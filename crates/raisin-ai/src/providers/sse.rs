@@ -104,7 +104,7 @@ where
             };
             futures::future::ready(Some(output))
         })
-        .filter_map(|opt| futures::future::ready(opt))
+        .filter_map(futures::future::ready)
 }
 
 #[cfg(test)]

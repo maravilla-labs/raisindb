@@ -178,6 +178,7 @@ pub(super) enum AnthropicStreamContentBlock {
 /// Delta payload in a `content_block_delta` event.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 pub(super) enum AnthropicStreamDelta {
     TextDelta {
         text: String,
