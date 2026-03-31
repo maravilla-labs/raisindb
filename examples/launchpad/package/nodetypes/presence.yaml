@@ -1,0 +1,20 @@
+name: launchpad:Presence
+title: User Presence
+description: Real-time presence status for a user.
+icon: user
+color: "#10b981"
+version: 1
+
+properties:
+  - name: status
+    title: Status
+    type: String
+    required: true
+  - name: last_seen
+    title: Last Seen
+    type: Date
+    required: true
+  - name: metadata
+    title: Metadata
+    type: Object
+    required: false

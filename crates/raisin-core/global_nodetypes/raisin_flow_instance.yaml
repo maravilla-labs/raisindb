@@ -1,0 +1,151 @@
+name: raisin:FlowInstance
+description: Running instance of a flow definition
+icon: play-circle
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  # Core identification
+  - name: flow_ref
+    type: Reference
+    required: true
+    title: Flow Reference
+    description: Reference to original raisin:Flow (for UI linking)
+    index: [Property]
+
+  - name: flow_version
+    type: Number
+    required: true
+    title: Flow Version
+    description: Version of flow definition at creation time
+    default: 1
+
+  - name: flow_definition_snapshot
+    type: Object
+    required: true
+    title: Flow Definition Snapshot
+    description: Complete workflow_data copied at instance creation (immutable)
+
+  # Execution state
+  - name: status
+    type: String
+    required: true
+    title: Status
+    description: Current execution status
+    enum: [pending, running, waiting, completed, failed, cancelled, rolled_back]
+    default: pending
+    index: [Property]
+
+  - name: current_node_id
+    type: String
+    required: false
+    title: Current Node ID
+    description: Current position in flow
+
+  # Wait management (formalized)
+  - name: wait_info
+    type: Object
+    required: false
+    title: Wait Info
+    description: |
+      Structured subscription for resumption.
+      Structure: {
+        subscription_id: "unique-id",
+        wait_type: "tool_call" | "human_task" | "scheduled" | "event",
+        target_path: "/path/to/watched/node",
+        expected_event: "event_type",
+        timeout_at: "2024-01-15T12:00:00Z"
+      }
+
+  # Context and data
+  - name: variables
+    type: Object
+    required: false
+    title: Variables
+    description: Flow-scoped variables (mutable during execution)
+
+  - name: input
+    type: Object
+    required: false
+    title: Input
+    description: Initial input to flow
+
+  - name: output
+    type: Object
+    required: false
+    title: Output
+    description: Final output (when completed)
+
+  # Saga/rollback support
+  - name: compensation_stack
+    type: Array
+    required: false
+    title: Compensation Stack
+    description: |
+      Stack of completed steps with undo info for rollback.
+      Each entry: {
+        step_id: String,
+        completed_at: DateTime,
+        compensation_fn: String (function to call to undo),
+        compensation_input: Object (data needed for undo),
+        compensation_status: "pending" | "executed" | "failed"
+      }
+
+  # Error handling
+  - name: error
+    type: String
+    required: false
+    title: Error
+    description: Error message (when failed)
+
+  - name: retry_count
+    type: Number
+    required: false
+    title: Retry Count
+    description: Number of times this flow has been retried
+    default: 0
+
+  # Timestamps
+  - name: started_at
+    type: Date
+    required: false
+    title: Started At
+    description: When flow execution started
+    index: [Property]
+
+  - name: completed_at
+    type: Date
+    required: false
+    title: Completed At
+    description: When flow execution completed
+    index: [Property]
+
+  # Hierarchy
+  - name: parent_instance_ref
+    type: Reference
+    required: false
+    title: Parent Instance Reference
+    description: Parent flow instance (for sub-flows)
+
+  # Metrics/observability
+  - name: metrics
+    type: Object
+    required: false
+    title: Metrics
+    description: |
+      Execution metrics for monitoring.
+      Structure: {
+        total_duration_ms: Integer,
+        step_count: Integer,
+        retry_count: Integer,
+        compensation_count: Integer,
+        ai_iteration_count: Integer
+      }
+
+allowed_children:
+  - raisin:FlowStepExecution
+  - raisin:AIConversation
+versionable: true
+publishable: false
+auditable: true

@@ -1,0 +1,88 @@
+name: raisin:AIMessage
+title: AI Message
+description: A single message in an AI conversation
+icon: message-circle
+color: "#818CF8"
+
+allowed_children:
+  - raisin:AIThought
+  - raisin:AITask
+  - raisin:AIPlan
+  - raisin:AIToolCall
+  - raisin:AIToolResult
+  - raisin:AIToolResultAggregator
+  - raisin:AICostRecord
+
+properties:
+  - name: role
+    title: Role
+    type: string
+    required: true
+    description: Message role (user, assistant, system)
+    ui:
+      widget: select
+      options:
+        - label: User
+          value: user
+        - label: Assistant
+          value: assistant
+        - label: System
+          value: system
+
+  - name: content
+    title: Content
+    type: string
+    required: true
+    description: Message content
+    ui:
+      widget: textarea
+      rows: 6
+
+  - name: tokens
+    title: Tokens
+    type: Number
+    description: Number of tokens in this message
+    readonly: true
+
+  - name: model
+    title: Model
+    type: string
+    description: Model that generated this message (for assistant messages)
+
+  - name: finish_reason
+    title: Finish Reason
+    type: string
+    description: Why the AI stopped generating (stop, length, content_filter)
+    readonly: true
+
+  - name: timestamp
+    title: Timestamp
+    type: Date
+    description: When the message was sent/received
+
+  - name: attachments
+    title: Attachments
+    type: array
+    items:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [image, file, code]
+        name:
+          type: string
+        url:
+          type: string
+        mime_type:
+          type: string
+    description: Any attachments with the message
+
+  - name: tool_calls
+    title: Tool Calls
+    type: Object
+    description: Tool/function calls made by the assistant
+
+  - name: tool_results
+    title: Tool Results
+    type: Object
+    description: Results from tool/function calls

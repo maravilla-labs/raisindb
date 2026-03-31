@@ -1,0 +1,25 @@
+title: Bienvenue sur Launchpad
+description: Votre passerelle pour lancer des projets exceptionnels
+content:
+  - uuid: hero-1
+    headline: Lancez votre vision
+    subheadline: Construisez, deployez et faites evoluer vos idees avec Launchpad
+    cta_text: Commencer
+
+  - uuid: intro-1
+    heading: Pourquoi Launchpad ?
+    content: |
+      Launchpad est votre plateforme tout-en-un pour concretiser vos idees.
+      Nous fournissons les outils, l'infrastructure et le support dont vous avez besoin pour reussir.
+
+  - uuid: features-1
+    heading: Fonctionnalites
+    features:
+      - title: Developpement rapide
+        description: Construisez et iterez rapidement avec notre stack moderne
+
+      - title: Securise par defaut
+        description: Securite de niveau entreprise integree dans chaque couche
+
+      - title: Echelle mondiale
+        description: Deployez dans le monde entier en un seul clic

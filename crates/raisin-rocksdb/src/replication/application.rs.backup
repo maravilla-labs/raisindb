@@ -1,0 +1,3469 @@
+//! Operation application layer for replication
+//!
+//! This module handles applying operations received from peer nodes to the local database.
+//! It implements a last-write-wins (LWW) conflict resolution strategy.
+//!
+//! ## Key Design Decisions
+//!
+//! 1. **Direct CF Writes**: Operations are applied by writing directly to RocksDB column families,
+//!    bypassing the repository layer. This prevents recursive operation capture.
+//!
+//! 2. **Event Emission**: Even though we bypass repositories, we still emit events so that
+//!    application-layer handlers (NodeType initialization, admin user creation, etc.) work correctly.
+//!
+//! 3. **LWW Conflict Resolution**: When multiple nodes create the same tenant/repository,
+//!    the one with the most recent timestamp wins. This is simple but effective for metadata.
+//!
+//! 4. **Idempotency**: Operations are applied idempotently - applying the same operation
+//!    multiple times has the same effect as applying it once.
+
+use crate::{
+    cf, cf_handle, fractional_index, keys,
+    repositories::{hash_property_value, BranchRepositoryImpl},
+};
+use raisin_error::Result;
+use raisin_events::{Event, EventBus, RepositoryEvent, RepositoryEventKind};
+use raisin_hlc::HLC;
+use raisin_models::admin_user::DatabaseAdminUser;
+use raisin_models::nodes::element::element_type::ElementType;
+use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::nodes::types::archetype::Archetype;
+use raisin_models::nodes::types::node_type::NodeType;
+use raisin_models::nodes::{Node, RelationRef};
+use raisin_models::registry::{DeploymentRegistration, TenantRegistration};
+use raisin_models::workspace::Workspace;
+use raisin_replication::{
+    operation::{ReplicatedNodeChange, ReplicatedNodeChangeKind},
+    OpType, Operation,
+};
+use raisin_storage::BranchRepository;
+use rocksdb::{WriteBatch, DB};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+const TOMBSTONE: &[u8] = b"T";
+
+fn is_tombstone(value: &[u8]) -> bool {
+    value == TOMBSTONE
+}
+
+fn node_workspace(node: &Node) -> &str {
+    node.workspace.as_deref().unwrap_or("default")
+}
+
+/// Applies operations to the local database
+///
+/// This is the core of the replication application layer. It receives operations
+/// from peer nodes and applies them to the local RocksDB instance.
+pub struct OperationApplicator {
+    db: Arc<DB>,
+    event_bus: Arc<dyn EventBus>,
+    branch_repo: Arc<BranchRepositoryImpl>,
+}
+
+impl OperationApplicator {
+    fn op_revision(op: &Operation) -> Result<HLC> {
+        // First check top-level revision field
+        if let Some(rev) = op.revision {
+            return Ok(rev);
+        }
+
+        // Fallback: extract revision from OpType variants
+        match &op.op_type {
+            OpType::UpsertNodeSnapshot { revision, .. } => Ok(*revision),
+            OpType::DeleteNodeSnapshot { revision, .. } => Ok(*revision),
+            OpType::ApplyRevision { branch_head, .. } => Ok(*branch_head),
+            _ => Err(raisin_error::Error::storage(format!(
+                "Operation {} missing revision in both Operation.revision and OpType - cannot apply",
+                op.op_id
+            )))
+        }
+    }
+
+    /// Create a new operation applicator
+    pub fn new(
+        db: Arc<DB>,
+        event_bus: Arc<dyn EventBus>,
+        branch_repo: Arc<BranchRepositoryImpl>,
+    ) -> Self {
+        Self {
+            db,
+            event_bus,
+            branch_repo,
+        }
+    }
+
+    /// Emit a node event for a replicated operation
+    ///
+    /// This helper ensures that replicated operations trigger the same events as local
+    /// operations, but with metadata indicating the source as "replication".
+    /// This allows event handlers to distinguish between local and remote operations.
+    fn emit_node_event(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        node_type: Option<&str>,
+        path: Option<&str>,
+        revision: &HLC,
+        kind: raisin_events::NodeEventKind,
+    ) {
+        use raisin_events::{Event, NodeEvent};
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "source".to_string(),
+            serde_json::Value::String("replication".to_string()),
+        );
+
+        tracing::debug!(
+            node_id = %node_id,
+            kind = ?kind,
+            source = "replication",
+            "Emitting node event for replicated operation"
+        );
+
+        let event = NodeEvent {
+            tenant_id: tenant_id.to_string(),
+            repository_id: repo_id.to_string(),
+            branch: branch.to_string(),
+            workspace_id: workspace.to_string(),
+            node_id: node_id.to_string(),
+            node_type: node_type.map(|s| s.to_string()),
+            revision: *revision,
+            kind,
+            path: path.map(|s| s.to_string()),
+            metadata: Some(metadata),
+        };
+
+        self.event_bus.publish(Event::Node(event));
+    }
+
+    /// Emit a schema event for a replicated schema operation
+    ///
+    /// This helper ensures that replicated schema operations trigger the same events as local
+    /// operations, but with metadata indicating the source as "replication".
+    /// This allows event handlers to distinguish between local and remote operations.
+    fn emit_schema_event(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        schema_id: &str,
+        schema_type: &str,
+        kind: raisin_events::SchemaEventKind,
+    ) {
+        use raisin_events::{Event, SchemaEvent};
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "source".to_string(),
+            serde_json::Value::String("replication".to_string()),
+        );
+
+        tracing::debug!(
+            schema_id = %schema_id,
+            schema_type = %schema_type,
+            kind = ?kind,
+            source = "replication",
+            "Emitting schema event for replicated operation"
+        );
+
+        let event = SchemaEvent {
+            tenant_id: tenant_id.to_string(),
+            repository_id: repo_id.to_string(),
+            branch: branch.to_string(),
+            schema_id: schema_id.to_string(),
+            schema_type: schema_type.to_string(),
+            kind,
+            metadata: Some(metadata),
+        };
+
+        self.event_bus.publish(Event::Schema(event));
+    }
+
+    /// Apply an operation to the local database
+    ///
+    /// This is the main entry point. It matches on the operation type and
+    /// calls the appropriate handler.
+    pub async fn apply_operation(&self, op: &Operation) -> Result<()> {
+        tracing::debug!(
+            "Applying operation: {} from node {}",
+            op.op_id,
+            op.cluster_node_id
+        );
+
+        // Log UpdateNodeType operations with more detail
+        if matches!(op.op_type, OpType::UpdateNodeType { .. }) {
+            tracing::debug!(
+                op_id = %op.op_id,
+                tenant_id = %op.tenant_id,
+                repo_id = %op.repo_id,
+                branch = %op.branch,
+                op_seq = op.op_seq,
+                cluster_node_id = %op.cluster_node_id,
+                "Starting to apply UpdateNodeType operation"
+            );
+        }
+
+        match &op.op_type {
+            // ========== Tenant/Deployment/Repository Operations ==========
+            OpType::UpdateTenant { tenant_id, tenant } => {
+                self.apply_update_tenant(tenant_id, tenant, op).await
+            }
+            OpType::UpdateDeployment {
+                deployment_id,
+                deployment,
+            } => {
+                self.apply_update_deployment(&deployment.tenant_id, deployment_id, deployment, op)
+                    .await
+            }
+            OpType::UpdateRepository {
+                tenant_id,
+                repo_id,
+                repository,
+            } => {
+                self.apply_update_repository(tenant_id, repo_id, repository, op)
+                    .await
+            }
+
+            // ========== Schema Operations ==========
+            OpType::UpdateNodeType {
+                node_type_id,
+                node_type,
+            } => {
+                self.apply_update_nodetype(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    node_type_id,
+                    node_type,
+                    op,
+                )
+                .await
+            }
+            OpType::UpdateArchetype {
+                archetype_id,
+                archetype,
+            } => {
+                self.apply_update_archetype(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    archetype_id,
+                    archetype,
+                    op,
+                )
+                .await
+            }
+            OpType::UpdateElementType {
+                element_type_id,
+                element_type,
+            } => {
+                self.apply_update_element_type(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    element_type_id,
+                    element_type,
+                    op,
+                )
+                .await
+            }
+            OpType::DeleteNodeType { node_type_id } => {
+                self.apply_delete_nodetype(&op.tenant_id, &op.repo_id, &op.branch, node_type_id, op)
+                    .await
+            }
+            OpType::DeleteArchetype { archetype_id } => {
+                self.apply_delete_archetype(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    archetype_id,
+                    op,
+                )
+                .await
+            }
+            OpType::DeleteElementType { element_type_id } => {
+                self.apply_delete_element_type(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    element_type_id,
+                    op,
+                )
+                .await
+            }
+
+            // ========== Node Operations ==========
+            OpType::ApplyRevision {
+                branch_head,
+                node_changes,
+            } => {
+                self.apply_replicated_revision(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    branch_head,
+                    node_changes,
+                    op,
+                )
+                .await
+            }
+            OpType::CreateNode {
+                node_id,
+                name,
+                node_type,
+                archetype,
+                parent_id,
+                order_key,
+                properties,
+                owner_id,
+                workspace,
+                path,
+            } => {
+                self.apply_create_node(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    workspace.as_ref().map(|s| s.as_str()).unwrap_or("default"),
+                    node_id,
+                    name,
+                    node_type,
+                    archetype.as_deref(),
+                    parent_id.as_deref(),
+                    order_key,
+                    properties,
+                    owner_id.as_deref(),
+                    path,
+                    op,
+                )
+                .await
+            }
+            OpType::DeleteNode { node_id } => {
+                self.apply_delete_node(&op.tenant_id, &op.repo_id, &op.branch, node_id, op)
+                    .await
+            }
+            OpType::SetProperty {
+                node_id,
+                property_name,
+                value,
+            } => {
+                self.apply_set_property(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    node_id,
+                    property_name,
+                    value,
+                    op,
+                )
+                .await
+            }
+            OpType::RenameNode {
+                node_id,
+                old_name: _,
+                new_name,
+            } => {
+                self.apply_rename_node(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    node_id,
+                    new_name,
+                    op,
+                )
+                .await
+            }
+            OpType::MoveNode {
+                node_id,
+                old_parent_id: _,
+                new_parent_id,
+                position,
+            } => {
+                self.apply_move_node(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    node_id,
+                    new_parent_id.as_deref(),
+                    position.as_deref(),
+                    op,
+                )
+                .await
+            }
+            OpType::SetArchetype {
+                node_id,
+                old_archetype: _,
+                new_archetype,
+            } => {
+                self.apply_set_archetype(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    node_id,
+                    new_archetype.as_deref(),
+                    op,
+                )
+                .await
+            }
+            OpType::AddRelation {
+                source_id,
+                relation_type,
+                target_id,
+                relation_id,
+                properties,
+            } => {
+                self.apply_add_relation(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    source_id,
+                    relation_type,
+                    target_id,
+                    *relation_id,
+                    properties,
+                    op,
+                )
+                .await
+            }
+            OpType::RemoveRelation {
+                source_id,
+                relation_type,
+                target_id,
+                relation_id,
+            } => {
+                self.apply_remove_relation(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    source_id,
+                    relation_type,
+                    target_id,
+                    *relation_id,
+                    op,
+                )
+                .await
+            }
+
+            // ========== User Operations ==========
+            OpType::UpdateUser { user_id, user } => {
+                self.apply_update_user(&op.tenant_id, user_id, user, op)
+                    .await
+            }
+            OpType::DeleteUser { user_id } => {
+                self.apply_delete_user(&op.tenant_id, user_id, op).await
+            }
+
+            // ========== Workspace/Branch/Tag Operations ==========
+            OpType::UpdateWorkspace {
+                workspace_id,
+                workspace,
+            } => {
+                self.apply_update_workspace(&op.tenant_id, &op.repo_id, workspace_id, workspace, op)
+                    .await
+            }
+            OpType::DeleteWorkspace { workspace_id } => {
+                self.apply_delete_workspace(&op.tenant_id, &op.repo_id, workspace_id, op)
+                    .await
+            }
+            OpType::UpdateBranch { branch } => {
+                self.apply_update_branch(&op.tenant_id, &op.repo_id, branch, op)
+                    .await
+            }
+            OpType::CreateRevisionMeta { revision_meta } => {
+                self.apply_create_revision_meta(&op.tenant_id, &op.repo_id, revision_meta, op)
+                    .await
+            }
+            OpType::DeleteBranch { branch_id } => {
+                self.apply_delete_branch(&op.tenant_id, &op.repo_id, branch_id, op)
+                    .await
+            }
+            OpType::CreateTag { tag_name, revision } => {
+                self.apply_create_tag(&op.tenant_id, &op.repo_id, tag_name, revision, op)
+                    .await
+            }
+            OpType::DeleteTag { tag_name } => {
+                self.apply_delete_tag(&op.tenant_id, &op.repo_id, tag_name, op)
+                    .await
+            }
+
+            // ========== CRDT Snapshot Operations (Decomposed from ApplyRevision) ==========
+            OpType::UpsertNodeSnapshot {
+                node,
+                parent_id,
+                revision,
+                cf_order_key,
+            } => {
+                self.apply_upsert_node_snapshot(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    node,
+                    parent_id.as_deref(),
+                    revision,
+                    cf_order_key,
+                    op,
+                )
+                .await
+            }
+            OpType::DeleteNodeSnapshot { node_id, revision } => {
+                self.apply_delete_node_snapshot(
+                    &op.tenant_id,
+                    &op.repo_id,
+                    &op.branch,
+                    node_id,
+                    revision,
+                    op,
+                )
+                .await
+            }
+
+            // ========== Not Yet Implemented ==========
+            _ => {
+                tracing::debug!("Operation type not handled by applicator: {:?}", op.op_type);
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply a tenant update operation
+    ///
+    /// This writes the tenant directly to the REGISTRY column family.
+    /// We bypass the RegistryRepository to avoid triggering operation capture.
+    async fn apply_update_tenant(
+        &self,
+        tenant_id: &str,
+        tenant: &TenantRegistration,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying tenant update: {} from node {}",
+            tenant_id,
+            op.cluster_node_id
+        );
+
+        // Check if tenant already exists for LWW conflict resolution
+        let key = keys::tenant_key(tenant_id);
+        let cf = cf_handle(&self.db, cf::REGISTRY)?;
+
+        let should_apply = match self.db.get_cf(cf, &key) {
+            Ok(Some(bytes)) => {
+                // Tenant exists - check timestamp for LWW
+                match rmp_serde::from_slice::<TenantRegistration>(&bytes) {
+                    Ok(existing) => {
+                        // Apply if incoming is newer
+                        let should_update = tenant.last_seen >= existing.last_seen;
+                        if !should_update {
+                            tracing::debug!(
+                                "Skipping tenant update - existing is newer: {} >= {}",
+                                existing.last_seen,
+                                tenant.last_seen
+                            );
+                        }
+                        should_update
+                    }
+                    Err(_) => true, // Corrupted data, overwrite it
+                }
+            }
+            Ok(None) => true, // Doesn't exist, apply it
+            Err(e) => {
+                tracing::error!("Failed to check existing tenant: {}", e);
+                return Err(raisin_error::Error::storage(e.to_string()));
+            }
+        };
+
+        if !should_apply {
+            return Ok(());
+        }
+
+        // Serialize and write
+        let value = rmp_serde::to_vec(&tenant).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Emit TenantCreated event to trigger admin user initialization
+        // Note: We always emit this even for updates, as the event handler checks if admin exists
+        let event = Event::Repository(RepositoryEvent {
+            tenant_id: tenant_id.to_string(),
+            repository_id: String::new(),
+            kind: RepositoryEventKind::TenantCreated,
+            workspace: None,
+            revision_id: None,
+            branch_name: None,
+            tag_name: None,
+            message: None,
+            actor: None,
+            metadata: Some(
+                tenant
+                    .metadata
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect(),
+            ),
+        });
+        self.event_bus.publish(event);
+
+        tracing::info!("✅ Tenant applied successfully: {}", tenant_id);
+        Ok(())
+    }
+
+    /// Apply a deployment update operation
+    async fn apply_update_deployment(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+        deployment: &DeploymentRegistration,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying deployment update: {}/{} from node {}",
+            tenant_id,
+            deployment_id,
+            op.cluster_node_id
+        );
+
+        // Check if deployment exists for LWW
+        let key = keys::deployment_key(tenant_id, deployment_id);
+        let cf = cf_handle(&self.db, cf::REGISTRY)?;
+
+        let should_apply = match self.db.get_cf(cf, &key) {
+            Ok(Some(bytes)) => match rmp_serde::from_slice::<DeploymentRegistration>(&bytes) {
+                Ok(existing) => deployment.last_seen >= existing.last_seen,
+                Err(_) => true,
+            },
+            Ok(None) => true,
+            Err(e) => {
+                tracing::error!("Failed to check existing deployment: {}", e);
+                return Err(raisin_error::Error::storage(e.to_string()));
+            }
+        };
+
+        if !should_apply {
+            return Ok(());
+        }
+
+        // Serialize and write
+        let value = rmp_serde::to_vec(&deployment).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Deployment applied successfully: {}/{}",
+            tenant_id,
+            deployment_id
+        );
+        Ok(())
+    }
+
+    /// Apply a repository update operation
+    async fn apply_update_repository(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        repository: &raisin_context::RepositoryInfo,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying repository update: {}/{} from node {}",
+            tenant_id,
+            repo_id,
+            op.cluster_node_id
+        );
+
+        // Check if repository exists for LWW
+        let key = keys::repository_key(tenant_id, repo_id);
+        let cf = cf_handle(&self.db, cf::REGISTRY)?;
+
+        // Check if repository exists (for event emission)
+        // Note: We don't need LWW comparison here because operations are already
+        // ordered by the replication layer's vector clock. We just need to know
+        // if this is a new repository or an update.
+        let is_new_repository = match self.db.get_cf(cf, &key) {
+            Ok(Some(_bytes)) => false, // Repository exists, this is an update
+            Ok(None) => true,          // Doesn't exist, it's new
+            Err(e) => {
+                tracing::error!("Failed to check existing repository: {}", e);
+                return Err(raisin_error::Error::storage(e.to_string()));
+            }
+        };
+
+        // Serialize and write
+        let value = rmp_serde::to_vec(&repository).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Only emit RepositoryCreated event for NEW repositories to trigger NodeType initialization
+        // For updates, don't emit event to avoid re-initializing workspaces and NodeTypes
+        if is_new_repository {
+            let event = Event::Repository(RepositoryEvent {
+                tenant_id: tenant_id.to_string(),
+                repository_id: repo_id.to_string(),
+                kind: RepositoryEventKind::Created,
+                workspace: None,
+                revision_id: None,
+                branch_name: Some(repository.config.default_branch.clone()),
+                tag_name: None,
+                message: None,
+                actor: None,
+                metadata: None,
+            });
+            self.event_bus.publish(event);
+            tracing::info!(
+                "✅ New repository created and applied: {}/{}",
+                tenant_id,
+                repo_id
+            );
+        } else {
+            tracing::info!(
+                "✅ Repository updated and applied: {}/{}",
+                tenant_id,
+                repo_id
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Apply a NodeType update operation
+    ///
+    /// This writes the NodeType directly to the NODE_TYPES column family.
+    /// We bypass the NodeTypeRepository to avoid triggering operation capture.
+    async fn apply_update_nodetype(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node_type_id: &str,
+        node_type: &NodeType,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying NodeType update: {}/{}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            branch,
+            node_type.name,
+            op.cluster_node_id
+        );
+
+        // Log NodeType details for debugging
+        tracing::debug!(
+            op_id = %op.op_id,
+            tenant_id = tenant_id,
+            repo_id = repo_id,
+            branch = branch,
+            node_type_id = node_type_id,
+            node_type_name = %node_type.name,
+            has_description = node_type.description.is_some(),
+            has_properties = node_type.properties.as_ref().map(|p| p.len()).unwrap_or(0),
+            "About to apply UpdateNodeType - received NodeType struct details"
+        );
+
+        // NodeTypes are revision-versioned, so we need to determine the revision
+        // Extract the revision from the operation (required for HLC consistency across cluster)
+        let revision = Self::op_revision(op)?;
+
+        let key =
+            keys::nodetype_key_versioned(tenant_id, repo_id, branch, &node_type.name, &revision);
+        let cf = cf_handle(&self.db, cf::NODE_TYPES)?;
+
+        // Diagnostic logging before serialization
+        tracing::debug!(
+            op_id = %op.op_id,
+            node_type_name = %node_type.name,
+            version = ?node_type.version,
+            has_properties = node_type.properties.is_some(),
+            has_description = node_type.description.is_some(),
+            "NodeType before serialization during replication"
+        );
+
+        // Serialize and write (use _named to match local write format)
+        let value = rmp_serde::to_vec_named(&node_type).map_err(|e| {
+            tracing::error!(
+                op_id = %op.op_id,
+                tenant_id = tenant_id,
+                repo_id = repo_id,
+                node_type_name = %node_type.name,
+                error = %e,
+                "Failed to serialize NodeType during apply_update_nodetype"
+            );
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        tracing::debug!(
+            op_id = %op.op_id,
+            tenant_id = tenant_id,
+            repo_id = repo_id,
+            node_type_name = %node_type.name,
+            serialized_size = value.len(),
+            "Successfully serialized NodeType for storage during apply_update_nodetype"
+        );
+
+        self.db.put_cf(cf, key, value).map_err(|e| {
+            tracing::error!(
+                op_id = %op.op_id,
+                tenant_id = tenant_id,
+                repo_id = repo_id,
+                node_type_name = %node_type.name,
+                error = %e,
+                "Failed to write NodeType to RocksDB during apply_update_nodetype"
+            );
+            raisin_error::Error::storage(e.to_string())
+        })?;
+
+        // Create version index if version is present (matching local write behavior)
+        if let Some(version) = node_type.version {
+            let index_key = keys::nodetype_version_index_key(
+                tenant_id,
+                repo_id,
+                branch,
+                &node_type.name,
+                version,
+            );
+            self.db
+                .put_cf(cf, index_key, &revision.encode_descending())
+                .map_err(|e| {
+                    tracing::error!(
+                        op_id = %op.op_id,
+                        tenant_id = tenant_id,
+                        node_type_name = %node_type.name,
+                        version = version,
+                        error = %e,
+                        "Failed to write NodeType version index during apply_update_nodetype"
+                    );
+                    raisin_error::Error::storage(e.to_string())
+                })?;
+        }
+
+        tracing::info!(
+            "✅ NodeType applied successfully: {}/{}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch,
+            node_type.name
+        );
+
+        // Emit SchemaEvent for indexing and job processing
+        self.emit_schema_event(
+            tenant_id,
+            repo_id,
+            branch,
+            &node_type.name,
+            "NodeType",
+            raisin_events::SchemaEventKind::NodeTypeUpdated,
+        );
+
+        Ok(())
+    }
+
+    /// Apply an Archetype update operation
+    ///
+    /// This writes the Archetype directly to the ARCHETYPES column family.
+    /// We bypass the ArchetypeRepository to avoid triggering operation capture.
+    async fn apply_update_archetype(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        archetype_id: &str,
+        archetype: &Archetype,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying Archetype update: {}/{}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            branch,
+            archetype.name,
+            op.cluster_node_id
+        );
+
+        let revision = Self::op_revision(op)?;
+        let key =
+            keys::archetype_key_versioned(tenant_id, repo_id, branch, &archetype.name, &revision);
+        let cf = cf_handle(&self.db, cf::ARCHETYPES)?;
+
+        // Use _named to match local write format
+        let value = rmp_serde::to_vec_named(&archetype).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Create version index if version is present (matching local write behavior)
+        if let Some(version) = archetype.version {
+            let index_key = keys::archetype_version_index_key(
+                tenant_id,
+                repo_id,
+                branch,
+                &archetype.name,
+                version,
+            );
+            self.db
+                .put_cf(cf, index_key, &revision.encode_descending())
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
+        tracing::info!(
+            "✅ Archetype applied successfully: {}/{}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch,
+            archetype.name
+        );
+
+        // Emit SchemaEvent for indexing and job processing
+        self.emit_schema_event(
+            tenant_id,
+            repo_id,
+            branch,
+            &archetype.name,
+            "Archetype",
+            raisin_events::SchemaEventKind::ArchetypeUpdated,
+        );
+
+        Ok(())
+    }
+
+    /// Apply an ElementType update operation
+    ///
+    /// This writes the ElementType directly to the ELEMENT_TYPES column family.
+    /// We bypass the ElementTypeRepository to avoid triggering operation capture.
+    async fn apply_update_element_type(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        element_type_id: &str,
+        element_type: &ElementType,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying ElementType update: {}/{}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            branch,
+            element_type.name,
+            op.cluster_node_id
+        );
+
+        let revision = Self::op_revision(op)?;
+        let key = keys::element_type_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            &element_type.name,
+            &revision,
+        );
+        let cf = cf_handle(&self.db, cf::ELEMENT_TYPES)?;
+
+        // Use _named to match local write format
+        let value = rmp_serde::to_vec_named(&element_type).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Create version index if version is present (matching local write behavior)
+        if let Some(version) = element_type.version {
+            let index_key = keys::element_type_version_index_key(
+                tenant_id,
+                repo_id,
+                branch,
+                &element_type.name,
+                version,
+            );
+            self.db
+                .put_cf(cf, index_key, &revision.encode_descending())
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
+        tracing::info!(
+            "✅ ElementType applied successfully: {}/{}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch,
+            element_type.name
+        );
+
+        // Emit SchemaEvent for indexing and job processing
+        self.emit_schema_event(
+            tenant_id,
+            repo_id,
+            branch,
+            &element_type.name,
+            "ElementType",
+            raisin_events::SchemaEventKind::ElementTypeUpdated,
+        );
+
+        Ok(())
+    }
+
+    /// Apply a NodeType delete operation
+    async fn apply_delete_nodetype(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node_type_id: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying NodeType delete: {}/{}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            branch,
+            node_type_id,
+            op.cluster_node_id
+        );
+
+        // For schema deletes, we need to delete all revisions
+        // Use a prefix scan to find and delete all versions
+        let prefix = keys::nodetype_name_prefix(tenant_id, repo_id, branch, node_type_id);
+        let cf = cf_handle(&self.db, cf::NODE_TYPES)?;
+
+        let keys_to_delete: Vec<Vec<u8>> = self
+            .db
+            .iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            )
+            .take_while(|result| {
+                if let Ok((key, _)) = result {
+                    key.starts_with(&prefix)
+                } else {
+                    false
+                }
+            })
+            .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
+            .collect();
+
+        for key in keys_to_delete {
+            self.db
+                .delete_cf(cf, key)
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
+        tracing::info!(
+            "✅ NodeType deleted successfully: {}/{}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch,
+            node_type_id
+        );
+
+        // Emit SchemaEvent for indexing and job processing
+        self.emit_schema_event(
+            tenant_id,
+            repo_id,
+            branch,
+            node_type_id,
+            "NodeType",
+            raisin_events::SchemaEventKind::NodeTypeDeleted,
+        );
+
+        Ok(())
+    }
+
+    /// Apply an Archetype delete operation
+    async fn apply_delete_archetype(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        archetype_id: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying Archetype delete: {}/{}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            branch,
+            archetype_id,
+            op.cluster_node_id
+        );
+
+        let prefix = keys::archetype_name_prefix(tenant_id, repo_id, branch, archetype_id);
+        let cf = cf_handle(&self.db, cf::ARCHETYPES)?;
+
+        let keys_to_delete: Vec<Vec<u8>> = self
+            .db
+            .iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            )
+            .take_while(|result| {
+                if let Ok((key, _)) = result {
+                    key.starts_with(&prefix)
+                } else {
+                    false
+                }
+            })
+            .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
+            .collect();
+
+        for key in keys_to_delete {
+            self.db
+                .delete_cf(cf, key)
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
+        tracing::info!(
+            "✅ Archetype deleted successfully: {}/{}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch,
+            archetype_id
+        );
+
+        // Emit SchemaEvent for indexing and job processing
+        self.emit_schema_event(
+            tenant_id,
+            repo_id,
+            branch,
+            archetype_id,
+            "Archetype",
+            raisin_events::SchemaEventKind::ArchetypeDeleted,
+        );
+
+        Ok(())
+    }
+
+    /// Apply an ElementType delete operation
+    async fn apply_delete_element_type(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        element_type_id: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying ElementType delete: {}/{}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            branch,
+            element_type_id,
+            op.cluster_node_id
+        );
+
+        let prefix = keys::element_type_name_prefix(tenant_id, repo_id, branch, element_type_id);
+        let cf = cf_handle(&self.db, cf::ELEMENT_TYPES)?;
+
+        let keys_to_delete: Vec<Vec<u8>> = self
+            .db
+            .iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            )
+            .take_while(|result| {
+                if let Ok((key, _)) = result {
+                    key.starts_with(&prefix)
+                } else {
+                    false
+                }
+            })
+            .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
+            .collect();
+
+        for key in keys_to_delete {
+            self.db
+                .delete_cf(cf, key)
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
+        tracing::info!(
+            "✅ ElementType deleted successfully: {}/{}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch,
+            element_type_id
+        );
+
+        // Emit SchemaEvent for indexing and job processing
+        self.emit_schema_event(
+            tenant_id,
+            repo_id,
+            branch,
+            element_type_id,
+            "ElementType",
+            raisin_events::SchemaEventKind::ElementTypeDeleted,
+        );
+
+        Ok(())
+    }
+
+    // ========== NODE OPERATION HANDLERS ==========
+
+    async fn apply_replicated_revision(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        branch_head: &HLC,
+        node_changes: &[ReplicatedNodeChange],
+        op: &Operation,
+    ) -> Result<()> {
+        let revision = Self::op_revision(op)?;
+
+        for change in node_changes {
+            let workspace = change.node.workspace.as_deref().unwrap_or("default");
+            match change.kind {
+                ReplicatedNodeChangeKind::Upsert => self.apply_replicated_upsert(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &change.node,
+                    change.parent_id.as_deref(),
+                    &revision,
+                    &change.cf_order_key,
+                )?,
+                ReplicatedNodeChangeKind::Delete => self.apply_replicated_delete(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &change.node,
+                    change.parent_id.as_deref(),
+                    &revision,
+                )?,
+            }
+        }
+
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, branch_head.clone())
+            .await?;
+
+        Ok(())
+    }
+
+    fn apply_replicated_upsert(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node: &Node,
+        parent_id: Option<&str>,
+        revision: &HLC,
+        cf_order_key: &str,
+    ) -> Result<()> {
+        let mut normalized_node = node.clone();
+        normalized_node.has_children = None;
+
+        // Determine CF order key to use (provided from source or fallback to local generation)
+        let cf_key_to_use = if !cf_order_key.is_empty() {
+            cf_order_key.to_string()
+        } else if let Some(pid) = parent_id {
+            // Fallback: Log warning and generate locally
+            tracing::warn!(
+                node_id = %normalized_node.id,
+                "⚠️ REPLICATION BUG: cf_order_key is empty - falling back to local generation"
+            );
+            self.allocate_order_label(tenant_id, repo_id, branch, workspace, pid)?
+        } else {
+            String::new()
+        };
+
+        tracing::debug!(
+            node_id = %normalized_node.id,
+            cf_key = %cf_key_to_use,
+            "📥 Applying CF order key from replication"
+        );
+
+        let mut batch = WriteBatch::default();
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        let node_value = rmp_serde::to_vec(&normalized_node)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        let node_key = keys::node_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &normalized_node.id,
+            revision,
+        );
+        batch.put_cf(cf_nodes, node_key, node_value);
+
+        let path_key = keys::path_index_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &normalized_node.path,
+            revision,
+        );
+        batch.put_cf(cf_path, path_key, normalized_node.id.as_bytes());
+
+        let is_published = normalized_node.published_at.is_some();
+        for (prop_name, prop_value) in &normalized_node.properties {
+            let value_hash = hash_property_value(prop_value);
+            let prop_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                &value_hash,
+                revision,
+                &normalized_node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, prop_key, normalized_node.id.as_bytes());
+        }
+
+        let mut write_field = |field: &str, value: &str| {
+            if value.is_empty() {
+                return;
+            }
+            let key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                field,
+                value,
+                revision,
+                &normalized_node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, key, normalized_node.id.as_bytes());
+        };
+
+        write_field("__node_type", &normalized_node.node_type);
+        write_field("__name", &normalized_node.name);
+        if let Some(ref archetype) = normalized_node.archetype {
+            write_field("__archetype", archetype);
+        }
+        if let Some(ref created_by) = normalized_node.created_by {
+            write_field("__created_by", created_by);
+        }
+        if let Some(ref updated_by) = normalized_node.updated_by {
+            write_field("__updated_by", updated_by);
+        }
+        if let Some(created_at) = normalized_node.created_at {
+            write_field("__created_at", &created_at.to_rfc3339());
+        }
+        if let Some(updated_at) = normalized_node.updated_at {
+            write_field("__updated_at", &updated_at.to_rfc3339());
+        }
+
+        for (prop_path, prop_value) in &normalized_node.properties {
+            if let PropertyValue::Reference(ref_data) = prop_value {
+                let fwd_key = keys::reference_forward_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &normalized_node.id,
+                    prop_path,
+                    revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
+
+                let rev_key = keys::reference_reverse_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &ref_data.workspace,
+                    &ref_data.path,
+                    &normalized_node.id,
+                    prop_path,
+                    revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, rev_key, normalized_node.id.as_bytes());
+            }
+        }
+
+        for relation in &normalized_node.relations {
+            let relation_bytes = rmp_serde::to_vec(&relation).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to serialize relation: {}", e))
+            })?;
+
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &normalized_node.id,
+                &relation.relation_type,
+                revision,
+                &relation.target,
+            );
+            batch.put_cf(cf_relation, fwd_key, &relation_bytes);
+
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &relation.workspace,
+                &relation.target,
+                &relation.relation_type,
+                revision,
+                &normalized_node.id,
+            );
+            batch.put_cf(cf_relation, rev_key, &relation_bytes);
+        }
+
+        if let Some(pid) = parent_id {
+            if cf_key_to_use.is_empty() {
+                tracing::warn!(
+                    node_id = %normalized_node.id,
+                    parent_id = %pid,
+                    "⚠️ Skipping ORDERED_CHILDREN update due to missing cf_order_key"
+                );
+            } else {
+                // Write exact CF key from source to ORDERED_CHILDREN
+                let ordered_key = keys::ordered_child_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    pid,
+                    &cf_key_to_use,
+                    revision,
+                    &normalized_node.id,
+                );
+                batch.put_cf(cf_ordered, ordered_key, normalized_node.name.as_bytes());
+
+                // Update metadata cache with the CF key
+                let metadata_key =
+                    keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, pid);
+                let should_update = match self.db.get_cf(cf_ordered, &metadata_key) {
+                    Ok(Some(existing)) => {
+                        let existing_label = String::from_utf8_lossy(&existing);
+                        cf_key_to_use.as_str() > existing_label.as_ref()
+                    }
+                    _ => true,
+                };
+
+                if should_update {
+                    batch.put_cf(cf_ordered, metadata_key, cf_key_to_use.as_bytes());
+                }
+            }
+        }
+
+        self.db.write(batch).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to apply replicated upsert: {}", e))
+        })?;
+
+        // Emit NodeEvent for indexing and job processing
+        // Using Updated event kind since upsert can be either create or update
+        self.emit_node_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &normalized_node.id,
+            Some(&normalized_node.node_type),
+            Some(&normalized_node.path),
+            revision,
+            raisin_events::NodeEventKind::Updated,
+        );
+
+        Ok(())
+    }
+
+    fn apply_replicated_delete(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node: &Node,
+        parent_id: Option<&str>,
+        revision: &HLC,
+    ) -> Result<()> {
+        let mut batch = WriteBatch::default();
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+        let cf_translation = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
+
+        let node_key =
+            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, revision);
+        batch.put_cf(cf_nodes, node_key, TOMBSTONE);
+
+        let path_key = keys::path_index_key_versioned(
+            tenant_id, repo_id, branch, workspace, &node.path, revision,
+        );
+        batch.put_cf(cf_path, path_key, TOMBSTONE);
+
+        let is_published = node.published_at.is_some();
+        for (prop_name, prop_value) in &node.properties {
+            let value_hash = hash_property_value(prop_value);
+            let prop_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                &value_hash,
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, prop_key, TOMBSTONE);
+        }
+
+        let mut tombstone_field = |field: &str, value: &str| {
+            if value.is_empty() {
+                return;
+            }
+            let key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                field,
+                value,
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, key, TOMBSTONE);
+        };
+
+        tombstone_field("__node_type", &node.node_type);
+        tombstone_field("__name", &node.name);
+        if let Some(ref archetype) = node.archetype {
+            tombstone_field("__archetype", archetype);
+        }
+        if let Some(ref created_by) = node.created_by {
+            tombstone_field("__created_by", created_by);
+        }
+        if let Some(ref updated_by) = node.updated_by {
+            tombstone_field("__updated_by", updated_by);
+        }
+        if let Some(created_at) = node.created_at {
+            tombstone_field("__created_at", &created_at.to_rfc3339());
+        }
+        if let Some(updated_at) = node.updated_at {
+            tombstone_field("__updated_at", &updated_at.to_rfc3339());
+        }
+
+        for (prop_path, prop_value) in &node.properties {
+            if let PropertyValue::Reference(ref_data) = prop_value {
+                let fwd_key = keys::reference_forward_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    prop_path,
+                    revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, fwd_key, TOMBSTONE);
+
+                let rev_key = keys::reference_reverse_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &ref_data.workspace,
+                    &ref_data.path,
+                    &node.id,
+                    prop_path,
+                    revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, rev_key, TOMBSTONE);
+            }
+        }
+
+        let outgoing_relations =
+            self.collect_outgoing_relations(tenant_id, repo_id, branch, workspace, &node.id)?;
+        for relation in outgoing_relations {
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                &relation.relation_type,
+                revision,
+                &relation.target,
+            );
+            batch.put_cf(cf_relation, fwd_key, TOMBSTONE);
+
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &relation.workspace,
+                &relation.target,
+                &relation.relation_type,
+                revision,
+                &node.id,
+            );
+            batch.put_cf(cf_relation, rev_key, TOMBSTONE);
+        }
+
+        let incoming_relations =
+            self.collect_incoming_relations(tenant_id, repo_id, branch, workspace, &node.id)?;
+        for (source_node_id, relation_type, source_workspace) in incoming_relations {
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &source_workspace,
+                &source_node_id,
+                &relation_type,
+                revision,
+                &node.id,
+            );
+            batch.put_cf(cf_relation, fwd_key, TOMBSTONE);
+
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                &relation_type,
+                revision,
+                &source_node_id,
+            );
+            batch.put_cf(cf_relation, rev_key, TOMBSTONE);
+        }
+
+        if let Some(pid) = parent_id {
+            let ordered_key = keys::ordered_child_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                pid,
+                &node.order_key,
+                revision,
+                &node.id,
+            );
+            batch.put_cf(cf_ordered, ordered_key, TOMBSTONE);
+        }
+
+        let translation_locales =
+            self.list_translation_locales(tenant_id, repo_id, branch, workspace, &node.id)?;
+        for locale in translation_locales {
+            let mut translation_key = format!(
+                "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
+                tenant_id, repo_id, branch, workspace, node.id, locale
+            )
+            .into_bytes();
+            translation_key.extend_from_slice(&keys::encode_descending_revision(revision));
+            batch.put_cf(cf_translation, translation_key, TOMBSTONE);
+        }
+
+        self.db.write(batch).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to apply replicated delete: {}", e))
+        })?;
+
+        // Emit NodeEvent for indexing and job processing
+        self.emit_node_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &node.id,
+            Some(&node.node_type),
+            Some(&node.path),
+            revision,
+            raisin_events::NodeEventKind::Deleted,
+        );
+
+        Ok(())
+    }
+
+    /// Apply a node snapshot upsert (decomposed from ApplyRevision for CRDT commutativity)
+    ///
+    /// This handler applies Last-Write-Wins (LWW) semantics using the revision HLC.
+    /// The LWW semantics are implemented at the storage layer through versioned keys.
+    /// Multiple versions of the same node can coexist, each tagged with its revision HLC.
+    /// When reading, the latest version (highest revision) is used.
+    async fn apply_upsert_node_snapshot(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node: &Node,
+        parent_id: Option<&str>,
+        revision: &HLC,
+        cf_order_key: &str,
+        _op: &Operation,
+    ) -> Result<()> {
+        let workspace = node.workspace.as_deref().unwrap_or("default");
+
+        // Apply the upsert using the existing replicated upsert logic
+        // This writes a versioned key with the revision HLC, implementing LWW
+        // The storage layer naturally handles multiple versions, and load_latest_node
+        // will always return the version with the highest revision
+        self.apply_replicated_upsert(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            parent_id,
+            revision,
+            cf_order_key,
+        )?;
+
+        tracing::debug!(
+            node_id = %node.id,
+            revision = ?revision,
+            "Applied UpsertNodeSnapshot with LWW semantics"
+        );
+
+        Ok(())
+    }
+
+    /// Apply a node snapshot delete (decomposed from ApplyRevision for CRDT commutativity)
+    ///
+    /// This handler applies Delete-Wins semantics - deletions always take precedence.
+    /// The deletion is written as a tombstone with the given revision HLC.
+    async fn apply_delete_node_snapshot(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node_id: &str,
+        revision: &HLC,
+        _op: &Operation,
+    ) -> Result<()> {
+        // Load the node to get its full information for deletion
+        let node = match self.load_latest_node(tenant_id, repo_id, branch, node_id)? {
+            Some(n) => n,
+            None => {
+                // Node doesn't exist, nothing to delete (idempotent)
+                tracing::debug!(
+                    node_id = %node_id,
+                    revision = ?revision,
+                    "Node not found for DeleteNodeSnapshot - treating as already deleted"
+                );
+                return Ok(());
+            }
+        };
+
+        let workspace = node.workspace.as_deref().unwrap_or("default");
+
+        // Extract parent_id from the node's path or use None if it's a root node
+        // The Node struct doesn't have a parent_id field, so we infer it from the path
+        let parent_id = if node.path.contains('/') {
+            // Get the parent path by removing the last segment
+            let parent_path = node.path.rsplit_once('/').map(|(parent, _)| parent);
+            // For now, we'll use None as we can't easily get parent_id from path
+            // The delete logic should handle this gracefully
+            None
+        } else {
+            None // Root level node
+        };
+
+        // Apply the delete using the existing replicated delete logic
+        // This writes tombstones with the revision HLC for all related indexes
+        self.apply_replicated_delete(
+            tenant_id, repo_id, branch, workspace, &node, parent_id, revision,
+        )?;
+
+        tracing::debug!(
+            node_id = %node_id,
+            revision = ?revision,
+            "Applied DeleteNodeSnapshot with Delete-Wins semantics"
+        );
+
+        Ok(())
+    }
+
+    fn load_latest_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node_id: &str,
+    ) -> Result<Option<Node>> {
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(branch)
+            .build_prefix();
+
+        let mut iter = self.db.iterator_cf(
+            cf_nodes,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+
+        while let Some(Ok((key, value))) = iter.next() {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() < 6 {
+                continue;
+            }
+
+            if parts[5] == node_id.as_bytes() {
+                if is_tombstone(&value) {
+                    return Ok(None);
+                }
+
+                let node: Node = rmp_serde::from_slice(&value).map_err(|e| {
+                    raisin_error::Error::storage(format!(
+                        "Failed to deserialize node during delete: {}",
+                        e
+                    ))
+                })?;
+                return Ok(Some(node));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn resolve_parent_id_for_snapshot(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node: &Node,
+    ) -> Result<Option<String>> {
+        if let Some(parent_path) = node.parent_path() {
+            if parent_path == "/" {
+                return Ok(Some("/".to_string()));
+            }
+            return self.lookup_node_id_by_path(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &parent_path,
+            );
+        }
+        Ok(None)
+    }
+
+    fn lookup_node_id_by_path(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(branch)
+            .push(workspace)
+            .push("path")
+            .push(path)
+            .build_prefix();
+        let prefix_clone = prefix.clone();
+        let mut iter = self.db.prefix_iterator_cf(cf_path, &prefix);
+
+        if let Some(Ok((key, value))) = iter.next() {
+            if key.starts_with(&prefix_clone) && !is_tombstone(&value) {
+                return Ok(Some(String::from_utf8_lossy(&value).into_owned()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn allocate_order_label(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_id: &str,
+    ) -> Result<String> {
+        if let Some(last_label) =
+            self.get_last_order_label_for_parent(tenant_id, repo_id, branch, workspace, parent_id)?
+        {
+            // Extract fractional part from last label (in case it has ::node_id suffix)
+            // This matches the pattern used in transaction/context/nodes/create/ordering.rs
+            let last_fractional = last_label.split("::").next().unwrap_or(&last_label);
+            fractional_index::inc(last_fractional)
+        } else {
+            Ok(fractional_index::first())
+        }
+    }
+
+    fn get_last_order_label_for_parent(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_id: &str,
+    ) -> Result<Option<String>> {
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+        let metadata_key =
+            keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
+
+        if let Ok(Some(cached_value)) = self.db.get_cf(cf_ordered, &metadata_key) {
+            if let Some(label) = Self::parse_order_label(&cached_value) {
+                return Ok(Some(label));
+            } else {
+                // Invalid cache entry - remove it so future lookups fall back to scanning.
+                tracing::warn!(
+                    parent_id = %parent_id,
+                    "⚠️ Ignoring invalid cached order label; resetting metadata"
+                );
+                self.db
+                    .delete_cf(cf_ordered, &metadata_key)
+                    .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+            }
+        }
+
+        self.scan_last_order_label_for_parent(tenant_id, repo_id, branch, workspace, parent_id)
+    }
+
+    fn scan_last_order_label_for_parent(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent_id: &str,
+    ) -> Result<Option<String>> {
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+        let prefix =
+            keys::ordered_children_prefix(tenant_id, repo_id, branch, workspace, parent_id);
+        let prefix_clone = prefix.clone();
+        let iter = self.db.prefix_iterator_cf(cf_ordered, prefix);
+
+        let mut last_label: Option<String> = None;
+        let mut highest_revision = HLC::new(0, 0);
+        let mut seen_labels = HashSet::new();
+
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            if !key.starts_with(&prefix_clone) {
+                break;
+            }
+
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 9 {
+                if let Some(order_label) = Self::parse_order_label(parts[6]) {
+                    let revision_bytes = parts[7];
+                    if revision_bytes.len() == 16 {
+                        let revision =
+                            keys::decode_descending_revision(revision_bytes).map_err(|e| {
+                                raisin_error::Error::storage(format!(
+                                    "Invalid HLC revision encoding: {}",
+                                    e
+                                ))
+                            })?;
+
+                        if seen_labels.insert(order_label.clone()) && revision > highest_revision {
+                            highest_revision = revision;
+                            last_label = Some(order_label);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(last_label)
+    }
+
+    fn parse_order_label(raw: &[u8]) -> Option<String> {
+        if raw.is_empty() {
+            return None;
+        }
+        let label = String::from_utf8_lossy(raw).to_string();
+        if label.is_empty() {
+            return None;
+        }
+
+        // Extract fractional index part (before ::node_id suffix if present)
+        // This allows compound keys like "a0::node-123" while validating only the fractional part
+        let fractional_part = label.split("::").next().unwrap_or(&label);
+
+        if ::fractional_index::FractionalIndex::from_string(fractional_part).is_err() {
+            return None;
+        }
+
+        // Return the full label (including compound suffix if present)
+        // The compound format "a0::node-123" is intentional and must be preserved
+        Some(label)
+    }
+
+    fn collect_incoming_relations(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let prefix = keys::relation_reverse_prefix(tenant_id, repo_id, branch, workspace, node_id);
+        let prefix_clone = prefix.clone();
+        let iter = self.db.prefix_iterator_cf(cf_relation, &prefix);
+
+        let mut relations = Vec::new();
+        let mut seen = HashSet::new();
+
+        for item in iter {
+            let (key, value) =
+                item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
+
+            if !key.starts_with(&prefix_clone) {
+                break;
+            }
+
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 9 {
+                let relation_type = String::from_utf8_lossy(parts[6]).to_string();
+                let source_node_id = String::from_utf8_lossy(parts[8]).to_string();
+                let dedupe_key = (source_node_id.clone(), relation_type.clone());
+                if seen.insert(dedupe_key) {
+                    relations.push((source_node_id, relation_type, workspace.to_string()));
+                }
+            }
+        }
+
+        Ok(relations)
+    }
+
+    fn collect_outgoing_relations(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<RelationRef>> {
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let prefix = keys::relation_forward_prefix(tenant_id, repo_id, branch, workspace, node_id);
+        let prefix_clone = prefix.clone();
+        let iter = self.db.prefix_iterator_cf(cf_relation, &prefix);
+
+        let mut relations = Vec::new();
+        let mut seen = HashSet::new();
+
+        for item in iter {
+            let (key, value) =
+                item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
+
+            if !key.starts_with(&prefix_clone) {
+                break;
+            }
+
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 9 {
+                let relation_type = String::from_utf8_lossy(parts[6]).to_string();
+                let target_node_id = String::from_utf8_lossy(parts[8]).to_string();
+                let dedupe_key = (target_node_id.clone(), relation_type.clone());
+                if seen.insert(dedupe_key) {
+                    let relation: RelationRef = rmp_serde::from_slice(&value).map_err(|e| {
+                        raisin_error::Error::storage(format!(
+                            "Failed to deserialize relation: {}",
+                            e
+                        ))
+                    })?;
+                    relations.push(relation);
+                }
+            }
+        }
+
+        Ok(relations)
+    }
+
+    fn list_translation_locales(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<String>> {
+        let cf_translation = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
+        let prefix = format!(
+            "{}\0{}\0{}\0{}\0translations\0{}\0",
+            tenant_id, repo_id, branch, workspace, node_id
+        )
+        .into_bytes();
+        let prefix_clone = prefix.clone();
+        let iter = self.db.prefix_iterator_cf(cf_translation, &prefix);
+        let mut locales = HashSet::new();
+
+        for item in iter {
+            let (key, value) =
+                item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
+
+            if !key.starts_with(&prefix_clone) {
+                break;
+            }
+
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 7 {
+                locales.insert(String::from_utf8_lossy(parts[6]).into_owned());
+            }
+        }
+
+        Ok(locales.into_iter().collect())
+    }
+
+    /// Apply a CreateNode operation
+    ///
+    /// This is a simplified implementation that creates the node without full index updates.
+    /// For production, this would need to update all secondary indexes (path, property, etc.)
+    async fn apply_create_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        name: &str,
+        node_type: &str,
+        archetype: Option<&str>,
+        parent_id: Option<&str>,
+        order_key: &str,
+        properties: &HashMap<String, raisin_models::nodes::properties::PropertyValue>,
+        owner_id: Option<&str>,
+        path: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            op_seq = op.op_seq,
+            revision = ?op.revision,
+            "📥 RECEIVED CreateNode operation from node {} with revision={:?}",
+            op.cluster_node_id,
+            op.revision
+        );
+
+        tracing::info!(
+            "📥 Applying CreateNode: {}/{}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            branch,
+            node_id,
+            op.cluster_node_id
+        );
+
+        // Create Node struct from operation data
+        use chrono::{DateTime, Utc};
+        let timestamp = DateTime::from_timestamp_millis(op.timestamp_ms as i64);
+
+        let node = Node {
+            id: node_id.to_string(),
+            name: name.to_string(),
+            node_type: node_type.to_string(),
+            archetype: archetype.map(|s| s.to_string()),
+            parent: parent_id.map(|s| s.to_string()),
+            order_key: order_key.to_string(),
+            properties: properties.clone(),
+            children: Vec::new(), // Will be populated by queries
+            has_children: None,   // Never store computed field
+            version: 1,
+            created_at: timestamp,
+            updated_at: timestamp,
+            path: path.to_string(), // Use the path from the CreateNode operation
+            published_at: None,
+            published_by: None,
+            updated_by: Some(op.actor.clone()),
+            created_by: Some(op.actor.clone()),
+            translations: None,
+            tenant_id: Some(tenant_id.to_string()),
+            workspace: Some(workspace.to_string()),
+            owner_id: owner_id.map(|s| s.to_string()),
+            relations: Vec::new(), // Will be populated by queries
+        };
+
+        // Extract the revision from the operation (required for HLC consistency across cluster)
+        let revision = Self::op_revision(op)?;
+
+        // Create ALL indexes (NODE, PATH, PROPERTY, REFERENCE, RELATION)
+        // This ensures consistency between local and remote writes
+        let mut batch = rocksdb::WriteBatch::default();
+
+        // Get column family handles
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+
+        // Serialize node once
+        let node_value = rmp_serde::to_vec(&node).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        // 1. Store node blob with versioned key
+        let node_key =
+            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, &revision);
+        batch.put_cf(cf_nodes, node_key, node_value);
+
+        // 2. Index by path with versioned key
+        let path_key = keys::path_index_key_versioned(
+            tenant_id, repo_id, branch, workspace, &node.path, &revision,
+        );
+        batch.put_cf(cf_path, path_key, node.id.as_bytes());
+
+        // 3. Add property indexes
+        let is_published = node.published_at.is_some();
+
+        // Helper function to hash property values for indexing
+        let hash_property_value =
+            |value: &raisin_models::nodes::properties::PropertyValue| -> String {
+                match value {
+                    raisin_models::nodes::properties::PropertyValue::String(s) => s.clone(),
+                    raisin_models::nodes::properties::PropertyValue::Number(n) => n.to_string(),
+                    raisin_models::nodes::properties::PropertyValue::Boolean(b) => b.to_string(),
+                    raisin_models::nodes::properties::PropertyValue::Date(d) => d.to_rfc3339(),
+                    raisin_models::nodes::properties::PropertyValue::URL(u) => u.clone(),
+                    raisin_models::nodes::properties::PropertyValue::Reference(r) => {
+                        format!("ref:{}", r.id)
+                    }
+                    raisin_models::nodes::properties::PropertyValue::Resource(res) => {
+                        format!("resource:{}", res.uuid)
+                    }
+                    raisin_models::nodes::properties::PropertyValue::Element(block) => {
+                        format!("block:{}", block.uuid)
+                    }
+                    raisin_models::nodes::properties::PropertyValue::Composite(container) => {
+                        format!("container:{}", container.uuid)
+                    }
+                    raisin_models::nodes::properties::PropertyValue::Vector(v) => {
+                        format!("vector:{}d", v.len())
+                    }
+                    raisin_models::nodes::properties::PropertyValue::Array(_)
+                    | raisin_models::nodes::properties::PropertyValue::Object(_) => {
+                        serde_json::to_string(value).unwrap_or_else(|_| "invalid".to_string())
+                    }
+                }
+            };
+
+        for (prop_name, prop_value) in &node.properties {
+            let value_hash = hash_property_value(prop_value);
+            let prop_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                &value_hash,
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, prop_key, node.id.as_bytes());
+        }
+
+        // 4. Add system property indexes (__node_type, __name, etc.)
+        let node_type_key = keys::property_index_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            "__node_type",
+            &node.node_type,
+            &revision,
+            &node.id,
+            is_published,
+        );
+        batch.put_cf(cf_property, node_type_key, node.id.as_bytes());
+
+        if !node.name.is_empty() {
+            let name_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__name",
+                &node.name,
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, name_key, node.id.as_bytes());
+        }
+
+        if let Some(ref archetype) = node.archetype {
+            if !archetype.is_empty() {
+                let archetype_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__archetype",
+                    archetype,
+                    &revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, archetype_key, node.id.as_bytes());
+            }
+        }
+
+        // 5. Add reference indexes (forward + reverse)
+        for (prop_path, prop_value) in &node.properties {
+            if let raisin_models::nodes::properties::PropertyValue::Reference(ref_data) = prop_value
+            {
+                // Forward reference: this_node -> target_node
+                let fwd_key = keys::reference_forward_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
+
+                // Reverse reference: target_node <- this_node
+                let rev_key = keys::reference_reverse_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &ref_data.workspace,
+                    &ref_data.path,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, rev_key, node.id.as_bytes());
+            }
+        }
+
+        // 6. Add relation indexes (forward + reverse)
+        for relation in &node.relations {
+            // Serialize the relation to MessagePack
+            let relation_bytes = rmp_serde::to_vec(&relation).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to serialize relation: {}", e))
+            })?;
+
+            // Forward relation index: source → target (for outgoing queries)
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                &relation.relation_type,
+                &revision,
+                &relation.target,
+            );
+            batch.put_cf(cf_relation, fwd_key, &relation_bytes);
+
+            // Reverse relation index: target → source (for incoming queries)
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &relation.workspace,
+                &relation.target,
+                &relation.relation_type,
+                &revision,
+                &node.id,
+            );
+            batch.put_cf(cf_relation, rev_key, &relation_bytes);
+        }
+
+        // Add ORDERED_CHILDREN index if node has a parent
+        // (This is not handled by add_node_indexes_to_batch)
+        if let Some(parent) = parent_id {
+            let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+            // Use parent_id directly, or "/" for root level
+            let parent_key = if parent.is_empty() || parent == "/" {
+                "/"
+            } else {
+                parent
+            };
+
+            let ordered_key = keys::ordered_child_key_versioned(
+                tenant_id, repo_id, branch, workspace, parent_key, order_key, &revision, node_id,
+            );
+
+            // Store child name as value for efficient name-based lookups
+            batch.put_cf(cf_ordered, ordered_key, name.as_bytes());
+
+            tracing::debug!(
+                "✅ Adding to ORDERED_CHILDREN index: parent={}, order_key={}, child={}",
+                parent_key,
+                order_key,
+                node_id
+            );
+
+            // Update metadata cache for last child optimization
+            // This cache enables O(1) lookups when appending new children
+            let metadata_key =
+                keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_key);
+
+            // Only update cache if this order_key is lexicographically greater than cached value
+            // This handles out-of-order operation arrival during replication
+            let should_update =
+                if let Ok(Some(cached_value)) = self.db.get_cf(cf_ordered, &metadata_key) {
+                    let cached_label = String::from_utf8_lossy(&cached_value);
+                    order_key > cached_label.as_ref()
+                } else {
+                    // No cache entry - always update
+                    true
+                };
+
+            if should_update {
+                batch.put_cf(cf_ordered, metadata_key, order_key.as_bytes());
+
+                tracing::debug!(
+                    "✅ Updating last_child metadata cache: parent={}, order_key={}",
+                    parent_key,
+                    order_key
+                );
+            }
+        }
+
+        // Atomic commit of all indexes
+        self.db.write(batch).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to apply create_node: {}", e))
+        })?;
+
+        // NOTE: We do NOT call update_head() here during replication!
+        // The branch HEAD update is handled by a separate UpdateBranch operation
+        // that was captured on the source node and will be replicated separately.
+        // Calling update_head() here would:
+        // 1. Capture another UpdateBranch operation (infinite loop)
+        // 2. Update HEAD to a revision that was already set by the UpdateBranch operation
+        // This is why you might see old_head == new_head in logs if this is called.
+
+        tracing::info!(
+            "✅ Node created successfully: {} (HEAD will be updated by separate UpdateBranch operation)",
+            node_id
+        );
+
+        // Emit NodeEvent for indexing and job processing
+        self.emit_node_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            Some(node_type),
+            Some(path),
+            &revision,
+            raisin_events::NodeEventKind::Created,
+        );
+
+        Ok(())
+    }
+
+    /// Apply a DeleteNode operation
+    async fn apply_delete_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node_id: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        let revision = Self::op_revision(op)?;
+        tracing::info!(
+            "📥 Applying DeleteNode: {}/{}/{}/{} from node {} at revision {}",
+            tenant_id,
+            repo_id,
+            branch,
+            node_id,
+            op.cluster_node_id,
+            revision
+        );
+
+        let node_snapshot = match self.load_latest_node(tenant_id, repo_id, branch, node_id)? {
+            Some(node) => node,
+            None => {
+                tracing::warn!(
+                    "DeleteNode skipped: node {} not found when applying replication delete",
+                    node_id
+                );
+                return Ok(());
+            }
+        };
+
+        let workspace = node_workspace(&node_snapshot);
+        let parent_id = self.resolve_parent_id_for_snapshot(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &node_snapshot,
+        )?;
+
+        self.apply_replicated_delete(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &node_snapshot,
+            parent_id.as_deref(),
+            &revision,
+        )?;
+
+        // Update branch HEAD to point to the new revision
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, revision)
+            .await?;
+
+        tracing::info!(
+            "✅ Node deleted successfully: {} (branch HEAD updated to revision {})",
+            node_id,
+            revision
+        );
+
+        // Emit NodeEvent for indexing and job processing
+        self.emit_node_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            Some(&node_snapshot.node_type),
+            Some(&node_snapshot.path),
+            &revision,
+            raisin_events::NodeEventKind::Deleted,
+        );
+
+        Ok(())
+    }
+
+    /// Apply a SetProperty operation
+    ///
+    /// This reads the latest node, updates the property, and writes a new revision.
+    async fn apply_set_property(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node_id: &str,
+        property_name: &str,
+        value: &raisin_models::nodes::properties::PropertyValue,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::debug!(
+            "📥 Applying SetProperty: {} -> {:?} on node {}",
+            property_name,
+            value,
+            node_id
+        );
+
+        // Extract the revision from the operation (required for HLC consistency across cluster)
+        let new_revision = Self::op_revision(op)?;
+
+        // Find the latest revision of this node
+        // We scan the node key prefix to find the most recent version
+        let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, "default", node_id);
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+
+        let mut iter = self.db.iterator_cf(
+            cf_nodes,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+
+        let mut latest_node: Option<Node> = None;
+
+        // Due to descending revision encoding, first matching key is the latest
+        while let Some(Ok((key, value))) = iter.next() {
+            if !key.starts_with(&prefix) {
+                break; // No longer in this node's keyspace
+            }
+
+            // Deserialize the node
+            if let Ok(node) = rmp_serde::from_slice::<Node>(&value) {
+                latest_node = Some(node);
+                break; // First match is latest due to descending HLC encoding
+            }
+        }
+
+        let mut node = match latest_node {
+            Some(n) => n,
+            None => {
+                tracing::warn!(
+                    "Cannot apply SetProperty: node {} not found in database",
+                    node_id
+                );
+                return Ok(()); // Skip this operation gracefully
+            }
+        };
+
+        // Update the property
+        node.properties
+            .insert(property_name.to_string(), value.clone());
+
+        // Update timestamps
+        use chrono::{DateTime, Utc};
+        let timestamp = DateTime::from_timestamp_millis(op.timestamp_ms as i64);
+        node.updated_at = timestamp;
+        node.updated_by = Some(op.actor.clone());
+        node.version += 1;
+
+        // Write new revision
+        let key = keys::node_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            "default",
+            node_id,
+            &new_revision,
+        );
+        let value = rmp_serde::to_vec(&node)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        self.db
+            .put_cf(cf_nodes, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Update branch HEAD to point to the new revision
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, new_revision)
+            .await?;
+
+        tracing::info!(
+            "✅ SetProperty applied: property={}, node={} (branch HEAD updated to revision {})",
+            property_name,
+            node_id,
+            new_revision
+        );
+
+        // Emit NodeEvent for indexing and job processing
+        let workspace = node.workspace.as_deref().unwrap_or("default");
+        self.emit_node_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            Some(&node.node_type),
+            Some(&node.path),
+            &new_revision,
+            raisin_events::NodeEventKind::Updated,
+        );
+
+        Ok(())
+    }
+
+    /// Apply a RenameNode operation
+    async fn apply_rename_node(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        node_id: &str,
+        new_name: &str,
+        _op: &Operation,
+    ) -> Result<()> {
+        tracing::info!("📥 Applying RenameNode: {} -> {}", node_id, new_name);
+        // Simplified implementation
+        Ok(())
+    }
+
+    /// Apply a MoveNode operation
+    async fn apply_move_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        node_id: &str,
+        new_parent_id: Option<&str>,
+        position: Option<&str>,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying MoveNode: {} -> {:?} at position {:?} from node {}",
+            node_id,
+            new_parent_id,
+            position,
+            op.cluster_node_id
+        );
+
+        // Extract the revision from the operation (required for HLC consistency across cluster)
+        let new_revision = Self::op_revision(op)?;
+
+        // Step 1: Read current node state to get old parent, order_key, and name
+        let prefix = keys::node_key_prefix(tenant_id, repo_id, branch, "default", node_id);
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+
+        let mut iter = self.db.iterator_cf(
+            cf_nodes,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+        let mut current_node: Option<Node> = None;
+
+        // First match is latest due to descending HLC encoding
+        while let Some(Ok((key, value))) = iter.next() {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if let Ok(node) = rmp_serde::from_slice::<Node>(&value) {
+                current_node = Some(node);
+                break;
+            }
+        }
+
+        let mut node = match current_node {
+            Some(n) => n,
+            None => {
+                tracing::warn!(
+                    "Cannot apply MoveNode: node {} not found in database",
+                    node_id
+                );
+                return Ok(()); // Skip gracefully
+            }
+        };
+
+        let old_parent_id = node.parent.clone();
+        let old_order_key = node.order_key.clone();
+        let node_name = node.name.clone();
+        let workspace = node.workspace.as_deref().unwrap_or("default");
+
+        // Step 2: Write tombstone for old ORDERED_CHILDREN entry (if had parent)
+        if let Some(old_parent) = &old_parent_id {
+            let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+            let parent_key = if old_parent.is_empty() || old_parent == "/" {
+                "/"
+            } else {
+                old_parent.as_str()
+            };
+
+            let old_ordered_key = keys::ordered_child_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent_key,
+                &old_order_key,
+                &new_revision,
+                node_id,
+            );
+
+            // Write empty value as tombstone
+            self.db
+                .put_cf(cf_ordered, old_ordered_key, b"")
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            tracing::debug!(
+                "🗑️  Tombstone written for old ORDERED_CHILDREN: parent={}, order_key={}, child={}",
+                parent_key,
+                old_order_key,
+                node_id
+            );
+        }
+
+        // Step 3: Write new ORDERED_CHILDREN entry (if has new parent)
+        if let Some(new_parent) = new_parent_id {
+            let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+            let parent_key = if new_parent.is_empty() || new_parent == "/" {
+                "/"
+            } else {
+                new_parent
+            };
+
+            // Use provided position, or keep old order_key if position is None
+            let new_order_key = position.unwrap_or(&old_order_key);
+
+            let new_ordered_key = keys::ordered_child_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent_key,
+                new_order_key,
+                &new_revision,
+                node_id,
+            );
+
+            // Store child name as value
+            self.db
+                .put_cf(cf_ordered, new_ordered_key, node_name.as_bytes())
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            tracing::debug!(
+                "✅ Added to ORDERED_CHILDREN index: parent={}, order_key={}, child={}",
+                parent_key,
+                new_order_key,
+                node_id
+            );
+
+            // Update node's order_key if position was provided
+            if position.is_some() {
+                node.order_key = new_order_key.to_string();
+            }
+        }
+
+        // Step 4: Update node's parent field and path
+        let old_path = node.path.clone();
+        node.parent = new_parent_id.map(|p| p.to_string());
+
+        // Calculate new path based on new parent
+        let new_path = if let Some(new_parent) = new_parent_id {
+            if new_parent == "/" || new_parent.is_empty() {
+                // Moving to root
+                format!("/{}", node.name)
+            } else {
+                // Moving to a non-root parent - need to get parent's path
+                // Load parent node to get its path
+                let parent_prefix =
+                    keys::node_key_prefix(tenant_id, repo_id, branch, workspace, new_parent);
+
+                let mut parent_iter = self.db.iterator_cf(
+                    cf_nodes,
+                    rocksdb::IteratorMode::From(&parent_prefix, rocksdb::Direction::Forward),
+                );
+
+                let parent_path = if let Some(Ok((key, value))) = parent_iter.next() {
+                    if key.starts_with(&parent_prefix) {
+                        if let Ok(parent_node) = rmp_serde::from_slice::<Node>(&value) {
+                            Some(parent_node.path)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(pp) = parent_path {
+                    format!("{}/{}", pp, node.name)
+                } else {
+                    // Parent not found - keep old path (should not happen in normal operation)
+                    tracing::warn!(
+                        "Parent node {} not found when calculating new path for {}",
+                        new_parent,
+                        node_id
+                    );
+                    old_path.clone()
+                }
+            }
+        } else {
+            // Moving to root (no parent)
+            format!("/{}", node.name)
+        };
+
+        // Only update path and PATH_INDEX if the path actually changed
+        if new_path != old_path {
+            let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+
+            // Tombstone old PATH_INDEX entry
+            let old_path_key = keys::path_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &old_path,
+                &new_revision,
+            );
+            self.db
+                .put_cf(cf_path, old_path_key, b"") // Tombstone
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            tracing::debug!(
+                "🗑️  Tombstone written for old PATH_INDEX: path={}",
+                old_path
+            );
+
+            // Update node path
+            node.path = new_path.clone();
+
+            // Create new PATH_INDEX entry
+            let new_path_key = keys::path_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &new_path,
+                &new_revision,
+            );
+            self.db
+                .put_cf(cf_path, new_path_key, node_id.as_bytes())
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            tracing::debug!(
+                "✅ PATH_INDEX updated: old_path={} -> new_path={}",
+                old_path,
+                new_path
+            );
+        }
+
+        // Update timestamps and version
+        use chrono::{DateTime, Utc};
+        let timestamp = DateTime::from_timestamp_millis(op.timestamp_ms as i64);
+        node.updated_at = timestamp;
+        node.updated_by = Some(op.actor.clone());
+        node.version += 1;
+
+        // Step 5: Write updated node with new revision
+        let node_key = keys::node_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            &new_revision,
+        );
+        let node_value = rmp_serde::to_vec(&node)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        self.db
+            .put_cf(cf_nodes, node_key, node_value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Update branch HEAD to point to the new revision
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, new_revision)
+            .await?;
+
+        // Emit NodeEvent for indexing and job processing
+        let workspace = node.workspace.as_deref().unwrap_or("default");
+        self.emit_node_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            Some(&node.node_type),
+            Some(&node.path),
+            &new_revision,
+            raisin_events::NodeEventKind::Updated,
+        );
+
+        tracing::info!(
+            "✅ MoveNode completed: {} moved from {:?} to {:?} (branch HEAD updated to revision {})",
+            node_id,
+            old_parent_id,
+            new_parent_id,
+            new_revision
+        );
+
+        Ok(())
+    }
+
+    /// Apply a SetArchetype operation
+    async fn apply_set_archetype(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        node_id: &str,
+        new_archetype: Option<&str>,
+        _op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying SetArchetype: {} -> {:?}",
+            node_id,
+            new_archetype
+        );
+        // Simplified implementation
+        Ok(())
+    }
+
+    /// Apply an AddRelation operation
+    ///
+    /// Writes to both forward (source->target) and reverse (target->source) relation indexes.
+    async fn apply_add_relation(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        source_id: &str,
+        relation_type: &str,
+        target_id: &str,
+        relation_id: uuid::Uuid,
+        properties: &HashMap<String, raisin_models::nodes::properties::PropertyValue>,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying AddRelation: {} --[{}]--> {} (id: {})",
+            source_id,
+            relation_type,
+            target_id,
+            relation_id
+        );
+
+        let revision = Self::op_revision(op)?;
+
+        // Serialize relation properties
+        let value = rmp_serde::to_vec(&properties)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        // Write to forward index (source -> target)
+        let forward_key = keys::relation_forward_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            "default", // workspace
+            source_id,
+            relation_type,
+            &revision,
+            target_id,
+        );
+
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        self.db
+            .put_cf(cf_relation, forward_key, &value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Write to reverse index (target <- source)
+        let reverse_key = keys::relation_reverse_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            "default", // workspace
+            target_id,
+            relation_type,
+            &revision,
+            source_id,
+        );
+
+        self.db
+            .put_cf(cf_relation, reverse_key, &value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Relation added: {} --[{}]--> {}",
+            source_id,
+            relation_type,
+            target_id
+        );
+        Ok(())
+    }
+
+    /// Apply a RemoveRelation operation
+    ///
+    /// Removes from both forward and reverse relation indexes.
+    async fn apply_remove_relation(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        source_id: &str,
+        relation_type: &str,
+        target_id: &str,
+        relation_id: uuid::Uuid,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying RemoveRelation: {} --[{}]--> {} (id: {})",
+            source_id,
+            relation_type,
+            target_id,
+            relation_id
+        );
+
+        let revision = Self::op_revision(op)?;
+
+        // Delete from forward index
+        let forward_key = keys::relation_forward_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            "default",
+            source_id,
+            relation_type,
+            &revision,
+            target_id,
+        );
+
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        self.db
+            .delete_cf(cf_relation, forward_key)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // Delete from reverse index
+        let reverse_key = keys::relation_reverse_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            "default",
+            target_id,
+            relation_type,
+            &revision,
+            source_id,
+        );
+
+        self.db
+            .delete_cf(cf_relation, reverse_key)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Relation removed: {} --[{}]--> {}",
+            source_id,
+            relation_type,
+            target_id
+        );
+        Ok(())
+    }
+
+    // ========== USER OPERATION HANDLERS ==========
+
+    /// Apply a user update operation
+    async fn apply_update_user(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        user: &DatabaseAdminUser,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying user update: {}/{} from node {}",
+            tenant_id,
+            user_id,
+            op.cluster_node_id
+        );
+
+        // Use username instead of user_id to match AdminUserStore.build_key() format
+        let key = keys::admin_user_key(tenant_id, &user.username);
+        let cf = cf_handle(&self.db, cf::ADMIN_USERS)?;
+
+        let value = rmp_serde::to_vec(&user)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!("✅ User applied successfully: {}/{}", tenant_id, user_id);
+        Ok(())
+    }
+
+    /// Apply a user delete operation
+    async fn apply_delete_user(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying user delete: {}/{} from node {}",
+            tenant_id,
+            user_id,
+            op.cluster_node_id
+        );
+
+        // Note: user_id parameter is actually the username (passed from capture_delete_user)
+        // Use it directly to match AdminUserStore.build_key() format
+        let key = keys::admin_user_key(tenant_id, user_id);
+        let cf = cf_handle(&self.db, cf::ADMIN_USERS)?;
+
+        self.db
+            .delete_cf(cf, key)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!("✅ User deleted successfully: {}/{}", tenant_id, user_id);
+        Ok(())
+    }
+
+    // ========== WORKSPACE/BRANCH/TAG OPERATION HANDLERS ==========
+
+    /// Apply a workspace update operation
+    async fn apply_update_workspace(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        workspace_id: &str,
+        workspace: &Workspace,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying workspace update: {}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            workspace_id,
+            op.cluster_node_id
+        );
+
+        let key = keys::workspace_key(tenant_id, repo_id, workspace_id);
+        let cf = cf_handle(&self.db, cf::WORKSPACES)?;
+
+        let value = rmp_serde::to_vec(&workspace)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Workspace applied successfully: {}/{}/{}",
+            tenant_id,
+            repo_id,
+            workspace_id
+        );
+        Ok(())
+    }
+
+    /// Apply a workspace delete operation
+    async fn apply_delete_workspace(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        workspace_id: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying workspace delete: {}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            workspace_id,
+            op.cluster_node_id
+        );
+
+        let key = keys::workspace_key(tenant_id, repo_id, workspace_id);
+        let cf = cf_handle(&self.db, cf::WORKSPACES)?;
+
+        self.db
+            .delete_cf(cf, key)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Workspace deleted successfully: {}/{}/{}",
+            tenant_id,
+            repo_id,
+            workspace_id
+        );
+        Ok(())
+    }
+
+    /// Apply a branch update operation
+    async fn apply_update_branch(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &raisin_context::Branch,
+        op: &Operation,
+    ) -> Result<()> {
+        // Validate that the operation has a revision (required for HLC consistency)
+        let revision = Self::op_revision(op)?;
+
+        tracing::info!(
+            "📥 Applying branch update: {}/{}/{} from node {} with revision {}",
+            tenant_id,
+            repo_id,
+            branch.name,
+            op.cluster_node_id,
+            revision
+        );
+
+        let key = keys::branch_key(tenant_id, repo_id, &branch.name);
+        let cf = cf_handle(&self.db, cf::BRANCHES)?;
+
+        let value = rmp_serde::to_vec(&branch)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Branch applied successfully: {}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch.name
+        );
+        Ok(())
+    }
+
+    /// Apply a revision metadata creation operation
+    /// This writes the RevisionMeta record that populates the revision history log
+    async fn apply_create_revision_meta(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        revision_meta: &raisin_storage::RevisionMeta,
+        op: &Operation,
+    ) -> Result<()> {
+        // Validate that the operation has a revision (required for HLC consistency)
+        let _revision = Self::op_revision(op)?;
+
+        tracing::info!(
+            "📥 Applying revision metadata: {}/{} revision={} branch={} from node {}",
+            tenant_id,
+            repo_id,
+            revision_meta.revision,
+            revision_meta.branch,
+            op.cluster_node_id
+        );
+
+        let key = keys::revision_meta_key(tenant_id, repo_id, &revision_meta.revision);
+        let cf = cf_handle(&self.db, cf::REVISIONS)?;
+
+        let value = rmp_serde::to_vec(&revision_meta).map_err(|e| {
+            raisin_error::Error::storage(format!("RevisionMeta serialization error: {}", e))
+        })?;
+
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Revision metadata applied: {}/{} revision={}",
+            tenant_id,
+            repo_id,
+            revision_meta.revision
+        );
+        Ok(())
+    }
+
+    /// Apply a branch delete operation
+    async fn apply_delete_branch(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_id: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        // Validate that the operation has a revision (required for HLC consistency)
+        let revision = Self::op_revision(op)?;
+
+        tracing::info!(
+            "📥 Applying branch delete: {}/{}/{} from node {} with revision {}",
+            tenant_id,
+            repo_id,
+            branch_id,
+            op.cluster_node_id,
+            revision
+        );
+
+        let key = keys::branch_key(tenant_id, repo_id, branch_id);
+        let cf = cf_handle(&self.db, cf::BRANCHES)?;
+
+        self.db
+            .delete_cf(cf, key)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Branch deleted successfully: {}/{}/{}",
+            tenant_id,
+            repo_id,
+            branch_id
+        );
+        Ok(())
+    }
+
+    /// Apply a tag creation operation
+    async fn apply_create_tag(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        tag_name: &str,
+        revision: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying tag creation: {}/{}/{} -> {} from node {}",
+            tenant_id,
+            repo_id,
+            tag_name,
+            revision,
+            op.cluster_node_id
+        );
+
+        let key = keys::tag_key(tenant_id, repo_id, tag_name);
+        let cf = cf_handle(&self.db, cf::TAGS)?;
+
+        // Store the revision string as the tag value
+        self.db
+            .put_cf(cf, key, revision.as_bytes())
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Tag created successfully: {}/{}/{}",
+            tenant_id,
+            repo_id,
+            tag_name
+        );
+        Ok(())
+    }
+
+    /// Apply a tag deletion operation
+    async fn apply_delete_tag(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        tag_name: &str,
+        op: &Operation,
+    ) -> Result<()> {
+        tracing::info!(
+            "📥 Applying tag delete: {}/{}/{} from node {}",
+            tenant_id,
+            repo_id,
+            tag_name,
+            op.cluster_node_id
+        );
+
+        let key = keys::tag_key(tenant_id, repo_id, tag_name);
+        let cf = cf_handle(&self.db, cf::TAGS)?;
+
+        self.db
+            .delete_cf(cf, key)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        tracing::info!(
+            "✅ Tag deleted successfully: {}/{}/{}",
+            tenant_id,
+            repo_id,
+            tag_name
+        );
+        Ok(())
+    }
+}

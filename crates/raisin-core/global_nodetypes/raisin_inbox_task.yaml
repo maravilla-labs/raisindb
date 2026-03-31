@@ -1,0 +1,101 @@
+name: raisin:InboxTask
+description: Task awaiting user action in human-in-the-loop workflows
+icon: inbox
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: task_type
+    type: String
+    required: true
+    title: Task Type
+    description: Type of task requiring user action
+    enum: [approval, input, review, action]
+    index: [Property]
+
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Human-readable task title
+    index: [Fulltext]
+
+  - name: description
+    type: String
+    required: false
+    title: Description
+    description: Detailed description of the task
+
+  - name: flow_instance_ref
+    type: Reference
+    required: true
+    title: Flow Instance Reference
+    description: Reference to raisin:FlowInstance waiting for response
+    index: [Property]
+
+  - name: step_id
+    type: String
+    required: true
+    title: Step ID
+    description: ID of the flow step that created this task
+    index: [Property]
+
+  - name: options
+    type: Array
+    required: false
+    title: Options
+    description: |
+      Available response options for the user.
+      Structure: [
+        { value: "approve", label: "Approve", style: "success" },
+        { value: "reject", label: "Reject", style: "danger" }
+      ]
+
+  - name: input_schema
+    type: Object
+    required: false
+    title: Input Schema
+    description: JSON Schema for validating required user input
+
+  - name: due_date
+    type: Date
+    required: false
+    title: Due Date
+    description: When the task is due
+    index: [Property]
+
+  - name: priority
+    type: Number
+    required: false
+    title: Priority
+    description: Task priority (1-5, where 1 is highest priority)
+    default: 3
+    index: [Property]
+
+  - name: status
+    type: String
+    required: true
+    title: Status
+    description: Current status of the task
+    enum: [pending, completed, expired, cancelled]
+    default: pending
+    index: [Property]
+
+  - name: response
+    type: Object
+    required: false
+    title: Response
+    description: User's response to the task
+
+  - name: responded_at
+    type: Date
+    required: false
+    title: Responded At
+    description: When the user responded to the task
+    index: [Property]
+
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

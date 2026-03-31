@@ -1,0 +1,43 @@
+node_type: raisin:Function
+properties:
+  title: Is Steward Of
+  description: >
+    Checks if user A is a steward of user B. Returns true if there is a
+    stewardship-implying relationship (PARENT_OF, GUARDIAN_OF) from A to B.
+    For PARENT_OF relationships, considers the minor status of B based on
+    birth_date and minor_age_threshold configuration.
+  language: Starlark
+  entry_file: index.py:is_steward_of
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - steward_user_path
+      - ward_user_path
+    properties:
+      steward_user_path:
+        type: string
+        description: Path to the potential steward user node (e.g., "/users/internal/bob")
+      ward_user_path:
+        type: string
+        description: Path to the potential ward user node (e.g., "/users/internal/alice")
+      workspace:
+        type: string
+        description: Workspace name (defaults to "raisin:access_control")
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      is_steward:
+        type: boolean
+      relation_type:
+        type: string
+      relation_title:
+        type: string
+      error:
+        type: string

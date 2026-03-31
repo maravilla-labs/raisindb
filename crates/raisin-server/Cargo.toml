@@ -1,0 +1,91 @@
+[package]
+name = "raisin-server"
+version = "0.1.0"
+edition = "2021"
+description = "RaisinDB server binary"
+license = "BSL-1.1"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+raisin-transport-http = { path = "../raisin-transport-http" }
+raisin-transport-ws = { path = "../raisin-transport-ws", optional = true }
+raisin-transport-pgwire = { path = "../raisin-transport-pgwire", optional = true }
+raisin-storage = { path = "../raisin-storage" }
+raisin-storage-memory = { path = "../raisin-storage-memory", optional = true }
+raisin-rocksdb = { path = "../raisin-rocksdb", optional = true }
+raisin-replication = { path = "../raisin-replication", optional = true }
+rocksdb = { version = "0.24", optional = true }
+raisin-indexer = { path = "../raisin-indexer", optional = true }
+raisin-hnsw = { path = "../raisin-hnsw", optional = true }
+raisin-embeddings = { path = "../raisin-embeddings", optional = true }
+raisin-sql-execution = { path = "../raisin-sql-execution", optional = true }
+raisin-binary = { path = "../raisin-binary" }
+raisin-core = { path = "../raisin-core" }
+raisin-context = { path = "../raisin-context" }
+raisin-audit = { path = "../raisin-audit" }
+raisin-error = { path = "../raisin-error" }
+raisin-events = { path = "../raisin-events" }
+raisin-models = { path = "../raisin-models" }
+uuid = { workspace = true, features = ["v4"] }
+bcrypt = "0.16"
+jsonwebtoken = "9.3"
+rand = "0.8"
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1.89"
+futures = "0.3"
+futures-util = "0.3"
+bytes = "1.0"
+tokio-stream = "0.1"
+async-stream = "0.3"
+chrono = { workspace = true }
+nanoid = "0.4"
+serde_yaml = "0.9"
+anyhow = "1.0"
+rmp-serde = { workspace = true }
+clap = { version = "4.5", features = ["derive", "env"] }
+toml = "0.8"
+pgwire = { version = "0.25", optional = true }
+raisin-functions = { path = "../raisin-functions", optional = true }
+reqwest = { workspace = true, features = ["json"] }
+raisin-ai = { version = "0.1.0", path = "../raisin-ai" }
+raisin-packages = { path = "../raisin-packages" }
+raisin-hlc = { path = "../raisin-hlc" }
+raisin-deps = { path = "../raisin-deps" }
+include_dir = "0.7"
+zip = "2.2"
+
+[[bin]]
+name = "raisin-server"
+path = "src/main.rs"
+
+[features]
+default = ["fs", "storage-rocksdb", "websocket", "pgwire", "ai"]
+fs = []
+s3 = ["raisin-binary/s3", "raisin-transport-http/s3"]
+store-memory = ["raisin-transport-http/store-memory", "dep:raisin-storage-memory"]
+store-mongo = ["raisin-transport-http/store-mongo"]
+storage-rocksdb = ["raisin-transport-http/storage-rocksdb", "dep:raisin-rocksdb", "dep:raisin-replication", "dep:rocksdb", "dep:raisin-indexer", "dep:raisin-hnsw", "dep:raisin-embeddings", "dep:raisin-sql-execution", "dep:raisin-functions"]
+websocket = ["dep:raisin-transport-ws"]
+pgwire = ["dep:pgwire", "dep:raisin-transport-pgwire", "raisin-transport-pgwire/indexing"]
+# AI features (forwarded from raisin-ai)
+ai = ["pdf", "pdf-markdown", "candle", "ocr"]
+pdf = ["raisin-ai/pdf"]
+pdf-markdown = ["raisin-ai/pdf-markdown"]
+ocr = ["raisin-ai/ocr"]
+candle = ["raisin-ai/candle"]
+huggingface = ["raisin-ai/huggingface"]
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["json", "multipart"] }
+tempfile = "3.8"
+chrono = { workspace = true }
+tokio-tungstenite = "0.21"
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+zip = "2.2"

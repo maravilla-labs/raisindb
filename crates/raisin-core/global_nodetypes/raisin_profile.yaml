@@ -1,0 +1,21 @@
+name: raisin:Profile
+description: User profile container with public and private data sections
+icon: account_circle
+version: 1
+indexable: true
+index_types: [Property]
+properties:
+  - name: data
+    type: Object
+    required: false
+allowed_children:
+  - raisin:ProfileData
+versionable: true
+publishable: false
+auditable: true
+initial_structure:
+  children:
+    - name: private
+      node_type: raisin:ProfileData
+    - name: public
+      node_type: raisin:ProfileData

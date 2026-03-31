@@ -1,0 +1,31 @@
+node_type: "raisin:Function"
+properties:
+  name: "forget"
+  title: "Forget User Context Entry"
+  description: |
+    Removes a specific memory entry by key from the user's stored memory.
+    Use this when the user asks you to forget something you previously remembered.
+    The key is matched against bullet list entries formatted as "- key: value".
+    Example: forget(key="preferred_language") removes the line "- preferred_language: ..."
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties:
+      key:
+        type: "string"
+        description: "The key of the memory entry to remove"
+    required:
+      - key
+  output_schema:
+    type: "object"
+    properties:
+      success:
+        type: "boolean"
+      key:
+        type: "string"
+      found:
+        type: "boolean"
+        description: "Whether the key existed before removal"

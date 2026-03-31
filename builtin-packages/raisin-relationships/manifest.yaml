@@ -1,0 +1,67 @@
+name: raisin-relationships
+version: 1.0.0
+title: RaisinDB Relationships Package
+description: >
+  Core relationship infrastructure for RaisinDB. Provides the RelationType
+  node type and relationship request/response workflow handlers. Other packages
+  (stewardship, social, messaging) depend on this package to define their
+  specific relationship types.
+author: RaisinDB Team
+license: BSL-1.1
+icon: link
+color: "#6366f1"
+keywords:
+  - relationships
+  - connections
+  - graph
+  - edges
+category: system
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  # Node types defined by this package
+  nodetypes:
+    - raisin:RelationType
+
+  # Triggers for relationship processing
+  triggers:
+    - /functions/triggers/raisin/relationships/process-relationship-request
+    - /functions/triggers/raisin/relationships/process-relationship-response
+
+  # Handler functions for relationship workflow
+  functions:
+    - /functions/lib/raisin/relationships/handlers/handle-relationship-request
+    - /functions/lib/raisin/relationships/handlers/handle-relationship-response
+
+# Sync configuration for package updates
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Handler functions
+    - root: /functions/lib/raisin/relationships/handlers
+      include:
+        - "handle-relationship-request/**"
+        - "handle-relationship-response/**"
+      mode: merge
+
+    # Triggers
+    - root: /functions/triggers/raisin/relationships
+      include:
+        - "process-relationship-request/**"
+        - "process-relationship-response/**"
+      mode: merge
+
+# Workspace configuration
+workspace_patches:
+  raisin:access_control:
+    default_folder_type: raisin:AclFolder
+    allowed_node_types:
+      add:
+        - raisin:RelationType
+  functions:
+    default_folder_type: raisin:Folder

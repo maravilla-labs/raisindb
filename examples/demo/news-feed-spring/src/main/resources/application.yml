@@ -1,0 +1,52 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: news-feed-spring
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/social_feed_demo_rel4
+    username: default
+    password: raisin_N7U7POgxOh9WqZIaPC5YK1W23HlEieb9
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      minimum-idle: 2
+      maximum-pool-size: 20
+      connection-timeout: 5000
+      idle-timeout: 30000
+      max-lifetime: 1800000
+      pool-name: RaisinDBPool
+      auto-commit: true
+
+  thymeleaf:
+    cache: false
+    prefix: classpath:/templates/
+    suffix: .html
+    mode: HTML
+
+  jackson:
+    default-property-inclusion: non_null
+
+# RaisinDB specific settings
+raisindb:
+  workspace: social
+  base-path: /superbigshit
+  articles-path: /superbigshit/articles
+  tags-path: /superbigshit/tags
+
+# External Auth API
+auth:
+  api-url: http://localhost:8081
+  repo-id: social_feed_demo_rel4
+
+logging:
+  level:
+    com.raisindb.newsfeed: DEBUG
+    org.springframework.jdbc.core: DEBUG
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

@@ -1,0 +1,1 @@
+export type DefaultValue = { "String": string } | { "Number": number } | { "Boolean": boolean } | "Null";

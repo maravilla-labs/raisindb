@@ -1,0 +1,22 @@
+node_type: raisin:Trigger
+properties:
+  title: Continue After Tool Result
+  description: Continues AI conversation after tool execution completes
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - ai
+    paths:
+      - "/agents/**/inbox/chats/**/aggregated_result"
+    node_types:
+      - raisin:AIToolResult
+    property_filters:
+      skip_continuation:
+        $ne: true
+  function_path: /lib/raisin/ai/agent-continue-handler
+  priority: 0
+  max_retries: 3

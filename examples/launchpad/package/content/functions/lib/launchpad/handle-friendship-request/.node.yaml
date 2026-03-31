@@ -1,0 +1,41 @@
+node_type: raisin:Function
+properties:
+  name: handle-friendship-request
+  title: Handle Friendship Request
+  description: |
+    Processes friendship request messages from user outbox.
+    Finds the recipient by email and creates a message in their inbox.
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleFriendshipRequest
+  version: 1
+  input_schema:
+    type: object
+    description: Trigger context with event and workspace
+    properties:
+      flow_input:
+        type: object
+        properties:
+          event:
+            type: object
+            properties:
+              type:
+                type: string
+              node_id:
+                type: string
+              node_type:
+                type: string
+              node_path:
+                type: string
+          workspace:
+            type: string
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      error:
+        type: string
+      inbox_message_path:
+        type: string

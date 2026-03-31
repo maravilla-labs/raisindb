@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout/main}">
+<head>
+    <title>Search Results</title>
+</head>
+<body>
+<div layout:fragment="content">
+    <!-- Search Header -->
+    <header class="mb-8">
+        <h1 class="text-3xl font-bold">Search Results</h1>
+        <p class="text-gray-600 mt-2">
+            <span th:if="${query}">
+                Searching for: <span th:text="${query}" class="font-medium"></span>
+            </span>
+            <span th:if="${tag}">
+                Articles tagged with: <span th:text="${tag}" class="font-medium"></span>
+            </span>
+        </p>
+    </header>
+
+    <!-- Search Form -->
+    <form th:action="@{/search}" method="get" class="mb-8">
+        <div class="flex gap-4">
+            <input type="text" name="q" th:value="${query}" placeholder="Search articles..."
+                   class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+            <button type="submit"
+                    class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                Search
+            </button>
+        </div>
+    </form>
+
+    <!-- Results -->
+    <div th:if="${#lists.isEmpty(articles)}" class="text-center py-12 text-gray-500">
+        <p th:if="${query or tag}">No articles found matching your search.</p>
+        <p th:unless="${query or tag}">Enter a search term to find articles.</p>
+    </div>
+    <div th:unless="${#lists.isEmpty(articles)}">
+        <p class="text-gray-600 mb-4">Found <span th:text="${#lists.size(articles)}">0</span> article(s)</p>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div th:each="article : ${articles}">
+                <div th:replace="~{fragments/article-card :: card(${article})}"></div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

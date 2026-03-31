@@ -1,0 +1,48 @@
+[package]
+name = "raisin-schema-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.1"
+description = "WASM bindings for RaisinDB schema validation"
+
+# Mark as standalone workspace (not part of parent workspace)
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# WASM bindings
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+serde-wasm-bindgen = "0.6"
+
+# Better panic messages in WASM
+console_error_panic_hook = "0.1"
+
+# Validation utilities
+regex = "1.0"
+lazy_static = "1.4"
+
+# Embed built-in types at compile time
+include_dir = "0.7"
+
+# RaisinDB models for serde-based validation
+raisin-models = { path = "../../../crates/raisin-models" }
+raisin-validation = { version = "0.1.0", path = "../../../crates/raisin-validation" }
+
+# WASM-compatible chrono (wasmbind for wasm32 target)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+# Optimize for size
+opt-level = "s"
+lto = true

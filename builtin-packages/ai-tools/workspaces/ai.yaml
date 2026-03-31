@@ -1,0 +1,40 @@
+name: ai
+title: AI Workspace
+description: Workspace for AI-related content and configurations with Janine
+icon: sparkles
+color: "#8B5CF6"
+
+allowed_node_types:
+  - raisin:Folder
+  - raisin:AIPrompt
+  - raisin:AIConversation
+  - raisin:AIMessage
+  - raisin:AIModel
+  - raisin:AIAgent
+  - raisin:AIThought
+  - raisin:AITask
+  - raisin:AIPlan
+  - raisin:AIToolCall
+  - raisin:AIToolResult
+  - raisin:AgentUserContext
+
+allowed_root_node_types:
+  - raisin:Folder
+
+root_structure:
+  - name: agents
+    node_type: raisin:Folder
+    title: Agents
+    description: AI agent definitions
+  - name: prompts
+    node_type: raisin:Folder
+    title: Prompt Library
+    description: Reusable AI prompt templates
+  - name: conversations
+    node_type: raisin:Folder
+    title: Conversations
+    description: AI conversation history
+  - name: models
+    node_type: raisin:Folder
+    title: Model Configurations
+    description: AI model configurations

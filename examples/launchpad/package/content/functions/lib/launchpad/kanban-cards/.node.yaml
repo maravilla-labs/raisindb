@@ -1,0 +1,67 @@
+node_type: raisin:Function
+properties:
+  name: kanban-cards
+  title: Kanban Cards
+  description: |
+    Manage cards on Kanban boards - add new cards, update card properties, or delete cards.
+
+    Operations:
+    - add: Add a new card to a column (requires board_path, column_id, title; optional description, note, position)
+    - update: Update card properties (requires board_path, card_uuid; optional title, description, note)
+    - delete: Delete a card (requires board_path, card_uuid)
+
+    Example:
+    - To add a card to board at /launchpad/tasks/cms-project:
+      board_path: '/launchpad/tasks/cms-project', column_id: 'col-backlog', title: 'My Task'
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleKanbanCards
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required:
+      - operation
+      - board_path
+    properties:
+      operation:
+        type: string
+        enum: [add, update, delete]
+        description: "The operation to perform: 'add' creates a new card, 'update' modifies an existing card, 'delete' removes a card."
+      board_path:
+        type: string
+        description: "Full path to the board including workspace. Example: '/launchpad/tasks/my-board'. Required for all operations."
+      column_id:
+        type: string
+        description: "ID of the target column where the card will be added. Examples: 'col-backlog', 'col-in-progress', 'col-done'. Get available column IDs by fetching the board first with kanban-boards. Required for 'add' operation."
+      card_uuid:
+        type: string
+        description: "UUID of the card to update or delete. Get this from the board's column cards array. Required for 'update' and 'delete' operations."
+      title:
+        type: string
+        description: "Title/name of the card displayed on the board. Example: 'Implement login feature'. Required for 'add', optional for 'update'."
+      description:
+        type: string
+        description: "Short description of the card's task or content. Displayed below the title on the card. Optional for 'add' and 'update'."
+      note:
+        type: string
+        description: "Additional notes or details for the card. Can contain longer text, implementation details, or requirements. Optional for 'add' and 'update'."
+      position:
+        type: integer
+        description: "0-based index position in the column. 0 = top of column, higher numbers = lower position. If omitted, card is added at the end. Optional for 'add'."
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+        description: "Whether the operation succeeded"
+      error:
+        type: string
+        description: "Error message if operation failed"
+      card:
+        type: object
+        description: "The card data (for add and update operations)"
+      deleted_uuid:
+        type: string
+        description: "UUID of deleted card (for delete operation)"

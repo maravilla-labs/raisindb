@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "SPOUSE_OF"
+  title: "Spouse Of"
+  description: "Spousal relationship"
+  category: "household"
+  inverse_relation_name: "SPOUSE_OF"
+  bidirectional: true
+  implies_stewardship: false
+  requires_minor: false
+  icon: "heart"
+  color: "#ec4899"

@@ -1,0 +1,24 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Friendship Response
+  description: |
+    Handles friendship response messages (accept/decline).
+    When accepted, creates bidirectional FRIENDS_WITH graph edges.
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "**/users/**/outbox/*"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: friendship_response
+      status: pending
+  priority: 10
+  max_retries: 3
+  function_path: /lib/launchpad/handle-friendship-response

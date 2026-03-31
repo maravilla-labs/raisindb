@@ -1,0 +1,9 @@
+node_type: events:Page
+archetype: events:ContentPage
+properties:
+  title: Venues
+  slug: venues
+  description: Browse all venues
+  content:
+    - element_type: events:VenueListBlock
+      heading: All Venues

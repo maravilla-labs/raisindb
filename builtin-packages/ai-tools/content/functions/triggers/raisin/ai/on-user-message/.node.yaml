@@ -1,0 +1,23 @@
+node_type: raisin:Trigger
+properties:
+  title: Handle User Messages
+  description: >
+    DISABLED: Replaced by messaging-agent-chat trigger in raisin-messaging package.
+    The unified chat architecture routes agent messages through handle-chat -> handle-agent-chat.
+    This trigger had no path/workspace filters, causing duplicate AI calls on every message
+    copy created by the messaging pipeline.
+  enabled: false
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    node_types:
+      - raisin:Message
+    property_filters:
+      role: "user"
+      _source:
+        $ne: "flow"
+  function_path: /lib/raisin/ai/agent-handler
+  priority: 0
+  max_retries: 0

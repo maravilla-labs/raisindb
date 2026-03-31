@@ -1,0 +1,57 @@
+name: raisin:User
+description: User account with authentication and authorization information
+icon: person
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  - name: email
+    type: String
+    required: true
+    unique: true
+    index: [Property, Fulltext]
+  - name: display_name
+    type: String
+    required: true
+    index: [Fulltext]
+  - name: groups
+    type: Array
+    required: false
+    items:
+      type: String
+  - name: roles
+    type: Array
+    required: false
+    items:
+      type: String
+  - name: metadata
+    type: Object
+    required: false
+  - name: birth_date
+    type: Date
+    required: false
+    description: Date of birth for minor status calculation
+  - name: can_login
+    type: Boolean
+    required: false
+    default: true
+    description: Whether user can authenticate (false for guardian-created accounts)
+allowed_children:
+  - raisin:Profile
+  - raisin:MessageFolder
+  - raisin:Folder
+versionable: true
+publishable: false
+auditable: true
+initial_structure:
+  children:
+    - name: profile
+      node_type: raisin:Profile
+    - name: inbox
+      node_type: raisin:MessageFolder
+    - name: outbox
+      node_type: raisin:MessageFolder
+    - name: sent
+      node_type: raisin:MessageFolder
+    - name: notifications
+      node_type: raisin:Folder

@@ -1,0 +1,44 @@
+[package]
+name = "raisin-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raisin-storage = { path = "../raisin-storage" }
+raisin-context = { path = "../raisin-context" }
+raisin-error = { path = "../raisin-error" }
+raisin-hlc = { path = "../raisin-hlc" }
+raisin-models = { path = "../raisin-models" }
+raisin-packages = { path = "../raisin-packages" }
+raisin-validation = { path = "../raisin-validation" }
+chrono = { workspace = true }
+raisin-audit = { path = "../raisin-audit" }
+regex = { workspace = true }
+nanoid = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9.34"
+tracing = "0.1.41"
+md5 = "0.8.0"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2.5"
+base64 = { workspace = true }
+raisin-indexer = { version = "0.1.0", path = "../raisin-indexer" }
+raisin-rel = { version = "0.1.0", path = "../raisin-rel" }
+serde = { workspace = true, features = ["derive"] }
+rmp-serde.workspace = true
+async-recursion = "1.0"
+include_dir = "0.7"
+tokio = { workspace = true, features = ["full"] }
+dashmap = "6.1"
+zip = "2.1"
+
+[dev-dependencies]
+tokio = { workspace = true }
+raisin-storage-memory = { path = "../raisin-storage-memory" }
+raisin-rocksdb = { path = "../raisin-rocksdb" }
+tempfile = { workspace = true }
+raisin-events = { path = "../raisin-events" }
+
+[features]
+deprecated-scoped-storage-tests = []

@@ -1,0 +1,22 @@
+name: events:HeroBlock
+title: Hero Block
+icon: image
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Heading
+    translatable: true
+  - $type: TextField
+    name: subheading
+    title: Subheading
+    translatable: true
+  - $type: MediaField
+    name: background_image
+    title: Background Image
+  - $type: TextField
+    name: cta_text
+    title: CTA Button Text
+  - $type: TextField
+    name: cta_link
+    title: CTA Button Link

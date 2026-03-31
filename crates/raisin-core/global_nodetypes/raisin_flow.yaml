@@ -1,0 +1,78 @@
+name: raisin:Flow
+description: Visual workflow container for triggers and function execution
+icon: workflow
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Human-readable flow title
+    index: [Fulltext]
+
+  - name: name
+    type: String
+    required: true
+    unique: true
+    title: Flow Name
+    description: Unique flow identifier
+    index: [Property]
+
+  - name: description
+    type: String
+    required: false
+    title: Description
+    description: Human-readable description of the workflow
+
+  - name: enabled
+    type: Boolean
+    required: false
+    title: Enabled
+    description: Whether the flow is active
+    default: true
+    index: [Property]
+
+  - name: workflow_data
+    type: Object
+    required: false
+    title: Workflow Data
+    description: |
+      Visual workflow definition containing nodes and their connections.
+
+      Structure:
+      {
+        version: 1,
+        error_strategy: "fail_fast" | "continue",
+        nodes: [
+          {
+            id: "node_1",
+            node_type: "raisin:FlowStep" | "raisin:FlowContainer",
+            properties: { action, function_ref, lua_script, disabled },
+            on_error: "stop" | "skip" | "continue"
+          },
+          {
+            id: "container_1",
+            node_type: "raisin:FlowContainer",
+            container_type: "and" | "or" | "parallel" | "ai_sequence",
+            rules: [{ condition, next_step }],
+            children: [...]
+          }
+        ]
+      }
+
+  - name: timeout_ms
+    type: Number
+    required: false
+    title: Timeout
+    description: Maximum execution time in milliseconds
+    default: 60000
+
+allowed_children:
+  - raisin:Trigger
+  - raisin:Function
+versionable: true
+publishable: true
+auditable: true

@@ -1,0 +1,52 @@
+name: raisin:Actor
+description: Base type for all workflow participants (AI and Human actors)
+icon: user-circle
+version: 1
+abstract: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: actor_id
+    type: String
+    required: true
+    unique: true
+    index: [Property]
+    description: Unique identifier for this actor
+  - name: display_name
+    type: String
+    required: true
+    index: [Fulltext]
+    description: Human-readable display name
+  - name: capabilities
+    type: Array
+    required: false
+    items:
+      type: String
+    description: Actions this actor can perform (approve, reject, review, execute, delegate, escalate, handoff, create_task, modify_context)
+  - name: inbox_path
+    type: String
+    required: false
+    description: Path where tasks for this actor are delivered
+  - name: state
+    type: String
+    required: false
+    default: idle
+    description: Current availability state (idle, busy, unavailable, delegated)
+  - name: current_task_ref
+    type: String
+    required: false
+    description: Reference to currently assigned task
+  - name: supervisor_ref
+    type: String
+    required: false
+    description: Escalation target actor reference
+  - name: metadata
+    type: Object
+    required: false
+    description: Additional actor metadata
+allowed_children:
+  - raisin:ActorTask
+  - raisin:Message
+versionable: true
+publishable: false
+auditable: true

@@ -1,0 +1,34 @@
+[package]
+name = "raisin-storage-memory"
+version = "0.1.0"
+edition = "2021"
+description = "In-memory storage backend for RaisinDB"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+raisin-error = { path = "../raisin-error" }
+raisin-models = { path = "../raisin-models" }
+raisin-storage = { path = "../raisin-storage" }
+raisin-context = { path = "../raisin-context" }
+raisin-events = { path = "../raisin-events" }
+chrono = { workspace = true }
+nanoid = { workspace = true }
+serde_json.workspace = true
+async-trait = "0.1.89"
+log = "0.4.28"
+futures = "0.3"
+blake3 = "1.8.2"
+rmp-serde.workspace = true
+raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "storage_benchmarks"
+harness = false

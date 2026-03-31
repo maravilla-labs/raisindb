@@ -1,0 +1,74 @@
+name: raisin:FlowStepExecution
+description: Record of a step execution within a flow instance
+icon: check-circle
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: node_id
+    type: String
+    required: true
+    title: Node ID
+    description: Which node in flow definition this execution corresponds to
+    index: [Property]
+
+  - name: status
+    type: String
+    required: true
+    title: Status
+    description: Current status of step execution
+    enum: [pending, running, completed, failed, skipped]
+    default: pending
+    index: [Property]
+
+  - name: input
+    type: Object
+    required: false
+    title: Input
+    description: Input data provided to this step
+
+  - name: output
+    type: Object
+    required: false
+    title: Output
+    description: Output data produced by this step
+
+  - name: error
+    type: String
+    required: false
+    title: Error
+    description: Error message if step failed
+
+  - name: started_at
+    type: Date
+    required: false
+    title: Started At
+    description: When step execution started
+    index: [Property]
+
+  - name: completed_at
+    type: Date
+    required: false
+    title: Completed At
+    description: When step execution completed
+    index: [Property]
+
+  - name: iteration
+    type: Number
+    required: false
+    title: Iteration
+    description: For loops, which iteration this execution represents
+    default: 0
+
+  - name: duration_ms
+    type: Number
+    required: false
+    title: Duration (ms)
+    description: Execution duration in milliseconds
+
+allowed_children:
+  - raisin:FlowStepExecution
+versionable: false
+publishable: false
+auditable: true

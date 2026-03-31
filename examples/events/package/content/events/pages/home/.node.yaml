@@ -1,0 +1,22 @@
+node_type: events:Page
+archetype: events:LandingPage
+properties:
+  title: Home
+  slug: home
+  description: Welcome to the Events platform
+  content:
+    - element_type: events:HeroBlock
+      heading: Discover Events
+      subheading: Find and explore upcoming events, venues, and speakers.
+      cta_text: Browse Events
+      cta_link: /events
+    - element_type: events:EventListBlock
+      heading: Featured Events
+      featured_only: true
+      limit: 3
+    - element_type: events:EventListBlock
+      heading: Upcoming Events
+      limit: 6
+    - element_type: events:SpeakerListBlock
+      heading: Featured Speakers
+      limit: 4

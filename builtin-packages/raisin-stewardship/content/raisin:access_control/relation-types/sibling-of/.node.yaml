@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "SIBLING_OF"
+  title: "Sibling Of"
+  description: "Sibling relationship"
+  category: "household"
+  inverse_relation_name: "SIBLING_OF"
+  bidirectional: true
+  implies_stewardship: false
+  requires_minor: false
+  icon: "users"
+  color: "#06b6d4"

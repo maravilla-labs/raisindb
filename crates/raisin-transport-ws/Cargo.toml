@@ -1,0 +1,68 @@
+[package]
+name = "raisin-transport-ws"
+version = "0.1.0"
+edition = "2021"
+description = "WebSocket transport for RaisinDB (placeholder)"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Web framework and WebSocket
+axum = { workspace = true, features = ["macros", "ws"] }
+tokio = { workspace = true }
+futures = "0.3"
+futures-util = { version = "0.3", default-features = false }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+
+# Concurrency primitives
+dashmap = "6.1"
+parking_lot = "0.12"
+
+# Utilities
+uuid = { workspace = true }
+nanoid = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1.41"
+chrono = { workspace = true }
+
+# Authentication
+jsonwebtoken = "9.3"
+base64 = "0.22"
+
+# RaisinDB core crates
+raisin-storage = { path = "../raisin-storage" }
+raisin-core = { path = "../raisin-core" }
+raisin-context = { path = "../raisin-context" }
+raisin-error = { path = "../raisin-error" }
+raisin-models = { path = "../raisin-models" }
+raisin-query = { path = "../raisin-query" }
+raisin-binary = { path = "../raisin-binary" }
+raisin-audit = { path = "../raisin-audit" }
+raisin-embeddings = { path = "../raisin-embeddings" }
+raisin-events = { path = "../raisin-events" }
+
+# Optional backends
+raisin-rocksdb = { path = "../raisin-rocksdb", optional = true }
+raisin-indexer = { path = "../raisin-indexer", optional = true }
+raisin-hnsw = { path = "../raisin-hnsw", optional = true }
+raisin-sql-execution = { path = "../raisin-sql-execution", optional = true }
+raisin-flow-runtime = { path = "../raisin-flow-runtime", optional = true }
+raisin-functions = { path = "../raisin-functions", optional = true }
+reqwest = { workspace = true, optional = true }
+bytes = "1.10.1"
+anyhow.workspace = true
+raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
+
+[dev-dependencies]
+tower = "0.5"
+tempfile = "3.8"
+
+[features]
+default = ["storage-rocksdb"]
+storage-rocksdb = ["dep:raisin-rocksdb", "dep:raisin-indexer", "dep:raisin-hnsw", "dep:raisin-sql-execution", "dep:raisin-flow-runtime", "dep:raisin-functions", "dep:reqwest"]

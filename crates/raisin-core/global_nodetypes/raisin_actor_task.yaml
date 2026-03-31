@@ -1,0 +1,98 @@
+name: raisin:ActorTask
+description: Task assigned to an actor (AI or Human) within a workflow
+icon: clipboard-check
+version: 3
+indexable: true
+index_types: [Property]
+properties:
+  - name: task_type
+    type: String
+    required: true
+    index: [Property]
+    description: Task type (approval, input, review, action, handoff, escalation)
+  - name: assignee_ref
+    type: String
+    required: true
+    index: [Property]
+    description: Reference to the assigned actor
+  - name: title
+    type: String
+    required: true
+    index: [Fulltext]
+    description: Task title
+  - name: description
+    type: String
+    required: false
+    index: [Fulltext]
+    description: Task description
+  - name: priority
+    type: Number
+    required: false
+    default: 3
+    description: Priority (1 = highest, 5 = lowest)
+  - name: status
+    type: String
+    required: false
+    default: pending
+    index: [Property]
+    description: Task status (pending, claimed, in_progress, completed, delegated, escalated, expired)
+  - name: machine_context
+    type: Object
+    required: false
+    properties:
+      instance_id:
+        type: String
+        description: State machine instance ID
+      state_path:
+        type: String
+        description: State path within the machine
+      invoke_id:
+        type: String
+        description: Invoke ID if from an invocation
+    description: State machine context for this task
+  - name: input_schema
+    type: Object
+    required: false
+    description: JSON Schema for expected response
+  - name: response
+    type: Object
+    required: false
+    description: Actor's response
+  - name: options
+    type: Array
+    required: false
+    items:
+      type: Object
+      properties:
+        value:
+          type: String
+          description: Option value
+        label:
+          type: String
+          description: Display label
+        next_event:
+          type: String
+          description: Event to trigger on selection
+        data:
+          type: Object
+          description: Additional data
+    description: Predefined options for the actor
+  - name: due_at
+    type: Date
+    required: false
+    description: Due date/time
+  - name: claimed_at
+    type: Date
+    required: false
+    description: When the task was claimed
+  - name: completed_at
+    type: Date
+    required: false
+    description: When the task was completed
+  - name: assigned_by
+    type: String
+    required: false
+    description: Who created/assigned the task
+versionable: false
+publishable: false
+auditable: true

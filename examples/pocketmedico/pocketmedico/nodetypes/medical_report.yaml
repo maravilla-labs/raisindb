@@ -1,0 +1,84 @@
+name: medico:MedicalReport
+title: Medical Report
+description: Generated medical document with structured sections
+icon: file-text
+color: "#10B981"
+version: 1
+indexable: true
+index_types: [Fulltext]
+
+properties:
+  - name: document_type
+    title: Document Type
+    type: String
+    required: true
+    index: [Property]
+    ui:
+      widget: select
+      options:
+        - { label: Arztbrief, value: arztbrief }
+        - { label: Befundbericht, value: befundbericht }
+        - { label: Entlassungsbericht, value: entlassungsbericht }
+        - { label: Konsiliarbericht, value: konsiliarbericht }
+        - { label: Überweisungsbrief, value: ueberweisungsbrief }
+  - name: template_used
+    title: Template
+    type: String
+    required: true
+    default: swiss
+    ui:
+      widget: select
+      options:
+        - { label: Swiss Format, value: swiss }
+        - { label: SOAP Format, value: soap }
+  - name: report_version
+    title: Report Version
+    type: Number
+    default: 1
+    description: Version number of the report content
+  - name: ai_generated
+    title: AI Generated
+    type: Boolean
+    default: true
+    description: Whether the initial content was AI-generated
+  - name: human_reviewed
+    title: Human Reviewed
+    type: Boolean
+    default: false
+    description: Whether a nurse has reviewed and approved the content
+  - name: reviewer_id
+    title: Reviewer ID
+    type: String
+    description: ID of the nurse who reviewed the report
+  - name: reviewed_at
+    title: Reviewed At
+    type: Date
+    description: Timestamp when the report was reviewed
+  - name: review_notes
+    title: Review Notes
+    type: String
+    description: Notes from the reviewer
+    ui:
+      widget: textarea
+
+allowed_children:
+  - medico:ReportSection
+
+versionable: true
+publishable: true
+auditable: true
+
+initial_structure:
+  children:
+    - name: kopfdaten
+      node_type: medico:ReportSection
+    - name: anamnese
+      node_type: medico:ReportSection
+    - name: befund
+      node_type: medico:ReportSection
+    - name: diagnose
+      node_type: medico:ReportSection
+    - name: therapie
+      node_type: medico:ReportSection
+    - name: signature
+      node_type: medico:ReportSection

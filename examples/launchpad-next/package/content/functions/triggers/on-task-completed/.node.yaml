@@ -1,0 +1,27 @@
+node_type: raisin:Trigger
+properties:
+  title: On Task Completed
+  description: |
+    Fires when a user marks a kanban card as done.
+    The frontend writes a task_completed message to the user's outbox,
+    and this trigger starts the task-completed-chat flow, which uses
+    a chat step with conversation_format: inbox to deliver an AI
+    message to the user's regular inbox.
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "**/users/**/outbox/*"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: task_completed
+      status: pending
+  priority: 10
+  max_retries: 3
+  flow_path: /flows/task-completed-chat

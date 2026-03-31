@@ -1,0 +1,80 @@
+name: raisin:StewardshipConfig
+description: Repository-level stewardship configuration settings
+icon: settings
+version: 1
+indexable: false
+properties:
+  - name: enabled
+    type: Boolean
+    required: false
+    default: false
+    description: Whether stewardship is enabled for this repository
+
+  - name: stewardship_relation_types
+    type: Array
+    required: false
+    items:
+      type: String
+    default: ["PARENT_OF", "GUARDIAN_OF"]
+    description: Which relation types imply stewardship
+
+  - name: require_minor_for_parent
+    type: Boolean
+    required: false
+    default: true
+    description: PARENT_OF only grants stewardship if target is minor
+
+  - name: allowed_workflows
+    type: Array
+    required: false
+    items:
+      type: String
+    default: ["invitation", "admin_assignment", "steward_creates_ward"]
+    description: Allowed workflows for establishing stewardship
+
+  - name: steward_creates_ward_enabled
+    type: Boolean
+    required: false
+    default: false
+    description: Whether stewards can create new ward accounts
+
+  - name: max_stewards_per_ward
+    type: Number
+    required: false
+    default: 5
+    description: Maximum number of stewards allowed per ward
+
+  - name: max_wards_per_steward
+    type: Number
+    required: false
+    default: 10
+    description: Maximum number of wards allowed per steward
+
+  - name: invitation_expiry_days
+    type: Number
+    required: false
+    default: 7
+    description: Days until a stewardship invitation expires
+
+  - name: require_ward_consent
+    type: Boolean
+    required: false
+    default: true
+    description: Whether ward consent is required for stewardship
+
+  - name: minor_age_threshold
+    type: Number
+    required: false
+    default: 18
+    description: Age below which a user is considered a minor
+
+  - name: allow_minor_login
+    type: Boolean
+    required: false
+    default: false
+    description: Whether minors can log in directly
+
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

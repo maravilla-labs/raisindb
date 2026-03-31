@@ -1,0 +1,122 @@
+name: raisin:AIAgent
+title: AI Agent
+description: AI agent definition with system prompt, tools, and rules
+icon: bot
+color: "#8B5CF6"
+
+properties:
+  - name: system_prompt
+    title: System Prompt
+    type: string
+    required: true
+    description: System message defining AI behavior
+    ui:
+      widget: textarea
+      rows: 10
+
+  - name: tools
+    title: Tools
+    type: array
+    items:
+      type: Reference
+    description: References to raisin:Function nodes that the agent can use
+
+  - name: rules
+    title: Rules
+    type: array
+    items:
+      type: string
+    description: Additional behavioral rules for the agent
+
+  - name: task_creation_enabled
+    title: Task Creation Enabled
+    type: boolean
+    default: false
+    description: Whether the agent can create and manage structured plans/tasks. When disabled, planning-category tools are filtered out even if listed in tools.
+
+  - name: thinking_enabled
+    title: Thinking Enabled
+    type: boolean
+    default: true
+    description: Show reasoning steps to user
+
+  - name: execution_mode
+    title: Task Execution Mode
+    type: string
+    default: automatic
+    description: |
+      Plan/task execution policy:
+      - automatic: create and execute tasks immediately
+      - approve_then_auto: require plan approval, then execute all tasks automatically
+      - step_by_step: execute one task per continue signal
+      - manual: no automatic task execution
+    ui:
+      widget: select
+      options:
+        - label: Automatic - execute tasks immediately
+          value: automatic
+        - label: Approve Then Auto - approve plan, then run all tasks
+          value: approve_then_auto
+        - label: Step-by-Step - one task per continue
+          value: step_by_step
+        - label: Manual - no automatic task execution
+          value: manual
+
+  - name: execution_context
+    title: Function Execution Context
+    type: string
+    default: user
+    description: |
+      Who functions execute as when called by this agent:
+      - "user": Functions run with the chatting user's permissions (default, recommended)
+      - "system": Functions run with full system privileges (use with caution)
+    ui:
+      widget: select
+      options:
+        - label: User Context (Recommended)
+          value: user
+        - label: System Context (Elevated)
+          value: system
+
+  - name: provider
+    title: Provider
+    type: string
+    required: true
+    default: openai
+    description: AI provider (openai, anthropic, custom)
+    ui:
+      widget: select
+      options:
+        - label: OpenAI
+          value: openai
+        - label: Anthropic
+          value: anthropic
+        - label: Custom
+          value: custom
+
+  - name: model
+    title: Model
+    type: string
+    required: true
+    default: gpt-4
+    description: The AI model to use
+
+  - name: temperature
+    title: Temperature
+    type: number
+    default: 0.7
+    description: Creativity level (0-2). Higher = more creative
+    validation:
+      min: 0
+      max: 2
+
+  - name: max_tokens
+    title: Max Tokens
+    type: Number
+    default: 4096
+    description: Maximum response length in tokens
+    validation:
+      min: 1
+      max: 100000
+
+allowed_children: []

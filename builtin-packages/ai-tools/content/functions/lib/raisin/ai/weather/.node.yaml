@@ -1,0 +1,39 @@
+node_type: "raisin:Function"
+properties:
+  execution_mode: "async"
+  enabled: true
+  description: |
+    # Weather Function
+    This function can get the current weather via api based on city name and optional cityname and country.
+
+    **for development only** 
+  network_policy:
+    http_enabled: true
+    request_timeout_ms: 30000
+    max_concurrent_requests: 10
+    allowed_urls:
+      - "https://geocoding-api.open-meteo.com/**"
+      - "https://api.open-meteo.com/**"
+  version: 1
+  input_schema:
+    type: "object"
+    additionalProperties: false
+    description: "city"
+    properties:
+      city:
+        description: "city with optional comma seperated coiuntry"
+        type: "string"
+  output_schema:
+    properties:
+      windspeed:
+        description: "optional windspeed"
+        type: "string"
+      weather:
+        description: "weather in celcius"
+        type: "string"
+    description: "returns the weather"
+    additionalProperties: false
+    type: "object"
+  language: "javascript"
+  title: "current weather 23424"
+  entry_file: "index.js:show"

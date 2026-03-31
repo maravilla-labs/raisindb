@@ -1,0 +1,120 @@
+name: raisin:Function
+description: Serverless function definition for RaisinDB
+icon: function-square
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Human-readable function title
+    index: [Fulltext]
+
+  - name: name
+    type: String
+    required: false
+    unique: true
+    title: Function Name
+    description: Unique function identifier (used in SQL calls and REST paths)
+    index: [Property]
+
+  - name: description
+    type: String
+    required: false
+    title: Description
+    description: Human-readable description of what the function does
+
+  - name: language
+    type: String
+    required: true
+    title: Language
+    description: Runtime language (javascript, starlark, sql)
+    index: [Property]
+
+  - name: execution_mode
+    type: String
+    required: false
+    title: Execution Mode
+    description: How function can be executed (async, sync, both). Default is async.
+    default: "async"
+
+  - name: enabled
+    type: Boolean
+    required: false
+    title: Enabled
+    description: Whether function is active
+    default: true
+    index: [Property]
+
+  - name: entry_file
+    type: String
+    required: false
+    title: Entry File
+    description: Entry point in format 'filename:function' (e.g., 'index.js:handler')
+    default: "index.js:handler"
+
+  - name: version
+    type: Number
+    required: false
+    title: Version
+    description: Function version number (incremented on updates)
+    default: 1
+
+  - name: resource_limits
+    type: Object
+    required: false
+    title: Resource Limits
+    description: |
+      Resource constraints for function execution.
+      Structure: { timeout_ms, max_memory_bytes, max_instructions, max_stack_bytes }
+
+  - name: network_policy
+    type: Object
+    required: false
+    title: Network Policy
+    description: |
+      HTTP access configuration.
+      Structure: { http_enabled, allowed_urls, max_concurrent_requests, request_timeout_ms }
+
+  - name: triggers
+    type: Array
+    required: false
+    title: Inline Triggers
+    description: |
+      Array of trigger conditions that invoke this function.
+      Each trigger has: name, trigger_type, enabled, filters, priority
+
+  - name: input_schema
+    type: Object
+    required: false
+    title: Input Schema
+    description: JSON Schema for validating function input
+
+  - name: output_schema
+    type: Object
+    required: false
+    title: Output Schema
+    description: JSON Schema for validating function output
+
+  - name: category
+    type: String
+    required: false
+    title: Category
+    description: Optional category tag for grouping functions (e.g., 'planning'). Used by agent handlers to detect tool capabilities.
+    index: [Property]
+
+  - name: metadata
+    type: Object
+    required: false
+    title: Metadata
+    description: Custom metadata for the function
+
+allowed_children:
+  - raisin:Asset
+  - raisin:Folder
+versionable: true
+publishable: true
+auditable: true

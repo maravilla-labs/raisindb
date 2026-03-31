@@ -1,0 +1,24 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Direct Message
+  description: |
+    Handles direct messages between users.
+    Verifies friendship before delivering to recipient inbox.
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "**/users/**/outbox/*"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: direct_message
+      status: pending
+  priority: 10
+  max_retries: 3
+  function_path: /lib/launchpad/handle-direct-message

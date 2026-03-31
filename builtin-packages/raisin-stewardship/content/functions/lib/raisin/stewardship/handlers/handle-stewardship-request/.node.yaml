@@ -1,0 +1,38 @@
+node_type: raisin:Function
+properties:
+  title: Handle Stewardship Request
+  description: >
+    Handles stewardship delegation request messages.
+    This handler is triggered when a message with type "stewardship_request" is sent.
+    It validates stewardship permissions, creates delegation records, and notifies both parties.
+  language: Starlark
+  entry_file: index.py:handle_stewardship_request
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 10000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - node
+    properties:
+      node:
+        type: object
+        description: The stewardship request message node
+      event:
+        type: object
+        description: The trigger event metadata
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      inbox_message_path:
+        type: string
+        description: Path to the inbox message for the ward
+      notification_path:
+        type: string
+        description: Path to the notification created
+      error:
+        type: string

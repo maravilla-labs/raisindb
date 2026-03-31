@@ -1,0 +1,25 @@
+node_type: "raisin:Function"
+properties:
+  title: "Plan Approval Handler"
+  description: "Handles user approval or rejection of AI-generated plans in step_by_step or manual execution modes"
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handlePlanApproval"
+  input_schema:
+    type: object
+    properties:
+      action:
+        type: string
+        enum: ["approve", "reject"]
+        description: "Whether to approve or reject the plan"
+      plan_path:
+        type: string
+        description: "Path to the plan node to approve/reject"
+      feedback:
+        type: string
+        description: "Optional feedback when rejecting a plan (for revision)"
+      plan_action_id:
+        type: string
+        description: "Optional correlation id for idempotent plan actions"
+    required: ["action", "plan_path"]

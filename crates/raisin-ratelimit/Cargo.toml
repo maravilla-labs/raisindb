@@ -1,0 +1,19 @@
+[package]
+name = "raisin-ratelimit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raisin-context = { path = "../raisin-context" }
+rocksdb = { version = "0.24.0", default-features = false, optional = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde.workspace = true
+
+[features]
+default = ["rocksdb-backend"]
+rocksdb-backend = ["rocksdb"]
+
+[dev-dependencies]
+tempfile.workspace = true

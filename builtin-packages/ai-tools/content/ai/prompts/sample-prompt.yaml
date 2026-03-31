@@ -1,0 +1,44 @@
+id: sample-code-review
+node_type: raisin:AIPrompt
+name: Code Review Prompt
+parent: prompts
+
+properties:
+  prompt_template: |
+    Please review the following {{language}} code and provide feedback:
+
+    ```{{language}}
+    {{code}}
+    ```
+
+    Focus on:
+    1. Code quality and best practices
+    2. Potential bugs or issues
+    3. Performance considerations
+    4. Security concerns
+    5. Suggestions for improvement
+
+    Be constructive and educational in your feedback.
+
+  system_message: |
+    You are an expert code reviewer with deep knowledge of software engineering
+    best practices, design patterns, and security. Provide thorough but
+    constructive feedback that helps developers improve their skills.
+
+  model: claude-3-sonnet
+  temperature: 0.3
+  max_tokens: 2000
+
+  variables:
+    - name: language
+      type: string
+      required: true
+      default: javascript
+    - name: code
+      type: string
+      required: true
+
+  tags:
+    - code-review
+    - development
+    - quality

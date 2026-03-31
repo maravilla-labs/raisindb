@@ -1,0 +1,886 @@
+//! Replication operation capture for RocksDB transactions
+//!
+//! This module contains all the logic for capturing operations for CRDT replication, including:
+//! - Operation capture internal logic
+//! - Tracked change processing
+//! - Node change operations (create, delete, update)
+//! - Property, relation, and metadata change capture
+//! - ApplyRevision operation building
+
+use super::RocksDBTransaction;
+use raisin_error::Result;
+use raisin_hlc::HLC;
+use raisin_models::nodes::Node;
+use raisin_replication::operation::{ReplicatedNodeChange, ReplicatedNodeChangeKind};
+use raisin_storage::NodeRepository;
+use std::collections::HashMap;
+
+impl RocksDBTransaction {
+    /// Capture an operation, using async queue if available or synchronous capture otherwise
+    ///
+    /// This method automatically selects the best approach:
+    /// - If operation_queue is available: enqueue operation (non-blocking)
+    /// - Otherwise: call operation_capture directly (blocking) and collect the operation
+    pub(super) async fn capture_operation_internal(
+        &self,
+        tenant_id: String,
+        repo_id: String,
+        branch: String,
+        op_type: raisin_replication::OpType,
+        actor: String,
+        message: Option<String>,
+        is_system: bool,
+        revision: Option<HLC>,
+    ) {
+        // Fall back to the transaction-wide revision if caller doesn't supply one
+        let resolved_revision = revision.or_else(|| {
+            self.metadata
+                .lock()
+                .ok()
+                .and_then(|meta| meta.transaction_revision)
+        });
+
+        if resolved_revision.is_none() {
+            tracing::warn!(
+                "capture_operation_internal called without revision (tenant={}, repo={}, branch={}, op_type={:?})",
+                tenant_id,
+                repo_id,
+                branch,
+                op_type
+            );
+        }
+
+        if let Some(ref queue) = self.operation_queue {
+            // Use async queue for non-blocking operation capture
+            // Note: When using queue, operations will be pushed by the queue worker,
+            // not by the transaction directly
+            let queued_op = crate::replication::QueuedOperation {
+                tenant_id,
+                repo_id,
+                branch,
+                op_type,
+                actor,
+                message,
+                is_system,
+                revision: resolved_revision,
+            };
+
+            if let Err(e) = queue.try_enqueue(queued_op) {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to enqueue operation - queue may be full (backpressure active)"
+                );
+            }
+        } else {
+            // Fallback to synchronous capture if queue not available
+            match self
+                .operation_capture
+                .capture_operation_with_revision(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    op_type,
+                    actor,
+                    message,
+                    is_system,
+                    resolved_revision,
+                )
+                .await
+            {
+                Ok(op) => {
+                    tracing::trace!("Captured operation synchronously");
+                    // Collect the operation for replication push
+                    if let Ok(mut ops) = self.captured_operations.lock() {
+                        ops.push(op);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to capture operation synchronously");
+                }
+            }
+        }
+    }
+
+    /// PHASE 5.4: Capture detailed operations from ChangeTracker for replication
+    pub(super) async fn capture_tracked_changes(
+        &self,
+        tenant_id: String,
+        repo_id: String,
+        branch_name: String,
+        max_revision: Option<HLC>,
+        actor: String,
+        message: String,
+        is_system: bool,
+    ) -> Result<()> {
+        tracing::info!(
+            operation_capture_enabled = self.operation_capture.is_enabled(),
+            "💾 TRANSACTION COMMIT: Starting operation capture phase"
+        );
+
+        if !self.operation_capture.is_enabled() {
+            return Ok(());
+        }
+
+        // Extract detailed changes from ChangeTracker
+        let tracked_changes = {
+            let tracker = self.change_tracker.lock().map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to lock change_tracker: {}", e))
+            })?;
+            tracker.get_changes().clone()
+        };
+
+        tracing::info!(
+            num_tracked_changes = tracked_changes.len(),
+            "📋 TRANSACTION COMMIT: Processing tracked changes for replication"
+        );
+
+        if tracked_changes.is_empty() {
+            return Ok(());
+        }
+
+        // Capture ApplyRevision operation
+        if let Some(branch_revision) = max_revision {
+            if let Err(e) = self
+                .capture_apply_revision_operation(
+                    tenant_id.clone(),
+                    repo_id.clone(),
+                    branch_name.clone(),
+                    branch_revision,
+                    &tracked_changes,
+                    actor.clone(),
+                    message.clone(),
+                    is_system,
+                    branch_revision,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to capture ApplyRevision operation"
+                );
+            }
+        }
+
+        tracing::debug!(
+            "ApplyRevision operation captured for {} node changes - granular operations disabled for transactions",
+            tracked_changes.len()
+        );
+
+        Ok(())
+    }
+
+    /// Process node changes from ChangeTracker and generate detailed operations
+    async fn process_node_changes(
+        &self,
+        tracked_changes: &HashMap<String, crate::replication::NodeChanges>,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+    ) {
+        for (node_id, node_changes) in tracked_changes.iter() {
+            let node_revision = Some(node_changes.revision.clone());
+
+            if node_changes.is_create {
+                self.capture_create_operation(
+                    node_id,
+                    node_changes,
+                    tenant_id,
+                    repo_id,
+                    branch_name,
+                    actor,
+                    message,
+                    is_system,
+                    node_revision.clone(),
+                )
+                .await;
+            } else if node_changes.is_delete {
+                self.capture_delete_operation(
+                    node_id,
+                    tenant_id,
+                    repo_id,
+                    branch_name,
+                    actor,
+                    message,
+                    is_system,
+                    node_revision.clone(),
+                )
+                .await;
+            } else {
+                // Handle updates (property changes, relations, moves)
+                self.capture_update_operations(
+                    node_id,
+                    node_changes,
+                    tenant_id,
+                    repo_id,
+                    branch_name,
+                    actor,
+                    message,
+                    is_system,
+                    node_revision.clone(),
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Capture CreateNode operation
+    async fn capture_create_operation(
+        &self,
+        node_id: &str,
+        node_changes: &crate::replication::NodeChanges,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+        node_revision: Option<HLC>,
+    ) {
+        tracing::info!(
+            node_id = %node_id,
+            workspace = %node_changes.workspace,
+            "🎯 TRANSACTION COMMIT: Capturing CreateNode operation"
+        );
+
+        if let Some(ref node_data) = node_changes.node_data {
+            tracing::debug!(
+                node_id = %node_id,
+                order_key = %node_data.order_key,
+                is_empty = node_data.order_key.is_empty(),
+                "📊 Capture: CreateNode operation with order_key"
+            );
+
+            let op_type = raisin_replication::OpType::CreateNode {
+                node_id: node_id.to_string(),
+                name: node_data.name.clone(),
+                node_type: node_data.node_type.clone(),
+                archetype: node_data.archetype.clone(),
+                parent_id: node_data.parent.clone(),
+                order_key: node_data.order_key.clone(),
+                properties: node_data.properties.clone(),
+                owner_id: node_data.owner_id.clone(),
+                workspace: Some(node_changes.workspace.clone()),
+                path: node_data.path.clone(), // Include full path for replication
+            };
+
+            self.capture_operation_internal(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch_name.to_string(),
+                op_type,
+                actor.to_string(),
+                Some(message.to_string()),
+                is_system,
+                node_revision,
+            )
+            .await;
+
+            tracing::trace!(
+                node_id = %node_id,
+                "Enqueued/captured CreateNode operation with full fields"
+            );
+        }
+    }
+
+    /// Capture DeleteNode operation
+    async fn capture_delete_operation(
+        &self,
+        node_id: &str,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+        node_revision: Option<HLC>,
+    ) {
+        let op_type = raisin_replication::OpType::DeleteNode {
+            node_id: node_id.to_string(),
+        };
+
+        self.capture_operation_internal(
+            tenant_id.to_string(),
+            repo_id.to_string(),
+            branch_name.to_string(),
+            op_type,
+            actor.to_string(),
+            Some(message.to_string()),
+            is_system,
+            node_revision,
+        )
+        .await;
+
+        tracing::trace!(
+            node_id = %node_id,
+            "Enqueued/captured DeleteNode operation"
+        );
+    }
+
+    /// Capture update operations (properties, relations, moves, metadata)
+    async fn capture_update_operations(
+        &self,
+        node_id: &str,
+        node_changes: &crate::replication::NodeChanges,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+        node_revision: Option<HLC>,
+    ) {
+        // Capture property changes
+        self.capture_property_changes(
+            node_id,
+            &node_changes.property_changes,
+            tenant_id,
+            repo_id,
+            branch_name,
+            actor,
+            message,
+            is_system,
+            node_revision.clone(),
+        )
+        .await;
+
+        // Capture move operations
+        if let Some(ref move_info) = node_changes.move_info {
+            self.capture_move_operation(
+                node_id,
+                move_info,
+                tenant_id,
+                repo_id,
+                branch_name,
+                actor,
+                message,
+                is_system,
+                node_revision.clone(),
+            )
+            .await;
+        }
+
+        // Capture relation changes
+        self.capture_relation_changes(
+            &node_changes.relation_changes,
+            tenant_id,
+            repo_id,
+            branch_name,
+            actor,
+            message,
+            is_system,
+            node_revision.clone(),
+        )
+        .await;
+
+        // Capture metadata field changes
+        self.capture_metadata_changes(
+            node_id,
+            &node_changes.metadata_changes,
+            tenant_id,
+            repo_id,
+            branch_name,
+            actor,
+            message,
+            is_system,
+            node_revision,
+        )
+        .await;
+    }
+
+    /// Capture property changes
+    async fn capture_property_changes(
+        &self,
+        node_id: &str,
+        property_changes: &[crate::replication::PropertyChange],
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+        node_revision: Option<HLC>,
+    ) {
+        for prop_change in property_changes {
+            if let Some(ref new_value) = prop_change.new_value {
+                let value = serde_json::from_value(new_value.clone()).unwrap_or(
+                    raisin_models::nodes::properties::PropertyValue::String(String::new()),
+                );
+                let op_type = raisin_replication::OpType::SetProperty {
+                    node_id: node_id.to_string(),
+                    property_name: prop_change.property_name.clone(),
+                    value,
+                };
+
+                self.capture_operation_internal(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch_name.to_string(),
+                    op_type,
+                    actor.to_string(),
+                    Some(message.to_string()),
+                    is_system,
+                    node_revision.clone(),
+                )
+                .await;
+
+                tracing::trace!(
+                    node_id = %node_id,
+                    property = %prop_change.property_name,
+                    "Enqueued/captured SetProperty operation"
+                );
+            } else {
+                tracing::trace!(
+                    node_id = %node_id,
+                    property = %prop_change.property_name,
+                    "Property removed (no OpType for property deletion yet)"
+                );
+            }
+        }
+    }
+
+    /// Capture move operation
+    async fn capture_move_operation(
+        &self,
+        node_id: &str,
+        move_info: &crate::replication::NodeMove,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+        node_revision: Option<HLC>,
+    ) {
+        let op_type = raisin_replication::OpType::MoveNode {
+            node_id: node_id.to_string(),
+            old_parent_id: move_info.old_parent_id.clone(),
+            new_parent_id: move_info.new_parent_id.clone(),
+            position: move_info.position.clone(),
+        };
+
+        self.capture_operation_internal(
+            tenant_id.to_string(),
+            repo_id.to_string(),
+            branch_name.to_string(),
+            op_type,
+            actor.to_string(),
+            Some(message.to_string()),
+            is_system,
+            node_revision,
+        )
+        .await;
+
+        tracing::trace!(
+            node_id = %node_id,
+            "Enqueued/captured MoveNode operation"
+        );
+    }
+
+    /// Capture relation changes
+    async fn capture_relation_changes(
+        &self,
+        relation_changes: &[crate::replication::RelationChange],
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+        node_revision: Option<HLC>,
+    ) {
+        for rel_change in relation_changes {
+            if rel_change.is_addition {
+                let properties =
+                    serde_json::from_value(rel_change.properties.clone()).unwrap_or_default();
+                let op_type = raisin_replication::OpType::AddRelation {
+                    source_id: rel_change.source_id.clone(),
+                    relation_type: rel_change.relation_type.clone(),
+                    target_id: rel_change.target_id.clone(),
+                    relation_id: rel_change.relation_id,
+                    properties,
+                };
+
+                self.capture_operation_internal(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch_name.to_string(),
+                    op_type,
+                    actor.to_string(),
+                    Some(message.to_string()),
+                    is_system,
+                    node_revision.clone(),
+                )
+                .await;
+
+                tracing::trace!(
+                    source = %rel_change.source_id,
+                    target = %rel_change.target_id,
+                    relation_type = %rel_change.relation_type,
+                    "Enqueued/captured AddRelation operation"
+                );
+            } else {
+                let op_type = raisin_replication::OpType::RemoveRelation {
+                    source_id: rel_change.source_id.clone(),
+                    relation_type: rel_change.relation_type.clone(),
+                    target_id: rel_change.target_id.clone(),
+                    relation_id: rel_change.relation_id,
+                };
+
+                self.capture_operation_internal(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch_name.to_string(),
+                    op_type,
+                    actor.to_string(),
+                    Some(message.to_string()),
+                    is_system,
+                    node_revision.clone(),
+                )
+                .await;
+
+                tracing::trace!(
+                    source = %rel_change.source_id,
+                    target = %rel_change.target_id,
+                    relation_type = %rel_change.relation_type,
+                    "Enqueued/captured RemoveRelation operation"
+                );
+            }
+        }
+    }
+
+    /// Capture metadata field changes (name, archetype, order_key, owner, publish/unpublish)
+    async fn capture_metadata_changes(
+        &self,
+        node_id: &str,
+        metadata: &crate::replication::NodeMetadataChanges,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        actor: &str,
+        message: &str,
+        is_system: bool,
+        node_revision: Option<HLC>,
+    ) {
+        // Capture name change
+        if let Some((old_name, new_name)) = &metadata.name_change {
+            let op_type = raisin_replication::OpType::RenameNode {
+                node_id: node_id.to_string(),
+                old_name: old_name.clone(),
+                new_name: new_name.clone(),
+            };
+
+            self.capture_operation_internal(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch_name.to_string(),
+                op_type,
+                actor.to_string(),
+                Some(message.to_string()),
+                is_system,
+                node_revision.clone(),
+            )
+            .await;
+
+            tracing::trace!(
+                node_id = %node_id,
+                old_name = %old_name,
+                new_name = %new_name,
+                "Enqueued/captured RenameNode operation"
+            );
+        }
+
+        // Capture archetype change
+        if let Some((old_archetype, new_archetype)) = &metadata.archetype_change {
+            let op_type = raisin_replication::OpType::SetArchetype {
+                node_id: node_id.to_string(),
+                old_archetype: old_archetype.clone(),
+                new_archetype: new_archetype.clone(),
+            };
+
+            self.capture_operation_internal(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch_name.to_string(),
+                op_type,
+                actor.to_string(),
+                Some(message.to_string()),
+                is_system,
+                node_revision.clone(),
+            )
+            .await;
+
+            tracing::trace!(
+                node_id = %node_id,
+                "Enqueued/captured SetArchetype operation"
+            );
+        }
+
+        // Capture order key change
+        if let Some((old_order_key, new_order_key)) = &metadata.order_key_change {
+            let op_type = raisin_replication::OpType::SetOrderKey {
+                node_id: node_id.to_string(),
+                old_order_key: old_order_key.clone(),
+                new_order_key: new_order_key.clone(),
+            };
+
+            self.capture_operation_internal(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch_name.to_string(),
+                op_type,
+                actor.to_string(),
+                Some(message.to_string()),
+                is_system,
+                node_revision.clone(),
+            )
+            .await;
+
+            tracing::trace!(
+                node_id = %node_id,
+                "Enqueued/captured SetOrderKey operation"
+            );
+        }
+
+        // Capture owner change
+        if let Some((old_owner_id, new_owner_id)) = &metadata.owner_change {
+            let op_type = raisin_replication::OpType::SetOwner {
+                node_id: node_id.to_string(),
+                old_owner_id: old_owner_id.clone(),
+                new_owner_id: new_owner_id.clone(),
+            };
+
+            self.capture_operation_internal(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch_name.to_string(),
+                op_type,
+                actor.to_string(),
+                Some(message.to_string()),
+                is_system,
+                node_revision.clone(),
+            )
+            .await;
+
+            tracing::trace!(
+                node_id = %node_id,
+                "Enqueued/captured SetOwner operation"
+            );
+        }
+
+        // Capture publish
+        if let Some((published_by, published_at_ms)) = &metadata.publish_change {
+            let op_type = raisin_replication::OpType::PublishNode {
+                node_id: node_id.to_string(),
+                published_by: published_by.clone(),
+                published_at: *published_at_ms,
+            };
+
+            self.capture_operation_internal(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch_name.to_string(),
+                op_type,
+                actor.to_string(),
+                Some(message.to_string()),
+                is_system,
+                node_revision.clone(),
+            )
+            .await;
+
+            tracing::trace!(
+                node_id = %node_id,
+                "Enqueued/captured PublishNode operation"
+            );
+        }
+
+        // Capture unpublish
+        if metadata.unpublish {
+            let op_type = raisin_replication::OpType::UnpublishNode {
+                node_id: node_id.to_string(),
+            };
+
+            self.capture_operation_internal(
+                tenant_id.to_string(),
+                repo_id.to_string(),
+                branch_name.to_string(),
+                op_type,
+                actor.to_string(),
+                Some(message.to_string()),
+                is_system,
+                node_revision,
+            )
+            .await;
+
+            tracing::trace!(
+                node_id = %node_id,
+                "Enqueued/captured UnpublishNode operation"
+            );
+        }
+    }
+
+    /// Capture ApplyRevision operation with all node changes in the transaction
+    async fn capture_apply_revision_operation(
+        &self,
+        tenant_id: String,
+        repo_id: String,
+        branch: String,
+        branch_head: HLC,
+        tracked_changes: &HashMap<String, crate::replication::NodeChanges>,
+        actor: String,
+        message: String,
+        is_system: bool,
+        revision: HLC,
+    ) -> Result<()> {
+        let node_changes = self
+            .build_replicated_node_changes(&tenant_id, &repo_id, &branch, tracked_changes)
+            .await?;
+
+        if node_changes.is_empty() {
+            return Ok(());
+        }
+
+        self.capture_operation_internal(
+            tenant_id,
+            repo_id,
+            branch,
+            raisin_replication::OpType::ApplyRevision {
+                branch_head,
+                node_changes,
+            },
+            actor,
+            Some(message),
+            is_system,
+            Some(revision),
+        )
+        .await;
+
+        Ok(())
+    }
+
+    /// Build replicated node changes from tracked changes
+    async fn build_replicated_node_changes(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        tracked_changes: &HashMap<String, crate::replication::NodeChanges>,
+    ) -> Result<Vec<ReplicatedNodeChange>> {
+        let mut replicated = Vec::new();
+
+        for (node_id, change) in tracked_changes {
+            let workspace = change.workspace.as_str();
+            let revision = change.revision.clone();
+
+            if change.is_delete {
+                if let Some(node_snapshot) = change.node_data.clone() {
+                    let parent_id = self
+                        .resolve_parent_id_for_node(
+                            tenant_id,
+                            repo_id,
+                            branch,
+                            workspace,
+                            &node_snapshot,
+                            Some(&revision),
+                        )
+                        .await?;
+
+                    replicated.push(ReplicatedNodeChange {
+                        node: node_snapshot,
+                        parent_id,
+                        kind: ReplicatedNodeChangeKind::Delete,
+                    });
+                } else {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        "Unable to include delete in ApplyRevision: missing snapshot data"
+                    );
+                }
+                continue;
+            }
+
+            let node_opt = self
+                .node_repo
+                .get(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    node_id,
+                    Some(&revision),
+                )
+                .await?;
+
+            if let Some(node_snapshot) = node_opt {
+                // Log order_key state when capturing node for replication
+                tracing::debug!(
+                    node_id = %node_snapshot.id,
+                    order_key = %node_snapshot.order_key,
+                    is_empty = node_snapshot.order_key.is_empty(),
+                    "📊 Capture: building replicated node change with order_key"
+                );
+
+                let parent_id = self
+                    .resolve_parent_id_for_node(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        workspace,
+                        &node_snapshot,
+                        Some(&revision),
+                    )
+                    .await?;
+
+                replicated.push(ReplicatedNodeChange {
+                    node: node_snapshot,
+                    parent_id,
+                    kind: ReplicatedNodeChangeKind::Upsert,
+                });
+            } else {
+                tracing::warn!(
+                    node_id = %node_id,
+                    revision = %revision,
+                    "Node missing at revision when building replicated change"
+                );
+            }
+        }
+
+        Ok(replicated)
+    }
+
+    /// Resolve parent ID for a node based on its parent_path
+    async fn resolve_parent_id_for_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node: &Node,
+        max_revision: Option<&HLC>,
+    ) -> Result<Option<String>> {
+        if let Some(parent_path) = node.parent_path() {
+            if parent_path == "/" {
+                return Ok(Some("/".to_string()));
+            }
+
+            if let Some(parent) = self
+                .node_repo
+                .get_by_path_impl(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &parent_path,
+                    max_revision,
+                )
+                .await?
+            {
+                return Ok(Some(parent.id));
+            }
+        }
+
+        Ok(None)
+    }
+}

@@ -1,0 +1,218 @@
+name: Server cross-platform release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., v0.1.0)"
+        required: false
+      prerelease:
+        description: "Mark the release as a prerelease"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "Create the release as a draft (not public)"
+        required: false
+        default: false
+        type: boolean
+      bump:
+        description: "Auto-bump when tag omitted (patch|minor|major)"
+        required: false
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  BIN_NAME: raisin-server
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.compute.outputs.tag }}
+    steps:
+      - name: Compute release tag
+        id: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            if [[ -n "${{ inputs.tag }}" ]]; then
+              TAG="${{ inputs.tag }}"
+            else
+              echo "Deriving next tag from existing releases..."
+              LATEST=$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName 2>/dev/null || true)
+              if [[ -z "$LATEST" ]]; then BASE="0.1.0"; else BASE="${LATEST#v}"; fi
+              PART="${{ inputs.bump }}"
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+              case "$PART" in
+                major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0;;
+                minor) MINOR=$((MINOR+1)); PATCH=0;;
+                *) PATCH=$((PATCH+1));;
+              esac
+              TAG="v${MAJOR}.${MINOR}.${PATCH}"
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            ext: ".exe"
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            ext: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      - name: Build
+        shell: bash
+        run: |
+          TAG_NAME="$RELEASE_TAG"
+          VER="${TAG_NAME#v}"
+          if [[ -n "$VER" && "$VER" != "$TAG_NAME" ]]; then
+            echo "Setting raisin-server version to $VER"
+            sed -i.bak -E '0,/^version\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"/{s/^(version\s*=\s*)"[0-9]+\.[0-9]+\.[0-9]+"/\1"'"$VER"'"/}' crates/raisin-server/Cargo.toml
+            rm -f crates/raisin-server/Cargo.toml.bak
+            echo "Updated Cargo.toml version:"
+            grep "^version" crates/raisin-server/Cargo.toml
+          fi
+          cargo build --release --package raisin-server \
+            --features "storage-rocksdb,websocket,pgwire" \
+            --target ${{ matrix.target }}
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          TAG_NAME="$RELEASE_TAG"
+          ARTIFACT_NAME="raisindb-${TAG_NAME}-${{ matrix.target }}"
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+          mkdir -p dist/$ARTIFACT_NAME
+          cp target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.ext }} dist/$ARTIFACT_NAME/raisindb${{ matrix.ext }}
+          if [ -f LICENSE ]; then cp LICENSE dist/$ARTIFACT_NAME/; fi
+          tar -C dist -czf "dist/$ARTIFACT_NAME.${{ matrix.archive }}" "$ARTIFACT_NAME"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tagName = $env:RELEASE_TAG
+          $artifactName = "raisindb-$tagName-${{ matrix.target }}"
+          echo "ARTIFACT_NAME=$artifactName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          New-Item -ItemType Directory -Force -Path "dist/$artifactName" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\$env:BIN_NAME${{ matrix.ext }}" "dist\$artifactName\raisindb${{ matrix.ext }}"
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "dist\$artifactName\" }
+          Compress-Archive -Path "dist/$artifactName/*" -DestinationPath "dist/$artifactName.${{ matrix.archive }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Create GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lah artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS || shasum -a 256 * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update release
+        env:
+          INPUT_PRERELEASE: "${{ inputs.prerelease }}"
+          INPUT_DRAFT: "${{ inputs.draft }}"
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          echo "Publishing release $TAG"
+
+          ASSETS=(artifacts/*)
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release exists. Uploading assets with clobber..."
+            gh release upload "$TAG" "${ASSETS[@]}" --repo "${{ github.repository }}" --clobber
+          else
+            echo "Creating release and uploading assets..."
+            CREATE_FLAGS=()
+            if [ "${INPUT_PRERELEASE}" = "true" ]; then CREATE_FLAGS+=(--prerelease); fi
+            if [ "${INPUT_DRAFT}" = "true" ]; then CREATE_FLAGS+=(--draft); fi
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --repo "${{ github.repository }}" \
+              --title "RaisinDB $TAG" \
+              --generate-notes \
+              "${CREATE_FLAGS[@]}"
+          fi
+
+      - name: Summary
+        run: echo "Published RaisinDB $RELEASE_TAG" >> $GITHUB_STEP_SUMMARY

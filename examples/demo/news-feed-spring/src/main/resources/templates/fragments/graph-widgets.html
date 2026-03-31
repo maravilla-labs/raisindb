@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head></head>
+<body>
+<div th:fragment="widgets(graphData)">
+    <!-- Smart Related Articles -->
+    <section th:if="${not #lists.isEmpty(graphData.smartRelated)}" class="mt-8 p-4 bg-gray-50 rounded-lg">
+        <h3 class="text-lg font-semibold mb-4">Smart Related</h3>
+        <div class="space-y-3">
+            <div th:each="item : ${graphData.smartRelated}" class="flex items-center justify-between">
+                <a th:href="@{/articles/{category}/{slug}(category=${item.article.categorySlug},slug=${item.article.slug})}"
+                   th:text="${item.article.properties.title}" class="text-blue-600 hover:underline flex-1"></a>
+                <span class="text-sm text-gray-500 mx-2" th:text="${item.relationType}"></span>
+                <span class="text-sm font-medium" th:text="${item.weight + '%'}"></span>
+            </div>
+        </div>
+    </section>
+
+    <!-- Timeline -->
+    <section th:if="${not #lists.isEmpty(graphData.timeline.predecessors) or not #lists.isEmpty(graphData.timeline.successors)}"
+             class="mt-8 p-4 bg-blue-50 rounded-lg">
+        <h3 class="text-lg font-semibold mb-4">Story Timeline</h3>
+
+        <div th:if="${not #lists.isEmpty(graphData.timeline.predecessors)}" class="mb-4">
+            <h4 class="text-sm font-medium text-gray-600 mb-2">Previous in series</h4>
+            <div th:each="article : ${graphData.timeline.predecessors}">
+                <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}"
+                   th:text="${article.properties.title}" class="text-blue-600 hover:underline block"></a>
+            </div>
+        </div>
+
+        <div th:if="${not #lists.isEmpty(graphData.timeline.successors)}">
+            <h4 class="text-sm font-medium text-gray-600 mb-2">Next in series</h4>
+            <div th:each="article : ${graphData.timeline.successors}">
+                <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}"
+                   th:text="${article.properties.title}" class="text-blue-600 hover:underline block"></a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Opposing Views -->
+    <section th:if="${not #lists.isEmpty(graphData.opposingViews)}" class="mt-8 p-4 bg-red-50 rounded-lg">
+        <h3 class="text-lg font-semibold mb-4">Opposing Views</h3>
+        <div th:each="article : ${graphData.opposingViews}">
+            <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}"
+               th:text="${article.properties.title}" class="text-red-600 hover:underline block"></a>
+        </div>
+    </section>
+
+    <!-- Evidence/Sources -->
+    <section th:if="${not #lists.isEmpty(graphData.evidence)}" class="mt-8 p-4 bg-green-50 rounded-lg">
+        <h3 class="text-lg font-semibold mb-4">Evidence &amp; Sources</h3>
+        <div th:each="article : ${graphData.evidence}">
+            <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}"
+               th:text="${article.properties.title}" class="text-green-600 hover:underline block"></a>
+        </div>
+    </section>
+
+    <!-- Shared Tag Articles -->
+    <section th:if="${not #lists.isEmpty(graphData.sharedTagArticles)}" class="mt-8 p-4 bg-purple-50 rounded-lg">
+        <h3 class="text-lg font-semibold mb-4">Articles Sharing Tags</h3>
+        <div th:each="item : ${graphData.sharedTagArticles}" class="flex items-center justify-between py-2">
+            <a th:href="${item.urlPath}"
+               th:text="${item.articleTitle}" class="text-purple-600 hover:underline"></a>
+            <span class="text-sm text-gray-500">
+                via <span th:text="${item.sharedTag}"></span>
+            </span>
+        </div>
+    </section>
+</div>
+</body>
+</html>

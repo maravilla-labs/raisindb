@@ -1,0 +1,30 @@
+node_type: "raisin:Function"
+properties:
+  name: "handle-inbox-reply"
+  title: "Handle Inbox Reply to Flow Chat"
+  description: |
+    When a user replies to an inbox conversation originated by a flow's
+    chat step, this function resumes the waiting flow with the user's message.
+    It reads the parent conversation's flow_instance_id and calls resume_flow.
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handleInboxReply"
+  version: 1
+  input_schema:
+    type: object
+    properties:
+      flow_input:
+        type: object
+        properties:
+          event:
+            type: object
+          workspace:
+            type: string
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      error:
+        type: string

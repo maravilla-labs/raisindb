@@ -1,0 +1,27 @@
+node_type: "raisin:Function"
+properties:
+  title: "Remember User Context"
+  description: |
+    Saves the user's memory as a complete markdown document, replacing any previous content.
+    First call read-user-context to get the current memory, then merge your changes and
+    pass the full updated markdown to this tool. The content is freeform markdown — use
+    bullet lists, headings, sections, or any structure that organizes the information well.
+    Always preserve existing entries unless the user explicitly asks to remove something.
+    Example: remember(content="- name: Şenol\n- language: Turkish\n- project: RaisinDB")
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties:
+      content:
+        type: "string"
+        description: "The complete markdown content to store as the user's memory. This replaces all previous memory content."
+    required:
+      - content
+  output_schema:
+    type: "object"
+    properties:
+      success:
+        type: "boolean"

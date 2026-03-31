@@ -1,0 +1,19 @@
+name: launchpad:TextBlock
+title: Text Block
+description: Rich text content block
+icon: align-left
+color: "#10b981"
+version: 1
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Heading
+    required: false
+    translatable: true
+
+  - $type: RichTextField
+    name: content
+    title: Content
+    required: true
+    translatable: true

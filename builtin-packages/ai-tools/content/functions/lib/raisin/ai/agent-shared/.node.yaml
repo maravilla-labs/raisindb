@@ -1,0 +1,8 @@
+node_type: raisin:Function
+properties:
+  title: Agent Handler Shared Utilities
+  description: Shared utilities for agent-handler and agent-continue-handler
+  language: JavaScript
+  entry_file: index.js
+  execution_mode: Sync
+  enabled: false

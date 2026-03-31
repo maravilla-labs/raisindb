@@ -1,0 +1,13 @@
+[package]
+name = "raisin-client"
+version = "0.1.0"
+edition = "2021"
+description = "Client SDK for RaisinDB (placeholder)"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "raisin-events"
+version = "0.1.0"
+edition = "2021"
+description = "Event types and in-proc event bus for RaisinDB"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
+raisin-hlc = { path = "../raisin-hlc" }
+raisin-models = { path = "../raisin-models" }
+anyhow = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }

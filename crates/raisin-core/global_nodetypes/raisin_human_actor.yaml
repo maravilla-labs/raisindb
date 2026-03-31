@@ -1,0 +1,73 @@
+name: raisin:HumanActor
+description: Human participant in workflows with availability and SLA configuration
+icon: user
+version: 1
+extends: raisin:Actor
+indexable: true
+index_types: [Property]
+properties:
+  # Inherited from raisin:Actor: actor_id, display_name, capabilities, inbox_path, state, current_task_ref, supervisor_ref, metadata
+  - name: user_ref
+    type: String
+    required: false
+    description: Reference to the raisin:User node
+  - name: role
+    type: String
+    required: false
+    index: [Property]
+    description: Role identifier for role-based assignment (e.g., reviewer, approver)
+  - name: email
+    type: String
+    required: false
+    description: Email address for notifications
+  - name: availability
+    type: Object
+    required: false
+    properties:
+      schedule:
+        type: String
+        description: Cron expression for working hours (e.g., "0 9-17 * * 1-5" for 9am-5pm Mon-Fri)
+      timezone:
+        type: String
+        description: Timezone for schedule interpretation
+      out_of_office:
+        type: Boolean
+        description: Whether the actor is currently out of office
+      out_of_office_message:
+        type: String
+        description: Out of office message
+      return_date:
+        type: Date
+        description: Expected return date from out of office
+    description: Availability configuration for the actor
+  - name: delegation_chain
+    type: Array
+    required: false
+    items:
+      type: String
+    description: Chain of actor references to delegate to when unavailable
+  - name: sla_config
+    type: Object
+    required: false
+    properties:
+      response_time_ms:
+        type: Number
+        description: Maximum response time in milliseconds
+      escalation_time_ms:
+        type: Number
+        description: Time until escalation in milliseconds
+      warning_threshold:
+        type: Number
+        description: Warning threshold as percentage of response time (0.0-1.0)
+    description: SLA (Service Level Agreement) configuration
+  - name: notification_channel
+    type: String
+    required: false
+    default: email
+    description: Preferred notification channel (email, slack, sms, in_app, push, webhook)
+allowed_children:
+  - raisin:ActorTask
+  - raisin:Message
+versionable: true
+publishable: false
+auditable: true

@@ -1,0 +1,32 @@
+name: raisin:AIThought
+title: AI Thought
+description: AI reasoning step (visible to user)
+icon: lightbulb
+color: "#FCD34D"
+
+properties:
+  - name: content
+    title: Content
+    type: string
+    required: true
+    description: The thought or reasoning content
+    ui:
+      widget: textarea
+      rows: 4
+
+  - name: thought_type
+    title: Thought Type
+    type: string
+    default: reasoning
+    description: Type of thought process
+    ui:
+      widget: select
+      options:
+        - label: Reasoning
+          value: reasoning
+        - label: Planning
+          value: planning
+        - label: Reflection
+          value: reflection
+
+allowed_children: []

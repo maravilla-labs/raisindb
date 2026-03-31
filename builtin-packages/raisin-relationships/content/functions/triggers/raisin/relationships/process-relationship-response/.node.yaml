@@ -1,0 +1,23 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Relationship Response Messages
+  name: relationships-response
+  description: Handles relationship response messages by creating or rejecting relationships
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "/users/**/outbox/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: "relationship_response"
+      status: "pending"
+  priority: 10
+  max_retries: 3
+  function_path: /lib/raisin/relationships/handlers/handle-relationship-response

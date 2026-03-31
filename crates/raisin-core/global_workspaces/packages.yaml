@@ -1,0 +1,32 @@
+name: packages
+description: Package repository for installable extensions
+allowed_node_types:
+  - raisin:Package
+  - raisin:Folder
+  - raisin:Asset
+  - raisin:Node
+allowed_root_node_types:
+  - raisin:Package
+  - raisin:Folder
+depends_on:
+  - default
+config:
+  default_branch: main
+  node_type_pins: {}
+initial_structure:
+  children:
+    - node_type: raisin:Folder
+      name: installed
+      properties:
+        title: Installed Packages
+        icon: check-circle
+    - node_type: raisin:Folder
+      name: available
+      properties:
+        title: Available Packages
+        icon: package
+    - node_type: raisin:Folder
+      name: builtin
+      properties:
+        title: Built-in Packages
+        icon: box

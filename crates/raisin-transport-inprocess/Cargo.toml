@@ -1,0 +1,15 @@
+[package]
+name = "raisin-transport-inprocess"
+version = "0.1.0"
+edition = "2021"
+description = "In-process API facade for RaisinDB"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raisin-storage = { path = "../raisin-storage" }
+raisin-error = { path = "../raisin-error" }
+raisin-core = { path = "../raisin-core" }
+raisin-models = { path = "../raisin-models" }

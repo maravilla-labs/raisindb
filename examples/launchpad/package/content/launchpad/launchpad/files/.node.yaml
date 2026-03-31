@@ -1,0 +1,6 @@
+node_type: launchpad:Page
+archetype: launchpad:FileBrowser
+properties:
+  title: Files
+  slug: files
+  description: Shared file storage

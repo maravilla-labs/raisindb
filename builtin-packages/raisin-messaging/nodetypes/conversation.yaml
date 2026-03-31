@@ -1,0 +1,42 @@
+name: raisin:Conversation
+title: Conversation
+description: A container for a conversation thread. Messages are stored as child nodes.
+icon: chat
+color: "#10b981"
+version: 1
+
+properties:
+  - name: subject
+    title: Subject
+    type: String
+    required: false
+  - name: participants
+    title: Participants
+    type: Array
+    required: true
+    description: Array of global user IDs for participants
+  - name: participant_details
+    title: Participant Details
+    type: Object
+    required: false
+    description: Optional cached display names keyed by user ID
+  - name: last_message
+    title: Last Message Preview
+    type: Object
+    required: false
+  - name: unread_count
+    title: Unread Count
+    type: Number
+    default: 0
+    required: false
+  - name: updated_at
+    title: Last Updated
+    type: Date
+    required: false
+
+allowed_children:
+  - raisin:Message
+
+versionable: false
+publishable: false
+auditable: true

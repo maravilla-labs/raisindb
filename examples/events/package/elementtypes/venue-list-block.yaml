@@ -1,0 +1,16 @@
+name: events:VenueListBlock
+title: Venue List Block
+icon: map-pin
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Heading
+    translatable: true
+  - $type: TextField
+    name: description
+    title: Description
+    translatable: true
+  - $type: NumberField
+    name: limit
+    title: Max Items

@@ -1,0 +1,152 @@
+name: raisin:Agent
+description: AI Agent that participates in messaging like a regular user
+icon: bot
+version: 1
+extends: raisin:User
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  # Inherited from raisin:User:
+  # - email, display_name, groups, roles, metadata, birth_date, can_login
+  # - inbox, outbox, sent folders via initial_structure
+
+  # AI Configuration Properties
+  - name: system_prompt
+    type: String
+    required: true
+    description: System prompt defining AI behavior
+
+  - name: provider
+    type: String
+    required: true
+    default: openai
+    description: AI provider (openai, anthropic, google, azure_openai, ollama, groq, openrouter, bedrock, custom)
+
+  - name: model
+    type: String
+    required: true
+    default: gpt-4
+    description: Model identifier (e.g., gpt-4, claude-3-opus)
+
+  - name: temperature
+    type: Number
+    required: false
+    default: 0.7
+    description: Temperature for response generation (0-2)
+
+  - name: max_tokens
+    type: Number
+    required: false
+    default: 4096
+    description: Maximum tokens in response
+
+  - name: tools
+    type: Array
+    required: false
+    items:
+      type: Object
+      properties:
+        path:
+          type: String
+          description: Path to the function
+        workspace:
+          type: String
+          description: Workspace where the function is stored
+        alias:
+          type: String
+          description: Optional alias for the tool
+        explicit:
+          type: Boolean
+          description: Whether the tool requires explicit invocation
+    description: Available function tools for the agent
+
+  - name: thinking_enabled
+    type: Boolean
+    required: false
+    default: false
+    description: Enable extended thinking/reasoning visible to user
+
+  - name: task_creation_enabled
+    type: Boolean
+    required: false
+    default: false
+    description: Whether the agent can create and manage structured plans/tasks. When false, planning-category tools are filtered out even if listed in tools.
+
+  - name: execution_mode
+    type: String
+    required: false
+    default: automatic
+    description: "Task execution mode: 'automatic' (no approval), 'step_by_step' (approve each task), 'manual' (approve plan before execution)"
+
+  - name: execution_context
+    type: String
+    required: false
+    default: user
+    description: "Who functions execute as: 'user' (chatting user's permissions) or 'system' (elevated)"
+
+  - name: rules
+    type: Array
+    required: false
+    items:
+      type: String
+    description: Additional behavioral rules for the agent
+
+  - name: max_iterations
+    type: Number
+    required: false
+    default: 10
+    description: Maximum iterations for agentic loops
+
+  - name: timeout_ms
+    type: Number
+    required: false
+    default: 30000
+    description: Timeout per iteration in milliseconds
+
+  - name: total_timeout_ms
+    type: Number
+    required: false
+    default: 300000
+    description: Total timeout for agent execution in milliseconds
+
+  # History Compaction Settings
+  - name: compaction_enabled
+    type: Boolean
+    required: false
+    default: true
+    description: Enable automatic history compaction to reduce token usage in long conversations
+
+  - name: compaction_token_threshold
+    type: Number
+    required: false
+    default: 8000
+    description: Token count threshold to trigger compaction
+
+  - name: compaction_keep_recent
+    type: Number
+    required: false
+    default: 10
+    description: Number of recent messages to keep uncompacted
+
+  - name: compaction_provider
+    type: String
+    required: false
+    description: Provider to use for summarization. Uses agent's main provider if not set.
+
+  - name: compaction_model
+    type: String
+    required: false
+    description: Model to use for summarization. Uses agent's main model if not set.
+
+  - name: compaction_prompt
+    type: String
+    required: false
+    description: Custom prompt template for summarization. Uses system default if not set.
+
+# Inherits allowed_children from raisin:User (Profile, MessageFolder)
+# This gives agents inbox/outbox/sent folders automatically
+versionable: true
+publishable: false
+auditable: true
+# initial_structure is inherited from raisin:User
+# agents get: profile, inbox, outbox, sent, notifications folders

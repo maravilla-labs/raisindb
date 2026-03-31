@@ -1,0 +1,26 @@
+name: example-package
+version: 1.0.0
+description: Example RaisinDB package structure
+author: Maravilla Labs
+
+# Optional dependencies on other packages
+dependencies:
+  base-types: "^1.0.0"
+
+# What this package provides
+provides:
+  nodetypes: []
+  mixins: []
+  archetypes: []
+  elementtypes: []
+  workspaces: []
+  functions: []
+  triggers: []
+
+# Files to include (glob patterns)
+# If omitted, all non-hidden files are included
+files:
+  - "**/*.raql"
+  - "**/*.yaml"
+  - "functions/**/*"
+  - "types/**/*"

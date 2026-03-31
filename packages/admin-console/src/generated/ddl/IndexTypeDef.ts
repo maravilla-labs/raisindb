@@ -1,0 +1,1 @@
+export type IndexTypeDef = "Fulltext" | "Vector" | "Property";

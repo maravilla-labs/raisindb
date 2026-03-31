@@ -1,0 +1,58 @@
+name: raisin:StewardshipOverride
+description: Explicit stewardship override for time-limited or scoped delegations
+icon: key
+version: 1
+indexable: true
+index_types: [Property]
+properties:
+  - name: steward_id
+    type: String
+    required: true
+    index: [Property]
+    description: User ID of the steward
+
+  - name: ward_id
+    type: String
+    required: true
+    index: [Property]
+    description: User ID of the ward
+
+  - name: delegation_mode
+    type: String
+    required: true
+    index: [Property]
+    description: Delegation mode - either full or scoped
+
+  - name: scoped_permissions
+    type: Array
+    required: false
+    items:
+      type: Object
+    description: Specific permissions granted (for scoped delegation)
+
+  - name: valid_from
+    type: Date
+    required: false
+    description: Start date for the stewardship
+
+  - name: valid_until
+    type: Date
+    required: false
+    description: End date for the stewardship (null = indefinite)
+
+  - name: status
+    type: String
+    required: true
+    index: [Property]
+    default: "pending"
+    description: Status - "pending", "active", "expired", "revoked"
+
+  - name: reason
+    type: String
+    required: false
+    description: Reason for the stewardship override
+
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

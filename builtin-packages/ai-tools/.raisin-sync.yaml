@@ -1,0 +1,11 @@
+version: 1
+branch: main
+conflict_strategy: prompt
+ignore:
+  - "*.local.*"
+  - .raisin-sync.yaml
+  - node_modules/
+  - .git/
+server: raisin://localhost:8081
+repository: launchpad-next
+remote_path: /ai-tools

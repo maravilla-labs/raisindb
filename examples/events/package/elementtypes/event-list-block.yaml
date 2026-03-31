@@ -1,0 +1,22 @@
+name: events:EventListBlock
+title: Event List Block
+icon: calendar
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Heading
+    translatable: true
+  - $type: TextField
+    name: description
+    title: Description
+    translatable: true
+  - $type: TextField
+    name: category_filter
+    title: Category Filter
+  - $type: BooleanField
+    name: featured_only
+    title: Featured Only
+  - $type: NumberField
+    name: limit
+    title: Max Items

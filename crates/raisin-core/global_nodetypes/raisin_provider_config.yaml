@@ -1,0 +1,116 @@
+name: raisin:ProviderConfig
+description: Authentication provider configuration (OAuth, OIDC, SAML, etc.)
+icon: key
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: true
+publishable: false
+auditable: true
+properties:
+  - name: provider_id
+    type: String
+    required: true
+    title: Provider ID
+    description: Unique identifier for this provider
+    index: [Property]
+
+  - name: strategy_id
+    type: String
+    required: true
+    title: Strategy ID
+    description: Authentication strategy (e.g., "local", "magic_link", "oidc:google")
+    index: [Property]
+
+  - name: display_name
+    type: String
+    required: true
+    title: Display Name
+    description: Human-readable name shown in the login UI
+
+  - name: icon
+    type: String
+    required: false
+    title: Icon
+    description: Lucide icon name for UI display
+    default: "key"
+
+  - name: enabled
+    type: Boolean
+    required: false
+    title: Enabled
+    description: Whether this provider is currently active
+    default: true
+    index: [Property]
+
+  - name: priority
+    type: Number
+    required: false
+    title: Priority
+    description: Display order priority (lower = higher priority)
+    default: 100
+
+  - name: client_id
+    type: String
+    required: false
+    title: Client ID
+    description: OAuth2/OIDC client identifier
+
+  - name: client_secret_encrypted
+    type: String
+    required: false
+    title: Encrypted Client Secret
+    description: AES-256-GCM encrypted client secret
+
+  - name: issuer_url
+    type: String
+    required: false
+    title: Issuer URL
+    description: OIDC issuer URL for discovery
+
+  - name: authorization_url
+    type: String
+    required: false
+    title: Authorization URL
+    description: OAuth2 authorization endpoint (if not using discovery)
+
+  - name: token_url
+    type: String
+    required: false
+    title: Token URL
+    description: OAuth2 token endpoint (if not using discovery)
+
+  - name: userinfo_url
+    type: String
+    required: false
+    title: User Info URL
+    description: OIDC userinfo endpoint (if not using discovery)
+
+  - name: scopes
+    type: Array
+    required: false
+    title: Scopes
+    description: OAuth2/OIDC scopes to request
+    default: ["openid", "email", "profile"]
+
+  - name: attribute_mapping
+    type: Object
+    required: false
+    title: Attribute Mapping
+    description: |
+      Maps provider claims to identity fields.
+      Structure: { email, name, picture, email_verified, given_name, family_name }
+
+  - name: groups_claim
+    type: String
+    required: false
+    title: Groups Claim
+    description: Claim name containing user groups for role mapping
+
+  - name: extra_config
+    type: Object
+    required: false
+    title: Extra Configuration
+    description: Provider-specific additional configuration
+allowed_children: []

@@ -1,0 +1,68 @@
+name: raisin:AICostRecord
+title: AI Cost Record
+description: Tracks AI completion costs and token usage per message
+icon: dollar-sign
+color: "#22C55E"
+
+allowed_parents:
+  - raisin:AIMessage
+  - raisin:Message
+
+properties:
+  - name: model
+    title: Model
+    type: string
+    required: true
+    description: Model identifier used for this completion
+
+  - name: provider
+    title: Provider
+    type: string
+    required: true
+    description: AI provider (openai, anthropic, groq, etc.)
+
+  - name: input_tokens
+    title: Input Tokens
+    type: Number
+    required: true
+    description: Number of input/prompt tokens
+    default: 0
+
+  - name: output_tokens
+    title: Output Tokens
+    type: Number
+    required: true
+    description: Number of output/completion tokens
+    default: 0
+
+  - name: total_tokens
+    title: Total Tokens
+    type: Number
+    readonly: true
+    description: Sum of input and output tokens
+
+  - name: cost_usd
+    title: Cost (USD)
+    type: Number
+    description: Calculated cost in USD based on model pricing
+
+  - name: duration_ms
+    title: Duration (ms)
+    type: Number
+    description: Time taken for the completion in milliseconds
+
+  - name: timestamp
+    title: Timestamp
+    type: Date
+    required: true
+    description: When this completion occurred
+
+  - name: cache_read_tokens
+    title: Cache Read Tokens
+    type: Number
+    description: Number of cached tokens read (for providers that support caching)
+
+  - name: cache_creation_tokens
+    title: Cache Creation Tokens
+    type: Number
+    description: Number of tokens used to create cache entries

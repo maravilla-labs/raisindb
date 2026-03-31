@@ -1,0 +1,116 @@
+@import 'tailwindcss';
+
+@theme {
+	--font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+
+	/* Category colors */
+	--color-tech: #3B82F6;
+	--color-business: #10B981;
+	--color-sports: #F59E0B;
+	--color-entertainment: #8B5CF6;
+}
+
+/* Prose styles for markdown content */
+.prose {
+	max-width: 65ch;
+	line-height: 1.75;
+}
+
+.prose h1 {
+	font-size: 2.25rem;
+	font-weight: 700;
+	margin-top: 0;
+	margin-bottom: 0.875em;
+	line-height: 1.1;
+}
+
+.prose h2 {
+	font-size: 1.5rem;
+	font-weight: 600;
+	margin-top: 2em;
+	margin-bottom: 1em;
+	line-height: 1.3;
+}
+
+.prose h3 {
+	font-size: 1.25rem;
+	font-weight: 600;
+	margin-top: 1.6em;
+	margin-bottom: 0.6em;
+	line-height: 1.4;
+}
+
+.prose p {
+	margin-top: 1.25em;
+	margin-bottom: 1.25em;
+}
+
+.prose ul {
+	list-style-type: disc;
+	margin-top: 1.25em;
+	margin-bottom: 1.25em;
+	padding-left: 1.625em;
+}
+
+.prose ol {
+	list-style-type: decimal;
+	margin-top: 1.25em;
+	margin-bottom: 1.25em;
+	padding-left: 1.625em;
+}
+
+.prose li {
+	margin-top: 0.5em;
+	margin-bottom: 0.5em;
+}
+
+.prose code {
+	font-size: 0.875em;
+	background-color: #f3f4f6;
+	padding: 0.2em 0.4em;
+	border-radius: 0.25rem;
+}
+
+.prose pre {
+	background-color: #1f2937;
+	color: #e5e7eb;
+	padding: 1rem;
+	border-radius: 0.5rem;
+	overflow-x: auto;
+	margin-top: 1.5em;
+	margin-bottom: 1.5em;
+}
+
+.prose pre code {
+	background-color: transparent;
+	padding: 0;
+}
+
+.prose blockquote {
+	border-left: 4px solid #e5e7eb;
+	padding-left: 1em;
+	margin-left: 0;
+	font-style: italic;
+	color: #6b7280;
+}
+
+.prose a {
+	color: #3b82f6;
+	text-decoration: underline;
+}
+
+.prose a:hover {
+	color: #1d4ed8;
+}
+
+.prose img {
+	margin-top: 2em;
+	margin-bottom: 2em;
+	border-radius: 0.5rem;
+}
+
+.prose hr {
+	border-color: #e5e7eb;
+	margin-top: 3em;
+	margin-bottom: 3em;
+}

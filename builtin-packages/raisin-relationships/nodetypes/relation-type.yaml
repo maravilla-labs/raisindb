@@ -1,0 +1,81 @@
+name: raisin:RelationType
+description: >
+  Discoverable relationship type definition for UI generation and permission configuration.
+  Defines how users can relate to each other (friends, family, organizational hierarchy, etc.)
+  and what capabilities those relationships enable (messaging, stewardship, etc.).
+icon: link
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  - name: relation_name
+    type: String
+    required: true
+    unique: true
+    index: [Property]
+    description: Graph relation type in UPPER_SNAKE_CASE (e.g., "PARENT_OF", "FRIENDS_WITH")
+
+  - name: title
+    type: String
+    required: true
+    index: [Fulltext]
+    description: Display name for UI (e.g., "Parent Of", "Friends With")
+
+  - name: description
+    type: String
+    required: false
+    index: [Fulltext]
+    description: Human-readable description of the relationship
+
+  - name: category
+    type: String
+    required: false
+    index: [Property]
+    description: Category for grouping (e.g., "household", "organization", "social", "stewardship", "family")
+
+  - name: inverse_relation_name
+    type: String
+    required: false
+    description: Inverse relation type (e.g., "CHILD_OF" for "PARENT_OF"). Null for bidirectional relations.
+
+  - name: bidirectional
+    type: Boolean
+    required: false
+    default: false
+    description: If true, relation exists both ways automatically (e.g., FRIENDS_WITH)
+
+  # Stewardship properties
+  - name: implies_stewardship
+    type: Boolean
+    required: false
+    default: false
+    description: Whether this relation type grants stewardship (acting on behalf of)
+
+  - name: requires_minor
+    type: Boolean
+    required: false
+    default: false
+    description: Only implies stewardship if target is a minor (for PARENT_OF type relations)
+
+  # Messaging properties
+  - name: enables_messaging
+    type: Boolean
+    required: false
+    default: false
+    description: Whether this relationship type enables direct messaging between users
+
+  # UI properties
+  - name: icon
+    type: String
+    required: false
+    description: Icon for UI display (e.g., "users", "heart", "briefcase")
+
+  - name: color
+    type: String
+    required: false
+    description: Color for UI display (e.g., "#10b981", "#3b82f6")
+
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

@@ -1,0 +1,66 @@
+name: raisin:AIConversation
+title: AI Conversation
+description: A conversation thread with an AI assistant
+icon: messages-square
+color: "#6366F1"
+
+allowed_children:
+  - raisin:AIMessage
+
+properties:
+  - name: agent_ref
+    title: Agent Reference
+    type: Reference
+    description: Reference to the raisin:AIAgent for this conversation
+
+
+  - name: title
+    title: Title
+    type: string
+    description: Conversation title or topic
+
+  - name: model
+    title: Model
+    type: string
+    description: The AI model used for this conversation
+    default: claude-3-sonnet
+
+  - name: system_message
+    title: System Message
+    type: string
+    description: System message defining AI behavior
+    ui:
+      widget: textarea
+
+  - name: status
+    title: Status
+    type: string
+    default: active
+    ui:
+      widget: select
+      options:
+        - label: Active
+          value: active
+        - label: Archived
+          value: archived
+        - label: Completed
+          value: completed
+
+  - name: message_count
+    title: Message Count
+    type: Number
+    description: Total number of messages
+    default: 0
+    readonly: true
+
+  - name: total_tokens
+    title: Total Tokens
+    type: Number
+    description: Total tokens used in conversation
+    default: 0
+    readonly: true
+
+  - name: metadata
+    title: Metadata
+    type: Object
+    description: Additional conversation metadata

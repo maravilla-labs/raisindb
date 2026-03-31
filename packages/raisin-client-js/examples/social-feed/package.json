@@ -1,0 +1,38 @@
+{
+  "name": "social-feed-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:cluster": "concurrently -n \"node1,node2,node3\" -c \"cyan,magenta,yellow\" \"VITE_RAISIN_URL=ws://localhost:8081/sys/default VITE_PORT=3000 vite\" \"VITE_RAISIN_URL=ws://localhost:8082/sys/default VITE_PORT=3001 VITE_NO_OPEN=true vite\" \"VITE_RAISIN_URL=ws://localhost:8083/sys/default VITE_PORT=3002 VITE_NO_OPEN=true vite\"",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "init-db": "VITE_RAISIN_URL=ws://localhost:8081/sys/default tsx src/lib/init-database.ts",
+    "init-stresstest": "VITE_RAISIN_URL=ws://localhost:8081/sys/default tsx src/lib/init-stress-test.ts"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../..",
+    "events": "^3.3.0",
+    "framer-motion": "^12.23.24",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router": "^7.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.12",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.8"
+  },
+  "overrides": {
+    "glob": ">=10.5.0",
+    "esbuild": ">=0.25.0"
+  }
+}

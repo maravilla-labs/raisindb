@@ -1,0 +1,29 @@
+name: launchpad:Page
+title: Page
+description: Base page type for Launchpad content
+icon: file-text
+color: "#6366f1"
+version: 1
+
+properties:
+  - name: title
+    title: Title
+    type: String
+    required: true
+    is_translatable: true
+    index:
+      - Fulltext
+  - name: slug
+    title: Slug
+    type: String
+    required: true
+  - name: description
+    title: Description
+    type: String
+    required: false
+    is_translatable: true
+
+versionable: true
+publishable: true
+auditable: true
+indexable: true

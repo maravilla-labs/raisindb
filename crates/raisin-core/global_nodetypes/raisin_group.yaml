@@ -1,0 +1,25 @@
+name: raisin:Group
+description: User group with assigned roles
+icon: group
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  - name: name
+    type: String
+    required: true
+    unique: true
+    index: [Property, Fulltext]
+  - name: description
+    type: String
+    required: false
+    index: [Fulltext]
+  - name: roles
+    type: Array
+    required: false
+    items:
+      type: String
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

@@ -1,0 +1,14 @@
+name: events:TextBlock
+title: Text Block
+icon: type
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Heading
+    translatable: true
+  - $type: TextField
+    name: body
+    title: Content
+    required: true
+    translatable: true

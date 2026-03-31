@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "WARD_OF"
+  title: "Ward Of"
+  description: "Ward of a legal guardian"
+  category: "legal"
+  inverse_relation_name: "GUARDIAN_OF"
+  bidirectional: false
+  implies_stewardship: false
+  requires_minor: false
+  icon: "user"
+  color: "#8b5cf6"

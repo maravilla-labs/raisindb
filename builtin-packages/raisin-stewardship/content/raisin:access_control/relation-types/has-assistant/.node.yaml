@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "HAS_ASSISTANT"
+  title: "Has Assistant"
+  description: "Person with an assistant in an organization"
+  category: "organization"
+  inverse_relation_name: "ASSISTANT_OF"
+  bidirectional: false
+  implies_stewardship: false
+  requires_minor: false
+  icon: "users"
+  color: "#6366f1"

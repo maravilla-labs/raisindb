@@ -1,0 +1,13 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "FRIENDS_WITH"
+  title: "Friends With"
+  description: "Mutual friendship relationship that enables direct messaging and social features"
+  category: "social"
+  inverse_relation_name: "FRIENDS_WITH"
+  bidirectional: true
+  implies_stewardship: false
+  requires_minor: false
+  enables_messaging: true
+  icon: "users"
+  color: "#3b82f6"

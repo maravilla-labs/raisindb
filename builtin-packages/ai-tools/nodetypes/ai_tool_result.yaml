@@ -1,0 +1,44 @@
+name: raisin:AIToolResult
+title: AI Tool Result
+description: Result of tool/function calls (single or aggregated from parallel execution)
+icon: check-circle
+color: "#10B981"
+
+properties:
+  - name: result
+    title: Result
+    type: Object
+    description: The result data returned by the function (for single tool calls)
+
+  - name: results
+    title: Results
+    type: array
+    description: Array of tool results (for aggregated parallel tool calls)
+
+  - name: result_count
+    title: Result Count
+    type: Number
+    description: Number of aggregated results
+    readonly: true
+
+  - name: aggregated
+    title: Aggregated
+    type: boolean
+    description: Whether this is an aggregated result from parallel tool calls
+    readonly: true
+
+  - name: error
+    title: Error
+    type: string
+    description: Error message if the function failed
+    ui:
+      widget: textarea
+      rows: 3
+
+  - name: duration_ms
+    title: Duration (ms)
+    type: Number
+    description: Execution time in milliseconds
+    readonly: true
+
+allowed_children: []

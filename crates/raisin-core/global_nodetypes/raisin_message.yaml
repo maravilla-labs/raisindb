@@ -1,0 +1,118 @@
+name: raisin:Message
+description: Message for inbox/outbox communication patterns (relationship requests, notifications, chat)
+icon: mail
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  - name: role
+    type: String
+    required: false
+    index: [Property]
+    description: Message role for chat conversations ("user", "assistant", "system")
+
+  - name: message_type
+    type: String
+    required: true
+    index: [Property]
+    description: Type of message (e.g., "relationship_request", "relationship_response", "stewardship_request", "task_assignment", "system_notification", "chat")
+
+  - name: subject
+    type: String
+    required: false
+    index: [Fulltext]
+    description: Subject line for display
+
+  - name: body
+    type: Object
+    required: true
+    description: Payload specific to message_type
+
+  - name: recipient_id
+    type: String
+    required: false
+    index: [Property]
+    description: Target user ID (optional for outbox messages that need processing)
+
+  - name: sender_id
+    type: String
+    required: true
+    index: [Property]
+    description: Source user ID
+
+  - name: sender_path
+    type: String
+    required: false
+    index: [Property]
+    description: Source user path (e.g., "/users/alice")
+
+  - name: recipient_path
+    type: String
+    required: false
+    index: [Property]
+    description: Target user path (e.g., "/users/bob")
+
+  - name: status
+    type: String
+    required: true
+    index: [Property]
+    default: "pending"
+    description: Status - "pending", "sent", "delivered", "read", "processed"
+
+  - name: created_at
+    type: Date
+    required: false
+    description: When the message was created
+
+  - name: sent_at
+    type: Date
+    required: false
+    description: When the message was sent from outbox
+
+  - name: delivered_at
+    type: Date
+    required: false
+    description: When the message was delivered to the recipient
+
+  - name: received_at
+    type: Date
+    required: false
+    description: When the message was received into an inbox
+
+  - name: read_at
+    type: Date
+    required: false
+    description: When the message was read
+
+  - name: processed_at
+    type: Date
+    required: false
+    description: When the message was processed by a handler
+
+  - name: related_entity_id
+    type: String
+    required: false
+    index: [Property]
+    description: Related entity ID (e.g., relationship request ID)
+
+  - name: expires_at
+    type: Date
+    required: false
+    description: Expiration date for the message
+
+  - name: metadata
+    type: Object
+    required: false
+    description: Additional extensible metadata
+
+allowed_children:
+  - raisin:AIThought
+  - raisin:AIPlan
+  - raisin:AIToolCall
+  - raisin:AIToolResult
+  - raisin:AIToolSingleCallResult
+  - raisin:AIToolResultAggregator
+  - raisin:AICostRecord
+versionable: false
+publishable: false
+auditable: true

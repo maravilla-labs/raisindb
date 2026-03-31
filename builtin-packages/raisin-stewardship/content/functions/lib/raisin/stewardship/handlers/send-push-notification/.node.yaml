@@ -1,0 +1,44 @@
+node_type: raisin:Function
+properties:
+  title: Send Push Notification (Placeholder)
+  description: >
+    Placeholder function for sending push notifications.
+    Currently logs the notification details. Replace with actual push service integration.
+  language: Starlark
+  entry_file: index.py:send_push_notification
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    required:
+      - user_id
+      - title
+    properties:
+      user_id:
+        type: string
+        description: User ID or path to send notification to
+      title:
+        type: string
+        description: Notification title
+      body:
+        type: string
+        description: Notification body text
+      data:
+        type: object
+        description: Additional data payload
+      priority:
+        type: string
+        enum: [high, normal, low]
+        default: normal
+  output_schema:
+    type: object
+    properties:
+      sent:
+        type: boolean
+        description: Whether the notification was sent
+      reason:
+        type: string
+        description: Reason if not sent

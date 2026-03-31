@@ -1,0 +1,49 @@
+name: raisin:AIToolCall
+title: AI Tool Call
+description: Function/tool invocation by AI
+icon: wrench
+color: "#F59E0B"
+
+properties:
+  - name: tool_call_id
+    title: Tool Call ID
+    type: string
+    required: true
+    description: OpenAI tool call ID for matching results to calls
+
+  - name: function_name
+    title: Function Name
+    type: string
+    description: Name of the function being called (for history building)
+
+  - name: function_ref
+    title: Function Reference
+    type: Reference
+    required: true
+    description: Reference to the raisin:Function being called
+
+  - name: arguments
+    title: Arguments
+    type: Object
+    description: Arguments passed to the function
+
+  - name: status
+    title: Status
+    type: string
+    default: pending
+    description: Current execution status
+    ui:
+      widget: select
+      options:
+        - label: Pending
+          value: pending
+        - label: Running
+          value: running
+        - label: Completed
+          value: completed
+        - label: Failed
+          value: failed
+
+allowed_children:
+  - raisin:AIToolResult
+  - raisin:AIToolSingleCallResult

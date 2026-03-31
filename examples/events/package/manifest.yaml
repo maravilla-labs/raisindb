@@ -1,0 +1,36 @@
+name: events
+version: 0.1.0
+title: Events
+description: An events management platform built on RaisinDB
+author: ""
+license: MIT
+icon: calendar
+color: "#6366f1"
+keywords:
+  - raisindb
+  - events
+
+provides:
+  nodetypes:
+    - events:Event
+    - events:Venue
+    - events:Speaker
+    - events:Page
+  archetypes:
+    - events:EventPage
+    - events:VenuePage
+    - events:SpeakerPage
+    - events:LandingPage
+    - events:ContentPage
+  elementtypes:
+    - events:HeroBlock
+    - events:TextBlock
+    - events:SpeakerCard
+    - events:ScheduleBlock
+    - events:EventListBlock
+    - events:VenueListBlock
+    - events:SpeakerListBlock
+  workspaces:
+    - events
+  functions: []
+  triggers: []

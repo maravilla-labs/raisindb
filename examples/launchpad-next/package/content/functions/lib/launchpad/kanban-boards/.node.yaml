@@ -1,0 +1,87 @@
+node_type: raisin:Function
+properties:
+  name: kanban-boards
+  title: Kanban Boards
+  description: |
+    Manage Kanban boards in the launchpad workspace - list all boards, get board details,
+    create new boards, update board properties, or delete boards.
+
+    Operations:
+    - list: Get all Kanban boards in the workspace (no additional params needed)
+    - get: Get a specific board with all columns and cards (requires board_path or board_id)
+    - create: Create a new board (requires parent_path, title, slug; optional description, columns)
+    - update: Update board properties (requires board_path; optional title, description)
+    - delete: Delete a board (requires board_path)
+
+    IMPORTANT: Before creating a board, ensure the parent folder exists. Use the list operation
+    first to see existing boards and their paths to understand the folder structure.
+
+    Example paths:
+    - Board path: /launchpad/tasks/my-board
+    - Parent path for create: /launchpad/tasks (the folder must exist)
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleKanbanBoards
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required:
+      - operation
+    properties:
+      operation:
+        type: string
+        enum: [list, get, create, update, delete]
+        description: "The operation to perform: list, get, create, update, or delete"
+      board_path:
+        type: string
+        description: "Full path to the board including workspace. Example: '/launchpad/tasks/my-board'. Required for get, update, delete operations."
+      board_id:
+        type: string
+        description: "Alternative to board_path - the UUID of the board node. Use this if you have the ID from a previous query."
+      parent_path:
+        type: string
+        description: "Parent folder path where the new board will be created. Example: '/launchpad/tasks'. The parent folder MUST exist before creating a board. Required for create operation."
+      title:
+        type: string
+        description: "Human-readable title for the board displayed in the UI. Example: 'CMS Project Tasks'. Required for create, optional for update."
+      slug:
+        type: string
+        description: "URL-safe slug that becomes the board's path segment. Example: 'cms-project' creates board at parent_path + '/cms-project'. Use lowercase with hyphens, no spaces. Required for create."
+      description:
+        type: string
+        description: "Optional description text for the board, shown below the title. Supports plain text."
+      columns:
+        type: array
+        description: "Initial columns for the board. Each column has an id and title. If not provided, defaults to: Backlog, In Progress, Done. Optional for create operation."
+        items:
+          type: object
+          required:
+            - id
+            - title
+          properties:
+            id:
+              type: string
+              description: "Unique identifier for the column, e.g., 'col-todo', 'col-in-progress'. Used for referencing in card operations."
+            title:
+              type: string
+              description: "Display title for the column, e.g., 'To Do', 'In Progress', 'Done'."
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+        description: "Whether the operation succeeded"
+      error:
+        type: string
+        description: "Error message if operation failed"
+      board:
+        type: object
+        description: "The board data (for get, create, update operations)"
+      boards:
+        type: array
+        description: "List of boards (for list operation)"
+      deleted_path:
+        type: string
+        description: "Path of deleted board (for delete operation)"

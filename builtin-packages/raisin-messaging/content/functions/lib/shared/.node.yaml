@@ -1,0 +1,5 @@
+node_type: raisin:Folder
+properties:
+  title: Shared Utilities
+  description: >
+    Shared JavaScript utility modules for messaging handlers.

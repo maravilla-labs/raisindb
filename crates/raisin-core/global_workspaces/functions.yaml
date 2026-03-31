@@ -1,0 +1,39 @@
+name: functions
+description: Workspace for serverless functions and triggers
+allowed_node_types:
+  - raisin:Folder
+  - raisin:Function
+  - raisin:Trigger
+  - raisin:Asset
+  - raisin:Flow
+  - raisin:Node
+allowed_root_node_types:
+  - raisin:Folder
+depends_on:
+  - default
+config:
+  default_branch: main
+  node_type_pins: {}
+initial_structure:
+  children:
+    - node_type: raisin:Folder
+      name: lib
+      properties:
+        title: Library Functions
+        icon: library
+      children:
+        - node_type: raisin:Folder
+          name: raisin
+          properties:
+            title: RaisinDB Built-in Functions
+            icon: package
+    - node_type: raisin:Folder
+      name: apps
+      properties:
+        title: Application Functions
+        icon: layers
+    - node_type: raisin:Folder
+      name: triggers
+      properties:
+        title: Standalone Triggers
+        icon: zap

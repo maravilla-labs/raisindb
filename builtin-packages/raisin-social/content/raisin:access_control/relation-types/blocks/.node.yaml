@@ -1,0 +1,13 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "BLOCKS"
+  title: "Blocks"
+  description: "One-way block relationship that prevents messaging and interaction"
+  category: "social"
+  inverse_relation_name: null
+  bidirectional: false
+  implies_stewardship: false
+  requires_minor: false
+  enables_messaging: false
+  icon: "shield"
+  color: "#ef4444"

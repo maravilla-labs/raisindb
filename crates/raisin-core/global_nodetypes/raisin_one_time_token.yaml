@@ -1,0 +1,92 @@
+name: raisin:OneTimeToken
+description: One-time token for magic links, password reset, etc.
+icon: ticket
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: true
+publishable: false
+auditable: true
+properties:
+  - name: token_id
+    type: String
+    required: true
+    title: Token ID
+    description: Token identifier
+    index: [Property]
+
+  - name: tenant_id
+    type: String
+    required: true
+    title: Tenant ID
+    description: Tenant this token belongs to
+    index: [Property]
+
+  - name: token_hash
+    type: String
+    required: true
+    title: Token Hash
+    description: Hash of the actual token value (never store plaintext)
+
+  - name: token_prefix
+    type: String
+    required: false
+    title: Token Prefix
+    description: Token prefix for identification (first 8 chars)
+    index: [Property]
+
+  - name: purpose
+    type: String
+    required: true
+    title: Purpose
+    description: Token purpose (magic_link, password_reset, email_verification, invitation)
+    index: [Property]
+
+  - name: identity_id
+    type: String
+    required: false
+    title: Identity ID
+    description: Identity ID this token is for (if known)
+    index: [Property]
+
+  - name: email
+    type: String
+    required: true
+    title: Email
+    description: Email this token was sent to
+    index: [Property]
+
+  - name: created_at
+    type: Date
+    required: false
+    title: Created At
+    description: When the token was created
+
+  - name: expires_at
+    type: Date
+    required: true
+    title: Expires At
+    description: When the token expires
+    index: [Property]
+
+  - name: used
+    type: Boolean
+    required: false
+    title: Used
+    description: Whether the token has been used
+    default: false
+    index: [Property]
+
+  - name: used_at
+    type: Date
+    required: false
+    title: Used At
+    description: When the token was used
+
+  - name: context
+    type: Object
+    required: false
+    title: Context
+    description: Additional context data for the token
+allowed_children: []

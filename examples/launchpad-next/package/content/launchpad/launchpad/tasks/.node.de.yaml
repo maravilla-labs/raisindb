@@ -1,0 +1,10 @@
+title: Aufgaben
+description: Verwalten Sie Ihre Aufgaben mit Kanban-Boards
+content:
+  - uuid: tasks-hero
+    headline: Aufgaben-Boards
+    subheadline: Organisieren Sie Ihre Arbeit mit interaktiven Kanban-Boards. Karten per Drag-and-Drop verschieben, in Echtzeit zusammenarbeiten.
+    cta_text: Board erstellen
+
+  - uuid: boards-list
+    heading: Ihre Boards

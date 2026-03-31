@@ -1,0 +1,33 @@
+name: launchpad:Notification
+title: Notification
+description: An ephemeral notification for a user.
+icon: bell
+color: "#f59e0b"
+version: 1
+
+properties:
+  - name: type
+    title: Notification Type
+    type: String
+    required: true
+  - name: title
+    title: Title
+    type: String
+    required: true
+  - name: body
+    title: Body
+    type: String
+    required: false
+  - name: link
+    title: Link / Action
+    type: String
+    required: false
+  - name: read
+    title: Read Status
+    type: Boolean
+    default: false
+    required: true
+  - name: data
+    title: Additional Data
+    type: Object
+    required: false

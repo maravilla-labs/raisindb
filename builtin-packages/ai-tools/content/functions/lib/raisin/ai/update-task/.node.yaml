@@ -1,0 +1,44 @@
+node_type: "raisin:Function"
+properties:
+  title: "Update Task Status"
+  description: |
+    Update the status of a task. Mark a task as in_progress before starting work,
+    completed when done, or cancelled if no longer needed.
+  execution_mode: "inline"
+  category: "planning"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties:
+      task_id:
+        type: "string"
+        description: "The task node ID (returned from create_plan or get_plan_status)"
+      status:
+        type: "string"
+        enum:
+          - pending
+          - in_progress
+          - completed
+          - cancelled
+        description: "New status for the task"
+      notes:
+        type: "string"
+        description: "Optional completion notes or reason for status change"
+    required:
+      - task_id
+      - status
+  output_schema:
+    type: "object"
+    properties:
+      success:
+        type: "boolean"
+      task_id:
+        type: "string"
+      title:
+        type: "string"
+      old_status:
+        type: "string"
+      new_status:
+        type: "string"

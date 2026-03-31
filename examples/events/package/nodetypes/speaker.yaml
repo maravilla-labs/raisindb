@@ -1,0 +1,44 @@
+name: events:Speaker
+title: Speaker
+description: An event speaker or presenter
+icon: user
+color: "#f59e0b"
+version: 1
+
+properties:
+  - name: name
+    title: Name
+    type: String
+    required: true
+    index:
+      - Fulltext
+  - name: slug
+    title: Slug
+    type: String
+    required: true
+  - name: bio
+    title: Bio
+    type: String
+    is_translatable: true
+  - name: title
+    title: Job Title
+    type: String
+  - name: company
+    title: Company
+    type: String
+  - name: photo
+    title: Photo
+    type: Resource
+  - name: website
+    title: Website
+    type: String
+  - name: twitter
+    title: Twitter
+    type: String
+  - name: linkedin
+    title: LinkedIn
+    type: String
+
+versionable: true
+auditable: true
+indexable: true

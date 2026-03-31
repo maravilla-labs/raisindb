@@ -1,0 +1,16 @@
+[package]
+name = "raisin-cypher-parser"
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.1"
+description = "Graph query parser for RaisinDB - parses openCypher and SQL/PGQ pattern syntax"
+keywords = ["cypher", "graph", "parser", "database", "query"]
+
+[dependencies]
+nom = "8.0.0"
+nom_locate = "5.0"
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

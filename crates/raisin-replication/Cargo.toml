@@ -1,0 +1,64 @@
+[package]
+name = "raisin-replication"
+version = "0.1.0"
+edition = "2021"
+description = "Operation-based CRDT replication system for RaisinDB clustering and offline sync"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Core dependencies
+serde = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# Serialization
+rmp-serde = "1.3"  # MessagePack
+rmpv = { version = "1.3", features = ["with-serde"] }  # MessagePack Value type
+serde_json = { workspace = true }
+base64 = "0.21"  # For binary data encoding in JSON conversion
+
+# RaisinDB crates
+raisin-models = { path = "../raisin-models" }
+raisin-error = { path = "../raisin-error" }
+raisin-events = { path = "../raisin-events" }
+raisin-storage = { path = "../raisin-storage" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "net", "time"] }
+tracing = { workspace = true }
+async-trait = "0.1"
+futures = "0.3"
+
+# Collections
+hashbrown = { version = "0.14", features = ["serde"] }
+
+# Configuration
+toml = "0.8"
+
+# Random for jitter
+rand = "0.8"
+raisin-context = { version = "0.1.0", path = "../raisin-context" }
+raisin-hlc = { path = "../raisin-hlc" }
+
+# Checksum for file streaming
+crc32fast = "1.4"
+
+[[bench]]
+name = "vector_clock_bench"
+harness = false
+
+[[bench]]
+name = "replication_performance"
+harness = false
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1.4"
+tempfile = "3.8"
+criterion = "0.5"
+rand = "0.8"

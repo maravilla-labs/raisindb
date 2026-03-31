@@ -1,0 +1,63 @@
+[package]
+name = "raisin-sql-execution"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core parsing and planning (WASM-compatible)
+raisin-sql = { path = "../raisin-sql" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = "0.3"
+async-stream = "0.3"
+pin-project = "1.1"
+
+# Logging
+tracing = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_path = "0.7"
+rmp-serde = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+rand = "0.8"
+indexmap = { version = "2.2", features = ["serde"] }
+nanoid = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+
+# RaisinDB crates (storage and execution dependencies)
+raisin-context = { path = "../raisin-context" }
+raisin-models = { path = "../raisin-models" }
+raisin-storage = { path = "../raisin-storage" }
+raisin-rocksdb = { path = "../raisin-rocksdb" }
+raisin-indexer = { path = "../raisin-indexer" }
+raisin-hnsw = { path = "../raisin-hnsw" }
+raisin-core = { path = "../raisin-core" }
+raisin-error = { path = "../raisin-error" }
+raisin-cypher-parser = { path = "../raisin-cypher-parser" }
+raisin-embeddings = { path = "../raisin-embeddings" }
+raisin-hlc = { path = "../raisin-hlc" }
+uuid.workspace = true
+
+# Geospatial
+geo = { workspace = true }
+geojson = { workspace = true }
+geohash = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+proptest = "1.0"
+raisin-storage-memory = { path = "../raisin-storage-memory" }
+
+[features]
+default = []
+# Enable detailed profiling with tracing (dev/staging only)
+profiling = ["tracing/max_level_debug"]

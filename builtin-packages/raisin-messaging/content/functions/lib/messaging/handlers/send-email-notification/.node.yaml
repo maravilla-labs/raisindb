@@ -1,0 +1,42 @@
+node_type: raisin:Function
+properties:
+  title: Send Email Notification
+  description: >
+    Sends email notifications to users.
+    This function is called by other handlers to send email alerts.
+  language: Starlark
+  entry_file: index.py:send_email_notification
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 30000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    required:
+      - recipient_email
+      - subject
+      - body
+    properties:
+      recipient_email:
+        type: string
+        description: The recipient's email address
+      subject:
+        type: string
+        description: The email subject
+      body:
+        type: string
+        description: The email body content
+      template:
+        type: string
+        description: Optional email template name
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      message_id:
+        type: string
+        description: The sent email message ID
+      error:
+        type: string

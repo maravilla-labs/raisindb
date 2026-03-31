@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout/main}">
+<head>
+    <title th:text="${category.displayLabel}">Category</title>
+</head>
+<body>
+<div layout:fragment="content">
+    <!-- Category Tabs -->
+    <div th:replace="~{fragments/category-tabs :: tabs(${categories}, ${category.slug})}"></div>
+
+    <!-- Category Header -->
+    <header class="mb-8">
+        <h1 class="text-3xl font-bold" th:text="${category.displayLabel}">Category</h1>
+        <p class="text-gray-600 mt-2">
+            Browse all articles in <span th:text="${category.displayLabel}" class="font-medium"></span>
+        </p>
+    </header>
+
+    <!-- Articles -->
+    <div th:if="${#lists.isEmpty(articles)}" class="text-center py-12 text-gray-500">
+        <p>No articles in this category yet.</p>
+    </div>
+    <div th:unless="${#lists.isEmpty(articles)}" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div th:each="article : ${articles}">
+            <div th:replace="~{fragments/article-card :: card(${article})}"></div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

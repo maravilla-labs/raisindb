@@ -1,0 +1,13 @@
+[package]
+name = "raisin-context"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
+serde = { workspace = true }
+chrono = { workspace = true }
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,23 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Stewardship Request Messages
+  name: stewardship-stewardship-request
+  description: Handles stewardship delegation request messages by validating permissions and notifying parties
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "/users/**/outbox/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: "stewardship_request"
+      status: "pending"
+  priority: 10
+  max_retries: 3
+  function_path: /lib/raisin/stewardship/handlers/handle-stewardship-request

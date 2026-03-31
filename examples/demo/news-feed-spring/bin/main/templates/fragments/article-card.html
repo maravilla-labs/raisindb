@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head></head>
+<body>
+<div th:fragment="card(article)" class="bg-white rounded-lg shadow-sm overflow-hidden hover:shadow-md transition-shadow">
+    <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}">
+        <div th:if="${article.properties.imageUrl}" class="aspect-video bg-gray-200">
+            <img th:src="${article.properties.imageUrl}" th:alt="${article.properties.title}"
+                 class="w-full h-full object-cover">
+        </div>
+        <div th:unless="${article.properties.imageUrl}" class="aspect-video bg-gradient-to-br from-blue-500 to-purple-600">
+        </div>
+    </a>
+    <div class="p-4">
+        <div class="flex items-center text-sm text-gray-500 mb-2">
+            <span th:text="${article.categorySlug}" class="capitalize"></span>
+            <span class="mx-2">|</span>
+            <span th:text="${#temporals.format(article.properties.publishingDate, 'MMM d, yyyy')}">Date</span>
+        </div>
+        <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}">
+            <h3 th:text="${article.properties.title}" class="font-semibold text-gray-900 hover:text-blue-600 line-clamp-2">
+                Title
+            </h3>
+        </a>
+        <p th:if="${article.properties.excerpt}" th:text="${article.properties.excerpt}"
+           class="text-gray-600 text-sm mt-2 line-clamp-2">
+            Excerpt
+        </p>
+        <div class="flex items-center justify-between mt-4 text-sm text-gray-500">
+            <span th:text="${article.properties.author}">Author</span>
+            <span th:text="${article.properties.views + ' views'}">Views</span>
+        </div>
+    </div>
+</div>
+
+<!-- Featured card variant -->
+<div th:fragment="featured-card(article)" class="bg-white rounded-lg shadow-md overflow-hidden hover:shadow-lg transition-shadow">
+    <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}">
+        <div th:if="${article.properties.imageUrl}" class="aspect-[16/9] bg-gray-200">
+            <img th:src="${article.properties.imageUrl}" th:alt="${article.properties.title}"
+                 class="w-full h-full object-cover">
+        </div>
+        <div th:unless="${article.properties.imageUrl}" class="aspect-[16/9] bg-gradient-to-br from-blue-500 to-purple-600">
+        </div>
+    </a>
+    <div class="p-6">
+        <span class="inline-block px-2 py-1 bg-yellow-100 text-yellow-800 text-xs font-medium rounded mb-3">
+            Featured
+        </span>
+        <a th:href="@{/articles/{category}/{slug}(category=${article.categorySlug},slug=${article.slug})}">
+            <h2 th:text="${article.properties.title}" class="text-xl font-bold text-gray-900 hover:text-blue-600">
+                Title
+            </h2>
+        </a>
+        <p th:if="${article.properties.excerpt}" th:text="${article.properties.excerpt}"
+           class="text-gray-600 mt-2 line-clamp-3">
+            Excerpt
+        </p>
+        <div class="flex items-center mt-4 text-sm text-gray-500">
+            <span th:text="${article.properties.author}">Author</span>
+            <span class="mx-2">|</span>
+            <span th:text="${#temporals.format(article.properties.publishingDate, 'MMM d, yyyy')}">Date</span>
+        </div>
+    </div>
+</div>
+</body>
+</html>

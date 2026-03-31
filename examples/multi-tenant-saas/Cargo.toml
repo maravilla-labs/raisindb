@@ -1,0 +1,24 @@
+[workspace]
+# This is a standalone package, not part of the workspace
+
+[package]
+name = "multi-tenant-saas"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raisin-core = { path = "../../crates/raisin-core" }
+raisin-storage = { path = "../../crates/raisin-storage" }
+raisin-storage-rocks = { path = "../../crates/raisin-storage-rocks" }
+raisin-context = { path = "../../crates/raisin-context" }
+raisin-ratelimit = { path = "../../crates/raisin-ratelimit" }
+raisin-models = { path = "../../crates/raisin-models" }
+raisin-error = { path = "../../crates/raisin-error" }
+
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"

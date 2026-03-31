@@ -1,0 +1,21 @@
+name: launchpad:KanbanCard
+title: Kanban Card
+description: A task card for Kanban boards
+icon: square-check
+color: "#8b5cf6"
+version: 1
+
+fields:
+  - $type: TextField
+    name: title
+    title: Card Title
+    required: true
+
+  - $type: TextField
+    name: description
+    title: Card Description
+    required: false
+  - $type: TextField
+    name: note
+    title: Note
+    required: false

@@ -1,0 +1,13 @@
+name: launchpad:ListKanbanBoards
+title: List Kanban Boards
+description: Displays a grid of Kanban board links for navigation
+icon: layout-grid
+color: "#8b5cf6"
+version: 1
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Section Heading
+    required: false
+    translatable: true

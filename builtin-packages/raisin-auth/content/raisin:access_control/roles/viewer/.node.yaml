@@ -1,0 +1,9 @@
+node_type: raisin:Role
+properties:
+  role_id: "viewer"
+  name: "Viewer"
+  description: "Read-only access to public content"
+  permissions:
+    - path: "**"
+      operations:
+        - read

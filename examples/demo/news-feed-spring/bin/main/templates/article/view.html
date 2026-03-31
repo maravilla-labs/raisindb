@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout/main}">
+<head>
+    <title th:text="${article.properties.title}">Article</title>
+</head>
+<body>
+<div layout:fragment="content">
+    <article class="max-w-4xl mx-auto">
+        <!-- Correction Banner -->
+        <div th:if="${graphData.correction}" class="bg-yellow-100 border-l-4 border-yellow-500 p-4 mb-6">
+            <p class="font-bold">This article has been corrected</p>
+            <a th:href="${graphData.correction.urlPath}"
+               th:text="${graphData.correction.title}" class="text-blue-600 hover:underline"></a>
+        </div>
+
+        <!-- Corrects Article Banner -->
+        <div th:if="${graphData.correctsArticle}" class="bg-orange-100 border-l-4 border-orange-500 p-4 mb-6">
+            <p class="font-bold">This article corrects</p>
+            <a th:href="${graphData.correctsArticle.urlPath}"
+               th:text="${graphData.correctsArticle.title}" class="text-blue-600 hover:underline"></a>
+        </div>
+
+        <!-- Header -->
+        <header class="mb-8">
+            <div class="flex items-center mb-4">
+                <a th:href="@{/articles/{category}(category=${article.categorySlug})}"
+                   th:text="${article.categorySlug}"
+                   class="text-blue-600 hover:underline capitalize"></a>
+                <span class="mx-2 text-gray-400">/</span>
+            </div>
+            <h1 th:text="${article.properties.title}" class="text-4xl font-bold mb-4"></h1>
+            <div class="flex items-center text-gray-600 mb-4">
+                <span th:text="${article.properties.author}"></span>
+                <span class="mx-2">|</span>
+                <time th:text="${#temporals.format(article.properties.publishingDate, 'MMMM d, yyyy')}"></time>
+                <span class="mx-2">|</span>
+                <span th:text="${article.properties.views + ' views'}"></span>
+            </div>
+
+            <!-- Tags -->
+            <div th:if="${not #lists.isEmpty(graphData.tags)}" class="flex flex-wrap gap-2">
+                <span th:each="tag : ${graphData.tags}"
+                      th:replace="~{fragments/tag-badge :: badge-link(${tag})}"></span>
+            </div>
+        </header>
+
+        <!-- Edit button -->
+        <div th:if="${userContext != null and userContext.authenticated}" class="mb-6">
+            <a th:href="@{/articles/{category}/{slug}/edit(category=${article.categorySlug},slug=${article.slug})}"
+               class="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+                Edit Article
+            </a>
+        </div>
+
+        <!-- Image -->
+        <div th:if="${article.properties.imageUrl}" class="mb-8">
+            <img th:src="${article.properties.imageUrl}"
+                 th:alt="${article.properties.title}"
+                 class="w-full rounded-lg">
+        </div>
+
+        <!-- Body (Markdown rendered to HTML) -->
+        <div class="prose prose-lg max-w-none" th:utext="${@markdown.toHtml(article.properties.body)}"></div>
+
+        <!-- Graph Widgets -->
+        <div th:replace="~{fragments/graph-widgets :: widgets(${graphData})}"></div>
+
+        <!-- Related Articles -->
+        <section th:if="${not #lists.isEmpty(related)}" class="mt-12">
+            <h3 class="text-xl font-bold mb-4">Related Articles</h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div th:each="relatedArticle : ${related}">
+                    <div th:replace="~{fragments/article-card :: card(${relatedArticle})}"></div>
+                </div>
+            </div>
+        </section>
+    </article>
+</div>
+</body>
+</html>

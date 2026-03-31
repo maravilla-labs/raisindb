@@ -1,0 +1,42 @@
+node_type: raisin:Function
+properties:
+  title: Messaging Permissions
+  description: >
+    Helper functions for checking messaging permissions based on relationships,
+    group membership, roles, and other criteria. Used by messaging handlers to
+    determine if a user can send messages to another user.
+  language: javascript
+  entry_file: index.js:check_messaging_permission
+  execution_mode: Sync
+  enabled: true
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    required:
+      - sender_id
+      - recipient_id
+      - message_type
+    properties:
+      sender_id:
+        type: string
+        description: The sender user ID
+      recipient_id:
+        type: string
+        description: The recipient user ID
+      message_type:
+        type: string
+        description: The type of message (chat, task_assignment, notification)
+      workspace:
+        type: string
+        description: The workspace to check in (defaults to raisin:access_control)
+  output_schema:
+    type: object
+    properties:
+      allowed:
+        type: boolean
+        description: Whether the message is allowed
+      reason:
+        type: string
+        description: Reason for denial if not allowed

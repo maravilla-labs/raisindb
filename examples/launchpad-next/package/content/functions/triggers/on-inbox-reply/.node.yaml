@@ -1,0 +1,33 @@
+node_type: raisin:Trigger
+properties:
+  title: On Inbox Reply to Flow Chat
+  description: |
+    Detects when a user replies to an inbox conversation that was created
+    by a flow's chat step (has flow_instance_id on the parent conversation).
+    Resumes the waiting flow with the user's message.
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "**/inbox/chats/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      _source:
+        $ne: flow
+      role:
+        $eq: user
+      message_type:
+        $in:
+          - chat
+          - direct_message
+      is_system_generated:
+        $ne: true
+  priority: 10
+  max_retries: 3
+  function_path: /lib/launchpad/handle-inbox-reply

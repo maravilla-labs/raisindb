@@ -1,0 +1,38 @@
+name: pocketmedico
+version: 0.1.0
+title: Pocket Medico - Medical Transcription
+description: >
+  Medical transcription platform for doctors. Hybrid AI + human-powered
+  transcription service supporting audio uploads, notes, and professional
+  medical documentation.
+author: Pocket Medico Team
+license: MIT
+icon: stethoscope
+color: "#0891B2"
+keywords:
+  - medical
+  - transcription
+  - healthcare
+  - audio
+  - documentation
+category: healthcare
+
+provides:
+  nodetypes:
+    - medico:TranscriptionOrder
+    - medico:SourceFile
+    - medico:MedicalReport
+    - medico:ReportSection
+  workspaces:
+    - medico
+  functions: []
+  triggers: []
+
+workspace_patches:
+  medico:
+    allowed_node_types:
+      add:
+        - medico:TranscriptionOrder
+        - medico:SourceFile
+        - medico:MedicalReport
+        - medico:ReportSection

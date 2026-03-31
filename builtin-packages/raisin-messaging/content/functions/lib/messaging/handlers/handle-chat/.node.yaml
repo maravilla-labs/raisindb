@@ -1,0 +1,35 @@
+node_type: raisin:Function
+properties:
+  title: Handle Chat Message
+  description: >
+    Handles chat messages by delivering them to recipients.
+    This handler is triggered when a message with type "chat" is sent.
+    It creates inbox messages for recipients and updates conversation metadata.
+  language: javascript
+  entry_file: index.js:handle_chat
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 10000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - node
+    properties:
+      node:
+        type: object
+        description: The chat message node
+      event:
+        type: object
+        description: The trigger event metadata
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      inbox_message_path:
+        type: string
+        description: Path to the inbox message created for recipient
+      error:
+        type: string

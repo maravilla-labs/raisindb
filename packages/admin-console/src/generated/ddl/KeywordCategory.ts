@@ -1,0 +1,1 @@
+export type KeywordCategory = "Statement" | "SchemaObject" | "Clause" | "PropertyType" | "Modifier" | "Flag" | "Operator" | "SqlFunction" | "JsonFunction" | "TableFunction" | "AggregateFunction" | "WindowFunction";

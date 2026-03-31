@@ -1,0 +1,11 @@
+[package]
+name = "raisin-i18n"
+version = "0.1.0"
+edition = "2021"
+description = "Internationalization utilities for RaisinDB (placeholder)"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

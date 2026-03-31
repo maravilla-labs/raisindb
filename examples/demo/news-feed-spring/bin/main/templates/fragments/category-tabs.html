@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head></head>
+<body>
+<nav th:fragment="tabs(categories, activeCategory)" class="flex space-x-1 mb-8 overflow-x-auto pb-2">
+    <a th:href="@{/}"
+       th:class="${activeCategory == null} ? 'px-4 py-2 bg-blue-600 text-white rounded-lg' : 'px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg'">
+        All
+    </a>
+    <a th:each="cat : ${categories}"
+       th:href="@{/articles/{slug}(slug=${cat.slug})}"
+       th:text="${cat.displayLabel}"
+       th:style="'border-left: 3px solid ' + ${cat.color}"
+       th:class="${activeCategory != null and activeCategory == cat.slug} ? 'px-4 py-2 bg-blue-600 text-white rounded-lg' : 'px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg'">
+        Category
+    </a>
+</nav>
+</body>
+</html>

@@ -1,0 +1,26 @@
+name: events:Page
+title: Page
+description: A generic content page composed of element blocks
+icon: file-text
+color: "#8b5cf6"
+version: 1
+
+properties:
+  - name: title
+    title: Title
+    type: String
+    required: true
+    is_translatable: true
+    index: [Fulltext]
+  - name: slug
+    title: Slug
+    type: String
+    required: true
+  - name: description
+    title: Description
+    type: String
+    is_translatable: true
+
+versionable: true
+publishable: true
+indexable: true

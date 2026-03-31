@@ -1,0 +1,43 @@
+[package]
+name = "raisin-transport-pgwire"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# pgwire protocol
+pgwire = "0.25"
+
+# Async runtime
+tokio = { version = "1", features = ["net", "rt-multi-thread", "sync"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# RaisinDB dependencies
+raisin-sql = { path = "../raisin-sql" }
+raisin-sql-execution = { path = "../raisin-sql-execution" }
+raisin-rocksdb = { path = "../raisin-rocksdb" }
+raisin-models = { path = "../raisin-models" }
+raisin-error = { path = "../raisin-error" }
+raisin-indexer = { path = "../raisin-indexer", optional = true }
+raisin-hnsw = { path = "../raisin-hnsw", optional = true }
+
+# Utilities
+tracing = { workspace = true }
+thiserror = { workspace = true }
+bytes = "1"
+serde_json = { workspace = true }
+base64 = "0.22"
+static_assertions = "1.1.0"
+postgres-types = "0.2.11"
+raisin-storage = { version = "0.1.0", path = "../raisin-storage" }
+raisin-core = { version = "0.1.0", path = "../raisin-core" }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+rust_decimal = { workspace = true }
+indexmap = "2"
+
+[features]
+default = ["indexing"]
+indexing = ["raisin-indexer", "raisin-hnsw"]

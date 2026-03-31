@@ -1,0 +1,33 @@
+name: launchpad:Conversation
+title: Conversation
+description: A container for a conversation thread. Messages are stored as child nodes.
+icon: chat
+color: "#6366f1"
+version: 1
+
+properties:
+  - name: subject
+    title: Subject
+    type: String
+    required: false
+  - name: participants
+    title: Participants
+    type: Array
+    required: true
+  - name: participant_details
+    title: Participant Details
+    type: Object
+    required: false
+  - name: last_message
+    title: Last Message Preview
+    type: Object
+    required: false
+  - name: unread_count
+    title: Unread Count
+    type: Number
+    default: 0
+    required: false
+  - name: updated_at
+    title: Last Updated
+    type: Date
+    required: false

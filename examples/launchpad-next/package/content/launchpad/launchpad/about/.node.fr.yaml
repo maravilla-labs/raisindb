@@ -1,0 +1,19 @@
+title: "A propos de Launchpad"
+description: "En savoir plus sur Launchpad et notre mission"
+content:
+  - uuid: about-hero-1
+    headline: "A propos"
+    subheadline: "Construire l'avenir du developpement d'applications"
+
+  - uuid: about-text-1
+    heading: Notre mission
+    content: |
+      Nous croyons que chacun devrait avoir le pouvoir de donner vie a ses idees.
+      Launchpad elimine la complexite du developpement d'applications moderne,
+      pour vous permettre de vous concentrer sur l'essentiel : votre vision.
+
+  - uuid: about-text-2
+    heading: Notre histoire
+    content: |
+      Fondee a Bale, en Suisse, Launchpad est nee d'une idee simple :
+      et si creer des applications etait aussi facile que de les utiliser ?

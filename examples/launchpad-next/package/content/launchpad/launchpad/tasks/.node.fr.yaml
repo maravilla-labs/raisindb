@@ -1,0 +1,10 @@
+title: "Taches"
+description: "Gerez vos taches avec des tableaux Kanban"
+content:
+  - uuid: tasks-hero
+    headline: Tableaux de taches
+    subheadline: "Organisez votre travail avec des tableaux Kanban interactifs. Glissez-deposez les cartes, collaborez en temps reel."
+    cta_text: "Creer un tableau"
+
+  - uuid: boards-list
+    heading: Vos tableaux

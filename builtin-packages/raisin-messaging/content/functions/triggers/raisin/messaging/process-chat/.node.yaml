@@ -1,0 +1,33 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Chat Messages
+  name: messaging-chat
+  description: Delivers chat messages and updates conversations
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+      - ai
+    paths:
+      - "/users/**/outbox/**"
+      - "/agents/**/outbox/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type:
+        $in:
+          - chat
+          - direct_message
+          - ai_thought
+          - ai_tool_call
+          - ai_tool_result
+          - ai_plan
+          - ai_task_update
+      status: "pending"
+  priority: 10
+  max_retries: 3
+  function_path: /lib/messaging/handlers/handle-chat

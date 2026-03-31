@@ -1,0 +1,16 @@
+[package]
+name = "raisin-audit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Audit interfaces and memory impl for RaisinDB"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+raisin-error = { path = "../raisin-error" }
+raisin-models = { path = "../raisin-models" }

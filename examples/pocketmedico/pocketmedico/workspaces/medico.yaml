@@ -1,0 +1,26 @@
+name: medico
+title: Pocket Medico Workspace
+description: Medical transcription workspace for managing transcription orders, audio files, and reports
+icon: stethoscope
+color: "#0891B2"
+
+allowed_node_types:
+  - raisin:Folder
+  - medico:TranscriptionOrder
+  - medico:SourceFile
+  - medico:MedicalReport
+  - medico:ReportSection
+
+allowed_root_node_types:
+  - raisin:Folder
+  - medico:TranscriptionOrder
+
+root_structure:
+  - name: orders
+    node_type: raisin:Folder
+    title: Transcription Orders
+    description: All transcription orders
+  - name: templates
+    node_type: raisin:Folder
+    title: Document Templates
+    description: Medical document templates

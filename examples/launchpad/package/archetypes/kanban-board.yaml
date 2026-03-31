@@ -1,0 +1,46 @@
+name: launchpad:KanbanBoard
+title: Kanban Board
+description: A Kanban board page with columns and draggable cards for task management
+icon: kanban
+color: "#8b5cf6"
+base_node_type: launchpad:Page
+version: 1
+
+fields:
+  - $type: TextField
+    name: title
+    title: Board Title
+    required: true
+
+  - $type: TextField
+    name: slug
+    title: URL Slug
+    required: true
+
+  - $type: TextField
+    name: description
+    title: Board Description
+    required: false
+
+  - $type: CompositeField
+    name: columns
+    title: Columns
+    repeatable: true
+    fields:
+      - $type: TextField
+        name: id
+        title: Column ID
+        required: true
+
+      - $type: TextField
+        name: title
+        title: Column Title
+        required: true
+
+      - $type: SectionField
+        name: cards
+        title: Cards
+        allowed_element_types:
+          - launchpad:KanbanCard
+
+publishable: true

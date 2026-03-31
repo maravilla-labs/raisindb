@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "GUARDIAN_OF"
+  title: "Guardian Of"
+  description: "Legal guardian relationship"
+  category: "legal"
+  inverse_relation_name: "WARD_OF"
+  bidirectional: false
+  implies_stewardship: true
+  requires_minor: false
+  icon: "shield"
+  color: "#8b5cf6"

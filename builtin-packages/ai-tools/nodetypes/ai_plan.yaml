@@ -1,0 +1,63 @@
+name: raisin:AIPlan
+title: AI Plan
+description: A structured plan created by an AI agent containing multiple tasks
+icon: clipboard-list
+color: "#3B82F6"
+
+allowed_children:
+  - raisin:AITask
+
+properties:
+  - name: title
+    title: Title
+    type: String
+    required: true
+    description: Plan title/objective
+
+  - name: description
+    title: Description
+    type: String
+    description: Detailed plan description
+    ui:
+      widget: textarea
+
+  - name: status
+    title: Status
+    type: String
+    default: draft
+    ui:
+      widget: select
+      options:
+        - label: Draft
+          value: draft
+        - label: Pending Approval
+          value: pending_approval
+        - label: In Progress
+          value: in_progress
+        - label: Completed
+          value: completed
+        - label: Cancelled
+          value: cancelled
+
+  - name: reasoning
+    title: Reasoning
+    type: String
+    description: AI's reasoning for this plan
+    ui:
+      widget: textarea
+
+  - name: estimated_steps
+    title: Estimated Steps
+    type: Number
+    description: Expected number of tasks
+
+  - name: completed_steps
+    title: Completed Steps
+    type: Number
+    default: 0
+    readonly: true
+
+  - name: metadata
+    title: Metadata
+    type: Object
+    description: Additional plan metadata

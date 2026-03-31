@@ -1,0 +1,9 @@
+node_type: events:Page
+archetype: events:ContentPage
+properties:
+  title: Events
+  slug: events
+  description: Browse all events
+  content:
+    - element_type: events:EventListBlock
+      heading: All Events

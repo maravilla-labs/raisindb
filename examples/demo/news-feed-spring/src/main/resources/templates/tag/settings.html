@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout/main}">
+<head>
+    <title>Tag Settings</title>
+</head>
+<body>
+<div layout:fragment="content">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold mb-8">Tag Management</h1>
+
+        <!-- Success/Error Messages -->
+        <div th:if="${success}" class="mb-4 p-4 bg-green-100 border border-green-400 text-green-700 rounded-lg">
+            <span th:text="${success}">Success</span>
+        </div>
+        <div th:if="${error}" class="mb-4 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg">
+            <span th:text="${error}">Error</span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <!-- Tag List -->
+            <div>
+                <h2 class="text-xl font-semibold mb-4">Existing Tags</h2>
+                <div class="space-y-2">
+                    <div th:each="tag : ${flatTags}"
+                         class="flex items-center justify-between p-3 bg-white rounded-lg shadow-sm">
+                        <div class="flex items-center space-x-2">
+                            <span th:style="'background-color: ' + (${tag.properties?.color} ?: '#6B7280')"
+                                  class="w-4 h-4 rounded-full"></span>
+                            <span th:text="${tag.properties?.label} ?: ${tag.name}"></span>
+                            <span class="text-xs text-gray-400" th:text="${tag.path}"></span>
+                        </div>
+                        <form th:action="@{/settings/tags/{id}/delete(id=${tag.id})}" method="post"
+                              onsubmit="return confirm('Delete this tag?')">
+                            <button type="submit" class="text-red-600 hover:text-red-800 text-sm">Delete</button>
+                        </form>
+                    </div>
+                    <div th:if="${#lists.isEmpty(flatTags)}" class="text-gray-500 py-4">
+                        No tags yet. Create one below.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Create Tag Form -->
+            <div>
+                <h2 class="text-xl font-semibold mb-4">Create New Tag</h2>
+                <form th:action="@{/settings/tags/create}" th:object="${tagForm}" method="post" class="space-y-4">
+                    <div>
+                        <label for="label" class="block text-sm font-medium text-gray-700 mb-1">Label</label>
+                        <input type="text" id="label" th:field="*{label}"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                    </div>
+
+                    <div>
+                        <label for="name" class="block text-sm font-medium text-gray-700 mb-1">Name (URL-friendly)</label>
+                        <input type="text" id="name" th:field="*{name}"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                    </div>
+
+                    <div>
+                        <label for="parentPath" class="block text-sm font-medium text-gray-700 mb-1">Parent</label>
+                        <select id="parentPath" th:field="*{parentPath}"
+                                class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                            <option value="/superbigshit/tags">Root</option>
+                            <option th:each="tag : ${flatTags}"
+                                    th:value="${tag.path}"
+                                    th:text="${tag.path}"></option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label for="icon" class="block text-sm font-medium text-gray-700 mb-1">Icon (Lucide name)</label>
+                        <input type="text" id="icon" th:field="*{icon}" placeholder="e.g., code, database, globe"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                    </div>
+
+                    <div>
+                        <label for="color" class="block text-sm font-medium text-gray-700 mb-1">Color</label>
+                        <input type="color" id="color" th:field="*{color}"
+                               class="w-16 h-10 border border-gray-300 rounded-lg">
+                    </div>
+
+                    <button type="submit"
+                            class="w-full px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                        Create Tag
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="mt-8">
+            <a th:href="@{/}" class="text-blue-600 hover:underline">&larr; Back to Home</a>
+        </div>
+    </div>
+</div>
+</body>
+</html>

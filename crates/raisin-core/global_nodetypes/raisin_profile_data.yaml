@@ -1,0 +1,13 @@
+name: raisin:ProfileData
+description: Profile data container for public or private user information
+icon: badge
+version: 1
+indexable: false
+properties:
+  - name: data
+    type: Object
+    required: false
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

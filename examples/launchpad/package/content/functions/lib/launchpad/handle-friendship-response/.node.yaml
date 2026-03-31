@@ -1,0 +1,42 @@
+node_type: raisin:Function
+properties:
+  name: handle-friendship-response
+  title: Handle Friendship Response
+  description: |
+    Processes friendship response messages (accept/decline).
+    When accepted, creates bidirectional FRIENDS_WITH graph edges.
+    Updates the original request status and notifies the requester.
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleFriendshipResponse
+  version: 1
+  input_schema:
+    type: object
+    description: Trigger context with event and workspace
+    properties:
+      flow_input:
+        type: object
+        properties:
+          event:
+            type: object
+            properties:
+              type:
+                type: string
+              node_id:
+                type: string
+              node_type:
+                type: string
+              node_path:
+                type: string
+          workspace:
+            type: string
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      error:
+        type: string
+      friendship_created:
+        type: boolean

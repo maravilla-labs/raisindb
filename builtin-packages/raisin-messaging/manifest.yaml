@@ -1,0 +1,93 @@
+name: raisin-messaging
+version: 1.0.1
+title: RaisinDB Messaging Package
+description: >
+  Provides the core inbox/outbox messaging pipeline, chat delivery,
+  task assignments, and system notifications for RaisinDB.
+author: RaisinDB Team
+license: BSL-1.1
+icon: mail
+color: "#14b8a6"
+keywords:
+  - messaging
+  - inbox
+  - notifications
+  - tasks
+  - chat
+category: system
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  nodetypes:
+    - raisin:Conversation
+    - raisin:MessagingConfig
+
+  triggers:
+    - /functions/triggers/raisin/messaging/process-chat
+    - /functions/triggers/raisin/messaging/process-agent-chat
+    - /functions/triggers/raisin/messaging/process-task-assignment
+    - /functions/triggers/raisin/messaging/process-system-notification
+
+  functions:
+    - /functions/lib/messaging/handlers/handle-chat
+    - /functions/lib/messaging/handlers/handle-task-assignment
+    - /functions/lib/messaging/handlers/handle-system-notification
+    - /functions/lib/messaging/handlers/send-push-notification
+    - /functions/lib/messaging/handlers/send-email-notification
+    - /functions/lib/messaging/permissions
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Messaging handlers
+    - root: /functions/lib/messaging/handlers
+      include:
+        - "handle-chat/**"
+        - "handle-task-assignment/**"
+        - "handle-system-notification/**"
+        - "send-push-notification/**"
+        - "send-email-notification/**"
+      mode: merge
+
+    # Messaging permissions
+    - root: /functions/lib/messaging/permissions
+      include:
+        - "**"
+      mode: merge
+
+    # Shared utilities
+    - root: /functions/lib/shared
+      include:
+        - "**"
+      mode: merge
+
+    # Messaging triggers
+    - root: /functions/triggers/raisin/messaging
+      include:
+        - "process-chat/**"
+        - "process-agent-chat/**"
+        - "process-task-assignment/**"
+        - "process-system-notification/**"
+      mode: merge
+
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+  "raisin:access_control":
+    default_folder_type: raisin:AclFolder
+    allowed_node_types:
+      add:
+        - raisin:Conversation
+        - raisin:InboxTask
+        - raisin:Notification
+  default:
+    allowed_node_types:
+      add:
+        - raisin:Conversation

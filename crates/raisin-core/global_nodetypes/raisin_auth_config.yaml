@@ -1,0 +1,91 @@
+name: raisin:AuthConfig
+description: Global authentication configuration for a tenant
+icon: settings
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: true
+publishable: false
+auditable: true
+properties:
+  - name: session_duration_hours
+    type: Number
+    required: false
+    title: Session Duration (Hours)
+    description: Access token duration in hours
+    default: 24
+
+  - name: refresh_token_duration_days
+    type: Number
+    required: false
+    title: Refresh Token Duration (Days)
+    description: Refresh token duration in days
+    default: 30
+
+  - name: max_sessions_per_user
+    type: Number
+    required: false
+    title: Max Sessions Per User
+    description: Maximum concurrent sessions allowed per user
+    default: 10
+
+  - name: sudo_threshold_seconds
+    type: Number
+    required: false
+    title: Sudo Threshold (Seconds)
+    description: Time before requiring re-authentication for sensitive operations
+    default: 300
+
+  - name: rotate_refresh_tokens
+    type: Boolean
+    required: false
+    title: Rotate Refresh Tokens
+    description: Whether to rotate refresh tokens on each use
+    default: true
+
+  - name: revoke_on_reuse_detection
+    type: Boolean
+    required: false
+    title: Revoke on Reuse Detection
+    description: Whether to revoke all tokens when reuse is detected
+    default: true
+
+  - name: password_policy
+    type: Object
+    required: false
+    title: Password Policy
+    description: |
+      Password requirements for local authentication.
+      Structure: { min_length, max_length, require_uppercase, require_lowercase, require_digit, require_special }
+
+  - name: magic_link
+    type: Object
+    required: false
+    title: Magic Link Settings
+    description: |
+      Magic link authentication settings.
+      Structure: { enabled: boolean, expiration_minutes: number }
+
+  - name: rate_limiting
+    type: Object
+    required: false
+    title: Rate Limiting
+    description: |
+      Rate limiting settings for authentication.
+      Structure: { max_attempts_per_minute, lockout_duration_minutes, lockout_threshold }
+
+  - name: audit_enabled
+    type: Boolean
+    required: false
+    title: Audit Enabled
+    description: Whether to enable audit logging for authentication events
+    default: true
+
+  - name: anonymous_enabled
+    type: Boolean
+    required: false
+    title: Anonymous Access Enabled
+    description: Whether anonymous (unauthenticated) access is enabled globally
+    default: false
+allowed_children: []

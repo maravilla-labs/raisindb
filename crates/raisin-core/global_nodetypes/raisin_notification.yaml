@@ -1,0 +1,68 @@
+name: raisin:Notification
+description: Notification for user inbox, used for alerts, messages, and system events
+icon: bell
+version: 1
+strict: true
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  - name: type
+    type: String
+    required: true
+    title: Notification Type
+    description: Type of notification (e.g., "task_assignment", "system_notification", "friendship_request")
+    index: [Property]
+
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Notification title displayed to user
+    index: [Fulltext]
+
+  - name: body
+    type: String
+    required: false
+    title: Body
+    description: Detailed notification message
+
+  - name: link
+    type: String
+    required: false
+    title: Link / Action
+    description: Path to related entity or action to perform
+    index: [Property]
+
+  - name: read
+    type: Boolean
+    required: true
+    title: Read Status
+    description: Whether the notification has been read
+    default: false
+    index: [Property]
+
+  - name: data
+    type: Object
+    required: false
+    title: Additional Data
+    description: Extra metadata for the notification
+
+  - name: priority
+    type: Number
+    required: false
+    title: Priority
+    description: Notification priority (1-5, where 5 is highest)
+    default: 3
+    index: [Property]
+
+  - name: expires_at
+    type: Date
+    required: false
+    title: Expires At
+    description: When the notification should be auto-dismissed
+    index: [Property]
+
+allowed_children: []
+versionable: false
+publishable: false
+auditable: true

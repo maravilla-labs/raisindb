@@ -1,0 +1,169 @@
+name: raisin:Package
+description: Installable package with node types, workspaces, and content
+icon: package
+version: 1
+strict: true
+indexable: true
+index_types: [Property, Fulltext]
+versionable: true
+publishable: true
+auditable: true
+properties:
+  - name: name
+    type: String
+    required: true
+    title: Package Name
+    description: Package identifier (e.g., 'ai-tools', 'analytics'). Path provides uniqueness.
+    index: [Property]
+
+  - name: version
+    type: String
+    required: true
+    title: Version
+    description: Semantic version string (e.g., '1.0.0')
+
+  - name: title
+    type: String
+    required: false
+    title: Title
+    description: Human-readable package title
+    index: [Fulltext]
+
+  - name: description
+    type: String
+    required: false
+    title: Description
+    description: Human-readable description of the package
+    index: [Fulltext]
+
+  - name: author
+    type: String
+    required: false
+    title: Author
+    description: Package author or organization
+    index: [Property]
+
+  - name: license
+    type: String
+    required: false
+    title: License
+    description: License identifier (e.g., 'MIT', 'Apache-2.0')
+
+  - name: icon
+    type: String
+    required: false
+    title: Icon
+    description: Lucide icon name for UI display (e.g., 'package', 'bot', 'sparkles')
+    default: "package"
+
+  - name: color
+    type: String
+    required: false
+    title: Color
+    description: Hex color for UI display (e.g., '#6366F1')
+    default: "#6366F1"
+
+  - name: keywords
+    type: Array
+    required: false
+    title: Keywords
+    description: Keywords for search and filtering (e.g., ['ai', 'agents', 'chat'])
+    index: [Property]
+
+  - name: category
+    type: String
+    required: false
+    title: Category
+    description: Package category (e.g., 'ai', 'integrations', 'utilities')
+    index: [Property]
+
+  - name: dependencies
+    type: Array
+    required: false
+    title: Dependencies
+    description: |
+      Array of package dependencies.
+      Structure: [{ name: string, version: string }]
+
+  - name: provides
+    type: Object
+    required: false
+    title: Provides
+    description: |
+      What this package provides.
+      Structure: { nodetypes: string[], workspaces: string[], content: string[] }
+
+  - name: workspace_patches
+    type: Object
+    required: false
+    title: Workspace Patches
+    description: |
+      Modifications to existing workspaces.
+      Structure: { [workspace]: { allowed_node_types: { add: string[] } } }
+
+  - name: installed
+    type: Boolean
+    required: false
+    title: Installed
+    description: Whether the package has been installed to this repository
+    default: false
+    index: [Property]
+
+  - name: installed_at
+    type: Date
+    required: false
+    title: Installed At
+    description: When the package was installed
+
+  - name: upload_state
+    type: String
+    required: false
+    title: Upload State
+    description: Whether this is a new package or an update (new, updated)
+    default: "new"
+    index: [Property]
+
+  - name: teaser_background_url
+    type: String
+    required: false
+    title: Teaser Background URL
+    description: URL to teaser background image from static/teaser_background.png or .jpg
+
+  - name: status
+    type: String
+    required: false
+    title: Status
+    description: Processing status of the package (processing, ready, error)
+    default: "ready"
+    index: [Property]
+
+  - name: progress
+    type: Number
+    required: false
+    title: Processing Progress
+    description: Upload/processing progress (0.0 to 1.0)
+    default: 0.0
+
+  - name: large_upload
+    type: Boolean
+    required: false
+    title: Large Upload
+    description: Whether this package was uploaded via large file streaming (internal flag)
+    default: false
+
+  - name: resource
+    type: Resource
+    required: true
+    title: Package Archive
+    description: The .rap ZIP file containing package contents
+    
+  - name: builtin
+    type: Boolean
+    required: false
+    title: Builtin Package
+    description: Whether the package is a builtin sytem package
+    default: false
+    index: [Property]
+allowed_children:
+  - raisin:Asset
+  - raisin:Folder

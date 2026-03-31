@@ -1,0 +1,53 @@
+[package]
+name = "raisin-auth"
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.1"
+description = "Pluggable authentication system for RaisinDB"
+repository = "https://github.com/maravilla-labs/raisindb"
+authors = ["SOLUTAS GmbH"]
+
+[dependencies]
+# Internal crates
+raisin-error = { path = "../raisin-error" }
+raisin-models = { path = "../raisin-models" }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync"] }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# JWT and crypto
+jsonwebtoken = "9"
+bcrypt = "0.15"
+sha2 = "0.10"
+base64 = { workspace = true }
+rand = "0.8"
+
+# HTTP client for OIDC
+reqwest = { workspace = true, features = ["json"], optional = true }
+
+# URL handling
+url = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# LRU cache for permissions
+lru = "0.12"
+
+# UUID generation
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = []
+oidc = ["reqwest"]

@@ -1,0 +1,39 @@
+name: raisin:AIToolSingleCallResult
+title: AI Tool Single Call Result
+description: Result of a single tool/function call (used for parallel tool aggregation)
+icon: check
+color: "#34D399"
+
+properties:
+  - name: tool_call_id
+    title: Tool Call ID
+    type: string
+    description: Correlation ID of the originating raisin:AIToolCall
+    readonly: true
+
+  - name: function_name
+    title: Function Name
+    type: string
+    description: Name of the function executed for this tool call
+    readonly: true
+
+  - name: result
+    title: Result
+    type: Object
+    description: The result data returned by the function
+
+  - name: error
+    title: Error
+    type: string
+    description: Error message if the function failed
+    ui:
+      widget: textarea
+      rows: 3
+
+  - name: duration_ms
+    title: Duration (ms)
+    type: Number
+    description: Execution time in milliseconds
+    readonly: true
+
+allowed_children: []

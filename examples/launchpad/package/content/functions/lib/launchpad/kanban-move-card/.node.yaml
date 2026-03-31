@@ -1,0 +1,62 @@
+node_type: raisin:Function
+properties:
+  name: kanban-move-card
+  title: Move Kanban Card
+  description: |
+    Move a card within a Kanban board - between columns or to a different position within the same column.
+    Can also move cards between different boards.
+
+    For same-board moves: provide board_path, card_uuid, to_column_id, and optionally to_position
+    For cross-board moves: also provide target_board_path
+
+    Example:
+    - Move card to "Done" column: board_path='/launchpad/tasks/cms-project', to_column_id='col-done'
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleMoveCard
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required:
+      - board_path
+      - card_uuid
+      - to_column_id
+    properties:
+      board_path:
+        type: string
+        description: "Full path to the source board including workspace. Example: '/launchpad/tasks/my-board'. Required."
+      card_uuid:
+        type: string
+        description: "UUID of the card to move. Get this from the board's column cards array. Required."
+      to_column_id:
+        type: string
+        description: "ID of the destination column. Examples: 'col-backlog', 'col-in-progress', 'col-done'. Get available column IDs by fetching the board first with kanban-boards. Required."
+      to_position:
+        type: integer
+        description: "0-based index position in the target column. 0 = top of column. If omitted, card is placed at the end. Optional."
+      target_board_path:
+        type: string
+        description: "Full path to the destination board for cross-board moves. Example: '/launchpad/tasks/other-board'. If omitted, card stays on the same board. Optional."
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+        description: "Whether the move succeeded"
+      error:
+        type: string
+        description: "Error message if operation failed"
+      card:
+        type: object
+        description: "The moved card data"
+      from_column_id:
+        type: string
+        description: "ID of the source column"
+      to_column_id:
+        type: string
+        description: "ID of the target column"
+      cross_board:
+        type: boolean
+        description: "Whether this was a cross-board move"

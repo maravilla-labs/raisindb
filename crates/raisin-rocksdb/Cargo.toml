@@ -1,0 +1,99 @@
+[package]
+name = "raisin-rocksdb"
+version = "0.1.0"
+edition = "2021"
+description = "RocksDB storage backend implementation for RaisinDB"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Storage traits
+raisin-storage = { path = "../raisin-storage" }
+raisin-models = { path = "../raisin-models" }
+raisin-error = { path = "../raisin-error" }
+raisin-context = { path = "../raisin-context" }
+raisin-core = { path = "../raisin-core" }
+raisin-events = { path = "../raisin-events" }
+raisin-embeddings = { path = "../raisin-embeddings" }
+raisin-indexer = { path = "../raisin-indexer" }
+raisin-hnsw = { path = "../raisin-hnsw" }
+raisin-replication = { path = "../raisin-replication" }
+raisin-binary = { path = "../raisin-binary" }
+
+# RocksDB
+rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+rmp-serde = "1.3"
+zip = "2.2"
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+futures = { workspace = true }
+async-channel = "2.3"
+
+# Authentication
+bcrypt = "0.16"
+jsonwebtoken = "9.3"
+rand = "0.8"
+sha2 = "0.10"
+
+# Utilities
+blake3 = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1.18.1", features = ["v4"] }
+nanoid = { workspace = true }
+hex = { workspace = true }
+num_cpus = "1.16"
+fractional_index = "2.0"
+hashbrown = { version = "0.14", features = ["serde"] }
+tempfile = { workspace = true }
+crc32fast = "1.4"
+regex = "1"
+mime_guess = "2.0"
+either = "1.13"
+lru = "0.12"
+dashmap = "6.1"
+
+# Geospatial indexing
+geohash = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1.89"
+reqwest = { workspace = true, features = ["json"] }
+urlencoding = "2.1.3"
+raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
+raisin-ai = { version = "0.1.0", path = "../raisin-ai", features = ["huggingface", "candle"] }
+raisin-auth = { version = "0.1.0", path = "../raisin-auth" }
+raisin-flow-runtime = { version = "0.1.0", path = "../raisin-flow-runtime" }
+raisin-rel = { version = "0.1.0", path = "../raisin-rel" }
+raisin-graph-algorithms = { version = "0.1.0", path = "../raisin-graph-algorithms" }
+glob = "0.3.3"
+arc-swap = "1.8.0"
+
+[dev-dependencies]
+raisin-core = { path = "../raisin-core" }
+tempfile = { workspace = true }
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+once_cell = "1.19"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+
+[[bench]]
+name = "rocksdb_benchmarks"
+harness = false
+
+[[bench]]
+name = "persistent_idempotency_bench"
+harness = false

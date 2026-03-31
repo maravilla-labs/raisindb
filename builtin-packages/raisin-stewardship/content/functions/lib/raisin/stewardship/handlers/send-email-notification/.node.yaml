@@ -1,0 +1,49 @@
+node_type: raisin:Function
+properties:
+  title: Send Email Notification (Placeholder)
+  description: >
+    Placeholder function for sending email notifications.
+    Currently logs the email details. Replace with actual email service integration.
+  language: Starlark
+  entry_file: index.py:send_email_notification
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 10000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    required:
+      - email
+      - subject
+    properties:
+      email:
+        type: string
+        description: Recipient email address
+      subject:
+        type: string
+        description: Email subject line
+      body:
+        type: string
+        description: Email body (plain text)
+      html_body:
+        type: string
+        description: Email body (HTML)
+      template:
+        type: string
+        description: Email template name
+      template_data:
+        type: object
+        description: Data to pass to template
+  output_schema:
+    type: object
+    properties:
+      sent:
+        type: boolean
+        description: Whether the email was sent
+      reason:
+        type: string
+        description: Reason if not sent
+      message_id:
+        type: string
+        description: Email service message ID if sent

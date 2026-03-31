@@ -1,0 +1,154 @@
+name: ai-tools
+version: 1.0.16
+title: AI Tools Package
+description: >
+  Provides AI-powered node types and tools for RaisinDB.
+  Includes AI prompts, AI conversations, and AI-generated content types.
+author: RaisinDB Team
+license: MIT
+icon: sparkles
+color: "#00bcd4"
+keywords:
+  - ai
+  - llm
+  - prompt
+  - conversation
+  - generation
+category: ai
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  nodetypes:
+    - raisin:AIPrompt
+    - raisin:AIModel
+    - raisin:AIAgent
+    - raisin:AIThought
+    - raisin:AITask
+    - raisin:AIPlan
+    - raisin:AIToolCall
+    - raisin:AIToolResult
+    - raisin:AIToolSingleCallResult
+    - raisin:AIToolResultAggregator
+    - raisin:AICostRecord
+    - raisin:AgentUserContext
+  workspaces:
+    - ai
+  functions:
+    - /functions/lib/raisin/ai/agent-handler
+    - /functions/lib/raisin/ai/agent-continue-handler
+    - /functions/lib/raisin/ai/create-plan
+    - /functions/lib/raisin/ai/add-task
+    - /functions/lib/raisin/ai/update-task
+    - /functions/lib/raisin/ai/get-plan-status
+    - /functions/lib/raisin/ai/remember
+    - /functions/lib/raisin/ai/read-user-context
+    - /functions/lib/raisin/ai/forget
+    - /functions/lib/raisin/ai/weather
+    - /functions/lib/raisin/ai/plan-approval-handler
+  triggers:
+    - /functions/triggers/raisin/ai/on-user-message
+    - /functions/triggers/raisin/ai/on-tool-result
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # AI agent functions
+    - root: /functions/lib/raisin/ai
+      include:
+        - "agent-handler/**"
+        - "agent-continue-handler/**"
+        - "agent-shared/**"
+        - "create-plan/**"
+        - "add-task/**"
+        - "update-task/**"
+        - "get-plan-status/**"
+        - "remember/**"
+        - "read-user-context/**"
+        - "forget/**"
+        - "weather/**"
+        - "plan-approval-handler/**"
+      mode: merge
+
+    # Flow definitions
+    - root: /functions/flows
+      include:
+        - "chat/**"
+        - "ai-agent-handler/**"
+      mode: merge
+
+    # AI-related triggers
+    - root: /functions/triggers/raisin/ai
+      include:
+        - "on-user-message/**"
+        - "on-tool-result/**"
+      mode: merge
+
+    # Agent home content in workspace ai
+    - root: /ai/agents
+      workspace: ai
+      include:
+        - "**"
+      mode: merge
+
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:AIAgent
+  "raisin:access_control":
+    allowed_node_types:
+      add:
+        - raisin:Conversation
+        - raisin:Message
+        - raisin:AIThought
+        - raisin:AIPlan
+        - raisin:AITask
+        - raisin:AIToolCall
+        - raisin:AIToolResult
+        - raisin:AIToolSingleCallResult
+        - raisin:AIToolResultAggregator
+        - raisin:AICostRecord
+  ai:
+    default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:AIPrompt
+        - raisin:Conversation
+        - raisin:Message
+        - raisin:AIModel
+        - raisin:AIAgent
+        - raisin:AIThought
+        - raisin:AITask
+        - raisin:AIPlan
+        - raisin:AIToolCall
+        - raisin:AIToolResult
+        - raisin:AIToolSingleCallResult
+        - raisin:AIToolResultAggregator
+        - raisin:Notification
+        - raisin:InboxTask
+        - raisin:Folder
+        - raisin:AgentUserContext
+  default:
+    default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:AIPrompt
+        - raisin:Conversation
+        - raisin:Message
+        - raisin:AIModel
+        - raisin:AIAgent
+        - raisin:AIThought
+        - raisin:AITask
+        - raisin:AIPlan
+        - raisin:AIToolCall
+        - raisin:AIToolResult
+        - raisin:AIToolSingleCallResult
+        - raisin:AIToolResultAggregator

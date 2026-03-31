@@ -1,0 +1,36 @@
+{
+  "name": "@raisindb/flow-designer",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "license": "BSL-1.1",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "sideEffects": [
+    "*.css"
+  ],
+  "scripts": {
+    "build": "npm run check",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "clsx": "^2.1.0",
+    "lucide-react": "^0.468.0",
+    "nanoid": "^5.0.0"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "eslint": "^9.18.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,23 @@
+node_type: raisin:Flow
+properties:
+  title: AI Agent Handler
+  name: ai-agent-handler
+  description: AI agent conversation flow - handles user messages with agentic loop
+  enabled: true
+  workflow_data:
+    version: 1
+    error_strategy: fail_fast
+    nodes:
+      - id: ai-agent
+        node_type: "raisin:FlowContainer"
+        container_type: ai_sequence
+        ai_config:
+          # Agent reference - use $auto to derive from conversation's agent_ref property
+          agent_ref: "$auto"
+          tool_mode: auto
+          max_iterations: 10
+          thinking_enabled: false
+          on_error: stop
+          timeout_ms: 30000
+          total_timeout_ms: 300000
+        children: []

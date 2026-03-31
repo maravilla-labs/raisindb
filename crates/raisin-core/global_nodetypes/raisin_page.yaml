@@ -1,0 +1,19 @@
+name: raisin:Page
+description: A basic content page
+icon: description
+version: 1
+indexable: true
+index_types: [Fulltext, Vector]
+properties:
+  - name: title
+    type: String
+    required: true
+    index: [Fulltext, Vector]
+  - name: content
+    type: String
+    required: false
+    index: [Fulltext, Vector]
+allowed_children: []
+versionable: true
+publishable: true
+auditable: true

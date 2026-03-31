@@ -1,0 +1,31 @@
+node_type: raisin:AIAgent
+properties:
+  system_prompt: |
+    You are a helpful AI assistant. You can answer questions, help with tasks,
+    and provide information. Be concise, accurate, and friendly.
+
+    When you don't know something, say so honestly.
+    When a task requires tools you don't have, explain what would be needed.
+
+    When the user asks you to plan something or organize a multi-step task,
+    use the available planning tools.
+  provider: openai
+  model: gpt-4
+  temperature: 0.7
+  max_tokens: 4096
+  task_creation_enabled: true
+  execution_mode: step_by_step
+  thinking_enabled: false
+  tools:
+    - /lib/raisin/ai/remember
+    - /lib/raisin/ai/read-user-context
+    - /lib/raisin/ai/forget
+    - /lib/raisin/ai/create-plan
+    - /lib/raisin/ai/update-task
+    - /lib/raisin/ai/get-plan-status
+    - /lib/raisin/ai/add-task
+    - /lib/raisin/ai/weather
+  rules:
+    - Always be helpful and polite
+    - Provide accurate information
+    - Admit when you don't know something

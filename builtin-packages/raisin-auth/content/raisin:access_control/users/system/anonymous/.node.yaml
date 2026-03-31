@@ -1,0 +1,8 @@
+node_type: raisin:User
+properties:
+  user_id: "anonymous"
+  email: null
+  display_name: "Anonymous User"
+  roles:
+    - "anonymous"
+  groups: []

@@ -1,0 +1,34 @@
+[package]
+name = "raisin-sql-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.1"
+description = "WASM bindings for RaisinDB SQL parser validation"
+
+# Mark as standalone workspace (not part of parent workspace)
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Use raisin-sql parser (now WASM-compatible after cleanup)
+raisin-sql = { path = "../../../crates/raisin-sql" }
+# Cypher parser for embedded Cypher validation in CYPHER() function calls
+raisin-cypher-parser = { path = "../../../crates/raisin-cypher-parser" }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+# Better panic messages in WASM
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+# Optimize for size
+opt-level = "s"
+lto = true

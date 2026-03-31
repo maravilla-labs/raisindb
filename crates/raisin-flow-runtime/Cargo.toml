@@ -1,0 +1,27 @@
+[package]
+name = "raisin-flow-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Stateful workflow execution runtime for RaisinDB"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raisin-storage = { version = "0.1.0", path = "../raisin-storage" }
+raisin-rel = { version = "0.1.0", path = "../raisin-rel" }
+raisin-models = { version = "0.1.0", path = "../raisin-models" }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+nanoid = { workspace = true }
+rand = "0.9.2"
+raisin-ai = { version = "0.1.0", path = "../raisin-ai" }
+sha2 = "0.10"
+hex = "0.4"

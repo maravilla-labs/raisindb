@@ -1,0 +1,87 @@
+name: raisin:AIPrompt
+title: AI Prompt
+description: A reusable prompt template for AI interactions
+icon: sparkles
+color: "#8B5CF6"
+
+properties:
+  - name: prompt_template
+    title: Prompt Template
+    type: string
+    required: true
+    description: The prompt template with {{variable}} placeholders
+    ui:
+      widget: textarea
+      rows: 10
+
+  - name: system_message
+    title: System Message
+    type: string
+    description: Optional system message to set AI behavior
+    ui:
+      widget: textarea
+      rows: 5
+
+  - name: model
+    title: Model
+    type: string
+    description: The AI model to use (e.g., claude-3-opus, gpt-4)
+    default: claude-3-sonnet
+    ui:
+      widget: select
+      options:
+        - label: Claude 3 Opus
+          value: claude-3-opus
+        - label: Claude 3 Sonnet
+          value: claude-3-sonnet
+        - label: Claude 3 Haiku
+          value: claude-3-haiku
+        - label: GPT-4
+          value: gpt-4
+        - label: GPT-4 Turbo
+          value: gpt-4-turbo
+
+  - name: temperature
+    title: Temperature
+    type: number
+    description: Creativity level (0-2). Higher = more creative
+    default: 0.7
+    validation:
+      min: 0
+      max: 2
+
+  - name: max_tokens
+    title: Max Tokens
+    type: Number
+    description: Maximum response length in tokens
+    default: 1000
+    validation:
+      min: 1
+      max: 100000
+
+  - name: variables
+    title: Variables
+    type: array
+    items:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Variable name (used as {{name}} in template)
+        type:
+          type: string
+          enum: [string, number, boolean, json]
+          default: string
+        required:
+          type: boolean
+          default: false
+        default:
+          type: string
+    description: Input variables for the prompt template
+
+  - name: tags
+    title: Tags
+    type: array
+    items:
+      type: string
+    description: Tags for categorizing prompts

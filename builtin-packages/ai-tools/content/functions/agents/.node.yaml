@@ -1,0 +1,5 @@
+node_type: raisin:Folder
+properties:
+  name: agents
+  title: AI Agents
+  description: AI agent definitions for use in flows

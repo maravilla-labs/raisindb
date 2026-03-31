@@ -1,0 +1,65 @@
+name: raisin:RepoAuthConfig
+description: Repository-level authentication and CORS configuration
+icon: shield
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: true
+publishable: false
+auditable: true
+properties:
+  - name: repo_id
+    type: String
+    required: false
+    title: Repository ID
+    description: The repository ID this configuration applies to
+    index: [Property]
+
+  - name: allow_registration
+    type: Boolean
+    required: false
+    title: Allow Registration
+    description: Whether user registration is allowed for this repository
+    default: true
+
+  - name: default_roles
+    type: Array
+    required: false
+    title: Default Roles
+    description: Default roles to assign to new users (e.g., ["viewer"])
+    default: ["viewer"]
+
+  - name: require_email_verification
+    type: Boolean
+    required: false
+    title: Require Email Verification
+    description: Whether to require email verification before granting access
+    default: false
+
+  - name: auto_approve_access
+    type: Boolean
+    required: false
+    title: Auto Approve Access
+    description: Whether to auto-approve access (true) or require admin approval (false)
+    default: true
+
+  - name: welcome_message
+    type: String
+    required: false
+    title: Welcome Message
+    description: Custom welcome message for registration page
+
+  - name: anonymous_enabled
+    type: Boolean
+    required: false
+    title: Anonymous Access Enabled
+    description: Override tenant-level anonymous access (null = inherit from tenant)
+
+  - name: cors_allowed_origins
+    type: Array
+    required: false
+    title: CORS Allowed Origins
+    description: Allowed origins for cross-origin requests to auth endpoints
+    default: []
+allowed_children: []

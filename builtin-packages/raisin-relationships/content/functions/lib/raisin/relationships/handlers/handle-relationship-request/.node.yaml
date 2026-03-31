@@ -1,0 +1,35 @@
+node_type: raisin:Function
+properties:
+  title: Handle Relationship Request
+  description: >
+    Handles relationship request messages by creating inbox messages for recipients.
+    This handler is triggered when a message with type "relationship_request" is sent.
+    It validates the request and creates an inbox message for the recipient to accept or reject.
+  language: Starlark
+  entry_file: index.py:handle_relationship_request
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 10000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - node
+    properties:
+      node:
+        type: object
+        description: The relationship request message node
+      event:
+        type: object
+        description: The trigger event metadata
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      inbox_message_path:
+        type: string
+        description: Path to the created inbox message for the recipient
+      error:
+        type: string

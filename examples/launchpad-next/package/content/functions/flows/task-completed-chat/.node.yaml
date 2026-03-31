@@ -1,0 +1,42 @@
+node_type: raisin:Flow
+properties:
+  title: Task Completed Chat
+  name: task-completed-chat
+  description: |
+    Flow triggered when a kanban card is moved to Done.
+    Starts an AI chat session that delivers a congratulatory message
+    to the user's regular inbox (not the AI chat UI).
+  enabled: true
+  workflow_data:
+    version: 1
+    error_strategy: fail_fast
+    nodes:
+      - id: start
+        node_type: "raisin:FlowStep"
+        properties:
+          step_type: start
+        connections:
+          - target: chat-session
+      - id: chat-session
+        node_type: "raisin:FlowStep"
+        properties:
+          step_type: chat
+          action: Task Completion Chat
+          agent_ref: /agents/sample-assistant
+          system_prompt: |
+            You are a helpful assistant embedded in a project management board.
+            A user just completed a task. Congratulate them briefly and offer to
+            help with next steps. Keep your response short and encouraging.
+            Do NOT ask the user to confirm or do anything — just send your message.
+          max_turns: 1
+          conversation_format: inbox
+          termination:
+            allow_user_end: true
+            allow_ai_end: true
+            end_keywords: []
+        connections:
+          - target: end
+      - id: end
+        node_type: "raisin:FlowStep"
+        properties:
+          step_type: end

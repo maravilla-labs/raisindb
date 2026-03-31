@@ -1,0 +1,23 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Relationship Request Messages
+  name: relationships-request
+  description: Handles relationship request messages by creating inbox messages for recipients
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "/users/**/outbox/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: "relationship_request"
+      status: "pending"
+  priority: 10
+  max_retries: 3
+  function_path: /lib/raisin/relationships/handlers/handle-relationship-request

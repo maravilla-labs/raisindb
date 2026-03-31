@@ -1,0 +1,19 @@
+node_type: raisin:Role
+properties:
+  role_id: viewer
+  name: Viewer
+  description: Default role for authenticated users with full access to their home folder.
+  permissions:
+    # Full access to user's own home folder and all children
+    # No node_types filter = allows ALL node types (including AI types)
+    - path: "/users/**"
+      operations: ["create", "read", "update", "delete"]
+      workspace: "raisin:access_control"
+    # Read access to launchpad workspace (public pages)
+    - path: "/**"
+      operations: ["read"]
+      workspace: "launchpad"
+    # Read access to functions workspace (agents, functions)
+    - path: "/**"
+      operations: ["read"]
+      workspace: "functions"

@@ -1,0 +1,30 @@
+# RaisinDB Node 1 Configuration
+# Example 3-node cluster setup
+
+[server]
+port = 8081
+bind_address = "127.0.0.1"
+data_dir = "./data/node1"
+initial_admin_password = "Admin1234567!8"  # Change in production!
+# Enable anonymous access for unauthenticated HTTP/WebSocket requests
+# Anonymous users get permissions from the "anonymous" role in access_control
+anonymous_enabled = true
+# CORS allowed origins for cross-origin requests (e.g., frontend dev servers)
+cors_allowed_origins = ["http://localhost:5173"]
+
+[replication]
+enabled = true
+node_id = "node1"
+port = 9001
+bind_address = "127.0.0.1"
+
+# Peer nodes in the cluster
+[[replication.peers]]
+peer_id = "node2"
+address = "127.0.0.1"
+port = 9002
+
+[[replication.peers]]
+peer_id = "node3"
+address = "127.0.0.1"
+port = 9003

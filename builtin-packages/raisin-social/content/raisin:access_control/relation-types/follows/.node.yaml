@@ -1,0 +1,13 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "FOLLOWS"
+  title: "Follows"
+  description: "One-way follow relationship for activity feeds and updates"
+  category: "social"
+  inverse_relation_name: "FOLLOWED_BY"
+  bidirectional: false
+  implies_stewardship: false
+  requires_minor: false
+  enables_messaging: false
+  icon: "user-plus"
+  color: "#10b981"

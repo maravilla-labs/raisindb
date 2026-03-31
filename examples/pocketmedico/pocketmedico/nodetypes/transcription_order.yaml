@@ -1,0 +1,81 @@
+name: medico:TranscriptionOrder
+title: Transcription Order
+description: Medical transcription order with source files and generated report
+icon: clipboard-list
+color: "#0891B2"
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+
+properties:
+  - name: order_number
+    title: Order Number
+    type: String
+    required: true
+    unique: true
+    index: [Property]
+  - name: customer_name
+    title: Customer Name
+    type: String
+    required: true
+    index: [Fulltext]
+  - name: patient_initials
+    title: Patient Initials
+    type: String
+    required: true
+  - name: tier
+    title: Service Tier
+    type: String
+    required: true
+    default: light
+    ui:
+      widget: select
+      options:
+        - label: Light (AI only)
+          value: light
+        - label: Pro (AI + Review)
+          value: pro
+  - name: status
+    title: Status
+    type: String
+    required: true
+    default: pending
+    index: [Property]
+    ui:
+      widget: select
+      options:
+        - { label: Pending, value: pending }
+        - { label: Processing, value: processing }
+        - { label: AI Complete, value: ai_complete }
+        - { label: In Review, value: in_review }
+        - { label: Ready, value: ready }
+        - { label: Downloaded, value: downloaded }
+  - name: priority
+    title: Priority
+    type: String
+    default: normal
+    ui:
+      widget: select
+      options:
+        - { label: Normal, value: normal }
+        - { label: Urgent, value: urgent }
+  - name: notes
+    title: Notes
+    type: String
+    ui:
+      widget: textarea
+  - name: ai_confidence_score
+    title: AI Confidence
+    type: Number
+    description: AI transcription confidence score (0-100)
+    validation:
+      min: 0
+      max: 100
+
+allowed_children:
+  - medico:SourceFile
+  - medico:MedicalReport
+
+versionable: true
+publishable: false
+auditable: true

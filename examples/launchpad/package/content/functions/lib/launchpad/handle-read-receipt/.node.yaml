@@ -1,0 +1,9 @@
+node_type: raisin:Function
+properties:
+  name: handle-read-receipt
+  title: Handle Read Receipt
+  description: Updates sender's message with read status when recipient reads a message
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleReadReceipt

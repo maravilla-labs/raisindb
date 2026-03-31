@@ -1,0 +1,20 @@
+node_type: "raisin:Function"
+properties:
+  title: "Read User Context"
+  description: |
+    Reads the stored memory for the current user as markdown text.
+    Call this before using the remember tool so you can merge new information
+    with existing content. Also useful to check what you know about the user.
+  execution_mode: "async"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties: {}
+  output_schema:
+    type: "object"
+    properties:
+      content:
+        type: "string"
+        description: "The user's memory as markdown text"

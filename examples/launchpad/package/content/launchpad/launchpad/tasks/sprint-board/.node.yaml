@@ -1,0 +1,54 @@
+node_type: launchpad:Page
+archetype: launchpad:KanbanBoard
+properties:
+  title: Sprint Board
+  slug: sprint-board
+  description: Current sprint tasks and progress tracking
+  columns:
+    - id: col-backlog
+      title: Backlog
+      cards:
+        - uuid: card-1
+          element_type: launchpad:KanbanCard
+          title: Setup project repository
+          description: Initialize Git repo and configure CI/CD pipeline
+        - uuid: card-2
+          element_type: launchpad:KanbanCard
+          title: Design database schema
+          description: Create ERD and define table relationships
+        - uuid: card-3
+          element_type: launchpad:KanbanCard
+          title: Write API documentation
+          description: Document all REST endpoints with OpenAPI spec
+
+    - id: col-in-progress
+      title: In Progress
+      cards:
+        - uuid: card-4
+          element_type: launchpad:KanbanCard
+          title: Implement user authentication
+          description: Add JWT-based auth with refresh tokens
+        - uuid: card-5
+          element_type: launchpad:KanbanCard
+          title: Build dashboard UI
+          description: Create responsive dashboard with charts
+
+    - id: col-review
+      title: In Review
+      cards:
+        - uuid: card-6
+          element_type: launchpad:KanbanCard
+          title: Fix navigation bug
+          description: Mobile menu not closing on route change
+
+    - id: col-done
+      title: Done
+      cards:
+        - uuid: card-7
+          element_type: launchpad:KanbanCard
+          title: Setup development environment
+          description: Docker compose for local development
+        - uuid: card-8
+          element_type: launchpad:KanbanCard
+          title: Create landing page
+          description: Hero section with feature highlights

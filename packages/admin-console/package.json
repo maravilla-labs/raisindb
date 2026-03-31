@@ -1,0 +1,53 @@
+{
+  "name": "@raisindb/admin-console",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "license": "BSL-1.1",
+  "scripts": {
+    "dev": "vite",
+    "prebuild:flow-designer": "npm --prefix ../raisin-flow-designer run build",
+    "prebuild:rel-wasm": "cd ../../tooling/packages/raisin-rel-wasm && ./build.sh",
+    "prebuild": "npm run prebuild:rel-wasm && npm run prebuild:flow-designer",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+  },
+  "dependencies": {
+    "@atlaskit/pragmatic-drag-and-drop": "^1.7.7",
+    "@atlaskit/pragmatic-drag-and-drop-hitbox": "^1.1.0",
+    "@headlessui/react": "^2.2.0",
+    "@hello-pangea/dnd": "^18.0.1",
+    "@microsoft/fetch-event-source": "^2.0.1",
+    "@monaco-editor/react": "^4.6.0",
+    "@raisindb/editor": "file:../raisin-editor",
+    "@raisindb/flow-designer": "file:../raisin-flow-designer",
+    "@raisindb/sql-wasm": "file:../../tooling/packages/raisin-sql-wasm/pkg",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "allotment": "^1.20.4",
+    "js-yaml": "^4.1.0",
+    "lucide-react": "^0.468.0",
+    "raisin-rel-wasm": "file:../../tooling/packages/raisin-rel-wasm/pkg",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.1.0",
+    "react-router-dom": "^7.1.3",
+    "react-syntax-highlighter": "^16.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.18.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

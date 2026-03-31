@@ -1,0 +1,106 @@
+name: raisin:Session
+description: Active authentication session
+icon: lock
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: true
+publishable: false
+auditable: true
+properties:
+  - name: session_id
+    type: String
+    required: true
+    title: Session ID
+    description: Unique session identifier
+    index: [Property]
+
+  - name: tenant_id
+    type: String
+    required: true
+    title: Tenant ID
+    description: Tenant this session belongs to
+    index: [Property]
+
+  - name: identity_id
+    type: String
+    required: true
+    title: Identity ID
+    description: Identity ID this session belongs to
+    index: [Property]
+
+  - name: strategy_id
+    type: String
+    required: true
+    title: Strategy ID
+    description: Authentication strategy used
+    index: [Property]
+
+  - name: created_at
+    type: Date
+    required: false
+    title: Created At
+    description: When the session was created
+
+  - name: expires_at
+    type: Date
+    required: true
+    title: Expires At
+    description: When the session expires
+    index: [Property]
+
+  - name: last_activity_at
+    type: Date
+    required: false
+    title: Last Activity At
+    description: Last activity time (updated on refresh)
+
+  - name: client_info
+    type: Object
+    required: false
+    title: Client Info
+    description: |
+      Client information.
+      Structure: { ip_address, user_agent, device_type, browser, os, location }
+
+  - name: revoked
+    type: Boolean
+    required: false
+    title: Revoked
+    description: Whether this session has been revoked
+    default: false
+    index: [Property]
+
+  - name: revoked_reason
+    type: String
+    required: false
+    title: Revoked Reason
+    description: Reason for revocation (if revoked)
+
+  - name: revoked_at
+    type: Date
+    required: false
+    title: Revoked At
+    description: When the session was revoked
+
+  - name: refresh_token_hash
+    type: String
+    required: false
+    title: Refresh Token Hash
+    description: Hash of the current refresh token
+
+  - name: token_family
+    type: String
+    required: true
+    title: Token Family
+    description: Token family ID for detecting refresh token reuse
+    index: [Property]
+
+  - name: token_generation
+    type: Number
+    required: false
+    title: Token Generation
+    description: Current generation in the token family
+    default: 0
+allowed_children: []

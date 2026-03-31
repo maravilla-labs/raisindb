@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "GRANDPARENT_OF"
+  title: "Grandparent Of"
+  description: "Grandparent-grandchild relationship"
+  category: "household"
+  inverse_relation_name: "GRANDCHILD_OF"
+  bidirectional: false
+  implies_stewardship: false
+  requires_minor: false
+  icon: "users"
+  color: "#f59e0b"

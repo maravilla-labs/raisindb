@@ -1,0 +1,36 @@
+name: launchpad:LandingPage
+title: Landing Page
+description: Landing page template with hero, content blocks, and features
+icon: layout
+color: "#6366f1"
+base_node_type: launchpad:Page
+version: 1
+
+fields:
+  - $type: TextField
+    name: title
+    title: Page Title
+    required: true
+    translatable: true
+
+  - $type: TextField
+    name: slug
+    title: URL Slug
+    required: true
+
+  - $type: TextField
+    name: description
+    title: Meta Description
+    required: false
+    translatable: true
+
+  - $type: SectionField
+    name: content
+    title: Page Content
+    allowed_element_types:
+      - launchpad:Hero
+      - launchpad:TextBlock
+      - launchpad:FeatureGrid
+      - launchpad:ListKanbanBoards
+
+publishable: true

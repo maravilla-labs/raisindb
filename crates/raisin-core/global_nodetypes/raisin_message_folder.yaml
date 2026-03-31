@@ -1,0 +1,15 @@
+name: raisin:MessageFolder
+description: Container for user messages (inbox/outbox)
+icon: mail
+version: 1
+indexable: false
+properties:
+  - name: data
+    type: Object
+    required: false
+allowed_children:
+  - raisin:Message
+  - raisin:Conversation
+versionable: false
+publishable: false
+auditable: false

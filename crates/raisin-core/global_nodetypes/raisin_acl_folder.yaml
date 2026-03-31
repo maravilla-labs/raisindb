@@ -1,0 +1,28 @@
+name: raisin:AclFolder
+description: Access control folder for organizing users, roles, and groups
+icon: shield
+version: 1
+extends: raisin:Folder
+indexable: true
+index_types: [Fulltext]
+properties:
+  - name: icon
+    type: String
+    title: Icon
+    description: Lucide icon name for the folder
+    required: false
+    default: "folder"
+  - name: color
+    type: String
+    title: Color
+    description: Background color for the folder (hex code)
+    required: false
+    default: "#3b82f6"
+allowed_children:
+  - raisin:User
+  - raisin:Role
+  - raisin:Group
+  - raisin:AclFolder
+versionable: true
+publishable: true
+auditable: true

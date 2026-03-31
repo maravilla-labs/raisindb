@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "PARENT_OF"
+  title: "Parent Of"
+  description: "Parent-child relationship in a household"
+  category: "household"
+  inverse_relation_name: "CHILD_OF"
+  bidirectional: false
+  implies_stewardship: true
+  requires_minor: true
+  icon: "users"
+  color: "#10b981"

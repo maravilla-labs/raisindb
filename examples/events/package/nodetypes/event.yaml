@@ -1,0 +1,77 @@
+name: events:Event
+title: Event
+description: An event with date, location, and details
+icon: calendar
+color: "#6366f1"
+version: 1
+
+properties:
+  - name: title
+    title: Title
+    type: String
+    required: true
+    is_translatable: true
+    index:
+      - Fulltext
+  - name: slug
+    title: Slug
+    type: String
+    required: true
+  - name: description
+    title: Description
+    type: String
+    is_translatable: true
+  - name: start_date
+    title: Start Date
+    type: Date
+    required: true
+  - name: end_date
+    title: End Date
+    type: Date
+  - name: location
+    title: Location
+    type: String
+  - name: venue
+    title: Venue
+    type: Reference
+  - name: cover_image
+    title: Cover Image
+    type: Resource
+  - name: category
+    title: Category
+    type: String
+    index:
+      - Fulltext
+  - name: tags
+    title: Tags
+    type: Array
+  - name: capacity
+    title: Capacity
+    type: Number
+  - name: price
+    title: Price
+    type: Number
+    default: 0
+  - name: currency
+    title: Currency
+    type: String
+    default: "USD"
+  - name: status
+    title: Status
+    type: String
+    default: "draft"
+  - name: featured
+    title: Featured
+    type: Boolean
+    default: false
+  - name: organizer
+    title: Organizer
+    type: Reference
+  - name: speakers
+    title: Speakers
+    type: Array
+
+versionable: true
+publishable: true
+auditable: true
+indexable: true

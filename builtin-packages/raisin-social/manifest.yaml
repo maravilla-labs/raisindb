@@ -1,0 +1,52 @@
+name: raisin-social
+version: 1.0.0
+title: RaisinDB Social Package
+description: >
+  Provides social relationship types for RaisinDB including friendships,
+  follows, and blocks. These relationships enable social features like
+  messaging, activity feeds, and connection management.
+author: RaisinDB Team
+license: BSL-1.1
+icon: heart
+color: "#ec4899"
+keywords:
+  - social
+  - friends
+  - followers
+  - connections
+  - relationships
+category: system
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+# Dependencies
+depends:
+  - raisin-relationships
+
+provides:
+  # Content nodes created in workspaces
+  content:
+    - raisin:access_control/relation-types/friends-with
+    - raisin:access_control/relation-types/follows
+    - raisin:access_control/relation-types/blocks
+
+# Sync configuration for package updates
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Social relation type definitions
+    - root: /raisin:access_control/relation-types
+      include:
+        - "friends-with/**"
+        - "follows/**"
+        - "blocks/**"
+      mode: merge
+
+# Workspace configuration
+workspace_patches:
+  raisin:access_control:
+    default_folder_type: raisin:AclFolder

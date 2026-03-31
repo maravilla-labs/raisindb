@@ -1,0 +1,22 @@
+node_type: raisin:Trigger
+properties:
+  title: On Read Receipt
+  description: Handles read receipts to update sender's message with read status
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "**/users/**/outbox/*"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: read_receipt
+      status: pending
+  priority: 10
+  max_retries: 3
+  function_path: /lib/launchpad/handle-read-receipt

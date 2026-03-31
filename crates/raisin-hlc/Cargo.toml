@@ -1,0 +1,22 @@
+[package]
+name = "raisin-hlc"
+version = "0.1.0"
+edition = "2021"
+description = "Hybrid Logical Clock implementation for RaisinDB distributed timestamps"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+schemars.workspace = true
+
+[[bench]]
+name = "hlc_bench"
+harness = false
+
+[dev-dependencies]
+criterion = "0.5"
+serde_json.workspace = true

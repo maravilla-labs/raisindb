@@ -1,0 +1,20 @@
+name: raisin:AIToolResultAggregator
+title: AI Tool Result Aggregator
+description: Coordination node for tracking parallel tool execution completion
+icon: git-merge
+color: "#8B5CF6"
+
+properties:
+  - name: expected_count
+    title: Expected Count
+    type: Number
+    description: Total number of tool calls expected to complete
+    readonly: true
+
+  - name: completed_count
+    title: Completed Count
+    type: Number
+    description: Number of tool calls that have completed
+    readonly: true
+
+allowed_children: []

@@ -1,0 +1,21 @@
+node_type: launchpad:Page
+archetype: launchpad:LandingPage
+properties:
+  title: Contact Us
+  slug: contact
+  description: Get in touch with the Launchpad team
+  content:
+    - uuid: contact-hero-1
+      element_type: launchpad:Hero
+      headline: Get in Touch
+      subheadline: We'd love to hear from you
+
+    - uuid: contact-text-1
+      element_type: launchpad:TextBlock
+      heading: Contact Information
+      content: |
+        **Email:** hello@launchpad.dev
+
+        **Location:** Basel, Switzerland
+
+        We typically respond within 24 hours.

@@ -1,0 +1,38 @@
+name: raisin:EntityCircle
+description: Generic grouping container for users (families, teams, org units, etc.)
+icon: users
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  - name: name
+    type: String
+    required: true
+    index: [Property, Fulltext]
+    description: Circle name (e.g., "Smith Family", "Engineering Team")
+
+  - name: circle_type
+    type: String
+    required: false
+    index: [Property]
+    description: Type of circle (e.g., "family", "team", "org_unit")
+
+  - name: primary_contact_id
+    type: String
+    required: false
+    description: User ID of the primary contact for this circle
+
+  - name: address
+    type: Object
+    required: false
+    description: Shared address information for the circle
+
+  - name: metadata
+    type: Object
+    required: false
+    description: Extensible properties for additional data
+
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

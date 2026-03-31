@@ -1,0 +1,83 @@
+name: raisin:WorkspaceAccess
+description: Workspace access record linking an Identity to a workspace
+icon: shield-check
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: true
+publishable: false
+auditable: true
+properties:
+  - name: identity_id
+    type: String
+    required: true
+    title: Identity ID
+    description: Global identity ID
+    index: [Property]
+
+  - name: tenant_id
+    type: String
+    required: true
+    title: Tenant ID
+    description: Tenant ID
+    index: [Property]
+
+  - name: repo_id
+    type: String
+    required: true
+    title: Repository ID
+    description: Repository/workspace ID
+    index: [Property]
+
+  - name: user_node_id
+    type: String
+    required: false
+    title: User Node ID
+    description: Workspace-specific user node ID (raisin:User in raisin:access_control)
+    index: [Property]
+
+  - name: status
+    type: String
+    required: true
+    title: Status
+    description: Access status (pending, active, invited, suspended, revoked)
+    index: [Property]
+
+  - name: granted_at
+    type: Date
+    required: false
+    title: Granted At
+    description: When access was granted
+
+  - name: granted_by
+    type: String
+    required: false
+    title: Granted By
+    description: Admin identity_id who granted access
+
+  - name: requested_at
+    type: Date
+    required: false
+    title: Requested At
+    description: When access was requested (if applicable)
+
+  - name: updated_at
+    type: Date
+    required: false
+    title: Updated At
+    description: When access was last modified
+
+  - name: roles
+    type: Array
+    required: false
+    title: Roles
+    description: Roles assigned to the user in this workspace
+    default: []
+
+  - name: notes
+    type: String
+    required: false
+    title: Notes
+    description: Notes or reason for access decision
+allowed_children: []

@@ -1,0 +1,96 @@
+name: raisin:AIModel
+title: AI Model Configuration
+description: Configuration for an AI model provider
+icon: cpu
+color: "#A855F7"
+
+properties:
+  - name: provider
+    title: Provider
+    type: string
+    required: true
+    description: AI provider (anthropic, openai, etc.)
+    ui:
+      widget: select
+      options:
+        - label: Anthropic
+          value: anthropic
+        - label: OpenAI
+          value: openai
+        - label: Azure OpenAI
+          value: azure
+        - label: Google AI
+          value: google
+        - label: Ollama (Local)
+          value: ollama
+        - label: Custom
+          value: custom
+
+  - name: model_id
+    title: Model ID
+    type: string
+    required: true
+    description: The model identifier (e.g., claude-3-opus-20240229)
+
+  - name: display_name
+    title: Display Name
+    type: string
+    description: Human-readable name for the model
+
+  - name: api_endpoint
+    title: API Endpoint
+    type: string
+    description: Custom API endpoint URL (for custom/self-hosted)
+
+  - name: api_key_ref
+    title: API Key Reference
+    type: string
+    description: Reference to secret containing API key (e.g., secrets/anthropic-key)
+
+  - name: default_temperature
+    title: Default Temperature
+    type: number
+    default: 0.7
+    validation:
+      min: 0
+      max: 2
+
+  - name: default_max_tokens
+    title: Default Max Tokens
+    type: Number
+    default: 4096
+
+  - name: context_window
+    title: Context Window
+    type: Number
+    description: Maximum context window size in tokens
+    readonly: true
+
+  - name: capabilities
+    title: Capabilities
+    type: array
+    items:
+      type: string
+      enum:
+        - text
+        - vision
+        - function_calling
+        - streaming
+        - embeddings
+    description: Model capabilities
+
+  - name: cost_per_1k_input
+    title: Cost per 1K Input Tokens
+    type: number
+    description: Cost in USD per 1000 input tokens
+
+  - name: cost_per_1k_output
+    title: Cost per 1K Output Tokens
+    type: number
+    description: Cost in USD per 1000 output tokens
+
+  - name: enabled
+    title: Enabled
+    type: boolean
+    default: true
+    description: Whether this model configuration is active

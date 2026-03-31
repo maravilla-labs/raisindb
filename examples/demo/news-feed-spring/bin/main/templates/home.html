@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{layout/main}">
+<head>
+    <title>Home</title>
+</head>
+<body>
+<div layout:fragment="content">
+    <!-- Category Tabs -->
+    <div th:replace="~{fragments/category-tabs :: tabs(${categories}, null)}"></div>
+
+    <!-- Featured Articles -->
+    <section th:if="${not #lists.isEmpty(featured)}" class="mb-12">
+        <h2 class="text-2xl font-bold mb-6">Featured Articles</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div th:each="article : ${featured}">
+                <div th:replace="~{fragments/article-card :: featured-card(${article})}"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Recent Articles -->
+    <section>
+        <h2 class="text-2xl font-bold mb-6">Recent Articles</h2>
+        <div th:if="${#lists.isEmpty(recent)}" class="text-center py-12 text-gray-500">
+            <p>No articles yet. Be the first to create one!</p>
+            <a th:if="${userContext != null and userContext.authenticated}"
+               th:href="@{/articles/new}"
+               class="mt-4 inline-block px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                Create Article
+            </a>
+        </div>
+        <div th:unless="${#lists.isEmpty(recent)}" class="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div th:each="article : ${recent}">
+                <div th:replace="~{fragments/article-card :: card(${article})}"></div>
+            </div>
+        </div>
+    </section>
+</div>
+</body>
+</html>

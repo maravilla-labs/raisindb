@@ -1,0 +1,17 @@
+node_type: launchpad:Page
+archetype: launchpad:LandingPage
+properties:
+  title: Tasks
+  slug: tasks
+  description: Manage your tasks with Kanban boards
+  content:
+    - uuid: tasks-hero
+      element_type: launchpad:Hero
+      headline: Task Boards
+      subheadline: Organize your work with interactive Kanban boards. Drag and drop cards, collaborate in real-time.
+      cta_text: Create Board
+      cta_action: createBoard
+
+    - uuid: boards-list
+      element_type: launchpad:ListKanbanBoards
+      heading: Your Boards

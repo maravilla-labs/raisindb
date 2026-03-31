@@ -1,0 +1,42 @@
+node_type: raisin:Function
+properties:
+  title: Send Push Notification
+  description: >
+    Sends push notifications to users.
+    This function is called by other handlers to send push alerts to mobile devices.
+  language: Starlark
+  entry_file: index.py:send_push_notification
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 30000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    required:
+      - user_id
+      - title
+      - body
+    properties:
+      user_id:
+        type: string
+        description: The recipient user ID
+      title:
+        type: string
+        description: The notification title
+      body:
+        type: string
+        description: The notification body content
+      data:
+        type: object
+        description: Optional additional data payload
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      notification_id:
+        type: string
+        description: The push notification ID
+      error:
+        type: string

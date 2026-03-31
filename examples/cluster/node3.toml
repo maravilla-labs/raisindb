@@ -1,0 +1,25 @@
+# RaisinDB Node 3 Configuration
+# Example 3-node cluster setup
+
+[server]
+port = 8083
+bind_address = "127.0.0.1"
+data_dir = "./data/node3"
+initial_admin_password = "Admin1234567!8"  # Change in production!
+
+[replication]
+enabled = true
+node_id = "node3"
+port = 9003
+bind_address = "127.0.0.1"
+
+# Peer nodes in the cluster
+[[replication.peers]]
+peer_id = "node1"
+address = "127.0.0.1"
+port = 9001
+
+[[replication.peers]]
+peer_id = "node2"
+address = "127.0.0.1"
+port = 9002

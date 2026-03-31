@@ -1,0 +1,12 @@
+node_type: raisin:RelationType
+properties:
+  relation_name: "MANAGER_OF"
+  title: "Manager Of"
+  description: "Manager-employee relationship in an organization"
+  category: "organization"
+  inverse_relation_name: "REPORTS_TO"
+  bidirectional: false
+  implies_stewardship: false
+  requires_minor: false
+  icon: "briefcase"
+  color: "#3b82f6"

@@ -1,0 +1,725 @@
+{
+  "keywords": [
+    {
+      "keyword": "CREATE",
+      "category": "Statement",
+      "description": "Creates a new schema object (NODETYPE, ARCHETYPE, or ELEMENTTYPE)",
+      "syntax": "CREATE NODETYPE|ARCHETYPE|ELEMENTTYPE 'name' ...",
+      "example": "CREATE NODETYPE 'myapp:Article' PROPERTIES (title String REQUIRED)"
+    },
+    {
+      "keyword": "ALTER",
+      "category": "Statement",
+      "description": "Modifies an existing schema object",
+      "syntax": "ALTER NODETYPE|ARCHETYPE|ELEMENTTYPE 'name' ADD|DROP|MODIFY|SET ...",
+      "example": "ALTER NODETYPE 'myapp:Article' ADD PROPERTY subtitle String FULLTEXT"
+    },
+    {
+      "keyword": "DROP",
+      "category": "Statement",
+      "description": "Removes a schema object",
+      "syntax": "DROP NODETYPE|ARCHETYPE|ELEMENTTYPE 'name' [CASCADE]",
+      "example": "DROP NODETYPE 'myapp:OldType' CASCADE"
+    },
+    {
+      "keyword": "NODETYPE",
+      "category": "SchemaObject",
+      "description": "Defines a node type schema with properties, inheritance, and behavior flags",
+      "syntax": "CREATE NODETYPE 'namespace:Name' [EXTENDS 'parent'] PROPERTIES (...)",
+      "example": "CREATE NODETYPE 'cms:Article' EXTENDS 'raisin:Page' PROPERTIES (title String REQUIRED)"
+    },
+    {
+      "keyword": "ARCHETYPE",
+      "category": "SchemaObject",
+      "description": "Defines a content archetype (pre-configured template) based on a node type",
+      "syntax": "CREATE ARCHETYPE 'name' BASE_NODE_TYPE 'type' FIELDS (...)",
+      "example": "CREATE ARCHETYPE 'blog-post' BASE_NODE_TYPE 'cms:Article' TITLE 'Blog Post'"
+    },
+    {
+      "keyword": "ELEMENTTYPE",
+      "category": "SchemaObject",
+      "description": "Defines a reusable element type for composite content blocks",
+      "syntax": "CREATE ELEMENTTYPE 'namespace:Name' FIELDS (...)",
+      "example": "CREATE ELEMENTTYPE 'ui:HeroBanner' FIELDS (heading String REQUIRED, image Resource)"
+    },
+    {
+      "keyword": "EXTENDS",
+      "category": "Clause",
+      "description": "Inherits properties and behavior from a parent type",
+      "syntax": "EXTENDS 'namespace:ParentType'",
+      "example": "CREATE NODETYPE 'myapp:Article' EXTENDS 'raisin:Page'"
+    },
+    {
+      "keyword": "MIXINS",
+      "category": "Clause",
+      "description": "Includes additional mixin types for composition",
+      "syntax": "MIXINS ('mixin1', 'mixin2')",
+      "example": "CREATE NODETYPE 'myapp:Article' MIXINS ('myapp:Publishable', 'myapp:SEO')"
+    },
+    {
+      "keyword": "PROPERTIES",
+      "category": "Clause",
+      "description": "Defines the properties (fields) of a node type",
+      "syntax": "PROPERTIES (name Type [MODIFIERS], ...)",
+      "example": "PROPERTIES (title String REQUIRED FULLTEXT, slug String REQUIRED UNIQUE)"
+    },
+    {
+      "keyword": "FIELDS",
+      "category": "Clause",
+      "description": "Defines fields for archetypes and element types",
+      "syntax": "FIELDS (name Type [MODIFIERS], ...)",
+      "example": "FIELDS (heading String REQUIRED, image Resource)"
+    },
+    {
+      "keyword": "ALLOWED_CHILDREN",
+      "category": "Clause",
+      "description": "Restricts which node types can be children of this type",
+      "syntax": "ALLOWED_CHILDREN ('type1', 'type2')",
+      "example": "ALLOWED_CHILDREN ('cms:Paragraph', 'cms:Image')"
+    },
+    {
+      "keyword": "REQUIRED_NODES",
+      "category": "Clause",
+      "description": "Specifies node types that must exist as children",
+      "syntax": "REQUIRED_NODES ('type1', 'type2')",
+      "example": "REQUIRED_NODES ('cms:MetaData')"
+    },
+    {
+      "keyword": "COMPOUND_INDEX",
+      "category": "Clause",
+      "description": "Define a compound index for efficient ORDER BY + filter queries",
+      "syntax": "COMPOUND_INDEX 'name' ON (col1, col2, col3 DESC)",
+      "example": "COMPOUND_INDEX 'idx_category_status_created' ON (category, status, __created_at DESC)"
+    },
+    {
+      "keyword": "ON",
+      "category": "Operator",
+      "description": "Specifies columns for COMPOUND_INDEX definition",
+      "syntax": "COMPOUND_INDEX 'name' ON (columns...)",
+      "example": "COMPOUND_INDEX 'idx_name' ON (category, status)"
+    },
+    {
+      "keyword": "ASC",
+      "category": "Operator",
+      "description": "Ascending sort order for ordering column in compound index",
+      "syntax": "column ASC",
+      "example": "COMPOUND_INDEX 'idx' ON (status, created_at ASC)"
+    },
+    {
+      "keyword": "DESC",
+      "category": "Operator",
+      "description": "Descending sort order for ordering column in compound index",
+      "syntax": "column DESC",
+      "example": "COMPOUND_INDEX 'idx' ON (status, created_at DESC)"
+    },
+    {
+      "keyword": "BASE_NODE_TYPE",
+      "category": "Clause",
+      "description": "Specifies the underlying node type for an archetype",
+      "syntax": "BASE_NODE_TYPE 'namespace:NodeType'",
+      "example": "CREATE ARCHETYPE 'blog' BASE_NODE_TYPE 'cms:Article'"
+    },
+    {
+      "keyword": "DESCRIPTION",
+      "category": "Clause",
+      "description": "Human-readable description of the schema object or property",
+      "syntax": "DESCRIPTION 'description text'",
+      "example": "DESCRIPTION 'Blog article content type'"
+    },
+    {
+      "keyword": "TITLE",
+      "category": "Clause",
+      "description": "Display title for archetypes",
+      "syntax": "TITLE 'Display Title'",
+      "example": "TITLE 'Blog Post'"
+    },
+    {
+      "keyword": "ICON",
+      "category": "Clause",
+      "description": "Icon identifier for UI display",
+      "syntax": "ICON 'icon-name'",
+      "example": "ICON 'article'"
+    },
+    {
+      "keyword": "String",
+      "category": "PropertyType",
+      "description": "Text data type. Supports FULLTEXT and TRANSLATABLE modifiers.",
+      "syntax": "name String [MODIFIERS]",
+      "example": "title String REQUIRED FULLTEXT"
+    },
+    {
+      "keyword": "Number",
+      "category": "PropertyType",
+      "description": "Numeric data type (stored as f64). Supports PROPERTY_INDEX.",
+      "syntax": "name Number [MODIFIERS]",
+      "example": "price Number DEFAULT 0"
+    },
+    {
+      "keyword": "Boolean",
+      "category": "PropertyType",
+      "description": "True/false data type.",
+      "syntax": "name Boolean [MODIFIERS]",
+      "example": "active Boolean DEFAULT true"
+    },
+    {
+      "keyword": "Date",
+      "category": "PropertyType",
+      "description": "DateTime with ISO-8601 serialization.",
+      "syntax": "name Date [MODIFIERS]",
+      "example": "published_at Date"
+    },
+    {
+      "keyword": "URL",
+      "category": "PropertyType",
+      "description": "URL string type with validation.",
+      "syntax": "name URL [MODIFIERS]",
+      "example": "website URL"
+    },
+    {
+      "keyword": "Reference",
+      "category": "PropertyType",
+      "description": "Cross-node reference type. Creates relationship in graph.",
+      "syntax": "name Reference [MODIFIERS]",
+      "example": "author Reference"
+    },
+    {
+      "keyword": "Resource",
+      "category": "PropertyType",
+      "description": "File/media resource with metadata (URL, mime type, size).",
+      "syntax": "name Resource [MODIFIERS]",
+      "example": "image Resource REQUIRED"
+    },
+    {
+      "keyword": "Object",
+      "category": "PropertyType",
+      "description": "Nested object with inline field definitions.",
+      "syntax": "name Object { field1 Type, field2 Type } [MODIFIERS]",
+      "example": "seo Object { title String, description String }"
+    },
+    {
+      "keyword": "Array",
+      "category": "PropertyType",
+      "description": "Ordered collection type. Use with OF keyword.",
+      "syntax": "name Array OF Type [MODIFIERS]",
+      "example": "tags Array OF String"
+    },
+    {
+      "keyword": "Composite",
+      "category": "PropertyType",
+      "description": "Rich content structure with multiple Elements/blocks.",
+      "syntax": "name Composite [MODIFIERS]",
+      "example": "body Composite"
+    },
+    {
+      "keyword": "Element",
+      "category": "PropertyType",
+      "description": "Single element reference for Composite content.",
+      "syntax": "name Element [MODIFIERS]",
+      "example": "hero Element"
+    },
+    {
+      "keyword": "NodeType",
+      "category": "PropertyType",
+      "description": "Reference to a NodeType definition.",
+      "syntax": "name NodeType [MODIFIERS]",
+      "example": "type_ref NodeType"
+    },
+    {
+      "keyword": "REQUIRED",
+      "category": "Modifier",
+      "description": "Property must have a value. Validation will fail if not provided.",
+      "syntax": "name Type REQUIRED",
+      "example": "title String REQUIRED"
+    },
+    {
+      "keyword": "UNIQUE",
+      "category": "Modifier",
+      "description": "Property value must be unique across all nodes of this type.",
+      "syntax": "name Type UNIQUE",
+      "example": "slug String REQUIRED UNIQUE"
+    },
+    {
+      "keyword": "FULLTEXT",
+      "category": "Modifier",
+      "description": "Enable full-text search indexing via Tantivy. Use FULLTEXT_MATCH() to search.",
+      "syntax": "name String FULLTEXT",
+      "example": "body String FULLTEXT"
+    },
+    {
+      "keyword": "VECTOR",
+      "category": "Modifier",
+      "description": "Enable vector embedding indexing for semantic search. Use KNN() for similarity search.",
+      "syntax": "name Array OF Number VECTOR",
+      "example": "embedding Array OF Number VECTOR"
+    },
+    {
+      "keyword": "PROPERTY_INDEX",
+      "category": "Modifier",
+      "description": "Create a RocksDB index for fast exact-match filtering in WHERE clauses.",
+      "syntax": "name Type PROPERTY_INDEX",
+      "example": "sku String PROPERTY_INDEX"
+    },
+    {
+      "keyword": "TRANSLATABLE",
+      "category": "Modifier",
+      "description": "Property supports i18n translations. Use locale filter in queries.",
+      "syntax": "name String TRANSLATABLE",
+      "example": "description String TRANSLATABLE"
+    },
+    {
+      "keyword": "DEFAULT",
+      "category": "Modifier",
+      "description": "Set a default value when property is not provided.",
+      "syntax": "name Type DEFAULT value",
+      "example": "status String DEFAULT 'draft'"
+    },
+    {
+      "keyword": "LABEL",
+      "category": "Modifier",
+      "description": "Human-readable label for UI display. Stored in property metadata.",
+      "syntax": "name Type LABEL 'Display Label'",
+      "example": "title String LABEL 'Article Title'"
+    },
+    {
+      "keyword": "ORDER",
+      "category": "Modifier",
+      "description": "Display order hint for UI forms. Lower numbers appear first.",
+      "syntax": "name Type ORDER number",
+      "example": "title String ORDER 1"
+    },
+    {
+      "keyword": "ALLOW_ADDITIONAL_PROPERTIES",
+      "category": "Modifier",
+      "description": "For Object types: allow properties not defined in schema.",
+      "syntax": "name Object { ... } ALLOW_ADDITIONAL_PROPERTIES",
+      "example": "meta Object {} ALLOW_ADDITIONAL_PROPERTIES"
+    },
+    {
+      "keyword": "VERSIONABLE",
+      "category": "Flag",
+      "description": "Enable version history. Each edit creates a new revision.",
+      "syntax": "CREATE NODETYPE '...' ... VERSIONABLE",
+      "example": "CREATE NODETYPE 'cms:Article' PROPERTIES (...) VERSIONABLE"
+    },
+    {
+      "keyword": "PUBLISHABLE",
+      "category": "Flag",
+      "description": "Enable publish workflow. Content has draft/published states.",
+      "syntax": "CREATE NODETYPE '...' ... PUBLISHABLE",
+      "example": "CREATE NODETYPE 'cms:Article' PROPERTIES (...) PUBLISHABLE"
+    },
+    {
+      "keyword": "AUDITABLE",
+      "category": "Flag",
+      "description": "Track all changes with user and timestamp.",
+      "syntax": "CREATE NODETYPE '...' ... AUDITABLE",
+      "example": "CREATE NODETYPE 'cms:Article' PROPERTIES (...) AUDITABLE"
+    },
+    {
+      "keyword": "INDEXABLE",
+      "category": "Flag",
+      "description": "Include nodes in search indexes. Default is true.",
+      "syntax": "CREATE NODETYPE '...' ... INDEXABLE",
+      "example": "CREATE NODETYPE 'cms:Article' PROPERTIES (...) INDEXABLE"
+    },
+    {
+      "keyword": "STRICT",
+      "category": "Flag",
+      "description": "Reject unknown properties. Validates against schema strictly.",
+      "syntax": "CREATE NODETYPE '...' ... STRICT",
+      "example": "CREATE NODETYPE 'cms:Article' PROPERTIES (...) STRICT"
+    },
+    {
+      "keyword": "OF",
+      "category": "Operator",
+      "description": "Specifies the item type for Array properties.",
+      "syntax": "Array OF Type",
+      "example": "tags Array OF String"
+    },
+    {
+      "keyword": "CASCADE",
+      "category": "Operator",
+      "description": "When dropping, also remove dependent objects and data.",
+      "syntax": "DROP ... CASCADE",
+      "example": "DROP NODETYPE 'myapp:OldType' CASCADE"
+    },
+    {
+      "keyword": "ADD",
+      "category": "Operator",
+      "description": "Add a new property, field, or mixin.",
+      "syntax": "ALTER ... ADD PROPERTY|FIELD|MIXIN ...",
+      "example": "ALTER NODETYPE 'myapp:Article' ADD PROPERTY subtitle String"
+    },
+    {
+      "keyword": "MODIFY",
+      "category": "Operator",
+      "description": "Modify an existing property or field.",
+      "syntax": "ALTER ... MODIFY PROPERTY|FIELD name Type [MODIFIERS]",
+      "example": "ALTER NODETYPE 'myapp:Article' MODIFY PROPERTY title String REQUIRED"
+    },
+    {
+      "keyword": "SET",
+      "category": "Operator",
+      "description": "Set a type attribute (DESCRIPTION, ICON, flags).",
+      "syntax": "ALTER ... SET attribute = value",
+      "example": "ALTER NODETYPE 'myapp:Article' SET DESCRIPTION = 'Updated'"
+    },
+    {
+      "keyword": "PROPERTY",
+      "category": "Operator",
+      "description": "References a property in ALTER statements.",
+      "syntax": "ADD|DROP|MODIFY PROPERTY name ...",
+      "example": "ADD PROPERTY subtitle String"
+    },
+    {
+      "keyword": "FIELD",
+      "category": "Operator",
+      "description": "References a field in ALTER ARCHETYPE/ELEMENTTYPE.",
+      "syntax": "ADD|DROP|MODIFY FIELD name ...",
+      "example": "ADD FIELD heading String"
+    },
+    {
+      "keyword": "MIXIN",
+      "category": "Operator",
+      "description": "References a mixin in ALTER statements.",
+      "syntax": "ADD|DROP MIXIN 'mixin-name'",
+      "example": "ADD MIXIN 'cms:Publishable'"
+    },
+    {
+      "keyword": "NULL",
+      "category": "Operator",
+      "description": "Null value in default clauses or comparisons.",
+      "syntax": "DEFAULT NULL",
+      "example": "optional_field String DEFAULT NULL"
+    },
+    {
+      "keyword": "DEPTH",
+      "category": "SqlFunction",
+      "description": "Returns the depth level (number of segments) of a path.",
+      "syntax": "DEPTH(path)",
+      "example": "SELECT * FROM nodes WHERE DEPTH(path) = 3"
+    },
+    {
+      "keyword": "PARENT",
+      "category": "SqlFunction",
+      "description": "Returns the parent path. Optional second arg for levels up.",
+      "syntax": "PARENT(path [, levels])",
+      "example": "SELECT * FROM nodes WHERE PARENT(path) = '/content'"
+    },
+    {
+      "keyword": "ANCESTOR",
+      "category": "SqlFunction",
+      "description": "Returns ancestor at specific absolute depth from root.",
+      "syntax": "ANCESTOR(path, depth)",
+      "example": "SELECT ANCESTOR(path, 2) AS section FROM nodes"
+    },
+    {
+      "keyword": "PATH_STARTS_WITH",
+      "category": "SqlFunction",
+      "description": "Returns true if path starts with prefix. Efficient for descendant queries.",
+      "syntax": "PATH_STARTS_WITH(path, prefix)",
+      "example": "SELECT * FROM nodes WHERE PATH_STARTS_WITH(path, '/content/blog')"
+    },
+    {
+      "keyword": "FULLTEXT_MATCH",
+      "category": "SqlFunction",
+      "description": "Full-text search using Tantivy. Supports AND, OR, NOT, wildcards (*), fuzzy (~), phrases.",
+      "syntax": "FULLTEXT_MATCH(query, language)",
+      "example": "SELECT * FROM nodes WHERE FULLTEXT_MATCH('rust AND database', 'english')"
+    },
+    {
+      "keyword": "FULLTEXT_SEARCH",
+      "category": "TableFunction",
+      "description": "Table function for cross-workspace full-text search.",
+      "syntax": "FULLTEXT_SEARCH(query, language)",
+      "example": "SELECT * FROM FULLTEXT_SEARCH('content management', 'english')"
+    },
+    {
+      "keyword": "EMBEDDING",
+      "category": "SqlFunction",
+      "description": "Generate embedding vector from text for similarity search.",
+      "syntax": "EMBEDDING(text)",
+      "example": "SELECT * FROM KNN(EMBEDDING('find similar articles'), 10)"
+    },
+    {
+      "keyword": "KNN",
+      "category": "TableFunction",
+      "description": "K-nearest neighbors vector search. Returns node_id and distance.",
+      "syntax": "KNN(vector, k)",
+      "example": "SELECT * FROM KNN(EMBEDDING('search query'), 10)"
+    },
+    {
+      "keyword": "NEIGHBORS",
+      "category": "TableFunction",
+      "description": "Graph traversal to find connected nodes.",
+      "syntax": "NEIGHBORS(node_id, direction, depth)",
+      "example": "SELECT * FROM NEIGHBORS('node-123', 'outbound', 2)"
+    },
+    {
+      "keyword": "CYPHER",
+      "category": "TableFunction",
+      "description": "Execute Cypher graph query and return results as table.",
+      "syntax": "CYPHER(query)",
+      "example": "SELECT * FROM CYPHER('MATCH (a)-[r]->(b) RETURN a, r, b')"
+    },
+    {
+      "keyword": "JSON_VALUE",
+      "category": "JsonFunction",
+      "description": "Extract scalar value using JSONPath.",
+      "syntax": "JSON_VALUE(json, '$.path.to.value')",
+      "example": "SELECT JSON_VALUE(properties, '$.seo.title') FROM nodes"
+    },
+    {
+      "keyword": "JSON_EXISTS",
+      "category": "JsonFunction",
+      "description": "Check if JSONPath exists in document.",
+      "syntax": "JSON_EXISTS(json, '$.path')",
+      "example": "SELECT * FROM nodes WHERE JSON_EXISTS(properties, '$.metadata.tags')"
+    },
+    {
+      "keyword": "JSON_GET_TEXT",
+      "category": "JsonFunction",
+      "description": "Extract top-level key as text.",
+      "syntax": "JSON_GET_TEXT(json, 'key')",
+      "example": "SELECT JSON_GET_TEXT(properties, 'title') FROM nodes"
+    },
+    {
+      "keyword": "JSON_GET_DOUBLE",
+      "category": "JsonFunction",
+      "description": "Extract top-level key as double.",
+      "syntax": "JSON_GET_DOUBLE(json, 'key')",
+      "example": "SELECT JSON_GET_DOUBLE(properties, 'price') FROM nodes"
+    },
+    {
+      "keyword": "JSON_GET_INT",
+      "category": "JsonFunction",
+      "description": "Extract top-level key as integer.",
+      "syntax": "JSON_GET_INT(json, 'key')",
+      "example": "SELECT JSON_GET_INT(properties, 'count') FROM nodes"
+    },
+    {
+      "keyword": "JSON_GET_BOOL",
+      "category": "JsonFunction",
+      "description": "Extract top-level key as boolean.",
+      "syntax": "JSON_GET_BOOL(json, 'key')",
+      "example": "SELECT * FROM nodes WHERE JSON_GET_BOOL(properties, 'active')"
+    },
+    {
+      "keyword": "TO_JSON",
+      "category": "JsonFunction",
+      "description": "Convert value or row to JSON.",
+      "syntax": "TO_JSON(value)",
+      "example": "SELECT TO_JSON(n) FROM nodes n"
+    },
+    {
+      "keyword": "TO_JSONB",
+      "category": "JsonFunction",
+      "description": "Convert value or row to JSONB (binary JSON).",
+      "syntax": "TO_JSONB(value)",
+      "example": "SELECT TO_JSONB(properties) FROM nodes"
+    },
+    {
+      "keyword": "COUNT",
+      "category": "AggregateFunction",
+      "description": "Count rows or non-null values.",
+      "syntax": "COUNT(*) | COUNT(column)",
+      "example": "SELECT COUNT(*) FROM nodes"
+    },
+    {
+      "keyword": "SUM",
+      "category": "AggregateFunction",
+      "description": "Sum numeric values.",
+      "syntax": "SUM(column)",
+      "example": "SELECT SUM(JSON_GET_DOUBLE(properties, 'price')) FROM nodes"
+    },
+    {
+      "keyword": "AVG",
+      "category": "AggregateFunction",
+      "description": "Average of numeric values.",
+      "syntax": "AVG(column)",
+      "example": "SELECT AVG(JSON_GET_DOUBLE(properties, 'rating')) FROM nodes"
+    },
+    {
+      "keyword": "MIN",
+      "category": "AggregateFunction",
+      "description": "Minimum value.",
+      "syntax": "MIN(column)",
+      "example": "SELECT MIN(created_at) FROM nodes"
+    },
+    {
+      "keyword": "MAX",
+      "category": "AggregateFunction",
+      "description": "Maximum value.",
+      "syntax": "MAX(column)",
+      "example": "SELECT MAX(updated_at) FROM nodes"
+    },
+    {
+      "keyword": "ARRAY_AGG",
+      "category": "AggregateFunction",
+      "description": "Collect values into array.",
+      "syntax": "ARRAY_AGG(column)",
+      "example": "SELECT ARRAY_AGG(name) FROM nodes GROUP BY node_type"
+    },
+    {
+      "keyword": "ROW_NUMBER",
+      "category": "WindowFunction",
+      "description": "Sequential row number within partition.",
+      "syntax": "ROW_NUMBER() OVER ([PARTITION BY ...] ORDER BY ...)",
+      "example": "SELECT name, ROW_NUMBER() OVER (ORDER BY created_at) FROM nodes"
+    },
+    {
+      "keyword": "RANK",
+      "category": "WindowFunction",
+      "description": "Rank with gaps for ties (1, 2, 2, 4).",
+      "syntax": "RANK() OVER ([PARTITION BY ...] ORDER BY ...)",
+      "example": "SELECT name, RANK() OVER (ORDER BY score DESC) FROM nodes"
+    },
+    {
+      "keyword": "DENSE_RANK",
+      "category": "WindowFunction",
+      "description": "Rank without gaps for ties (1, 2, 2, 3).",
+      "syntax": "DENSE_RANK() OVER ([PARTITION BY ...] ORDER BY ...)",
+      "example": "SELECT name, DENSE_RANK() OVER (ORDER BY score DESC) FROM nodes"
+    },
+    {
+      "keyword": "BRANCH",
+      "category": "SchemaObject",
+      "description": "A named reference to a revision in the repository for version control",
+      "syntax": "CREATE BRANCH 'name' [FROM 'source'] [AT REVISION <rev>] [DESCRIPTION 'desc'] [PROTECTED] [UPSTREAM 'branch'] [WITH HISTORY]",
+      "example": "CREATE BRANCH 'feature/new-article' FROM 'main'"
+    },
+    {
+      "keyword": "MERGE",
+      "category": "Statement",
+      "description": "Merges one branch into another with optional strategy",
+      "syntax": "MERGE BRANCH 'source' INTO 'target' [USING FAST_FORWARD|THREE_WAY] [MESSAGE 'msg']",
+      "example": "MERGE BRANCH 'feature/x' INTO 'main' USING THREE_WAY"
+    },
+    {
+      "keyword": "USE",
+      "category": "Statement",
+      "description": "Sets the session branch context for subsequent queries",
+      "syntax": "USE BRANCH 'branch-name'",
+      "example": "USE BRANCH 'develop'"
+    },
+    {
+      "keyword": "CHECKOUT",
+      "category": "Statement",
+      "description": "Alias for USE BRANCH - sets the session branch context",
+      "syntax": "CHECKOUT BRANCH 'branch-name'",
+      "example": "CHECKOUT BRANCH 'feature/x'"
+    },
+    {
+      "keyword": "SHOW BRANCHES",
+      "category": "Statement",
+      "description": "Lists all branches in the repository",
+      "syntax": "SHOW BRANCHES",
+      "example": "SHOW BRANCHES"
+    },
+    {
+      "keyword": "SHOW CURRENT BRANCH",
+      "category": "Statement",
+      "description": "Shows the current session branch",
+      "syntax": "SHOW CURRENT BRANCH",
+      "example": "SHOW CURRENT BRANCH"
+    },
+    {
+      "keyword": "DESCRIBE BRANCH",
+      "category": "Statement",
+      "description": "Shows detailed information about a branch",
+      "syntax": "DESCRIBE BRANCH 'branch-name'",
+      "example": "DESCRIBE BRANCH 'main'"
+    },
+    {
+      "keyword": "SHOW DIVERGENCE",
+      "category": "Statement",
+      "description": "Shows how many commits a branch is ahead/behind another",
+      "syntax": "SHOW DIVERGENCE 'branch' FROM 'base'",
+      "example": "SHOW DIVERGENCE 'feature/x' FROM 'main'"
+    },
+    {
+      "keyword": "AT REVISION",
+      "category": "Clause",
+      "description": "Specifies a revision reference for branching (HLC timestamp or HEAD~N)",
+      "syntax": "AT REVISION <hlc> | HEAD~N | branch~N",
+      "example": "CREATE BRANCH 'hotfix' FROM 'main' AT REVISION HEAD~5"
+    },
+    {
+      "keyword": "INTO",
+      "category": "Clause",
+      "description": "Specifies the target branch for merge operations",
+      "syntax": "INTO 'target-branch'",
+      "example": "MERGE BRANCH 'feature/x' INTO 'main'"
+    },
+    {
+      "keyword": "USING",
+      "category": "Clause",
+      "description": "Specifies the merge strategy",
+      "syntax": "USING FAST_FORWARD | THREE_WAY",
+      "example": "MERGE BRANCH 'hotfix' INTO 'production' USING FAST_FORWARD"
+    },
+    {
+      "keyword": "MESSAGE",
+      "category": "Clause",
+      "description": "Specifies the commit message for a merge",
+      "syntax": "MESSAGE 'commit message'",
+      "example": "MERGE BRANCH 'feature/x' INTO 'main' MESSAGE 'Merge feature X'"
+    },
+    {
+      "keyword": "UPSTREAM",
+      "category": "Clause",
+      "description": "Sets the upstream branch for divergence tracking",
+      "syntax": "UPSTREAM 'branch-name'",
+      "example": "CREATE BRANCH 'feature/x' FROM 'main' UPSTREAM 'main'"
+    },
+    {
+      "keyword": "WITH HISTORY",
+      "category": "Modifier",
+      "description": "Copies revision history when creating a branch",
+      "syntax": "WITH HISTORY",
+      "example": "CREATE BRANCH 'archive' FROM 'main' WITH HISTORY"
+    },
+    {
+      "keyword": "FAST_FORWARD",
+      "category": "Modifier",
+      "description": "Fast-forward merge strategy (only if target is ancestor of source)",
+      "syntax": "USING FAST_FORWARD",
+      "example": "MERGE BRANCH 'hotfix' INTO 'production' USING FAST_FORWARD"
+    },
+    {
+      "keyword": "THREE_WAY",
+      "category": "Modifier",
+      "description": "Three-way merge with conflict detection (default)",
+      "syntax": "USING THREE_WAY",
+      "example": "MERGE BRANCH 'feature/x' INTO 'main' USING THREE_WAY"
+    },
+    {
+      "keyword": "HEAD",
+      "category": "Operator",
+      "description": "Reference to the current HEAD revision of a branch",
+      "syntax": "HEAD~N",
+      "example": "AT REVISION HEAD~5"
+    },
+    {
+      "keyword": "IF EXISTS",
+      "category": "Modifier",
+      "description": "Suppresses error if the object doesn't exist",
+      "syntax": "DROP BRANCH IF EXISTS 'name'",
+      "example": "DROP BRANCH IF EXISTS 'feature/old'"
+    },
+    {
+      "keyword": "RENAME TO",
+      "category": "Clause",
+      "description": "Renames a branch to a new name",
+      "syntax": "ALTER BRANCH 'old' RENAME TO 'new'",
+      "example": "ALTER BRANCH 'old-name' RENAME TO 'new-name'"
+    },
+    {
+      "keyword": "UNSET",
+      "category": "Operator",
+      "description": "Removes a property or setting",
+      "syntax": "UNSET UPSTREAM",
+      "example": "ALTER BRANCH 'feature/x' UNSET UPSTREAM"
+    }
+  ]
+}

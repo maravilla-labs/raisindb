@@ -1,0 +1,40 @@
+[package]
+name = "raisin-deps"
+version = "0.1.0"
+edition = "2021"
+description = "External dependency management for RaisinDB"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Interactive prompts
+inquire = "0.7"
+
+# Find executables in PATH
+which = "7"
+
+# Colored terminal output
+colored = "2"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1"
+
+# Serialization for storage
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Date/time
+chrono = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["process"] }
+
+# Tracing
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

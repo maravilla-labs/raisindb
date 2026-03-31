@@ -1,0 +1,18 @@
+name: raisin:Node
+description: A generic node type 
+icon: insert_drive_file
+version: 1
+indexable: true
+index_types: [Fulltext]
+properties:
+  - name: title
+    type: String
+    title: Title
+    description: A brief description of the node
+    required: false
+    index: [Fulltext]
+allowed_children: 
+  - raisin:Node
+versionable: true
+publishable: true
+auditable: true

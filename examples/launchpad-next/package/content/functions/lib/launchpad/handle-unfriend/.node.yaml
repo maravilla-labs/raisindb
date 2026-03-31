@@ -1,0 +1,39 @@
+node_type: raisin:Function
+properties:
+  name: handle-unfriend
+  title: Handle Unfriend
+  description: |
+    Processes unfriend requests.
+    Removes bidirectional FRIENDS_WITH graph edges between users.
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleUnfriend
+  version: 1
+  input_schema:
+    type: object
+    description: Trigger context with event and workspace
+    properties:
+      flow_input:
+        type: object
+        properties:
+          event:
+            type: object
+            properties:
+              type:
+                type: string
+              node_id:
+                type: string
+              node_type:
+                type: string
+              node_path:
+                type: string
+          workspace:
+            type: string
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      error:
+        type: string

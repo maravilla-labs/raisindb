@@ -1,0 +1,75 @@
+[package]
+name = "raisin-ai"
+version = "0.1.0"
+edition = "2021"
+description = "AI/LLM provider integration for RaisinDB"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["tiktoken-rs"]
+tiktoken-rs = ["dep:tiktoken-rs", "text-splitter/tiktoken-rs"]
+huggingface = ["dep:hf-hub", "dep:dirs"]
+pdf = ["dep:pdf-extract"]
+# PDF to markdown using pdf_oxide (pure Rust, includes OCR)
+pdf-markdown = ["dep:pdf_oxide"]
+# OCR for scanned PDFs/images using Tesseract
+ocr = ["dep:tesseract", "dep:tempfile", "dep:raisin-deps"]
+# Candle for local AI inference (CLIP, BLIP)
+candle = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:image",
+    "huggingface",
+]
+# Integration tests that require model downloads (~800MB)
+integration-tests = ["candle", "pdf"]
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "fs"] }
+futures = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+ring = "0.17"
+base64 = "0.22"
+regex = "1"
+once_cell = "1"
+raisin-error = { path = "../raisin-error" }
+jsonschema = "0.37"
+text-splitter = "0.29.3"
+tiktoken-rs = { version = "0.9", optional = true }
+# HuggingFace model management
+hf-hub = { version = "0.4", optional = true }
+dirs = { version = "5", optional = true }
+
+# PDF processing
+pdf-extract = { version = "0.10", optional = true }
+pdf_oxide = { version = "0.2", optional = true }
+image = { version = "0.25", optional = true }
+raisin-binary = { path = "../raisin-binary" }
+
+# Candle for local AI inference (CLIP, BLIP)
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+tokenizers = { version = "0.21", optional = true }
+
+# OCR via Tesseract
+tesseract = { version = "0.15", optional = true }
+tempfile = { version = "3", optional = true }
+raisin-deps = { path = "../raisin-deps", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
+image = "0.25"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

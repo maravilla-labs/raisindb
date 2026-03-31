@@ -1,0 +1,19 @@
+title: "Uber Launchpad"
+description: "Erfahren Sie mehr uber Launchpad und unsere Mission"
+content:
+  - uuid: about-hero-1
+    headline: "Uber uns"
+    subheadline: Die Zukunft der Anwendungsentwicklung gestalten
+
+  - uuid: about-text-1
+    heading: Unsere Mission
+    content: |
+      Wir glauben, dass jeder die Kraft haben sollte, seine Ideen zum Leben zu erwecken.
+      Launchpad beseitigt die Komplexitat der modernen Anwendungsentwicklung,
+      damit Sie sich auf das Wesentliche konzentrieren konnen: Ihre Vision.
+
+  - uuid: about-text-2
+    heading: Unsere Geschichte
+    content: |
+      Launchpad wurde in Basel, Schweiz, aus einer einfachen Idee heraus geboren:
+      Was ware, wenn das Erstellen von Apps so einfach ware wie deren Nutzung?

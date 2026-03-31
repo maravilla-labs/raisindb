@@ -1,0 +1,35 @@
+name: raisin:SecurityConfig
+description: Security configuration for access control policies
+icon: settings
+version: 1
+indexable: true
+index_types: [Property]
+properties:
+  - name: workspace
+    type: String
+    required: true
+    unique: true
+    index: [Property]
+    description: Workspace pattern this config applies to (* for global default)
+  - name: default_policy
+    type: String
+    required: true
+    default: "deny"
+    description: Default access policy when no permission matches (deny or allow)
+  - name: anonymous_enabled
+    type: Boolean
+    required: false
+    default: false
+    description: Whether anonymous (unauthenticated) access is allowed
+  - name: anonymous_role
+    type: String
+    required: false
+    description: Role ID to use for anonymous users
+  - name: interfaces
+    type: Object
+    required: false
+    description: Per-interface configuration overrides (rest, pgwire, websocket)
+allowed_children: []
+versionable: true
+publishable: true
+auditable: true

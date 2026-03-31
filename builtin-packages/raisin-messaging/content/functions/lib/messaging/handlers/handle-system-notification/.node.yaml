@@ -1,0 +1,35 @@
+node_type: raisin:Function
+properties:
+  title: Handle System Notification
+  description: >
+    Handles system notification messages by creating Notification nodes.
+    This handler is triggered when a message with type "system_notification" is sent.
+    It creates notification entries in the recipient's notifications area.
+  language: Starlark
+  entry_file: index.py:handle_system_notification
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 10000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - node
+    properties:
+      node:
+        type: object
+        description: The system notification message node
+      event:
+        type: object
+        description: The trigger event metadata
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      notification_path:
+        type: string
+        description: Path to the notification created
+      error:
+        type: string

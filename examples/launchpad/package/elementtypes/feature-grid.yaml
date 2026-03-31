@@ -1,0 +1,32 @@
+name: launchpad:FeatureGrid
+title: Feature Grid
+description: Grid of feature cards with icons and descriptions
+icon: grid-3x3
+color: "#f59e0b"
+version: 1
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Section Heading
+    required: false
+
+  - $type: CompositeField
+    name: features
+    title: Features
+    repeatable: true
+    fields:
+      - $type: TextField
+        name: icon
+        title: Icon Name
+        required: false
+
+      - $type: TextField
+        name: title
+        title: Feature Title
+        required: true
+
+      - $type: TextField
+        name: description
+        title: Feature Description
+        required: true

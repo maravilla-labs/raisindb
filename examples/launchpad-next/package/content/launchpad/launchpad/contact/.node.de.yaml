@@ -1,0 +1,15 @@
+title: Kontakt
+description: Nehmen Sie Kontakt mit dem Launchpad-Team auf
+content:
+  - uuid: contact-hero-1
+    headline: Kontakt aufnehmen
+    subheadline: "Wir freuen uns, von Ihnen zu horen"
+
+  - uuid: contact-text-1
+    heading: Kontaktinformationen
+    content: |
+      **E-Mail:** hello@launchpad.dev
+
+      **Standort:** Basel, Schweiz
+
+      Wir antworten in der Regel innerhalb von 24 Stunden.

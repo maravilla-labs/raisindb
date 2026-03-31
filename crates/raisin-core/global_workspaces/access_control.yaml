@@ -1,0 +1,181 @@
+name: raisin:access_control
+description: Access control workspace for managing users, roles, groups, and permissions
+allowed_node_types:
+  - raisin:User
+  - raisin:Role
+  - raisin:Group
+  - raisin:Profile
+  - raisin:ProfileData
+  - raisin:MessageFolder
+  - raisin:Message
+  - raisin:AclFolder
+  - raisin:Folder
+  - raisin:SecurityConfig
+  - raisin:StewardshipConfig
+  - raisin:RelationType
+  - raisin:EntityCircle
+  - raisin:StewardshipOverride
+  - raisin:GraphAlgorithmConfig
+allowed_root_node_types:
+  - raisin:User
+  - raisin:Role
+  - raisin:Group
+  - raisin:AclFolder
+  - raisin:SecurityConfig
+  - raisin:StewardshipConfig
+  - raisin:RelationType
+  - raisin:EntityCircle
+  - raisin:StewardshipOverride
+  - raisin:GraphAlgorithmConfig
+depends_on: []
+initial_structure:
+  children:
+    # Security configuration
+    - node_type: raisin:AclFolder
+      name: config
+      properties:
+        icon: "settings"
+        color: "#6366f1"
+      children:
+        - node_type: raisin:SecurityConfig
+          name: default
+          properties:
+            workspace: "*"
+            default_policy: "deny"
+            anonymous_enabled: false
+    # Users folder structure
+    - node_type: raisin:AclFolder
+      name: users
+      children:
+        - node_type: raisin:AclFolder
+          name: system
+          properties:
+            color: "red"
+            icon: "shield"
+          children:
+            # Physical anonymous user - used for unauthenticated requests
+            # Permissions come from the "anonymous" role assignment
+            - node_type: raisin:User
+              name: anonymous
+              properties:
+                user_id: "anonymous"
+                email: null
+                display_name: "Anonymous User"
+                roles:
+                  - "anonymous"
+                groups: []
+        - node_type: raisin:AclFolder
+          name: internal
+          properties:
+            color: "blue"
+            icon: "lock"
+    # Roles with built-in system roles
+    - node_type: raisin:AclFolder
+      name: roles
+      children:
+        - node_type: raisin:Role
+          name: system_admin
+          properties:
+            role_id: "system_admin"
+            name: "System Administrator"
+            description: "Built-in superuser role with full access to all resources"
+            permissions:
+              - path: "**"
+                operations: ["create", "read", "update", "delete", "translate", "relate", "unrelate"]
+        - node_type: raisin:Role
+          name: anonymous
+          properties:
+            role_id: "anonymous"
+            name: "Anonymous Access"
+            description: "Role for unauthenticated users with read-only access to public workspaces"
+            permissions:
+              - path: "**"
+                operations: ["read"]
+                workspace: "launchpad"
+        - node_type: raisin:Role
+          name: authenticated_user
+          properties:
+            role_id: "authenticated_user"
+            name: "Authenticated User"
+            description: "Default role for all authenticated users with social profile access"
+            permissions:
+              # Self - full access to own user node
+              - path: "users/**"
+                operations: ["read", "update"]
+                node_types: ["raisin:User"]
+                workspace: "raisin:access_control"
+                condition: "node.id == auth.local_user_id"
+
+              # Self - full access to own profile
+              - path: "users/**/profile"
+                operations: ["read", "update"]
+                workspace: "raisin:access_control"
+                condition: "node.path.startsWith(auth.home)"
+
+              # Friends - read profile
+              - path: "users/**/profile"
+                operations: ["read"]
+                workspace: "raisin:access_control"
+                condition: "node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH'"
+
+              # Friends-of-friends - limited profile fields
+              - path: "users/**/profile"
+                operations: ["read"]
+                workspace: "raisin:access_control"
+                fields: ["display_name", "avatar", "bio"]
+                condition: "node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH' DEPTH 2"
+
+              # Public - display_name only for all users
+              - path: "users/**"
+                operations: ["read"]
+                node_types: ["raisin:User"]
+                workspace: "raisin:access_control"
+                fields: ["display_name"]
+
+              # Own inbox - read, update, delete
+              - path: "users/**/inbox/**"
+                operations: ["read", "update", "delete"]
+                workspace: "raisin:access_control"
+                condition: "node.path.startsWith(auth.home)"
+
+              # Own outbox - full CRUD
+              - path: "users/**/outbox/**"
+                operations: ["create", "read", "update", "delete"]
+                workspace: "raisin:access_control"
+                condition: "node.path.startsWith(auth.home)"
+
+              # Own sent - read only
+              - path: "users/**/sent/**"
+                operations: ["read"]
+                workspace: "raisin:access_control"
+                condition: "node.path.startsWith(auth.home)"
+
+              # Own notifications - read, update, delete
+              - path: "users/**/notifications/**"
+                operations: ["read", "update", "delete"]
+                workspace: "raisin:access_control"
+                condition: "node.path.startsWith(auth.home)"
+    # Groups folder
+    - node_type: raisin:AclFolder
+      name: groups
+    # Relation types folder
+    - node_type: raisin:AclFolder
+      name: relation-types
+      properties:
+        icon: "link"
+        color: "#8b5cf6"
+    # Entity circles folder
+    - node_type: raisin:AclFolder
+      name: circles
+      properties:
+        icon: "users"
+        color: "#06b6d4"
+    # Graph algorithm precomputation configs
+    - node_type: raisin:AclFolder
+      name: graph-config
+      properties:
+        icon: "share-2"
+        color: "#10b981"
+config:
+  default_branch: main
+  node_type_pins: {}

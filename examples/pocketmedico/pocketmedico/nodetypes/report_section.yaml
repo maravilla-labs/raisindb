@@ -1,0 +1,58 @@
+name: medico:ReportSection
+title: Report Section
+description: Individual section/block within a medical report
+icon: text
+color: "#F59E0B"
+version: 1
+indexable: true
+index_types: [Fulltext]
+
+properties:
+  - name: section_type
+    title: Section Type
+    type: String
+    required: true
+    index: [Property]
+    ui:
+      widget: select
+      options:
+        # Swiss Format
+        - { label: Kopfdaten, value: kopfdaten }
+        - { label: Anamnese, value: anamnese }
+        - { label: Befund, value: befund }
+        - { label: Diagnose, value: diagnose }
+        - { label: Therapie, value: therapie }
+        # SOAP Format
+        - { label: Subjective, value: subjective }
+        - { label: Objective, value: objective }
+        - { label: Assessment, value: assessment }
+        - { label: Plan, value: plan }
+        # Common
+        - { label: Header, value: header }
+        - { label: Notes, value: notes }
+        - { label: Signature, value: signature }
+  - name: label
+    title: Display Label
+    type: String
+    required: true
+    index: [Fulltext]
+    description: Human-readable label for this section
+  - name: content
+    title: Content
+    type: String
+    required: false
+    index: [Fulltext]
+    description: The actual text content of this section
+    ui:
+      widget: textarea
+      rows: 6
+  - name: display_order
+    title: Display Order
+    type: Number
+    default: 0
+    description: Order in which this section should be displayed
+
+allowed_children: []
+versionable: true
+publishable: false
+auditable: false

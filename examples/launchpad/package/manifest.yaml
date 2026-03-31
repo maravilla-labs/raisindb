@@ -1,0 +1,62 @@
+name: launchpad
+version: 1.0.25
+title: Launchpad
+description: LaunchKit customer portal - minimal demo for testing RaisinDB + raisin-client-js
+author: SOLUTAS GmbH
+license: BSL-1.1
+icon: rocket
+color: "#6366f1"
+keywords:
+  - launchkit
+  - portal
+  - demo
+category: examples
+
+provides:
+  nodetypes:
+    - launchpad:Page
+    - launchpad:Presence
+  archetypes:
+    - launchpad:LandingPage
+    - launchpad:KanbanBoard
+    - launchpad:FileBrowser
+  elementtypes:
+    - launchpad:Hero
+    - launchpad:TextBlock
+    - launchpad:FeatureGrid
+    - launchpad:ListKanbanBoards
+    - launchpad:KanbanCard
+  workspaces:
+    - launchpad
+  functions:
+    - /lib/launchpad/handle-read-receipt
+    - /lib/launchpad/kanban-boards
+    - /lib/launchpad/kanban-cards
+    - /lib/launchpad/kanban-move-card
+    - /lib/launchpad/process-asset
+  triggers:
+    - /triggers/on-read-receipt
+    - /triggers/on-batch-read-receipt
+    - /triggers/on-asset-ready
+
+workspace_patches:
+  launchpad:
+    allowed_node_types:
+      add:
+        - launchpad:Page
+        - raisin:Folder
+        - launchpad:Presence
+        - raisin:Asset
+  "raisin:access_control":
+    allowed_node_types:
+      add:
+        - raisin:Folder
+        - raisin:Message
+        - raisin:Conversation
+        - raisin:AIConversation
+        - raisin:AIMessage
+        - raisin:AIThought
+        - raisin:AIToolCall
+        - raisin:AIToolResult
+        - raisin:AIToolSingleCallResult
+        - raisin:AIToolResultAggregator

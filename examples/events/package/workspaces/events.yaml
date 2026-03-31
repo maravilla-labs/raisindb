@@ -1,0 +1,33 @@
+name: events
+title: Events
+description: Events management workspace
+icon: calendar
+color: "#6366f1"
+
+allowed_node_types:
+  - raisin:Folder
+  - events:Event
+  - events:Venue
+  - events:Speaker
+  - events:Page
+
+allowed_root_node_types:
+  - raisin:Folder
+
+root_structure:
+  - name: events
+    node_type: raisin:Folder
+    title: Events
+    description: All events
+  - name: venues
+    node_type: raisin:Folder
+    title: Venues
+    description: Event venues
+  - name: speakers
+    node_type: raisin:Folder
+    title: Speakers
+    description: Event speakers
+  - name: pages
+    node_type: raisin:Folder
+    title: Pages
+    description: Content pages

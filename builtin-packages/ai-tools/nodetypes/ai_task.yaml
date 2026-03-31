@@ -1,0 +1,56 @@
+name: raisin:AITask
+title: AI Task
+description: Task created by AI during conversation
+icon: check-square
+color: "#34D399"
+
+properties:
+  - name: title
+    title: Title
+    type: string
+    required: true
+    description: Task title
+
+  - name: description
+    title: Description
+    type: string
+    description: Detailed task description
+    ui:
+      widget: textarea
+      rows: 4
+
+  - name: status
+    title: Status
+    type: string
+    default: pending
+    description: Current task status
+    ui:
+      widget: select
+      options:
+        - label: Pending
+          value: pending
+        - label: In Progress
+          value: in_progress
+        - label: Completed
+          value: completed
+        - label: Cancelled
+          value: cancelled
+
+  - name: priority
+    title: Priority
+    type: string
+    default: normal
+    description: Task priority level
+    ui:
+      widget: select
+      options:
+        - label: Low
+          value: low
+        - label: Normal
+          value: normal
+        - label: High
+          value: high
+        - label: Urgent
+          value: urgent
+
+allowed_children: []

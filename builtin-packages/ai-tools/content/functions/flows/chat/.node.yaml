@@ -1,0 +1,23 @@
+node_type: raisin:Flow
+properties:
+  title: Chat
+  name: chat
+  description: Interactive multi-turn chat flow for ChatClient conversations
+  enabled: true
+  workflow_data:
+    version: 1
+    error_strategy: fail_fast
+    nodes:
+      - id: chat-session
+        node_type: "raisin:FlowStep"
+        properties:
+          step_type: chat
+          action: Chat Session
+          chat_config:
+            agent_ref: null
+            max_turns: 50
+            session_timeout_ms: 600000
+            termination:
+              allow_user_end: true
+              allow_ai_end: true
+              end_keywords: []

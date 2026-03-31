@@ -1,0 +1,34 @@
+[package]
+name = "raisin-packages"
+version = "0.1.0"
+edition = "2021"
+description = "Package management for RaisinDB - install, browse, and manage .rap packages"
+license = "BSL-1.1"
+
+[dependencies]
+# Core dependencies
+raisin-models = { path = "../raisin-models" }
+raisin-error = { path = "../raisin-error" }
+raisin-storage = { path = "../raisin-storage" }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+# ZIP handling
+zip = "2.2"
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }

@@ -1,0 +1,25 @@
+[package]
+name = "raisin-indexer"
+version = "0.1.0"
+edition = "2021"
+description = "Pluggable indexing framework for RaisinDB with full-text search and property indexing"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+raisin-error = { version = "0.1.0", path = "../raisin-error" }
+raisin-events = { version = "0.1.0", path = "../raisin-events" }
+raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
+raisin-models = { version = "0.1.0", path = "../raisin-models" }
+raisin-storage = { version = "0.1.0", path = "../raisin-storage" }
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "fs", "sync", "time"] }
+chrono.workspace = true
+tantivy = "0.25.0"
+uuid = { version = "1.11.0", features = ["v4", "serde"] }
+tracing = "0.1"
+moka = { version = "0.12", features = ["sync"] }

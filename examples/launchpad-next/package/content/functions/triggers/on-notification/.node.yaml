@@ -1,0 +1,19 @@
+node_type: raisin:Trigger
+properties:
+  title: On Notification Created
+  description: |
+    Triggered when a new launchpad:Notification is created.
+    Simulates sending a push notification.
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    node_types:
+      - launchpad:Notification
+  priority: 10
+  max_retries: 3
+  function_path: /lib/launchpad/handle-notification

@@ -1,0 +1,23 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Task Assignment Messages
+  name: messaging-task-assignment
+  description: Handles task assignment messages by creating InboxTask and notifications
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "/users/**/outbox/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: "task_assignment"
+      status: "pending"
+  priority: 10
+  max_retries: 3
+  function_path: /lib/messaging/handlers/handle-task-assignment

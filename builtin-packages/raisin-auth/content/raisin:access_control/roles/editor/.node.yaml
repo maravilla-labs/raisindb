@@ -1,0 +1,13 @@
+node_type: raisin:Role
+properties:
+  role_id: "editor"
+  name: "Editor"
+  description: "Can create, edit, and delete any content"
+  permissions:
+    - path: "**"
+      operations:
+        - create
+        - read
+        - update
+        - delete
+        - translate

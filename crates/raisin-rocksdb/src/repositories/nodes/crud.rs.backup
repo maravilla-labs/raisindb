@@ -1,0 +1,2933 @@
+//! Core CRUD operations for nodes
+
+use super::helpers::{hash_property_value, is_tombstone, TOMBSTONE};
+use super::NodeRepositoryImpl;
+use crate::{cf, cf_handle, keys};
+use raisin_error::Result;
+use raisin_hlc::HLC;
+use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::nodes::Node;
+use raisin_storage::{BranchRepository, NodeRepository, RevisionRepository};
+use rocksdb::WriteBatch;
+use std::collections::{HashMap, HashSet};
+
+impl NodeRepositoryImpl {
+    /// Add ORDERED_CHILDREN index entry to WriteBatch
+    ///
+    /// This helper is shared between direct mode (put_impl) and transaction mode (put_node).
+    /// It looks up the parent node to get its ID, calculates fractional index ordering,
+    /// and adds the entry to the provided WriteBatch.
+    ///
+    /// # Arguments
+    /// * `batch` - WriteBatch to add the operation to (caller controls when it's written)
+    /// * `node` - The node to index
+    /// * `tenant_id`, `repo_id`, `branch`, `workspace` - Context for the operation
+    /// * `revision` - The revision number to use for the versioned key
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Err if parent lookup or ordering calculation fails
+    pub(crate) async fn add_ordered_children_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        node: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+    ) -> Result<()> {
+        let order_start = std::time::Instant::now();
+
+        // Get column family handle
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        // ========== SUBSTEP 1: Parent lookup ==========
+        let substep_start = std::time::Instant::now();
+
+        // Get parent ID - node.parent contains parent NAME, but we need parent ID for the index
+        let parent_id_for_index = if let Some(parent_path) = node.parent_path() {
+            if parent_path == "/" {
+                // Special case: root-level nodes use "/" as parent_id
+                Some("/".to_string())
+            } else {
+                // Get parent node to find its ID (always use HEAD for write operations)
+                self.get_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
+                    .await?
+                    .map(|p| p.id)
+            }
+        } else {
+            None
+        };
+
+        let parent_lookup_time = substep_start.elapsed().as_micros();
+
+        if let Some(ref parent_id) = parent_id_for_index {
+            // ========== SUBSTEP 2: Existence check ==========
+            let substep_start = std::time::Instant::now();
+
+            // OPTIMIZATION: Check if node exists at HEAD before scanning for existing label
+            // This avoids O(n) scan for brand new nodes
+            let is_update = self
+                .get_latest_revision_for_node(tenant_id, repo_id, branch, workspace, &node.id)?
+                .is_some();
+
+            let existence_check_time = substep_start.elapsed().as_micros();
+
+            // ========== SUBSTEP 3: Order label calculation ==========
+            let substep_start = std::time::Instant::now();
+            let mut get_existing_time = 0u128;
+            let mut get_last_time = 0u128;
+            let mut inc_time = 0u128;
+
+            let (order_label, is_new_child) = if is_update {
+                // Node exists - check for existing order label (may scan, but only for updates)
+                let t = std::time::Instant::now();
+                let existing_label = self.get_order_label_for_child(
+                    tenant_id, repo_id, branch, workspace, parent_id, &node.id,
+                )?;
+                get_existing_time = t.elapsed().as_micros();
+
+                if let Some(existing) = existing_label {
+                    // Preserve existing order label
+                    (existing, false)
+                } else {
+                    // Update without previous order (rare edge case)
+                    let t = std::time::Instant::now();
+                    let last_label = self
+                        .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+                    get_last_time = t.elapsed().as_micros();
+
+                    let t = std::time::Instant::now();
+                    let new_label = if let Some(ref last) = last_label {
+                        crate::fractional_index::inc(last)?
+                    } else {
+                        crate::fractional_index::first()
+                    };
+                    inc_time = t.elapsed().as_micros();
+
+                    (new_label, true)
+                }
+            } else {
+                // FAST PATH: New node - skip existence check, just calculate new label
+                let t = std::time::Instant::now();
+                let last_label =
+                    self.get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+                get_last_time = t.elapsed().as_micros();
+
+                let t = std::time::Instant::now();
+                let new_label = if let Some(ref last) = last_label {
+                    crate::fractional_index::inc(last)?
+                } else {
+                    crate::fractional_index::first()
+                };
+                inc_time = t.elapsed().as_micros();
+
+                (new_label, true)
+            };
+
+            let label_calc_time = substep_start.elapsed().as_micros();
+
+            // ========== SUBSTEP 4: Batch preparation ==========
+            let substep_start = std::time::Instant::now();
+
+            // Write to ordered children index
+            // Store child name as value for efficient name-based lookups
+            let ordered_key = keys::ordered_child_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent_id,
+                &order_label,
+                &revision,
+                &node.id,
+            );
+            batch.put_cf(cf_ordered, ordered_key, node.name.as_bytes());
+
+            // OPTIMIZATION: Update metadata cache for new children
+            // This makes get_last_order_label() O(1) instead of O(n)
+            if is_new_child {
+                let metadata_key =
+                    keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
+                batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
+            }
+
+            let batch_prep_time = substep_start.elapsed().as_micros();
+
+            let total_order_time = order_start.elapsed().as_micros();
+
+            // Log detailed order label timing breakdown
+            tracing::debug!(
+                "ORDER_TIMING node={} total={}μs [parent={}μs, exist={}μs, calc={}μs (get_existing={}μs, get_last={}μs, inc={}μs), batch={}μs]",
+                node.name,
+                total_order_time,
+                parent_lookup_time,
+                existence_check_time,
+                label_calc_time,
+                get_existing_time,
+                get_last_time,
+                inc_time,
+                batch_prep_time
+            );
+
+            // Also output to stderr for test visibility
+            if std::env::var("RAISIN_PROFILE").is_ok() {
+                eprintln!(
+                    "ORDER_TIMING node={} total={}μs [parent={}μs, exist={}μs, calc={}μs (get_existing={}μs, get_last={}μs, inc={}μs), batch={}μs]",
+                    node.name,
+                    total_order_time,
+                    parent_lookup_time,
+                    existence_check_time,
+                    label_calc_time,
+                    get_existing_time,
+                    get_last_time,
+                    inc_time,
+                    batch_prep_time
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add a node to WriteBatch with all necessary index entries
+    ///
+    /// This is a helper for operations that need to manually construct WriteBatch
+    /// entries (like copy_tree and delete_tree with single revision).
+    ///
+    /// # What it does
+    /// - Adds node to NODES CF
+    /// - Adds path index entry
+    /// - Adds property indexes (including pseudo-properties)
+    /// - Adds reference indexes (forward + reverse)
+    /// - Adds relation indexes (forward + reverse)
+    /// - Adds ORDERED_CHILDREN index entry (if order_label provided)
+    ///
+    /// # Parameters
+    /// * `batch` - WriteBatch to add operations to
+    /// * `node` - The node to add
+    /// * `tenant_id`, `repo_id`, `branch`, `workspace` - Context
+    /// * `revision` - The revision to use (IMPORTANT: caller controls this for atomicity)
+    /// * `order_label` - Optional fractional index label for ORDERED_CHILDREN (None = skip ordering)
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Err if serialization or index construction fails
+    pub(crate) fn add_node_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        node: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+        order_label: Option<&str>,
+    ) -> Result<()> {
+        self.add_node_to_batch_with_parent_id(
+            batch,
+            node,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            revision,
+            order_label,
+            None,
+        )
+    }
+
+    pub(crate) fn add_node_to_batch_with_parent_id(
+        &self,
+        batch: &mut WriteBatch,
+        node: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+        order_label: Option<&str>,
+        parent_id_override: Option<&str>,
+    ) -> Result<()> {
+        // Get column family handles
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        // Serialize node once
+        let node_value = rmp_serde::to_vec(&node)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        // 1. Store node blob with versioned key
+        let node_key =
+            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, &revision);
+        batch.put_cf(cf_nodes, node_key, node_value);
+
+        // 2. Index by path with versioned key
+        let path_key = keys::path_index_key_versioned(
+            tenant_id, repo_id, branch, workspace, &node.path, &revision,
+        );
+        batch.put_cf(cf_path, path_key, node.id.as_bytes());
+
+        // 3. Add property indexes
+        let is_published = node.published_at.is_some();
+        for (prop_name, prop_value) in &node.properties {
+            let value_hash = hash_property_value(prop_value);
+            let prop_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                &value_hash,
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, prop_key, node.id.as_bytes());
+        }
+
+        // 4. Index node_type as pseudo-property
+        let node_type_key = keys::property_index_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            "__node_type",
+            &node.node_type,
+            revision,
+            &node.id,
+            is_published,
+        );
+        batch.put_cf(cf_property, node_type_key, node.id.as_bytes());
+
+        // 5. Index common node fields as pseudo-properties
+        if !node.name.is_empty() {
+            let name_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__name",
+                &node.name,
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, name_key, node.id.as_bytes());
+        }
+
+        if let Some(ref archetype) = node.archetype {
+            if !archetype.is_empty() {
+                let archetype_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__archetype",
+                    archetype,
+                    revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, archetype_key, node.id.as_bytes());
+            }
+        }
+
+        if let Some(ref created_by) = node.created_by {
+            if !created_by.is_empty() {
+                let created_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__created_by",
+                    created_by,
+                    revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, created_by_key, node.id.as_bytes());
+            }
+        }
+
+        if let Some(ref updated_by) = node.updated_by {
+            if !updated_by.is_empty() {
+                let updated_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__updated_by",
+                    updated_by,
+                    revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, updated_by_key, node.id.as_bytes());
+            }
+        }
+
+        if let Some(created_at) = node.created_at {
+            let created_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__created_at",
+                &created_at.to_rfc3339(),
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, created_at_key, node.id.as_bytes());
+        }
+
+        if let Some(updated_at) = node.updated_at {
+            let updated_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__updated_at",
+                &updated_at.to_rfc3339(),
+                revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, updated_at_key, node.id.as_bytes());
+        }
+
+        // 6. Add reference indexes
+        for (prop_path, prop_value) in &node.properties {
+            if let PropertyValue::Reference(ref_data) = prop_value {
+                // Forward reference
+                let fwd_key = keys::reference_forward_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
+
+                // Reverse reference
+                let rev_key = keys::reference_reverse_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &ref_data.workspace,
+                    &ref_data.path,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, rev_key, node.id.as_bytes());
+            }
+        }
+
+        // 7. Add relation indexes
+        for relation in &node.relations {
+            let relation_bytes = rmp_serde::to_vec(&relation).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to serialize relation: {}", e))
+            })?;
+
+            // Forward relation
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                &relation.relation_type,
+                &revision,
+                &relation.target,
+            );
+            batch.put_cf(cf_relation, fwd_key, &relation_bytes);
+
+            // Reverse relation
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &relation.workspace,
+                &relation.target,
+                &relation.relation_type,
+                &revision,
+                &node.id,
+            );
+            batch.put_cf(cf_relation, rev_key, &relation_bytes);
+        }
+
+        // 8. Add ORDERED_CHILDREN index entry (if order_label provided)
+        if let Some(label) = order_label {
+            // Use parent_id_override if provided (for copy operations where node.parent is a NAME not ID)
+            // Otherwise use node.parent (which should be an ID for regular operations)
+            let parent_id = parent_id_override.or(node.parent.as_deref());
+            if let Some(pid) = parent_id {
+                let ordered_key = keys::ordered_child_key_versioned(
+                    tenant_id, repo_id, branch, workspace, pid, label, &revision, &node.id,
+                );
+                batch.put_cf(cf_ordered, ordered_key, node.name.as_bytes());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Populate has_children field for a node
+    ///
+    /// This helper uses the MVCC-aware has_children_impl to correctly determine
+    /// whether a node has children at a specific revision (or HEAD if None).
+    ///
+    /// Returns a boxed future to break recursive async function cycles.
+    fn populate_node_has_children<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        repo_id: &'a str,
+        branch: &'a str,
+        workspace: &'a str,
+        node: &'a mut Node,
+        max_revision: Option<&'a HLC>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            // Use existing has_children_impl which already supports max_revision filtering
+            let has_children = self
+                .has_children_impl(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    max_revision,
+                )
+                .await?;
+
+            node.has_children = Some(has_children);
+            Ok(())
+        })
+    }
+
+    /// Get a node at HEAD revision
+    pub(super) async fn get_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        id: &str,
+        populate_has_children: bool,
+    ) -> Result<Option<Node>> {
+        // Find the latest revision for this node
+        let revision =
+            match self.get_latest_revision_for_node(tenant_id, repo_id, branch, workspace, id)? {
+                Some(rev) => rev,
+                None => {
+                    tracing::info!("REPO get_impl: node_id={} - no revision found", id);
+                    return Ok(None); // Node doesn't exist at any revision
+                }
+            };
+
+        tracing::info!("REPO get_impl: node_id={}, found_revision={}", id, revision);
+
+        // Construct versioned key
+        let key = keys::node_key_versioned(tenant_id, repo_id, branch, workspace, id, &revision);
+        let cf = cf_handle(&self.db, cf::NODES)?;
+
+        match self.db.get_cf(cf, key) {
+            Ok(Some(bytes)) => {
+                // Check if this is a tombstone
+                if is_tombstone(&bytes) {
+                    tracing::info!(
+                        "REPO get_impl: node_id={} at revision={} is tombstone",
+                        id,
+                        revision
+                    );
+                    return Ok(None);
+                }
+
+                let mut node: Node = rmp_serde::from_slice(&bytes).map_err(|e| {
+                    raisin_error::Error::storage(format!(
+                        "Deserialization error: {}",
+                        e.to_string()
+                    ))
+                })?;
+                tracing::info!(
+                    "REPO get_impl: node_id={} successfully deserialized, path={}",
+                    id,
+                    node.path
+                );
+
+                // Populate has_children using the same revision context (latest/HEAD)
+                if populate_has_children {
+                    self.populate_node_has_children(
+                        tenant_id, repo_id, branch, workspace, &mut node, None,
+                    )
+                    .await?;
+                }
+
+                Ok(Some(node))
+            }
+            Ok(None) => {
+                tracing::info!(
+                    "REPO get_impl: node_id={} at revision={} - key not found in db",
+                    id,
+                    revision
+                );
+                Ok(None)
+            }
+            Err(e) => Err(raisin_error::Error::storage(e.to_string())),
+        }
+    }
+
+    /// Get a node at a specific revision (time-travel query)
+    pub(super) async fn get_at_revision_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        id: &str,
+        target_revision: &HLC,
+        populate_has_children: bool,
+    ) -> Result<Option<Node>> {
+        // Find the latest revision at or before target_revision
+        let revision = match self.get_revision_at_or_before(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            id,
+            target_revision,
+        )? {
+            Some(rev) => rev,
+            None => {
+                tracing::debug!(
+                    "REPO get_at_revision_impl: node_id={} - no revision found at or before {}",
+                    id,
+                    target_revision
+                );
+                return Ok(None);
+            }
+        };
+
+        tracing::debug!(
+            "REPO get_at_revision_impl: node_id={}, found_revision={} (target={})",
+            id,
+            revision,
+            target_revision
+        );
+
+        // Construct versioned key
+        let key = keys::node_key_versioned(tenant_id, repo_id, branch, workspace, id, &revision);
+        let cf = cf_handle(&self.db, cf::NODES)?;
+
+        match self.db.get_cf(cf, key) {
+            Ok(Some(bytes)) => {
+                // Check if this is a tombstone
+                if is_tombstone(&bytes) {
+                    tracing::debug!(
+                        "REPO get_at_revision_impl: node_id={} at revision={} is tombstone",
+                        id,
+                        revision
+                    );
+                    return Ok(None);
+                }
+
+                let mut node: Node = rmp_serde::from_slice(&bytes).map_err(|e| {
+                    raisin_error::Error::storage(format!(
+                        "Deserialization error: {}",
+                        e.to_string()
+                    ))
+                })?;
+                tracing::debug!(
+                    "REPO get_at_revision_impl: node_id={} successfully deserialized, path={}",
+                    id,
+                    node.path
+                );
+
+                // Populate has_children at the target revision (historical snapshot)
+                if populate_has_children {
+                    self.populate_node_has_children(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        workspace,
+                        &mut node,
+                        Some(target_revision),
+                    )
+                    .await?;
+                }
+
+                Ok(Some(node))
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "REPO get_at_revision_impl: node_id={} at revision={} - key not found in db",
+                    id,
+                    revision
+                );
+                Ok(None)
+            }
+            Err(e) => Err(raisin_error::Error::storage(e.to_string())),
+        }
+    }
+
+    /// Create or update a node
+    pub(super) async fn put_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        mut node: Node,
+    ) -> Result<()> {
+        let put_start = std::time::Instant::now();
+
+        // CRITICAL: Normalize parent field from path before saving
+        // Parent should NEVER be null - it's either "/" for root-level nodes or the parent's name
+        node.parent = Node::extract_parent_name_from_path(&node.path);
+
+        // CRITICAL: has_children is a computed field and should NEVER be stored
+        // It's only populated at the service layer for API responses
+        node.has_children = None;
+
+        // VALIDATION 1: Check workspace allowed_node_types
+        let is_root_node = node.parent_path().map(|p| p == "/").unwrap_or(false);
+        self.validate_workspace_allows_node_type(
+            tenant_id,
+            repo_id,
+            workspace,
+            &node.node_type,
+            is_root_node,
+        )
+        .await?;
+
+        // VALIDATION 2: Check NodeType.allowed_children if node has a parent
+        // This is opportunistic: only validate if parent exists, allowing flexible node creation order
+        if let Some(parent_path) = node.parent_path() {
+            if parent_path != "/" {
+                // Try to get parent node - if it exists, validate allowed_children
+                if let Some(parent) = self
+                    .get_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
+                    .await?
+                {
+                    // Validate that parent's NodeType allows this child's NodeType
+                    self.validate_parent_allows_child(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        &parent.node_type,
+                        &node.node_type,
+                    )
+                    .await?;
+                }
+                // If parent doesn't exist yet, skip validation - allows flexible creation order
+            }
+        }
+
+        // ========== STEP 1: Allocate revision ==========
+        let step_start = std::time::Instant::now();
+        let revision = self.revision_repo.allocate_revision();
+        let revision_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 2: Setup and serialization ==========
+        let step_start = std::time::Instant::now();
+
+        // Prepare WriteBatch for atomic multi-operation update
+        let mut batch = WriteBatch::default();
+
+        // Get column family handles
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let _cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        // Serialize node once
+        let node_value = rmp_serde::to_vec(&node).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        let serialization_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 3: Build index entries ==========
+        let step_start = std::time::Instant::now();
+
+        // Store node blob with versioned key
+        let node_key =
+            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, &revision);
+        batch.put_cf(cf_nodes, node_key, node_value);
+
+        // Index by path with versioned key
+        let path_key = keys::path_index_key_versioned(
+            tenant_id, repo_id, branch, workspace, &node.path, &revision,
+        );
+        batch.put_cf(cf_path, path_key, node.id.as_bytes());
+
+        // Add property indexes
+        let is_published = node.published_at.is_some();
+        for (prop_name, prop_value) in &node.properties {
+            let value_hash = hash_property_value(prop_value);
+            let prop_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                &value_hash,
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, prop_key, node.id.as_bytes());
+        }
+
+        // Index node_type as a pseudo-property for efficient list_by_type queries
+        let node_type_key = keys::property_index_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            "__node_type",
+            &node.node_type,
+            &revision,
+            &node.id,
+            is_published,
+        );
+        batch.put_cf(cf_property, node_type_key, node.id.as_bytes());
+
+        // Index common node fields as pseudo-properties for efficient queries
+        // Index: name
+        if !node.name.is_empty() {
+            let name_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__name",
+                &node.name,
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, name_key, node.id.as_bytes());
+        }
+
+        // Index: archetype
+        if let Some(ref archetype) = node.archetype {
+            if !archetype.is_empty() {
+                let archetype_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__archetype",
+                    archetype,
+                    &revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, archetype_key, node.id.as_bytes());
+            }
+        }
+
+        // Index: created_by
+        if let Some(ref created_by) = node.created_by {
+            if !created_by.is_empty() {
+                let created_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__created_by",
+                    created_by,
+                    &revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, created_by_key, node.id.as_bytes());
+            }
+        }
+
+        // Index: updated_by
+        if let Some(ref updated_by) = node.updated_by {
+            if !updated_by.is_empty() {
+                let updated_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__updated_by",
+                    updated_by,
+                    &revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, updated_by_key, node.id.as_bytes());
+            }
+        }
+
+        // Index: created_at (as RFC3339 string for range queries)
+        if let Some(created_at) = node.created_at {
+            let created_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__created_at",
+                &created_at.to_rfc3339(),
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, created_at_key, node.id.as_bytes());
+        }
+
+        // Index: updated_at (as RFC3339 string for range queries)
+        if let Some(updated_at) = node.updated_at {
+            let updated_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__updated_at",
+                &updated_at.to_rfc3339(),
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, updated_at_key, node.id.as_bytes());
+        }
+
+        // Add reference indexes
+        // Extract references from properties (looking for PropertyValue::Reference)
+        for (prop_path, prop_value) in &node.properties {
+            if let PropertyValue::Reference(ref_data) = prop_value {
+                // Forward reference index (from this node to target)
+                let fwd_key = keys::reference_forward_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
+
+                // Reverse reference index (from target to this node)
+                let rev_key = keys::reference_reverse_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &ref_data.workspace,
+                    &ref_data.path,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, rev_key, node.id.as_bytes());
+            }
+        }
+
+        // Add relation indexes (graph edges)
+        for relation in &node.relations {
+            // Serialize the relation to MessagePack
+            let relation_bytes = rmp_serde::to_vec(&relation).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to serialize relation: {}", e))
+            })?;
+
+            // Forward relation index: source → target (for outgoing queries)
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                &relation.relation_type,
+                &revision,
+                &relation.target,
+            );
+            batch.put_cf(cf_relation, fwd_key, &relation_bytes);
+
+            // Reverse relation index: target → source (for incoming queries)
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &relation.workspace,
+                &relation.target,
+                &relation.relation_type,
+                &revision,
+                &node.id,
+            );
+            batch.put_cf(cf_relation, rev_key, &relation_bytes);
+        }
+
+        let index_prep_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 4: Order label calculation (POTENTIAL BOTTLENECK) ==========
+        let step_start = std::time::Instant::now();
+
+        // Add ORDERED_CHILDREN index entry using shared helper (DRY)
+        self.add_ordered_children_to_batch(
+            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
+        )
+        .await?;
+
+        let order_label_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 5: RocksDB write batch (POTENTIAL BOTTLENECK) ==========
+        let step_start = std::time::Instant::now();
+
+        // Atomic commit - all operations succeed or fail together
+        self.db
+            .write(batch)
+            .map_err(|e| raisin_error::Error::storage(format!("Atomic write failed: {}", e)))?;
+
+        let rocksdb_write_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 6: Revision indexing ==========
+        let step_start = std::time::Instant::now();
+
+        // Index the node change for revision tracking
+        self.revision_repo
+            .index_node_change(tenant_id, repo_id, &revision, &node.id)
+            .await?;
+
+        // Update branch HEAD to the new revision
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, revision.clone())
+            .await?;
+
+        let revision_index_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 7: Capture operation for replication (non-transaction path) ==========
+        // This happens AFTER commit succeeds to ensure we only replicate committed changes
+        if self.operation_capture.is_enabled() {
+            // Determine if this is a create or update
+            // For HLC, we check if there was a previous revision
+            // If get_revision_at_or_before returns None (excluding current), it's a create
+            let is_create = self
+                .get_revision_at_or_before(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    &HLC::new(revision.timestamp_ms.saturating_sub(1), 0),
+                )?
+                .is_none();
+
+            if is_create {
+                // Capture as CreateNode operation with all fields
+                let op_type = raisin_replication::OpType::CreateNode {
+                    node_id: node.id.clone(),
+                    name: node.name.clone(),
+                    node_type: node.node_type.clone(),
+                    archetype: node.archetype.clone(),
+                    parent_id: node.parent.clone(),
+                    order_key: node.order_key.clone(),
+                    properties: node.properties.clone(),
+                    owner_id: node.owner_id.clone(),
+                    workspace: Some(workspace.to_string()),
+                };
+
+                let _ = self
+                    .operation_capture
+                    .capture_operation_with_revision(
+                        tenant_id.to_string(),
+                        repo_id.to_string(),
+                        branch.to_string(),
+                        op_type,
+                        "system".to_string(), // Direct writes are system operations
+                        None,
+                        true, // is_system = true
+                        Some(revision.clone()),
+                    )
+                    .await;
+            } else {
+                // Capture property changes as SetProperty operations
+                for (prop_name, prop_value) in &node.properties {
+                    let op_type = raisin_replication::OpType::SetProperty {
+                        node_id: node.id.clone(),
+                        property_name: prop_name.clone(),
+                        value: prop_value.clone(),
+                    };
+
+                    let _ = self
+                        .operation_capture
+                        .capture_operation_with_revision(
+                            tenant_id.to_string(),
+                            repo_id.to_string(),
+                            branch.to_string(),
+                            op_type,
+                            "system".to_string(),
+                            None,
+                            true,
+                            Some(revision.clone()),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        let total_time = put_start.elapsed().as_micros();
+
+        // Log detailed timing breakdown (enable with RUST_LOG=raisin_rocksdb=debug)
+        tracing::debug!(
+            "PUT_TIMING node={} total={}μs [rev={}μs, ser={}μs, idx={}μs, ord={}μs, write={}μs, rev_idx={}μs]",
+            node.name,
+            total_time,
+            revision_time,
+            serialization_time,
+            index_prep_time,
+            order_label_time,
+            rocksdb_write_time,
+            revision_index_time
+        );
+
+        // Also output to stderr for test visibility
+        if std::env::var("RAISIN_PROFILE").is_ok() {
+            eprintln!(
+                "PUT_TIMING node={} total={}μs [rev={}μs, ser={}μs, idx={}μs, ord={}μs, write={}μs, rev_idx={}μs]",
+                node.name,
+                total_time,
+                revision_time,
+                serialization_time,
+                index_prep_time,
+                order_label_time,
+                rocksdb_write_time,
+                revision_index_time
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Add a brand new node (optimized - no existence check)
+    ///
+    /// This is an optimized version of put_impl that ASSUMES the node is new.
+    /// Use this when you know for certain the node doesn't exist yet.
+    ///
+    /// **IMPORTANT**: Do NOT use this for updates! Only for brand new nodes.
+    pub(super) async fn add_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        mut node: Node,
+    ) -> Result<()> {
+        let put_start = std::time::Instant::now();
+
+        // CRITICAL: Normalize parent field from path before saving
+        node.parent = Node::extract_parent_name_from_path(&node.path);
+
+        // CRITICAL: has_children is a computed field and should NEVER be stored
+        // It's only populated at the service layer for API responses
+        node.has_children = None;
+
+        // VALIDATION 1: Check workspace allowed_node_types
+        let is_root_node = node.parent_path().map(|p| p == "/").unwrap_or(false);
+        self.validate_workspace_allows_node_type(
+            tenant_id,
+            repo_id,
+            workspace,
+            &node.node_type,
+            is_root_node,
+        )
+        .await?;
+
+        // VALIDATION 2: Check NodeType.allowed_children if node has a parent
+        // This is opportunistic: only validate if parent exists, allowing flexible node creation order
+        if let Some(parent_path) = node.parent_path() {
+            if parent_path != "/" {
+                // Try to get parent node - if it exists, validate allowed_children
+                if let Some(parent) = self
+                    .get_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
+                    .await?
+                {
+                    // Validate that parent's NodeType allows this child's NodeType
+                    self.validate_parent_allows_child(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        &parent.node_type,
+                        &node.node_type,
+                    )
+                    .await?;
+                }
+                // If parent doesn't exist yet, skip validation - allows flexible creation order
+            }
+        }
+
+        // ========== STEP 1: Allocate revision ==========
+        let step_start = std::time::Instant::now();
+        let revision = self.revision_repo.allocate_revision();
+        let revision_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 2: Setup and serialization ==========
+        let step_start = std::time::Instant::now();
+
+        let mut batch = WriteBatch::default();
+
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let _cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        let node_value = rmp_serde::to_vec(&node).map_err(|e| {
+            raisin_error::Error::storage(format!("Serialization error: {}", e.to_string()))
+        })?;
+
+        let serialization_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 3: Build index entries ==========
+        let step_start = std::time::Instant::now();
+
+        let node_key =
+            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, &revision);
+        batch.put_cf(cf_nodes, node_key, node_value);
+
+        let path_key = keys::path_index_key_versioned(
+            tenant_id, repo_id, branch, workspace, &node.path, &revision,
+        );
+        batch.put_cf(cf_path, path_key, node.id.as_bytes());
+
+        let is_published = node.published_at.is_some();
+        for (prop_name, prop_value) in &node.properties {
+            let value_hash = hash_property_value(prop_value);
+            let prop_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                &value_hash,
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, prop_key, node.id.as_bytes());
+        }
+
+        let node_type_key = keys::property_index_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            "__node_type",
+            &node.node_type,
+            &revision,
+            &node.id,
+            is_published,
+        );
+        batch.put_cf(cf_property, node_type_key, node.id.as_bytes());
+
+        // Index common node fields as pseudo-properties
+        if !node.name.is_empty() {
+            let name_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__name",
+                &node.name,
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, name_key, node.id.as_bytes());
+        }
+        if let Some(ref archetype) = node.archetype {
+            if !archetype.is_empty() {
+                let archetype_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__archetype",
+                    archetype,
+                    &revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, archetype_key, node.id.as_bytes());
+            }
+        }
+        if let Some(ref created_by) = node.created_by {
+            if !created_by.is_empty() {
+                let created_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__created_by",
+                    created_by,
+                    &revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, created_by_key, node.id.as_bytes());
+            }
+        }
+        if let Some(ref updated_by) = node.updated_by {
+            if !updated_by.is_empty() {
+                let updated_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__updated_by",
+                    updated_by,
+                    &revision,
+                    &node.id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, updated_by_key, node.id.as_bytes());
+            }
+        }
+        if let Some(created_at) = node.created_at {
+            let created_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__created_at",
+                &created_at.to_rfc3339(),
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, created_at_key, node.id.as_bytes());
+        }
+        if let Some(updated_at) = node.updated_at {
+            let updated_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__updated_at",
+                &updated_at.to_rfc3339(),
+                &revision,
+                &node.id,
+                is_published,
+            );
+            batch.put_cf(cf_property, updated_at_key, node.id.as_bytes());
+        }
+
+        for (prop_path, prop_value) in &node.properties {
+            if let PropertyValue::Reference(ref_data) = prop_value {
+                let fwd_key = keys::reference_forward_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
+
+                let rev_key = keys::reference_reverse_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &ref_data.workspace,
+                    &ref_data.path,
+                    &node.id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, rev_key, node.id.as_bytes());
+            }
+        }
+
+        // Add relation indexes (graph edges)
+        for relation in &node.relations {
+            // Serialize the relation to MessagePack
+            let relation_bytes = rmp_serde::to_vec(&relation).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to serialize relation: {}", e))
+            })?;
+
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                &relation.relation_type,
+                &revision,
+                &relation.target,
+            );
+            batch.put_cf(cf_relation, fwd_key, &relation_bytes);
+
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &relation.workspace,
+                &relation.target,
+                &relation.relation_type,
+                &revision,
+                &node.id,
+            );
+            batch.put_cf(cf_relation, rev_key, &relation_bytes);
+        }
+
+        let index_prep_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 4: Order label - OPTIMIZED (skip existence check) ==========
+        let step_start = std::time::Instant::now();
+
+        // Call optimized version that skips existence check
+        self.add_ordered_children_to_batch_fast_path(
+            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
+        )
+        .await?;
+
+        let order_label_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 5: RocksDB write batch ==========
+        let step_start = std::time::Instant::now();
+
+        self.db
+            .write(batch)
+            .map_err(|e| raisin_error::Error::storage(format!("Atomic write failed: {}", e)))?;
+
+        let rocksdb_write_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 6: Revision indexing ==========
+        let step_start = std::time::Instant::now();
+
+        self.revision_repo
+            .index_node_change(tenant_id, repo_id, &revision, &node.id)
+            .await?;
+
+        // Update branch HEAD to the new revision
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, revision.clone())
+            .await?;
+
+        let revision_index_time = step_start.elapsed().as_micros();
+
+        // ========== STEP 7: Capture operation for replication (non-transaction path) ==========
+        // add_impl is always a CreateNode since it's for brand new nodes
+        if self.operation_capture.is_enabled() {
+            let op_type = raisin_replication::OpType::CreateNode {
+                node_id: node.id.clone(),
+                name: node.name.clone(),
+                node_type: node.node_type.clone(),
+                archetype: node.archetype.clone(),
+                parent_id: node.parent.clone(),
+                order_key: node.order_key.clone(),
+                properties: node.properties.clone(),
+                owner_id: node.owner_id.clone(),
+                workspace: Some(workspace.to_string()),
+            };
+
+            let _ = self
+                .operation_capture
+                .capture_operation_with_revision(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch.to_string(),
+                    op_type,
+                    "system".to_string(), // Direct writes are system operations
+                    None,
+                    true, // is_system = true
+                    Some(revision.clone()),
+                )
+                .await;
+        }
+
+        let total_time = put_start.elapsed().as_micros();
+
+        if std::env::var("RAISIN_PROFILE").is_ok() {
+            eprintln!(
+                "ADD_TIMING node={} total={}μs [rev={}μs, ser={}μs, idx={}μs, ord={}μs, write={}μs, rev_idx={}μs]",
+                node.name,
+                total_time,
+                revision_time,
+                serialization_time,
+                index_prep_time,
+                order_label_time,
+                rocksdb_write_time,
+                revision_index_time
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Fast path for adding ordered children (assumes node is new)
+    async fn add_ordered_children_to_batch_fast_path(
+        &self,
+        batch: &mut WriteBatch,
+        node: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+    ) -> Result<()> {
+        let order_start = std::time::Instant::now();
+
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        // ========== SUBSTEP 1: Parent lookup ==========
+        let substep_start = std::time::Instant::now();
+
+        let parent_id_for_index = if let Some(parent_path) = node.parent_path() {
+            if parent_path == "/" {
+                Some("/".to_string())
+            } else {
+                self.get_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
+                    .await?
+                    .map(|p| p.id)
+            }
+        } else {
+            None
+        };
+
+        let parent_lookup_time = substep_start.elapsed().as_micros();
+
+        if let Some(ref parent_id) = parent_id_for_index {
+            // ========== SUBSTEP 2: Order label calculation (FAST PATH - no existence check) ==========
+            let substep_start = std::time::Instant::now();
+
+            let t = std::time::Instant::now();
+            let last_label =
+                self.get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+            let get_last_time = t.elapsed().as_micros();
+
+            let t = std::time::Instant::now();
+            let order_label = if let Some(ref last) = last_label {
+                crate::fractional_index::inc(last)?
+            } else {
+                crate::fractional_index::first()
+            };
+            let inc_time = t.elapsed().as_micros();
+
+            let label_calc_time = substep_start.elapsed().as_micros();
+
+            // ========== SUBSTEP 3: Batch preparation ==========
+            let substep_start = std::time::Instant::now();
+
+            let ordered_key = keys::ordered_child_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent_id,
+                &order_label,
+                &revision,
+                &node.id,
+            );
+            batch.put_cf(cf_ordered, ordered_key, node.name.as_bytes());
+
+            // Update metadata cache
+            let metadata_key =
+                keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
+            batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
+
+            let batch_prep_time = substep_start.elapsed().as_micros();
+
+            let total_order_time = order_start.elapsed().as_micros();
+
+            if std::env::var("RAISIN_PROFILE").is_ok() {
+                eprintln!(
+                    "ORDER_TIMING_FAST node={} total={}μs [parent={}μs, calc={}μs (get_last={}μs, inc={}μs), batch={}μs]",
+                    node.name,
+                    total_order_time,
+                    parent_lookup_time,
+                    label_calc_time,
+                    get_last_time,
+                    inc_time,
+                    batch_prep_time
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Soft delete a node using tombstones
+    pub(super) async fn delete_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        id: &str,
+    ) -> Result<bool> {
+        // Check referential integrity first - prevent deletion if other nodes reference this node
+        self.check_delete_safety(tenant_id, repo_id, branch, workspace, id)
+            .await?;
+
+        // Get current node to check if it exists and get its properties (internal operation)
+        let node = match self
+            .get_impl(tenant_id, repo_id, branch, workspace, id, false)
+            .await?
+        {
+            Some(n) => n,
+            None => return Ok(false),
+        };
+
+        // Allocate a new revision for the deletion
+        let revision = self.revision_repo.allocate_revision();
+
+        eprintln!(
+            "🗑️  delete_impl: node_id={}, allocated revision={}",
+            id, revision
+        );
+
+        // Prepare WriteBatch for atomic multi-operation delete
+        let mut batch = WriteBatch::default();
+
+        // Get column family handles
+        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
+        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        // Write tombstone marker at new revision
+        let node_key =
+            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, id, &revision);
+        batch.put_cf(cf_nodes, node_key, TOMBSTONE);
+
+        // Tombstone path index at new revision (preserve history)
+        let path_key = keys::path_index_key_versioned(
+            tenant_id, repo_id, branch, workspace, &node.path, &revision,
+        );
+        batch.put_cf(cf_path, path_key, TOMBSTONE);
+
+        // Tombstone property indexes at new revision (preserve history)
+        let is_published = node.published_at.is_some();
+        for (prop_name, prop_value) in &node.properties {
+            let value_hash = hash_property_value(prop_value);
+            let prop_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                &value_hash,
+                &revision,
+                id,
+                is_published,
+            );
+            batch.put_cf(cf_property, prop_key, TOMBSTONE);
+        }
+
+        // Tombstone node_type index
+        let node_type_key = keys::property_index_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            "__node_type",
+            &node.node_type,
+            &revision,
+            id,
+            is_published,
+        );
+        batch.put_cf(cf_property, node_type_key, TOMBSTONE);
+
+        // Tombstone common node field indexes
+        if !node.name.is_empty() {
+            let name_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__name",
+                &node.name,
+                &revision,
+                id,
+                is_published,
+            );
+            batch.put_cf(cf_property, name_key, TOMBSTONE);
+        }
+        if let Some(ref archetype) = node.archetype {
+            if !archetype.is_empty() {
+                let archetype_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__archetype",
+                    archetype,
+                    &revision,
+                    id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, archetype_key, TOMBSTONE);
+            }
+        }
+        if let Some(ref created_by) = node.created_by {
+            if !created_by.is_empty() {
+                let created_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__created_by",
+                    created_by,
+                    &revision,
+                    id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, created_by_key, TOMBSTONE);
+            }
+        }
+        if let Some(ref updated_by) = node.updated_by {
+            if !updated_by.is_empty() {
+                let updated_by_key = keys::property_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    "__updated_by",
+                    updated_by,
+                    &revision,
+                    id,
+                    is_published,
+                );
+                batch.put_cf(cf_property, updated_by_key, TOMBSTONE);
+            }
+        }
+        if let Some(created_at) = node.created_at {
+            let created_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__created_at",
+                &created_at.to_rfc3339(),
+                &revision,
+                id,
+                is_published,
+            );
+            batch.put_cf(cf_property, created_at_key, TOMBSTONE);
+        }
+        if let Some(updated_at) = node.updated_at {
+            let updated_at_key = keys::property_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                "__updated_at",
+                &updated_at.to_rfc3339(),
+                &revision,
+                id,
+                is_published,
+            );
+            batch.put_cf(cf_property, updated_at_key, TOMBSTONE);
+        }
+
+        // Tombstone reference indexes at new revision (preserve history)
+        for (prop_path, prop_value) in &node.properties {
+            if let PropertyValue::Reference(ref_data) = prop_value {
+                // Tombstone forward reference
+                let fwd_key = keys::reference_forward_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, fwd_key, TOMBSTONE);
+
+                // Tombstone reverse reference
+                let rev_key = keys::reference_reverse_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &ref_data.workspace,
+                    &ref_data.path,
+                    id,
+                    prop_path,
+                    &revision,
+                    is_published,
+                );
+                batch.put_cf(cf_reference, rev_key, TOMBSTONE);
+            }
+        }
+
+        // Tombstone ALL outgoing relations (where THIS node points TO other nodes)
+        // Query the relation repository to get actual relations (don't rely on node.relations field)
+        let outgoing_relations =
+            self.get_outgoing_relations(tenant_id, repo_id, branch, workspace, id)?;
+
+        for relation in outgoing_relations {
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                id,
+                &relation.relation_type,
+                &revision,
+                &relation.target,
+            );
+            batch.put_cf(cf_relation, fwd_key, TOMBSTONE);
+
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &relation.workspace,
+                &relation.target,
+                &relation.relation_type,
+                &revision,
+                id,
+            );
+            batch.put_cf(cf_relation, rev_key, TOMBSTONE);
+        }
+
+        // Tombstone ALL incoming relations (where other nodes point TO this node)
+        let incoming_relations =
+            self.get_incoming_relations(tenant_id, repo_id, branch, workspace, id)?;
+
+        for (source_node_id, relation_type, source_workspace) in incoming_relations {
+            // Tombstone the forward relation from source → this node
+            let fwd_key = keys::relation_forward_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                &source_workspace,
+                &source_node_id,
+                &relation_type,
+                &revision,
+                id, // target is the node being deleted
+            );
+            batch.put_cf(cf_relation, fwd_key, TOMBSTONE);
+
+            // Tombstone the reverse relation (this is already in the reverse index)
+            let rev_key = keys::relation_reverse_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                id, // target is the node being deleted
+                &relation_type,
+                &revision,
+                &source_node_id,
+            );
+            batch.put_cf(cf_relation, rev_key, TOMBSTONE);
+        }
+
+        // Tombstone all translations for this node
+        let cf_translation_data = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
+        let translation_locales =
+            self.list_translation_locales(tenant_id, repo_id, branch, workspace, id)?;
+
+        for locale in translation_locales {
+            let mut translation_key = format!(
+                "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
+                tenant_id, repo_id, branch, workspace, id, locale
+            )
+            .into_bytes();
+            translation_key.extend_from_slice(&keys::encode_descending_revision(&revision));
+
+            batch.put_cf(cf_translation_data, translation_key, TOMBSTONE);
+        }
+
+        // Tombstone ordered children entry at new revision (preserve ordering history)
+        if let Some(ref parent_id) = node.parent {
+            if let Some(label) = self
+                .get_order_label_for_child(tenant_id, repo_id, branch, workspace, parent_id, id)?
+            {
+                let ordered_key = keys::ordered_child_key_versioned(
+                    tenant_id, repo_id, branch, workspace, parent_id, &label, &revision, id,
+                );
+                batch.put_cf(cf_ordered, ordered_key, TOMBSTONE);
+            }
+        }
+
+        // Atomic commit - all operations succeed or fail together
+        self.db
+            .write(batch)
+            .map_err(|e| raisin_error::Error::storage(format!("Atomic delete failed: {}", e)))?;
+
+        // Update branch HEAD to the new revision
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, revision)
+            .await?;
+
+        // Index the deletion as a node change
+        self.revision_repo
+            .index_node_change(tenant_id, repo_id, &revision, id)
+            .await?;
+
+        // Capture DeleteNode operation for replication (non-transaction path)
+        if self.operation_capture.is_enabled() {
+            let op_type = raisin_replication::OpType::DeleteNode {
+                node_id: id.to_string(),
+            };
+
+            let _ = self
+                .operation_capture
+                .capture_operation_with_revision(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch.to_string(),
+                    op_type,
+                    "system".to_string(), // Direct writes are system operations
+                    None,
+                    true, // is_system = true
+                    Some(revision),
+                )
+                .await;
+        }
+
+        Ok(true)
+    }
+
+    /// List all nodes in workspace at HEAD (or specific revision)
+    pub(super) async fn list_all_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        max_revision: Option<&HLC>,
+    ) -> Result<Vec<Node>> {
+        // Build prefix for nodes in this workspace
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(branch)
+            .push(workspace)
+            .push("nodes")
+            .build_prefix();
+
+        let cf = cf_handle(&self.db, cf::NODES)?;
+        // Clone prefix before passing to iterator so we can use it for validation
+        let prefix_clone = prefix.clone();
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+
+        let mut nodes_map: HashMap<String, Node> = HashMap::new();
+        let mut deleted_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        tracing::debug!(
+            "list_all_impl: tenant={}, repo={}, branch={}, workspace={}, max_revision={:?}",
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            max_revision
+        );
+
+        // Iterate through all versioned node entries
+        // Due to descending revision encoding, we'll see newest versions first
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            // CRITICAL FIX: Verify key actually starts with our prefix
+            // RocksDB prefix_iterator may return keys that don't match the prefix exactly
+            // without a properly configured prefix extractor
+            if !key.starts_with(&prefix_clone) {
+                break; // Stop iteration when we reach keys outside our prefix
+            }
+
+            // Parse revision and check bounds
+            // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0nodes\0{node_id}\0{~revision}
+            let revision = match keys::extract_revision_from_key(&key) {
+                Ok(rev) => rev,
+                Err(e) => {
+                    eprintln!("⚠️  Skipping key with invalid revision: {}", e);
+                    continue;
+                }
+            };
+
+            // Extract node_id by splitting (safe because node_id doesn't contain null bytes)
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() < 6 {
+                eprintln!(
+                    "⚠️  Skipping key with unexpected format (parts={}): {:?}",
+                    parts.len(),
+                    String::from_utf8_lossy(&key)
+                );
+                continue;
+            }
+            let node_id = String::from_utf8_lossy(parts[5]);
+
+            // Skip revisions beyond max_revision
+            if let Some(max_rev) = max_revision {
+                if &revision > max_rev {
+                    tracing::debug!(
+                        "  SKIP: node_id={}, revision={} > max_revision={}",
+                        node_id,
+                        revision,
+                        max_rev
+                    );
+                    continue;
+                } else {
+                    tracing::debug!(
+                        "  KEEP: node_id={}, revision={} <= max_revision={}",
+                        node_id,
+                        revision,
+                        max_rev
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    "  KEEP: node_id={}, revision={} (no max_revision)",
+                    node_id,
+                    revision
+                );
+            }
+
+            // Handle tombstones: mark node as deleted so older revisions are also skipped
+            if is_tombstone(&value) {
+                let node_id_str = node_id.to_string();
+                tracing::debug!(
+                    "  TOMBSTONE: node_id={} at revision {} - marking as deleted",
+                    node_id_str,
+                    revision
+                );
+                deleted_nodes.insert(node_id_str);
+                continue;
+            }
+
+            let node_id = node_id.to_string();
+
+            // Skip if node was deleted in a newer revision
+            if deleted_nodes.contains(&node_id) {
+                tracing::debug!(
+                    "  SKIP: node_id={} at revision {} (deleted in newer revision)",
+                    node_id,
+                    revision
+                );
+                continue;
+            }
+
+            // Only add if we haven't seen this node_id yet (first = newest revision within bounds)
+            if !nodes_map.contains_key(&node_id) {
+                let node: Node = rmp_serde::from_slice(&value).map_err(|e| {
+                    raisin_error::Error::storage(format!(
+                        "Deserialization error: {}",
+                        e.to_string()
+                    ))
+                })?;
+                tracing::debug!(
+                    "  ADDED: node_id={}, path={}, revision={}",
+                    node_id,
+                    node.path,
+                    revision
+                );
+                nodes_map.insert(node_id, node);
+            } else {
+                tracing::debug!(
+                    "  DUPLICATE: node_id={} already in map (older revision)",
+                    node_id
+                );
+            }
+        }
+
+        // Sort nodes using depth-first traversal of ORDERED_CHILDREN index
+        // This ensures results respect the user-defined ordering in the tree structure
+        tracing::debug!(
+            "list_all_impl: collected {} nodes, now sorting by ordered children index",
+            nodes_map.len()
+        );
+
+        let ordered_nodes = self
+            .order_nodes_by_tree_traversal(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                nodes_map,
+                max_revision,
+            )
+            .await?;
+
+        tracing::debug!(
+            "list_all_impl: returning {} ordered nodes",
+            ordered_nodes.len()
+        );
+
+        Ok(ordered_nodes)
+    }
+
+    /// Count all nodes in a workspace without deserializing node data
+    ///
+    /// This is an optimized version of list_all that only counts keys without
+    /// deserializing the full Node objects. Used for efficient COUNT(*) queries.
+    ///
+    /// # Performance
+    /// - Memory: O(1) - only stores count and deduplication set
+    /// - Time: O(n) - iterates all versioned entries
+    /// - For 2M nodes: ~10MB memory vs 1-4GB for list_all()
+    pub(super) async fn count_all_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        max_revision: Option<&HLC>,
+    ) -> Result<usize> {
+        // Build prefix for nodes in this workspace
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(branch)
+            .push(workspace)
+            .push("nodes")
+            .build_prefix();
+
+        let cf = cf_handle(&self.db, cf::NODES)?;
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+
+        let mut seen_nodes = HashSet::new();
+        let mut count = 0usize;
+
+        // Iterate through all versioned node entries
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::Backend(e.to_string()))?;
+
+            // Extract node_id and revision from key
+            let revision = match keys::extract_revision_from_key(&key) {
+                Ok(rev) => rev,
+                Err(_) => continue, // Skip keys with invalid revisions
+            };
+
+            // Extract node_id by splitting (safe because node_id doesn't contain null bytes)
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() < 6 {
+                continue; // Invalid key format
+            }
+            let node_id = parts[5];
+
+            // Apply max_revision filter
+            if let Some(max_rev) = max_revision {
+                if &revision > max_rev {
+                    continue;
+                }
+            }
+
+            // Check for tombstone
+            if value.len() == 1 && value[0] == 0xFF {
+                // This is a tombstone - mark as seen but don't count
+                seen_nodes.insert(String::from_utf8_lossy(node_id).to_string());
+                continue;
+            }
+
+            // Skip if we've already seen this node (keep latest version only)
+            if seen_nodes.contains(String::from_utf8_lossy(node_id).as_ref()) {
+                continue;
+            }
+
+            // Count this node and mark as seen
+            seen_nodes.insert(String::from_utf8_lossy(node_id).to_string());
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
+    /// Order nodes using depth-first traversal of the ORDERED_CHILDREN index
+    ///
+    /// This function performs an in-memory depth-first traversal starting from root nodes,
+    /// using the ORDERED_CHILDREN index to determine the order of siblings at each level.
+    /// This ensures the returned nodes respect the user-defined ordering in the tree structure.
+    ///
+    /// # Algorithm
+    /// 1. Extract root nodes (depth = 0 or parent = None)
+    /// 2. Build a parent_id -> Node map for fast lookups
+    /// 3. Perform depth-first traversal using ORDERED_CHILDREN index for sibling order
+    /// 4. Return nodes in traversal order
+    async fn order_nodes_by_tree_traversal(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        nodes_map: HashMap<String, Node>,
+        max_revision: Option<&HLC>,
+    ) -> Result<Vec<Node>> {
+        use std::collections::VecDeque;
+
+        // Build parent_id -> children map for efficient tree traversal
+        // First, build a path-to-id map so we can look up parent IDs by path
+        let path_to_id: HashMap<String, String> = nodes_map
+            .values()
+            .map(|n| (n.path.clone(), n.id.clone()))
+            .collect();
+
+        let mut parent_to_children: HashMap<String, Vec<Node>> = HashMap::new();
+        let mut root_nodes = Vec::new();
+
+        for node in nodes_map.into_values() {
+            if node.parent.is_none() || node.parent.as_deref() == Some("/") {
+                // Root-level node (including "/" itself)
+                root_nodes.push(node);
+            } else {
+                // Derive parent's path from this node's path
+                let parent_path = node.path.rsplit_once('/').map(|(p, _)| p).unwrap_or("/");
+                let parent_path = if parent_path.is_empty() {
+                    "/"
+                } else {
+                    parent_path
+                };
+
+                // Look up parent ID by path
+                if let Some(parent_id) = path_to_id.get(parent_path) {
+                    parent_to_children
+                        .entry(parent_id.clone())
+                        .or_insert_with(Vec::new)
+                        .push(node);
+                } else {
+                    // Parent not found - treat as orphaned, add to root
+                    root_nodes.push(node);
+                }
+            }
+        }
+
+        // Sort root nodes by their order in ORDERED_CHILDREN index
+        let root_ids = self
+            .get_ordered_child_ids(tenant_id, repo_id, branch, workspace, "/", max_revision)
+            .await?;
+
+        // Create ordered root nodes list based on ORDERED_CHILDREN index
+        let mut ordered_root_nodes = Vec::new();
+        for root_id in root_ids {
+            if let Some(pos) = root_nodes.iter().position(|n| n.id == root_id) {
+                ordered_root_nodes.push(root_nodes.remove(pos));
+            }
+        }
+        // Add any remaining root nodes that weren't in the index (shouldn't happen normally)
+        ordered_root_nodes.extend(root_nodes);
+
+        // Perform depth-first traversal
+        let mut result = Vec::new();
+        let mut stack: VecDeque<Node> = VecDeque::from(ordered_root_nodes);
+
+        while let Some(node) = stack.pop_front() {
+            // Skip the root node "/" itself (it's a system detail)
+            if node.path != "/" {
+                result.push(node.clone());
+            }
+
+            // Get ordered children for this node from ORDERED_CHILDREN index
+            let child_ids = self
+                .get_ordered_child_ids(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &node.id,
+                    max_revision,
+                )
+                .await?;
+
+            // Add children in reverse order to maintain DFS order when popping from front
+            for child_id in child_ids.iter().rev() {
+                // Find the child node in parent_to_children map
+                if let Some(children) = parent_to_children.get(&node.id) {
+                    if let Some(child_node) = children.iter().find(|c| c.id == *child_id) {
+                        stack.push_front(child_node.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Find the latest revision for a specific node
+    ///
+    /// Uses prefix iteration with descending revision encoding to efficiently
+    /// find the newest version of a node.
+    pub(super) fn get_latest_revision_for_node(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Option<HLC>> {
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(branch)
+            .push(workspace)
+            .push("nodes")
+            .push(node_id)
+            .build_prefix();
+
+        let cf = cf_handle(&self.db, cf::NODES)?;
+        let mut iter = self.db.prefix_iterator_cf(cf, prefix);
+
+        // Due to descending revision encoding, the first item is the newest
+        if let Some(item) = iter.next() {
+            let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            // Parse the revision from the key
+            // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0nodes\0{node_id}\0{~revision}
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 7 {
+                let rev_bytes = parts[6];
+                if rev_bytes.len() == 16 {
+                    let revision = keys::decode_descending_revision(rev_bytes).map_err(|e| {
+                        raisin_error::Error::storage(format!("Failed to decode revision: {}", e))
+                    })?;
+                    return Ok(Some(revision));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the latest revision for a node at or before a target revision
+    /// Used for time-travel queries
+    pub(super) fn get_revision_at_or_before(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        target_revision: &HLC,
+    ) -> Result<Option<HLC>> {
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push(branch)
+            .push(workspace)
+            .push("nodes")
+            .push(node_id)
+            .build_prefix();
+
+        let cf = cf_handle(&self.db, cf::NODES)?;
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+
+        // Iterate through revisions (newest first due to descending encoding)
+        // Return the first revision that is <= target_revision
+        for item in iter {
+            let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            // Parse the revision from the key
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 7 {
+                let rev_bytes = parts[6];
+                if rev_bytes.len() == 16 {
+                    let revision = keys::decode_descending_revision(rev_bytes).map_err(|e| {
+                        raisin_error::Error::storage(format!("Failed to decode revision: {}", e))
+                    })?;
+
+                    if &revision <= target_revision {
+                        return Ok(Some(revision));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Check if node can be safely deleted (no incoming references or relations from other nodes)
+    ///
+    /// This method ensures referential integrity by preventing deletion of nodes that are
+    /// referenced by other nodes through either property references or graph relations.
+    ///
+    /// # Returns
+    /// - `Ok(())` if the node can be safely deleted
+    /// - `Err(...)` if other nodes reference this node, with a descriptive error message
+    pub(super) async fn check_delete_safety(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<()> {
+        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+
+        let mut referencing_nodes = Vec::new();
+
+        // Get the node to find its path
+        let node = match self
+            .get_impl(tenant_id, repo_id, branch, workspace, node_id, false)
+            .await?
+        {
+            Some(n) => n,
+            None => return Ok(()), // Node doesn't exist, safe to "delete"
+        };
+
+        // Check for incoming references (both published and unpublished)
+        for published in [false, true] {
+            let ref_prefix = keys::reference_reverse_prefix(
+                tenant_id, repo_id, branch, workspace, workspace, &node.path, published,
+            );
+
+            let iter = self.db.prefix_iterator_cf(cf_reference, &ref_prefix);
+
+            // Track unique source nodes to avoid duplicates
+            let mut seen_sources = HashSet::new();
+
+            for item in iter {
+                let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+                // Stop if we've moved past our prefix
+                if !key.starts_with(&ref_prefix) {
+                    break;
+                }
+
+                // Skip tombstones
+                if is_tombstone(&value) {
+                    continue;
+                }
+
+                // Parse key to extract source_node_id
+                // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0ref_rev{_pub}\0{target_workspace}\0{target_path}\0{source_node_id}\0{property_path}\0{~revision}
+                let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+                if parts.len() >= 8 {
+                    let source_node_id = String::from_utf8_lossy(parts[7]).to_string();
+
+                    tracing::debug!(
+                        "check_delete_safety: Found reference from source_node_id='{}' to target='{}'",
+                        source_node_id, node.path
+                    );
+
+                    if source_node_id != node_id && !seen_sources.contains(&source_node_id) {
+                        seen_sources.insert(source_node_id.clone());
+
+                        // Get the source node's path for the error message
+                        // If source node doesn't exist (deleted or invalid), skip it
+                        match self
+                            .get_impl(
+                                tenant_id,
+                                repo_id,
+                                branch,
+                                workspace,
+                                &source_node_id,
+                                false,
+                            )
+                            .await
+                        {
+                            Ok(Some(source_node)) => {
+                                referencing_nodes.push(source_node.path.clone());
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    "check_delete_safety: Source node '{}' not found - reference index may be stale",
+                                    source_node_id
+                                );
+                                // Skip this reference - source node doesn't exist
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "check_delete_safety: Error getting source node '{}': {}",
+                                    source_node_id,
+                                    e
+                                );
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for incoming relations
+        let rel_prefix =
+            keys::relation_reverse_prefix(tenant_id, repo_id, branch, workspace, node_id);
+
+        let iter = self.db.prefix_iterator_cf(cf_relation, &rel_prefix);
+
+        let mut seen_sources = HashSet::new();
+
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            // Stop if we've moved past our prefix
+            if !key.starts_with(&rel_prefix) {
+                break;
+            }
+
+            // Skip tombstones
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            // Parse key to extract source_node_id
+            // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0rel_rev\0{target_node_id}\0{relation_type}\0{~revision}\0{source_node_id}
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 9 {
+                let source_node_id = String::from_utf8_lossy(parts[8]).to_string();
+
+                eprintln!(
+                    "🔍 check_delete_safety: Found relation from source='{}' to target='{}'",
+                    source_node_id, node_id
+                );
+
+                if source_node_id != node_id && !seen_sources.contains(&source_node_id) {
+                    seen_sources.insert(source_node_id.clone());
+
+                    // Get the source node's path for the error message
+                    // If source node doesn't exist (deleted or invalid), skip it
+                    match self
+                        .get_impl(
+                            tenant_id,
+                            repo_id,
+                            branch,
+                            workspace,
+                            &source_node_id,
+                            false,
+                        )
+                        .await
+                    {
+                        Ok(Some(source_node)) => {
+                            eprintln!("✅ Found source node at path: {}", source_node.path);
+                            referencing_nodes.push(source_node.path.clone());
+                        }
+                        Ok(None) => {
+                            eprintln!(
+                                "⚠️  Source node '{}' NOT FOUND - skipping stale index entry",
+                                source_node_id
+                            );
+                            // Skip this relation - source node doesn't exist
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Error getting source node '{}': {}", source_node_id, e);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If any nodes reference this node, return an error
+        if !referencing_nodes.is_empty() {
+            return Err(raisin_error::Error::Validation(format!(
+                "Cannot delete node '{}': {} other node(s) reference it: [{}]",
+                node.path,
+                referencing_nodes.len(),
+                referencing_nodes.join(", ")
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Get all locale codes for a node's translations
+    ///
+    /// This scans the TRANSLATION_DATA column family to find all locales
+    /// that have translation data for the specified node.
+    ///
+    /// # Returns
+    /// Vector of locale codes (e.g., ["en", "es", "fr"])
+    fn list_translation_locales(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+    ) -> Result<Vec<String>> {
+        let cf_translation_data = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
+
+        // Build prefix to scan all translations for this node
+        // Format: {tenant}\0{repo}\0{branch}\0{workspace}\0translations\0{node_id}\0
+        let prefix = format!(
+            "{}\0{}\0{}\0{}\0translations\0{}\0",
+            tenant_id, repo_id, branch, workspace, node_id
+        )
+        .into_bytes();
+
+        let iter = self.db.prefix_iterator_cf(cf_translation_data, &prefix);
+
+        let mut locales = HashSet::new();
+
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            // Stop if we've moved past our prefix
+            if !key.starts_with(&prefix) {
+                break;
+            }
+
+            // Skip tombstones
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            // Parse locale from key
+            // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0translations\0{node_id}\0{locale}\0{~revision}
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 7 {
+                let locale = String::from_utf8_lossy(parts[6]).to_string();
+                locales.insert(locale);
+            }
+        }
+
+        Ok(locales.into_iter().collect())
+    }
+
+    /// Get all incoming relations to this node (where other nodes point TO this node)
+    ///
+    /// This method scans the reverse relation index to find all source nodes that
+    /// have relations pointing to the target node.
+    ///
+    /// # Returns
+    /// Vector of tuples: (source_node_id, relation_type, source_workspace)
+    fn get_incoming_relations(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        target_node_id: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+
+        let rel_prefix =
+            keys::relation_reverse_prefix(tenant_id, repo_id, branch, workspace, target_node_id);
+
+        let iter = self.db.prefix_iterator_cf(cf_relation, &rel_prefix);
+
+        let mut relations = Vec::new();
+        // Track unique (source_node_id, relation_type) pairs to get only the latest revision
+        let mut seen = HashSet::new();
+
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            // Stop if we've moved past our prefix
+            if !key.starts_with(&rel_prefix) {
+                break;
+            }
+
+            // Skip tombstones
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            // Parse key to extract source_node_id and relation_type
+            // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0rel_rev\0{target_node_id}\0{relation_type}\0{~revision}\0{source_node_id}
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 9 {
+                let relation_type = String::from_utf8_lossy(parts[6]).to_string();
+                let source_node_id = String::from_utf8_lossy(parts[8]).to_string();
+
+                // Since keys are sorted by ~revision (newest first), we only want the first occurrence
+                let pair_key = (source_node_id.clone(), relation_type.clone());
+                if !seen.contains(&pair_key) {
+                    seen.insert(pair_key);
+
+                    // The source workspace is the same as the current workspace
+                    // (relations are workspace-scoped in the current implementation)
+                    relations.push((source_node_id, relation_type, workspace.to_string()));
+                }
+            }
+        }
+
+        Ok(relations)
+    }
+
+    /// Get all outgoing relations for a node (for tombstoning during deletion)
+    ///
+    /// # Returns
+    /// Vector of RelationRef objects representing relations FROM this node TO other nodes
+    pub(super) fn get_outgoing_relations(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        source_node_id: &str,
+    ) -> Result<Vec<raisin_models::nodes::RelationRef>> {
+        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
+
+        let rel_prefix =
+            keys::relation_forward_prefix(tenant_id, repo_id, branch, workspace, source_node_id);
+
+        let iter = self.db.prefix_iterator_cf(cf_relation, &rel_prefix);
+
+        let mut relations = Vec::new();
+        // Track unique (target_node_id, relation_type) pairs to get only the latest revision
+        let mut seen = HashSet::new();
+
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+            // Stop if we've moved past our prefix
+            if !key.starts_with(&rel_prefix) {
+                break;
+            }
+
+            // Skip tombstones
+            if is_tombstone(&value) {
+                continue;
+            }
+
+            // Parse key to extract target_node_id and relation_type
+            // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0rel\0{source_node_id}\0{relation_type}\0{~revision}\0{target_node_id}
+            let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+            if parts.len() >= 9 {
+                let relation_type = String::from_utf8_lossy(parts[6]).to_string();
+                let target_node_id = String::from_utf8_lossy(parts[8]).to_string();
+
+                // Since keys are sorted by ~revision (newest first), we only want the first occurrence
+                let pair_key = (target_node_id.clone(), relation_type.clone());
+                if !seen.contains(&pair_key) {
+                    seen.insert(pair_key);
+
+                    // Deserialize the RelationRef to get full relation details
+                    let relation: raisin_models::nodes::RelationRef = rmp_serde::from_slice(&value)
+                        .map_err(|e| {
+                            raisin_error::Error::storage(format!(
+                                "Failed to deserialize relation: {}",
+                                e
+                            ))
+                        })?;
+
+                    relations.push(relation);
+                }
+            }
+        }
+
+        Ok(relations)
+    }
+
+    /// Create a node with automatic parent directory creation (deep create).
+    ///
+    /// Creates all missing parent folders and the target node atomically in a single
+    /// WriteBatch with the same revision. This ensures proper MVCC semantics.
+    pub(super) async fn create_deep_node_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        path: &str,
+        mut node: Node,
+        parent_node_type: &str,
+        options: raisin_storage::CreateNodeOptions,
+    ) -> Result<Node> {
+        use rocksdb::WriteBatch;
+
+        // Parse path into segments
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        if segments.is_empty() {
+            return Err(raisin_error::Error::Validation(
+                "Path cannot be empty".to_string(),
+            ));
+        }
+
+        // STEP 1: Allocate SINGLE revision for all operations
+        let revision = self.revision_repo.allocate_revision();
+
+        // STEP 2: Collect nodes that need to be created (with IDs and parent IDs)
+        let mut nodes_to_create: Vec<(Node, String)> = Vec::new(); // (node, parent_id)
+
+        // Track created parent IDs for calculating order labels
+        let mut path_to_id: HashMap<String, String> = HashMap::new();
+        path_to_id.insert("/".to_string(), "/".to_string()); // Root always has ID "/"
+
+        // Check and collect missing parent folders
+        for i in 1..segments.len() {
+            let parent_path = format!("/{}", segments[..i].join("/"));
+
+            // Check if parent exists in database or was just created
+            let existing_parent = self
+                .get_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
+                .await?;
+
+            if let Some(existing) = existing_parent {
+                // Parent exists - track its ID
+                path_to_id.insert(parent_path, existing.id);
+            } else {
+                // Create parent folder node
+                let parent_id = nanoid::nanoid!();
+                let parent_name = segments[i - 1].to_string();
+                let parent_parent_path = if i == 1 {
+                    "/".to_string()
+                } else {
+                    format!("/{}", segments[..i - 1].join("/"))
+                };
+                let parent_parent_id = path_to_id
+                    .get(&parent_parent_path)
+                    .cloned()
+                    .unwrap_or_else(|| "/".to_string());
+
+                let parent_node = Node {
+                    id: parent_id.clone(),
+                    path: parent_path.clone(),
+                    name: parent_name,
+                    parent: Some(parent_parent_path.clone()),
+                    node_type: parent_node_type.to_string(),
+                    properties: HashMap::new(),
+                    children: Vec::new(),
+                    order_key: "a0".to_string(),
+                    has_children: None,
+                    version: 1,
+                    archetype: None,
+                    created_at: Some(chrono::Utc::now()),
+                    updated_at: Some(chrono::Utc::now()),
+                    created_by: node.created_by.clone(),
+                    updated_by: node.updated_by.clone(),
+                    published_at: None,
+                    published_by: None,
+                    translations: None,
+                    tenant_id: Some(tenant_id.to_string()),
+                    workspace: Some(workspace.to_string()),
+                    owner_id: None,
+                    relations: Vec::new(),
+                };
+
+                // Track this parent's ID
+                path_to_id.insert(parent_path, parent_id.clone());
+                nodes_to_create.push((parent_node, parent_parent_id));
+            }
+        }
+
+        // STEP 3: Prepare target node
+        let target_parent = if segments.len() == 1 {
+            Some("/".to_string())
+        } else {
+            Some(format!("/{}", segments[..segments.len() - 1].join("/")))
+        };
+
+        node.path = path.to_string();
+        // Only set name from path if not already provided
+        if node.name.is_empty() {
+            node.name = segments.last().unwrap().to_string();
+        }
+
+        // Get target node's parent ID before moving target_parent
+        let target_parent_id = path_to_id
+            .get(&target_parent.clone().unwrap_or_else(|| "/".to_string()))
+            .cloned()
+            .unwrap_or_else(|| "/".to_string());
+
+        node.parent = target_parent;
+        if node.id.is_empty() {
+            node.id = nanoid::nanoid!();
+        }
+
+        // Validate target node (but skip parent validation since we're creating parents)
+        let validation_options = raisin_storage::CreateNodeOptions {
+            validate_parent_allows_child: false, // We're creating the parents ourselves
+            ..options
+        };
+        self.validate_for_create(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &node,
+            &validation_options,
+        )
+        .await?;
+
+        nodes_to_create.push((node.clone(), target_parent_id.clone()));
+
+        // STEP 4: Create WriteBatch with SAME revision for all nodes
+        let mut batch = WriteBatch::default();
+        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        // Track last order label per parent for calculating new labels
+        let mut last_labels: HashMap<String, String> = HashMap::new();
+
+        for (node_to_create, parent_id) in &nodes_to_create {
+            // Add node to batch (this handles all indexes except ORDERED_CHILDREN)
+            self.add_node_to_batch(
+                &mut batch,
+                node_to_create,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &revision,
+                None, // Don't use the buggy order_label parameter
+            )?;
+
+            // Manually add ORDERED_CHILDREN index (like create_impl does)
+            // Calculate fractional index order label
+            let order_label = if let Some(last) = last_labels.get(parent_id) {
+                crate::fractional_index::inc(last)?
+            } else {
+                // Check if parent already has children
+                let existing_last =
+                    self.get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+                if let Some(ref last) = existing_last {
+                    crate::fractional_index::inc(last)?
+                } else {
+                    crate::fractional_index::first()
+                }
+            };
+
+            // Store the label for next sibling
+            last_labels.insert(parent_id.clone(), order_label.clone());
+
+            // Add ORDERED_CHILDREN index entry
+            let ordered_key = keys::ordered_child_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent_id,
+                &order_label,
+                &revision,
+                &node_to_create.id,
+            );
+            batch.put_cf(cf_ordered, ordered_key, node_to_create.name.as_bytes());
+
+            // Update metadata cache for new children
+            let metadata_key =
+                keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
+            batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
+        }
+
+        // STEP 5: Atomic commit
+        self.db
+            .write(batch)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // STEP 6: Index all node changes with SAME revision
+        for (node_to_create, _) in &nodes_to_create {
+            self.revision_repo
+                .index_node_change(tenant_id, repo_id, &revision, &node_to_create.id)
+                .await?;
+        }
+
+        // Update branch HEAD to the new revision
+        self.branch_repo
+            .update_head(tenant_id, repo_id, branch, revision)
+            .await?;
+
+        Ok(node)
+    }
+}

@@ -1,0 +1,26 @@
+node_type: launchpad:Page
+archetype: launchpad:LandingPage
+properties:
+  title: About Launchpad
+  slug: about
+  description: Learn more about Launchpad and our mission
+  content:
+    - uuid: about-hero-1
+      element_type: launchpad:Hero
+      headline: About Us
+      subheadline: Building the future of application development
+
+    - uuid: about-text-1
+      element_type: launchpad:TextBlock
+      heading: Our Mission
+      content: |
+        We believe everyone should have the power to bring their ideas to life.
+        Launchpad removes the complexity of modern application development,
+        letting you focus on what matters most: your vision.
+
+    - uuid: about-text-2
+      element_type: launchpad:TextBlock
+      heading: Our Story
+      content: |
+        Founded in Basel, Switzerland, Launchpad was born from a simple idea:
+        what if building apps was as easy as using them?

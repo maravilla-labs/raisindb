@@ -1,0 +1,35 @@
+node_type: raisin:Function
+properties:
+  title: Handle Relationship Response
+  description: >
+    Handles relationship response messages by creating or rejecting relationships.
+    This handler is triggered when a message with type "relationship_response" is sent.
+    If accepted, creates the graph relation between users. Creates notification for the original requestor.
+  language: Starlark
+  entry_file: index.py:handle_relationship_response
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 10000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - node
+    properties:
+      node:
+        type: object
+        description: The relationship response message node
+      event:
+        type: object
+        description: The trigger event metadata
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      relationship_created:
+        type: boolean
+        description: Whether a relationship was created (only true if accepted)
+      error:
+        type: string

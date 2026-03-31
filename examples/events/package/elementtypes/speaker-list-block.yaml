@@ -1,0 +1,16 @@
+name: events:SpeakerListBlock
+title: Speaker List Block
+icon: users
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Heading
+    translatable: true
+  - $type: TextField
+    name: description
+    title: Description
+    translatable: true
+  - $type: NumberField
+    name: limit
+    title: Max Items

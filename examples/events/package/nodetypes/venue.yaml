@@ -1,0 +1,50 @@
+name: events:Venue
+title: Venue
+description: An event venue or location
+icon: map-pin
+color: "#10b981"
+version: 1
+
+properties:
+  - name: title
+    title: Name
+    type: String
+    required: true
+    is_translatable: true
+    index:
+      - Fulltext
+  - name: slug
+    title: Slug
+    type: String
+    required: true
+  - name: description
+    title: Description
+    type: String
+    is_translatable: true
+  - name: address
+    title: Address
+    type: String
+  - name: city
+    title: City
+    type: String
+    index:
+      - Fulltext
+  - name: country
+    title: Country
+    type: String
+  - name: capacity
+    title: Capacity
+    type: Number
+  - name: image
+    title: Image
+    type: Resource
+  - name: website
+    title: Website
+    type: String
+  - name: contact_email
+    title: Contact Email
+    type: String
+
+versionable: true
+auditable: true
+indexable: true

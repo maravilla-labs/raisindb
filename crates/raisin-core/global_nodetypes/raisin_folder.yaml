@@ -1,0 +1,17 @@
+name: raisin:Folder
+description: A folder to organize nodes
+icon: folder_open
+version: 3
+indexable: true
+index_types: [Fulltext]
+properties:
+  - name: description
+    type: String
+    title: Description
+    description: A brief description of the folder
+    required: false
+    index: [Fulltext]
+allowed_children: []
+versionable: true
+publishable: true
+auditable: true

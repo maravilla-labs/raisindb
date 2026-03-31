@@ -1,0 +1,26 @@
+node_type: raisin:Trigger
+properties:
+  title: AI Asset Processing
+  name: launchpad-asset-ai-processing
+  description: |
+    Triggered when an asset upload completes (storage_key is set).
+    Generates alt-text, descriptions, keywords, and thumbnails for images.
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created  # Asset is created atomically with storage_key already present
+  filters:
+    workspaces:
+      - launchpad
+    node_types:
+      - raisin:Asset
+    paths:
+      - "**"
+    property_filters:
+      # Only trigger when storage_key exists (file upload is complete)
+      "file.metadata.storage_key":
+        $exists: true
+  priority: 10
+  max_retries: 3
+  function_path: /lib/launchpad/process-asset

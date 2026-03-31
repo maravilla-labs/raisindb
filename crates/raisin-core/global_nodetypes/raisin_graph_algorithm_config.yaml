@@ -1,0 +1,52 @@
+name: raisin:GraphAlgorithmConfig
+description: Configuration for precomputed graph algorithms (PageRank, Louvain, etc.)
+icon: share-2
+version: 1
+indexable: true
+index_types: [Property]
+properties:
+  - name: algorithm
+    type: String
+    required: true
+    index: [Property]
+    description: Algorithm name (pagerank, louvain, connected_components, betweenness_centrality, triangle_count, relates_cache)
+  - name: enabled
+    type: Boolean
+    required: true
+    default: true
+    description: Whether this algorithm config is active
+  - name: target
+    type: Object
+    required: true
+    description: Branch/revision targeting configuration
+    # target.mode: "branch" | "all_branches" | "revision" | "branch_pattern"
+    # target.branches: ["main", "staging"] (for mode=branch)
+    # target.revisions: ["abc123"] (for mode=revision)
+    # target.branch_pattern: "release/*" (for mode=branch_pattern)
+  - name: scope
+    type: Object
+    required: true
+    description: Node scoping configuration (paths, node_types, workspaces, relation_types)
+    # scope.paths: ["social/users/**"]
+    # scope.node_types: ["raisin:User"]
+    # scope.workspaces: ["social"]
+    # scope.relation_types: ["FRIENDS_WITH"]
+  - name: config
+    type: Object
+    required: false
+    description: Algorithm-specific configuration parameters
+    # For pagerank: damping_factor, max_iterations, convergence_threshold
+    # For louvain: resolution, max_iterations
+    # For relates_cache: max_depth, cache_scope
+  - name: refresh
+    type: Object
+    required: false
+    description: Refresh trigger configuration
+    # refresh.ttl_seconds: 300
+    # refresh.on_branch_change: true
+    # refresh.on_relation_change: true
+    # refresh.cron: "0 */6 * * *"
+allowed_children: []
+versionable: true
+publishable: true
+auditable: true

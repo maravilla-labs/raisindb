@@ -1,0 +1,49 @@
+name: raisin:Asset
+description: Media asset (image, video, document, etc.)
+icon: image
+version: 2
+strict: false
+indexable: true
+index_types: [Fulltext, Property]
+properties:
+  - name: title
+    type: String
+    required: true
+    index: [Fulltext]
+  - name: file
+    type: Resource
+    required: true
+  - name: file_type
+    type: String
+    required: false
+    index: [Property]
+  - name: file_size
+    type: Number
+    required: false
+    index: [Property]
+  - name: description
+    type: String
+    required: false
+    index: [Fulltext]
+  - name: alt_text
+    type: String
+    required: false
+    description: Brief accessibility description for screen readers
+  - name: keywords
+    type: Array
+    required: false
+    index: [Fulltext]
+    description: Search keywords for categorization
+  - name: meta
+    type: Object
+    required: false
+    description: AI-generated and extracted metadata
+  - name: content_hash
+    type: String
+    required: false
+    index: [Property]
+    description: SHA-256 hash of file content for change detection during package installation
+allowed_children: []
+versionable: false
+publishable: true
+auditable: false

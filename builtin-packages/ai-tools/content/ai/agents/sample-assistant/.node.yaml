@@ -1,0 +1,10 @@
+node_type: raisin:Folder
+properties:
+  title: Sample Assistant
+  agent_ref:
+    raisin:ref: ""
+    raisin:workspace: "functions"
+    raisin:path: "/agents/sample-assistant"
+  user_id: "agent:sample-assistant"
+  display_name: "Sample Assistant"
+  max_turns: 10

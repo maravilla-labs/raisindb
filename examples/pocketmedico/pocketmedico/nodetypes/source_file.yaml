@@ -1,0 +1,38 @@
+name: medico:SourceFile
+title: Source File
+description: Uploaded audio or image file for transcription
+icon: file-audio
+color: "#6366F1"
+version: 1
+
+properties:
+  - name: file_type
+    title: File Type
+    type: String
+    required: true
+    ui:
+      widget: select
+      options:
+        - { label: Audio, value: audio }
+        - { label: Image, value: image }
+  - name: file_name
+    title: File Name
+    type: String
+    required: true
+  - name: file_size
+    title: File Size (bytes)
+    type: Number
+    description: File size in bytes
+  - name: duration_seconds
+    title: Duration (seconds)
+    type: Number
+    description: Audio duration in seconds (for audio files only)
+  - name: storage_key
+    title: Storage Key
+    type: String
+    description: Reference to binary storage location
+
+allowed_children: []
+versionable: false
+publishable: false
+auditable: true

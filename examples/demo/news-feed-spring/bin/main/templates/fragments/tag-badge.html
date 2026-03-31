@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head></head>
+<body>
+<span th:fragment="badge(tag)"
+      th:style="'background-color: ' + (${tag.color} ?: '#6B7280') + '20; color: ' + (${tag.color} ?: '#6B7280')"
+      class="inline-flex items-center px-2 py-1 text-sm rounded-full">
+    <span th:text="${tag.label} ?: ${tag.name}">Tag</span>
+</span>
+
+<a th:fragment="badge-link(tag)"
+   th:href="@{/search(tag=${tag.path})}"
+   th:style="'background-color: ' + (${tag.color} ?: '#6B7280') + '20; color: ' + (${tag.color} ?: '#6B7280')"
+   class="inline-flex items-center px-2 py-1 text-sm rounded-full hover:opacity-80 transition-opacity">
+    <span th:text="${tag.label} ?: ${tag.name}">Tag</span>
+</a>
+</body>
+</html>

@@ -1,0 +1,13 @@
+name: default
+description: Default workspace for general content
+allowed_node_types:
+  - raisin:Folder
+  - raisin:Page
+  - raisin:Asset
+  - raisin:Node
+allowed_root_node_types:
+  - raisin:Folder
+depends_on: []
+config:
+  default_branch: main
+  node_type_pins: {}

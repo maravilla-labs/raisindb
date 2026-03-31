@@ -1,0 +1,23 @@
+node_type: raisin:Trigger
+properties:
+  title: Process System Notification Messages
+  name: messaging-system-notification
+  description: Handles system notification messages by creating Notification nodes
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "/users/**/outbox/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: "system_notification"
+      status: "pending"
+  priority: 10
+  max_retries: 3
+  function_path: /lib/messaging/handlers/handle-system-notification

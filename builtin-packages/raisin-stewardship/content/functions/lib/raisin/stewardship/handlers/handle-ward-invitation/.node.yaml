@@ -1,0 +1,38 @@
+node_type: raisin:Function
+properties:
+  title: Handle Ward Invitation
+  description: >
+    Handles ward invitation messages by creating new ward accounts and establishing relationships.
+    This handler is triggered when a message with type "ward_invitation" is sent.
+    It creates a new user node for the ward and establishes the stewardship relationship.
+  language: Starlark
+  entry_file: index.py:handle_ward_invitation
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 15000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - node
+    properties:
+      node:
+        type: object
+        description: The ward invitation message node
+      event:
+        type: object
+        description: The trigger event metadata
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      ward_path:
+        type: string
+        description: Path to the newly created ward user
+      relationship_created:
+        type: boolean
+        description: Whether the stewardship relationship was created
+      error:
+        type: string

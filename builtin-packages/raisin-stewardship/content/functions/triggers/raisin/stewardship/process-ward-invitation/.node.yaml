@@ -1,0 +1,23 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Ward Invitation Messages
+  name: stewardship-ward-invitation
+  description: Handles ward invitation messages by creating new ward accounts and establishing relationships
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - raisin:access_control
+    paths:
+      - "/users/**/outbox/**"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: "ward_invitation"
+      status: "pending"
+  priority: 10
+  max_retries: 3
+  function_path: /lib/raisin/stewardship/handlers/handle-ward-invitation

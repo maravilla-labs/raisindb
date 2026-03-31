@@ -1,0 +1,130 @@
+name: raisin-stewardship
+version: 1.0.0
+title: RaisinDB Stewardship Package
+description: >
+  Provides a generic delegation system where Stewards can act on behalf of Wards.
+  Supports household management (parents/children), organization delegation
+  (assistants/executives), and temporary access scenarios with configurable
+  workflows and time-limited delegations.
+author: RaisinDB Team
+license: BSL-1.1
+icon: users
+color: "#8b5cf6"
+keywords:
+  - stewardship
+  - delegation
+  - guardian
+  - relationships
+  - access-control
+category: system
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+# Dependencies
+depends:
+  - raisin-relationships
+
+provides:
+  # Node types defined by this package
+  nodetypes:
+    - raisin:StewardshipConfig
+    - raisin:EntityCircle
+    - raisin:StewardshipOverride
+
+  # Triggers for stewardship-specific message processing
+  triggers:
+    - /functions/triggers/raisin/stewardship/process-ward-invitation
+    - /functions/triggers/raisin/stewardship/process-stewardship-request
+
+  # Library functions for stewardship queries
+  functions:
+    - /functions/lib/raisin/stewardship/is-steward-of
+    - /functions/lib/raisin/stewardship/get-stewards
+    - /functions/lib/raisin/stewardship/get-wards
+    - /functions/lib/raisin/stewardship/handlers/handle-ward-invitation
+    - /functions/lib/raisin/stewardship/handlers/handle-stewardship-request
+    - /functions/lib/raisin/stewardship/handlers/send-push-notification
+    - /functions/lib/raisin/stewardship/handlers/send-email-notification
+
+  # Content nodes created in workspaces
+  # Note: friends-with moved to raisin-social package
+  content:
+    - raisin:access_control/config/stewardship
+    # Stewardship relation types
+    - raisin:access_control/relation-types/parent-of
+    - raisin:access_control/relation-types/child-of
+    - raisin:access_control/relation-types/guardian-of
+    - raisin:access_control/relation-types/ward-of
+    # Family relation types
+    - raisin:access_control/relation-types/spouse-of
+    - raisin:access_control/relation-types/sibling-of
+    - raisin:access_control/relation-types/grandparent-of
+    - raisin:access_control/relation-types/grandchild-of
+    # Organization relation types
+    - raisin:access_control/relation-types/manager-of
+    - raisin:access_control/relation-types/reports-to
+    - raisin:access_control/relation-types/assistant-of
+    - raisin:access_control/relation-types/has-assistant
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Library functions for stewardship queries
+    - root: /functions/lib/raisin/stewardship
+      include:
+        - "is-steward-of/**"
+        - "get-stewards/**"
+        - "get-wards/**"
+      mode: merge
+
+    # Handler functions for stewardship message processing
+    - root: /functions/lib/raisin/stewardship/handlers
+      include:
+        - "handle-ward-invitation/**"
+        - "handle-stewardship-request/**"
+        - "send-push-notification/**"
+        - "send-email-notification/**"
+      mode: merge
+
+    # Stewardship-related triggers
+    - root: /functions/triggers/raisin/stewardship
+      include:
+        - "process-ward-invitation/**"
+        - "process-stewardship-request/**"
+      mode: merge
+
+    # Relation type definitions (stewardship, family, organization categories)
+    - root: /raisin:access_control/relation-types
+      include:
+        - "parent-of/**"
+        - "child-of/**"
+        - "guardian-of/**"
+        - "ward-of/**"
+        - "spouse-of/**"
+        - "sibling-of/**"
+        - "grandparent-of/**"
+        - "grandchild-of/**"
+        - "manager-of/**"
+        - "reports-to/**"
+        - "assistant-of/**"
+        - "has-assistant/**"
+      mode: merge
+
+    # Stewardship configuration
+    - root: /raisin:access_control/config
+      include:
+        - "stewardship/**"
+      mode: merge
+
+# Workspace configuration for auto-created folders
+workspace_patches:
+  raisin:access_control:
+    default_folder_type: raisin:AclFolder
+  functions:
+    default_folder_type: raisin:Folder

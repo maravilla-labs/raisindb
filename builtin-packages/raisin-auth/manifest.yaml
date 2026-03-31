@@ -1,0 +1,65 @@
+name: raisin-auth
+version: 1.0.0
+title: RaisinDB Authentication Package
+description: >
+  Provides default roles and user management for RaisinDB repositories.
+  Auto-installed on repository creation to enable user authentication
+  with role-based access control.
+author: RaisinDB Team
+license: BSL-1.1
+icon: shield
+color: "#10b981"
+keywords:
+  - auth
+  - authentication
+  - roles
+  - users
+  - access-control
+category: system
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  # Content nodes created in workspaces (informational - actual content comes from content/ directory)
+  content:
+    - raisin:access_control/roles/viewer
+    - raisin:access_control/roles/author
+    - raisin:access_control/roles/editor
+    - raisin:access_control/users/system/anonymous
+    - functions/lib/raisin/auth/create-user-node
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Auth-related functions
+    - root: /functions/lib/raisin/auth
+      include:
+        - "**"
+      mode: merge
+
+    # Default roles
+    - root: /raisin:access_control/roles
+      include:
+        - "viewer/**"
+        - "author/**"
+        - "editor/**"
+      mode: merge
+
+    # System users (anonymous)
+    - root: /raisin:access_control/users/system
+      include:
+        - "anonymous/**"
+      mode: merge
+
+# Workspace configuration for auto-created folders
+workspace_patches:
+  raisin:access_control:
+    default_folder_type: raisin:AclFolder
+  functions:
+    default_folder_type: raisin:Folder

@@ -1,0 +1,95 @@
+name: raisin:AIActor
+description: AI-powered actor with model configuration for workflow participation
+icon: bot
+version: 1
+extends: raisin:Actor
+indexable: true
+index_types: [Property]
+properties:
+  # Inherited from raisin:Actor: actor_id, display_name, capabilities, inbox_path, state, current_task_ref, supervisor_ref, metadata
+  - name: system_prompt
+    type: String
+    required: true
+    description: System prompt defining AI behavior
+  - name: provider
+    type: String
+    required: true
+    description: AI provider (openai, anthropic, google, azure_openai, ollama, groq, openrouter, bedrock, custom)
+  - name: model
+    type: String
+    required: true
+    description: Model identifier (e.g., gpt-4, claude-3-opus)
+  - name: temperature
+    type: Number
+    required: false
+    default: 0.7
+    description: Temperature for response generation (0-2)
+  - name: max_tokens
+    type: Number
+    required: false
+    default: 4096
+    description: Maximum tokens in response
+  - name: tools
+    type: Array
+    required: false
+    items:
+      type: Object
+      properties:
+        path:
+          type: String
+          description: Path to the function
+        workspace:
+          type: String
+          description: Workspace where the function is stored
+        alias:
+          type: String
+          description: Optional alias for the tool
+        explicit:
+          type: Boolean
+          description: Whether the tool requires explicit invocation
+    description: Available function tools
+  - name: thinking_enabled
+    type: Boolean
+    required: false
+    default: false
+    description: Enable extended thinking/reasoning
+  - name: delegation_rules
+    type: Array
+    required: false
+    items:
+      type: Object
+      properties:
+        condition:
+          type: String
+          description: REL expression for when to delegate
+        delegate_to:
+          type: String
+          description: Target actor reference
+        reason_template:
+          type: String
+          description: Template for the handoff reason
+        priority:
+          type: Number
+          description: Priority of this rule (higher = evaluated first)
+    description: Rules for automatic delegation to other actors
+  - name: max_iterations
+    type: Number
+    required: false
+    default: 10
+    description: Maximum iterations for agentic loops
+  - name: timeout_ms
+    type: Number
+    required: false
+    default: 30000
+    description: Timeout per iteration in milliseconds
+  - name: total_timeout_ms
+    type: Number
+    required: false
+    default: 300000
+    description: Total timeout for actor execution in milliseconds
+allowed_children:
+  - raisin:ActorTask
+  - raisin:Message
+versionable: true
+publishable: false
+auditable: true

@@ -1,0 +1,50 @@
+node_type: raisin:Function
+properties:
+  title: Get Stewards
+  description: >
+    Gets all stewards for a given ward user. Returns users who have stewardship
+    relationships (PARENT_OF, GUARDIAN_OF) with the specified ward. For PARENT_OF
+    relationships, only returns parents if the ward is a minor (based on birth_date
+    and minor_age_threshold configuration).
+  language: Starlark
+  entry_file: index.py:get_stewards
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - ward_user_path
+    properties:
+      ward_user_path:
+        type: string
+        description: Path to the ward user node (e.g., "/users/internal/alice")
+      workspace:
+        type: string
+        description: Workspace name (defaults to "raisin:access_control")
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      stewards:
+        type: array
+        items:
+          type: object
+          properties:
+            user_id:
+              type: string
+            user_path:
+              type: string
+            email:
+              type: string
+            display_name:
+              type: string
+            relation_type:
+              type: string
+            relation_title:
+              type: string
+      error:
+        type: string

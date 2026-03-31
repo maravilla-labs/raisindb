@@ -1,0 +1,11 @@
+node_type: raisin:Function
+properties:
+  name: process-asset
+  title: Process Asset
+  description: |
+    AI-powered asset processing function.
+    Generates alt-text, captions, keywords, and thumbnails for uploaded images.
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:processAsset

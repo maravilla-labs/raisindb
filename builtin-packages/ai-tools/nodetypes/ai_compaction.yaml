@@ -1,0 +1,28 @@
+name: raisin:AICompaction
+title: AI Compaction
+description: Records when conversation history was compacted
+icon: archive
+color: "#6b7280"
+
+properties:
+  - name: messages_compacted
+    title: Messages Compacted
+    type: Number
+    required: true
+    description: Number of older messages that were summarized
+
+  - name: messages_kept
+    title: Messages Kept
+    type: Number
+    required: true
+    description: Number of recent messages preserved
+
+  - name: summary_preview
+    title: Summary Preview
+    type: String
+    required: false
+    description: First 200 chars of the generated summary
+
+versionable: false
+publishable: false
+auditable: false

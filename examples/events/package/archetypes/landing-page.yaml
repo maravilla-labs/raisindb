@@ -1,0 +1,30 @@
+name: events:LandingPage
+title: Landing Page
+base_node_type: events:Page
+
+fields:
+  - $type: TextField
+    name: title
+    title: Title
+    required: true
+    translatable: true
+  - $type: TextField
+    name: slug
+    title: URL Slug
+    required: true
+  - $type: TextField
+    name: description
+    title: Description
+    translatable: true
+  - $type: SectionField
+    name: content
+    title: Content
+    allowed_element_types:
+      - events:HeroBlock
+      - events:TextBlock
+      - events:EventListBlock
+      - events:SpeakerListBlock
+      - events:VenueListBlock
+      - events:ScheduleBlock
+
+publishable: true

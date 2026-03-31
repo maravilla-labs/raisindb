@@ -1,0 +1,26 @@
+node_type: raisin:Trigger
+properties:
+  title: Process Agent Chat Messages
+  name: messaging-agent-chat
+  description: >
+    Triggers AI response generation when chat messages are delivered to agent inboxes.
+    This fires AFTER process-chat creates the delivered message in the agent's inbox.
+    Only triggers for message_type "chat" to avoid infinite loops with intermediate types.
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds:
+      - Created
+  filters:
+    workspaces:
+      - ai
+    paths:
+      - "/agents/**/inbox/chats/**/msg-*"
+    node_types:
+      - raisin:Message
+    property_filters:
+      message_type: "chat"
+      status: "delivered"
+  priority: 20
+  max_retries: 3
+  function_path: /lib/raisin/ai/agent-handler

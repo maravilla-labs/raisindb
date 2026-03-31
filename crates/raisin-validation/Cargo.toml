@@ -1,0 +1,15 @@
+[package]
+name = "raisin-validation"
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.1"
+description = "Shared validation logic for RaisinDB"
+
+[dependencies]
+raisin-models = { path = "../raisin-models" }
+raisin-error = { path = "../raisin-error" }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

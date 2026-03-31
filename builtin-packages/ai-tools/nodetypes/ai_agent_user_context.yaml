@@ -1,0 +1,26 @@
+name: raisin:AgentUserContext
+title: Agent User Context
+description: Persistent per-user memory for an AI agent. Stores key-value entries the agent has been asked to remember.
+icon: brain
+color: "#8B5CF6"
+
+properties:
+  - name: user_id
+    title: User ID
+    type: string
+    required: true
+    description: The user this context belongs to
+
+  - name: entries
+    title: Memory Entries
+    type: array
+    items:
+      type: object
+    description: List of {key, value, created_at} memory entries
+
+  - name: updated_at
+    title: Updated At
+    type: string
+    description: ISO timestamp of last modification
+
+allowed_children: []

@@ -1,0 +1,18 @@
+node_type: raisin:StewardshipConfig
+properties:
+  enabled: false
+  stewardship_relation_types:
+    - "PARENT_OF"
+    - "GUARDIAN_OF"
+  require_minor_for_parent: true
+  allowed_workflows:
+    - "invitation"
+    - "admin_assignment"
+    - "steward_creates_ward"
+  steward_creates_ward_enabled: false
+  max_stewards_per_ward: 5
+  max_wards_per_steward: 10
+  invitation_expiry_days: 7
+  require_ward_consent: true
+  minor_age_threshold: 18
+  allow_minor_login: false

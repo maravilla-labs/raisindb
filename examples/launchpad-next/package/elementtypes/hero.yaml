@@ -1,0 +1,42 @@
+name: launchpad:Hero
+title: Hero Section
+description: Full-width hero section with headline, subheadline, and call-to-action
+icon: image
+color: "#8b5cf6"
+version: 1
+
+fields:
+  - $type: TextField
+    name: headline
+    title: Headline
+    required: true
+    translatable: true
+
+  - $type: TextField
+    name: subheadline
+    title: Subheadline
+    required: false
+    translatable: true
+
+  - $type: TextField
+    name: cta_text
+    title: CTA Button Text
+    required: false
+    translatable: true
+
+  - $type: TextField
+    name: cta_link
+    title: CTA Button Link
+    description: URL to navigate to when clicked
+    required: false
+
+  - $type: TextField
+    name: cta_action
+    title: CTA Action
+    description: Action to trigger (e.g., createBoard). Used instead of cta_link.
+    required: false
+
+  - $type: MediaField
+    name: background_image
+    title: Background Image
+    required: false

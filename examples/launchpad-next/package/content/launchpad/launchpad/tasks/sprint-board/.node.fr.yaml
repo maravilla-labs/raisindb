@@ -1,0 +1,38 @@
+title: Tableau de sprint
+description: Suivi des taches et de la progression du sprint actuel
+columns:
+  - title: Backlog
+    cards:
+      - uuid: card-1
+        title: "Configurer le depot du projet"
+        description: "Initialiser le depot Git et configurer le pipeline CI/CD"
+      - uuid: card-2
+        title: "Concevoir le schema de base de donnees"
+        description: "Creer le diagramme ERD et definir les relations entre les tables"
+      - uuid: card-3
+        title: "Rediger la documentation API"
+        description: "Documenter tous les endpoints REST avec la specification OpenAPI"
+
+  - title: En cours
+    cards:
+      - uuid: card-4
+        title: "Implementer l'authentification utilisateur"
+        description: "Ajouter l'authentification JWT avec jetons de rafraichissement"
+      - uuid: card-5
+        title: "Construire l'interface du tableau de bord"
+        description: "Creer un tableau de bord responsive avec des graphiques"
+
+  - title: En revue
+    cards:
+      - uuid: card-6
+        title: "Corriger le bug de navigation"
+        description: "Le menu mobile ne se ferme pas lors du changement de route"
+
+  - title: Termine
+    cards:
+      - uuid: card-7
+        title: "Configurer l'environnement de developpement"
+        description: "Docker Compose pour le developpement local"
+      - uuid: card-8
+        title: "Creer la page d'accueil"
+        description: "Section hero avec mise en avant des fonctionnalites"

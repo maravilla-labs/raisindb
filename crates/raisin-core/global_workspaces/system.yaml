@@ -1,0 +1,109 @@
+name: raisin:system
+description: System workspace for global authentication and configuration
+allowed_node_types:
+  - raisin:AuthConfig
+  - raisin:RepoAuthConfig
+  - raisin:ProviderConfig
+  - raisin:Identity
+  - raisin:Session
+  - raisin:OneTimeToken
+  - raisin:WorkspaceAccess
+  - raisin:AclFolder
+  - raisin:Folder
+  - raisin:FlowInstance
+  - raisin:Node
+allowed_root_node_types:
+  - raisin:AuthConfig
+  - raisin:ProviderConfig
+  - raisin:AclFolder
+  - raisin:Folder
+depends_on: []
+initial_structure:
+  children:
+    # Authentication configuration
+    - node_type: raisin:AclFolder
+      name: config
+      properties:
+        icon: "settings"
+        color: "#8b5cf6"
+        title: "Authentication Configuration"
+      children:
+        - node_type: raisin:AuthConfig
+          name: auth
+          properties:
+            session_duration_hours: 24
+            refresh_token_duration_days: 30
+            max_sessions_per_user: 10
+            password_policy:
+              min_length: 12
+              require_uppercase: true
+              require_lowercase: true
+              require_digit: true
+              require_special: true
+            magic_link:
+              enabled: true
+              expiration_minutes: 15
+            rate_limiting:
+              max_attempts_per_minute: 5
+              lockout_duration_minutes: 15
+        # Repository-level auth configurations
+        # Nodes created dynamically at /config/repos/{repo_id}
+        - node_type: raisin:AclFolder
+          name: repos
+          properties:
+            icon: "database"
+            color: "#8b5cf6"
+            title: "Repository Auth Configurations"
+    # Authentication providers
+    - node_type: raisin:AclFolder
+      name: providers
+      properties:
+        icon: "key"
+        color: "#06b6d4"
+        title: "Authentication Providers"
+      children: []
+    # Global identities (users)
+    - node_type: raisin:AclFolder
+      name: identities
+      properties:
+        icon: "users"
+        color: "#10b981"
+        title: "Global Identities"
+    # Sessions
+    - node_type: raisin:AclFolder
+      name: sessions
+      properties:
+        icon: "lock"
+        color: "#f59e0b"
+        title: "Active Sessions"
+    # One-time tokens
+    - node_type: raisin:AclFolder
+      name: tokens
+      properties:
+        icon: "ticket"
+        color: "#ec4899"
+        title: "One-Time Tokens"
+    # Workspace access records
+    - node_type: raisin:AclFolder
+      name: access
+      properties:
+        icon: "shield"
+        color: "#6366f1"
+        title: "Workspace Access Records"
+    # Flow runtime
+    - node_type: raisin:Folder
+      name: flows
+      properties:
+        icon: "play"
+        color: "#22c55e"
+        title: "Flow Runtime"
+      children:
+        - node_type: raisin:Folder
+          name: instances
+          properties:
+            icon: "activity"
+            color: "#3b82f6"
+            title: "Flow Instances"
+config:
+  default_branch: main
+  node_type_pins: {}

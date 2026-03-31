@@ -1,0 +1,101 @@
+name: raisin:Trigger
+description: Trigger definition that specifies when a flow should execute (event type, schedule, or HTTP endpoint)
+icon: zap
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+properties:
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Human-readable trigger title
+    index: [Fulltext]
+
+  - name: description
+    type: String
+    required: false
+    title: Description
+    description: Human-readable description of the trigger
+
+  - name: trigger_type
+    type: String
+    required: true
+    title: Trigger Type
+    description: Type of trigger (node_event, schedule, http)
+    index: [Property]
+
+  - name: webhook_id
+    type: String
+    required: false
+    title: Webhook ID
+    description: Auto-generated nanoid for secure webhook URL (for HTTP triggers)
+    index: [Property]
+
+  - name: config
+    type: Object
+    required: true
+    title: Trigger Configuration
+    description: |
+      Type-specific trigger configuration.
+
+      For node_event: { event_kinds: ["created", "updated", "deleted", ...] }
+      For schedule: { cron_expression: "0 * * * *" }
+      For http: {
+        methods: ["GET", "POST"],
+        path_pattern: "/:userId/orders/:orderId",  // matchit syntax for route params
+        route_mode: "config" | "script",           // config = use path_pattern, script = handle in function
+        default_sync: false                        // true = wait for result, false = fire-and-forget
+      }
+
+  - name: filters
+    type: Object
+    required: false
+    title: Filters
+    description: |
+      Conditions that narrow when the trigger fires.
+      Structure: { workspaces, paths, node_types, property_filters }
+
+  - name: enabled
+    type: Boolean
+    required: true
+    title: Enabled
+    description: Whether trigger is active
+    default: true
+    index: [Property]
+
+  - name: priority
+    type: Number
+    required: false
+    title: Priority
+    description: Execution priority (lower = higher priority)
+    default: 0
+
+  - name: max_retries
+    type: Number
+    required: false
+    title: Max Retries
+    description: Maximum number of retry attempts on failure (0 = no retries, default = 3)
+    default: 3
+
+  - name: function_path
+    type: String
+    required: false
+    title: Function Path
+    description: |
+      Path to the function to execute when trigger fires (e.g., /lib/raisin/agent-handler).
+      Use this for single-function triggers. Alternative to function_flow for simpler cases.
+
+  - name: function_flow
+    type: Object
+    required: false
+    title: Function Flow
+    description: |
+      Multi-function execution flow for complex trigger handling.
+      Structure matches raisin:Flow workflow_data format.
+
+allowed_children: []
+versionable: true
+publishable: true
+auditable: true

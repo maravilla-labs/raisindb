@@ -1,0 +1,114 @@
+@import "tailwindcss";
+
+/* Include flow-designer package classes */
+@source "../../node_modules/@raisindb/flow-designer/src/**/*.{ts,tsx}";
+@source "../../../raisin-flow-designer/src/**/*.{ts,tsx}";
+
+/* Glassmorphism custom styles */
+@theme {
+  /* Brand Colors - Brown/Amber Theme */
+  --color-primary-50: #fef8f3;
+  --color-primary-100: #fdeee0;
+  --color-primary-200: #fad9bd;
+  --color-primary-300: #f5bb8f;
+  --color-primary-400: #ee925f;
+  --color-primary-500: #B8754E;
+  --color-primary-600: #a5653f;
+  --color-primary-700: #8a5133;
+  --color-primary-800: #70422d;
+  --color-primary-900: #5c3827;
+  --color-primary-950: #321c13;
+
+  --color-secondary-50: #fffbeb;
+  --color-secondary-100: #fef3c7;
+  --color-secondary-200: #fde68a;
+  --color-secondary-300: #fcd34d;
+  --color-secondary-400: #fbbf24;
+  --color-secondary-500: #f59e0b;
+  --color-secondary-600: #D97706;
+  --color-secondary-700: #b45309;
+  --color-secondary-800: #92400e;
+  --color-secondary-900: #78350f;
+  --color-secondary-950: #451a03;
+
+  --color-accent-50: #fff7ed;
+  --color-accent-100: #ffedd5;
+  --color-accent-200: #fed7aa;
+  --color-accent-300: #fdba74;
+  --color-accent-400: #fb923c;
+  --color-accent-500: #f97316;
+  --color-accent-600: #EA580C;
+  --color-accent-700: #c2410c;
+  --color-accent-800: #9a3412;
+  --color-accent-900: #7c2d12;
+  --color-accent-950: #431407;
+
+  /* Glass effects with warm tones */
+  --color-glass: rgba(184, 117, 78, 0.1);
+  --color-glass-dark: rgba(10, 10, 10, 0.3);
+  --color-glass-border: rgba(184, 117, 78, 0.2);
+
+  --animate-fade-in: fadeIn 0.3s ease-in-out;
+  --animate-slide-in: slideIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Glass effect utilities */
+.glass {
+  background: rgba(184, 117, 78, 0.1);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(184, 117, 78, 0.2);
+}
+
+.glass-dark {
+  background: rgba(10, 10, 10, 0.3);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(184, 117, 78, 0.15);
+}
+
+/* Monaco Editor dark theme adjustments */
+.monaco-editor {
+  @apply rounded-lg overflow-hidden;
+}
+
+/* REL Editor placeholder styling */
+.rel-editor-placeholder {
+  color: rgba(128, 128, 128, 0.5);
+  font-style: italic;
+  pointer-events: none;
+}
+
+/* Native app behaviors - prevent text selection on UI chrome */
+.ui-chrome {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Scroll containment - prevent scroll chaining */
+.overscroll-none {
+  overscroll-behavior: none;
+}
+
+.overscroll-contain {
+  overscroll-behavior: contain;
+}
+
+/* Touch optimization for better mobile interactions */
+.touch-manipulation {
+  touch-action: manipulation;
+}

@@ -1,0 +1,30 @@
+name: raisin:Role
+description: Role definition with permissions and inheritance
+icon: shield
+version: 1
+indexable: true
+index_types: [Property, Fulltext]
+properties:
+  - name: name
+    type: String
+    required: true
+    unique: true
+    index: [Property, Fulltext]
+  - name: description
+    type: String
+    required: false
+    index: [Fulltext]
+  - name: inherits
+    type: Array
+    required: false
+    items:
+      type: String
+  - name: permissions
+    type: Array
+    required: false
+    items:
+      type: Object
+allowed_children: []
+versionable: true
+publishable: true
+auditable: true

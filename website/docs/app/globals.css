@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import 'highlight.js/styles/tokyo-night-dark.css';
+
+:root {
+  color-scheme: dark;
+  --background: #080808;
+  --card: #0f0f10;
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: radial-gradient(circle at top, rgba(200, 106, 58, 0.25), transparent 45%),
+    radial-gradient(circle at bottom, rgba(17, 24, 39, 0.9), #050505 70%);
+  color: #f9fafb;
+  min-height: 100vh;
+}
+
+::selection {
+  background: rgba(200, 106, 58, 0.35);
+}
+
+main {
+  width: 100%;
+}
+
+.prose-title {
+  @apply text-4xl md:text-5xl font-semibold tracking-tight;
+}
+
+.section-shell {
+  @apply relative overflow-hidden rounded-3xl border border-white/5 bg-white/5 backdrop-blur-xl shadow-2xl shadow-orange-900/20;
+}
+
+.code-scrollbar::-webkit-scrollbar {
+  height: 8px;
+}
+
+.code-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.code-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 999px;
+}

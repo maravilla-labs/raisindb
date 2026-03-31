@@ -1,0 +1,9 @@
+node_type: events:Page
+archetype: events:ContentPage
+properties:
+  title: Speakers
+  slug: speakers
+  description: Browse all speakers
+  content:
+    - element_type: events:SpeakerListBlock
+      heading: All Speakers

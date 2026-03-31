@@ -1,0 +1,17 @@
+node_type: raisin:Function
+properties:
+  title: AI Agent Message Handler
+  description: Handles user messages and generates AI responses
+  language: JavaScript
+  entry_file: index.js:handleUserMessage
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 120000
+    max_memory_bytes: 268435456
+  network_policy:
+    http_enabled: true
+    allowed_urls:
+      - "https://api.openai.com/*"
+      - "https://api.anthropic.com/*"
+      - "http://localhost:11434/*"

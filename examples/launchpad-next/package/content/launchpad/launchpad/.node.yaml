@@ -1,0 +1,4 @@
+node_type: raisin:Folder
+properties:
+  title: Launchpad Site
+  description: Root folder for Launchpad content

@@ -1,0 +1,66 @@
+name: raisin:MessagingConfig
+description: >
+  Configuration for messaging permissions and delivery rules.
+  Defines who can send messages to whom based on relationships,
+  group membership, roles, and other criteria.
+icon: settings
+version: 1
+indexable: true
+index_types: [Property]
+properties:
+  - name: enabled
+    type: Boolean
+    required: false
+    default: true
+    description: Whether messaging is enabled for this repository
+
+  - name: chat_permissions
+    type: Object
+    required: false
+    description: >
+      Rules for who can send chat messages. Contains 'mode' (any_of/all_of)
+      and 'rules' array of permission rules.
+    default:
+      mode: "any_of"
+      rules:
+        - type: "always"
+
+  - name: task_permissions
+    type: Object
+    required: false
+    description: >
+      Rules for who can assign tasks. Contains 'mode' (any_of/all_of)
+      and 'rules' array of permission rules.
+    default:
+      mode: "any_of"
+      rules:
+        - type: "always"
+
+  - name: blocked_users_prevent_messaging
+    type: Boolean
+    required: false
+    default: true
+    description: Whether blocked users are prevented from sending messages
+
+  - name: require_email_verification
+    type: Boolean
+    required: false
+    default: false
+    description: Whether users must have verified email to send messages
+
+  - name: max_message_length
+    type: Number
+    required: false
+    default: 10000
+    description: Maximum length of message content in characters
+
+  - name: rate_limit_messages_per_minute
+    type: Number
+    required: false
+    default: 60
+    description: Maximum messages a user can send per minute
+
+allowed_children: []
+versionable: true
+publishable: false
+auditable: true

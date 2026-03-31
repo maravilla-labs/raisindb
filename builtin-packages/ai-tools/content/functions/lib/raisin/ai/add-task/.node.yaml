@@ -1,0 +1,42 @@
+node_type: "raisin:Function"
+properties:
+  title: "Add Task to Plan"
+  description: |
+    Add a new task to the current plan. Use when you discover additional work is needed.
+  execution_mode: "inline"
+  category: "planning"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties:
+      title:
+        type: "string"
+        description: "Task title describing what needs to be done"
+      description:
+        type: "string"
+        description: "Optional detailed description of the task"
+      priority:
+        type: "string"
+        enum:
+          - low
+          - normal
+          - high
+          - urgent
+        description: "Task priority level"
+    required:
+      - title
+  output_schema:
+    type: "object"
+    properties:
+      success:
+        type: "boolean"
+      task_id:
+        type: "string"
+      task_number:
+        type: "number"
+      title:
+        type: "string"
+      plan_title:
+        type: "string"

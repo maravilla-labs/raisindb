@@ -1,0 +1,45 @@
+name: events:VenuePage
+title: Venue Page
+base_node_type: events:Venue
+
+fields:
+  - $type: TextField
+    name: title
+    title: Venue Name
+    required: true
+    translatable: true
+  - $type: TextField
+    name: slug
+    title: URL Slug
+    required: true
+  - $type: TextField
+    name: description
+    title: Description
+    translatable: true
+  - $type: TextField
+    name: address
+    title: Address
+  - $type: TextField
+    name: city
+    title: City
+  - $type: TextField
+    name: country
+    title: Country
+  - $type: NumberField
+    name: capacity
+    title: Capacity
+  - $type: TextField
+    name: website
+    title: Website
+  - $type: TextField
+    name: contact_email
+    title: Contact Email
+  - $type: MediaField
+    name: image
+    title: Image
+  - $type: SectionField
+    name: content
+    title: Content
+    allowed_element_types:
+      - events:HeroBlock
+      - events:TextBlock

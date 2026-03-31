@@ -1,0 +1,38 @@
+title: Sprint-Board
+description: Aktuelle Sprint-Aufgaben und Fortschrittsverfolgung
+columns:
+  - title: Backlog
+    cards:
+      - uuid: card-1
+        title: Projekt-Repository einrichten
+        description: Git-Repository initialisieren und CI/CD-Pipeline konfigurieren
+      - uuid: card-2
+        title: Datenbankschema entwerfen
+        description: ERD erstellen und Tabellenbeziehungen definieren
+      - uuid: card-3
+        title: API-Dokumentation schreiben
+        description: Alle REST-Endpunkte mit OpenAPI-Spezifikation dokumentieren
+
+  - title: In Bearbeitung
+    cards:
+      - uuid: card-4
+        title: Benutzerauthentifizierung implementieren
+        description: JWT-basierte Authentifizierung mit Refresh-Tokens hinzufugen
+      - uuid: card-5
+        title: Dashboard-UI erstellen
+        description: Responsives Dashboard mit Diagrammen erstellen
+
+  - title: In Prufung
+    cards:
+      - uuid: card-6
+        title: Navigationsfehler beheben
+        description: Mobiles Menu schliesst sich bei Routenwechsel nicht
+
+  - title: Erledigt
+    cards:
+      - uuid: card-7
+        title: Entwicklungsumgebung einrichten
+        description: Docker Compose fur lokale Entwicklung
+      - uuid: card-8
+        title: Landing-Page erstellen
+        description: Hero-Bereich mit Feature-Highlights

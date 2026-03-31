@@ -1,0 +1,101 @@
+name: raisin:Identity
+description: Global user identity within a tenant
+icon: user
+version: 1
+strict: false
+indexable: true
+index_types: [Property]
+versionable: true
+publishable: false
+auditable: true
+properties:
+  - name: identity_id
+    type: String
+    required: true
+    title: Identity ID
+    description: Unique identifier (UUID)
+    index: [Property]
+
+  - name: tenant_id
+    type: String
+    required: true
+    title: Tenant ID
+    description: Tenant this identity belongs to
+    index: [Property]
+
+  - name: email
+    type: String
+    required: true
+    title: Email
+    description: Primary email address (unique within tenant)
+    index: [Property]
+
+  - name: email_verified
+    type: Boolean
+    required: false
+    title: Email Verified
+    description: Whether the email has been verified
+    default: false
+    index: [Property]
+
+  - name: display_name
+    type: String
+    required: false
+    title: Display Name
+    description: User's display name
+
+  - name: avatar_url
+    type: String
+    required: false
+    title: Avatar URL
+    description: URL to user's avatar image
+
+  - name: is_active
+    type: Boolean
+    required: false
+    title: Active
+    description: Whether the identity is active
+    default: true
+    index: [Property]
+
+  - name: linked_providers
+    type: Array
+    required: false
+    title: Linked Providers
+    description: |
+      Linked authentication providers.
+      Structure: [{ strategy_id, provider_subject_id, linked_at, email, display_name, raw_claims }]
+    default: []
+
+  - name: local_credentials
+    type: Object
+    required: false
+    title: Local Credentials
+    description: |
+      Local username/password credentials.
+      Structure: { password_hash, password_updated_at, failed_attempts, locked_until }
+
+  - name: metadata
+    type: Object
+    required: false
+    title: Metadata
+    description: Custom metadata key-value pairs
+
+  - name: created_at
+    type: Date
+    required: false
+    title: Created At
+    description: When the identity was created
+
+  - name: last_login_at
+    type: Date
+    required: false
+    title: Last Login At
+    description: Last login timestamp
+
+  - name: updated_at
+    type: Date
+    required: false
+    title: Updated At
+    description: Last time any profile field was updated
+allowed_children: []

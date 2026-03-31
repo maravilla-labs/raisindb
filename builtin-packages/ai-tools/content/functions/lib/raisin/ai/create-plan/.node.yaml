@@ -1,0 +1,63 @@
+node_type: "raisin:Function"
+properties:
+  name: "create-plan"
+  title: "Create Plan"
+  description: |
+    Create a structured plan with tasks. Use when user asks to break something down,
+    create a plan, or work through a complex problem systematically.
+  execution_mode: "inline"
+  category: "planning"
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties:
+      title:
+        type: "string"
+        description: "Plan title/objective describing the overall goal"
+      description:
+        type: "string"
+        description: "Optional detailed description of the plan"
+      tasks:
+        type: "array"
+        description: "List of tasks to complete the plan"
+        items:
+          type: "object"
+          properties:
+            title:
+              type: "string"
+              description: "Task title describing what needs to be done"
+            description:
+              type: "string"
+              description: "Optional detailed description of the task"
+            priority:
+              type: "string"
+              enum:
+                - low
+                - normal
+                - high
+                - urgent
+              description: "Task priority level"
+          required:
+            - title
+    required:
+      - title
+      - tasks
+  output_schema:
+    type: "object"
+    properties:
+      success:
+        type: "boolean"
+      plan_id:
+        type: "string"
+      plan_path:
+        type: "string"
+      title:
+        type: "string"
+      status:
+        type: "string"
+      requires_approval:
+        type: "boolean"
+      total_tasks:
+        type: "number"

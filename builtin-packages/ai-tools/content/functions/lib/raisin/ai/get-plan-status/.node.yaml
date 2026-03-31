@@ -1,0 +1,30 @@
+node_type: raisin:Function
+properties:
+  title: "Get Plan Status" 
+  description: |
+    # Get Plan Status    
+    Get the current plan and all task statuses. Use to check progress or see what tasks remain.
+  execution_mode: "inline"
+  category: "planning" 
+  enabled: true
+  language: "javascript"
+  entry_file: "index.js:handler"
+  input_schema:
+    type: "object"
+    properties: {}
+    required: []
+  output_schema:  
+    type: "object" 
+    properties:
+      has_plan:
+        type: "boolean"
+      plan_id:
+        type: "string"
+      title:
+        type: "string"
+      status:
+        type: "string"
+      total_tasks:
+        type: "number"
+      completed_tasks:
+        type: "number"

@@ -1,0 +1,9 @@
+node_type: raisin:Function
+properties:
+  name: handle-notification
+  title: Handle Notification
+  description: Handles new notifications (simulates push)
+  execution_mode: async
+  enabled: true
+  language: javascript
+  entry_file: index.js:handleNotification

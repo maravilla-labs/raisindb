@@ -1,0 +1,16 @@
+node_type: raisin:Role
+properties:
+  role_id: "author"
+  name: "Author"
+  description: "Can create content and edit own content"
+  permissions:
+    - path: "**"
+      operations:
+        - create
+        - read
+    - path: "**"
+      operations:
+        - update
+        - delete
+      conditions:
+        owner: "$user.id"

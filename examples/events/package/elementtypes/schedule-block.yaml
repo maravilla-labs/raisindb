@@ -1,0 +1,13 @@
+name: events:ScheduleBlock
+title: Schedule Block
+icon: clock
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Section Heading
+    translatable: true
+  - $type: TextField
+    name: description
+    title: Section Description
+    translatable: true

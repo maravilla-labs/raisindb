@@ -1,0 +1,36 @@
+node_type: launchpad:Page
+archetype: launchpad:LandingPage
+properties:
+  title: Welcome to Launchpad
+  slug: home
+  description: Your gateway to launching amazing projects
+  content:
+    - uuid: hero-1
+      element_type: launchpad:Hero
+      headline: Launch Your Vision
+      subheadline: Build, deploy, and scale your ideas with Launchpad
+      cta_text: Get Started
+      cta_link: /contact
+
+    - uuid: intro-1
+      element_type: launchpad:TextBlock
+      heading: Why Launchpad?
+      content: |
+        Launchpad is your all-in-one platform for turning ideas into reality.
+        We provide the tools, infrastructure, and support you need to succeed.
+
+    - uuid: features-1
+      element_type: launchpad:FeatureGrid
+      heading: Features
+      features:
+        - icon: zap
+          title: Fast Development
+          description: Build and iterate quickly with our modern stack
+
+        - icon: shield
+          title: Secure by Default
+          description: Enterprise-grade security built into every layer
+
+        - icon: globe
+          title: Global Scale
+          description: Deploy worldwide with a single click

@@ -1,0 +1,59 @@
+[package]
+name = "raisin-functions"
+version = "0.1.0"
+edition = "2021"
+description = "Serverless functions for RaisinDB - JavaScript and Starlark runtimes"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Internal crates
+raisin-error = { path = "../raisin-error" }
+raisin-models = { path = "../raisin-models" }
+raisin-storage = { path = "../raisin-storage" }
+raisin-events = { path = "../raisin-events" }
+raisin-hlc = { path = "../raisin-hlc" }
+raisin-context = { path = "../raisin-context" }
+raisin-ai = { path = "../raisin-ai", features = ["pdf", "pdf-markdown", "ocr"] }
+
+# PDF processing (pure Rust)
+pdf_oxide = "0.2"
+raisin-flow-runtime = { path = "../raisin-flow-runtime" }
+raisin-rocksdb = { path = "../raisin-rocksdb" }
+raisin-binary = { path = "../raisin-binary" }
+raisin-indexer = { path = "../raisin-indexer" }
+raisin-hnsw = { path = "../raisin-hnsw" }
+raisin-sql-execution = { path = "../raisin-sql-execution" }
+raisin-core = { path = "../raisin-core" }
+
+# Workspace dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+nanoid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+
+# JavaScript runtime (QuickJS)
+rquickjs = { version = "0.10", features = ["bindgen", "parallel", "futures", "macro", "loader"] }
+
+# Starlark runtime (Python-like)
+starlark = "0.13"
+anyhow = "1.0"
+
+# Utilities
+glob = "0.3"
+regex = "1"
+base64 = "0.22"
+hex.workspace = true
+dashmap = "6.1"
+bytes = "1.0"
+image = "0.25"
+num_cpus = "1.16"

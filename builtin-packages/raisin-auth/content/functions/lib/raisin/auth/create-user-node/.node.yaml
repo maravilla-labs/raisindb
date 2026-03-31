@@ -1,0 +1,43 @@
+node_type: raisin:Function
+properties:
+  title: Create User Node
+  description: >
+    Creates a raisin:User node in access_control workspace for a newly
+    registered or authorized identity. Called after identity registration
+    or when access is granted to a repository.
+  language: JavaScript
+  entry_file: index.js:createUserNode
+  execution_mode: Async
+  enabled: true
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    required:
+      - identity_id
+      - email
+    properties:
+      identity_id:
+        type: string
+        description: The identity ID from the auth system
+      email:
+        type: string
+        description: User's email address
+      display_name:
+        type: string
+        description: Optional display name
+      default_roles:
+        type: array
+        items:
+          type: string
+        description: Role IDs to assign (defaults to ["viewer"])
+  output_schema:
+    type: object
+    properties:
+      success:
+        type: boolean
+      user_node_id:
+        type: string
+      user_path:
+        type: string

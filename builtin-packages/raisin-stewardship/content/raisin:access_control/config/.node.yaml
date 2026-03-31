@@ -1,0 +1,4 @@
+node_type: raisin:AclFolder
+properties:
+  icon: settings
+  color: "#6366f1"

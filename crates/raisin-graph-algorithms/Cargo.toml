@@ -1,0 +1,15 @@
+[package]
+name = "raisin-graph-algorithms"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+petgraph = "0.6"
+rayon = "1.7"
+dashmap = "5.5"
+raisin-storage = { path = "../raisin-storage" }
+raisin-models = { path = "../raisin-models" }
+raisin-hlc = { path = "../raisin-hlc" }
