@@ -111,11 +111,22 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install
+
       - name: Install Linux build deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
 
       - name: Build
         shell: bash

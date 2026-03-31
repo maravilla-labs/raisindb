@@ -36,20 +36,29 @@ fn main() {
     println!("cargo:rerun-if-changed={}/src", raisin_sql_dir);
     println!("cargo:rerun-if-changed={}/Cargo.toml", raisin_sql_dir);
 
-    // Skip build in CI or if SKIP_ADMIN_BUILD is set
-    if env::var("CI").is_ok() || env::var("SKIP_ADMIN_BUILD").is_ok() {
-        println!("cargo:warning=Skipping admin console build (CI or SKIP_ADMIN_BUILD set)");
+    // Ensure the dist folder exists (rust-embed needs it even when empty)
+    let dist_dir = Path::new(".admin-console-dist");
+    if !dist_dir.exists() {
+        std::fs::create_dir_all(dist_dir).ok();
+    }
+
+    // Skip build only if explicitly requested
+    if env::var("SKIP_ADMIN_BUILD").is_ok() {
+        println!("cargo:warning=Skipping admin console build (SKIP_ADMIN_BUILD set)");
         return;
     }
 
-    // Check if npm is available
-    let npm_available = Command::new("npm").arg("--version").output().is_ok();
+    // Check if npm/pnpm is available
+    let pnpm_available = Command::new("pnpm").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    let npm_available = Command::new("npm").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
 
-    if !npm_available {
-        println!("cargo:warning=npm not found, skipping frontend build");
+    if !pnpm_available && !npm_available {
+        println!("cargo:warning=Neither pnpm nor npm found, skipping frontend build");
         println!("cargo:warning=The admin console will not be available");
         return;
     }
+
+    let pkg_cmd = if pnpm_available { "pnpm" } else { "npm" };
 
     // Step 1: Build WASM module
     // Always rebuild to ensure changes in raisin-sql are picked up
@@ -100,7 +109,7 @@ fn main() {
             // Step 1b: Install WASM package in admin-console
             // Path from admin-console to wasm pkg: ../../tooling/packages/raisin-sql-wasm/pkg
             println!("cargo:warning=Installing WASM package in admin-console...");
-            let install_wasm_status = Command::new("npm")
+            let install_wasm_status = Command::new(pkg_cmd)
                 .args(["install", "../../tooling/packages/raisin-sql-wasm/pkg"])
                 .current_dir(frontend_dir)
                 .status();
@@ -123,8 +132,8 @@ fn main() {
 
     // Step 2: Check if node_modules exists
     if !Path::new(frontend_dir).join("node_modules").exists() {
-        println!("cargo:warning=Installing npm dependencies for admin-console...");
-        let status = Command::new("npm")
+        println!("cargo:warning=Installing dependencies for admin-console...");
+        let status = Command::new(pkg_cmd)
             .args(["install"])
             .current_dir(frontend_dir)
             .status()
@@ -138,7 +147,7 @@ fn main() {
 
     // Step 3: Build the frontend
     println!("cargo:warning=Building admin-console frontend...");
-    let status = Command::new("npm")
+    let status = Command::new(pkg_cmd)
         .args(["run", "build"])
         .current_dir(frontend_dir)
         .status()
