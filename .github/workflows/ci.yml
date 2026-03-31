@@ -21,6 +21,10 @@ jobs:
           toolchain: 1.89.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -33,7 +37,7 @@ jobs:
         with:
           toolchain: 1.89.0
       - uses: Swatinem/rust-cache@v2
-      - name: Install build deps
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
