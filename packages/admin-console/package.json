@@ -22,7 +22,7 @@
     "@monaco-editor/react": "^4.6.0",
     "@raisindb/editor": "file:../raisin-editor",
     "@raisindb/flow-designer": "file:../raisin-flow-designer",
-    "@raisindb/sql-wasm": "file:../../tooling/packages/raisin-sql-wasm/pkg",
+    "@raisindb/sql-wasm": "link:../../tooling/packages/raisin-sql-wasm/pkg",
     "@types/react-syntax-highlighter": "^15.5.13",
     "allotment": "^1.20.4",
     "js-yaml": "^4.1.0",
