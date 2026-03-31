@@ -8,8 +8,8 @@ use super::{OllamaProvider, TOOL_CAPABLE_MODELS};
 use crate::model_cache::ModelInfo;
 use crate::provider::{AIProviderTrait, ProviderError, Result};
 use crate::types::{
-    CompletionRequest, CompletionResponse, FunctionCall, Message, ResponseFormat, Role, StreamChunk,
-    ToolCall, ToolDefinition, Usage,
+    CompletionRequest, CompletionResponse, FunctionCall, Message, ResponseFormat, Role,
+    StreamChunk, ToolCall, ToolDefinition, Usage,
 };
 use crate::utils::strip_markdown_fences;
 use async_trait::async_trait;

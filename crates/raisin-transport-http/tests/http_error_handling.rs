@@ -49,7 +49,7 @@ async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
         published_at: None,
         published_by: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
         previous_version: None,
     };
     storage

@@ -254,7 +254,10 @@ impl BackgroundJobs for RocksDBStorage {
 
         for (job_id, entry) in persisted_jobs {
             // Only target Running jobs
-            if !matches!(entry.status, raisin_storage::JobStatus::Running | raisin_storage::JobStatus::Executing) {
+            if !matches!(
+                entry.status,
+                raisin_storage::JobStatus::Running | raisin_storage::JobStatus::Executing
+            ) {
                 continue;
             }
             // Check if started_at is older than the cutoff

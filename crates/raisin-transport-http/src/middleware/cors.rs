@@ -161,11 +161,15 @@ pub async fn unified_cors_middleware(
             let headers = response.headers_mut();
             headers.insert(
                 header::ACCESS_CONTROL_ALLOW_ORIGIN,
-                origin.parse().unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
+                origin
+                    .parse()
+                    .unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
             );
             headers.insert(
                 header::ACCESS_CONTROL_ALLOW_METHODS,
-                "GET, POST, PUT, DELETE, OPTIONS, PATCH".parse().expect("hardcoded methods are valid"),
+                "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+                    .parse()
+                    .expect("hardcoded methods are valid"),
             );
             headers.insert(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
@@ -177,7 +181,10 @@ pub async fn unified_cors_middleware(
                 header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
                 "true".parse().expect("hardcoded 'true' is valid"),
             );
-            headers.insert(header::ACCESS_CONTROL_MAX_AGE, "86400".parse().expect("hardcoded '86400' is valid"));
+            headers.insert(
+                header::ACCESS_CONTROL_MAX_AGE,
+                "86400".parse().expect("hardcoded '86400' is valid"),
+            );
         }
 
         return Ok(response);
@@ -189,7 +196,9 @@ pub async fn unified_cors_middleware(
         let headers = response.headers_mut();
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            origin.parse().unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
+            origin
+                .parse()
+                .unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
         );
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
@@ -197,7 +206,9 @@ pub async fn unified_cors_middleware(
         );
         headers.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            "Content-Range, Accept-Ranges".parse().expect("hardcoded headers are valid"),
+            "Content-Range, Accept-Ranges"
+                .parse()
+                .expect("hardcoded headers are valid"),
         );
     }
 
@@ -215,21 +226,30 @@ fn apply_preflight_cors_headers(headers: &mut axum::http::HeaderMap, origin: &st
 
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        origin.parse().unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
+        origin
+            .parse()
+            .unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        "GET, POST, PUT, DELETE, OPTIONS, PATCH".parse().expect("hardcoded methods are valid"),
+        "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+            .parse()
+            .expect("hardcoded methods are valid"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        "Content-Type, Authorization, Accept, Cache-Control".parse().expect("hardcoded headers are valid"),
+        "Content-Type, Authorization, Accept, Cache-Control"
+            .parse()
+            .expect("hardcoded headers are valid"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
         "true".parse().expect("hardcoded 'true' is valid"),
     );
-    headers.insert(header::ACCESS_CONTROL_MAX_AGE, "86400".parse().expect("hardcoded '86400' is valid"));
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        "86400".parse().expect("hardcoded '86400' is valid"),
+    );
 }
 
 /// Apply CORS headers for regular (non-preflight) responses.
@@ -239,7 +259,9 @@ fn apply_response_cors_headers(headers: &mut axum::http::HeaderMap, origin: &str
 
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        origin.parse().unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
+        origin
+            .parse()
+            .unwrap_or_else(|_| "*".parse().expect("hardcoded '*' is valid")),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_CREDENTIALS,

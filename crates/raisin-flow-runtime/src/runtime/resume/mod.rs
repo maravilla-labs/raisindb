@@ -71,7 +71,10 @@ pub async fn resume_flow(
             info!(instance_id = %instance_id, "Flow is already running (idempotent)");
             return Ok(());
         }
-        FlowStatus::Completed | FlowStatus::Failed | FlowStatus::Cancelled | FlowStatus::RolledBack => {
+        FlowStatus::Completed
+        | FlowStatus::Failed
+        | FlowStatus::Cancelled
+        | FlowStatus::RolledBack => {
             info!(instance_id = %instance_id, status = ?instance.status, "Flow is in terminal state (idempotent)");
             return Ok(());
         }
@@ -94,7 +97,8 @@ pub async fn resume_flow(
     }
 
     // 4. Process resume data based on wait_info
-    let early_return = process_resume_data(instance_id, &mut instance, &resume_data, callbacks).await?;
+    let early_return =
+        process_resume_data(instance_id, &mut instance, &resume_data, callbacks).await?;
     if early_return {
         return Ok(());
     }

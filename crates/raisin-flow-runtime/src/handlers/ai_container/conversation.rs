@@ -9,9 +9,7 @@
 //! and managing conversation state within the flow context.
 
 use super::types::{AiMessage, MessageRole, ToolCall};
-use crate::handlers::conversation_persistence::{
-    self, AiResponseData, ToolCallData, UsageData,
-};
+use crate::handlers::conversation_persistence::{self, AiResponseData, ToolCallData, UsageData};
 use crate::types::{FlowCallbacks, FlowContext, FlowError, FlowExecutionEvent, FlowResult};
 use serde_json::Value;
 use tracing::{debug, error};
@@ -40,14 +38,9 @@ impl AiContainerHandler {
         let mut messages = Vec::with_capacity(children.len());
 
         for child in &children {
-            let props = child
-                .get("properties")
-                .unwrap_or(child);
+            let props = child.get("properties").unwrap_or(child);
 
-            let role_str = props
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
+            let role_str = props.get("role").and_then(|v| v.as_str()).unwrap_or("user");
 
             let role = match role_str {
                 "assistant" => MessageRole::Assistant,
@@ -85,7 +78,10 @@ impl AiContainerHandler {
             });
         }
 
-        debug!("Loaded {} messages from conversation history", messages.len());
+        debug!(
+            "Loaded {} messages from conversation history",
+            messages.len()
+        );
         Ok(messages)
     }
 
@@ -139,15 +135,11 @@ impl AiContainerHandler {
             let input_tokens = usage_obj
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(|v| v.as_u64())
-                .or_else(|| {
-                    ai_response.get("input_tokens").and_then(|v| v.as_u64())
-                });
+                .or_else(|| ai_response.get("input_tokens").and_then(|v| v.as_u64()));
             let output_tokens = usage_obj
                 .and_then(|u| u.get("output_tokens"))
                 .and_then(|v| v.as_u64())
-                .or_else(|| {
-                    ai_response.get("output_tokens").and_then(|v| v.as_u64())
-                });
+                .or_else(|| ai_response.get("output_tokens").and_then(|v| v.as_u64()));
             let model = ai_response
                 .get("model")
                 .and_then(|v| v.as_str())

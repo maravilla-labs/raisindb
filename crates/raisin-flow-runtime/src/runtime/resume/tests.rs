@@ -62,7 +62,13 @@ impl FlowCallbacks for MockCallbacks {
     async fn queue_job(&self, _: &str, _: Value) -> FlowResult<String> {
         Ok("test-job-id".to_string())
     }
-    async fn call_ai(&self, _: &str, _: &str, _: Vec<Value>, _: Option<Value>) -> FlowResult<Value> {
+    async fn call_ai(
+        &self,
+        _: &str,
+        _: &str,
+        _: Vec<Value>,
+        _: Option<Value>,
+    ) -> FlowResult<Value> {
         Ok(Value::Null)
     }
     async fn execute_function(&self, _: &str, _: Value) -> FlowResult<Value> {
@@ -198,7 +204,11 @@ async fn test_resume_with_tool_result() {
     assert_eq!(updated.status, FlowStatus::Running);
     assert!(updated.wait_info.is_none());
     assert_eq!(
-        updated.variables.as_object().unwrap().get("__last_tool_result"),
+        updated
+            .variables
+            .as_object()
+            .unwrap()
+            .get("__last_tool_result"),
         Some(&tool_result)
     );
 }
@@ -212,7 +222,11 @@ async fn test_resume_with_human_response() {
 
     let updated = cb.instance.lock().unwrap();
     assert_eq!(
-        updated.variables.as_object().unwrap().get("__human_response"),
+        updated
+            .variables
+            .as_object()
+            .unwrap()
+            .get("__human_response"),
         Some(&response)
     );
 }
@@ -236,7 +250,11 @@ async fn test_resume_chat_session_message_key() {
 
     let updated = cb.instance.lock().unwrap();
     assert_eq!(
-        updated.variables.as_object().unwrap().get("__chat_user_message"),
+        updated
+            .variables
+            .as_object()
+            .unwrap()
+            .get("__chat_user_message"),
         Some(&json!("Hello from user"))
     );
     assert_eq!(updated.status, FlowStatus::Running);
@@ -246,11 +264,20 @@ async fn test_resume_chat_session_message_key() {
 async fn test_resume_chat_session_content_key() {
     let inst = waiting_instance("chat-step", simple_wait(WaitType::ChatSession));
     let cb = MockCallbacks::new(inst);
-    let _ = resume_flow("test-instance", json!({"content": "User content via content key"}), &cb).await;
+    let _ = resume_flow(
+        "test-instance",
+        json!({"content": "User content via content key"}),
+        &cb,
+    )
+    .await;
 
     let updated = cb.instance.lock().unwrap();
     assert_eq!(
-        updated.variables.as_object().unwrap().get("__chat_user_message"),
+        updated
+            .variables
+            .as_object()
+            .unwrap()
+            .get("__chat_user_message"),
         Some(&json!("User content via content key"))
     );
 }
@@ -264,7 +291,11 @@ async fn test_resume_chat_session_raw_string() {
 
     let updated = cb.instance.lock().unwrap();
     assert_eq!(
-        updated.variables.as_object().unwrap().get("__chat_user_message"),
+        updated
+            .variables
+            .as_object()
+            .unwrap()
+            .get("__chat_user_message"),
         Some(&data)
     );
 }
@@ -299,7 +330,10 @@ async fn test_resume_function_call_failure_transitions_to_failed() {
     assert!(cb.was_save_called());
     let updated = cb.instance.lock().unwrap();
     assert_eq!(updated.status, FlowStatus::Failed);
-    assert_eq!(updated.error, Some("Function execution timeout".to_string()));
+    assert_eq!(
+        updated.error,
+        Some("Function execution timeout".to_string())
+    );
     assert!(updated.wait_info.is_none());
 }
 
@@ -357,7 +391,11 @@ async fn test_resume_not_timed_out_proceeds_normally() {
     assert_eq!(updated.status, FlowStatus::Running);
     assert!(updated.wait_info.is_none());
     assert_eq!(
-        updated.variables.as_object().unwrap().get("__human_response"),
+        updated
+            .variables
+            .as_object()
+            .unwrap()
+            .get("__human_response"),
         Some(&response)
     );
 }
@@ -372,7 +410,11 @@ async fn test_resume_no_timeout_proceeds_normally() {
     let updated = cb.instance.lock().unwrap();
     assert_eq!(updated.status, FlowStatus::Running);
     assert_eq!(
-        updated.variables.as_object().unwrap().get("__human_response"),
+        updated
+            .variables
+            .as_object()
+            .unwrap()
+            .get("__human_response"),
         Some(&response)
     );
 }

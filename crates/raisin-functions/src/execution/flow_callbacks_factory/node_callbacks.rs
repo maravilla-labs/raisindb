@@ -5,7 +5,9 @@
 
 //! Node operation callbacks (loader, saver, creator) for flow execution
 
-use super::types::{ChildrenListerCallback, NodeCreatorCallback, NodeLoaderCallback, NodeSaverCallback};
+use super::types::{
+    ChildrenListerCallback, NodeCreatorCallback, NodeLoaderCallback, NodeSaverCallback,
+};
 use crate::execution::ExecutionDependencies;
 use raisin_binary::BinaryStorage;
 use raisin_storage::{transactional::TransactionalStorage, Storage, StorageScope};
@@ -184,7 +186,8 @@ where
                 };
 
                 // Create the node using deep create to auto-create parent folders
-                let created = deps.storage
+                let created = deps
+                    .storage
                     .nodes()
                     .create_deep_node(
                         StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),

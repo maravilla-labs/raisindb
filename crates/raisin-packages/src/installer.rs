@@ -448,7 +448,10 @@ mixins:
         assert_eq!(node_types[0].0, "test:Article");
 
         assert_eq!(installer.manifest().provides.mixins.len(), 1);
-        assert_eq!(installer.manifest().provides.mixins[0], "raisin:publishable");
+        assert_eq!(
+            installer.manifest().provides.mixins[0],
+            "raisin:publishable"
+        );
     }
 
     #[test]

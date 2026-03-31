@@ -21,11 +21,10 @@ mod metadata;
 mod types;
 
 // Re-export types
-pub use types::{
-    AiResponseData, ConversationType, ToolCallData, UsageData,
-    SYSTEM_WORKSPACE, USER_WORKSPACE,
-};
 pub(crate) use types::AI_SENDER_ID;
+pub use types::{
+    AiResponseData, ConversationType, ToolCallData, UsageData, SYSTEM_WORKSPACE, USER_WORKSPACE,
+};
 
 // Re-export functions
 pub use conversation::ensure_conversation;

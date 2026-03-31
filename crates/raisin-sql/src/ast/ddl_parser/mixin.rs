@@ -40,10 +40,7 @@ pub(crate) fn create_mixin(input: &str) -> IResult<&str, CreateMixin> {
 }
 
 /// Parse Mixin clauses (DESCRIPTION, ICON, PROPERTIES)
-fn parse_mixin_clauses<'a>(
-    mut input: &'a str,
-    result: &mut CreateMixin,
-) -> IResult<&'a str, ()> {
+fn parse_mixin_clauses<'a>(mut input: &'a str, result: &mut CreateMixin) -> IResult<&'a str, ()> {
     loop {
         let (remaining, _) = ws_and_comments(input)?;
 

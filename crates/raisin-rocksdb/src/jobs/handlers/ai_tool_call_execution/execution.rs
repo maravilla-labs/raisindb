@@ -126,7 +126,10 @@ impl<S: Storage + 'static> AIToolCallExecutionHandler<S> {
         );
 
         if let Some(id) = tool_call_id.filter(|v| !v.is_empty()) {
-            properties.insert("tool_call_id".to_string(), PropertyValue::String(id.to_string()));
+            properties.insert(
+                "tool_call_id".to_string(),
+                PropertyValue::String(id.to_string()),
+            );
         }
 
         if let Some(name) = function_name.filter(|v| !v.is_empty()) {

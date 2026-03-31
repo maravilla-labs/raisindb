@@ -59,7 +59,11 @@ impl GeminiProvider {
     async fn fetch_models(&self) -> Result<Vec<ModelInfo>> {
         let response = self
             .client
-            .get(format!("{}/models?key={}", self.base_url, self.api_key.expose()))
+            .get(format!(
+                "{}/models?key={}",
+                self.base_url,
+                self.api_key.expose()
+            ))
             .send()
             .await
             .map_err(|e| ProviderError::NetworkError(e.to_string()))?;

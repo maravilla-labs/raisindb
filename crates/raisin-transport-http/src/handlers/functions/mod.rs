@@ -24,10 +24,10 @@ const FUNCTIONS_WORKSPACE: &str = "functions";
 const SYSTEM_WORKSPACE: &str = "raisin:system";
 
 // Re-export public handler functions
+pub use flow_events::stream_flow_events;
 pub use invoke::invoke_function;
 pub use list::{get_execution, get_function, list_executions, list_functions};
 pub use run_file::run_file;
-pub use flow_events::stream_flow_events;
 pub use run_flow::{
     cancel_flow_instance, delete_flow_instance, get_flow_instance, resume_flow, run_flow,
     run_flow_test,

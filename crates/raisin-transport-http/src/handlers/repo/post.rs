@@ -149,10 +149,7 @@ pub async fn repo_post(
             sign_request,
         )
         .await?;
-        return Ok((
-            StatusCode::OK,
-            Json(serde_json::to_value(response.0)?),
-        ));
+        return Ok((StatusCode::OK, Json(serde_json::to_value(response.0)?)));
     }
 
     let tenant_id = "default"; // TODO: Extract from middleware/auth

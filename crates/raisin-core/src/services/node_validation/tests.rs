@@ -51,7 +51,7 @@ async fn create_node_type(
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage
@@ -543,7 +543,7 @@ async fn test_validation_with_inheritance() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
     storage
         .node_types()
@@ -588,7 +588,7 @@ async fn test_validation_with_inheritance() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
     storage
         .node_types()

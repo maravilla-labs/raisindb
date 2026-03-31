@@ -58,15 +58,9 @@ const CHANNEL_CAPACITY: usize = 100;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationEvent {
     /// Streaming text chunk from AI response
-    TextChunk {
-        text: String,
-        timestamp: String,
-    },
+    TextChunk { text: String, timestamp: String },
     /// AI thinking/reasoning chunk
-    ThoughtChunk {
-        text: String,
-        timestamp: String,
-    },
+    ThoughtChunk { text: String, timestamp: String },
     /// AI tool call has started
     ToolCallStarted {
         #[serde(rename = "toolCallId")]

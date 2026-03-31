@@ -223,7 +223,10 @@ impl AnthropicProvider {
             }
         }
 
-        let mut converted_tools = request.tools.as_ref().map(|tools| Self::convert_tools(tools));
+        let mut converted_tools = request
+            .tools
+            .as_ref()
+            .map(|tools| Self::convert_tools(tools));
         let mut tool_choice = None;
         Self::apply_response_format(
             request.response_format.as_ref(),
@@ -250,10 +253,7 @@ impl AnthropicProvider {
     ///
     /// Adds `x-api-key` and `anthropic-version` headers, and maps
     /// HTTP errors to `ProviderError`.
-    async fn send_api_request(
-        &self,
-        body: &AnthropicChatRequest,
-    ) -> Result<reqwest::Response> {
+    async fn send_api_request(&self, body: &AnthropicChatRequest) -> Result<reqwest::Response> {
         use super::http_helpers;
 
         http_helpers::send_json_request(
@@ -318,12 +318,10 @@ impl AnthropicProvider {
                     None => *tools = Some(vec![structured_tool]),
                 }
 
-                *tool_choice = Some(AnthropicToolChoice::Specific(
-                    AnthropicToolChoiceSpecific {
-                        choice_type: "tool".to_string(),
-                        name: tool_name,
-                    },
-                ));
+                *tool_choice = Some(AnthropicToolChoice::Specific(AnthropicToolChoiceSpecific {
+                    choice_type: "tool".to_string(),
+                    name: tool_name,
+                }));
             }
         }
     }

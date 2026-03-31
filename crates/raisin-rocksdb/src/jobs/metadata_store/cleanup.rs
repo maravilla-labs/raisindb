@@ -113,8 +113,10 @@ impl JobMetadataStore {
                 Ok(Some(value_bytes)) => {
                     match rmp_serde::from_slice::<PersistedJobEntry>(&value_bytes) {
                         Ok(entry) => {
-                            let can_delete =
-                                !matches!(entry.status, JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled);
+                            let can_delete = !matches!(
+                                entry.status,
+                                JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled
+                            );
 
                             if can_delete {
                                 batch.delete_cf(cf_metadata, key);

@@ -86,12 +86,10 @@ pub async fn persist_assistant_response(
     if let Some(ref model) = response.model {
         properties["model"] = Value::String(model.clone());
     }
-    properties["finish_reason"] = Value::String(
-        match response.finish_reason.as_deref() {
-            Some("end_turn") | None => "stop".to_string(),
-            Some(reason) => reason.to_string(),
-        },
-    );
+    properties["finish_reason"] = Value::String(match response.finish_reason.as_deref() {
+        Some("end_turn") | None => "stop".to_string(),
+        Some(reason) => reason.to_string(),
+    });
 
     if let Some(ref usage) = response.usage {
         let mut tokens = serde_json::Map::new();
@@ -156,7 +154,12 @@ async fn persist_child_nodes(
                 "thought_type": "reasoning",
             });
             if let Err(e) = callbacks
-                .create_node_in_workspace(workspace, "raisin:AIThought", &thought_path, thought_props)
+                .create_node_in_workspace(
+                    workspace,
+                    "raisin:AIThought",
+                    &thought_path,
+                    thought_props,
+                )
                 .await
             {
                 warn!("Failed to persist thought node {}: {}", thought_path, e);

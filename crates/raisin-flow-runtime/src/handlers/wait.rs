@@ -246,16 +246,12 @@ fn parse_duration(s: &str) -> FlowResult<u64> {
         )
     } else if s.ends_with("hours") || s.ends_with("hour") {
         (
-            s.trim_end_matches("hours")
-                .trim_end_matches("hour")
-                .trim(),
+            s.trim_end_matches("hours").trim_end_matches("hour").trim(),
             "h",
         )
     } else if s.ends_with("days") || s.ends_with("day") {
         (
-            s.trim_end_matches("days")
-                .trim_end_matches("day")
-                .trim(),
+            s.trim_end_matches("days").trim_end_matches("day").trim(),
             "d",
         )
     } else if s.ends_with('s') {

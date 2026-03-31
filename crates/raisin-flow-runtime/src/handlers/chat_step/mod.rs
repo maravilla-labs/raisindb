@@ -120,10 +120,7 @@ impl ChatStepHandler {
                 .get("retry_delay_ms")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1000),
-            timeout_ms: step
-                .properties
-                .get("timeout_ms")
-                .and_then(|v| v.as_u64()),
+            timeout_ms: step.properties.get("timeout_ms").and_then(|v| v.as_u64()),
             thinking_enabled: step
                 .properties
                 .get("thinking_enabled")
@@ -210,8 +207,7 @@ impl StepHandler for ChatStepHandler {
             .await;
 
         let session_key = format!("__chat_session_{}", step.id);
-        let (is_new, mut session) =
-            session::load_or_init_session(context, &session_key, &config);
+        let (is_new, mut session) = session::load_or_init_session(context, &session_key, &config);
 
         let (conv_ws, conv_prefix) = session::resolve_conversation_location(context);
         debug!(
@@ -247,7 +243,11 @@ impl StepHandler for ChatStepHandler {
 
         // Handle user message
         if let Some(message) = session::take_user_message(context) {
-            let source = if is_new { "context.input (first turn)" } else { "__chat_user_message (resume)" };
+            let source = if is_new {
+                "context.input (first turn)"
+            } else {
+                "__chat_user_message (resume)"
+            };
             debug!("User message found (source: {}): {}", source, message);
 
             if is_resumed {
@@ -299,14 +299,8 @@ impl StepHandler for ChatStepHandler {
         if session.turn_count >= config.max_turns {
             session.is_complete = true;
             session.completion_reason = Some("max_turns_reached".to_string());
-            session::update_stats_and_save(
-                callbacks,
-                context,
-                &session_key,
-                &session,
-                &conv_ws,
-            )
-            .await;
+            session::update_stats_and_save(callbacks, context, &session_key, &session, &conv_ws)
+                .await;
             warn!("Chat session reached max turns: {}", config.max_turns);
             return Ok(session::make_continue(step, &session));
         }
@@ -318,12 +312,21 @@ impl StepHandler for ChatStepHandler {
                 agent_path, session.turn_count, session.conversation_path
             );
             if let Err(e) = ai_turn::process_ai_turn(
-                callbacks, context, &config, &mut session, agent_path, &conv_ws, &step.id,
+                callbacks,
+                context,
+                &config,
+                &mut session,
+                agent_path,
+                &conv_ws,
+                &step.id,
             )
             .await
             {
                 let error_msg = e.to_string();
-                warn!("ChatStep AI turn failed for step '{}': {}", step.id, error_msg);
+                warn!(
+                    "ChatStep AI turn failed for step '{}': {}",
+                    step.id, error_msg
+                );
 
                 // Emit a log event (not StepFailed) since we're recovering and the
                 // session will continue in Wait state for the user to retry.
@@ -338,14 +341,8 @@ impl StepHandler for ChatStepHandler {
 
         // If session is complete, finish the step
         if session.is_complete {
-            session::update_stats_and_save(
-                callbacks,
-                context,
-                &session_key,
-                &session,
-                &conv_ws,
-            )
-            .await;
+            session::update_stats_and_save(callbacks, context, &session_key, &session, &conv_ws)
+                .await;
             return Ok(session::make_continue(step, &session));
         }
 

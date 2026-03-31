@@ -28,10 +28,10 @@ mod handlers {
     pub mod auth;
     pub mod branches;
     pub mod commit;
+    pub mod conversations;
     pub mod element_types;
     #[cfg(feature = "storage-rocksdb")]
     pub mod embeddings;
-    pub mod conversations;
     pub mod functions;
     #[cfg(feature = "storage-rocksdb")]
     pub mod hybrid_search;

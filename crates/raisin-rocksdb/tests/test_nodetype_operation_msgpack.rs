@@ -30,7 +30,7 @@ fn test_nodetype_in_operation_msgpack() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     let mut vc = VectorClock::new();

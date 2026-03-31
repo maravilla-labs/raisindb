@@ -218,23 +218,21 @@ fn parse_anthropic_chunk(event_type: &str, data: &str) -> Option<Result<StreamCh
 
             match block {
                 AnthropicStreamContentBlock::Text { .. } => None,
-                AnthropicStreamContentBlock::ToolUse { id, name } => {
-                    Some(Ok(StreamChunk {
-                        delta: String::new(),
-                        tool_calls: Some(vec![ToolCall {
-                            id,
-                            call_type: "function".to_string(),
-                            function: FunctionCall {
-                                name,
-                                arguments: String::new(),
-                            },
-                            index: event.index,
-                        }]),
-                        usage: None,
-                        stop_reason: None,
-                        model: None,
-                    }))
-                }
+                AnthropicStreamContentBlock::ToolUse { id, name } => Some(Ok(StreamChunk {
+                    delta: String::new(),
+                    tool_calls: Some(vec![ToolCall {
+                        id,
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name,
+                            arguments: String::new(),
+                        },
+                        index: event.index,
+                    }]),
+                    usage: None,
+                    stop_reason: None,
+                    model: None,
+                })),
             }
         }
         "message_start" => {

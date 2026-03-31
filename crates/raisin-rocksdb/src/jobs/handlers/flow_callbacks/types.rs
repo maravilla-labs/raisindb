@@ -86,9 +86,7 @@ pub type AIStreamingCallerCallback = Arc<
             Vec<Value>,
             Option<Value>,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<tokio::sync::mpsc::Receiver<Value>, String>> + Send,
-            >,
+            Box<dyn Future<Output = Result<tokio::sync::mpsc::Receiver<Value>, String>> + Send>,
         > + Send
         + Sync,
 >;

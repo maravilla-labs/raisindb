@@ -234,10 +234,8 @@ mod tests {
     fn test_buffered_text_stream_error_propagation() {
         use futures::stream::StreamExt;
 
-        let chunks: Vec<Result<Vec<u8>, String>> = vec![
-            Ok(b"data: ok\n".to_vec()),
-            Err("network error".to_string()),
-        ];
+        let chunks: Vec<Result<Vec<u8>, String>> =
+            vec![Ok(b"data: ok\n".to_vec()), Err("network error".to_string())];
 
         let stream = buffered_text_stream(futures::stream::iter(chunks));
         let texts: Vec<Result<String, String>> = futures::executor::block_on(stream.collect());

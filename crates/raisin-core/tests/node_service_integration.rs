@@ -69,7 +69,7 @@ async fn create_test_node_type<S: Storage>(
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage
@@ -381,7 +381,7 @@ async fn test_initial_structure_auto_creation() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage
@@ -474,7 +474,7 @@ async fn test_nested_initial_structure() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage
@@ -565,7 +565,7 @@ async fn test_initial_structure_with_transaction_api() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage
@@ -705,7 +705,7 @@ async fn test_nested_initial_structure_with_transaction_api() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage

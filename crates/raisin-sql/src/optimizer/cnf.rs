@@ -84,7 +84,12 @@ pub fn combine_conjuncts(conjuncts: Vec<TypedExpr>) -> Option<TypedExpr> {
     }
 
     if conjuncts.len() == 1 {
-        return Some(conjuncts.into_iter().next().expect("non-empty after length check"));
+        return Some(
+            conjuncts
+                .into_iter()
+                .next()
+                .expect("non-empty after length check"),
+        );
     }
 
     // Build nested AND tree (left-associative)

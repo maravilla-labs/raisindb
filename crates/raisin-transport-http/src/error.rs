@@ -470,12 +470,10 @@ impl From<raisin_flow_runtime::types::FlowError> for ApiError {
         match err {
             FlowError::NodeNotFound(msg) => ApiError::not_found(msg),
             FlowError::InvalidDefinition(msg) => ApiError::validation_failed(msg),
-            FlowError::InvalidStateTransition { from, to } => {
-                ApiError::validation_failed(format!(
-                    "Invalid state transition from {} to {}",
-                    from, to
-                ))
-            }
+            FlowError::InvalidStateTransition { from, to } => ApiError::validation_failed(format!(
+                "Invalid state transition from {} to {}",
+                from, to
+            )),
             FlowError::AlreadyTerminated { status } => {
                 ApiError::validation_failed(format!("Flow instance is already {}", status))
             }

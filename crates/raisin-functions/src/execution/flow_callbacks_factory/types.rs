@@ -90,9 +90,8 @@ pub type AIStreamingCallerCallback = Arc<
             Option<serde_json::Value>,
         ) -> Pin<
             Box<
-                dyn Future<
-                        Output = Result<tokio::sync::mpsc::Receiver<serde_json::Value>, String>,
-                    > + Send,
+                dyn Future<Output = Result<tokio::sync::mpsc::Receiver<serde_json::Value>, String>>
+                    + Send,
             >,
         > + Send
         + Sync,

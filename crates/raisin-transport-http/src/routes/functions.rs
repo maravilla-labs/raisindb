@@ -62,10 +62,9 @@ pub(crate) fn function_routes(state: &AppState) -> Router<AppState> {
         // Test flow execution (with mock configuration)
         .route(
             "/api/flows/{repo}/test",
-            post(crate::handlers::functions::run_flow_test).layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                optional_auth_middleware,
-            )),
+            post(crate::handlers::functions::run_flow_test).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // Get flow instance status / Delete a flow instance
         .route(
@@ -80,26 +79,23 @@ pub(crate) fn function_routes(state: &AppState) -> Router<AppState> {
         // Resume a paused flow instance
         .route(
             "/api/flows/{repo}/instances/{instance_id}/resume",
-            post(crate::handlers::functions::resume_flow).layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                optional_auth_middleware,
-            )),
+            post(crate::handlers::functions::resume_flow).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // Cancel a running/waiting flow instance
         .route(
             "/api/flows/{repo}/instances/{instance_id}/cancel",
-            post(crate::handlers::functions::cancel_flow_instance).layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                optional_auth_middleware,
-            )),
+            post(crate::handlers::functions::cancel_flow_instance).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // Flow instance events SSE (real-time step-level events)
         .route(
             "/api/flows/{repo}/instances/{instance_id}/events",
-            get(crate::handlers::functions::stream_flow_events).layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                optional_auth_middleware,
-            )),
+            get(crate::handlers::functions::stream_flow_events).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // ----------------------------------------------------------------
         // Conversation events SSE (real-time AI conversation streaming)

@@ -50,7 +50,8 @@ pub(super) async fn call_ai_streaming_with_retry(
             Ok(Ok(mut rx)) => {
                 let mut tool_map = std::collections::HashMap::new();
                 let response =
-                    ai_tool_loop::accumulate_stream(&mut rx, callbacks, instance_id, &mut tool_map).await;
+                    ai_tool_loop::accumulate_stream(&mut rx, callbacks, instance_id, &mut tool_map)
+                        .await;
                 return Ok(response);
             }
             Ok(Err(e)) => {
@@ -91,8 +92,9 @@ pub(super) async fn call_ai_streaming_with_retry(
         }
     }
 
-    Err(last_err
-        .unwrap_or_else(|| FlowError::AIProvider("AI call failed with no error details".to_string())))
+    Err(last_err.unwrap_or_else(|| {
+        FlowError::AIProvider("AI call failed with no error details".to_string())
+    }))
 }
 
 /// Check if a flow error represents a transient AI failure worth retrying.

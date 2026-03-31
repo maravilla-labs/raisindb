@@ -218,10 +218,7 @@ async fn test_execute_first_turn_waits_for_input() {
     let metadata = expect_wait(handler.execute(&node, &mut context, &callbacks).await);
 
     assert!(metadata.get("session_id").is_some());
-    assert_eq!(
-        metadata.get("turn_count").and_then(|v| v.as_u64()),
-        Some(0)
-    );
+    assert_eq!(metadata.get("turn_count").and_then(|v| v.as_u64()), Some(0));
 }
 
 #[tokio::test]
@@ -240,10 +237,7 @@ async fn test_execute_with_user_message_calls_ai() {
 
     let metadata = expect_wait(handler.execute(&node, &mut context, &callbacks).await);
 
-    assert_eq!(
-        metadata.get("turn_count").and_then(|v| v.as_u64()),
-        Some(1)
-    );
+    assert_eq!(metadata.get("turn_count").and_then(|v| v.as_u64()), Some(1));
     assert!(!context.variables.contains_key("__chat_user_message"));
 }
 
@@ -254,10 +248,9 @@ async fn test_execute_termination_keyword() {
     let node = create_chat_node();
     let mut context = FlowContext::new("test".to_string(), serde_json::json!({}));
 
-    context.variables.insert(
-        "__chat_user_message".to_string(),
-        serde_json::json!("bye"),
-    );
+    context
+        .variables
+        .insert("__chat_user_message".to_string(), serde_json::json!("bye"));
 
     let output = expect_continue(handler.execute(&node, &mut context, &callbacks).await);
 
@@ -280,10 +273,7 @@ async fn test_execute_max_turns_reached() {
         step_type: StepType::Chat,
         properties: {
             let mut props = HashMap::new();
-            props.insert(
-                "agent_ref".to_string(),
-                serde_json::json!("/agents/test"),
-            );
+            props.insert("agent_ref".to_string(), serde_json::json!("/agents/test"));
             props.insert("max_turns".to_string(), serde_json::json!(2));
             props
         },
@@ -293,10 +283,9 @@ async fn test_execute_max_turns_reached() {
     let mut context = FlowContext::new("test".to_string(), serde_json::json!({}));
 
     // Turn 1
-    context.variables.insert(
-        "__chat_user_message".to_string(),
-        serde_json::json!("msg1"),
-    );
+    context
+        .variables
+        .insert("__chat_user_message".to_string(), serde_json::json!("msg1"));
     let r1 = handler
         .execute(&node, &mut context, &callbacks)
         .await
@@ -304,10 +293,9 @@ async fn test_execute_max_turns_reached() {
     assert!(matches!(r1, StepResult::Wait { .. }));
 
     // Turn 2
-    context.variables.insert(
-        "__chat_user_message".to_string(),
-        serde_json::json!("msg2"),
-    );
+    context
+        .variables
+        .insert("__chat_user_message".to_string(), serde_json::json!("msg2"));
     let output = expect_continue(handler.execute(&node, &mut context, &callbacks).await);
 
     assert_eq!(
@@ -330,10 +318,7 @@ async fn test_execute_ai_end_session_signal() {
         step_type: StepType::Chat,
         properties: {
             let mut props = HashMap::new();
-            props.insert(
-                "agent_ref".to_string(),
-                serde_json::json!("/agents/test"),
-            );
+            props.insert("agent_ref".to_string(), serde_json::json!("/agents/test"));
             props.insert(
                 "termination".to_string(),
                 serde_json::json!({
@@ -389,10 +374,7 @@ async fn test_agent_ref_fallback_from_flow_input() {
 
     let metadata = expect_wait(handler.execute(&node, &mut context, &callbacks).await);
 
-    assert_eq!(
-        metadata.get("turn_count").and_then(|v| v.as_u64()),
-        Some(1)
-    );
+    assert_eq!(metadata.get("turn_count").and_then(|v| v.as_u64()), Some(1));
     assert_eq!(
         metadata.get("current_agent").and_then(|v| v.as_str()),
         Some("/agents/sample-assistant")
@@ -430,8 +412,5 @@ async fn test_execute_with_tool_calls() {
 
     let metadata = expect_wait(handler.execute(&node, &mut context, &callbacks).await);
 
-    assert_eq!(
-        metadata.get("turn_count").and_then(|v| v.as_u64()),
-        Some(1)
-    );
+    assert_eq!(metadata.get("turn_count").and_then(|v| v.as_u64()), Some(1));
 }

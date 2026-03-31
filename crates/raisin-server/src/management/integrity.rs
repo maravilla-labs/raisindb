@@ -51,7 +51,10 @@ pub async fn start_integrity_check(
     for job in jobs {
         if matches!(job.job_type, JobType::IntegrityScan)
             && job.tenant.as_deref() == Some(&tenant)
-            && matches!(job.status, JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled)
+            && matches!(
+                job.status,
+                JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled
+            )
         {
             tracing::info!(
                 "Integrity check already running for tenant '{}', returning existing job ID",

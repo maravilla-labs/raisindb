@@ -6,7 +6,7 @@
 #![allow(unexpected_cfgs)]
 #![allow(mismatched_lifetime_syntaxes)]
 
-//! Core business logic and services for RaisinDB. 
+//! Core business logic and services for RaisinDB.
 //!
 //! This crate provides the main service layer for managing nodes, workspaces,
 //! node types, and validation. It sits between the storage layer and transport layer.

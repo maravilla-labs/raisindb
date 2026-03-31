@@ -59,7 +59,11 @@ impl RocksDBStorage {
                     };
 
                     // Reset Running/Executing → Scheduled (crashed mid-execution)
-                    if matches!(job_info.status, raisin_storage::jobs::JobStatus::Running | raisin_storage::jobs::JobStatus::Executing) {
+                    if matches!(
+                        job_info.status,
+                        raisin_storage::jobs::JobStatus::Running
+                            | raisin_storage::jobs::JobStatus::Executing
+                    ) {
                         job_info.status = raisin_storage::jobs::JobStatus::Scheduled;
                         job_info.last_heartbeat = None;
                         reset_running += 1;

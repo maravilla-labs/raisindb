@@ -36,7 +36,10 @@ pub async fn load_conversation_history(
         match role {
             "user" => {
                 if content.is_empty() {
-                    debug!("Skipping user message with empty content at '{}'", child_path);
+                    debug!(
+                        "Skipping user message with empty content at '{}'",
+                        child_path
+                    );
                     continue;
                 }
                 messages.push(json!({"role": "user", "content": content}));
@@ -104,10 +107,7 @@ async fn append_assistant_message(
     content: &str,
     messages: &mut Vec<Value>,
 ) {
-    let tool_calls = props
-        .get("tool_calls")
-        .and_then(|v| v.as_array())
-        .cloned();
+    let tool_calls = props.get("tool_calls").and_then(|v| v.as_array()).cloned();
 
     let has_tool_calls = tool_calls
         .as_ref()
@@ -134,10 +134,7 @@ async fn append_assistant_message(
 
     for tc_node in &msg_children {
         let tc_props = tc_node.get("properties").cloned().unwrap_or_default();
-        let tc_path = tc_node
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let tc_path = tc_node.get("path").and_then(|v| v.as_str()).unwrap_or("");
         let node_type = tc_node
             .get("node_type")
             .and_then(|v| v.as_str())
@@ -159,14 +156,8 @@ async fn append_assistant_message(
             .unwrap_or_default();
 
         if let Some(result_node) = result_children.first() {
-            let result_props = result_node
-                .get("properties")
-                .cloned()
-                .unwrap_or_default();
-            let result_value = result_props
-                .get("result")
-                .cloned()
-                .unwrap_or(json!(null));
+            let result_props = result_node.get("properties").cloned().unwrap_or_default();
+            let result_value = result_props.get("result").cloned().unwrap_or(json!(null));
             let result_str = serde_json::to_string(&result_value).unwrap_or_default();
 
             messages.push(json!({

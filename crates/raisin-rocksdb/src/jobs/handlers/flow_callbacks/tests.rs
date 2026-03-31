@@ -60,7 +60,9 @@ async fn test_call_ai_no_callback_returns_error() {
         "main".to_string(),
     );
 
-    let result = callbacks.call_ai("functions", "/agents/test", vec![], None).await;
+    let result = callbacks
+        .call_ai("functions", "/agents/test", vec![], None)
+        .await;
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), FlowError::AIProvider(_)));
 }

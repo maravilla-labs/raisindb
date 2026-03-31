@@ -8,7 +8,9 @@
 
 use super::types::{ChatConfig, ChatSessionState};
 use crate::handlers::ai_tool_loop::{self, ToolLoopConfig, ToolLoopResult};
-use crate::handlers::conversation_persistence::{self, AiResponseData, ToolCallData, UsageData, AI_SENDER_ID};
+use crate::handlers::conversation_persistence::{
+    self, AiResponseData, ToolCallData, UsageData, AI_SENDER_ID,
+};
 use crate::types::{AiExecutionConfig, FlowCallbacks, FlowContext, FlowExecutionEvent, FlowResult};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -94,11 +96,7 @@ pub(super) async fn process_ai_turn(
             let _ = callbacks
                 .emit_event(
                     &context.instance_id,
-                    FlowExecutionEvent::log(
-                        "error",
-                        &error_msg,
-                        Some(step_id.to_string()),
-                    ),
+                    FlowExecutionEvent::log("error", &error_msg, Some(step_id.to_string())),
                 )
                 .await;
 

@@ -11,13 +11,15 @@ use std::sync::LazyLock;
 
 /// Regex matching `<function=name>{args}</function>` blocks.
 /// Tool names may contain word chars and hyphens (e.g. `kanban-boards`).
-static FUNCTION_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<function=([\w-]+)>([\s\S]*?)</function>").unwrap()
-});
+static FUNCTION_CALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<function=([\w-]+)>([\s\S]*?)</function>").unwrap());
 
 /// Regex matching model control tokens that should never appear in user-facing content.
 static CONTROL_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<\|(python_tag|eom_id|eot_id|start_header_id|end_header_id|begin_of_text|end_of_text)\|>").unwrap()
+    Regex::new(
+        r"<\|(python_tag|eom_id|eot_id|start_header_id|end_header_id|begin_of_text|end_of_text)\|>",
+    )
+    .unwrap()
 });
 
 /// Scan content for raw `<function=name>{args}</function>` patterns and extract
@@ -67,9 +69,7 @@ pub fn extract_tool_calls_from_content(content: &str) -> Option<Vec<ToolCall>> {
 /// or similar control tokens from content.
 pub fn strip_tool_call_syntax(content: &str) -> String {
     let cleaned = FUNCTION_CALL_RE.replace_all(content, "");
-    strip_model_control_tokens(&cleaned)
-        .trim()
-        .to_string()
+    strip_model_control_tokens(&cleaned).trim().to_string()
 }
 
 /// Strip model control tokens (`<|python_tag|>`, `<|eom_id|>`, etc.) from
@@ -289,7 +289,8 @@ mod tests {
 
     #[test]
     fn test_strip_tool_call_syntax() {
-        let content = r#"Here is some text <function=weather>{"city":"Bern"}</function> and more text"#;
+        let content =
+            r#"Here is some text <function=weather>{"city":"Bern"}</function> and more text"#;
         let cleaned = strip_tool_call_syntax(content);
         assert_eq!(cleaned, "Here is some text  and more text");
     }
@@ -310,7 +311,8 @@ mod tests {
 
     #[test]
     fn test_extract_with_surrounding_text() {
-        let content = r#"I'll call the tool now <function=weather>{"city":"Zurich"}</function> Done!"#;
+        let content =
+            r#"I'll call the tool now <function=weather>{"city":"Zurich"}</function> Done!"#;
         let calls = extract_tool_calls_from_content(content).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "weather");

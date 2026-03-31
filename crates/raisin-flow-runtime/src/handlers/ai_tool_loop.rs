@@ -96,7 +96,9 @@ pub async fn run_ai_with_tools(
         // Extract tool name → path mapping (included by ai_callback)
         if tool_map.is_empty() {
             if let Some(map) = response.get("_tool_map") {
-                if let Ok(parsed) = serde_json::from_value::<std::collections::HashMap<String, String>>(map.clone()) {
+                if let Ok(parsed) =
+                    serde_json::from_value::<std::collections::HashMap<String, String>>(map.clone())
+                {
                     tool_map = parsed;
                 }
             }
@@ -178,7 +180,8 @@ pub async fn run_ai_with_tools(
 
         // Execute each tool call
         for tc in &tool_calls {
-            let executed = execute_tool_call(callbacks, tc, &tool_map, instance_id, iteration).await;
+            let executed =
+                execute_tool_call(callbacks, tc, &tool_map, instance_id, iteration).await;
             messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": executed.id,
@@ -233,35 +236,68 @@ pub async fn run_ai_with_tools_streaming(
 
         // Accumulate usage
         if let Some(usage) = response.get("usage") {
-            total_input_tokens += usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            total_output_tokens += usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            total_input_tokens += usage
+                .get("prompt_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            total_output_tokens += usage
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
         }
 
-        last_model = response.get("model").and_then(|v| v.as_str()).map(String::from);
+        last_model = response
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
-        let tool_calls = response.get("tool_calls").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let tool_calls = response
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         if tool_calls.is_empty() || iteration == config.max_tool_iterations {
             if iteration == config.max_tool_iterations && !tool_calls.is_empty() {
-                warn!("Streaming tool loop hit max iterations ({})", config.max_tool_iterations);
+                warn!(
+                    "Streaming tool loop hit max iterations ({})",
+                    config.max_tool_iterations
+                );
             }
-            let content = response.get("content").or_else(|| response.get("message"))
-                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let content = response
+                .get("content")
+                .or_else(|| response.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
             return Ok(ToolLoopResult {
                 content,
                 tool_calls_executed: all_tool_calls,
                 model: last_model,
-                finish_reason: response.get("finish_reason").and_then(|v| v.as_str()).map(String::from),
+                finish_reason: response
+                    .get("finish_reason")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 total_input_tokens,
                 total_output_tokens,
-                end_session: response.get("end_session").and_then(|v| v.as_bool()).unwrap_or(false),
-                handoff_to: response.get("handoff_to").and_then(|v| v.as_str()).map(String::from),
+                end_session: response
+                    .get("end_session")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                handoff_to: response
+                    .get("handoff_to")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
             });
         }
 
         // Tool calls present — execute them (same logic as non-streaming)
-        let assistant_content = response.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let assistant_content = response
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         messages.push(serde_json::json!({
             "role": "assistant",
             "content": assistant_content,
@@ -269,7 +305,8 @@ pub async fn run_ai_with_tools_streaming(
         }));
 
         for tc in &tool_calls {
-            let executed = execute_tool_call(callbacks, tc, &tool_map, instance_id, iteration).await;
+            let executed =
+                execute_tool_call(callbacks, tc, &tool_map, instance_id, iteration).await;
             messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": executed.id,
@@ -337,36 +374,70 @@ async fn execute_tool_call(
     instance_id: &str,
     iteration: u32,
 ) -> ExecutedToolCall {
-    let tc_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let tc_id = tc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let func = tc.get("function").cloned().unwrap_or_default();
-    let func_name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let func_name = func
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let arguments = parse_tool_arguments(&func);
 
     debug!(tool_call_id = %tc_id, function = %func_name, "Executing tool call (iteration {})", iteration);
 
     let _ = callbacks
-        .emit_event(instance_id, FlowExecutionEvent::tool_call_started(&tc_id, &func_name, arguments.clone()))
+        .emit_event(
+            instance_id,
+            FlowExecutionEvent::tool_call_started(&tc_id, &func_name, arguments.clone()),
+        )
         .await;
 
-    let func_path = tool_map.get(&func_name).cloned().unwrap_or_else(|| func_name.clone());
+    let func_path = tool_map
+        .get(&func_name)
+        .cloned()
+        .unwrap_or_else(|| func_name.clone());
 
     let start = Instant::now();
-    let exec_result = callbacks.execute_function(&func_path, arguments.clone()).await;
+    let exec_result = callbacks
+        .execute_function(&func_path, arguments.clone())
+        .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let (result_value, error) = match exec_result {
         Ok(val) => (val, None),
         Err(e) => {
             warn!("Tool call {} ({}) failed: {}", tc_id, func_name, e);
-            (serde_json::json!({"error": e.to_string()}), Some(e.to_string()))
+            (
+                serde_json::json!({"error": e.to_string()}),
+                Some(e.to_string()),
+            )
         }
     };
 
     let _ = callbacks
-        .emit_event(instance_id, FlowExecutionEvent::tool_call_completed(&tc_id, result_value.clone(), error.clone(), Some(duration_ms)))
+        .emit_event(
+            instance_id,
+            FlowExecutionEvent::tool_call_completed(
+                &tc_id,
+                result_value.clone(),
+                error.clone(),
+                Some(duration_ms),
+            ),
+        )
         .await;
 
-    ExecutedToolCall { id: tc_id, function_name: func_name, arguments, result: result_value, error, duration_ms }
+    ExecutedToolCall {
+        id: tc_id,
+        function_name: func_name,
+        arguments,
+        result: result_value,
+        error,
+        duration_ms,
+    }
 }
 
 /// Parse tool arguments from the function object.
@@ -374,7 +445,9 @@ async fn execute_tool_call(
 /// The `arguments` field may be a JSON string (OpenAI format) or already a Value.
 fn parse_tool_arguments(func: &Value) -> Value {
     match func.get("arguments") {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Object(Default::default())),
+        Some(Value::String(s)) => {
+            serde_json::from_str(s).unwrap_or(Value::Object(Default::default()))
+        }
         Some(v) => v.clone(),
         None => Value::Object(Default::default()),
     }

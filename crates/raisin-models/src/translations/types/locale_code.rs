@@ -199,7 +199,10 @@ impl LocaleCode {
     /// ```
     #[inline]
     pub fn language(&self) -> &str {
-        self.0.split('-').next().expect("split always yields at least one element")
+        self.0
+            .split('-')
+            .next()
+            .expect("split always yields at least one element")
     }
 
     /// Get the region part of the locale (after hyphen), if present.

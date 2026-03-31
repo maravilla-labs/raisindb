@@ -255,7 +255,7 @@ mod tests {
                     published_by: None,
                     previous_version: None,
                     compound_indexes: None,
-            is_mixin: None,
+                    is_mixin: None,
                 },
             },
             revision: None,

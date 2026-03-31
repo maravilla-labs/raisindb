@@ -18,7 +18,7 @@ use raisin_binary::BinaryStorage;
 use raisin_models::nodes::properties::{Properties, PropertyValue};
 use raisin_storage::{transactional::TransactionalStorage, NodeRepository, Storage, StorageScope};
 
-use super::types::{AiCallContext, AICallerCallback, AIStreamingCallerCallback};
+use super::types::{AICallerCallback, AIStreamingCallerCallback, AiCallContext};
 
 // ---------------------------------------------------------------------------
 // Envelope types – typed structs that serialize to the JSON shape the flow
@@ -83,11 +83,7 @@ impl From<StreamChunk> for StreamChunkEnvelope {
 
         let delta = if has_content || has_tool_calls {
             Some(StreamDelta {
-                content: if has_content {
-                    Some(chunk.delta)
-                } else {
-                    None
-                },
+                content: if has_content { Some(chunk.delta) } else { None },
                 tool_calls: chunk.tool_calls.map(|calls| {
                     calls
                         .into_iter()
@@ -189,52 +185,51 @@ where
     B: BinaryStorage + 'static,
 {
     let deps = deps.clone();
-    Arc::new(move |ctx: AiCallContext, messages: Vec<serde_json::Value>, response_format_json: Option<serde_json::Value>| {
-        let deps = deps.clone();
-        Box::pin(async move {
-            tracing::debug!(
-                tenant_id = %ctx.tenant_id,
-                repo_id = %ctx.repo_id,
-                branch = %ctx.branch,
-                agent_ref = %ctx.agent_ref,
-                message_count = messages.len(),
-                "Flow ai_caller callback"
-            );
+    Arc::new(
+        move |ctx: AiCallContext,
+              messages: Vec<serde_json::Value>,
+              response_format_json: Option<serde_json::Value>| {
+            let deps = deps.clone();
+            Box::pin(async move {
+                tracing::debug!(
+                    tenant_id = %ctx.tenant_id,
+                    repo_id = %ctx.repo_id,
+                    branch = %ctx.branch,
+                    agent_ref = %ctx.agent_ref,
+                    message_count = messages.len(),
+                    "Flow ai_caller callback"
+                );
 
-            let (request, tool_path_map) = build_completion_request(
-                &deps,
-                &ctx,
-                &messages,
-                response_format_json,
-                false,
-            )
-            .await?;
+                let (request, tool_path_map) =
+                    build_completion_request(&deps, &ctx, &messages, response_format_json, false)
+                        .await?;
 
-            let model = request.model.clone();
-            let ai_config_store = deps.ai_config_store.as_ref().ok_or_else(|| {
-                "AI operations not configured - no ai_config_store available".to_string()
-            })?;
+                let model = request.model.clone();
+                let ai_config_store = deps.ai_config_store.as_ref().ok_or_else(|| {
+                    "AI operations not configured - no ai_config_store available".to_string()
+                })?;
 
-            let provider =
-                create_provider_for_model(ai_config_store.as_ref(), &ctx.tenant_id, &model)
+                let provider =
+                    create_provider_for_model(ai_config_store.as_ref(), &ctx.tenant_id, &model)
+                        .await
+                        .map_err(|e| format!("Failed to create AI provider: {}", e))?;
+
+                let response = provider
+                    .complete(request)
                     .await
-                    .map_err(|e| format!("Failed to create AI provider: {}", e))?;
+                    .map_err(|e| format!("AI completion failed: {}", e))?;
 
-            let response = provider
-                .complete(request)
-                .await
-                .map_err(|e| format!("AI completion failed: {}", e))?;
+                tracing::debug!(
+                    model = %response.model,
+                    finish_reason = ?response.stop_reason,
+                    "AI completion successful"
+                );
 
-            tracing::debug!(
-                model = %response.model,
-                finish_reason = ?response.stop_reason,
-                "AI completion successful"
-            );
-
-            let envelope = CompletionResponseEnvelope::from_response(response, tool_path_map);
-            serde_json::to_value(&envelope).map_err(|e| format!("Serialization failed: {}", e))
-        })
-    })
+                let envelope = CompletionResponseEnvelope::from_response(response, tool_path_map);
+                serde_json::to_value(&envelope).map_err(|e| format!("Serialization failed: {}", e))
+            })
+        },
+    )
 }
 
 /// Create streaming AI caller callback — invokes AI agents with streaming.
@@ -250,65 +245,63 @@ where
     B: BinaryStorage + 'static,
 {
     let deps = deps.clone();
-    Arc::new(move |ctx: AiCallContext, messages: Vec<serde_json::Value>, response_format_json: Option<serde_json::Value>| {
-        let deps = deps.clone();
-        Box::pin(async move {
-            let (request, tool_path_map) = build_completion_request(
-                &deps,
-                &ctx,
-                &messages,
-                response_format_json,
-                true,
-            )
-            .await?;
+    Arc::new(
+        move |ctx: AiCallContext,
+              messages: Vec<serde_json::Value>,
+              response_format_json: Option<serde_json::Value>| {
+            let deps = deps.clone();
+            Box::pin(async move {
+                let (request, tool_path_map) =
+                    build_completion_request(&deps, &ctx, &messages, response_format_json, true)
+                        .await?;
 
-            let model = request.model.clone();
-            let ai_config_store = deps.ai_config_store.as_ref().ok_or_else(|| {
-                "AI operations not configured - no ai_config_store available".to_string()
-            })?;
-            let provider =
-                create_provider_for_model(ai_config_store.as_ref(), &ctx.tenant_id, &model)
+                let model = request.model.clone();
+                let ai_config_store = deps.ai_config_store.as_ref().ok_or_else(|| {
+                    "AI operations not configured - no ai_config_store available".to_string()
+                })?;
+                let provider =
+                    create_provider_for_model(ai_config_store.as_ref(), &ctx.tenant_id, &model)
+                        .await
+                        .map_err(|e| format!("Failed to create AI provider: {}", e))?;
+
+                let mut stream = provider
+                    .stream_complete(request)
                     .await
-                    .map_err(|e| format!("Failed to create AI provider: {}", e))?;
+                    .map_err(|e| format!("Stream AI completion failed: {}", e))?;
 
-            let mut stream = provider
-                .stream_complete(request)
-                .await
-                .map_err(|e| format!("Stream AI completion failed: {}", e))?;
+                let (tx, rx) = tokio::sync::mpsc::channel::<serde_json::Value>(32);
 
-            let (tx, rx) = tokio::sync::mpsc::channel::<serde_json::Value>(32);
+                if !tool_path_map.is_empty() {
+                    let _ = tx
+                        .send(serde_json::json!({ "_tool_map": tool_path_map }))
+                        .await;
+                }
 
-            if !tool_path_map.is_empty() {
-                let _ = tx
-                    .send(serde_json::json!({ "_tool_map": tool_path_map }))
-                    .await;
-            }
-
-            tokio::spawn(async move {
-                while let Some(chunk_result) = stream.next().await {
-                    match chunk_result {
-                        Ok(chunk) => {
-                            let envelope = StreamChunkEnvelope::from(chunk);
-                            let chunk_json =
-                                serde_json::to_value(&envelope).unwrap_or_default();
-                            if tx.send(chunk_json).await.is_err() {
+                tokio::spawn(async move {
+                    while let Some(chunk_result) = stream.next().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                let envelope = StreamChunkEnvelope::from(chunk);
+                                let chunk_json =
+                                    serde_json::to_value(&envelope).unwrap_or_default();
+                                if tx.send(chunk_json).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Stream chunk error: {}", e);
+                                let _ =
+                                    tx.send(serde_json::json!({ "error": e.to_string() })).await;
                                 break;
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("Stream chunk error: {}", e);
-                            let _ = tx
-                                .send(serde_json::json!({ "error": e.to_string() }))
-                                .await;
-                            break;
-                        }
                     }
-                }
-            });
+                });
 
-            Ok(rx)
-        })
-    })
+                Ok(rx)
+            })
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -407,10 +400,7 @@ where
 ///
 /// Uses `Message` constructors and `serde_json::from_value` for tool_calls
 /// instead of manual field-by-field parsing.
-fn build_ai_messages(
-    system_prompt: Option<&str>,
-    messages: &[serde_json::Value],
-) -> Vec<Message> {
+fn build_ai_messages(system_prompt: Option<&str>, messages: &[serde_json::Value]) -> Vec<Message> {
     let mut ai_messages: Vec<Message> = Vec::new();
 
     if let Some(system) = system_prompt {
@@ -506,7 +496,10 @@ async fn load_agent_tools<S, B>(
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
-) -> (Vec<raisin_ai::types::ToolDefinition>, HashMap<String, String>)
+) -> (
+    Vec<raisin_ai::types::ToolDefinition>,
+    HashMap<String, String>,
+)
 where
     S: Storage + TransactionalStorage + 'static,
     B: BinaryStorage + 'static,

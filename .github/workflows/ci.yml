@@ -36,5 +36,5 @@ jobs:
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
       - run: cargo test --workspace

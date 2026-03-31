@@ -85,7 +85,10 @@ impl StepHandler for AiContainerHandler {
         if let Ok(path) = self.get_conversation_path(context) {
             match self.load_conversation_history(&path, callbacks).await {
                 Ok(history) if !history.is_empty() => {
-                    debug!("Loaded {} messages from conversation history", history.len());
+                    debug!(
+                        "Loaded {} messages from conversation history",
+                        history.len()
+                    );
                     messages = history;
                 }
                 Ok(_) => {
@@ -100,10 +103,7 @@ impl StepHandler for AiContainerHandler {
         // On first iteration, append the triggering user message if not already in history
         if state.iteration == 0 && messages.is_empty() {
             self.init_user_message_to(context, &mut messages);
-            debug!(
-                "Initialized conversation with {} messages",
-                messages.len()
-            );
+            debug!("Initialized conversation with {} messages", messages.len());
         }
 
         // Check max iterations
@@ -128,9 +128,7 @@ impl StepHandler for AiContainerHandler {
         }
 
         // Check total execution timeout
-        if let (Some(started), Some(total_limit)) =
-            (state.started_at_ms, config.total_timeout_ms)
-        {
+        if let (Some(started), Some(total_limit)) = (state.started_at_ms, config.total_timeout_ms) {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -377,13 +375,29 @@ impl StepHandler for AiContainerHandler {
             }
             ToolProcessingResult::AutoExecute(tools) => {
                 let message_path = self
-                    .save_assistant_response(context, callbacks, &content, &Some(tools.clone()), &ai_response)
+                    .save_assistant_response(
+                        context,
+                        callbacks,
+                        &content,
+                        &Some(tools.clone()),
+                        &ai_response,
+                    )
                     .await
-                    .map_err(|e| { error!("Failed to save assistant response: {}", e); e })
+                    .map_err(|e| {
+                        error!("Failed to save assistant response: {}", e);
+                        e
+                    })
                     .ok();
 
                 debug!("Auto-executing {} tools", tools.len());
-                execute_auto_tools(callbacks, &context.instance_id, &tools, message_path.as_deref(), &mut state).await;
+                execute_auto_tools(
+                    callbacks,
+                    &context.instance_id,
+                    &tools,
+                    message_path.as_deref(),
+                    &mut state,
+                )
+                .await;
 
                 self.save_state(context, &step.id, &state)?;
                 Ok(StepResult::SameStep {
@@ -405,18 +419,46 @@ impl StepHandler for AiContainerHandler {
                     }),
                 })
             }
-            ToolProcessingResult::Mixed { auto_tools, explicit_tools } => {
-                let all_tools: Vec<ToolCall> = auto_tools.iter().chain(explicit_tools.iter()).cloned().collect();
+            ToolProcessingResult::Mixed {
+                auto_tools,
+                explicit_tools,
+            } => {
+                let all_tools: Vec<ToolCall> = auto_tools
+                    .iter()
+                    .chain(explicit_tools.iter())
+                    .cloned()
+                    .collect();
                 let message_path = self
-                    .save_assistant_response(context, callbacks, &content, &Some(all_tools), &ai_response)
+                    .save_assistant_response(
+                        context,
+                        callbacks,
+                        &content,
+                        &Some(all_tools),
+                        &ai_response,
+                    )
                     .await
-                    .map_err(|e| { error!("Failed to save assistant response: {}", e); e })
+                    .map_err(|e| {
+                        error!("Failed to save assistant response: {}", e);
+                        e
+                    })
                     .ok();
 
-                debug!("Mixed mode: auto-executing {} tools, waiting on {} explicit tools", auto_tools.len(), explicit_tools.len());
-                execute_auto_tools(callbacks, &context.instance_id, &auto_tools, message_path.as_deref(), &mut state).await;
+                debug!(
+                    "Mixed mode: auto-executing {} tools, waiting on {} explicit tools",
+                    auto_tools.len(),
+                    explicit_tools.len()
+                );
+                execute_auto_tools(
+                    callbacks,
+                    &context.instance_id,
+                    &auto_tools,
+                    message_path.as_deref(),
+                    &mut state,
+                )
+                .await;
 
-                emit_tool_call_started_events(callbacks, &context.instance_id, &explicit_tools).await;
+                emit_tool_call_started_events(callbacks, &context.instance_id, &explicit_tools)
+                    .await;
 
                 state.pending_tool_calls = explicit_tools;
                 self.save_state(context, &step.id, &state)?;
@@ -447,11 +489,7 @@ async fn execute_auto_tools(
         let _ = callbacks
             .emit_event(
                 instance_id,
-                FlowExecutionEvent::tool_call_started(
-                    &tool.id,
-                    &tool.name,
-                    tool.arguments.clone(),
-                ),
+                FlowExecutionEvent::tool_call_started(&tool.id, &tool.name, tool.arguments.clone()),
             )
             .await;
 
@@ -476,7 +514,12 @@ async fn execute_auto_tools(
         let _ = callbacks
             .emit_event(
                 instance_id,
-                FlowExecutionEvent::tool_call_completed(&tool.id, result_value.clone(), error.clone(), None),
+                FlowExecutionEvent::tool_call_completed(
+                    &tool.id,
+                    result_value.clone(),
+                    error.clone(),
+                    None,
+                ),
             )
             .await;
 
@@ -499,11 +542,7 @@ async fn emit_tool_call_started_events(
         let _ = callbacks
             .emit_event(
                 instance_id,
-                FlowExecutionEvent::tool_call_started(
-                    &tool.id,
-                    &tool.name,
-                    tool.arguments.clone(),
-                ),
+                FlowExecutionEvent::tool_call_started(&tool.id, &tool.name, tool.arguments.clone()),
             )
             .await;
     }

@@ -50,16 +50,16 @@ fn test_build_chat_request_basic() {
 fn test_build_chat_request_with_system() {
     let request = CompletionRequest::new(
         "claude-sonnet-4-5".to_string(),
-        vec![
-            Message::system("You are helpful"),
-            Message::user("Hello"),
-        ],
+        vec![Message::system("You are helpful"), Message::user("Hello")],
     );
 
     let anthropic_request = AnthropicProvider::build_chat_request(&request, false);
 
     // System messages go into the `system` field, not into messages
-    assert_eq!(anthropic_request.system, Some("You are helpful".to_string()));
+    assert_eq!(
+        anthropic_request.system,
+        Some("You are helpful".to_string())
+    );
     // Only the user message should be in the messages array
     assert_eq!(anthropic_request.messages.len(), 1);
     assert_eq!(anthropic_request.messages[0].role, "user");
@@ -165,7 +165,11 @@ fn test_apply_response_format_text_is_noop() {
     let mut tools = None;
     let mut tool_choice = None;
 
-    AnthropicProvider::apply_response_format(Some(&ResponseFormat::Text), &mut tools, &mut tool_choice);
+    AnthropicProvider::apply_response_format(
+        Some(&ResponseFormat::Text),
+        &mut tools,
+        &mut tool_choice,
+    );
 
     assert!(tools.is_none());
     assert!(tool_choice.is_none());
@@ -302,10 +306,7 @@ fn test_extract_structured_output_moves_tool_call_to_content() {
 
     AnthropicProvider::extract_structured_output(&mut response, Some(&schema));
 
-    assert_eq!(
-        response.message.content,
-        r#"{"keywords":["rust","async"]}"#
-    );
+    assert_eq!(response.message.content, r#"{"keywords":["rust","async"]}"#);
     assert!(response.message.tool_calls.is_none());
     assert_eq!(response.stop_reason.as_deref(), Some("stop"));
 }
@@ -408,14 +409,11 @@ data: {\"type\":\"message_stop\"}\n";
     let chunks = parse_anthropic_sse_events(sse);
 
     // Find tool call start
-    let tool_start = chunks
-        .iter()
-        .filter_map(|r| r.as_ref().ok())
-        .find(|c| {
-            c.tool_calls
-                .as_ref()
-                .is_some_and(|tc| !tc.is_empty() && !tc[0].id.is_empty())
-        });
+    let tool_start = chunks.iter().filter_map(|r| r.as_ref().ok()).find(|c| {
+        c.tool_calls
+            .as_ref()
+            .is_some_and(|tc| !tc.is_empty() && !tc[0].id.is_empty())
+    });
     assert!(tool_start.is_some());
     let tc = &tool_start.unwrap().tool_calls.as_ref().unwrap()[0];
     assert_eq!(tc.id, "toolu_xyz");
@@ -433,9 +431,16 @@ data: {\"type\":\"message_stop\"}\n";
         .collect();
 
     assert_eq!(arg_chunks.len(), 2);
-    assert_eq!(arg_chunks[0].tool_calls.as_ref().unwrap()[0].function.arguments, "{\"loc");
     assert_eq!(
-        arg_chunks[1].tool_calls.as_ref().unwrap()[0].function.arguments,
+        arg_chunks[0].tool_calls.as_ref().unwrap()[0]
+            .function
+            .arguments,
+        "{\"loc"
+    );
+    assert_eq!(
+        arg_chunks[1].tool_calls.as_ref().unwrap()[0]
+            .function
+            .arguments,
         "ation\":\"Paris\"}"
     );
 
@@ -445,10 +450,7 @@ data: {\"type\":\"message_stop\"}\n";
         .filter_map(|r| r.as_ref().ok())
         .find(|c| c.stop_reason.is_some());
     assert!(stop_chunk.is_some());
-    assert_eq!(
-        stop_chunk.unwrap().stop_reason.as_deref(),
-        Some("tool_use")
-    );
+    assert_eq!(stop_chunk.unwrap().stop_reason.as_deref(), Some("tool_use"));
 }
 
 #[test]

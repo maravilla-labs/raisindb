@@ -244,7 +244,11 @@ impl RocksDBWorkerPool {
     ) -> Self {
         let mut pools = HashMap::new();
 
-        for category in [JobCategory::Realtime, JobCategory::Background, JobCategory::System] {
+        for category in [
+            JobCategory::Realtime,
+            JobCategory::Background,
+            JobCategory::System,
+        ] {
             let receiver = receivers
                 .get(&category)
                 .cloned()
@@ -257,7 +261,10 @@ impl RocksDBWorkerPool {
                 .get(&category)
                 .unwrap_or_else(|| panic!("{} config must exist", category));
 
-            pools.insert(category, CategoryPool::new(category, config, receiver, runtime));
+            pools.insert(
+                category,
+                CategoryPool::new(category, config, receiver, runtime),
+            );
         }
 
         Self {
@@ -293,12 +300,7 @@ impl RocksDBWorkerPool {
         let mut pools = HashMap::new();
         pools.insert(
             JobCategory::Realtime,
-            CategoryPool::new(
-                JobCategory::Realtime,
-                &config,
-                receiver,
-                worker_runtime,
-            ),
+            CategoryPool::new(JobCategory::Realtime, &config, receiver, worker_runtime),
         );
 
         Self {

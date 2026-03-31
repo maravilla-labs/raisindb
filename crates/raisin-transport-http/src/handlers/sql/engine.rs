@@ -227,23 +227,20 @@ pub(super) fn create_function_invoke_callback(
     let state = state.clone();
     let repo = repo.to_string();
 
-    Arc::new(move |path: String, input: serde_json::Value, workspace: Option<String>| {
-        let state = state.clone();
-        let repo = repo.clone();
+    Arc::new(
+        move |path: String, input: serde_json::Value, workspace: Option<String>| {
+            let state = state.clone();
+            let repo = repo.clone();
 
-        Box::pin(async move {
-            let rocksdb = state
-                .rocksdb_storage
-                .as_ref()
-                .ok_or_else(|| {
+            Box::pin(async move {
+                let rocksdb = state.rocksdb_storage.as_ref().ok_or_else(|| {
                     raisin_error::Error::Backend("RocksDB storage not available".into())
                 })?;
 
-            let ws = workspace.as_deref().unwrap_or("functions");
+                let ws = workspace.as_deref().unwrap_or("functions");
 
-            // Find function node via canonical code_loader
-            let function_node =
-                raisin_functions::execution::code_loader::find_function(
+                // Find function node via canonical code_loader
+                let function_node = raisin_functions::execution::code_loader::find_function(
                     state.storage.as_ref(),
                     "default",
                     &repo,
@@ -253,40 +250,45 @@ pub(super) fn create_function_invoke_callback(
                 )
                 .await?;
 
-            // Register background job
-            let execution_id = nanoid::nanoid!();
-            let job_type = JobType::FunctionExecution {
-                function_path: function_node.path.clone(),
-                trigger_name: Some("sql".into()),
-                execution_id: execution_id.clone(),
-            };
+                // Register background job
+                let execution_id = nanoid::nanoid!();
+                let job_type = JobType::FunctionExecution {
+                    function_path: function_node.path.clone(),
+                    trigger_name: Some("sql".into()),
+                    execution_id: execution_id.clone(),
+                };
 
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("input".to_string(), input);
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("input".to_string(), input);
 
-            let context = raisin_storage::jobs::JobContext {
-                tenant_id: "default".to_string(),
-                repo_id: repo.clone(),
-                branch: "main".to_string(),
-                workspace_id: ws.to_string(),
-                revision: raisin_hlc::HLC::new(0, 0),
-                metadata,
-            };
+                let context = raisin_storage::jobs::JobContext {
+                    tenant_id: "default".to_string(),
+                    repo_id: repo.clone(),
+                    branch: "main".to_string(),
+                    workspace_id: ws.to_string(),
+                    revision: raisin_hlc::HLC::new(0, 0),
+                    metadata,
+                };
 
-            let job_id = rocksdb
-                .job_registry()
-                .register_job(job_type, Some("default".to_string()), None, None, None)
-                .await
-                .map_err(|e| raisin_error::Error::Backend(format!("Failed to register job: {}", e)))?;
+                let job_id = rocksdb
+                    .job_registry()
+                    .register_job(job_type, Some("default".to_string()), None, None, None)
+                    .await
+                    .map_err(|e| {
+                        raisin_error::Error::Backend(format!("Failed to register job: {}", e))
+                    })?;
 
-            rocksdb
-                .job_data_store()
-                .put(&job_id, &context)
-                .map_err(|e| raisin_error::Error::Backend(format!("Failed to store job context: {}", e)))?;
+                rocksdb
+                    .job_data_store()
+                    .put(&job_id, &context)
+                    .map_err(|e| {
+                        raisin_error::Error::Backend(format!("Failed to store job context: {}", e))
+                    })?;
 
-            Ok((execution_id, job_id.to_string()))
-        })
-    })
+                Ok((execution_id, job_id.to_string()))
+            })
+        },
+    )
 }
 
 /// Create a callback for sync function invocation via SQL INVOKE_SYNC().
@@ -298,16 +300,16 @@ pub(super) fn create_function_invoke_sync_callback(
     let state = state.clone();
     let repo = repo.to_string();
 
-    Arc::new(move |path: String, input: serde_json::Value, workspace: Option<String>| {
-        let state = state.clone();
-        let repo = repo.clone();
+    Arc::new(
+        move |path: String, input: serde_json::Value, workspace: Option<String>| {
+            let state = state.clone();
+            let repo = repo.clone();
 
-        Box::pin(async move {
-            let ws = workspace.as_deref().unwrap_or("functions");
+            Box::pin(async move {
+                let ws = workspace.as_deref().unwrap_or("functions");
 
-            // Find function node via canonical code_loader
-            let function_node =
-                raisin_functions::execution::code_loader::find_function(
+                // Find function node via canonical code_loader
+                let function_node = raisin_functions::execution::code_loader::find_function(
                     state.storage.as_ref(),
                     "default",
                     &repo,
@@ -317,63 +319,70 @@ pub(super) fn create_function_invoke_sync_callback(
                 )
                 .await?;
 
-            // Load function code via code_loader (resolves entry_file property)
-            let (code, metadata) = raisin_functions::execution::code_loader::load_function_code(
-                state.storage.as_ref(),
-                state.bin.as_ref(),
-                "default",
-                &repo,
-                "main",
-                ws,
-                &function_node,
-                &function_node.path,
-            )
-            .await
-            .map_err(|e| raisin_error::Error::Backend(format!("Failed to load function code: {}", e)))?;
+                // Load function code via code_loader (resolves entry_file property)
+                let (code, metadata) =
+                    raisin_functions::execution::code_loader::load_function_code(
+                        state.storage.as_ref(),
+                        state.bin.as_ref(),
+                        "default",
+                        &repo,
+                        "main",
+                        ws,
+                        &function_node,
+                        &function_node.path,
+                    )
+                    .await
+                    .map_err(|e| {
+                        raisin_error::Error::Backend(format!("Failed to load function code: {}", e))
+                    })?;
 
-            let loaded = raisin_functions::LoadedFunction::new(
-                metadata,
-                code,
-                function_node.path.clone(),
-                function_node.id.clone(),
-                function_node.workspace.clone().unwrap_or_else(|| "functions".into()),
-            );
+                let loaded = raisin_functions::LoadedFunction::new(
+                    metadata,
+                    code,
+                    function_node.path.clone(),
+                    function_node.id.clone(),
+                    function_node
+                        .workspace
+                        .clone()
+                        .unwrap_or_else(|| "functions".into()),
+                );
 
-            // Build execution context and API
-            let context = raisin_functions::ExecutionContext::new("default", &repo, "main", "system")
-                .with_workspace(ws)
-                .with_input(input);
+                // Build execution context and API
+                let context =
+                    raisin_functions::ExecutionContext::new("default", &repo, "main", "system")
+                        .with_workspace(ws)
+                        .with_input(input);
 
-            let api = crate::handlers::functions::build_function_api(
-                &state,
-                &repo,
-                loaded.metadata.network_policy.clone(),
-                None,
-            );
+                let api = crate::handlers::functions::build_function_api(
+                    &state,
+                    &repo,
+                    loaded.metadata.network_policy.clone(),
+                    None,
+                );
 
-            // Execute function
-            let executor = raisin_functions::FunctionExecutor::new();
-            let result = executor
-                .execute(&loaded, context, api)
-                .await
-                .map_err(|e| raisin_error::Error::Backend(format!("Function execution failed: {}", e)))?;
+                // Execute function
+                let executor = raisin_functions::FunctionExecutor::new();
+                let result = executor.execute(&loaded, context, api).await.map_err(|e| {
+                    raisin_error::Error::Backend(format!("Function execution failed: {}", e))
+                })?;
 
-            // Return result as JSON
-            match result.output {
-                Some(output) => Ok(output),
-                None => {
-                    if let Some(err) = result.error {
-                        Err(raisin_error::Error::Backend(format!(
-                            "Function '{}' failed: {}",
-                            path, err
-                        )))
-                    } else {
-                        Ok(serde_json::Value::Null)
+                // Return result as JSON
+                match result.output {
+                    Some(output) => Ok(output),
+                    None => {
+                        if let Some(err) = result.error {
+                            Err(raisin_error::Error::Backend(format!(
+                                "Function '{}' failed: {}",
+                                path, err
+                            )))
+                        } else {
+                            Ok(serde_json::Value::Null)
+                        }
                     }
                 }
-            }
-        })
-    })
+            })
+        },
+    )
 }
 
 /// Configure the embedding provider and storage on the query engine.

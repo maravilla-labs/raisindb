@@ -59,7 +59,7 @@ async fn create_node_type_with_unique_property(storage: &InMemoryStorage, name: 
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage

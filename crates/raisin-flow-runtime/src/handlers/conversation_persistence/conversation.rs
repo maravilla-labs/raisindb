@@ -39,11 +39,7 @@ pub async fn ensure_conversation(
     let details = participant_details.unwrap_or_else(|| {
         let mut map = serde_json::Map::new();
         if let Some(r) = agent_ref {
-            let display_name = r
-                .rsplit('/')
-                .next()
-                .unwrap_or("AI Assistant")
-                .to_string();
+            let display_name = r.rsplit('/').next().unwrap_or("AI Assistant").to_string();
             map.insert(
                 AI_SENDER_ID.to_string(),
                 json!({ "display_name": display_name }),
@@ -65,7 +61,12 @@ pub async fn ensure_conversation(
     });
 
     callbacks
-        .create_node_in_workspace(workspace, "raisin:Conversation", conversation_path, properties)
+        .create_node_in_workspace(
+            workspace,
+            "raisin:Conversation",
+            conversation_path,
+            properties,
+        )
         .await?;
 
     // Emit ConversationCreated event

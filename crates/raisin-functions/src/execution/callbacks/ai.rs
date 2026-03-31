@@ -182,7 +182,11 @@ pub fn create_ai_completion(
                         }
 
                         let elapsed = start.elapsed().as_millis() as u64;
-                        let has_tool_calls = response.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                        let has_tool_calls = response
+                            .message
+                            .tool_calls
+                            .as_ref()
+                            .map_or(false, |tc| !tc.is_empty());
                         tracing::info!(
                             target: "ai_completion",
                             model = %response.model,
@@ -322,7 +326,11 @@ pub fn create_ai_completion(
                         }
 
                         let elapsed = start.elapsed().as_millis() as u64;
-                        let has_tool_calls = fallback.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                        let has_tool_calls = fallback
+                            .message
+                            .tool_calls
+                            .as_ref()
+                            .map_or(false, |tc| !tc.is_empty());
                         tracing::info!(
                             target: "ai_completion",
                             model = %fallback.model,
@@ -371,7 +379,11 @@ pub fn create_ai_completion(
                     }
 
                     let elapsed = start.elapsed().as_millis() as u64;
-                    let has_tool_calls = response.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                    let has_tool_calls = response
+                        .message
+                        .tool_calls
+                        .as_ref()
+                        .map_or(false, |tc| !tc.is_empty());
                     tracing::info!(
                         target: "ai_completion",
                         model = %response.model,
@@ -391,7 +403,11 @@ pub fn create_ai_completion(
                 })?;
 
                 let elapsed = start.elapsed().as_millis() as u64;
-                let has_tool_calls = response.message.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                let has_tool_calls = response
+                    .message
+                    .tool_calls
+                    .as_ref()
+                    .map_or(false, |tc| !tc.is_empty());
                 tracing::info!(
                     target: "ai_completion",
                     model = %response.model,
@@ -422,8 +438,8 @@ fn build_response_json(response: &raisin_ai::types::CompletionResponse) -> Value
     // Strip control tokens from content
     let mut content =
         raisin_ai::tool_call_extraction::strip_model_control_tokens(&response.message.content);
-    let mut tool_calls_json: Value = serde_json::to_value(&response.message.tool_calls)
-        .unwrap_or(Value::Null);
+    let mut tool_calls_json: Value =
+        serde_json::to_value(&response.message.tool_calls).unwrap_or(Value::Null);
     let mut stop_reason = response.stop_reason.clone();
 
     // Provider-agnostic: extract raw tool call syntax from content

@@ -182,8 +182,8 @@ pub(super) async fn execute_flow_with_retry(
 
                 instance.current_node_id = next_node_id;
                 same_step_count = 0; // Reset SameStep guard on step transition
-                // OPTIMIZATION: Don't persist to DB yet if next step is also sync
-                // Only persist at async boundaries
+                                     // OPTIMIZATION: Don't persist to DB yet if next step is also sync
+                                     // Only persist at async boundaries
             }
 
             // 5. Async Boundary -> Persist and Exit
@@ -270,9 +270,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::{json, Value};
 
-    use crate::types::{
-        FlowCallbacks, FlowExecutionEvent, FlowInstance, FlowResult, FlowStatus,
-    };
+    use crate::types::{FlowCallbacks, FlowExecutionEvent, FlowInstance, FlowResult, FlowStatus};
 
     // -----------------------------------------------------------------------
     // Mock FlowCallbacks
@@ -354,11 +352,7 @@ mod tests {
             Ok(json!({ "content": "AI response" }))
         }
 
-        async fn execute_function(
-            &self,
-            _function_ref: &str,
-            _input: Value,
-        ) -> FlowResult<Value> {
+        async fn execute_function(&self, _function_ref: &str, _input: Value) -> FlowResult<Value> {
             Ok(json!({ "status": "ok" }))
         }
 
@@ -481,10 +475,7 @@ mod tests {
         assert_eq!(saved.status, FlowStatus::Waiting);
         assert!(saved.wait_info.is_some());
         let wait_info = saved.wait_info.as_ref().unwrap();
-        assert_eq!(
-            wait_info.wait_type,
-            crate::types::WaitType::FunctionCall
-        );
+        assert_eq!(wait_info.wait_type, crate::types::WaitType::FunctionCall);
     }
 
     /// Resuming a function step with __function_result completes the flow.

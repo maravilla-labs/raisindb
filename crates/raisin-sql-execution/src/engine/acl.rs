@@ -36,9 +36,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     /// Read operations (SHOW, DESCRIBE) require authentication (not anonymous).
     fn acl_check_authorization(&self, stmt: &AclStatement) -> Result<(), Error> {
         let auth = self.auth_context.as_ref().ok_or_else(|| {
-            Error::Forbidden(
-                "Authentication required for access control operations".to_string(),
-            )
+            Error::Forbidden("Authentication required for access control operations".to_string())
         })?;
 
         // System context always allowed (internal operations)

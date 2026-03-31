@@ -74,7 +74,10 @@ impl BinOp {
 
     /// Check if this is an arithmetic operator
     pub fn is_arithmetic(&self) -> bool {
-        matches!(self, Self::Add | Self::Sub | Self::Mul | Self::Div | Self::Mod)
+        matches!(
+            self,
+            Self::Add | Self::Sub | Self::Mul | Self::Div | Self::Mod
+        )
     }
 }
 

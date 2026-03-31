@@ -13,7 +13,9 @@
 //! generate summary.
 
 use super::{StepHandler, StepResult};
-use crate::types::{FlowCallbacks, FlowContext, FlowError, FlowExecutionEvent, FlowNode, FlowResult};
+use crate::types::{
+    FlowCallbacks, FlowContext, FlowError, FlowExecutionEvent, FlowNode, FlowResult,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Instant;
@@ -111,7 +113,12 @@ impl StepHandler for AgentStepHandler {
         }
 
         let ai_response = callbacks
-            .call_ai(&agent_workspace, &agent_ref, messages, response_format.clone())
+            .call_ai(
+                &agent_workspace,
+                &agent_ref,
+                messages,
+                response_format.clone(),
+            )
             .await
             .map_err(|e| {
                 error!("Agent step AI call failed: {}", e);

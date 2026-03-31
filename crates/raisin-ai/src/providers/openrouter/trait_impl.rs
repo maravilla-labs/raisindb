@@ -7,8 +7,8 @@ use std::pin::Pin;
 use crate::model_cache::ModelInfo;
 use crate::provider::{AIProviderTrait, ProviderError, Result};
 use crate::types::{
-    CompletionRequest, CompletionResponse, FunctionCall, Message, ResponseFormat, Role, StreamChunk,
-    ToolCall, Usage,
+    CompletionRequest, CompletionResponse, FunctionCall, Message, ResponseFormat, Role,
+    StreamChunk, ToolCall, Usage,
 };
 use crate::utils::strip_markdown_fences;
 

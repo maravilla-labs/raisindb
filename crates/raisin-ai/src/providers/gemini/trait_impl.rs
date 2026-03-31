@@ -46,7 +46,9 @@ impl AIProviderTrait for GeminiProvider {
 
         let url = format!(
             "{}/models/{}:generateContent?key={}",
-            self.base_url, request.model, self.api_key.expose()
+            self.base_url,
+            request.model,
+            self.api_key.expose()
         );
 
         let response = self
@@ -229,7 +231,9 @@ impl AIProviderTrait for GeminiProvider {
         // Gemini streaming uses streamGenerateContent instead of generateContent
         let url = format!(
             "{}/models/{}:streamGenerateContent?key={}&alt=sse",
-            self.base_url, request.model, self.api_key.expose()
+            self.base_url,
+            request.model,
+            self.api_key.expose()
         );
 
         let response = self
@@ -310,8 +314,7 @@ fn parse_gemini_chunk(data: &str, model: &str) -> Option<Result<StreamChunk>> {
                     call_type: "function".to_string(),
                     function: FunctionCall {
                         name: function_call.name,
-                        arguments: serde_json::to_string(&function_call.args)
-                            .unwrap_or_default(),
+                        arguments: serde_json::to_string(&function_call.args).unwrap_or_default(),
                     },
                     index: None,
                 });

@@ -223,7 +223,7 @@ fn test_update_nodetype_serialization() {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     // Create an UpdateNodeType operation

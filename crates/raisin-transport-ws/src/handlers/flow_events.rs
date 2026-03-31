@@ -75,14 +75,9 @@ where
                             | raisin_storage::jobs::FlowEvent::FlowFailed { .. }
                     );
 
-                    let data = serde_json::to_value(&event)
-                        .unwrap_or(serde_json::Value::Null);
+                    let data = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
 
-                    let msg = EventMessage::new(
-                        sub_id.clone(),
-                        event_type,
-                        data,
-                    );
+                    let msg = EventMessage::new(sub_id.clone(), event_type, data);
 
                     let send_result = {
                         let conn = conn_state.read();

@@ -130,7 +130,10 @@ mod inner {
         );
 
         if payload.wait_for_completion {
-            let wait_timeout_ms = payload.wait_timeout_ms.unwrap_or(60_000).clamp(1_000, 300_000);
+            let wait_timeout_ms = payload
+                .wait_timeout_ms
+                .unwrap_or(60_000)
+                .clamp(1_000, 300_000);
             let waited = wait_for_job_terminal_state(&rocksdb, &job_id, wait_timeout_ms).await?;
 
             return Ok(Some(ResponseEnvelope::success(
@@ -194,7 +197,10 @@ mod inner {
                     .await
                     .map_err(|e| WsError::StorageError(e.to_string()))?;
 
-                if !matches!(info.status, JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled) {
+                if !matches!(
+                    info.status,
+                    JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled
+                ) {
                     return Ok::<WaitedJob, WsError>(WaitedJob::Completed(info));
                 }
 
@@ -278,8 +284,7 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         use raisin_functions::{
-            execution::callbacks::create_production_callbacks,
-            execution::ExecutionDependencies,
+            execution::callbacks::create_production_callbacks, execution::ExecutionDependencies,
             ExecutionContext, FunctionExecutor, RaisinFunctionApi,
         };
 

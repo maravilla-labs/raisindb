@@ -196,22 +196,18 @@ where
                 let ws = workspace.as_deref().unwrap_or("functions");
 
                 // Find function node via canonical code_loader
-                let function_node =
-                    raisin_functions::execution::code_loader::find_function(
-                        &*ws_state.storage,
-                        "default",
-                        &ws_repo,
-                        "main",
-                        ws,
-                        &path,
-                    )
-                    .await
-                    .map_err(|e| {
-                        raisin_error::Error::Backend(format!(
-                            "Failed to find function: {}",
-                            e
-                        ))
-                    })?;
+                let function_node = raisin_functions::execution::code_loader::find_function(
+                    &*ws_state.storage,
+                    "default",
+                    &ws_repo,
+                    "main",
+                    ws,
+                    &path,
+                )
+                .await
+                .map_err(|e| {
+                    raisin_error::Error::Backend(format!("Failed to find function: {}", e))
+                })?;
 
                 // Register background job
                 let execution_id = nanoid::nanoid!();
@@ -238,20 +234,14 @@ where
                     .register_job(job_type, Some("default".to_string()), None, None, None)
                     .await
                     .map_err(|e| {
-                        raisin_error::Error::Backend(format!(
-                            "Failed to register job: {}",
-                            e
-                        ))
+                        raisin_error::Error::Backend(format!("Failed to register job: {}", e))
                     })?;
 
                 rocksdb
                     .job_data_store()
                     .put(&job_id, &context)
                     .map_err(|e| {
-                        raisin_error::Error::Backend(format!(
-                            "Failed to store job context: {}",
-                            e
-                        ))
+                        raisin_error::Error::Backend(format!("Failed to store job context: {}", e))
                     })?;
 
                 Ok((execution_id, job_id.to_string()))
@@ -290,22 +280,18 @@ where
                 let ws = workspace.as_deref().unwrap_or("functions");
 
                 // Find function node via canonical code_loader
-                let function_node =
-                    raisin_functions::execution::code_loader::find_function(
-                        &*ws_state.storage,
-                        "default",
-                        &ws_repo,
-                        "main",
-                        ws,
-                        &path,
-                    )
-                    .await
-                    .map_err(|e| {
-                        raisin_error::Error::Backend(format!(
-                            "Failed to find function: {}",
-                            e
-                        ))
-                    })?;
+                let function_node = raisin_functions::execution::code_loader::find_function(
+                    &*ws_state.storage,
+                    "default",
+                    &ws_repo,
+                    "main",
+                    ws,
+                    &path,
+                )
+                .await
+                .map_err(|e| {
+                    raisin_error::Error::Backend(format!("Failed to find function: {}", e))
+                })?;
 
                 // Load function code via canonical code_loader (resolves entry_file property)
                 let (code, metadata) =
@@ -321,10 +307,7 @@ where
                     )
                     .await
                     .map_err(|e| {
-                        raisin_error::Error::Backend(format!(
-                            "Failed to load function code: {}",
-                            e
-                        ))
+                        raisin_error::Error::Backend(format!("Failed to load function code: {}", e))
                     })?;
 
                 let loaded = raisin_functions::LoadedFunction::new(
@@ -339,11 +322,10 @@ where
                 );
 
                 // Build execution context
-                let context = raisin_functions::ExecutionContext::new(
-                    "default", &ws_repo, "main", "system",
-                )
-                .with_workspace(ws)
-                .with_input(input);
+                let context =
+                    raisin_functions::ExecutionContext::new("default", &ws_repo, "main", "system")
+                        .with_workspace(ws)
+                        .with_input(input);
 
                 // Build API via canonical create_production_callbacks
                 let deps = Arc::new(raisin_functions::execution::ExecutionDependencies {
@@ -357,33 +339,26 @@ where
                     job_data_store: None,
                 });
 
-                let callbacks =
-                    raisin_functions::execution::callbacks::create_production_callbacks(
-                        deps,
-                        "default".to_string(),
-                        ws_repo.clone(),
-                        "main".to_string(),
-                        None,
-                    );
+                let callbacks = raisin_functions::execution::callbacks::create_production_callbacks(
+                    deps,
+                    "default".to_string(),
+                    ws_repo.clone(),
+                    "main".to_string(),
+                    None,
+                );
 
                 let api = Arc::new(raisin_functions::RaisinFunctionApi::new(
-                    raisin_functions::ExecutionContext::new(
-                        "default", &ws_repo, "main", "system",
-                    )
-                    .with_workspace("functions"),
+                    raisin_functions::ExecutionContext::new("default", &ws_repo, "main", "system")
+                        .with_workspace("functions"),
                     loaded.metadata.network_policy.clone(),
                     callbacks,
                 ));
 
                 // Execute function
                 let executor = raisin_functions::FunctionExecutor::new();
-                let result =
-                    executor.execute(&loaded, context, api).await.map_err(|e| {
-                        raisin_error::Error::Backend(format!(
-                            "Function execution failed: {}",
-                            e
-                        ))
-                    })?;
+                let result = executor.execute(&loaded, context, api).await.map_err(|e| {
+                    raisin_error::Error::Backend(format!("Function execution failed: {}", e))
+                })?;
 
                 match result.output {
                     Some(output) => Ok(output),

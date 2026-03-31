@@ -33,7 +33,7 @@ pub use persistence::JobPersistence;
 pub use pool::{CategoryPoolStats, WorkerPool, WorkerPoolStats};
 pub use registry::{global_registry, JobRegistry};
 pub use types::{
-    AssetProcessingOptions, BatchIndexOperation, IndexOperation, JobCategory, JobContext, JobHandle,
-    JobId, JobInfo, JobPriority, JobStatus, JobType, PdfExtractionStrategy,
+    AssetProcessingOptions, BatchIndexOperation, IndexOperation, JobCategory, JobContext,
+    JobHandle, JobId, JobInfo, JobPriority, JobStatus, JobType, PdfExtractionStrategy,
 };
 pub use worker::JobWorker;

@@ -256,7 +256,9 @@ async fn main() {
             let pools_config = if let Ok(preset) = std::env::var("RAISIN_JOB_POOL_PRESET") {
                 match preset.as_str() {
                     "production" => raisin_rocksdb::config::JobPoolsConfig::production(),
-                    "high_performance" => raisin_rocksdb::config::JobPoolsConfig::high_performance(),
+                    "high_performance" => {
+                        raisin_rocksdb::config::JobPoolsConfig::high_performance()
+                    }
                     _ => raisin_rocksdb::config::JobPoolsConfig::development(),
                 }
             } else if server_config.dev_mode {
@@ -289,9 +291,18 @@ async fn main() {
                 .expect("Failed to create system runtime");
 
             let mut worker_runtimes = std::collections::HashMap::new();
-            worker_runtimes.insert(raisin_storage::jobs::JobCategory::Realtime, rt_runtime.handle().clone());
-            worker_runtimes.insert(raisin_storage::jobs::JobCategory::Background, bg_runtime.handle().clone());
-            worker_runtimes.insert(raisin_storage::jobs::JobCategory::System, sys_runtime.handle().clone());
+            worker_runtimes.insert(
+                raisin_storage::jobs::JobCategory::Realtime,
+                rt_runtime.handle().clone(),
+            );
+            worker_runtimes.insert(
+                raisin_storage::jobs::JobCategory::Background,
+                bg_runtime.handle().clone(),
+            );
+            worker_runtimes.insert(
+                raisin_storage::jobs::JobCategory::System,
+                sys_runtime.handle().clone(),
+            );
 
             let storage_for_init = storage.clone();
 
@@ -436,7 +447,13 @@ async fn main() {
 
             // Keep runtimes alive for the server's lifetime.
             // Dropping them would terminate all worker tasks.
-            (Some(pool), Some(token), Some(rt_runtime), Some(bg_runtime), Some(sys_runtime))
+            (
+                Some(pool),
+                Some(token),
+                Some(rt_runtime),
+                Some(bg_runtime),
+                Some(sys_runtime),
+            )
         } else {
             tracing::info!("Background jobs disabled in config");
             (None, None, None, None, None)

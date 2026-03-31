@@ -123,9 +123,11 @@ pub async fn invoke_function(
     } else {
         if req.wait_for_completion {
             let wait_timeout_ms = req.wait_timeout_ms.unwrap_or(60_000).clamp(1_000, 300_000);
-            let waited_job = wait_for_job_terminal_state(&rocksdb, &job_id, wait_timeout_ms).await?;
+            let waited_job =
+                wait_for_job_terminal_state(&rocksdb, &job_id, wait_timeout_ms).await?;
 
-            let (status, completed, timed_out, result, error, duration_ms, logs) = match waited_job {
+            let (status, completed, timed_out, result, error, duration_ms, logs) = match waited_job
+            {
                 WaitedJob::Completed(job_info) => {
                     let (result, error, duration_ms, logs) = extract_result_fields(&job_info);
                     (
@@ -265,7 +267,10 @@ async fn wait_for_job_terminal_state(
                 .await
                 .map_err(map_storage_error)?;
 
-            if !matches!(info.status, JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled) {
+            if !matches!(
+                info.status,
+                JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled
+            ) {
                 return Ok::<WaitedJob, ApiError>(WaitedJob::Completed(info));
             }
 

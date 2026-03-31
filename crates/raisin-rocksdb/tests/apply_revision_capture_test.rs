@@ -174,7 +174,7 @@ fn make_node_type(name: &str, allowed_children: Vec<&str>) -> NodeType {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     }
 }
 

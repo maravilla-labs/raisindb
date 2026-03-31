@@ -187,10 +187,7 @@ where
 /// to. If the index is new, a new tool call entry is created. Otherwise, the
 /// `function.arguments` string is appended to the existing entry.
 pub fn merge_streaming_tool_call(tool_calls: &mut Vec<Value>, delta: &Value) {
-    let index = delta
-        .get("index")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let index = delta.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     // Ensure the array is large enough
     while tool_calls.len() <= index {
@@ -395,7 +392,9 @@ mod tests {
         );
 
         // Tool calls should be extracted
-        let tool_calls = result["tool_calls"].as_array().expect("should have tool_calls");
+        let tool_calls = result["tool_calls"]
+            .as_array()
+            .expect("should have tool_calls");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["function"]["name"], "weather");
         assert_eq!(tool_calls[0]["function"]["arguments"], r#"{"city":"Bern"}"#);
@@ -466,7 +465,9 @@ mod tests {
         assert!(text_chunks.is_empty());
 
         // Tool call extracted
-        let tool_calls = result["tool_calls"].as_array().expect("should have tool_calls");
+        let tool_calls = result["tool_calls"]
+            .as_array()
+            .expect("should have tool_calls");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["function"]["name"], "weather");
         assert_eq!(result["stop_reason"], "tool_calls");
@@ -513,7 +514,9 @@ mod tests {
         assert_eq!(result["content"], "I'll help! ");
 
         // Tool call extracted
-        let tool_calls = result["tool_calls"].as_array().expect("should have tool_calls");
+        let tool_calls = result["tool_calls"]
+            .as_array()
+            .expect("should have tool_calls");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["function"]["name"], "weather");
         assert_eq!(result["stop_reason"], "tool_calls");

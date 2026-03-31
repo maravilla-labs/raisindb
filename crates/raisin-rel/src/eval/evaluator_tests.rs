@@ -510,14 +510,8 @@ fn test_arithmetic_division_by_zero() {
 fn test_arithmetic_with_comparison() {
     let ctx = empty_ctx();
     // Arithmetic has higher precedence than comparison
-    assert_eq!(
-        eval("2 + 3 > 4", &ctx).unwrap(),
-        Value::Boolean(true)
-    );
-    assert_eq!(
-        eval("2 + 3 == 5", &ctx).unwrap(),
-        Value::Boolean(true)
-    );
+    assert_eq!(eval("2 + 3 > 4", &ctx).unwrap(), Value::Boolean(true));
+    assert_eq!(eval("2 + 3 == 5", &ctx).unwrap(), Value::Boolean(true));
 }
 
 #[test]

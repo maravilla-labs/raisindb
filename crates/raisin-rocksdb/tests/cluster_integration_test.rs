@@ -671,34 +671,43 @@ async fn test_lazy_index_trigger_after_catchup() {
 
     // Create per-category runtime handles (all use current runtime in tests)
     let mut test_runtimes = std::collections::HashMap::new();
-    test_runtimes.insert(raisin_storage::jobs::JobCategory::Realtime, tokio::runtime::Handle::current());
-    test_runtimes.insert(raisin_storage::jobs::JobCategory::Background, tokio::runtime::Handle::current());
-    test_runtimes.insert(raisin_storage::jobs::JobCategory::System, tokio::runtime::Handle::current());
+    test_runtimes.insert(
+        raisin_storage::jobs::JobCategory::Realtime,
+        tokio::runtime::Handle::current(),
+    );
+    test_runtimes.insert(
+        raisin_storage::jobs::JobCategory::Background,
+        tokio::runtime::Handle::current(),
+    );
+    test_runtimes.insert(
+        raisin_storage::jobs::JobCategory::System,
+        tokio::runtime::Handle::current(),
+    );
 
     let (_worker_pool, _shutdown_token) = storage2
         .clone()
         .init_job_system(
             tantivy_engine,
             hnsw_engine,
-            None,                              // sql_executor
-            None,                              // copy_tree_executor
-            None,                              // restore_tree_executor
-            None,                              // function_executor
-            None,                              // function_enabled_checker
-            None,                              // scheduled_trigger_finder
-            None,                              // binary_retrieval
-            None,                              // binary_storage
-            None,                              // binary_upload
-            None,                              // flow_node_loader
-            None,                              // flow_node_saver
-            None,                              // flow_node_creator
-            None,                              // flow_job_queuer
-            None,                              // flow_ai_caller
-            None,                              // flow_ai_streaming_caller
-            None,                              // flow_function_executor
-            None,                              // flow_children_lister
-            None,                              // ai_tool_call_node_creator
-            test_runtimes,                     // per-category runtimes
+            None,                                                  // sql_executor
+            None,                                                  // copy_tree_executor
+            None,                                                  // restore_tree_executor
+            None,                                                  // function_executor
+            None,                                                  // function_enabled_checker
+            None,                                                  // scheduled_trigger_finder
+            None,                                                  // binary_retrieval
+            None,                                                  // binary_storage
+            None,                                                  // binary_upload
+            None,                                                  // flow_node_loader
+            None,                                                  // flow_node_saver
+            None,                                                  // flow_node_creator
+            None,                                                  // flow_job_queuer
+            None,                                                  // flow_ai_caller
+            None,                                                  // flow_ai_streaming_caller
+            None,                                                  // flow_function_executor
+            None,                                                  // flow_children_lister
+            None,                                                  // ai_tool_call_node_creator
+            test_runtimes,                                         // per-category runtimes
             raisin_rocksdb::config::JobPoolsConfig::development(), // pools config
         )
         .await

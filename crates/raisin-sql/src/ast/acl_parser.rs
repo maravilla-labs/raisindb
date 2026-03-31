@@ -179,7 +179,10 @@ fn acl_statement(input: &str) -> IResult<&str, AclStatement> {
         map(show_security_config, AclStatement::ShowSecurityConfig),
         // Introspection
         map(show_permissions_for, AclStatement::ShowPermissionsFor),
-        map(show_effective_roles_for, AclStatement::ShowEffectiveRolesFor),
+        map(
+            show_effective_roles_for,
+            AclStatement::ShowEffectiveRolesFor,
+        ),
     ))
     .parse(input)
 }
@@ -399,10 +402,7 @@ fn where_condition(input: &str) -> IResult<&str, &str> {
 fn permission_list(input: &str) -> IResult<&str, Vec<PermissionGrant>> {
     delimited(
         (char('('), multispace0),
-        separated_list1(
-            (multispace0, char(','), multispace0),
-            permission_grant,
-        ),
+        separated_list1((multispace0, char(','), multispace0), permission_grant),
         (multispace0, char(')')),
     )
     .parse(input)
@@ -504,9 +504,9 @@ fn alter_role_drop_permission(input: &str) -> IResult<&str, AlterRoleAction> {
     ))
     .parse(input)?;
     let (input, idx) = digit1(input)?;
-    let idx: usize = idx
-        .parse()
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)))?;
+    let idx: usize = idx.parse().map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
+    })?;
     Ok((input, AlterRoleAction::DropPermission(idx)))
 }
 
@@ -575,12 +575,8 @@ fn drop_role(input: &str) -> IResult<&str, DropRole> {
 }
 
 fn show_roles(input: &str) -> IResult<&str, ShowRoles> {
-    let (input, _) = tuple((
-        tag_no_case("SHOW"),
-        multispace1,
-        tag_no_case("ROLES"),
-    ))
-    .parse(input)?;
+    let (input, _) =
+        tuple((tag_no_case("SHOW"), multispace1, tag_no_case("ROLES"))).parse(input)?;
 
     let (input, like_pattern) = opt(preceded(
         tuple((multispace1, tag_no_case("LIKE"), multispace1)),
@@ -743,12 +739,8 @@ fn drop_group(input: &str) -> IResult<&str, DropGroup> {
 }
 
 fn show_groups(input: &str) -> IResult<&str, ShowGroups> {
-    let (input, _) = tuple((
-        tag_no_case("SHOW"),
-        multispace1,
-        tag_no_case("GROUPS"),
-    ))
-    .parse(input)?;
+    let (input, _) =
+        tuple((tag_no_case("SHOW"), multispace1, tag_no_case("GROUPS"))).parse(input)?;
 
     let (input, like_pattern) = opt(preceded(
         tuple((multispace1, tag_no_case("LIKE"), multispace1)),
@@ -1043,12 +1035,8 @@ fn drop_user(input: &str) -> IResult<&str, DropUser> {
 }
 
 fn show_users(input: &str) -> IResult<&str, ShowUsers> {
-    let (input, _) = tuple((
-        tag_no_case("SHOW"),
-        multispace1,
-        tag_no_case("USERS"),
-    ))
-    .parse(input)?;
+    let (input, _) =
+        tuple((tag_no_case("SHOW"), multispace1, tag_no_case("USERS"))).parse(input)?;
 
     let (input, like_pattern) = opt(preceded(
         tuple((multispace1, tag_no_case("LIKE"), multispace1)),
@@ -1128,34 +1116,22 @@ fn grant_items(input: &str) -> IResult<&str, Vec<GrantItem>> {
     alt((
         // ROLES ('x', 'y')
         map(
-            preceded(
-                tuple((tag_no_case("ROLES"), multispace0)),
-                string_list,
-            ),
+            preceded(tuple((tag_no_case("ROLES"), multispace0)), string_list),
             |roles| roles.into_iter().map(GrantItem::Role).collect(),
         ),
         // ROLE 'x'
         map(
-            preceded(
-                tuple((tag_no_case("ROLE"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("ROLE"), multispace1)), quoted_string),
             |s| vec![GrantItem::Role(s.to_string())],
         ),
         // GROUPS ('x', 'y')
         map(
-            preceded(
-                tuple((tag_no_case("GROUPS"), multispace0)),
-                string_list,
-            ),
+            preceded(tuple((tag_no_case("GROUPS"), multispace0)), string_list),
             |groups| groups.into_iter().map(GrantItem::Group).collect(),
         ),
         // GROUP 'x'
         map(
-            preceded(
-                tuple((tag_no_case("GROUP"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("GROUP"), multispace1)), quoted_string),
             |s| vec![GrantItem::Group(s.to_string())],
         ),
     ))
@@ -1165,17 +1141,11 @@ fn grant_items(input: &str) -> IResult<&str, Vec<GrantItem>> {
 fn grant_target(input: &str) -> IResult<&str, GrantTarget> {
     alt((
         map(
-            preceded(
-                tuple((tag_no_case("USER"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("USER"), multispace1)), quoted_string),
             |s| GrantTarget::User(s.to_string()),
         ),
         map(
-            preceded(
-                tuple((tag_no_case("GROUP"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("GROUP"), multispace1)), quoted_string),
             |s| GrantTarget::Group(s.to_string()),
         ),
     ))
@@ -1192,37 +1162,31 @@ fn revoke_stmt(input: &str) -> IResult<&str, Revoke> {
     let (input, _) = tuple((multispace1, tag_no_case("FROM"), multispace1)).parse(input)?;
     let (input, target) = revoke_target(input)?;
 
-    Ok((input, Revoke { target, revocations }))
+    Ok((
+        input,
+        Revoke {
+            target,
+            revocations,
+        },
+    ))
 }
 
 fn revoke_items(input: &str) -> IResult<&str, Vec<RevokeItem>> {
     alt((
         map(
-            preceded(
-                tuple((tag_no_case("ROLES"), multispace0)),
-                string_list,
-            ),
+            preceded(tuple((tag_no_case("ROLES"), multispace0)), string_list),
             |roles| roles.into_iter().map(RevokeItem::Role).collect(),
         ),
         map(
-            preceded(
-                tuple((tag_no_case("ROLE"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("ROLE"), multispace1)), quoted_string),
             |s| vec![RevokeItem::Role(s.to_string())],
         ),
         map(
-            preceded(
-                tuple((tag_no_case("GROUPS"), multispace0)),
-                string_list,
-            ),
+            preceded(tuple((tag_no_case("GROUPS"), multispace0)), string_list),
             |groups| groups.into_iter().map(RevokeItem::Group).collect(),
         ),
         map(
-            preceded(
-                tuple((tag_no_case("GROUP"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("GROUP"), multispace1)), quoted_string),
             |s| vec![RevokeItem::Group(s.to_string())],
         ),
     ))
@@ -1232,17 +1196,11 @@ fn revoke_items(input: &str) -> IResult<&str, Vec<RevokeItem>> {
 fn revoke_target(input: &str) -> IResult<&str, RevokeTarget> {
     alt((
         map(
-            preceded(
-                tuple((tag_no_case("USER"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("USER"), multispace1)), quoted_string),
             |s| RevokeTarget::User(s.to_string()),
         ),
         map(
-            preceded(
-                tuple((tag_no_case("GROUP"), multispace1)),
-                quoted_string,
-            ),
+            preceded(tuple((tag_no_case("GROUP"), multispace1)), quoted_string),
             |s| RevokeTarget::Group(s.to_string()),
         ),
     ))
@@ -1266,8 +1224,8 @@ fn alter_security_config(input: &str) -> IResult<&str, AlterSecurityConfig> {
     let (input, workspace_pattern) = quoted_string(input)?;
 
     // Parse one or more SET clauses
-    let (input, settings) = nom::multi::many1(preceded(multispace1, security_config_setting))
-        .parse(input)?;
+    let (input, settings) =
+        nom::multi::many1(preceded(multispace1, security_config_setting)).parse(input)?;
 
     Ok((
         input,
@@ -1333,11 +1291,7 @@ fn security_config_anonymous_role(input: &str) -> IResult<&str, SecurityConfigSe
 }
 
 fn security_config_interface_setting(input: &str) -> IResult<&str, SecurityConfigSetting> {
-    let (input, _) = tuple((
-        tag_no_case("INTERFACE"),
-        multispace1,
-    ))
-    .parse(input)?;
+    let (input, _) = tuple((tag_no_case("INTERFACE"), multispace1)).parse(input)?;
     let (input, interface) = identifier(input)?;
     let (input, _) = multispace1.parse(input)?;
 
@@ -2201,7 +2155,9 @@ mod tests {
         assert!(is_acl_statement("GRANT ROLE 'editor' TO USER 'alice'"));
         assert!(is_acl_statement("REVOKE ROLE 'editor' FROM USER 'alice'"));
         // Security config
-        assert!(is_acl_statement("ALTER SECURITY CONFIG 'ws' SET DEFAULT POLICY 'deny'"));
+        assert!(is_acl_statement(
+            "ALTER SECURITY CONFIG 'ws' SET DEFAULT POLICY 'deny'"
+        ));
         assert!(is_acl_statement("SHOW SECURITY CONFIG"));
         assert!(is_acl_statement("SHOW SECURITY CONFIG FOR 'myws'"));
         // Introspection

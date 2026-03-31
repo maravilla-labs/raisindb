@@ -423,11 +423,7 @@ mod tests {
             }
             Ok(responses.remove(0))
         }
-        async fn execute_function(
-            &self,
-            function_ref: &str,
-            input: Value,
-        ) -> FlowResult<Value> {
+        async fn execute_function(&self, function_ref: &str, input: Value) -> FlowResult<Value> {
             self.executed_functions
                 .lock()
                 .unwrap()
@@ -451,7 +447,10 @@ mod tests {
         let result = handler.execute(&node, &mut context, &callbacks).await;
         assert!(result.is_ok());
         match result.unwrap() {
-            StepResult::Continue { next_node_id, output } => {
+            StepResult::Continue {
+                next_node_id,
+                output,
+            } => {
                 assert_eq!(next_node_id, "end");
                 assert_eq!(
                     output.get("response").and_then(|v| v.as_str()),
@@ -465,19 +464,17 @@ mod tests {
     #[tokio::test]
     async fn test_execute_with_auto_tool_calls() {
         // First call returns a tool call, second call completes
-        let callbacks = MockCallbacks::new(vec![
-            serde_json::json!({
-                "content": "",
-                "finish_reason": "tool_calls",
-                "tool_calls": [{
-                    "id": "call_1",
-                    "function": {
-                        "name": "get_weather",
-                        "arguments": "{\"city\": \"Zurich\"}"
-                    }
-                }]
-            }),
-        ]);
+        let callbacks = MockCallbacks::new(vec![serde_json::json!({
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [{
+                "id": "call_1",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"city\": \"Zurich\"}"
+                }
+            }]
+        })]);
         let handler = AiContainerHandler::new();
         let node = create_ai_container_node();
         let mut context = create_test_context();

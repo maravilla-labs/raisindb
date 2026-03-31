@@ -44,7 +44,7 @@ async fn create_simple_node_type(storage: &InMemoryStorage, name: &str) {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage

@@ -265,9 +265,10 @@ pub(super) fn register_functions_internal<'js>(
             let arguments: serde_json::Value =
                 serde_json::from_str(&args_json).unwrap_or(serde_json::json!({}));
 
-            let result = run_async_blocking(async move {
-                api.function_call(&function_path, arguments).await
-            });
+            let result =
+                run_async_blocking(
+                    async move { api.function_call(&function_path, arguments).await },
+                );
 
             match result {
                 Ok(v) => serde_json::to_string(&v)

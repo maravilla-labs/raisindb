@@ -109,10 +109,7 @@ pub enum FlowEvent {
         timestamp: String,
     },
     /// Streaming text chunk from AI
-    TextChunk {
-        text: String,
-        timestamp: String,
-    },
+    TextChunk { text: String, timestamp: String },
     /// AI tool call started
     ToolCallStarted {
         tool_call_id: String,
@@ -131,10 +128,7 @@ pub enum FlowEvent {
         timestamp: String,
     },
     /// AI thinking/reasoning chunk
-    ThoughtChunk {
-        text: String,
-        timestamp: String,
-    },
+    ThoughtChunk { text: String, timestamp: String },
     /// AI conversation node was created or resolved
     ConversationCreated {
         conversation_path: String,

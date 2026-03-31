@@ -45,7 +45,7 @@ fn build_node_type(name: &str, id: &str) -> NodeType {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     }
 }
 
@@ -122,10 +122,7 @@ async fn test_node_type_publish_unpublish() {
         .is_published(scope(), "test:PublishType", None)
         .await
         .unwrap());
-    assert_eq!(
-        repo.list_published(scope(), None).await.unwrap().len(),
-        0
-    );
+    assert_eq!(repo.list_published(scope(), None).await.unwrap().len(), 0);
 
     repo.publish(scope(), "test:PublishType", commit("publish node type"))
         .await
@@ -135,10 +132,7 @@ async fn test_node_type_publish_unpublish() {
         .is_published(scope(), "test:PublishType", None)
         .await
         .unwrap());
-    assert_eq!(
-        repo.list_published(scope(), None).await.unwrap().len(),
-        1
-    );
+    assert_eq!(repo.list_published(scope(), None).await.unwrap().len(), 1);
 
     repo.validate_published(scope(), "test:PublishType", None)
         .await
@@ -152,10 +146,7 @@ async fn test_node_type_publish_unpublish() {
         .is_published(scope(), "test:PublishType", None)
         .await
         .unwrap());
-    assert_eq!(
-        repo.list_published(scope(), None).await.unwrap().len(),
-        0
-    );
+    assert_eq!(repo.list_published(scope(), None).await.unwrap().len(), 0);
 
     assert!(repo
         .validate_published(scope(), "test:PublishType", None)
@@ -212,9 +203,13 @@ async fn test_concurrent_operations() {
                 node_type.description = Some(format!("Type {}", i));
                 node_type.publishable = Some(i % 2 == 0);
 
-                repo.put(scope(), node_type, commit(&format!("create node type {}", i)))
-                    .await
-                    .unwrap();
+                repo.put(
+                    scope(),
+                    node_type,
+                    commit(&format!("create node type {}", i)),
+                )
+                .await
+                .unwrap();
             })
         })
         .collect();

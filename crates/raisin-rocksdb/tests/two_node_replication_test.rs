@@ -549,7 +549,7 @@ async fn test_schema_replication() {
                 published_by: None,
                 previous_version: None,
                 compound_indexes: None,
-            is_mixin: None,
+                is_mixin: None,
             },
             "user1".to_string(),
             HLC::now(),

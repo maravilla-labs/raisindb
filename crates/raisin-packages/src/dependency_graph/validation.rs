@@ -225,11 +225,7 @@ impl ContentValidator {
     }
 
     /// Validate a mixin reference (e.g., from a node type's mixins field)
-    pub fn validate_mixin(
-        &self,
-        name: &str,
-        file_path: &str,
-    ) -> Option<ContentValidationWarning> {
+    pub fn validate_mixin(&self, name: &str, file_path: &str) -> Option<ContentValidationWarning> {
         if !self.is_mixin_available(name) {
             Some(ContentValidationWarning {
                 file_path: file_path.to_string(),

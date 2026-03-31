@@ -94,7 +94,11 @@ impl JobDispatcher {
         let mut categories = HashMap::new();
         let mut receivers = HashMap::new();
 
-        for category in [JobCategory::Realtime, JobCategory::Background, JobCategory::System] {
+        for category in [
+            JobCategory::Realtime,
+            JobCategory::Background,
+            JobCategory::System,
+        ] {
             let (high_tx, high_rx) = bounded(HIGH_QUEUE_CAPACITY);
             let (normal_tx, normal_rx) = bounded(NORMAL_QUEUE_CAPACITY);
             let (low_tx, low_rx) = bounded(LOW_QUEUE_CAPACITY);
@@ -349,7 +353,11 @@ mod tests {
             .dispatch_categorized(low_job.clone(), JobPriority::Low, JobCategory::Realtime)
             .await;
         dispatcher
-            .dispatch_categorized(normal_job.clone(), JobPriority::Normal, JobCategory::Realtime)
+            .dispatch_categorized(
+                normal_job.clone(),
+                JobPriority::Normal,
+                JobCategory::Realtime,
+            )
             .await;
         dispatcher
             .dispatch_categorized(high_job.clone(), JobPriority::High, JobCategory::Realtime)

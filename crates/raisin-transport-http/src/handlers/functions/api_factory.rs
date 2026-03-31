@@ -54,13 +54,7 @@ pub(crate) fn build_function_api(
     });
 
     // Build all callbacks via canonical factory
-    let callbacks = create_production_callbacks(
-        deps,
-        tenant,
-        repo_id,
-        branch,
-        auth_context,
-    );
+    let callbacks = create_production_callbacks(deps, tenant, repo_id, branch, auth_context);
 
     Arc::new(RaisinFunctionApi::new(
         ExecutionContext::new(TENANT_ID, repo, DEFAULT_BRANCH, "system")

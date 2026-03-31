@@ -8102,7 +8102,7 @@ async fn test_initial_structure_with_transaction_api() -> Result<()> {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage
@@ -8164,7 +8164,7 @@ async fn test_initial_structure_with_transaction_api() -> Result<()> {
         published_by: None,
         previous_version: None,
         compound_indexes: None,
-            is_mixin: None,
+        is_mixin: None,
     };
 
     storage

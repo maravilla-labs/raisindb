@@ -171,9 +171,7 @@ pub async fn resume_flow(
     Path((_repo, _instance_id)): Path<(String, String)>,
     Json(_req): Json<ResumeFlowRequest>,
 ) -> Result<Json<RunFlowResponse>, ApiError> {
-    Err(ApiError::internal(
-        "Flow resume requires RocksDB backend",
-    ))
+    Err(ApiError::internal("Flow resume requires RocksDB backend"))
 }
 
 // ============================================================================
@@ -294,13 +292,12 @@ pub async fn delete_flow_instance(
             })?,
     };
 
-    let instance: raisin_flow_runtime::types::FlowInstance =
-        serde_json::from_value(serde_json::to_value(&instance_node.properties).map_err(|e| {
+    let instance: raisin_flow_runtime::types::FlowInstance = serde_json::from_value(
+        serde_json::to_value(&instance_node.properties).map_err(|e| {
             ApiError::internal(format!("Failed to serialize instance properties: {}", e))
-        })?)
-        .map_err(|e| {
-            ApiError::internal(format!("Failed to deserialize flow instance: {}", e))
-        })?;
+        })?,
+    )
+    .map_err(|e| ApiError::internal(format!("Failed to deserialize flow instance: {}", e)))?;
 
     if !instance.is_terminated() {
         return Err(ApiError::validation_failed(format!(
