@@ -89,6 +89,7 @@ pub struct OperationMeta {
 
 impl OperationMeta {
     /// Create a new OperationMeta for a move operation
+    #[allow(clippy::too_many_arguments)]
     pub fn new_move(
         node_id: String,
         from_path: String,
@@ -118,6 +119,7 @@ impl OperationMeta {
     }
 
     /// Create a new OperationMeta for a copy operation
+    #[allow(clippy::too_many_arguments)]
     pub fn new_copy(
         node_id: String,
         source_id: String,

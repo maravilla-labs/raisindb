@@ -224,6 +224,7 @@ impl FullRelation {
     /// * `target_node_type` - Node type of the target
     /// * `relation_type` - Semantic type of the relationship
     /// * `weight` - Optional weight for graph algorithms
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_id: String,
         source_workspace: String,
