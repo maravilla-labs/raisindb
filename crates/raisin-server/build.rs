@@ -49,8 +49,16 @@ fn main() {
     }
 
     // Check if npm/pnpm is available
-    let pnpm_available = Command::new("pnpm").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
-    let npm_available = Command::new("npm").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    let pnpm_available = Command::new("pnpm")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let npm_available = Command::new("npm")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
     if !pnpm_available && !npm_available {
         println!("cargo:warning=Neither pnpm nor npm found, skipping frontend build");

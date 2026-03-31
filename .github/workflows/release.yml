@@ -120,6 +120,13 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
 
+      - name: Build WASM packages
+        shell: bash
+        run: |
+          cargo install wasm-pack
+          cd tooling/packages/raisin-sql-wasm && wasm-pack build --target web --out-dir pkg --release
+          cd ../raisin-rel-wasm && wasm-pack build --target web --out-dir pkg --release
+
       - run: pnpm install
 
       - name: Install Linux build deps
