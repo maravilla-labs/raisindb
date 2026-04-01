@@ -36,6 +36,8 @@ concurrency:
 env:
   BIN_NAME: raisin-server
   CARGO_TERM_COLOR: always
+  # All features enabled on every platform
+  BUILD_FEATURES: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
 
 jobs:
   prepare:
@@ -83,41 +85,20 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             ext: ""
-            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
             ext: ".exe"
-            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle"
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
             ext: ""
-            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle"
-          - os: macos-15
-            target: x86_64-apple-darwin
-            archive: tar.gz
-            ext: ""
-            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle"
     runs-on: ${{ matrix.os }}
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            crates
-            packages
-            tooling
-            Cargo.toml
-            Cargo.lock
-            pnpm-lock.yaml
-            pnpm-workspace.yaml
-            package-lock.json
-            LICENSE
-            rust-toolchain.toml
-          sparse-checkout-cone-mode: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -137,6 +118,30 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
 
+      # --- Platform-specific system deps ---
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libleptonica-dev libtesseract-dev
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tesseract leptonica pkg-config
+
+      - name: Install system deps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install leptonica:x64-windows tesseract:x64-windows
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # --- WASM + Node deps ---
+
       - name: Install wasm-pack
         shell: bash
         run: cargo install wasm-pack
@@ -150,11 +155,7 @@ jobs:
 
       - run: pnpm install
 
-      - name: Install Linux build deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
+      # --- Build ---
 
       - name: Build
         shell: bash
@@ -163,7 +164,6 @@ jobs:
           VER="${TAG_NAME#v}"
           if [[ -n "$VER" && "$VER" != "$TAG_NAME" ]]; then
             echo "Setting raisin-server version to $VER"
-            # Cross-platform: use awk to replace only the first version line
             awk -v ver="$VER" '/^version *= *"[0-9]/ && !done { sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" ver "\""); done=1 } 1' \
               crates/raisin-server/Cargo.toml > crates/raisin-server/Cargo.toml.tmp \
               && mv crates/raisin-server/Cargo.toml.tmp crates/raisin-server/Cargo.toml
@@ -172,8 +172,10 @@ jobs:
           fi
           cargo build --release --package raisin-server \
             --no-default-features \
-            --features "${{ matrix.features }}" \
+            --features "$BUILD_FEATURES" \
             --target ${{ matrix.target }}
+
+      # --- Package ---
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
