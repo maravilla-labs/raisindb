@@ -83,18 +83,22 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             ext: ""
+            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
             ext: ".exe"
+            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle"
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
             ext: ""
+            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle"
           - os: macos-15
             target: x86_64-apple-darwin
             archive: tar.gz
             ext: ""
+            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle"
     runs-on: ${{ matrix.os }}
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
@@ -167,7 +171,8 @@ jobs:
             grep "^version" crates/raisin-server/Cargo.toml
           fi
           cargo build --release --package raisin-server \
-            --features "storage-rocksdb,websocket,pgwire" \
+            --no-default-features \
+            --features "${{ matrix.features }}" \
             --target ${{ matrix.target }}
 
       - name: Package (Linux/macOS)
