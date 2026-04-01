@@ -11,8 +11,19 @@ use raisin_error::Result;
 use raisin_hlc::HLC;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use usearch::{Index as UsearchIndex, IndexOptions, MetricKind, ScalarKind};
+
+/// Tracks how the usearch index was loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexLoadState {
+    /// Created in-memory (new index, not loaded from disk).
+    InMemory,
+    /// Memory-mapped from disk via `view()`. Read-only until promoted.
+    Viewed,
+    /// Fully loaded into RAM via `load()`. Supports mutations.
+    Loaded,
+}
 
 /// Metadata for a vector entry (stored in the JSON sidecar, not in usearch).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +56,12 @@ pub struct HnswIndex {
 
     /// Next available key for usearch
     next_key: u64,
+
+    /// How the usearch index was loaded (InMemory, Viewed, or Loaded)
+    load_state: IndexLoadState,
+
+    /// Path to the .hnsw file on disk (needed for promotion from Viewed → Loaded)
+    source_path: Option<PathBuf>,
 }
 
 impl HnswIndex {
@@ -73,6 +90,8 @@ impl HnswIndex {
             dimensions,
             distance_metric: metric,
             next_key: 0,
+            load_state: IndexLoadState::InMemory,
+            source_path: None,
         }
     }
 
@@ -112,7 +131,100 @@ impl HnswIndex {
             dimensions,
             distance_metric: metric,
             next_key,
+            load_state: IndexLoadState::Loaded,
+            source_path: Some(path.to_path_buf()),
         })
+    }
+
+    /// Reconstruct an index from persisted files using memory-mapping (view).
+    ///
+    /// The usearch graph is memory-mapped and read-only. Mutations will
+    /// transparently promote the index to fully loaded via `ensure_mutable()`.
+    pub(crate) fn from_persisted_view(
+        path: &Path,
+        dimensions: usize,
+        metric: DistanceMetric,
+        node_to_key: HashMap<String, u64>,
+        key_to_meta: HashMap<u64, NodeMeta>,
+        next_key: u64,
+    ) -> Result<Self> {
+        let options = IndexOptions {
+            dimensions,
+            metric: metric.to_usearch_metric(),
+            quantization: ScalarKind::F32,
+            connectivity: 0,
+            expansion_add: 0,
+            expansion_search: 0,
+            multi: false,
+        };
+        let index = UsearchIndex::new(&options).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to create usearch index: {}", e))
+        })?;
+
+        let path_str = path.to_str().ok_or_else(|| {
+            raisin_error::Error::storage("Index path contains invalid UTF-8".to_string())
+        })?;
+        index.view(path_str).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to view usearch index: {}", e))
+        })?;
+
+        Ok(Self {
+            index,
+            node_to_key,
+            key_to_meta,
+            dimensions,
+            distance_metric: metric,
+            next_key,
+            load_state: IndexLoadState::Viewed,
+            source_path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Promote a viewed (mmap'd) index to a fully loaded index.
+    ///
+    /// This is called automatically before mutations. If the index is already
+    /// mutable (InMemory or Loaded), this is a no-op.
+    fn ensure_mutable(&mut self) -> Result<()> {
+        if self.load_state != IndexLoadState::Viewed {
+            return Ok(());
+        }
+
+        let path = self.source_path.as_ref().ok_or_else(|| {
+            raisin_error::Error::storage(
+                "Viewed index has no source path for promotion".to_string(),
+            )
+        })?;
+        let path_str = path.to_str().ok_or_else(|| {
+            raisin_error::Error::storage("Index path contains invalid UTF-8".to_string())
+        })?;
+
+        // Create a fresh usearch index and load the full file into RAM.
+        // We cannot reuse the viewed index because reset()+load() leaves
+        // usearch's internal thread pool in a bad state.
+        let options = IndexOptions {
+            dimensions: self.dimensions,
+            metric: self.distance_metric.to_usearch_metric(),
+            quantization: ScalarKind::F32,
+            connectivity: 0,
+            expansion_add: 0,
+            expansion_search: 0,
+            multi: false,
+        };
+        let new_index = UsearchIndex::new(&options).map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to create usearch index: {}", e))
+        })?;
+        new_index.load(path_str).map_err(|e| {
+            raisin_error::Error::storage(format!(
+                "Failed to promote index from view to load: {}",
+                e
+            ))
+        })?;
+
+        tracing::info!(path = %path.display(), "Promoted HNSW index from viewed to loaded");
+        self.index = new_index;
+        self.load_state = IndexLoadState::Loaded;
+
+        Ok(())
     }
 
     /// Get the distance metric used by this index.
@@ -121,6 +233,9 @@ impl HnswIndex {
     }
 
     /// Add a vector to the index. Updates in-place if node_id already exists.
+    ///
+    /// If the index is memory-mapped (viewed), it will be transparently
+    /// promoted to a fully loaded index before the mutation.
     pub fn add(
         &mut self,
         node_id: String,
@@ -128,6 +243,8 @@ impl HnswIndex {
         revision: HLC,
         vector: Vec<f32>,
     ) -> Result<()> {
+        self.ensure_mutable()?;
+
         if vector.len() != self.dimensions {
             return Err(raisin_error::Error::storage(format!(
                 "Vector dimension mismatch: expected {}, got {}",
@@ -174,7 +291,12 @@ impl HnswIndex {
     }
 
     /// Remove a vector from the index.
+    ///
+    /// If the index is memory-mapped (viewed), it will be transparently
+    /// promoted to a fully loaded index before the mutation.
     pub fn remove(&mut self, node_id: &str) -> Result<()> {
+        self.ensure_mutable()?;
+
         if let Some(&key) = self.node_to_key.get(node_id) {
             self.index.remove(key).map_err(|e| {
                 raisin_error::Error::storage(format!("Failed to remove vector: {}", e))
@@ -243,13 +365,25 @@ impl HnswIndex {
     }
 
     /// Save index to file (dual-file format: .hnsw + .hnsw.meta).
+    ///
+    /// No-op for viewed indexes since the on-disk file is already current.
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        if self.load_state == IndexLoadState::Viewed {
+            tracing::debug!("Skipping save for viewed (read-only) index");
+            return Ok(());
+        }
         crate::persistence::save_to_file(self, path.as_ref())
     }
 
     /// Load index from file, auto-detecting old vs new format.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         crate::persistence::load_from_file(path.as_ref())
+    }
+
+    /// View (mmap) an index from file. The usearch graph is memory-mapped
+    /// and read-only. Mutations will transparently promote to fully loaded.
+    pub fn view_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        crate::persistence::view_from_file(path.as_ref())
     }
 
     // --- Accessors for persistence module ---
@@ -272,6 +406,10 @@ impl HnswIndex {
 
     pub(crate) fn next_key(&self) -> u64 {
         self.next_key
+    }
+
+    pub(crate) fn is_viewed(&self) -> bool {
+        self.load_state == IndexLoadState::Viewed
     }
 }
 
@@ -587,5 +725,191 @@ mod tests {
         let mut index = HnswIndex::new(4);
         // Should not error
         index.remove("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn test_view_and_search() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("view_test.hnsw");
+
+        // Create and save an index
+        {
+            let mut index = HnswIndex::new(128);
+            index
+                .add(
+                    "node1".to_string(),
+                    "ws".to_string(),
+                    HLC::new(1, 0),
+                    create_test_vector(128, 1.0),
+                )
+                .unwrap();
+            index
+                .add(
+                    "node2".to_string(),
+                    "ws".to_string(),
+                    HLC::new(2, 0),
+                    create_test_vector(128, 2.0),
+                )
+                .unwrap();
+            index.save_to_file(&index_path).unwrap();
+        }
+
+        // View (mmap) and search
+        {
+            let index = HnswIndex::view_from_file(&index_path).unwrap();
+            assert!(index.is_viewed());
+            assert_eq!(index.len(), 2);
+
+            let query = create_test_vector(128, 1.1);
+            let results = index.search(&query, 2).unwrap();
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].node_id, "node1");
+        }
+    }
+
+    #[test]
+    fn test_view_then_add_promotes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("promote_test.hnsw");
+
+        {
+            let mut index = HnswIndex::new(128);
+            index
+                .add(
+                    "node1".to_string(),
+                    "ws".to_string(),
+                    HLC::new(1, 0),
+                    create_test_vector(128, 1.0),
+                )
+                .unwrap();
+            index.save_to_file(&index_path).unwrap();
+        }
+
+        {
+            let mut index = HnswIndex::view_from_file(&index_path).unwrap();
+            assert!(index.is_viewed());
+
+            // Adding should transparently promote to loaded
+            index
+                .add(
+                    "node2".to_string(),
+                    "ws".to_string(),
+                    HLC::new(2, 0),
+                    create_test_vector(128, 2.0),
+                )
+                .unwrap();
+            assert!(!index.is_viewed());
+            assert_eq!(index.len(), 2);
+
+            // Both vectors should be searchable
+            let results = index.search(&create_test_vector(128, 1.1), 2).unwrap();
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].node_id, "node1");
+        }
+    }
+
+    #[test]
+    fn test_view_then_remove_promotes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("remove_promote_test.hnsw");
+
+        {
+            let mut index = HnswIndex::new(128);
+            index
+                .add(
+                    "node1".to_string(),
+                    "ws".to_string(),
+                    HLC::new(1, 0),
+                    create_test_vector(128, 1.0),
+                )
+                .unwrap();
+            index
+                .add(
+                    "node2".to_string(),
+                    "ws".to_string(),
+                    HLC::new(2, 0),
+                    create_test_vector(128, 2.0),
+                )
+                .unwrap();
+            index.save_to_file(&index_path).unwrap();
+        }
+
+        {
+            let mut index = HnswIndex::view_from_file(&index_path).unwrap();
+            assert!(index.is_viewed());
+
+            index.remove("node1").unwrap();
+            assert!(!index.is_viewed());
+            assert_eq!(index.len(), 1);
+
+            let results = index.search(&create_test_vector(128, 1.0), 10).unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].node_id, "node2");
+        }
+    }
+
+    #[test]
+    fn test_view_save_is_noop() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("view_save_test.hnsw");
+
+        {
+            let mut index = HnswIndex::new(128);
+            index
+                .add(
+                    "node1".to_string(),
+                    "ws".to_string(),
+                    HLC::new(1, 0),
+                    create_test_vector(128, 1.0),
+                )
+                .unwrap();
+            index.save_to_file(&index_path).unwrap();
+        }
+
+        {
+            let index = HnswIndex::view_from_file(&index_path).unwrap();
+            // Saving a viewed index should be a no-op (no panic, no error)
+            index.save_to_file(&index_path).unwrap();
+            assert!(index.is_viewed());
+        }
+    }
+
+    #[test]
+    fn test_view_estimated_memory_less_than_loaded() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("mem_test.hnsw");
+
+        {
+            let mut index = HnswIndex::new(128);
+            for i in 0..100 {
+                index
+                    .add(
+                        format!("node{}", i),
+                        "ws".to_string(),
+                        HLC::new(i as u64, 0),
+                        create_test_vector(128, i as f32),
+                    )
+                    .unwrap();
+            }
+            index.save_to_file(&index_path).unwrap();
+        }
+
+        let loaded_mem = {
+            let index = HnswIndex::load_from_file(&index_path).unwrap();
+            index.estimated_memory_bytes()
+        };
+
+        let viewed_mem = {
+            let index = HnswIndex::view_from_file(&index_path).unwrap();
+            index.estimated_memory_bytes()
+        };
+
+        // Viewed index should report less memory than fully loaded
+        assert!(
+            viewed_mem < loaded_mem,
+            "viewed ({}) should use less memory than loaded ({})",
+            viewed_mem,
+            loaded_mem
+        );
     }
 }

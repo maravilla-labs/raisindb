@@ -136,7 +136,7 @@ impl HnswIndexingEngine {
         // Load from disk or create new
         let path = self.get_index_path(&key);
         let index = if path.exists() {
-            HnswIndex::load_from_file(&path)?
+            HnswIndex::view_from_file(&path)?
         } else {
             HnswIndex::with_metric(self.dimensions, self.distance_metric)
         };
