@@ -124,8 +124,9 @@ jobs:
         shell: bash
         run: |
           cargo install wasm-pack
-          cd tooling/packages/raisin-sql-wasm && wasm-pack build --target web --out-dir pkg --release
-          cd ../raisin-rel-wasm && wasm-pack build --target web --out-dir pkg --release
+          for pkg in raisin-sql-wasm raisin-rel-wasm raisin-schema-wasm; do
+            cd tooling/packages/$pkg && wasm-pack build --target web --out-dir pkg --release && cd ../../..
+          done
 
       - run: pnpm install
 
