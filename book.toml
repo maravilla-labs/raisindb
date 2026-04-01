@@ -9,6 +9,7 @@ src = "book/src"
 build-dir = "book/output"
 
 [output.html]
+theme = "book/theme"
 default-theme = "rust"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/maravilla-labs/raisindb"

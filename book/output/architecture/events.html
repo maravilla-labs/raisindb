@@ -7,6 +7,64 @@
 
 
         <!-- Custom HTML head -->
+        <link rel="icon" href="../favicon.ico" type="image/x-icon">
+        <meta name="logo-root" content="../">
+        <style>
+        .sidebar-logo {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px 12px;
+            background: rgba(var(--sidebar-bg-rgb, 36, 41, 51), 0.75);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            transition: padding 0.3s ease, height 0.3s ease;
+        }
+        .sidebar-logo img {
+            height: 64px;
+            transition: height 0.3s ease;
+            object-fit: contain;
+        }
+        .sidebar-logo.shrink {
+            padding: 8px 12px;
+        }
+        .sidebar-logo.shrink img {
+            height: 36px;
+        }
+        
+        .sidebar-scrollbox { position: relative; }
+        
+        /* Theme-specific glassmorphism backgrounds */
+        :root .sidebar-logo { background: rgba(255, 255, 255, 0.75); }
+        .rust .sidebar-logo { background: rgba(255, 255, 255, 0.75); }
+        .coal .sidebar-logo { background: rgba(20, 20, 28, 0.75); }
+        .navy .sidebar-logo { background: rgba(22, 25, 35, 0.75); }
+        .ayu .sidebar-logo { background: rgba(20, 25, 31, 0.75); }
+        </style>
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var scrollbox = document.querySelector('.sidebar-scrollbox');
+            if (!scrollbox) return;
+        
+            var root = document.querySelector('meta[name="logo-root"]').getAttribute('content');
+            var logo = document.createElement('div');
+            logo.className = 'sidebar-logo';
+            logo.innerHTML = '<img src="' + root + 'logo.webp" alt="RaisinDB">';
+            scrollbox.parentNode.insertBefore(logo, scrollbox);
+        
+            scrollbox.addEventListener('scroll', function() {
+                if (scrollbox.scrollTop > 30) {
+                    logo.classList.add('shrink');
+                } else {
+                    logo.classList.remove('shrink');
+                }
+            });
+        });
+        </script>
 
         <meta name="description" content="A flexible, multi-tenant content database built with Rust">
         <meta name="viewport" content="width=device-width, initial-scale=1">
