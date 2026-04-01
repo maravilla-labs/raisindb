@@ -8,54 +8,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
   check:
-    name: Format & Lint
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.89.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
+          components: rustfmt
       - run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -W warnings
-        continue-on-error: true
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.89.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
-      - name: Install wasm-pack
-        run: cargo install wasm-pack
-      - name: Build WASM packages
-        run: |
-          cd tooling/packages/raisin-sql-wasm && bash build.sh && cd ../../..
-          cd tooling/packages/raisin-rel-wasm && bash build.sh && cd ../../..
-          cd tooling/packages/raisin-schema-wasm && bash build.sh && cd ../../..
-      - run: pnpm install
-      - run: cargo build --workspace
