@@ -110,6 +110,49 @@ fn load_new_format(path: &Path, meta_path: &Path) -> Result<HnswIndex> {
     Ok(index)
 }
 
+/// View (mmap) an HNSW index from disk, auto-detecting old vs new format.
+///
+/// The usearch graph is memory-mapped and read-only. Metadata sidecar is
+/// still loaded into RAM. Old format falls back to full migration.
+pub(crate) fn view_from_file(path: &Path) -> Result<HnswIndex> {
+    let meta_path = meta_path_for(path);
+
+    if meta_path.exists() {
+        view_new_format(path, &meta_path)
+    } else {
+        // Old format cannot be mmap'd — fall back to migration (fully loads)
+        migration::migrate_from_old_format(path)
+    }
+}
+
+/// View index from new dual-file format using memory mapping.
+fn view_new_format(path: &Path, meta_path: &Path) -> Result<HnswIndex> {
+    let meta_bytes = std::fs::read(meta_path).map_err(|e| {
+        raisin_error::Error::storage(format!("Failed to read metadata sidecar: {}", e))
+    })?;
+    let metadata: IndexMetadata = serde_json::from_slice(&meta_bytes).map_err(|e| {
+        raisin_error::Error::storage(format!("Failed to deserialize metadata: {}", e))
+    })?;
+
+    let index = HnswIndex::from_persisted_view(
+        path,
+        metadata.dimensions,
+        metadata.distance_metric,
+        metadata.node_to_key,
+        metadata.key_to_meta,
+        metadata.next_key,
+    )?;
+
+    tracing::debug!(
+        path = %path.display(),
+        count = index.len(),
+        dims = metadata.dimensions,
+        "Viewed (mmap) HNSW index"
+    );
+
+    Ok(index)
+}
+
 /// Compute the metadata sidecar path for a given index path.
 pub(crate) fn meta_path_for(path: &Path) -> std::path::PathBuf {
     let mut meta = path.as_os_str().to_os_string();
