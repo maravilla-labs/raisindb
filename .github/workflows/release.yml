@@ -266,12 +266,14 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
-          pattern: "*-*-*"
+          path: raw-artifacts
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -lah artifacts
+      - name: Collect release files
+        run: |
+          mkdir -p artifacts
+          cp raw-artifacts/*.tar.gz raw-artifacts/*.zip artifacts/ 2>/dev/null || true
+          ls -lah artifacts
 
       - name: Generate checksums
         run: |
