@@ -189,6 +189,8 @@ jobs:
           echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           # Fix usearch POSIX mmap symbols missing on Windows
           echo 'CXXFLAGS=-DMAP_FAILED=((void*)-1)' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Force dynamic MSVC runtime to match native deps (esaxx_rs, leptonica)
+          echo 'RUSTFLAGS=-C target-feature=+crt-static=no' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # --- Build ---
 
