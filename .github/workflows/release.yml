@@ -193,9 +193,10 @@ jobs:
           echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           # Fix usearch POSIX mmap symbols missing on Windows
           echo 'CXXFLAGS=-DMAP_FAILED=((void*)-1)' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # Force static CRT to match esaxx_rs native dep (MT_StaticRelease)
+          # Force static CRT to match esaxx_rs (which hardcodes static_crt(true))
           echo 'RUSTFLAGS=-C target-feature=+crt-static' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo 'CFLAGS=/MT' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Force aws-lc-sys to use CMake builder (avoids __builtin_bswap errors with static CRT)
+          echo 'AWS_LC_SYS_CMAKE_BUILDER=1' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # --- Build ---
 
