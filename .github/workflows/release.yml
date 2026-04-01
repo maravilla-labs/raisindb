@@ -120,13 +120,16 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
 
+      - name: Install wasm-pack
+        shell: bash
+        run: cargo install wasm-pack
+
       - name: Build WASM packages
         shell: bash
         run: |
-          cargo install wasm-pack
-          for pkg in raisin-sql-wasm raisin-rel-wasm raisin-schema-wasm; do
-            cd tooling/packages/$pkg && wasm-pack build --target web --out-dir pkg --release && cd ../../..
-          done
+          cd tooling/packages/raisin-sql-wasm && bash build.sh && cd ../../..
+          cd tooling/packages/raisin-rel-wasm && bash build.sh && cd ../../..
+          cd tooling/packages/raisin-schema-wasm && bash build.sh && cd ../../..
 
       - run: pnpm install
 

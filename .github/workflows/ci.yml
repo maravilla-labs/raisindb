@@ -50,11 +50,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libleptonica-dev libtesseract-dev
-      - name: Build WASM packages (needed before pnpm install)
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      - name: Build WASM packages
         run: |
-          cargo install wasm-pack
-          for pkg in raisin-sql-wasm raisin-rel-wasm raisin-schema-wasm; do
-            cd tooling/packages/$pkg && wasm-pack build --target web --out-dir pkg --release && cd ../../..
-          done
+          cd tooling/packages/raisin-sql-wasm && bash build.sh && cd ../../..
+          cd tooling/packages/raisin-rel-wasm && bash build.sh && cd ../../..
+          cd tooling/packages/raisin-schema-wasm && bash build.sh && cd ../../..
       - run: pnpm install
       - run: cargo build --workspace
