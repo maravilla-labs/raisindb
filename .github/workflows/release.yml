@@ -112,11 +112,6 @@ jobs:
           cd packages/raisin-flow-designer && pnpm run build && cd ../..
           cd packages/admin-console && pnpm run build && cd ../..
 
-      - name: Copy dist to server embed location
-        run: |
-          rm -rf crates/raisin-server/.admin-console-dist
-          cp -r packages/admin-console/dist crates/raisin-server/.admin-console-dist
-
       - name: Upload admin console dist
         uses: actions/upload-artifact@v4
         with:
