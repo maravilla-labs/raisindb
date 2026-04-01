@@ -94,7 +94,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-3f205a71.js";
+            window.path_to_searchindex_js = "searchindex-cdeb316a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-7d500c97.js"></script>
@@ -13384,6 +13384,167 @@ let plugin = PropertyIndexPlugin::new(storage.clone());
 // when nodes are created or modified
 <span class="boring">}</span></code></pre>
 <p>Property indexes are used by the SQL engine’s physical planner to select efficient scan strategies (index lookup instead of table scan).</p>
+<h2 id="compound-indexes"><a class="header" href="#compound-indexes">Compound Indexes</a></h2>
+<p>Compound indexes (also called composite or multi-column indexes) allow efficient queries on combinations of properties. Instead of scanning every node in a workspace, the query engine performs a prefix scan on the index, making queries like <code>WHERE category = 'tech' AND status = 'published' ORDER BY __created_at DESC LIMIT 20</code> run in O(LIMIT) time.</p>
+<h3 id="defining-compound-indexes"><a class="header" href="#defining-compound-indexes">Defining Compound Indexes</a></h3>
+<p>Compound indexes are defined on node types using the <code>COMPOUND_INDEX</code> clause in <code>CREATE NODETYPE</code>:</p>
+<pre><code class="language-sql">CREATE NODETYPE 'myapp:Article'
+  PROPERTIES (
+    title String NOT NULL,
+    category String,
+    status String DEFAULT 'draft',
+    priority Integer
+  )
+  COMPOUND_INDEX 'idx_category_status_created' ON (
+    category,
+    status,
+    __created_at DESC
+  )
+  COMPOUND_INDEX 'idx_status_priority' ON (
+    status,
+    priority DESC
+  )
+</code></pre>
+<p>Each index has:</p>
+<ul>
+<li>A <strong>unique name</strong> (e.g., <code>idx_category_status_created</code>)</li>
+<li>An ordered list of <strong>columns</strong> with optional sort direction (<code>ASC</code> or <code>DESC</code>)</li>
+</ul>
+<h3 id="column-types"><a class="header" href="#column-types">Column Types</a></h3>
+<p>Column types are automatically inferred from the property definition:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column Type</th><th>Encoding</th><th>Properties</th></tr>
+</thead>
+<tbody>
+<tr><td><code>String</code></td><td>Null-byte delimited (lexicographic order)</td><td>String properties</td></tr>
+<tr><td><code>Integer</code></td><td>Big-endian i64 (numeric order)</td><td>Integer properties</td></tr>
+<tr><td><code>Timestamp</code></td><td>Special encoding for sort direction</td><td><code>__created_at</code>, <code>__updated_at</code></td></tr>
+<tr><td><code>Boolean</code></td><td>Single byte (0 or 1)</td><td>Boolean properties</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Timestamp encoding:</strong> <code>DESC</code> timestamps use bitwise NOT of the microsecond value, so the most recent entries appear first in a natural forward scan. <code>ASC</code> timestamps use direct big-endian encoding.</p>
+<h3 id="system-properties"><a class="header" href="#system-properties">System Properties</a></h3>
+<p>In addition to user-defined properties, compound indexes can include system properties as columns:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>System Property</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>__node_type</code></td><td>String</td><td>The node’s type (e.g., <code>myapp:Article</code>)</td></tr>
+<tr><td><code>__created_at</code></td><td>Timestamp</td><td>Node creation time</td></tr>
+<tr><td><code>__updated_at</code></td><td>Timestamp</td><td>Last modification time</td></tr>
+</tbody>
+</table>
+</div>
+<p>This enables cross-type indexes. For example, to query all content types sorted by creation date:</p>
+<pre><code class="language-sql">CREATE NODETYPE 'myapp:Content'
+  PROPERTIES (
+    workspace_id String
+  )
+  COMPOUND_INDEX 'idx_ws_type_created' ON (
+    workspace_id,
+    __node_type,
+    __created_at DESC
+  )
+</code></pre>
+<h3 id="how-queries-use-compound-indexes"><a class="header" href="#how-queries-use-compound-indexes">How Queries Use Compound Indexes</a></h3>
+<p>The SQL query planner automatically matches compound indexes to query predicates. The matching algorithm works on <strong>equality prefix + optional trailing ORDER BY</strong>:</p>
+<pre><code class="language-sql">-- Given index: idx_category_status_created ON (category, status, __created_at DESC)
+
+-- Uses index: equality on leading columns + ORDER BY on trailing column
+SELECT * FROM 'default'
+WHERE properties-&gt;&gt;'category'::String = 'tech'
+  AND properties-&gt;&gt;'status'::String = 'published'
+ORDER BY __created_at DESC
+LIMIT 20
+
+-- Uses index: partial prefix (category only)
+SELECT * FROM 'default'
+WHERE properties-&gt;&gt;'category'::String = 'tech'
+
+-- Cannot use index: skips leading column
+SELECT * FROM 'default'
+WHERE properties-&gt;&gt;'status'::String = 'published'
+</code></pre>
+<p>The key rule: <strong>equality conditions must match a prefix of the index columns, in order.</strong> The last matched column can optionally be used for ORDER BY instead of equality.</p>
+<h3 id="query-optimization-example"><a class="header" href="#query-optimization-example">Query Optimization Example</a></h3>
+<p>Without a compound index, this query scans every node:</p>
+<pre><code class="language-sql">SELECT * FROM 'default'
+WHERE properties-&gt;&gt;'category'::String = 'tech'
+  AND properties-&gt;&gt;'status'::String = 'published'
+ORDER BY __created_at DESC
+LIMIT 10
+</code></pre>
+<p>With <code>COMPOUND_INDEX 'idx' ON (category, status, __created_at DESC)</code>, the query becomes:</p>
+<ol>
+<li>Seek to the index prefix <code>category=tech, status=published</code></li>
+<li>Read 10 entries (already sorted by <code>__created_at DESC</code>)</li>
+<li>Look up the 10 nodes by ID</li>
+</ol>
+<p>This is O(LIMIT) instead of O(total nodes).</p>
+<h3 id="background-index-building"><a class="header" href="#background-index-building">Background Index Building</a></h3>
+<p>When you add a compound index to a node type that already has data, RaisinDB automatically schedules a background job to build the index:</p>
+<ul>
+<li>Scans all existing nodes of the target node type</li>
+<li>Processes nodes in batches of 1,000</li>
+<li>Skips nodes where required index columns are missing</li>
+<li>New nodes created during the build are indexed inline (no data loss)</li>
+</ul>
+<p>The job runs through the unified job queue and can be monitored like any other background job.</p>
+<h3 id="draft-vs-published-spaces"><a class="header" href="#draft-vs-published-spaces">Draft vs. Published Spaces</a></h3>
+<p>Compound indexes maintain separate entries for draft and published node states. The index key includes a space marker (<code>cidx</code> for draft, <code>cidx_pub</code> for published), ensuring that queries against published content only return published nodes.</p>
+<h3 id="mvcc-and-versioning"><a class="header" href="#mvcc-and-versioning">MVCC and Versioning</a></h3>
+<p>Compound index entries are revision-aware:</p>
+<ul>
+<li>Each entry includes the HLC revision in the key (using descending encoding so the latest revision comes first)</li>
+<li>Deleted nodes are tracked with tombstone markers</li>
+<li>Index scans deduplicate by node ID, returning only the latest non-tombstoned entry</li>
+</ul>
+<p>This ensures correct results even during concurrent writes and branch operations.</p>
+<h3 id="practical-examples-1"><a class="header" href="#practical-examples-1">Practical Examples</a></h3>
+<p><strong>Social feed index</strong> – show the latest posts by a user:</p>
+<pre><code class="language-sql">CREATE NODETYPE 'social:Post'
+  PROPERTIES (
+    author_id String NOT NULL,
+    visibility String DEFAULT 'public'
+  )
+  COMPOUND_INDEX 'idx_author_feed' ON (
+    author_id,
+    visibility,
+    __created_at DESC
+  )
+</code></pre>
+<pre><code class="language-sql">-- Get latest 20 public posts by user
+SELECT * FROM 'default'
+WHERE properties-&gt;&gt;'author_id'::String = 'user-123'
+  AND properties-&gt;&gt;'visibility'::String = 'public'
+ORDER BY __created_at DESC
+LIMIT 20
+</code></pre>
+<p><strong>E-commerce catalog</strong> – browse products by category with price sorting:</p>
+<pre><code class="language-sql">CREATE NODETYPE 'shop:Product'
+  PROPERTIES (
+    category String NOT NULL,
+    in_stock Boolean DEFAULT true,
+    price Integer
+  )
+  COMPOUND_INDEX 'idx_category_stock_price' ON (
+    category,
+    in_stock,
+    price ASC
+  )
+</code></pre>
+<pre><code class="language-sql">-- Cheapest in-stock electronics
+SELECT * FROM 'default'
+WHERE properties-&gt;&gt;'category'::String = 'electronics'
+  AND properties-&gt;&gt;'in_stock'::Boolean = true
+ORDER BY properties-&gt;&gt;'price'::Integer ASC
+LIMIT 50
+</code></pre>
 <h2 id="full-text-search"><a class="header" href="#full-text-search">Full-Text Search</a></h2>
 <h3 id="tantivy-engine"><a class="header" href="#tantivy-engine">Tantivy Engine</a></h3>
 <p>RaisinDB uses <a href="https://github.com/quickwit-oss/tantivy">Tantivy</a> as its full-text search engine. The <code>TantivyIndexingEngine</code> manages per-workspace indexes with language-aware tokenization:</p>
