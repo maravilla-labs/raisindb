@@ -3,8 +3,6 @@
 ## Project Overview
 Complete TypeScript/JavaScript client SDK for RaisinDB WebSocket protocol that works in browser, Node.js, and serverless environments.
 
-## Project Location
-`/Users/senol/Projects/maravilla-labs/repos/raisindb/packages/raisin-client-js/`
 
 ## Project Structure
 ```
