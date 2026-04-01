@@ -112,12 +112,16 @@ jobs:
           cd packages/raisin-flow-designer && pnpm run build && cd ../..
           cd packages/admin-console && pnpm run build && cd ../..
 
+      - name: Verify admin console dist
+        run: ls -la crates/raisin-server/.admin-console-dist/
+
       - name: Upload admin console dist
         uses: actions/upload-artifact@v4
         with:
           name: admin-console-dist
-          path: crates/raisin-server/.admin-console-dist/
+          path: crates/raisin-server/.admin-console-dist/*
           retention-days: 1
+          include-hidden-files: true
 
   build:
     name: Build ${{ matrix.target }}
