@@ -36,7 +36,6 @@ concurrency:
 env:
   BIN_NAME: raisin-server
   CARGO_TERM_COLOR: always
-  BUILD_FEATURES: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
 
 jobs:
   prepare:
@@ -134,14 +133,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             ext: ""
+            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
             ext: ".exe"
+            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
             ext: ""
+            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
     runs-on: ${{ matrix.os }}
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
@@ -185,6 +187,8 @@ jobs:
           vcpkg install leptonica:x64-windows-static-md tesseract:x64-windows-static-md
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Fix usearch POSIX mmap symbols missing on Windows
+          echo 'CXXFLAGS=-DMAP_FAILED=((void*)-1)' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # --- Build ---
 
@@ -206,7 +210,7 @@ jobs:
         run: |
           cargo build --release --package raisin-server \
             --no-default-features \
-            --features "$BUILD_FEATURES" \
+            --features "${{ matrix.features }}" \
             --target ${{ matrix.target }}
 
       # --- Package ---

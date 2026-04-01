@@ -18,7 +18,7 @@ tracing = "0.1"
 raisin-error = { path = "../raisin-error" }
 
 # HNSW implementation
-usearch = "2"
+usearch = "2.24"
 
 # Cache
 moka = { version = "0.12", features = ["sync"] }
