@@ -318,8 +318,9 @@ function buildServerUrl(
   config: SyncConfig,
   filePath: string
 ): { url: string; workspace: string; nodePath: string } {
+  const { decodeNamespace } = await import('../namespace-encoding.js');
   const parts = filePath.split('/');
-  const workspace = parts[0]; // e.g. "functions"
+  const workspace = decodeNamespace(parts[0]); // e.g. "_raisin_access_control" → "raisin:access_control"
   const rest = parts.slice(1); // e.g. ["lib", "raisin", "ai", "agent-handler", ".node.yaml"]
 
   const filename = path.basename(filePath);

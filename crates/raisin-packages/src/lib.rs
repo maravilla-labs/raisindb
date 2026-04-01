@@ -30,6 +30,7 @@ mod error;
 pub mod exporter;
 mod installer;
 mod manifest;
+pub mod namespace_encoding;
 mod patcher;
 pub mod sync;
 pub mod sync_config;

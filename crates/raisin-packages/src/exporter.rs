@@ -216,7 +216,10 @@ impl PackageExporter {
                     .map_err(|e| PackageError::IoError(std::io::Error::other(e)))?;
 
                 for mixin in &self.mixins {
-                    let filename = format!("mixins/{}.yaml", mixin.name.replace(':', "_"));
+                    let filename = format!(
+                        "mixins/{}.yaml",
+                        crate::namespace_encoding::encode_namespace(&mixin.name)
+                    );
                     zip.start_file(&filename, options)
                         .map_err(|e| PackageError::IoError(std::io::Error::other(e)))?;
                     zip.write_all(mixin.definition.as_bytes())
@@ -231,7 +234,10 @@ impl PackageExporter {
                     .map_err(|e| PackageError::IoError(std::io::Error::other(e)))?;
 
                 for node_type in &self.node_types {
-                    let filename = format!("nodetypes/{}.yaml", node_type.name.replace(':', "_"));
+                    let filename = format!(
+                        "nodetypes/{}.yaml",
+                        crate::namespace_encoding::encode_namespace(&node_type.name)
+                    );
                     zip.start_file(&filename, options)
                         .map_err(|e| PackageError::IoError(std::io::Error::other(e)))?;
                     zip.write_all(node_type.definition.as_bytes())
@@ -320,7 +326,8 @@ impl ContentBuilder {
 
     /// Build the export content
     pub fn build(self) -> ExportContent {
-        let package_path = format!("content/{}/{}/", self.workspace, self.path);
+        let encoded_ws = crate::namespace_encoding::encode_namespace(&self.workspace);
+        let package_path = format!("content/{}/{}/", encoded_ws, self.path);
 
         // Create node.yaml content
         let node_yaml = serde_json::json!({

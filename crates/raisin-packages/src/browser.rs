@@ -191,10 +191,12 @@ impl PackageBrowser {
             .into_iter()
             .filter(|e| e.entry_type == EntryType::Directory)
             .map(|e| {
-                e.path
+                let dir_name = e
+                    .path
                     .trim_start_matches("content/")
                     .trim_end_matches('/')
-                    .to_string()
+                    .to_string();
+                crate::namespace_encoding::decode_namespace(&dir_name)
             })
             .collect())
     }

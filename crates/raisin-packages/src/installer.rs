@@ -174,7 +174,8 @@ impl PackageInstaller {
 
     /// Parse content for a specific workspace
     fn parse_workspace_content(&self, workspace: &str) -> PackageResult<Vec<ContentNode>> {
-        let base_path = format!("content/{}/", workspace);
+        let encoded_ws = crate::namespace_encoding::encode_namespace(workspace);
+        let base_path = format!("content/{}/", encoded_ws);
         self.parse_directory_content(workspace, &base_path, "")
     }
 
