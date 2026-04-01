@@ -159,8 +159,10 @@ jobs:
           VER="${TAG_NAME#v}"
           if [[ -n "$VER" && "$VER" != "$TAG_NAME" ]]; then
             echo "Setting raisin-server version to $VER"
-            sed -i.bak -E '0,/^version\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"/{s/^(version\s*=\s*)"[0-9]+\.[0-9]+\.[0-9]+"/\1"'"$VER"'"/}' crates/raisin-server/Cargo.toml
-            rm -f crates/raisin-server/Cargo.toml.bak
+            # Cross-platform: use awk to replace only the first version line
+            awk -v ver="$VER" '/^version *= *"[0-9]/ && !done { sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" ver "\""); done=1 } 1' \
+              crates/raisin-server/Cargo.toml > crates/raisin-server/Cargo.toml.tmp \
+              && mv crates/raisin-server/Cargo.toml.tmp crates/raisin-server/Cargo.toml
             echo "Updated Cargo.toml version:"
             grep "^version" crates/raisin-server/Cargo.toml
           fi
