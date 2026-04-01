@@ -93,7 +93,7 @@
             const path_to_root = "../";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+            window.path_to_searchindex_js = "../searchindex-3f205a71.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-7d500c97.js"></script>
@@ -255,6 +255,27 @@
 </tbody>
 </table>
 </div>
+<h3 id="function-definition"><a class="header" href="#function-definition">Function Definition</a></h3>
+<p>Functions are stored as <code>raisin:Function</code> nodes with metadata and code:</p>
+<pre><code class="language-javascript">// Metadata (stored as node properties)
+{
+  name: "process-order",
+  title: "Process Order",
+  description: "Validates and processes incoming orders",
+  language: "javascript",          // javascript | starlark | sql
+  execution_mode: "async",         // async | sync | both
+  entry_file: "index.js:handler",  // format: "filename:function_name"
+  version: 1,
+  enabled: true
+}
+</code></pre>
+<p>Function code is stored in a child <code>raisin:Asset</code> node. The <code>entry_file</code> field specifies which file and function to call (e.g., <code>"index.js:handler"</code> calls the <code>handler</code> export from <code>index.js</code>).</p>
+<p><strong>Execution modes:</strong></p>
+<ul>
+<li><code>async</code> (default) – always runs via the job queue</li>
+<li><code>sync</code> – can run synchronously for web API responses with timeout</li>
+<li><code>both</code> – caller decides which mode to use</li>
+</ul>
 <h3 id="javascript-functions"><a class="header" href="#javascript-functions">JavaScript Functions</a></h3>
 <p>Functions are written as async handlers with access to the RaisinDB API:</p>
 <pre><code class="language-javascript">async function handler(input) {
@@ -272,48 +293,387 @@
     );
 
     // Make HTTP requests (allowlisted)
-    const response = await raisin.http.get("https://api.example.com/data");
+    const response = await fetch("https://api.example.com/data");
+    const data = await response.json();
 
     return { success: true, count: results.length };
 }
 </code></pre>
-<h3 id="sandboxed-execution"><a class="header" href="#sandboxed-execution">Sandboxed Execution</a></h3>
-<p>Functions run in a sandboxed environment with configurable resource limits:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>use raisin_functions::runtime::{Sandbox, SandboxConfig};
+<h3 id="execution-context"><a class="header" href="#execution-context">Execution Context</a></h3>
+<p>Every function receives an execution context accessible via <code>raisin.context</code>:</p>
+<pre><code class="language-javascript">async function handler(input) {
+    const ctx = raisin.context;
 
-let config = SandboxConfig {
-    max_memory_bytes: 128 * 1024 * 1024,  // 128 MB
-    max_execution_time_ms: 30_000,         // 30 seconds
-    max_concurrent: 15,                     // concurrent executions
-    // ...
-};
-<span class="boring">}</span></code></pre>
-<p>Concurrency is controlled by a global semaphore (configurable via <code>RAISIN_MAX_CONCURRENT_FUNCTIONS</code> environment variable, default: 15).</p>
-<h3 id="raisindb-api-access"><a class="header" href="#raisindb-api-access">RaisinDB API Access</a></h3>
-<p>Functions have access to:</p>
+    ctx.execution_id    // Unique execution identifier
+    ctx.tenant_id       // Tenant identifier
+    ctx.repo_id         // Repository identifier
+    ctx.branch          // Branch name
+    ctx.workspace_id    // Workspace (if applicable)
+    ctx.actor           // User ID or "system"
+    ctx.trigger_name    // Name of the trigger that invoked this function
+    ctx.started_at      // ISO 8601 execution start time
+    ctx.input           // Function input parameters
+    ctx.metadata        // Custom metadata key-value pairs
+
+    // Event data (for event-triggered functions)
+    ctx.event_data.node_id
+    ctx.event_data.node_path
+    ctx.event_data.node_type
+    ctx.event_data.type         // event type (e.g., "created", "updated")
+
+    // HTTP request data (for HTTP-triggered functions)
+    ctx.http_request.method
+    ctx.http_request.path
+    ctx.http_request.path_params    // e.g., { userId: "123" }
+    ctx.http_request.query_params
+    ctx.http_request.headers
+    ctx.http_request.body
+}
+</code></pre>
+<h3 id="complete-api-reference"><a class="header" href="#complete-api-reference">Complete API Reference</a></h3>
+<h4 id="node-operations--raisinnodes"><a class="header" href="#node-operations--raisinnodes">Node Operations – <code>raisin.nodes.*</code></a></h4>
+<pre><code class="language-javascript">// Read
+const node = await raisin.nodes.get(workspace, path);
+const node = await raisin.nodes.getById(workspace, id);
+const children = await raisin.nodes.getChildren(workspace, parentPath, limit?);
+const results = await raisin.nodes.query(workspace, queryObject);
+
+// Write
+const created = await raisin.nodes.create(workspace, parentPath, nodeData);
+await raisin.nodes.update(workspace, path, updateData);
+await raisin.nodes.delete(workspace, path);
+await raisin.nodes.move(workspace, path, newParentPath);
+await raisin.nodes.updateProperty(workspace, path, propertyPath, value);
+</code></pre>
+<h4 id="sql-operations--raisinsql"><a class="header" href="#sql-operations--raisinsql">SQL Operations – <code>raisin.sql.*</code></a></h4>
+<pre><code class="language-javascript">// SELECT queries -- returns rows
+const rows = await raisin.sql.query(sql, params?);
+
+// INSERT/UPDATE/DELETE -- returns affected row count
+const count = await raisin.sql.execute(sql, params?);
+</code></pre>
+<h4 id="transaction-operations--raisintx"><a class="header" href="#transaction-operations--raisintx">Transaction Operations – <code>raisin.tx.*</code></a></h4>
+<p>Functions can group multiple operations into atomic transactions:</p>
+<pre><code class="language-javascript">const txId = await raisin.tx.begin();
+
+try {
+    await raisin.tx.create(txId, workspace, parentPath, nodeData);
+    await raisin.tx.update(txId, workspace, path, updateData);
+    await raisin.tx.delete(txId, workspace, path);
+
+    // Read within transaction (sees uncommitted changes)
+    const node = await raisin.tx.get(txId, workspace, id);
+    const node = await raisin.tx.getByPath(txId, workspace, path);
+    const children = await raisin.tx.listChildren(txId, workspace, parentPath);
+
+    // Bulk operations
+    await raisin.tx.add(txId, workspace, data);
+    await raisin.tx.put(txId, workspace, data);
+    await raisin.tx.upsert(txId, workspace, data);
+    await raisin.tx.createDeep(txId, workspace, parentPath, data, parentNodeType);
+    await raisin.tx.upsertDeep(txId, workspace, data, parentNodeType);
+
+    // Move and property updates
+    await raisin.tx.move(txId, workspace, path, newParentPath);
+    await raisin.tx.updateProperty(txId, workspace, path, propertyPath, value);
+    await raisin.tx.deleteById(txId, workspace, id);
+
+    // Set transaction metadata
+    await raisin.tx.setActor(txId, "user-123");
+    await raisin.tx.setMessage(txId, "Batch import completed");
+
+    await raisin.tx.commit(txId);
+} catch (e) {
+    await raisin.tx.rollback(txId);
+    throw e;
+}
+</code></pre>
+<h4 id="http-operations--raisinhttp-and-fetch"><a class="header" href="#http-operations--raisinhttp-and-fetch">HTTP Operations – <code>raisin.http.*</code> and <code>fetch</code></a></h4>
+<p>Functions have access to the W3C Fetch API and a convenience wrapper:</p>
+<pre><code class="language-javascript">// W3C Fetch API (global)
+const response = await fetch("https://api.example.com/data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: "value" })
+});
+const data = await response.json();
+
+// Convenience wrapper
+const result = await raisin.http.fetch(url, options);
+</code></pre>
+<p>HTTP access requires the function’s <code>network_policy</code> to explicitly allowlist URLs. See <a href="#network-policy">Network Policy</a> below.</p>
+<p>Global Web APIs are also available: <code>Request</code>, <code>Response</code>, <code>Headers</code>, <code>AbortController</code>, <code>AbortSignal</code>.</p>
+<h4 id="ai-operations--raisinai"><a class="header" href="#ai-operations--raisinai">AI Operations – <code>raisin.ai.*</code></a></h4>
+<pre><code class="language-javascript">// LLM completion
+const response = await raisin.ai.completion({
+    model: "gpt-4o",
+    messages: [
+        { role: "system", content: "You are a helpful assistant." },
+        { role: "user", content: "Summarize this article: " + text }
+    ],
+    temperature: 0.7,
+    max_tokens: 500
+});
+
+// List available models for the tenant
+const models = await raisin.ai.listModels();
+
+// Get default model for a use case
+const model = await raisin.ai.getDefaultModel("chat"); // chat | completion | embedding | agent
+
+// Generate embeddings
+const embedding = await raisin.ai.embed({
+    input: "Text to embed",
+    model: "text-embedding-3-small"
+});
+</code></pre>
+<h4 id="event-operations--raisinevents"><a class="header" href="#event-operations--raisinevents">Event Operations – <code>raisin.events.*</code></a></h4>
+<pre><code class="language-javascript">// Emit custom events (can trigger other functions)
+await raisin.events.emit("order.completed", {
+    orderId: "order-123",
+    total: 99.99
+});
+</code></pre>
+<h4 id="resource-and-pdf-operations"><a class="header" href="#resource-and-pdf-operations">Resource and PDF Operations</a></h4>
+<pre><code class="language-javascript">// Get a resource from a node property
+const node = await raisin.nodes.get(workspace, path);
+const resource = node.getResource("attachment");
+
+// Binary operations
+const base64 = await resource.getBinary();
+const dataUrl = await resource.toDataUrl();
+
+// Image operations (via ImageMagick)
+const resized = await resource.resize({ width: 800, height: 600 });
+
+// PDF operations
+const pageCount = await resource.getPageCount();
+const image = await resource.toImage({ page: 1, dpi: 150 });
+const extracted = await resource.processDocument({
+    extract_text: true,
+    ocr: true
+});
+
+// Upload a resource
+await raisin.resources.addToNode(workspace, nodePath, propertyPath, {
+    data: base64Data,
+    filename: "report.pdf",
+    content_type: "application/pdf"
+});
+
+// Direct PDF processing from storage
+const result = await raisin.pdf.processFromStorage(storageKey, options);
+</code></pre>
+<h4 id="task-operations--raisintasks"><a class="header" href="#task-operations--raisintasks">Task Operations – <code>raisin.tasks.*</code></a></h4>
+<p>Create human tasks that appear in a user’s inbox (used with workflow human-in-the-loop):</p>
+<pre><code class="language-javascript">// Create a task for human review
+const task = await raisin.tasks.create({
+    title: "Review content",
+    assignee: "user-123",
+    data: { nodeId: "node-456" }
+});
+
+// Update task
+await raisin.tasks.update(taskId, { status: "in_progress" });
+
+// Complete task with response
+await raisin.tasks.complete(taskId, { approved: true });
+
+// Query tasks
+const pending = await raisin.tasks.query({ status: "pending", assignee: "user-123" });
+</code></pre>
+<h4 id="function-to-function-calls--raisinfunctions"><a class="header" href="#function-to-function-calls--raisinfunctions">Function-to-Function Calls – <code>raisin.functions.*</code></a></h4>
+<pre><code class="language-javascript">// Execute another function (with full tool lifecycle)
+const result = await raisin.functions.execute("/functions/validate", args, context);
+
+// Direct function call (simpler, no lifecycle hooks)
+const result = await raisin.functions.call("/functions/validate", args);
+</code></pre>
+<h4 id="datetime-utilities--raisindate"><a class="header" href="#datetime-utilities--raisindate">Date/Time Utilities – <code>raisin.date.*</code></a></h4>
+<pre><code class="language-javascript">raisin.date.now()                    // ISO 8601 string
+raisin.date.timestamp()              // Unix seconds
+raisin.date.timestampMillis()        // Unix milliseconds
+raisin.date.parse(dateStr, format?)  // Parse to timestamp
+raisin.date.format(timestamp, fmt?)  // Format timestamp
+raisin.date.addDays(timestamp, days) // Add days
+raisin.date.diffDays(ts1, ts2)       // Difference in days
+</code></pre>
+<h4 id="crypto-utilities--raisincrypto"><a class="header" href="#crypto-utilities--raisincrypto">Crypto Utilities – <code>raisin.crypto.*</code></a></h4>
+<pre><code class="language-javascript">const hash = raisin.crypto.md5(data);     // MD5 hex hash
+const hash = raisin.crypto.sha256(data);  // SHA-256 hex hash
+const id = raisin.crypto.uuid();          // Random UUID v4
+</code></pre>
+<h4 id="timer-apis-global"><a class="header" href="#timer-apis-global">Timer APIs (Global)</a></h4>
+<pre><code class="language-javascript">setTimeout(callback, delayMs);
+clearTimeout(timeoutId);
+setInterval(callback, intervalMs);
+clearInterval(intervalId);
+</code></pre>
+<h4 id="console-logging"><a class="header" href="#console-logging">Console Logging</a></h4>
+<pre><code class="language-javascript">console.log("Info message");    // Info level
+console.warn("Warning");        // Warning level
+console.error("Error occurred"); // Error level
+</code></pre>
+<p>Logs are captured per-execution and can be streamed in real-time via the <code>LogEmitter</code>.</p>
+<h3 id="admin-escalation"><a class="header" href="#admin-escalation">Admin Escalation</a></h3>
+<p>Functions can bypass Row-Level Security (RLS) when <code>allows_admin_escalation</code> is enabled on the execution context:</p>
+<pre><code class="language-javascript">// Normal access -- respects RLS
+const node = await raisin.nodes.get(workspace, path);
+
+// Admin access -- bypasses RLS
+const node = await raisin.asAdmin().nodes.get(workspace, path);
+const rows = await raisin.asAdmin().sql.query(sql, params);
+
+// All node and SQL operations have admin variants
+await raisin.asAdmin().nodes.query(workspace, query);
+await raisin.asAdmin().nodes.update(workspace, path, data);
+</code></pre>
+<h3 id="function-triggers"><a class="header" href="#function-triggers">Function Triggers</a></h3>
+<p>Functions can be triggered by:</p>
+<h4 id="event-triggers"><a class="header" href="#event-triggers">Event Triggers</a></h4>
+<p>React to node lifecycle events:</p>
+<pre><code class="language-javascript">// Trigger configuration
+{
+  type: "event",
+  events: ["created", "updated", "deleted", "published",
+           "unpublished", "moved", "renamed"],
+  filters: {
+    workspaces: ["default"],
+    paths: ["/content/**"],
+    node_types: ["raisin:Page", "raisin:Article"],
+    property_filters: { status: "draft" }
+  }
+}
+</code></pre>
+<p>Filters use glob patterns for workspaces and paths, allowing fine-grained control over which events trigger the function.</p>
+<h4 id="http-triggers"><a class="header" href="#http-triggers">HTTP Triggers</a></h4>
+<p>Expose functions as API endpoints:</p>
+<pre><code class="language-javascript">// HTTP trigger configuration
+{
+  type: "http",
+  methods: ["GET", "POST"],
+  route: "/:userId/orders/:orderId",  // Matchit syntax with path params
+  route_mode: "config",               // "config" (pattern) or "script" (function handles routing)
+  default_sync: true                   // Run synchronously by default
+}
+</code></pre>
+<p>Path parameters are available in <code>raisin.context.http_request.path_params</code>.</p>
+<p>Functions can return custom HTTP responses:</p>
+<pre><code class="language-javascript">async function handler(input) {
+    return {
+        __http_response: true,
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+        body: { message: "Hello" }
+    };
+}
+</code></pre>
+<h4 id="scheduled-triggers"><a class="header" href="#scheduled-triggers">Scheduled Triggers</a></h4>
+<p>Run functions on a cron schedule:</p>
+<pre><code class="language-javascript">// Scheduled trigger
+{
+  type: "schedule",
+  cron: "0 * * * *"  // Every hour
+}
+</code></pre>
+<h4 id="sql-call-triggers"><a class="header" href="#sql-call-triggers">SQL Call Triggers</a></h4>
+<p>Call functions directly from SQL queries:</p>
+<pre><code class="language-sql">SELECT my_function(arg1, arg2) FROM 'workspace'
+</code></pre>
+<h3 id="resource-limits"><a class="header" href="#resource-limits">Resource Limits</a></h3>
+<p>Every function has configurable resource limits:</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>API</th><th>Operations</th></tr>
+<tr><th>Setting</th><th>Default</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>raisin.nodes</code></td><td><code>get</code>, <code>getById</code>, <code>getChildren</code>, <code>create</code>, <code>update</code>, <code>delete</code>, <code>query</code></td></tr>
-<tr><td><code>raisin.sql</code></td><td><code>query</code>, <code>execute</code></td></tr>
-<tr><td><code>raisin.http</code></td><td><code>get</code>, <code>post</code>, <code>put</code>, <code>delete</code> (allowlisted endpoints)</td></tr>
-<tr><td><code>raisin.events</code></td><td><code>emit</code> (publish events)</td></tr>
+<tr><td><code>timeout_ms</code></td><td>30,000 (30s)</td><td>Maximum execution time</td></tr>
+<tr><td><code>max_memory_bytes</code></td><td>128 MB</td><td>Memory limit</td></tr>
+<tr><td><code>max_instructions</code></td><td>100,000,000</td><td>QuickJS instruction limit</td></tr>
+<tr><td><code>max_stack_bytes</code></td><td>1 MB</td><td>Stack size limit</td></tr>
 </tbody>
 </table>
 </div>
-<h3 id="function-triggers"><a class="header" href="#function-triggers">Function Triggers</a></h3>
-<p>Functions can be triggered by:</p>
-<ul>
-<li><strong>Events</strong> – react to node changes, workspace updates, etc.</li>
-<li><strong>HTTP</strong> – exposed as API endpoints</li>
-<li><strong>Schedule</strong> – cron-based execution</li>
-<li><strong>SQL</strong> – called as SQL functions in queries</li>
-</ul>
+<p><strong>Presets:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Preset</th><th>Timeout</th><th>Memory</th><th>Instructions</th><th>Stack</th></tr>
+</thead>
+<tbody>
+<tr><td><code>minimal</code></td><td>5s</td><td>32 MB</td><td>10M</td><td>512 KB</td></tr>
+<tr><td><code>default</code></td><td>30s</td><td>128 MB</td><td>100M</td><td>1 MB</td></tr>
+<tr><td><code>generous</code></td><td>5min</td><td>512 MB</td><td>1B</td><td>4 MB</td></tr>
+</tbody>
+</table>
+</div>
+<p>Concurrency is controlled by a global semaphore (configurable via <code>RAISIN_MAX_CONCURRENT_FUNCTIONS</code>, default: 15).</p>
+<h3 id="network-policy"><a class="header" href="#network-policy">Network Policy</a></h3>
+<p>HTTP access is disabled by default. To allow outbound requests, configure a network policy:</p>
+<pre><code class="language-javascript">// Network policy configuration
+{
+  http_enabled: true,
+  allowed_urls: [
+    "https://api.example.com/*",         // Entire domain
+    "https://*.myservice.com/api/*"      // Wildcard subdomains
+  ],
+  max_concurrent_requests: 5,    // Default: 5
+  request_timeout_ms: 10000,     // Default: 10s
+  max_response_size_bytes: 10485760  // Default: 10 MB
+}
+</code></pre>
+<p>URL patterns use glob syntax. Requests to URLs not matching any pattern are rejected with a <code>URL_NOT_ALLOWED</code> error.</p>
+<h3 id="execution-result"><a class="header" href="#execution-result">Execution Result</a></h3>
+<p>Every function execution produces a result with detailed stats:</p>
+<pre><code class="language-javascript">{
+  execution_id: "abc123",
+  success: true,
+  output: { /* function return value */ },
+  http_response: null,  // or custom HTTP response
+  stats: {
+    duration_ms: 245,
+    memory_used_bytes: 4521984,
+    instructions_executed: 892341,
+    http_requests_made: 1,
+    node_operations: 3,
+    sql_queries: 1
+  },
+  logs: [
+    { level: "info", message: "Processing started", timestamp: "2025-01-15T10:30:00Z" }
+  ],
+  error: null  // or { code: "TIMEOUT", message: "...", stack_trace: "..." }
+}
+</code></pre>
+<p><strong>Error codes:</strong> <code>TIMEOUT</code>, <code>RUNTIME_ERROR</code>, <code>SYNTAX_ERROR</code>, <code>URL_NOT_ALLOWED</code>, <code>MEMORY_LIMIT</code>, <code>INSTRUCTION_LIMIT</code>.</p>
+<h3 id="function-flows"><a class="header" href="#function-flows">Function Flows</a></h3>
+<p>Multiple functions can be composed into flows with sequential and parallel execution:</p>
+<pre><code class="language-javascript">// Function flow definition
+{
+  steps: [
+    {
+      name: "validate",
+      function: "/functions/validate-order",
+      input: { orderId: "${input.orderId}" }
+    },
+    {
+      name: "charge",
+      function: "/functions/charge-payment",
+      depends_on: ["validate"],
+      input: { amount: "${steps.validate.output.total}" }
+    },
+    {
+      name: "notify",
+      function: "/functions/send-notification",
+      depends_on: ["charge"],
+      retry: { max_attempts: 3, backoff_ms: 1000 }
+    }
+  ],
+  error_strategy: "fail_fast",  // or "continue"
+  timeout_ms: 60000
+}
+</code></pre>
+<p>Steps are topologically sorted by dependencies and executed in order. Steps without dependencies can run in parallel.</p>
 <h3 id="function-loading"><a class="header" href="#function-loading">Function Loading</a></h3>
 <p>The <code>FunctionLoader</code> resolves function code from storage:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -322,6 +682,9 @@ let config = SandboxConfig {
 
 let loader = FunctionLoader::new(storage);
 let function = loader.load("tenant1", "repo1", "main", "/functions/my-func").await?;
+// function.metadata -- FunctionMetadata
+// function.code -- source code string
+// function.files -- all module files
 <span class="boring">}</span></code></pre>
 <h2 id="workflow-engine"><a class="header" href="#workflow-engine">Workflow Engine</a></h2>
 <p>The <code>raisin-flow-runtime</code> crate provides a stateful workflow execution engine for complex, long-running processes.</p>

@@ -93,7 +93,7 @@
             const path_to_root = "../";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+            window.path_to_searchindex_js = "../searchindex-3f205a71.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-7d500c97.js"></script>
@@ -287,29 +287,189 @@ let config = TenantAIConfig {
     providers: vec![provider_config],
 };
 <span class="boring">}</span></code></pre>
+<h3 id="use-cases"><a class="header" href="#use-cases">Use Cases</a></h3>
+<p>Models can be assigned to specific use cases:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Use Case</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Chat</code></td><td>Interactive chat conversations</td></tr>
+<tr><td><code>Completion</code></td><td>Text completion and generation</td></tr>
+<tr><td><code>Embedding</code></td><td>Vector embedding generation</td></tr>
+<tr><td><code>Agent</code></td><td>Agentic workflows with tool calling</td></tr>
+<tr><td><code>Classification</code></td><td>Content classification and labeling</td></tr>
+</tbody>
+</table>
+</div>
 <h3 id="api-key-security"><a class="header" href="#api-key-security">API Key Security</a></h3>
 <p>API keys are encrypted using AES-256-GCM before storage. The master encryption key should be stored securely (environment variables, secrets manager). Encrypted keys are never returned to clients.</p>
-<h3 id="text-chunking"><a class="header" href="#text-chunking">Text Chunking</a></h3>
+<h2 id="completions"><a class="header" href="#completions">Completions</a></h2>
+<p>The <code>AIProviderTrait</code> provides a unified interface for completions across all providers.</p>
+<h3 id="completion-request"><a class="header" href="#completion-request">Completion Request</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_ai::{CompletionRequest, Message, Role};
+
+let request = CompletionRequest {
+    model: "gpt-4o".to_string(),
+    messages: vec![
+        Message::system("You are a helpful assistant."),
+        Message::user("Summarize this document."),
+    ],
+    temperature: Some(0.7),
+    max_tokens: Some(500),
+    tools: None,
+    response_format: None,
+};
+
+let response = provider.complete(request).await?;
+println!("{}", response.content);
+<span class="boring">}</span></code></pre>
+<h3 id="multimodal-messages"><a class="header" href="#multimodal-messages">Multimodal Messages</a></h3>
+<p>Messages can include both text and images:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_ai::{Message, ContentPart};
+
+let message = Message::user_multimodal(vec![
+    ContentPart::text("What's in this image?"),
+    ContentPart::image_url("https://example.com/photo.jpg"),
+    ContentPart::image_base64("data:image/png;base64,iVBOR..."),
+]);
+<span class="boring">}</span></code></pre>
+<h3 id="streaming"><a class="header" href="#streaming">Streaming</a></h3>
+<p>Streaming completions return chunks as they’re generated:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_ai::{accumulate_stream, StreamEvent};
+
+let stream = provider.stream_complete(request).await?;
+
+// Accumulate with event callbacks
+let response = accumulate_stream(stream, |event| {
+    match event {
+        StreamEvent::TextChunk(text) =&gt; print!("{}", text),
+        StreamEvent::ThoughtChunk(thought) =&gt; {}, // model reasoning
+    }
+}).await?;
+<span class="boring">}</span></code></pre>
+<h3 id="tool-calling--function-calling"><a class="header" href="#tool-calling--function-calling">Tool Calling / Function Calling</a></h3>
+<p>Define tools that AI models can call during completions:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_ai::{ToolDefinition, ToolCall};
+
+let tools = vec![
+    ToolDefinition::function(
+        "search_products",
+        "Search the product catalog",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "category": { "type": "string" }
+            },
+            "required": ["query"]
+        }),
+    ),
+];
+
+let request = CompletionRequest {
+    model: "gpt-4o".to_string(),
+    messages: vec![Message::user("Find me running shoes under $100")],
+    tools: Some(tools),
+    ..Default::default()
+};
+
+let response = provider.complete(request).await?;
+
+// Check for tool calls in the response
+if let Some(tool_calls) = response.tool_calls {
+    for call in tool_calls {
+        println!("Call: {} with args: {}", call.function.name, call.function.arguments);
+    }
+}
+<span class="boring">}</span></code></pre>
+<p>After executing tool calls, feed results back:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>messages.push(Message::assistant_with_tool_calls(tool_calls));
+messages.push(Message::tool("search_products", tool_call_id, results_json));
+// Continue the conversation with updated messages
+<span class="boring">}</span></code></pre>
+<p>For models that emit tool calls in raw text (e.g., <code>&lt;function=name&gt;{args}&lt;/function&gt;</code>), the <code>extract_tool_calls_from_content()</code> utility parses them. The <code>StreamingToolCallDetector</code> handles incremental detection during streaming.</p>
+<p>Auto-generated system prompts for tool usage are available via <code>ToolDefinition::generate_tool_guidance()</code>.</p>
+<h3 id="structured-output-json-schema-mode"><a class="header" href="#structured-output-json-schema-mode">Structured Output (JSON Schema Mode)</a></h3>
+<p>Request structured JSON output conforming to a schema:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_ai::ResponseFormat;
+
+let request = CompletionRequest {
+    response_format: Some(ResponseFormat::JsonSchema {
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "sentiment": { "type": "string", "enum": ["positive", "negative", "neutral"] },
+                "confidence": { "type": "number" }
+            }
+        }),
+    }),
+    ..Default::default()
+};
+<span class="boring">}</span></code></pre>
+<p>Output validation is available via <code>validate_output()</code>.</p>
+<h3 id="provider-capabilities"><a class="header" href="#provider-capabilities">Provider Capabilities</a></h3>
+<p>Query provider capabilities at runtime:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Check what a provider supports
+provider.supports_streaming();
+provider.supports_tools();
+provider.list_available_models().await?;
+<span class="boring">}</span></code></pre>
+<h2 id="text-chunking"><a class="header" href="#text-chunking">Text Chunking</a></h2>
 <p>The <code>TextChunker</code> splits documents into chunks suitable for embedding generation:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use raisin_ai::TextChunker;
+</span>use raisin_ai::{TextChunker, ChunkingConfig, SplitterType, OverlapConfig};
 
-let chunker = TextChunker::new(/* chunking config */);
-let chunks = chunker.chunk("Long document text...");
+let config = ChunkingConfig {
+    splitter: SplitterType::Recursive,  // or FixedSize
+    chunk_size: 512,                     // tokens
+    overlap: OverlapConfig { tokens: 50 },
+};
+
+let chunker = TextChunker::new(config);
+let chunks: Vec&lt;TextChunk&gt; = chunker.chunk("Long document text...");
 <span class="boring">}</span></code></pre>
-<p>Chunking supports configurable overlap between chunks and multiple splitting strategies (by tokens, by sentences, by paragraphs).</p>
-<h3 id="pdf-processing"><a class="header" href="#pdf-processing">PDF Processing</a></h3>
+<p>Chunking is token-aware (uses tiktoken) and supports configurable overlap between chunks.</p>
+<h2 id="pdf-processing"><a class="header" href="#pdf-processing">PDF Processing</a></h2>
 <p>With the <code>pdf</code> or <code>pdf-markdown</code> feature flags, documents can be extracted from PDF files:</p>
 <pre><code class="language-toml">[dependencies]
 raisin-ai = { path = "../raisin-ai", features = ["pdf"] }
 </code></pre>
-<h3 id="local-inference-candle"><a class="header" href="#local-inference-candle">Local Inference (Candle)</a></h3>
-<p>The optional <code>candle</code> feature enables local AI inference using the Candle framework for models like CLIP and BLIP (image understanding):</p>
+<p>Multiple extraction strategies:</p>
+<ul>
+<li><strong>Native</strong> (<code>pdf-extract</code>) – fast text extraction from text-based PDFs</li>
+<li><strong>Markdown</strong> (<code>pdf_oxide</code>) – preserves structure as Markdown</li>
+<li><strong>OCR</strong> (<code>tesseract</code>) – for scanned PDFs, configurable via <code>OcrOptions</code></li>
+</ul>
+<p>The <code>PdfProcessor</code> uses a router pattern to select the best strategy per document.</p>
+<h2 id="local-inference-candle"><a class="header" href="#local-inference-candle">Local Inference (Candle)</a></h2>
+<p>The optional <code>candle</code> feature enables local AI inference using the Candle framework:</p>
 <pre><code class="language-toml">[dependencies]
 raisin-ai = { path = "../raisin-ai", features = ["candle"] }
 </code></pre>
-<p>This downloads models from HuggingFace and runs inference locally without external API calls.</p>
+<p><strong>Supported local models:</strong></p>
+<ul>
+<li><strong>CLIP</strong> – image and text embeddings for multimodal search</li>
+<li><strong>BLIP</strong> – image captioning</li>
+<li><strong>Moondream</strong> – image understanding</li>
+</ul>
+<p>Models are downloaded from HuggingFace on first use and cached locally. No external API calls required.</p>
 <h2 id="embeddings"><a class="header" href="#embeddings">Embeddings</a></h2>
 <p>The <code>raisin-embeddings</code> crate manages vector embedding storage and generation.</p>
 <h3 id="embedding-storage"><a class="header" href="#embedding-storage">Embedding Storage</a></h3>
@@ -326,6 +486,19 @@ let embedding = EmbeddingData {
     // ...
 };
 <span class="boring">}</span></code></pre>
+<h3 id="embedding-versioning"><a class="header" href="#embedding-versioning">Embedding Versioning</a></h3>
+<p>The <code>EmbedderId</code> prevents collisions when the embedding model or configuration changes:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_ai::EmbedderId;
+
+// EmbedderId encodes provider + model + dimensions + tokenizer
+let id = EmbedderId::new("openai", "text-embedding-3-small", 1536, "cl100k_base");
+
+// Generates a stable 11-char base64url hash for storage keys
+let key = id.to_key_hash(); // e.g., "a1B2c3D4e5F"
+<span class="boring">}</span></code></pre>
+<p>When you switch embedding models, old and new embeddings coexist without conflicts.</p>
 <h3 id="embedding-jobs"><a class="header" href="#embedding-jobs">Embedding Jobs</a></h3>
 <p>Embedding generation runs asynchronously through the job system:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]

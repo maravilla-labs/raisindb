@@ -48,24 +48,184 @@ let config = TenantAIConfig {
 };
 ```
 
+### Use Cases
+
+Models can be assigned to specific use cases:
+
+| Use Case | Description |
+|----------|-------------|
+| `Chat` | Interactive chat conversations |
+| `Completion` | Text completion and generation |
+| `Embedding` | Vector embedding generation |
+| `Agent` | Agentic workflows with tool calling |
+| `Classification` | Content classification and labeling |
+
 ### API Key Security
 
 API keys are encrypted using AES-256-GCM before storage. The master encryption key should be stored securely (environment variables, secrets manager). Encrypted keys are never returned to clients.
 
-### Text Chunking
+## Completions
+
+The `AIProviderTrait` provides a unified interface for completions across all providers.
+
+### Completion Request
+
+```rust
+use raisin_ai::{CompletionRequest, Message, Role};
+
+let request = CompletionRequest {
+    model: "gpt-4o".to_string(),
+    messages: vec![
+        Message::system("You are a helpful assistant."),
+        Message::user("Summarize this document."),
+    ],
+    temperature: Some(0.7),
+    max_tokens: Some(500),
+    tools: None,
+    response_format: None,
+};
+
+let response = provider.complete(request).await?;
+println!("{}", response.content);
+```
+
+### Multimodal Messages
+
+Messages can include both text and images:
+
+```rust
+use raisin_ai::{Message, ContentPart};
+
+let message = Message::user_multimodal(vec![
+    ContentPart::text("What's in this image?"),
+    ContentPart::image_url("https://example.com/photo.jpg"),
+    ContentPart::image_base64("data:image/png;base64,iVBOR..."),
+]);
+```
+
+### Streaming
+
+Streaming completions return chunks as they're generated:
+
+```rust
+use raisin_ai::{accumulate_stream, StreamEvent};
+
+let stream = provider.stream_complete(request).await?;
+
+// Accumulate with event callbacks
+let response = accumulate_stream(stream, |event| {
+    match event {
+        StreamEvent::TextChunk(text) => print!("{}", text),
+        StreamEvent::ThoughtChunk(thought) => {}, // model reasoning
+    }
+}).await?;
+```
+
+### Tool Calling / Function Calling
+
+Define tools that AI models can call during completions:
+
+```rust
+use raisin_ai::{ToolDefinition, ToolCall};
+
+let tools = vec![
+    ToolDefinition::function(
+        "search_products",
+        "Search the product catalog",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "category": { "type": "string" }
+            },
+            "required": ["query"]
+        }),
+    ),
+];
+
+let request = CompletionRequest {
+    model: "gpt-4o".to_string(),
+    messages: vec![Message::user("Find me running shoes under $100")],
+    tools: Some(tools),
+    ..Default::default()
+};
+
+let response = provider.complete(request).await?;
+
+// Check for tool calls in the response
+if let Some(tool_calls) = response.tool_calls {
+    for call in tool_calls {
+        println!("Call: {} with args: {}", call.function.name, call.function.arguments);
+    }
+}
+```
+
+After executing tool calls, feed results back:
+
+```rust
+messages.push(Message::assistant_with_tool_calls(tool_calls));
+messages.push(Message::tool("search_products", tool_call_id, results_json));
+// Continue the conversation with updated messages
+```
+
+For models that emit tool calls in raw text (e.g., `<function=name>{args}</function>`), the `extract_tool_calls_from_content()` utility parses them. The `StreamingToolCallDetector` handles incremental detection during streaming.
+
+Auto-generated system prompts for tool usage are available via `ToolDefinition::generate_tool_guidance()`.
+
+### Structured Output (JSON Schema Mode)
+
+Request structured JSON output conforming to a schema:
+
+```rust
+use raisin_ai::ResponseFormat;
+
+let request = CompletionRequest {
+    response_format: Some(ResponseFormat::JsonSchema {
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "sentiment": { "type": "string", "enum": ["positive", "negative", "neutral"] },
+                "confidence": { "type": "number" }
+            }
+        }),
+    }),
+    ..Default::default()
+};
+```
+
+Output validation is available via `validate_output()`.
+
+### Provider Capabilities
+
+Query provider capabilities at runtime:
+
+```rust
+// Check what a provider supports
+provider.supports_streaming();
+provider.supports_tools();
+provider.list_available_models().await?;
+```
+
+## Text Chunking
 
 The `TextChunker` splits documents into chunks suitable for embedding generation:
 
 ```rust
-use raisin_ai::TextChunker;
+use raisin_ai::{TextChunker, ChunkingConfig, SplitterType, OverlapConfig};
 
-let chunker = TextChunker::new(/* chunking config */);
-let chunks = chunker.chunk("Long document text...");
+let config = ChunkingConfig {
+    splitter: SplitterType::Recursive,  // or FixedSize
+    chunk_size: 512,                     // tokens
+    overlap: OverlapConfig { tokens: 50 },
+};
+
+let chunker = TextChunker::new(config);
+let chunks: Vec<TextChunk> = chunker.chunk("Long document text...");
 ```
 
-Chunking supports configurable overlap between chunks and multiple splitting strategies (by tokens, by sentences, by paragraphs).
+Chunking is token-aware (uses tiktoken) and supports configurable overlap between chunks.
 
-### PDF Processing
+## PDF Processing
 
 With the `pdf` or `pdf-markdown` feature flags, documents can be extracted from PDF files:
 
@@ -74,16 +234,28 @@ With the `pdf` or `pdf-markdown` feature flags, documents can be extracted from 
 raisin-ai = { path = "../raisin-ai", features = ["pdf"] }
 ```
 
-### Local Inference (Candle)
+Multiple extraction strategies:
+- **Native** (`pdf-extract`) -- fast text extraction from text-based PDFs
+- **Markdown** (`pdf_oxide`) -- preserves structure as Markdown
+- **OCR** (`tesseract`) -- for scanned PDFs, configurable via `OcrOptions`
 
-The optional `candle` feature enables local AI inference using the Candle framework for models like CLIP and BLIP (image understanding):
+The `PdfProcessor` uses a router pattern to select the best strategy per document.
+
+## Local Inference (Candle)
+
+The optional `candle` feature enables local AI inference using the Candle framework:
 
 ```toml
 [dependencies]
 raisin-ai = { path = "../raisin-ai", features = ["candle"] }
 ```
 
-This downloads models from HuggingFace and runs inference locally without external API calls.
+**Supported local models:**
+- **CLIP** -- image and text embeddings for multimodal search
+- **BLIP** -- image captioning
+- **Moondream** -- image understanding
+
+Models are downloaded from HuggingFace on first use and cached locally. No external API calls required.
 
 ## Embeddings
 
@@ -104,6 +276,22 @@ let embedding = EmbeddingData {
     // ...
 };
 ```
+
+### Embedding Versioning
+
+The `EmbedderId` prevents collisions when the embedding model or configuration changes:
+
+```rust
+use raisin_ai::EmbedderId;
+
+// EmbedderId encodes provider + model + dimensions + tokenizer
+let id = EmbedderId::new("openai", "text-embedding-3-small", 1536, "cl100k_base");
+
+// Generates a stable 11-char base64url hash for storage keys
+let key = id.to_key_hash(); // e.g., "a1B2c3D4e5F"
+```
+
+When you switch embedding models, old and new embeddings coexist without conflicts.
 
 ### Embedding Jobs
 
