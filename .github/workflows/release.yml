@@ -263,14 +263,12 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
     steps:
-      - name: Download all build artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: "*-*-*"
           merge-multiple: true
-
-      - name: Remove frontend artifact from release
-        run: rm -rf artifacts/admin-console-dist
 
       - name: List artifacts
         run: ls -lah artifacts
