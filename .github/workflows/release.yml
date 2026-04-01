@@ -180,6 +180,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tesseract leptonica pkg-config
 
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
       - name: Install system deps (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

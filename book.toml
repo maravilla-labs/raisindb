@@ -3,7 +3,6 @@ title = "RaisinDB Documentation"
 authors = ["RaisinDB Contributors"]
 description = "A flexible, multi-tenant content database built with Rust"
 language = "en"
-multilingual = false
 src = "book/src"
 
 [build]

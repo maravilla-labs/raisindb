@@ -6,7 +6,7 @@ RaisinDB includes a reference HTTP server implementation (`raisin-server`) that 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/raisindb
+git clone https://github.com/maravilla-labs/raisindb
 cd raisindb
 
 # Run the server (with default features: storage-rocksdb, websocket, pgwire, ai)

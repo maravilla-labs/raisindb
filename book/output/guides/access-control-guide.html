@@ -1,0 +1,919 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Access Control Guide - RaisinDB Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="A flexible, multi-tenant content database built with Rust">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-7d500c97.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RaisinDB Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/guides/access-control-guide.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="access-control-practical-guide"><a class="header" href="#access-control-practical-guide">Access Control Practical Guide</a></h1>
+<p>This guide walks through common access control tasks in RaisinDB – creating users, defining roles, configuring security policies, and testing permissions. It is a hands-on companion to the <a href="../architecture/access-control.html">Access Control &amp; Authorization</a> architecture chapter, which covers the underlying design in detail.</p>
+<p>All access control entities (users, roles, groups) are stored as nodes in the built-in <code>raisin:access_control</code> workspace. You manage them via the REST API or the Admin Console, just like any other content in RaisinDB.</p>
+<h2 id="managing-users"><a class="header" href="#managing-users">Managing Users</a></h2>
+<p>A <code>raisin:User</code> node represents a user’s presence within the system. Each user lives under <code>/users</code> in the <code>raisin:access_control</code> workspace and carries role assignments, group memberships, and profile data.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>email</code></td><td>String</td><td>Yes</td><td>User’s email (unique)</td></tr>
+<tr><td><code>display_name</code></td><td>String</td><td>Yes</td><td>Display name</td></tr>
+<tr><td><code>roles</code></td><td>Array</td><td>No</td><td>Direct role assignments</td></tr>
+<tr><td><code>groups</code></td><td>Array</td><td>No</td><td>Group memberships</td></tr>
+<tr><td><code>metadata</code></td><td>Object</td><td>No</td><td>Custom key-value data</td></tr>
+<tr><td><code>birth_date</code></td><td>Date</td><td>No</td><td>For minor status calculation</td></tr>
+<tr><td><code>can_login</code></td><td>Boolean</td><td>No</td><td>Whether user can authenticate (default: <code>true</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="via-rest-api"><a class="header" href="#via-rest-api">Via REST API</a></h3>
+<p>Create a user by posting a node to the <code>raisin:access_control</code> workspace:</p>
+<pre><code class="language-bash">curl -X POST \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "parent_path": "/users",
+    "name": "alice",
+    "node_type": "raisin:User",
+    "properties": {
+      "user_id": "alice",
+      "email": "alice@example.com",
+      "display_name": "Alice Smith",
+      "roles": ["editor", "reviewer"],
+      "groups": ["engineering"]
+    }
+  }'
+</code></pre>
+<p>Update an existing user’s roles:</p>
+<pre><code class="language-bash">curl -X PUT \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes/users/alice" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "properties": {
+      "user_id": "alice",
+      "email": "alice@example.com",
+      "display_name": "Alice Smith",
+      "roles": ["editor", "reviewer", "content-manager"],
+      "groups": ["engineering", "content-team"]
+    }
+  }'
+</code></pre>
+<p>List all users:</p>
+<pre><code class="language-bash">curl "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes/users" \
+  -H "Authorization: Bearer $TOKEN"
+</code></pre>
+<h3 id="via-admin-console"><a class="header" href="#via-admin-console">Via Admin Console</a></h3>
+<p>The Admin Console provides a <strong>UserEditor</strong> form for managing user accounts:</p>
+<ol>
+<li>Navigate to the Access Control section and select <strong>Users</strong>.</li>
+<li>Click <strong>Create User</strong> to open the editor.</li>
+<li>Fill in the required fields:
+<ul>
+<li><strong>user_id</strong> – A unique text identifier for the user. This field cannot be changed after creation.</li>
+<li><strong>email</strong> – The user’s email address.</li>
+<li><strong>display_name</strong> – The name shown in the UI.</li>
+</ul>
+</li>
+<li>Assign <strong>roles</strong> using the tag selector. The selector suggests from all existing roles in the system.</li>
+<li>Assign <strong>groups</strong> using the tag selector. The selector suggests from all existing groups.</li>
+<li>Click <strong>Save</strong>. The console creates a <code>raisin:User</code> node at <code>/users/{user_id}</code> in the <code>raisin:access_control</code> workspace.</li>
+</ol>
+<p>When editing an existing user, the <code>user_id</code> field is disabled to prevent accidental identity changes. All other fields remain editable.</p>
+<h2 id="managing-roles"><a class="header" href="#managing-roles">Managing Roles</a></h2>
+<p>A <code>raisin:Role</code> node defines a named set of permissions. Roles can inherit from other roles, forming a hierarchy. They live under <code>/roles</code> in the <code>raisin:access_control</code> workspace.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td>String</td><td>Yes</td><td>Role name (unique)</td></tr>
+<tr><td><code>description</code></td><td>String</td><td>No</td><td>Human-readable description</td></tr>
+<tr><td><code>inherits</code></td><td>Array</td><td>No</td><td>Role IDs this role inherits from</td></tr>
+<tr><td><code>permissions</code></td><td>Array</td><td>No</td><td>Permission grant objects</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="via-rest-api-1"><a class="header" href="#via-rest-api-1">Via REST API</a></h3>
+<p>Create a role:</p>
+<pre><code class="language-bash">curl -X POST \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "parent_path": "/roles",
+    "name": "content-editor",
+    "node_type": "raisin:Role",
+    "properties": {
+      "role_id": "content-editor",
+      "name": "Content Editor",
+      "description": "Can manage articles in the content workspace",
+      "inherits": ["viewer"],
+      "permissions": [
+        {
+          "workspace": "content",
+          "path": "articles/**",
+          "operations": ["create", "read", "update", "delete"],
+          "node_types": ["blog:Article", "blog:Draft"]
+        }
+      ]
+    }
+  }'
+</code></pre>
+<p>Update a role to add new permissions:</p>
+<pre><code class="language-bash">curl -X PUT \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes/roles/content-editor" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "properties": {
+      "role_id": "content-editor",
+      "name": "Content Editor",
+      "description": "Can manage articles and media in the content workspace",
+      "inherits": ["viewer"],
+      "permissions": [
+        {
+          "workspace": "content",
+          "path": "articles/**",
+          "operations": ["create", "read", "update", "delete"],
+          "node_types": ["blog:Article", "blog:Draft"]
+        },
+        {
+          "path": "media/**",
+          "operations": ["read"],
+          "fields": ["title", "url", "thumbnail"]
+        }
+      ]
+    }
+  }'
+</code></pre>
+<h3 id="defining-permissions"><a class="header" href="#defining-permissions">Defining Permissions</a></h3>
+<p>Each entry in the <code>permissions</code> array is a permission grant. Here is a reference for every field:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>workspace</code></td><td>String</td><td>All workspaces</td><td>Workspace pattern (supports globs like <code>content-*</code>)</td></tr>
+<tr><td><code>branch_pattern</code></td><td>String</td><td>All branches</td><td>Branch pattern (supports globs like <code>features/*</code>)</td></tr>
+<tr><td><code>path</code></td><td>String</td><td>–</td><td>Path pattern for content matching (required)</td></tr>
+<tr><td><code>operations</code></td><td>Array</td><td>–</td><td>List of allowed operations (required)</td></tr>
+<tr><td><code>node_types</code></td><td>Array</td><td>All types</td><td>Restrict to specific node types</td></tr>
+<tr><td><code>fields</code></td><td>Array</td><td>All fields</td><td>Field whitelist – only these fields are accessible</td></tr>
+<tr><td><code>except_fields</code></td><td>Array</td><td>None</td><td>Field blacklist – all fields except these</td></tr>
+<tr><td><code>condition</code></td><td>String</td><td>None</td><td>REL expression that must evaluate to truthy</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Operations</strong> – seven operations can be granted:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operation</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>create</code></td><td>Create new nodes</td></tr>
+<tr><td><code>read</code></td><td>View and query nodes</td></tr>
+<tr><td><code>update</code></td><td>Modify existing nodes</td></tr>
+<tr><td><code>delete</code></td><td>Remove nodes</td></tr>
+<tr><td><code>translate</code></td><td>Modify translations on nodes</td></tr>
+<tr><td><code>relate</code></td><td>Create relationships between nodes</td></tr>
+<tr><td><code>unrelate</code></td><td>Remove relationships between nodes</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Path patterns</strong> use glob-style matching:</p>
+<ul>
+<li><code>*</code> matches any characters except <code>/</code> (single segment)</li>
+<li><code>**</code> matches any characters including <code>/</code> (recursive)</li>
+<li><code>?</code> matches any single character except <code>/</code></li>
+</ul>
+<p>Path validation rules (enforced by the Admin Console):</p>
+<ul>
+<li>Must start with <code>/</code></li>
+<li>No triple slashes (<code>///</code>)</li>
+<li>Valid characters: letters, numbers, <code>-</code>, <code>_</code>, <code>/</code>, <code>*</code>, <code>?</code></li>
+<li>No <code>***</code> or longer wildcard sequences</li>
+</ul>
+<p><strong>Example: Read-only access to published articles</strong></p>
+<pre><code class="language-json">{
+  "workspace": "content",
+  "path": "articles/published/**",
+  "operations": ["read"],
+  "node_types": ["blog:Article"]
+}
+</code></pre>
+<p><strong>Example: Full access within a team’s workspace, excluding sensitive fields</strong></p>
+<pre><code class="language-json">{
+  "workspace": "team-alpha",
+  "path": "**",
+  "operations": ["create", "read", "update", "delete", "relate", "unrelate"],
+  "except_fields": ["internal_notes", "salary"]
+}
+</code></pre>
+<p><strong>Example: Conditional access with a REL expression</strong></p>
+<pre><code class="language-json">{
+  "workspace": "content",
+  "path": "articles/**",
+  "operations": ["update", "delete"],
+  "condition": "node.created_by == auth.user_id"
+}
+</code></pre>
+<p>This permission only applies when the node’s creator matches the requesting user, effectively implementing ownership-based access.</p>
+<h3 id="via-admin-console-1"><a class="header" href="#via-admin-console-1">Via Admin Console</a></h3>
+<p>The Admin Console provides a <strong>RoleEditor</strong> form and a <strong>PermissionEditor</strong> component for managing roles and their permissions.</p>
+<p><strong>Creating or editing a role:</strong></p>
+<ol>
+<li>Navigate to <strong>Roles</strong> under the Access Control section.</li>
+<li>Click <strong>Create Role</strong> or select an existing role to edit.</li>
+<li>Fill in the fields:
+<ul>
+<li><strong>role_id</strong> – Unique identifier (disabled when editing an existing role).</li>
+<li><strong>name</strong> – Human-readable role name.</li>
+<li><strong>description</strong> – Optional description (textarea).</li>
+</ul>
+</li>
+<li>Under <strong>Inherits</strong>, use the tag selector to pick parent roles. The selector shows all roles in the system, filtered to exclude the current role (preventing self-inheritance).</li>
+<li>The <strong>Permissions</strong> section shows each permission as a card displaying the path, operations, workspace badge, branch badge, node type count, and condition preview.</li>
+</ol>
+<p><strong>Adding or editing a permission:</strong></p>
+<p>Click <strong>Add Permission</strong> on a role, or click an existing permission card. A dialog opens with two tabs:</p>
+<p><strong>Details tab:</strong></p>
+<ul>
+<li><strong>workspace</strong> – Workspace scope for this permission (text input).</li>
+<li><strong>branch_pattern</strong> – Branch scope (text input).</li>
+<li><strong>path</strong> – Content path pattern with glob validation.</li>
+<li><strong>operations</strong> – Seven checkboxes: create, read, update, delete, translate, relate, unrelate.</li>
+<li><strong>node_types</strong> – Tag selector populated from the system’s registered node types. Does not allow custom values.</li>
+<li><strong>fields</strong> – Whitelist of allowed fields. Tag selector with suggestions loaded from the selected node type’s property definitions.</li>
+<li><strong>except_fields</strong> – Blacklist. Same tag selector as fields.</li>
+</ul>
+<p><strong>Conditions tab:</strong></p>
+<ul>
+<li>A ConditionBuilder component for writing REL expressions.</li>
+<li>Shows available variables for reference: <code>resource.*</code>, <code>auth.user_id</code>, <code>auth.email</code>, <code>auth.roles</code>, <code>auth.groups</code>.</li>
+<li>See the <a href="../architecture/access-control.html">architecture chapter</a> for the full list of <code>auth.*</code> and <code>node.*</code> variables available in REL conditions.</li>
+</ul>
+<h3 id="role-inheritance-in-practice"><a class="header" href="#role-inheritance-in-practice">Role Inheritance in Practice</a></h3>
+<p>Roles can inherit from other roles via the <code>inherits</code> property. Permissions are collected from the entire inheritance chain.</p>
+<p>A typical hierarchy:</p>
+<pre><code>system_admin    (full access to everything)
+    ^
+  admin         (manage users, configure workspaces)
+    ^
+  editor        (create and edit content)
+    ^
+  viewer        (read-only access)
+</code></pre>
+<p>When you assign a user the <code>editor</code> role, they also receive all permissions from <code>viewer</code> (and any other roles in <code>viewer</code>’s chain). Inheritance is resolved recursively with cycle detection, so you cannot create circular dependencies.</p>
+<p>To set up this hierarchy via the API:</p>
+<pre><code class="language-bash"># Create the viewer role
+curl -X POST \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "parent_path": "/roles",
+    "name": "viewer",
+    "node_type": "raisin:Role",
+    "properties": {
+      "role_id": "viewer",
+      "name": "Viewer",
+      "permissions": [
+        { "path": "**", "operations": ["read"] }
+      ]
+    }
+  }'
+
+# Create the editor role, inheriting from viewer
+curl -X POST \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "parent_path": "/roles",
+    "name": "editor",
+    "node_type": "raisin:Role",
+    "properties": {
+      "role_id": "editor",
+      "name": "Editor",
+      "inherits": ["viewer"],
+      "permissions": [
+        { "path": "articles/**", "operations": ["create", "update", "delete"] }
+      ]
+    }
+  }'
+</code></pre>
+<p>The <code>editor</code> role now grants <code>create</code>, <code>update</code>, <code>delete</code> on articles, plus the <code>read</code> on everything inherited from <code>viewer</code>.</p>
+<h2 id="managing-groups"><a class="header" href="#managing-groups">Managing Groups</a></h2>
+<p>Groups are a layer of indirection between users and roles. Instead of assigning roles to individual users, you assign roles to a group and then add users to that group. When group roles change, all members are affected.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td>String</td><td>Yes</td><td>Group name (unique)</td></tr>
+<tr><td><code>description</code></td><td>String</td><td>No</td><td>Human-readable description</td></tr>
+<tr><td><code>roles</code></td><td>Array</td><td>No</td><td>Roles assigned to all group members</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="via-rest-api-2"><a class="header" href="#via-rest-api-2">Via REST API</a></h3>
+<p>Create a group:</p>
+<pre><code class="language-bash">curl -X POST \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "parent_path": "/groups",
+    "name": "engineering",
+    "node_type": "raisin:Group",
+    "properties": {
+      "group_id": "engineering",
+      "name": "Engineering Team",
+      "description": "All engineering staff",
+      "roles": ["editor", "developer"]
+    }
+  }'
+</code></pre>
+<p>Then assign a user to the group by including the group in their <code>groups</code> array:</p>
+<pre><code class="language-bash">curl -X PUT \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes/users/alice" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "properties": {
+      "user_id": "alice",
+      "email": "alice@example.com",
+      "display_name": "Alice Smith",
+      "groups": ["engineering"]
+    }
+  }'
+</code></pre>
+<h3 id="via-admin-console-2"><a class="header" href="#via-admin-console-2">Via Admin Console</a></h3>
+<p>The <strong>GroupEditor</strong> form works similarly to the other editors:</p>
+<ol>
+<li>Navigate to <strong>Groups</strong> under Access Control.</li>
+<li>Click <strong>Create Group</strong> or select an existing group.</li>
+<li>Fill in:
+<ul>
+<li><strong>group_id</strong> – Unique identifier (disabled when editing).</li>
+<li><strong>name</strong> – Human-readable group name.</li>
+<li><strong>description</strong> – Optional description (textarea).</li>
+</ul>
+</li>
+<li>Under <strong>Roles</strong>, use the tag selector to assign roles. The selector suggests from all existing roles.</li>
+<li>Click <strong>Save</strong>. The console creates a <code>raisin:Group</code> node at <code>/groups/{group_id}</code> in <code>raisin:access_control</code>.</li>
+</ol>
+<h2 id="security-configuration"><a class="header" href="#security-configuration">Security Configuration</a></h2>
+<p>The <code>raisin:SecurityConfig</code> node at <code>/config/default</code> in the <code>raisin:access_control</code> workspace controls global security behavior.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>workspace</code></td><td>String</td><td><code>*</code></td><td>Workspace scope (required, unique)</td></tr>
+<tr><td><code>default_policy</code></td><td>String</td><td><code>deny</code></td><td>Default policy when no permission matches (<code>deny</code>)</td></tr>
+<tr><td><code>anonymous_enabled</code></td><td>Boolean</td><td><code>false</code></td><td>Whether unauthenticated access is allowed</td></tr>
+<tr><td><code>anonymous_role</code></td><td>String</td><td>–</td><td>Role assigned to anonymous requests</td></tr>
+<tr><td><code>interfaces</code></td><td>Object</td><td>–</td><td>Per-interface overrides</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="configuring-default-policy"><a class="header" href="#configuring-default-policy">Configuring Default Policy</a></h3>
+<p>The initial security configuration ships with a deny-all default:</p>
+<pre><code class="language-bash">curl -X PUT \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes/config/default" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "properties": {
+      "workspace": "*",
+      "default_policy": "deny",
+      "anonymous_enabled": false
+    }
+  }'
+</code></pre>
+<p>With <code>default_policy</code> set to <code>deny</code>, any request that does not match an explicit permission grant is rejected. This is the recommended setting for production.</p>
+<h3 id="enabling-anonymous-access"><a class="header" href="#enabling-anonymous-access">Enabling Anonymous Access</a></h3>
+<p>To allow unauthenticated users to access certain content, enable anonymous access and assign a role:</p>
+<pre><code class="language-bash">curl -X PUT \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes/config/default" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "properties": {
+      "workspace": "*",
+      "default_policy": "deny",
+      "anonymous_enabled": true,
+      "anonymous_role": "anonymous"
+    }
+  }'
+</code></pre>
+<p>The built-in <code>anonymous</code> role grants read-only access to the <code>launchpad</code> workspace:</p>
+<pre><code class="language-json">{
+  "role_id": "anonymous",
+  "name": "Anonymous Access",
+  "description": "Role for unauthenticated users with read-only access to public workspaces",
+  "permissions": [
+    { "path": "**", "operations": ["read"], "workspace": "launchpad" }
+  ]
+}
+</code></pre>
+<p>You can customize the <code>anonymous</code> role’s permissions to grant access to other workspaces or paths as needed.</p>
+<h3 id="per-interface-overrides"><a class="header" href="#per-interface-overrides">Per-Interface Overrides</a></h3>
+<p>The <code>interfaces</code> property allows different security settings for different transport layers (HTTP, WebSocket, PGWire). For example, you might want stricter anonymous settings on the PGWire interface while allowing anonymous reads over HTTP.</p>
+<h2 id="testing-permissions-with-impersonation"><a class="header" href="#testing-permissions-with-impersonation">Testing Permissions with Impersonation</a></h2>
+<p>Before deploying permission changes, you should verify they work as expected. RaisinDB supports user impersonation for this purpose.</p>
+<h3 id="via-admin-console-3"><a class="header" href="#via-admin-console-3">Via Admin Console</a></h3>
+<p>The Admin Console includes an <strong>ImpersonationSelector</strong> component in the toolbar. It is only visible to administrators whose account has the <code>can_impersonate</code> access flag set.</p>
+<p><strong>To impersonate a user:</strong></p>
+<ol>
+<li>Click the <strong>“View as…”</strong> button in the toolbar.</li>
+<li>A dropdown appears with two modes:
+<ul>
+<li><strong>Search mode</strong> – Type a name, email, or user ID. The search queries the <code>raisin:access_control</code> workspace for matching <code>raisin:User</code> nodes by <code>display_name</code>, <code>email</code>, <code>user_id</code>, or <code>name</code>. Search is debounced at 350ms.</li>
+<li><strong>Tree browse mode</strong> – Browse the root nodes of the <code>raisin:access_control</code> workspace to find users.</li>
+</ul>
+</li>
+<li>Select a user. The toolbar updates to show the impersonated user’s name.</li>
+<li>Navigate the system. All content is now filtered through the impersonated user’s permissions.</li>
+<li>Click <strong>“Exit impersonation”</strong> to return to your own view.</li>
+</ol>
+<p>A warning footer displays while impersonation is active: “You are viewing content as another user. Actions are still audited under your account.” Impersonation uses the user node’s ID (UUID), not the <code>user_id</code> property.</p>
+<h3 id="via-rest-api-3"><a class="header" href="#via-rest-api-3">Via REST API</a></h3>
+<p>Use the <code>X-Raisin-Impersonate</code> header to test permissions programmatically:</p>
+<pre><code class="language-bash"># View content as alice would see it
+curl "https://your-server/api/v1/repositories/my-repo/workspaces/content/nodes/articles" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Raisin-Impersonate: alice-node-uuid"
+</code></pre>
+<p>The impersonating user must have the <code>can_impersonate</code> access flag. All actions taken while impersonating are audited under the original administrator’s account.</p>
+<h2 id="common-patterns"><a class="header" href="#common-patterns">Common Patterns</a></h2>
+<h3 id="ownership-based-access"><a class="header" href="#ownership-based-access">Ownership-Based Access</a></h3>
+<p>Allow users to edit only content they created:</p>
+<pre><code class="language-json">{
+  "path": "articles/**",
+  "operations": ["update", "delete"],
+  "condition": "node.created_by == auth.user_id"
+}
+</code></pre>
+<p>This REL condition compares the node’s <code>created_by</code> field (set automatically on creation) against the authenticated user’s identity.</p>
+<h3 id="team-based-content-spaces"><a class="header" href="#team-based-content-spaces">Team-Based Content Spaces</a></h3>
+<p>Give each team a dedicated workspace with full control:</p>
+<pre><code class="language-json">{
+  "workspace": "team-alpha",
+  "path": "**",
+  "operations": ["create", "read", "update", "delete", "relate", "unrelate"]
+}
+</code></pre>
+<p>Assign this permission to a <code>team-alpha-member</code> role, then create a <code>team-alpha</code> group with that role. Adding or removing users from the group controls access to the team’s workspace.</p>
+<h3 id="publicprivate-content"><a class="header" href="#publicprivate-content">Public/Private Content</a></h3>
+<p>Combine the built-in <code>anonymous</code> role (read access to a public workspace) with authenticated roles for private content:</p>
+<pre><code class="language-json">[
+  {
+    "workspace": "public-site",
+    "path": "**",
+    "operations": ["read"]
+  }
+]
+</code></pre>
+<p>Assign this to the <code>anonymous</code> role so unauthenticated visitors can read public content. Private workspaces remain inaccessible because the default policy is <code>deny</code>.</p>
+<h3 id="home-directory-pattern"><a class="header" href="#home-directory-pattern">Home Directory Pattern</a></h3>
+<p>The built-in <code>authenticated_user</code> role demonstrates a home directory pattern where each user has access to their own subtree. The relevant permissions use <code>auth.home</code> to scope access:</p>
+<pre><code class="language-json">{
+  "path": "users/**/inbox/**",
+  "operations": ["read", "update", "delete"],
+  "workspace": "raisin:access_control",
+  "condition": "node.path.startsWith(auth.home)"
+}
+</code></pre>
+<p>The <code>auth.home</code> variable resolves to the user’s home path in the repository (e.g., <code>/users/alice</code>). This means Alice can manage her own inbox but cannot access Bob’s.</p>
+<p>The full <code>authenticated_user</code> role also covers <code>outbox</code>, <code>sent</code>, and <code>notifications</code> folders with the same pattern:</p>
+<pre><code class="language-json">{
+  "path": "users/**/outbox/**",
+  "operations": ["create", "read", "update", "delete"],
+  "workspace": "raisin:access_control",
+  "condition": "node.path.startsWith(auth.home)"
+}
+</code></pre>
+<h3 id="social-graph-permissions"><a class="header" href="#social-graph-permissions">Social Graph Permissions</a></h3>
+<p>The <code>authenticated_user</code> role shows how graph relationships can drive access control. Profile visibility is determined by social connections:</p>
+<p><strong>Own profile – full access:</strong></p>
+<pre><code class="language-json">{
+  "path": "users/**/profile",
+  "operations": ["read", "update"],
+  "workspace": "raisin:access_control",
+  "condition": "node.path.startsWith(auth.home)"
+}
+</code></pre>
+<p><strong>Friends’ profiles – read access:</strong></p>
+<pre><code class="language-json">{
+  "path": "users/**/profile",
+  "operations": ["read"],
+  "workspace": "raisin:access_control",
+  "condition": "node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH'"
+}
+</code></pre>
+<p><strong>Friends-of-friends – limited fields only:</strong></p>
+<pre><code class="language-json">{
+  "path": "users/**/profile",
+  "operations": ["read"],
+  "workspace": "raisin:access_control",
+  "fields": ["display_name", "avatar", "bio"],
+  "condition": "node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH' DEPTH 2"
+}
+</code></pre>
+<p>This creates a graduated visibility model: you see your own full profile, your direct friends see everything, and friends-of-friends see only <code>display_name</code>, <code>avatar</code>, and <code>bio</code>. Everyone else sees only the <code>display_name</code> (granted by a separate blanket permission on <code>raisin:User</code> nodes).</p>
+<h2 id="stewardship-setup"><a class="header" href="#stewardship-setup">Stewardship Setup</a></h2>
+<p>The stewardship system manages parent/guardian relationships over minor or dependent user accounts. It is provided by the built-in <code>raisin-stewardship</code> package (which depends on <code>raisin-relationships</code>).</p>
+<h3 id="enabling-stewardship"><a class="header" href="#enabling-stewardship">Enabling Stewardship</a></h3>
+<p>Stewardship is configured via the <code>raisin:StewardshipConfig</code> node. The default configuration has stewardship disabled:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td>Boolean</td><td><code>false</code></td><td>Master switch for stewardship features</td></tr>
+<tr><td><code>stewardship_relation_types</code></td><td>Array</td><td><code>["PARENT_OF", "GUARDIAN_OF"]</code></td><td>Relation types that grant stewardship</td></tr>
+<tr><td><code>require_minor_for_parent</code></td><td>Boolean</td><td><code>true</code></td><td>PARENT_OF requires ward to be a minor</td></tr>
+<tr><td><code>max_stewards_per_ward</code></td><td>Number</td><td><code>5</code></td><td>Maximum stewards per dependent</td></tr>
+<tr><td><code>max_wards_per_steward</code></td><td>Number</td><td><code>10</code></td><td>Maximum dependents per steward</td></tr>
+<tr><td><code>invitation_expiry_days</code></td><td>Number</td><td><code>7</code></td><td>Days before a stewardship invitation expires</td></tr>
+<tr><td><code>require_ward_consent</code></td><td>Boolean</td><td><code>true</code></td><td>Whether the ward must accept</td></tr>
+<tr><td><code>minor_age_threshold</code></td><td>Number</td><td><code>18</code></td><td>Age below which a user is considered a minor</td></tr>
+<tr><td><code>allow_minor_login</code></td><td>Boolean</td><td><code>false</code></td><td>Whether minors can log in directly</td></tr>
+</tbody>
+</table>
+</div>
+<p>To enable stewardship:</p>
+<pre><code class="language-bash">curl -X PUT \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes/config/stewardship" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "properties": {
+      "enabled": true,
+      "stewardship_relation_types": ["PARENT_OF", "GUARDIAN_OF"],
+      "minor_age_threshold": 18,
+      "allow_minor_login": false
+    }
+  }'
+</code></pre>
+<h3 id="creating-entity-circles"><a class="header" href="#creating-entity-circles">Creating Entity Circles</a></h3>
+<p>Entity circles represent organizational groupings like families, teams, or departments. They are <code>raisin:EntityCircle</code> nodes.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td>String</td><td>Circle name (required)</td></tr>
+<tr><td><code>circle_type</code></td><td>String</td><td>One of: <code>family</code>, <code>team</code>, <code>org_unit</code>, <code>department</code>, <code>project</code>, <code>custom</code></td></tr>
+<tr><td><code>primary_contact_id</code></td><td>String</td><td>User ID of the primary contact</td></tr>
+<tr><td><code>address</code></td><td>Object</td><td>Address with <code>street</code>, <code>city</code>, <code>state</code>, <code>postal_code</code>, <code>country</code></td></tr>
+<tr><td><code>metadata</code></td><td>Object</td><td>Custom key-value data</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bash">curl -X POST \
+  "https://your-server/api/v1/repositories/my-repo/workspaces/raisin:access_control/nodes" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "parent_path": "/circles",
+    "name": "smith-family",
+    "node_type": "raisin:EntityCircle",
+    "properties": {
+      "name": "Smith Family",
+      "circle_type": "family",
+      "primary_contact_id": "alice",
+      "address": {
+        "city": "Portland",
+        "state": "OR",
+        "country": "US"
+      }
+    }
+  }'
+</code></pre>
+<h3 id="establishing-stewardship-relationships"><a class="header" href="#establishing-stewardship-relationships">Establishing Stewardship Relationships</a></h3>
+<p>Once stewardship is enabled, create <code>PARENT_OF</code> or <code>GUARDIAN_OF</code> relationships between user nodes. The stewardship system uses the same relationship infrastructure as the rest of RaisinDB (provided by the <code>raisin-relationships</code> dependency).</p>
+<p>When a steward is acting on behalf of a ward, the <code>auth.acting_as_ward</code> and <code>auth.active_stewardship_source</code> variables are populated in REL conditions, enabling permissions that account for delegated access.</p>
+<h2 id="packages-and-access-control"><a class="header" href="#packages-and-access-control">Packages and Access Control</a></h2>
+<h3 id="builtin-packages"><a class="header" href="#builtin-packages">Builtin Packages</a></h3>
+<p>RaisinDB ships with built-in roles that are always available:</p>
+<p><strong>system_admin</strong> – Full access to everything:</p>
+<pre><code class="language-json">{
+  "role_id": "system_admin",
+  "name": "System Administrator",
+  "description": "Built-in superuser role with full access to all resources",
+  "permissions": [
+    { "path": "**", "operations": ["create", "read", "update", "delete", "translate", "relate", "unrelate"] }
+  ]
+}
+</code></pre>
+<p><strong>anonymous</strong> – Read-only access for unauthenticated users:</p>
+<pre><code class="language-json">{
+  "role_id": "anonymous",
+  "name": "Anonymous Access",
+  "description": "Role for unauthenticated users with read-only access to public workspaces",
+  "permissions": [
+    { "path": "**", "operations": ["read"], "workspace": "launchpad" }
+  ]
+}
+</code></pre>
+<p><strong>authenticated_user</strong> – Default role for all logged-in users, granting access to their own profile, inbox, outbox, sent, and notifications folders. See <a href="#social-graph-permissions">Social Graph Permissions</a> above for a walkthrough of its permissions.</p>
+<p>The <code>raisin-stewardship</code> package is also built-in. It depends on <code>raisin-relationships</code>, provides the <code>raisin:StewardshipConfig</code>, <code>raisin:EntityCircle</code>, and <code>raisin:StewardshipOverride</code> node types, and installs 12 relation types into the <code>raisin:access_control</code> workspace. It also patches the <code>raisin:access_control</code> workspace to use <code>raisin:AclFolder</code> as the default folder type.</p>
+<h3 id="custom-auth-content-in-rap-packages"><a class="header" href="#custom-auth-content-in-rap-packages">Custom Auth Content in RAP Packages</a></h3>
+<p>You can include custom roles, groups, and security configurations in your own <a href="../guides/packages.html">RAP packages</a>. This is useful for distributing a consistent authorization setup across environments or tenants.</p>
+<p>In your package’s <code>content/</code> directory, place role and group nodes under the <code>raisin:access_control</code> workspace:</p>
+<pre><code>my-auth-package-1.0.0.rap
+  manifest.yaml
+  content/
+    raisin:access_control/
+      roles/
+        custom-editor/
+          node.yaml
+        custom-viewer/
+          node.yaml
+      groups/
+        default-team/
+          node.yaml
+</code></pre>
+<p>Each <code>node.yaml</code> defines the node type and properties, just as they would be created via the API. When the package is installed, these nodes are created in the <code>raisin:access_control</code> workspace.</p>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<p><strong>User cannot access content they should have access to:</strong></p>
+<ol>
+<li>Check the user’s roles and groups. Verify the user node at <code>/users/{user_id}</code> has the expected <code>roles</code> and <code>groups</code> arrays.</li>
+<li>Inspect role permissions. Look at each role’s <code>permissions</code> array and verify the <code>path</code>, <code>operations</code>, <code>workspace</code>, and <code>node_types</code> fields match the content being accessed.</li>
+<li>Check inheritance. If the role inherits from other roles, verify those parent roles exist and have the expected permissions.</li>
+<li>Test with impersonation. Use the Admin Console’s impersonation feature to view content as the affected user.</li>
+</ol>
+<p><strong>Permission condition is not matching:</strong></p>
+<ol>
+<li>Verify the REL expression syntax. Common mistakes include using <code>==</code> with array values (use <code>CONTAINS</code> instead) or referencing undefined variables.</li>
+<li>Check <code>auth.*</code> variable values. The <code>auth.home</code> variable requires the user to have a home path set. The <code>auth.local_user_id</code> is the workspace-specific node ID, not the global identity ID.</li>
+<li>For graph conditions (<code>RELATES ... VIA</code>), verify the relationship exists between the relevant nodes.</li>
+</ol>
+<p><strong>Anonymous access is not working:</strong></p>
+<ol>
+<li>Confirm <code>anonymous_enabled</code> is <code>true</code> in the security config at <code>/config/default</code>.</li>
+<li>Verify <code>anonymous_role</code> points to a valid role with appropriate permissions.</li>
+<li>Check that the <code>anonymous</code> role (or whichever role you specified) has permissions for the target workspace and path.</li>
+</ol>
+<p><strong>Field filtering is hiding expected data:</strong></p>
+<ol>
+<li>Check whether the matching permission has a <code>fields</code> whitelist. If set, only listed fields are returned.</li>
+<li>Check for <code>except_fields</code> blacklists that might exclude the field you need.</li>
+<li>Remember that whitelist takes precedence over blacklist if both are set on the same permission.</li>
+</ol>
+<p><strong>Role inheritance creates unexpected permissions:</strong></p>
+<ol>
+<li>Roles inherit all permissions from their parent chain. Use the Admin Console’s role editor to inspect the full <code>inherits</code> chain.</li>
+<li>Check for unintended transitive inheritance – if role A inherits B which inherits C, role A gets permissions from both B and C.</li>
+<li>Cycle detection prevents infinite loops, but complex inheritance graphs can still produce surprising results. Keep hierarchies shallow when possible.</li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/packages.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/validation.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/packages.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/validation.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace-2a3cd908.js"></script>
+        <script src="../mode-rust-2c9d5c9a.js"></script>
+        <script src="../editor-16ca416c.js"></script>
+        <script src="../theme-dawn-4493f9c8.js"></script>
+        <script src="../theme-tomorrow_night-9dbe62a9.js"></script>
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

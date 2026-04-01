@@ -1,0 +1,850 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>SQL Access Control Extensions - RaisinDB Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="A flexible, multi-tenant content database built with Rust">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-7d500c97.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RaisinDB Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/architecture/sql-access-control.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="sql-access-control-extensions"><a class="header" href="#sql-access-control-extensions">SQL Access Control Extensions</a></h1>
+<p>RaisinDB manages access control through nodes in the <code>raisin:access_control</code> workspace – roles, groups, users, and security policies are all first-class content. The REST API and Admin Console already provide full CRUD for these entities. This chapter introduces SQL extensions that bring the same capabilities to the SQL interface, so administrators can manage access control from <code>psql</code>, the SQL query page in the Admin Console, or any PostgreSQL-compatible client.</p>
+<h2 id="design-philosophy"><a class="header" href="#design-philosophy">Design Philosophy</a></h2>
+<p>Three principles guided the design of these extensions:</p>
+<p><strong>Consistent with existing patterns.</strong> RaisinDB already extends SQL with <code>CREATE NODETYPE</code>, <code>CREATE BRANCH</code>, <code>RELATE</code>, and other domain-specific statements. Access control DDL follows the same conventions: keyword-driven syntax, string-quoted identifiers, optional clauses in any order, and results returned as row sets.</p>
+<p><strong>Declarative over procedural.</strong> Administrators declare the desired state (<code>CREATE ROLE 'editor' WITH PERMISSIONS (...)</code>) rather than issuing a sequence of low-level node mutations. The engine translates this into the correct node operations in <code>raisin:access_control</code>, including validation, deduplication, and cache invalidation.</p>
+<p><strong>SQL as a first-class management interface.</strong> Every access control operation available through the REST API or Admin Console should be expressible in SQL. This enables infrastructure-as-code workflows where security policies are version-controlled SQL scripts, applied through migrations or CI/CD pipelines.</p>
+<h2 id="statement-overview"><a class="header" href="#statement-overview">Statement Overview</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Category</th><th>Statements</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Roles</strong></td><td><code>CREATE ROLE</code>, <code>ALTER ROLE</code>, <code>DROP ROLE</code>, <code>SHOW ROLES</code>, <code>DESCRIBE ROLE</code></td></tr>
+<tr><td><strong>Groups</strong></td><td><code>CREATE GROUP</code>, <code>ALTER GROUP</code>, <code>DROP GROUP</code>, <code>SHOW GROUPS</code>, <code>DESCRIBE GROUP</code></td></tr>
+<tr><td><strong>Users</strong></td><td><code>CREATE USER</code>, <code>ALTER USER</code>, <code>DROP USER</code>, <code>SHOW USERS</code>, <code>DESCRIBE USER</code></td></tr>
+<tr><td><strong>Grants</strong></td><td><code>GRANT</code>, <code>REVOKE</code></td></tr>
+<tr><td><strong>Security Policy</strong></td><td><code>ALTER SECURITY CONFIG</code>, <code>SHOW SECURITY CONFIG</code></td></tr>
+<tr><td><strong>Inspection</strong></td><td><code>SHOW PERMISSIONS FOR</code>, <code>SHOW EFFECTIVE ROLES FOR</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>All statements operate on the <code>raisin:access_control</code> workspace. They require appropriate permissions – typically the <code>system_admin</code> role or a custom role with write access to <code>raisin:access_control</code>.</p>
+<h2 id="role-management"><a class="header" href="#role-management">Role Management</a></h2>
+<h3 id="create-role"><a class="header" href="#create-role">CREATE ROLE</a></h3>
+<pre><code class="language-sql">CREATE ROLE 'editor'
+  DESCRIPTION 'Can manage articles in the content workspace'
+  INHERITS ('viewer')
+  PERMISSIONS (
+    ALLOW read, update ON 'content' PATH '/articles/**'
+      NODE TYPES ('blog:Article', 'blog:Draft')
+      EXCEPT FIELDS (internal_notes)
+      WHERE node.created_by == auth.user_id,
+
+    ALLOW read ON '*' PATH '/media/**'
+      FIELDS (title, url, thumbnail)
+  );
+</code></pre>
+<p>The <code>CREATE ROLE</code> statement creates a <code>raisin:Role</code> node under <code>/roles</code> in the <code>raisin:access_control</code> workspace.</p>
+<h4 id="syntax"><a class="header" href="#syntax">Syntax</a></h4>
+<pre><code>CREATE ROLE 'role_id'
+  [DESCRIPTION 'text']
+  [INHERITS ('role_a', 'role_b', ...)]
+  [PERMISSIONS (
+    permission_grant [, permission_grant ...]
+  )]
+</code></pre>
+<h4 id="permission-grant-syntax"><a class="header" href="#permission-grant-syntax">Permission Grant Syntax</a></h4>
+<p>Each permission grant follows this structure:</p>
+<pre><code>ALLOW operation [, operation ...] ON workspace_pattern PATH 'path_pattern'
+  [BRANCH 'branch_pattern']
+  [NODE TYPES ('type_a', 'type_b', ...)]
+  [FIELDS (field_a, field_b, ...)]
+  [EXCEPT FIELDS (field_x, field_y, ...)]
+  [WHERE rel_expression]
+</code></pre>
+<p><strong>Operations:</strong> <code>create</code>, <code>read</code>, <code>update</code>, <code>delete</code>, <code>translate</code>, <code>relate</code>, <code>unrelate</code></p>
+<p><strong>Workspace pattern:</strong> A glob pattern matching workspace names. Use <code>'*'</code> for all workspaces. Omitting <code>ON</code> defaults to all workspaces.</p>
+<p><strong>Path pattern:</strong> A glob path pattern. <code>*</code> matches a single segment, <code>**</code> matches recursively, <code>?</code> matches a single character.</p>
+<p><strong>Branch pattern:</strong> Optional glob for branch filtering. Omitting defaults to all branches.</p>
+<p><strong>WHERE clause:</strong> A REL (Raisin Expression Language) condition evaluated at runtime. Available variables:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>auth.user_id</code></td><td>Global identity ID</td></tr>
+<tr><td><code>auth.local_user_id</code></td><td>Workspace-specific user node ID</td></tr>
+<tr><td><code>auth.email</code></td><td>User’s email</td></tr>
+<tr><td><code>auth.home</code></td><td>User’s home path</td></tr>
+<tr><td><code>auth.roles</code></td><td>Array of role IDs</td></tr>
+<tr><td><code>auth.groups</code></td><td>Array of group IDs</td></tr>
+<tr><td><code>auth.is_anonymous</code></td><td>Boolean</td></tr>
+<tr><td><code>node.id</code></td><td>Node UUID</td></tr>
+<tr><td><code>node.name</code></td><td>Node name</td></tr>
+<tr><td><code>node.path</code></td><td>Full hierarchical path</td></tr>
+<tr><td><code>node.node_type</code></td><td>Node type</td></tr>
+<tr><td><code>node.created_by</code></td><td>Creator identity</td></tr>
+<tr><td><code>node.owner_id</code></td><td>Owner identity</td></tr>
+<tr><td><code>node.&lt;property&gt;</code></td><td>Any node property</td></tr>
+</tbody>
+</table>
+</div>
+<h4 id="examples"><a class="header" href="#examples">Examples</a></h4>
+<p>Minimal role with a single permission:</p>
+<pre><code class="language-sql">CREATE ROLE 'viewer'
+  PERMISSIONS (
+    ALLOW read ON '*' PATH '/**'
+  );
+</code></pre>
+<p>Role with inheritance and conditional access:</p>
+<pre><code class="language-sql">CREATE ROLE 'content-author'
+  DESCRIPTION 'Authors can create and edit their own articles'
+  INHERITS ('viewer')
+  PERMISSIONS (
+    ALLOW create, read, update ON 'content' PATH '/articles/**'
+      NODE TYPES ('blog:Article')
+      WHERE node.created_by == auth.user_id,
+
+    ALLOW create, read, update, delete ON 'content' PATH '/drafts/**'
+      WHERE node.created_by == auth.user_id
+  );
+</code></pre>
+<p>Role with field-level filtering:</p>
+<pre><code class="language-sql">CREATE ROLE 'public-reader'
+  PERMISSIONS (
+    ALLOW read ON 'content' PATH '/articles/**'
+      FIELDS (title, summary, author, published_at)
+      WHERE node.status == 'published'
+  );
+</code></pre>
+<p>Role with graph-based access (social features):</p>
+<pre><code class="language-sql">CREATE ROLE 'social-user'
+  PERMISSIONS (
+    -- Friends can see full profile
+    ALLOW read ON 'raisin:access_control' PATH '/users/**/profile'
+      WHERE node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH',
+
+    -- Friends-of-friends see limited profile
+    ALLOW read ON 'raisin:access_control' PATH '/users/**/profile'
+      FIELDS (display_name, avatar, bio)
+      WHERE node.created_by RELATES auth.local_user_id VIA 'FRIENDS_WITH' DEPTH 2
+  );
+</code></pre>
+<h3 id="alter-role"><a class="header" href="#alter-role">ALTER ROLE</a></h3>
+<pre><code class="language-sql">-- Add permissions
+ALTER ROLE 'editor'
+  ADD PERMISSION
+    ALLOW delete ON 'content' PATH '/articles/**'
+      WHERE node.created_by == auth.user_id;
+
+-- Drop a permission by index (1-based)
+ALTER ROLE 'editor'
+  DROP PERMISSION 2;
+
+-- Change inheritance
+ALTER ROLE 'editor'
+  ADD INHERITS ('reviewer');
+
+ALTER ROLE 'editor'
+  DROP INHERITS ('reviewer');
+
+-- Update description
+ALTER ROLE 'editor'
+  SET DESCRIPTION 'Updated role description';
+</code></pre>
+<h4 id="syntax-1"><a class="header" href="#syntax-1">Syntax</a></h4>
+<pre><code>ALTER ROLE 'role_id'
+  ADD PERMISSION permission_grant
+| DROP PERMISSION index
+| ADD INHERITS ('role_a', ...)
+| DROP INHERITS ('role_a', ...)
+| SET DESCRIPTION 'text'
+</code></pre>
+<h3 id="drop-role"><a class="header" href="#drop-role">DROP ROLE</a></h3>
+<pre><code class="language-sql">DROP ROLE 'editor';
+DROP ROLE IF EXISTS 'temp-reviewer';
+</code></pre>
+<p>Dropping a role removes it from the <code>raisin:access_control</code> workspace. Any users or groups referencing the dropped role will retain the reference, but it will have no effect during permission resolution (missing roles are silently skipped).</p>
+<h3 id="show-roles"><a class="header" href="#show-roles">SHOW ROLES</a></h3>
+<pre><code class="language-sql">-- List all roles
+SHOW ROLES;
+
+-- Filter by pattern
+SHOW ROLES LIKE 'content-%';
+</code></pre>
+<p>Returns: <code>role_id</code>, <code>name</code>, <code>description</code>, <code>inherits</code>, <code>permission_count</code>.</p>
+<h3 id="describe-role"><a class="header" href="#describe-role">DESCRIBE ROLE</a></h3>
+<pre><code class="language-sql">DESCRIBE ROLE 'editor';
+</code></pre>
+<p>Returns the full role definition including all permissions as rows:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>role_id</code></td><td>TEXT</td><td>Role identifier</td></tr>
+<tr><td><code>name</code></td><td>TEXT</td><td>Display name</td></tr>
+<tr><td><code>description</code></td><td>TEXT</td><td>Description</td></tr>
+<tr><td><code>inherits</code></td><td>TEXT[]</td><td>Inherited role IDs</td></tr>
+<tr><td><code>permission_index</code></td><td>INT</td><td>1-based permission index</td></tr>
+<tr><td><code>workspace</code></td><td>TEXT</td><td>Workspace pattern</td></tr>
+<tr><td><code>branch_pattern</code></td><td>TEXT</td><td>Branch pattern</td></tr>
+<tr><td><code>path</code></td><td>TEXT</td><td>Path pattern</td></tr>
+<tr><td><code>operations</code></td><td>TEXT[]</td><td>Allowed operations</td></tr>
+<tr><td><code>node_types</code></td><td>TEXT[]</td><td>Restricted node types</td></tr>
+<tr><td><code>fields</code></td><td>TEXT[]</td><td>Field whitelist</td></tr>
+<tr><td><code>except_fields</code></td><td>TEXT[]</td><td>Field blacklist</td></tr>
+<tr><td><code>condition</code></td><td>TEXT</td><td>REL expression</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="group-management"><a class="header" href="#group-management">Group Management</a></h2>
+<h3 id="create-group"><a class="header" href="#create-group">CREATE GROUP</a></h3>
+<pre><code class="language-sql">CREATE GROUP 'engineering'
+  DESCRIPTION 'All engineers across projects'
+  ROLES ('developer', 'viewer');
+</code></pre>
+<p>Creates a <code>raisin:Group</code> node under <code>/groups</code> in <code>raisin:access_control</code>.</p>
+<h4 id="syntax-2"><a class="header" href="#syntax-2">Syntax</a></h4>
+<pre><code>CREATE GROUP 'group_id'
+  [DESCRIPTION 'text']
+  [ROLES ('role_a', 'role_b', ...)]
+</code></pre>
+<h3 id="alter-group"><a class="header" href="#alter-group">ALTER GROUP</a></h3>
+<pre><code class="language-sql">ALTER GROUP 'engineering'
+  ADD ROLES ('deployer');
+
+ALTER GROUP 'engineering'
+  DROP ROLES ('viewer');
+
+ALTER GROUP 'engineering'
+  SET DESCRIPTION 'Updated description';
+</code></pre>
+<h4 id="syntax-3"><a class="header" href="#syntax-3">Syntax</a></h4>
+<pre><code>ALTER GROUP 'group_id'
+  ADD ROLES ('role_a', ...)
+| DROP ROLES ('role_a', ...)
+| SET DESCRIPTION 'text'
+</code></pre>
+<h3 id="drop-group"><a class="header" href="#drop-group">DROP GROUP</a></h3>
+<pre><code class="language-sql">DROP GROUP 'engineering';
+DROP GROUP IF EXISTS 'temp-team';
+</code></pre>
+<h3 id="show-groups"><a class="header" href="#show-groups">SHOW GROUPS</a></h3>
+<pre><code class="language-sql">SHOW GROUPS;
+SHOW GROUPS LIKE 'team-%';
+</code></pre>
+<p>Returns: <code>group_id</code>, <code>name</code>, <code>description</code>, <code>roles</code>, <code>member_count</code>.</p>
+<h3 id="describe-group"><a class="header" href="#describe-group">DESCRIBE GROUP</a></h3>
+<pre><code class="language-sql">DESCRIBE GROUP 'engineering';
+</code></pre>
+<p>Returns the group definition and its members (users who have this group in their <code>groups</code> array).</p>
+<h2 id="user-management"><a class="header" href="#user-management">User Management</a></h2>
+<h3 id="create-user"><a class="header" href="#create-user">CREATE USER</a></h3>
+<pre><code class="language-sql">CREATE USER 'alice'
+  EMAIL 'alice@example.com'
+  DISPLAY NAME 'Alice Smith'
+  ROLES ('editor', 'reviewer')
+  GROUPS ('engineering', 'content-team');
+</code></pre>
+<p>Creates a <code>raisin:User</code> node under <code>/users</code> in <code>raisin:access_control</code> with the initial child structure (profile, inbox, outbox, sent, notifications).</p>
+<h4 id="syntax-4"><a class="header" href="#syntax-4">Syntax</a></h4>
+<pre><code>CREATE USER 'user_id'
+  EMAIL 'email'
+  [DISPLAY NAME 'name']
+  [ROLES ('role_a', ...)]
+  [GROUPS ('group_a', ...)]
+  [CAN LOGIN true|false]
+  [BIRTH DATE 'YYYY-MM-DD']
+  [IN FOLDER '/users/subfolder']
+</code></pre>
+<p>The optional <code>IN FOLDER</code> clause places the user under a specific <code>raisin:AclFolder</code> rather than the default <code>/users</code> root.</p>
+<h3 id="alter-user"><a class="header" href="#alter-user">ALTER USER</a></h3>
+<pre><code class="language-sql">ALTER USER 'alice'
+  ADD ROLES ('admin');
+
+ALTER USER 'alice'
+  DROP ROLES ('reviewer');
+
+ALTER USER 'alice'
+  ADD GROUPS ('analytics-team');
+
+ALTER USER 'alice'
+  DROP GROUPS ('content-team');
+
+ALTER USER 'alice'
+  SET EMAIL 'alice.smith@example.com';
+
+ALTER USER 'alice'
+  SET DISPLAY NAME 'Alice M. Smith';
+
+ALTER USER 'alice'
+  SET CAN LOGIN false;
+</code></pre>
+<h4 id="syntax-5"><a class="header" href="#syntax-5">Syntax</a></h4>
+<pre><code>ALTER USER 'user_id'
+  ADD ROLES ('role_a', ...)
+| DROP ROLES ('role_a', ...)
+| ADD GROUPS ('group_a', ...)
+| DROP GROUPS ('group_a', ...)
+| SET EMAIL 'email'
+| SET DISPLAY NAME 'name'
+| SET CAN LOGIN true|false
+| SET BIRTH DATE 'YYYY-MM-DD'
+</code></pre>
+<h3 id="drop-user"><a class="header" href="#drop-user">DROP USER</a></h3>
+<pre><code class="language-sql">DROP USER 'alice';
+DROP USER IF EXISTS 'temp-user';
+</code></pre>
+<h3 id="show-users"><a class="header" href="#show-users">SHOW USERS</a></h3>
+<pre><code class="language-sql">SHOW USERS;
+SHOW USERS LIKE '%@example.com';
+SHOW USERS IN GROUP 'engineering';
+SHOW USERS WITH ROLE 'editor';
+</code></pre>
+<p>Returns: <code>user_id</code>, <code>email</code>, <code>display_name</code>, <code>roles</code>, <code>groups</code>, <code>can_login</code>.</p>
+<h3 id="describe-user"><a class="header" href="#describe-user">DESCRIBE USER</a></h3>
+<pre><code class="language-sql">DESCRIBE USER 'alice';
+</code></pre>
+<p>Returns the user’s properties, effective roles (including inherited through groups), and effective permissions.</p>
+<h2 id="grant--revoke"><a class="header" href="#grant--revoke">GRANT / REVOKE</a></h2>
+<p>The <code>GRANT</code> and <code>REVOKE</code> statements provide a concise syntax for assigning and removing roles and group memberships without using <code>ALTER USER</code> or <code>ALTER GROUP</code>.</p>
+<h3 id="grant"><a class="header" href="#grant">GRANT</a></h3>
+<pre><code class="language-sql">-- Grant roles to a user
+GRANT ROLE 'editor' TO USER 'alice';
+GRANT ROLES ('editor', 'reviewer') TO USER 'alice';
+
+-- Grant roles to a group
+GRANT ROLE 'deployer' TO GROUP 'engineering';
+GRANT ROLES ('deployer', 'viewer') TO GROUP 'engineering';
+
+-- Add a user to groups
+GRANT GROUP 'engineering' TO USER 'alice';
+GRANT GROUPS ('engineering', 'content-team') TO USER 'alice';
+</code></pre>
+<h3 id="revoke"><a class="header" href="#revoke">REVOKE</a></h3>
+<pre><code class="language-sql">-- Revoke roles from a user
+REVOKE ROLE 'editor' FROM USER 'alice';
+REVOKE ROLES ('editor', 'reviewer') FROM USER 'alice';
+
+-- Revoke roles from a group
+REVOKE ROLE 'deployer' FROM GROUP 'engineering';
+
+-- Remove a user from groups
+REVOKE GROUP 'engineering' FROM USER 'alice';
+</code></pre>
+<h3 id="syntax-6"><a class="header" href="#syntax-6">Syntax</a></h3>
+<pre><code>GRANT ROLE[S] ('role_a', ...) TO USER|GROUP 'id'
+GRANT GROUP[S] ('group_a', ...) TO USER 'id'
+REVOKE ROLE[S] ('role_a', ...) FROM USER|GROUP 'id'
+REVOKE GROUP[S] ('group_a', ...) FROM USER 'id'
+</code></pre>
+<h2 id="security-policy-configuration"><a class="header" href="#security-policy-configuration">Security Policy Configuration</a></h2>
+<h3 id="alter-security-config"><a class="header" href="#alter-security-config">ALTER SECURITY CONFIG</a></h3>
+<pre><code class="language-sql">-- Change the global default policy
+ALTER SECURITY CONFIG '*'
+  SET DEFAULT POLICY 'deny';
+
+-- Enable anonymous access with a specific role
+ALTER SECURITY CONFIG '*'
+  SET ANONYMOUS ENABLED true
+  SET ANONYMOUS ROLE 'anonymous';
+
+-- Configure per-interface overrides
+ALTER SECURITY CONFIG 'content'
+  SET DEFAULT POLICY 'deny'
+  SET ANONYMOUS ENABLED true
+  SET ANONYMOUS ROLE 'public-reader'
+  SET INTERFACE rest ANONYMOUS ENABLED true
+  SET INTERFACE pgwire ANONYMOUS ENABLED false
+  SET INTERFACE websocket ANONYMOUS ENABLED false;
+</code></pre>
+<p>This modifies the <code>raisin:SecurityConfig</code> node for the specified workspace pattern. If no config exists for that pattern, one is created.</p>
+<h4 id="syntax-7"><a class="header" href="#syntax-7">Syntax</a></h4>
+<pre><code>ALTER SECURITY CONFIG 'workspace_pattern'
+  SET DEFAULT POLICY 'deny'|'allow'
+| SET ANONYMOUS ENABLED true|false
+| SET ANONYMOUS ROLE 'role_id'
+| SET INTERFACE interface_name setting value
+</code></pre>
+<p>Interface names: <code>rest</code>, <code>pgwire</code>, <code>websocket</code>.</p>
+<h3 id="show-security-config"><a class="header" href="#show-security-config">SHOW SECURITY CONFIG</a></h3>
+<pre><code class="language-sql">-- Show all security configurations
+SHOW SECURITY CONFIG;
+
+-- Show config for a specific workspace
+SHOW SECURITY CONFIG FOR 'content';
+</code></pre>
+<p>Returns: <code>workspace</code>, <code>default_policy</code>, <code>anonymous_enabled</code>, <code>anonymous_role</code>, <code>interfaces</code>.</p>
+<h2 id="inspection-queries"><a class="header" href="#inspection-queries">Inspection Queries</a></h2>
+<p>These read-only statements help administrators understand the effective permission state for a user.</p>
+<h3 id="show-permissions-for"><a class="header" href="#show-permissions-for">SHOW PERMISSIONS FOR</a></h3>
+<pre><code class="language-sql">-- Show effective permissions for a user
+SHOW PERMISSIONS FOR USER 'alice';
+
+-- Show permissions for a user on a specific workspace
+SHOW PERMISSIONS FOR USER 'alice' ON 'content';
+</code></pre>
+<p>Returns: the fully resolved permission set after role inheritance, group expansion, and deduplication. Each row is one permission grant with its source (direct role, group role, inherited role).</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>source_type</code></td><td>TEXT</td><td><code>direct_role</code>, <code>group_role</code>, or <code>inherited_role</code></td></tr>
+<tr><td><code>source_name</code></td><td>TEXT</td><td>Role or group that contributed this permission</td></tr>
+<tr><td><code>workspace</code></td><td>TEXT</td><td>Workspace pattern</td></tr>
+<tr><td><code>path</code></td><td>TEXT</td><td>Path pattern</td></tr>
+<tr><td><code>operations</code></td><td>TEXT[]</td><td>Allowed operations</td></tr>
+<tr><td><code>node_types</code></td><td>TEXT[]</td><td>Node type filter</td></tr>
+<tr><td><code>fields</code></td><td>TEXT[]</td><td>Field whitelist</td></tr>
+<tr><td><code>except_fields</code></td><td>TEXT[]</td><td>Field blacklist</td></tr>
+<tr><td><code>condition</code></td><td>TEXT</td><td>REL expression</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="show-effective-roles-for"><a class="header" href="#show-effective-roles-for">SHOW EFFECTIVE ROLES FOR</a></h3>
+<pre><code class="language-sql">SHOW EFFECTIVE ROLES FOR USER 'alice';
+</code></pre>
+<p>Returns: all roles that apply to the user after resolving group memberships and role inheritance.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>role_id</code></td><td>TEXT</td><td>Role identifier</td></tr>
+<tr><td><code>source</code></td><td>TEXT</td><td>How the role was acquired: <code>direct</code>, <code>group:group_name</code>, or <code>inherited:parent_role</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="transaction-support"><a class="header" href="#transaction-support">Transaction Support</a></h2>
+<p>Access control statements participate in RaisinDB’s transaction model. Multiple changes can be grouped into a single atomic commit:</p>
+<pre><code class="language-sql">BEGIN;
+
+CREATE ROLE 'blog-editor'
+  PERMISSIONS (
+    ALLOW create, read, update ON 'content' PATH '/blog/**'
+  );
+
+CREATE GROUP 'blog-team'
+  ROLES ('blog-editor');
+
+GRANT GROUP 'blog-team' TO USER 'alice';
+GRANT GROUP 'blog-team' TO USER 'bob';
+
+COMMIT WITH MESSAGE 'Set up blog team access' ACTOR 'admin';
+</code></pre>
+<p>All changes are applied atomically: either all succeed or none do. The commit message appears in the version history of <code>raisin:access_control</code>.</p>
+<h2 id="putting-it-together"><a class="header" href="#putting-it-together">Putting It Together</a></h2>
+<p>Here is a complete example that sets up access control for a content management system:</p>
+<pre><code class="language-sql">BEGIN;
+
+-- 1. Create a read-only role for public content
+CREATE ROLE 'public-viewer'
+  DESCRIPTION 'Anonymous read access to published content'
+  PERMISSIONS (
+    ALLOW read ON 'content' PATH '/**'
+      WHERE node.status == 'published'
+  );
+
+-- 2. Create an editor role that inherits from viewer
+CREATE ROLE 'content-editor'
+  DESCRIPTION 'Can manage articles and media'
+  INHERITS ('public-viewer')
+  PERMISSIONS (
+    ALLOW create, read, update, delete ON 'content' PATH '/articles/**'
+      WHERE node.created_by == auth.user_id,
+
+    ALLOW read ON 'media' PATH '/**'
+  );
+
+-- 3. Create an admin role that inherits from editor
+CREATE ROLE 'content-admin'
+  DESCRIPTION 'Full control over content workspaces'
+  INHERITS ('content-editor')
+  PERMISSIONS (
+    ALLOW create, read, update, delete ON 'content' PATH '/**',
+    ALLOW create, read, update, delete ON 'media' PATH '/**'
+  );
+
+-- 4. Create groups
+CREATE GROUP 'editors'
+  DESCRIPTION 'Content editing team'
+  ROLES ('content-editor');
+
+CREATE GROUP 'admins'
+  DESCRIPTION 'Content administration team'
+  ROLES ('content-admin');
+
+-- 5. Create users and assign them to groups
+CREATE USER 'alice' EMAIL 'alice@example.com' DISPLAY NAME 'Alice' GROUPS ('admins');
+CREATE USER 'bob'   EMAIL 'bob@example.com'   DISPLAY NAME 'Bob'   GROUPS ('editors');
+
+-- 6. Enable anonymous access for the public-viewer role
+ALTER SECURITY CONFIG 'content'
+  SET ANONYMOUS ENABLED true
+  SET ANONYMOUS ROLE 'public-viewer';
+
+COMMIT WITH MESSAGE 'Initial CMS access control setup' ACTOR 'admin';
+</code></pre>
+<p>After this script runs, verify the setup:</p>
+<pre><code class="language-sql">-- Check alice's effective roles
+SHOW EFFECTIVE ROLES FOR USER 'alice';
+-- Returns: content-admin (direct via group), content-editor (inherited),
+--          public-viewer (inherited)
+
+-- Check alice's permissions on the content workspace
+SHOW PERMISSIONS FOR USER 'alice' ON 'content';
+
+-- Check security policy
+SHOW SECURITY CONFIG FOR 'content';
+</code></pre>
+<h2 id="implementation-architecture"><a class="header" href="#implementation-architecture">Implementation Architecture</a></h2>
+<p>These SQL extensions follow the same pipeline as existing RaisinDB custom statements:</p>
+<pre><code>SQL Input
+    │
+    ▼
+┌───────────────────────┐
+│  Parser (raisin-sql)  │  New: acl_parser.rs
+│  nom-based parsers    │  Parses ROLE/GROUP/USER/GRANT/REVOKE/
+│  for ACL statements   │  SECURITY CONFIG syntax
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  Analyzer             │  New: acl_analysis.rs
+│  Semantic validation  │  Validates identifiers, checks workspace
+│  + catalog lookups    │  catalog, resolves references
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│  Analyzed Statement   │  New variants in AnalyzedStatement enum:
+│  AnalyzedStatement::  │  AclCreateRole, AclAlterRole, AclDropRole,
+│  Acl(AclStatement)    │  AclGrant, AclRevoke, etc.
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────────────┐
+│  Execution (raisin-sql-exec)  │  New: acl_executor.rs
+│  Translates ACL statements    │  Performs node CRUD in the
+│  to node operations in        │  raisin:access_control workspace,
+│  raisin:access_control        │  validates constraints, invalidates
+│                               │  the permission cache
+└───────────┬───────────────────┘
+            │
+            ▼
+┌───────────────────────────┐
+│  RowStream response       │  Returns result rows
+│  (PGWire / HTTP / WS)    │  (e.g., SHOW results, confirmation)
+└───────────────────────────┘
+</code></pre>
+<h3 id="key-implementation-details"><a class="header" href="#key-implementation-details">Key Implementation Details</a></h3>
+<p><strong>Workspace isolation.</strong> All ACL statements implicitly target the <code>raisin:access_control</code> workspace. The executor creates and updates <code>raisin:Role</code>, <code>raisin:Group</code>, and <code>raisin:User</code> nodes using the same storage APIs as the REST layer.</p>
+<p><strong>Permission cache invalidation.</strong> After any mutation (CREATE, ALTER, DROP, GRANT, REVOKE), the executor calls <code>invalidate_workspace("raisin:access_control")</code> on the permission cache, ensuring subsequent requests pick up the changes within the cache TTL window.</p>
+<p><strong>Authorization.</strong> ACL statements are themselves subject to access control. The executor checks that the current <code>AuthContext</code> has write permissions to the <code>raisin:access_control</code> workspace before proceeding. Typically this means the user must have the <code>system_admin</code> role or a custom role that grants write access to <code>/roles/**</code>, <code>/groups/**</code>, or <code>/users/**</code> in <code>raisin:access_control</code>.</p>
+<p><strong>Audit trail.</strong> Because ACL entities are versioned nodes, every change is tracked in the commit history with the actor, timestamp, and commit message (from the enclosing <code>COMMIT</code> statement or an auto-generated message for standalone statements).</p>
+<p><strong>RLS enforcement on reads.</strong> <code>SHOW</code> and <code>DESCRIBE</code> statements respect row-level security. A non-admin user running <code>SHOW USERS</code> will only see users they have read access to.</p>
+<h3 id="new-source-files"><a class="header" href="#new-source-files">New Source Files</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>File</th><th>Crate</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ast/acl_parser.rs</code></td><td>raisin-sql</td><td>nom parsers for ACL statement syntax</td></tr>
+<tr><td><code>ast/acl.rs</code></td><td>raisin-sql</td><td>AST types (AclStatement enum, CreateRole, AlterRole, etc.)</td></tr>
+<tr><td><code>analyzer/acl_analysis.rs</code></td><td>raisin-sql</td><td>Semantic validation for ACL statements</td></tr>
+<tr><td><code>engine/handlers/acl.rs</code></td><td>raisin-sql-execution</td><td>Execution logic translating AST to node operations</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="ast-types"><a class="header" href="#ast-types">AST Types</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub enum AclStatement {
+    CreateRole(CreateRole),
+    AlterRole(AlterRole),
+    DropRole(DropRole),
+    ShowRoles(ShowRoles),
+    DescribeRole(DescribeRole),
+
+    CreateGroup(CreateGroup),
+    AlterGroup(AlterGroup),
+    DropGroup(DropGroup),
+    ShowGroups(ShowGroups),
+    DescribeGroup(DescribeGroup),
+
+    CreateUser(CreateUser),
+    AlterUser(AlterUser),
+    DropUser(DropUser),
+    ShowUsers(ShowUsers),
+    DescribeUser(DescribeUser),
+
+    Grant(Grant),
+    Revoke(Revoke),
+
+    AlterSecurityConfig(AlterSecurityConfig),
+    ShowSecurityConfig(ShowSecurityConfig),
+
+    ShowPermissionsFor(ShowPermissionsFor),
+    ShowEffectiveRolesFor(ShowEffectiveRolesFor),
+}
+<span class="boring">}</span></code></pre>
+<p>The <code>AnalyzedStatement</code> enum gains one new variant:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub enum AnalyzedStatement {
+    // ... existing variants ...
+    Acl(AclStatement),
+}
+<span class="boring">}</span></code></pre>
+<h2 id="further-reading"><a class="header" href="#further-reading">Further Reading</a></h2>
+<ul>
+<li><a href="./access-control.html">Access Control &amp; Authorization</a> – the architectural reference for the permission model</li>
+<li><a href="./authentication.html">Authentication</a> – how users authenticate before ACL applies</li>
+<li><a href="../guides/access-control-guide.html">Access Control Practical Guide</a> – hands-on guide with REST API and Admin Console examples</li>
+<li><a href="../api/sql-reference.html">SQL Reference</a> – complete SQL reference including other custom extensions</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/access-control.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/embedding-guide.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/access-control.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/embedding-guide.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace-2a3cd908.js"></script>
+        <script src="../mode-rust-2c9d5c9a.js"></script>
+        <script src="../editor-16ca416c.js"></script>
+        <script src="../theme-dawn-4493f9c8.js"></script>
+        <script src="../theme-tomorrow_night-9dbe62a9.js"></script>
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

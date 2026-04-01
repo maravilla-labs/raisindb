@@ -17,7 +17,7 @@ The `raisin-server` binary provides a complete HTTP REST API for RaisinDB. It's 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/raisindb
+git clone https://github.com/maravilla-labs/raisindb
 cd raisindb
 
 # Build the server

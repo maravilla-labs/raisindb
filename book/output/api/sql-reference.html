@@ -1,0 +1,1381 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>SQL Reference - RaisinDB Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="A flexible, multi-tenant content database built with Rust">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-7d500c97.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RaisinDB Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/api/sql-reference.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="sql-reference"><a class="header" href="#sql-reference">SQL Reference</a></h1>
+<p>RaisinDB provides a content-aware SQL dialect based on PostgreSQL syntax. Queries are workspace-scoped and operate on RaisinDB’s hierarchical node model. You can connect via the PostgreSQL wire protocol (psql, any PostgreSQL driver) or the HTTP query endpoint.</p>
+<h2 id="connecting"><a class="header" href="#connecting">Connecting</a></h2>
+<h3 id="pgwire-postgresql-wire-protocol"><a class="header" href="#pgwire-postgresql-wire-protocol">PGWire (PostgreSQL Wire Protocol)</a></h3>
+<p>RaisinDB exposes a PostgreSQL-compatible wire protocol on port 5432 (default).</p>
+<pre><code class="language-bash"># Connect with psql
+psql -h localhost -p 5432 -U tenant_id -d repo_name
+
+# Connection string format
+postgresql://tenant_id:api_key@localhost:5432/repo_name
+</code></pre>
+<p>The username maps to the tenant ID and the database name maps to the repository. Branch context can be set after connecting with <code>USE BRANCH</code>.</p>
+<h3 id="http-query-endpoint"><a class="header" href="#http-query-endpoint">HTTP Query Endpoint</a></h3>
+<p>Queries can also be submitted via the REST API as JSON:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:3000/api/v1/tenants/{tenant}/repos/{repo}/sql \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT * FROM workspace LIMIT 10", "params": []}'
+</code></pre>
+<h2 id="data-model-mapping"><a class="header" href="#data-model-mapping">Data Model Mapping</a></h2>
+<p>RaisinDB maps its content model to SQL tables as follows:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>RaisinDB Concept</th><th>SQL Representation</th></tr>
+</thead>
+<tbody>
+<tr><td>Workspace</td><td>Table name (e.g., <code>FROM 'my-workspace'</code>)</td></tr>
+<tr><td>Node</td><td>Row</td></tr>
+<tr><td>Node properties</td><td><code>properties</code> column (JSONB)</td></tr>
+<tr><td>Node path</td><td><code>path</code> column (PATH type)</td></tr>
+<tr><td>Node type</td><td><code>node_type</code> column (TEXT)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="the-nodes-table"><a class="header" href="#the-nodes-table">The <code>nodes</code> Table</a></h3>
+<p>The default table <code>nodes</code> (or any workspace name used as a table) exposes these columns:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column</th><th>Type</th><th>Nullable</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>id</code></td><td>TEXT</td><td>No</td><td>Unique node identifier</td></tr>
+<tr><td><code>path</code></td><td>PATH</td><td>No</td><td>Hierarchical path (e.g., <code>/content/blog/post1</code>)</td></tr>
+<tr><td><code>name</code></td><td>TEXT</td><td>No</td><td>Node name (last path segment)</td></tr>
+<tr><td><code>node_type</code></td><td>TEXT</td><td>No</td><td>Type with namespace (e.g., <code>myapp:Article</code>)</td></tr>
+<tr><td><code>archetype</code></td><td>TEXT</td><td>Yes</td><td>Archetype name</td></tr>
+<tr><td><code>properties</code></td><td>JSONB</td><td>No</td><td>All node properties as JSON</td></tr>
+<tr><td><code>parent_name</code></td><td>TEXT</td><td>Yes</td><td>Parent node name</td></tr>
+<tr><td><code>version</code></td><td>INT</td><td>No</td><td>Node version number</td></tr>
+<tr><td><code>created_at</code></td><td>TIMESTAMPTZ</td><td>No</td><td>Creation timestamp</td></tr>
+<tr><td><code>updated_at</code></td><td>TIMESTAMPTZ</td><td>No</td><td>Last update timestamp</td></tr>
+<tr><td><code>published_at</code></td><td>TIMESTAMPTZ</td><td>Yes</td><td>Publication timestamp</td></tr>
+<tr><td><code>published_by</code></td><td>TEXT</td><td>Yes</td><td>User who published</td></tr>
+<tr><td><code>updated_by</code></td><td>TEXT</td><td>Yes</td><td>User who last updated</td></tr>
+<tr><td><code>created_by</code></td><td>TEXT</td><td>Yes</td><td>User who created</td></tr>
+<tr><td><code>translations</code></td><td>JSONB</td><td>Yes</td><td>Translation data</td></tr>
+<tr><td><code>owner_id</code></td><td>TEXT</td><td>Yes</td><td>Owner user ID</td></tr>
+<tr><td><code>relations</code></td><td>JSONB</td><td>Yes</td><td>Graph relations</td></tr>
+<tr><td><code>parent_path</code></td><td>PATH</td><td>Yes</td><td>Parent node path (generated)</td></tr>
+<tr><td><code>depth</code></td><td>INT</td><td>No</td><td>Tree depth from root (generated)</td></tr>
+<tr><td><code>locale</code></td><td>TEXT</td><td>No</td><td>Locale code (generated)</td></tr>
+<tr><td><code>__revision</code></td><td>BIGINT</td><td>Yes</td><td>Internal revision (generated)</td></tr>
+<tr><td><code>__branch</code></td><td>TEXT</td><td>No</td><td>Branch name (generated)</td></tr>
+<tr><td><code>__workspace</code></td><td>TEXT</td><td>No</td><td>Workspace name (generated)</td></tr>
+<tr><td><code>embedding</code></td><td>VECTOR(N)</td><td>Yes</td><td>Vector embedding (when configured)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="schema-tables"><a class="header" href="#schema-tables">Schema Tables</a></h3>
+<p>DML operations are also supported on schema management tables:</p>
+<ul>
+<li><code>NodeTypes</code> – Node type definitions</li>
+<li><code>Archetypes</code> – Archetype definitions</li>
+<li><code>ElementTypes</code> – Element type definitions</li>
+</ul>
+<h2 id="data-types"><a class="header" href="#data-types">Data Types</a></h2>
+<h3 id="core-types"><a class="header" href="#core-types">Core Types</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Description</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td><code>INT</code></td><td>32-bit integer</td><td><code>42</code></td></tr>
+<tr><td><code>BIGINT</code></td><td>64-bit integer</td><td><code>9223372036854775807</code></td></tr>
+<tr><td><code>DOUBLE</code></td><td>64-bit floating point</td><td><code>3.14</code></td></tr>
+<tr><td><code>BOOLEAN</code></td><td>True/false</td><td><code>true</code>, <code>false</code></td></tr>
+<tr><td><code>TEXT</code></td><td>UTF-8 string</td><td><code>'hello'</code></td></tr>
+<tr><td><code>UUID</code></td><td>UUID string</td><td><code>'550e8400-e29b-41d4-a716-446655440000'</code></td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="temporal-types"><a class="header" href="#temporal-types">Temporal Types</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>TIMESTAMPTZ</code></td><td>Timestamp with timezone (UTC normalized)</td></tr>
+<tr><td><code>INTERVAL</code></td><td>Time interval / duration</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="raisindb-specific-types"><a class="header" href="#raisindb-specific-types">RaisinDB-Specific Types</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>PATH</code></td><td>Hierarchical path (e.g., <code>/content/blog/post1</code>)</td></tr>
+<tr><td><code>JSONB</code></td><td>JSON data (maps to node properties)</td></tr>
+<tr><td><code>VECTOR(N)</code></td><td>Fixed-dimension vector for embeddings</td></tr>
+<tr><td><code>GEOMETRY</code></td><td>GeoJSON geometry (Point, LineString, Polygon)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="search-types"><a class="header" href="#search-types">Search Types</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>TSVECTOR</code></td><td>Full-text search document</td></tr>
+<tr><td><code>TSQUERY</code></td><td>Full-text search query</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="collection-types"><a class="header" href="#collection-types">Collection Types</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Array(T)</code></td><td>Array of elements (e.g., <code>TEXT[]</code>, <code>INT[]</code>)</td></tr>
+<tr><td><code>Nullable(T)</code></td><td>Nullable wrapper (e.g., <code>TEXT?</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="type-coercion-implicit"><a class="header" href="#type-coercion-implicit">Type Coercion (Implicit)</a></h3>
+<p>The following implicit coercions are performed automatically:</p>
+<ul>
+<li><code>INT</code> -&gt; <code>BIGINT</code> -&gt; <code>DOUBLE</code> (numeric widening)</li>
+<li><code>TEXT</code> -&gt; <code>PATH</code> (for literal comparisons)</li>
+<li><code>T</code> -&gt; <code>Nullable(T)</code> (non-null to nullable)</li>
+</ul>
+<h3 id="explicit-casting"><a class="header" href="#explicit-casting">Explicit Casting</a></h3>
+<p>Use the <code>::Type</code> syntax for explicit casts:</p>
+<pre><code class="language-sql">-- Cast JSON property value to a specific type
+SELECT * FROM 'workspace' WHERE properties-&gt;&gt;'age'::String = '25'
+
+-- Cast between text and numeric types
+SELECT version::TEXT FROM 'workspace'
+SELECT '42'::INT
+</code></pre>
+<p>Allowed explicit casts include:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>From</th><th>To</th></tr>
+</thead>
+<tbody>
+<tr><td>TEXT</td><td>INT, BIGINT, DOUBLE, BOOLEAN, JSONB, PATH, TIMESTAMPTZ, GEOMETRY</td></tr>
+<tr><td>INT, BIGINT, DOUBLE</td><td>TEXT</td></tr>
+<tr><td>BOOLEAN</td><td>TEXT</td></tr>
+<tr><td>DOUBLE</td><td>INT, BIGINT</td></tr>
+<tr><td>BIGINT</td><td>INT</td></tr>
+<tr><td>PATH</td><td>TEXT</td></tr>
+<tr><td>JSONB</td><td>TEXT</td></tr>
+<tr><td>TIMESTAMPTZ</td><td>TEXT</td></tr>
+<tr><td>GEOMETRY</td><td>TEXT</td></tr>
+</tbody>
+</table>
+</div>
+<p>JSONB values can be cast to BOOLEAN, INT, BIGINT, DOUBLE, or PATH through an intermediate TEXT conversion (two-step cast handled automatically).</p>
+<h2 id="statements"><a class="header" href="#statements">Statements</a></h2>
+<h3 id="select"><a class="header" href="#select">SELECT</a></h3>
+<pre><code class="language-sql">SELECT [DISTINCT] columns
+FROM table [AS alias]
+[JOIN ...]
+[WHERE condition]
+[GROUP BY expressions]
+[HAVING condition]
+[ORDER BY expressions [ASC|DESC]]
+[LIMIT count]
+[OFFSET count]
+</code></pre>
+<p>Table names can be quoted with single quotes for workspace names:</p>
+<pre><code class="language-sql">SELECT * FROM 'my-workspace' WHERE node_type = 'myapp:Article'
+</code></pre>
+<h4 id="with-common-table-expressions"><a class="header" href="#with-common-table-expressions">WITH (Common Table Expressions)</a></h4>
+<pre><code class="language-sql">WITH recent_posts AS (
+  SELECT * FROM 'workspace' WHERE node_type = 'cms:Post' ORDER BY created_at DESC LIMIT 10
+)
+SELECT id, properties-&gt;&gt;'title'::String AS title FROM recent_posts
+</code></pre>
+<h4 id="distinct"><a class="header" href="#distinct">DISTINCT</a></h4>
+<pre><code class="language-sql">SELECT DISTINCT node_type FROM 'workspace'
+</code></pre>
+<h4 id="subqueries-in-from"><a class="header" href="#subqueries-in-from">Subqueries in FROM</a></h4>
+<pre><code class="language-sql">SELECT sub.title
+FROM (
+  SELECT properties-&gt;&gt;'title'::String AS title FROM 'workspace'
+) AS sub
+WHERE sub.title IS NOT NULL
+</code></pre>
+<h3 id="insert"><a class="header" href="#insert">INSERT</a></h3>
+<pre><code class="language-sql">INSERT INTO nodes (path, node_type, properties)
+VALUES ('/content/blog/post1', 'myapp:Article', '{"title": "Hello World"}')
+</code></pre>
+<h3 id="upsert"><a class="header" href="#upsert">UPSERT</a></h3>
+<p>Identical syntax to INSERT but uses create-or-update semantics (will update if the node already exists):</p>
+<pre><code class="language-sql">UPSERT INTO nodes (path, node_type, properties)
+VALUES ('/content/blog/post1', 'myapp:Article', '{"title": "Updated Title"}')
+</code></pre>
+<h3 id="update"><a class="header" href="#update">UPDATE</a></h3>
+<pre><code class="language-sql">UPDATE nodes SET properties = '{"status": "published"}' WHERE id = 'node-123'
+</code></pre>
+<h3 id="delete"><a class="header" href="#delete">DELETE</a></h3>
+<pre><code class="language-sql">DELETE FROM nodes WHERE id = 'node-123'
+</code></pre>
+<h3 id="explain"><a class="header" href="#explain">EXPLAIN</a></h3>
+<p>Shows the query execution plan:</p>
+<pre><code class="language-sql">EXPLAIN SELECT * FROM 'workspace' WHERE node_type = 'cms:Article'
+EXPLAIN VERBOSE SELECT * FROM 'workspace' WHERE depth = 2
+EXPLAIN ANALYZE SELECT * FROM 'workspace' LIMIT 10
+</code></pre>
+<h3 id="show"><a class="header" href="#show">SHOW</a></h3>
+<pre><code class="language-sql">SHOW search_path
+SHOW server_version
+</code></pre>
+<h2 id="expressions-and-operators"><a class="header" href="#expressions-and-operators">Expressions and Operators</a></h2>
+<h3 id="comparison-operators"><a class="header" href="#comparison-operators">Comparison Operators</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>=</code></td><td>Equal</td></tr>
+<tr><td><code>&lt;&gt;</code> or <code>!=</code></td><td>Not equal</td></tr>
+<tr><td><code>&lt;</code></td><td>Less than</td></tr>
+<tr><td><code>&lt;=</code></td><td>Less than or equal</td></tr>
+<tr><td><code>&gt;</code></td><td>Greater than</td></tr>
+<tr><td><code>&gt;=</code></td><td>Greater than or equal</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="logical-operators"><a class="header" href="#logical-operators">Logical Operators</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>AND</code></td><td>Logical AND</td></tr>
+<tr><td><code>OR</code></td><td>Logical OR</td></tr>
+<tr><td><code>NOT</code></td><td>Logical NOT</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="arithmetic-operators"><a class="header" href="#arithmetic-operators">Arithmetic Operators</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>+</code></td><td>Addition (also: TIMESTAMPTZ + INTERVAL)</td></tr>
+<tr><td><code>-</code></td><td>Subtraction (also: TIMESTAMPTZ - INTERVAL, TIMESTAMPTZ - TIMESTAMPTZ -&gt; INTERVAL)</td></tr>
+<tr><td><code>*</code></td><td>Multiplication</td></tr>
+<tr><td><code>/</code></td><td>Division</td></tr>
+<tr><td><code>%</code></td><td>Modulo</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="string-operators"><a class="header" href="#string-operators">String Operators</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>||</code></td><td>String concatenation</td></tr>
+<tr><td><code>LIKE</code></td><td>Pattern matching (<code>%</code> = any chars, <code>_</code> = one char)</td></tr>
+<tr><td><code>ILIKE</code></td><td>Case-insensitive pattern matching</td></tr>
+<tr><td><code>NOT LIKE</code></td><td>Negated pattern matching</td></tr>
+<tr><td><code>NOT ILIKE</code></td><td>Negated case-insensitive pattern matching</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="null-checks"><a class="header" href="#null-checks">Null Checks</a></h3>
+<pre><code class="language-sql">WHERE published_at IS NULL
+WHERE properties-&gt;&gt;'title'::String IS NOT NULL
+</code></pre>
+<h3 id="in-lists-and-subqueries"><a class="header" href="#in-lists-and-subqueries">IN Lists and Subqueries</a></h3>
+<pre><code class="language-sql">WHERE node_type IN ('cms:Article', 'cms:Page')
+WHERE node_type NOT IN ('cms:Draft')
+WHERE id IN (SELECT id FROM 'other-workspace' WHERE node_type = 'cms:Tag')
+WHERE id NOT IN (SELECT id FROM 'archive')
+</code></pre>
+<h3 id="between"><a class="header" href="#between">BETWEEN</a></h3>
+<pre><code class="language-sql">WHERE version BETWEEN 1 AND 10
+</code></pre>
+<h3 id="case-expressions"><a class="header" href="#case-expressions">CASE Expressions</a></h3>
+<pre><code class="language-sql">SELECT
+  CASE
+    WHEN depth &gt; 3 THEN 'deep'
+    WHEN depth &gt; 1 THEN 'medium'
+    ELSE 'shallow'
+  END AS depth_category
+FROM 'workspace'
+</code></pre>
+<h2 id="json-property-access"><a class="header" href="#json-property-access">JSON Property Access</a></h2>
+<p>RaisinDB stores node properties as JSONB. The JSON operators are the primary way to query property values.</p>
+<h3 id="the---operator-extract-as-text"><a class="header" href="#the---operator-extract-as-text">The <code>-&gt;&gt;</code> Operator (Extract as Text)</a></h3>
+<pre><code class="language-sql">-- Extract a property as text
+SELECT properties-&gt;&gt;'title' AS title FROM 'workspace'
+</code></pre>
+<p><strong>Important</strong>: When using <code>-&gt;&gt;</code> in a WHERE clause, cast the <strong>key</strong> to <code>String</code>:</p>
+<pre><code class="language-sql">-- Correct: cast the key
+SELECT * FROM 'workspace' WHERE properties-&gt;&gt;'user_id'::String = $1
+SELECT * FROM 'workspace' WHERE properties-&gt;&gt;'email'::String = $1
+
+-- Wrong: cast the result (causes type error)
+SELECT * FROM 'workspace' WHERE (properties-&gt;&gt;'user_id')::String = $1
+
+-- Wrong: no cast (returns empty results)
+SELECT * FROM 'workspace' WHERE properties-&gt;&gt;'user_id' = $1
+</code></pre>
+<h3 id="the---operator-extract-as-json"><a class="header" href="#the---operator-extract-as-json">The <code>-&gt;</code> Operator (Extract as JSON)</a></h3>
+<pre><code class="language-sql">-- Extract a nested JSON object
+SELECT properties-&gt;'metadata' FROM 'workspace'
+</code></pre>
+<h3 id="the--operator-json-containment"><a class="header" href="#the--operator-json-containment">The <code>@&gt;</code> Operator (JSON Containment)</a></h3>
+<pre><code class="language-sql">-- Find nodes where properties contain specific key-value pairs
+SELECT * FROM 'workspace' WHERE properties @&gt; '{"status": "published"}'
+</code></pre>
+<h3 id="the--operator-key-existence"><a class="header" href="#the--operator-key-existence">The <code>?</code> Operator (Key Existence)</a></h3>
+<pre><code class="language-sql">-- Check if a key exists in the JSON object
+SELECT * FROM 'workspace' WHERE properties ? 'featured'
+</code></pre>
+<h3 id="the--and--operators-multiple-key-existence"><a class="header" href="#the--and--operators-multiple-key-existence">The <code>?|</code> and <code>?&amp;</code> Operators (Multiple Key Existence)</a></h3>
+<pre><code class="language-sql">-- Any key exists
+SELECT * FROM 'workspace' WHERE properties ?| ARRAY['title', 'subtitle']
+
+-- All keys exist
+SELECT * FROM 'workspace' WHERE properties ?&amp; ARRAY['title', 'author']
+</code></pre>
+<h3 id="the--and--operators-path-extraction"><a class="header" href="#the--and--operators-path-extraction">The <code>#&gt;</code> and <code>#&gt;&gt;</code> Operators (Path Extraction)</a></h3>
+<pre><code class="language-sql">-- Extract JSON at path
+SELECT properties #&gt; ARRAY['metadata', 'author'] FROM 'workspace'
+
+-- Extract text at path
+SELECT properties #&gt;&gt; ARRAY['metadata', 'author'] FROM 'workspace'
+</code></pre>
+<h3 id="the---operator-json-remove"><a class="header" href="#the---operator-json-remove">The <code>-</code> Operator (JSON Remove)</a></h3>
+<pre><code class="language-sql">-- Remove a key from JSON
+SELECT properties - 'temp_field' FROM 'workspace'
+</code></pre>
+<h3 id="the---operator-remove-at-path"><a class="header" href="#the---operator-remove-at-path">The <code>#-</code> Operator (Remove at Path)</a></h3>
+<pre><code class="language-sql">-- Remove value at a nested path
+SELECT properties #- ARRAY['metadata', 'draft_notes'] FROM 'workspace'
+</code></pre>
+<h3 id="json-path-operators"><a class="header" href="#json-path-operators">JSON Path Operators</a></h3>
+<pre><code class="language-sql">-- JSONPath match: @@ tests if predicate matches
+SELECT * FROM 'workspace' WHERE properties @@ '$.tags[*] ? (@ == "rust")'
+
+-- JSONPath exists: @? tests if path has matches
+SELECT * FROM 'workspace' WHERE properties @? '$.metadata.author'
+</code></pre>
+<h3 id="the--operator-json-merge"><a class="header" href="#the--operator-json-merge">The <code>||</code> Operator (JSON Merge)</a></h3>
+<pre><code class="language-sql">-- Merge two JSONB values
+SELECT properties || '{"new_key": "value"}' FROM 'workspace'
+</code></pre>
+<h2 id="built-in-functions"><a class="header" href="#built-in-functions">Built-in Functions</a></h2>
+<h3 id="string-functions"><a class="header" href="#string-functions">String Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>LOWER(text)</code></td><td>TEXT -&gt; TEXT</td><td>Convert to lowercase</td></tr>
+<tr><td><code>UPPER(text)</code></td><td>TEXT -&gt; TEXT</td><td>Convert to uppercase</td></tr>
+<tr><td><code>LENGTH(text)</code></td><td>TEXT -&gt; INT</td><td>String length</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="math-functions"><a class="header" href="#math-functions">Math Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ROUND(value)</code></td><td>DOUBLE -&gt; DOUBLE</td><td>Round to nearest integer</td></tr>
+<tr><td><code>ROUND(value, precision)</code></td><td>DOUBLE, INT -&gt; DOUBLE</td><td>Round to N decimal places</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="null-handling-functions"><a class="header" href="#null-handling-functions">Null Handling Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>COALESCE(val1, val2, ...)</code></td><td>ANY… -&gt; ANY</td><td>First non-NULL value</td></tr>
+<tr><td><code>NULLIF(val1, val2)</code></td><td>ANY, ANY -&gt; ANY</td><td>NULL if values are equal</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="temporal-functions"><a class="header" href="#temporal-functions">Temporal Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>NOW()</code></td><td>-&gt; TIMESTAMPTZ</td><td>Current UTC timestamp</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="json-functions"><a class="header" href="#json-functions">JSON Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>JSON_VALUE(json, path)</code></td><td>JSONB, TEXT -&gt; TEXT?</td><td>Extract scalar value at path</td></tr>
+<tr><td><code>JSON_QUERY(json, path)</code></td><td>JSONB, TEXT -&gt; JSONB?</td><td>Extract JSON at path</td></tr>
+<tr><td><code>JSON_EXISTS(json, path)</code></td><td>JSONB, TEXT -&gt; BOOLEAN</td><td>Check if path exists</td></tr>
+<tr><td><code>JSON_GET_TEXT(json, key)</code></td><td>JSONB, TEXT -&gt; TEXT?</td><td>Extract as text</td></tr>
+<tr><td><code>JSON_GET_DOUBLE(json, key)</code></td><td>JSONB, TEXT -&gt; DOUBLE?</td><td>Extract as double</td></tr>
+<tr><td><code>JSON_GET_INT(json, key)</code></td><td>JSONB, TEXT -&gt; INT?</td><td>Extract as integer</td></tr>
+<tr><td><code>JSON_GET_BOOL(json, key)</code></td><td>JSONB, TEXT -&gt; BOOLEAN?</td><td>Extract as boolean</td></tr>
+<tr><td><code>TO_JSON(value)</code></td><td>ANY -&gt; JSONB</td><td>Convert to JSON</td></tr>
+<tr><td><code>TO_JSONB(value)</code></td><td>ANY -&gt; JSONB</td><td>Convert to JSONB</td></tr>
+<tr><td><code>JSONB_SET(json, path, value)</code></td><td>JSONB, TEXT, ANY -&gt; JSONB</td><td>Set value at path</td></tr>
+<tr><td><code>JSONB_SET(json, path, value, create)</code></td><td>JSONB, TEXT, ANY, BOOLEAN -&gt; JSONB</td><td>Set value, control creation</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="hierarchy-functions"><a class="header" href="#hierarchy-functions">Hierarchy Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>PATH_STARTS_WITH(path, prefix)</code></td><td>PATH, PATH -&gt; BOOLEAN</td><td>Check if path starts with prefix</td></tr>
+<tr><td><code>PARENT(path)</code></td><td>PATH -&gt; PATH?</td><td>Get parent path</td></tr>
+<tr><td><code>PARENT(path, levels)</code></td><td>PATH, INT -&gt; PATH?</td><td>Get ancestor N levels up</td></tr>
+<tr><td><code>DEPTH(path)</code></td><td>PATH -&gt; INT</td><td>Get tree depth</td></tr>
+<tr><td><code>ANCESTOR(path, level)</code></td><td>PATH, INT -&gt; PATH?</td><td>Get ancestor at specific level</td></tr>
+<tr><td><code>CHILD_OF(parent_path)</code></td><td>PATH -&gt; BOOLEAN</td><td>Check if node is direct child</td></tr>
+<tr><td><code>DESCENDANT_OF(parent_path)</code></td><td>PATH -&gt; BOOLEAN</td><td>Check if node is descendant</td></tr>
+<tr><td><code>DESCENDANT_OF(parent_path, max_depth)</code></td><td>PATH, INT -&gt; BOOLEAN</td><td>Descendants up to max depth</td></tr>
+<tr><td><code>REFERENCES(target)</code></td><td>TEXT -&gt; BOOLEAN</td><td>Check if node references target</td></tr>
+<tr><td><code>NEIGHBORS(node_id, direction, type)</code></td><td>TEXT, TEXT, TEXT -&gt; TEXT[]</td><td>Get graph neighbors</td></tr>
+<tr><td><code>RESOLVE(json)</code></td><td>JSONB -&gt; JSONB</td><td>Resolve references (depth=1)</td></tr>
+<tr><td><code>RESOLVE(json, depth)</code></td><td>JSONB, INT -&gt; JSONB</td><td>Resolve references with depth</td></tr>
+</tbody>
+</table>
+</div>
+<p>The <code>NEIGHBORS</code> function takes a direction parameter: <code>'OUT'</code> (outgoing), <code>'IN'</code> (incoming), or <code>'BOTH'</code>.</p>
+<h3 id="full-text-search-functions"><a class="header" href="#full-text-search-functions">Full-Text Search Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>to_tsvector(config, text)</code></td><td>TEXT, TEXT -&gt; TSVECTOR</td><td>Create text search vector</td></tr>
+<tr><td><code>to_tsquery(config, text)</code></td><td>TEXT, TEXT -&gt; TSQUERY</td><td>Create text search query</td></tr>
+<tr><td><code>FULLTEXT_MATCH(query, language)</code></td><td>TEXT, TEXT -&gt; BOOLEAN</td><td>Search using Tantivy index</td></tr>
+</tbody>
+</table>
+</div>
+<p>Full-text search match operator:</p>
+<pre><code class="language-sql">-- Using the @@ operator with tsvector/tsquery
+WHERE to_tsvector('english', properties-&gt;&gt;'body'::String) @@ to_tsquery('english', 'database &amp; content')
+
+-- Using FULLTEXT_MATCH with the Tantivy index
+WHERE FULLTEXT_MATCH('database content', 'english')
+</code></pre>
+<h3 id="vector-search-functions"><a class="header" href="#vector-search-functions">Vector Search Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>EMBEDDING(text)</code></td><td>TEXT -&gt; VECTOR</td><td>Generate embedding from text</td></tr>
+<tr><td><code>VECTOR_L2_DISTANCE(v1, v2)</code></td><td>VECTOR, VECTOR -&gt; DOUBLE</td><td>Euclidean distance</td></tr>
+<tr><td><code>VECTOR_COSINE_DISTANCE(v1, v2)</code></td><td>VECTOR, VECTOR -&gt; DOUBLE</td><td>Cosine distance</td></tr>
+<tr><td><code>VECTOR_INNER_PRODUCT(v1, v2)</code></td><td>VECTOR, VECTOR -&gt; DOUBLE</td><td>Inner product</td></tr>
+</tbody>
+</table>
+</div>
+<p>Vector distance operators (pgvector-compatible):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>&lt;-&gt;</code></td><td>L2 (Euclidean) distance</td></tr>
+<tr><td><code>&lt;=&gt;</code></td><td>Cosine distance</td></tr>
+<tr><td><code>&lt;#&gt;</code></td><td>Inner product (negative dot product)</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-sql">-- Semantic similarity search
+SELECT *, embedding &lt;-&gt; EMBEDDING('search query') AS distance
+FROM 'workspace'
+ORDER BY embedding &lt;-&gt; EMBEDDING('search query')
+LIMIT 10
+</code></pre>
+<h3 id="geospatial-functions-postgis-compatible"><a class="header" href="#geospatial-functions-postgis-compatible">Geospatial Functions (PostGIS-Compatible)</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_POINT(lon, lat)</code></td><td>DOUBLE, DOUBLE -&gt; GEOMETRY</td><td>Create a point</td></tr>
+<tr><td><code>ST_GEOMFROMGEOJSON(json)</code></td><td>TEXT -&gt; GEOMETRY</td><td>Parse GeoJSON</td></tr>
+<tr><td><code>ST_ASGEOJSON(geom)</code></td><td>GEOMETRY -&gt; TEXT</td><td>Convert to GeoJSON</td></tr>
+<tr><td><code>ST_DISTANCE(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; DOUBLE</td><td>Distance between geometries</td></tr>
+<tr><td><code>ST_DWITHIN(g1, g2, dist)</code></td><td>GEOMETRY, GEOMETRY, DOUBLE -&gt; BOOLEAN</td><td>Within distance</td></tr>
+<tr><td><code>ST_CONTAINS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; BOOLEAN</td><td>Contains check</td></tr>
+<tr><td><code>ST_WITHIN(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; BOOLEAN</td><td>Within check</td></tr>
+<tr><td><code>ST_INTERSECTS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; BOOLEAN</td><td>Intersection check</td></tr>
+<tr><td><code>ST_X(geom)</code></td><td>GEOMETRY -&gt; DOUBLE?</td><td>Get X coordinate (longitude)</td></tr>
+<tr><td><code>ST_Y(geom)</code></td><td>GEOMETRY -&gt; DOUBLE?</td><td>Get Y coordinate (latitude)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="system-functions"><a class="header" href="#system-functions">System Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>VERSION()</code></td><td>-&gt; TEXT</td><td>RaisinDB version</td></tr>
+<tr><td><code>CURRENT_SCHEMA()</code></td><td>-&gt; TEXT</td><td>Current schema</td></tr>
+<tr><td><code>CURRENT_DATABASE()</code></td><td>-&gt; TEXT</td><td>Current database (repo)</td></tr>
+<tr><td><code>CURRENT_USER</code></td><td>-&gt; TEXT</td><td>Current user</td></tr>
+<tr><td><code>SESSION_USER</code></td><td>-&gt; TEXT</td><td>Session user</td></tr>
+<tr><td><code>CURRENT_CATALOG</code></td><td>-&gt; TEXT</td><td>Current catalog</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="authentication-functions"><a class="header" href="#authentication-functions">Authentication Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>RAISIN_AUTH_CURRENT_USER()</code></td><td>-&gt; TEXT?</td><td>Current authenticated user ID</td></tr>
+<tr><td><code>RAISIN_CURRENT_USER()</code></td><td>-&gt; JSONB?</td><td>Current user as JSON object</td></tr>
+<tr><td><code>RAISIN_AUTH_CURRENT_WORKSPACE()</code></td><td>-&gt; TEXT?</td><td>Current workspace</td></tr>
+<tr><td><code>RAISIN_AUTH_HAS_PERMISSION(resource, action)</code></td><td>TEXT, TEXT -&gt; BOOLEAN</td><td>Check permission</td></tr>
+<tr><td><code>RAISIN_AUTH_GET_SETTINGS()</code></td><td>-&gt; JSONB</td><td>Get auth settings</td></tr>
+<tr><td><code>RAISIN_AUTH_UPDATE_SETTINGS(json)</code></td><td>TEXT -&gt; JSONB</td><td>Update auth settings</td></tr>
+<tr><td><code>RAISIN_AUTH_ADD_PROVIDER(name, config)</code></td><td>TEXT, TEXT -&gt; TEXT</td><td>Add auth provider</td></tr>
+<tr><td><code>RAISIN_AUTH_UPDATE_PROVIDER(name, config)</code></td><td>TEXT, TEXT -&gt; JSONB</td><td>Update auth provider</td></tr>
+<tr><td><code>RAISIN_AUTH_REMOVE_PROVIDER(name)</code></td><td>TEXT -&gt; BOOLEAN</td><td>Remove auth provider</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="invocation-functions"><a class="header" href="#invocation-functions">Invocation Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>INVOKE(path)</code></td><td>TEXT -&gt; JSONB</td><td>Invoke a function asynchronously</td></tr>
+<tr><td><code>INVOKE(path, input)</code></td><td>TEXT, JSONB -&gt; JSONB</td><td>Invoke with input</td></tr>
+<tr><td><code>INVOKE(path, input, workspace)</code></td><td>TEXT, JSONB, TEXT -&gt; JSONB</td><td>Invoke in specific workspace</td></tr>
+<tr><td><code>INVOKE_SYNC(path)</code></td><td>TEXT -&gt; JSONB</td><td>Invoke synchronously</td></tr>
+<tr><td><code>INVOKE_SYNC(path, input)</code></td><td>TEXT, JSONB -&gt; JSONB</td><td>Invoke synchronously with input</td></tr>
+<tr><td><code>INVOKE_SYNC(path, input, workspace)</code></td><td>TEXT, JSONB, TEXT -&gt; JSONB</td><td>Invoke synchronously in workspace</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="aggregate-functions"><a class="header" href="#aggregate-functions">Aggregate Functions</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>COUNT(*)</code></td><td>-&gt; BIGINT</td><td>Count all rows</td></tr>
+<tr><td><code>COUNT(expr)</code></td><td>ANY -&gt; BIGINT</td><td>Count non-NULL values</td></tr>
+<tr><td><code>SUM(expr)</code></td><td>DOUBLE -&gt; DOUBLE?</td><td>Sum of values</td></tr>
+<tr><td><code>AVG(expr)</code></td><td>DOUBLE -&gt; DOUBLE?</td><td>Average of values</td></tr>
+<tr><td><code>MIN(expr)</code></td><td>ANY -&gt; ANY</td><td>Minimum value</td></tr>
+<tr><td><code>MAX(expr)</code></td><td>ANY -&gt; ANY</td><td>Maximum value</td></tr>
+<tr><td><code>ARRAY_AGG(expr)</code></td><td>ANY -&gt; ANY</td><td>Collect values into array</td></tr>
+</tbody>
+</table>
+</div>
+<p>Aggregates support the <code>FILTER</code> clause:</p>
+<pre><code class="language-sql">SELECT
+  COUNT(*) AS total,
+  COUNT(*) FILTER (WHERE node_type = 'cms:Article') AS articles
+FROM 'workspace'
+</code></pre>
+<h2 id="window-functions"><a class="header" href="#window-functions">Window Functions</a></h2>
+<p>Window functions compute values across a set of rows related to the current row.</p>
+<h3 id="ranking-functions"><a class="header" href="#ranking-functions">Ranking Functions</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ROW_NUMBER()</code></td><td>Sequential row number within partition</td></tr>
+<tr><td><code>RANK()</code></td><td>Rank with gaps for ties</td></tr>
+<tr><td><code>DENSE_RANK()</code></td><td>Rank without gaps</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="aggregate-window-functions"><a class="header" href="#aggregate-window-functions">Aggregate Window Functions</a></h3>
+<p>All aggregate functions (COUNT, SUM, AVG, MIN, MAX) can be used as window functions.</p>
+<h3 id="syntax"><a class="header" href="#syntax">Syntax</a></h3>
+<pre><code class="language-sql">function() OVER (
+  [PARTITION BY expr, ...]
+  [ORDER BY expr [ASC|DESC], ...]
+  [frame_clause]
+)
+</code></pre>
+<h3 id="frame-clause"><a class="header" href="#frame-clause">Frame Clause</a></h3>
+<pre><code class="language-sql">ROWS BETWEEN frame_start AND frame_end
+RANGE BETWEEN frame_start AND frame_end
+</code></pre>
+<p>Frame bounds: <code>UNBOUNDED PRECEDING</code>, <code>N PRECEDING</code>, <code>CURRENT ROW</code>, <code>N FOLLOWING</code>, <code>UNBOUNDED FOLLOWING</code>.</p>
+<h3 id="examples"><a class="header" href="#examples">Examples</a></h3>
+<pre><code class="language-sql">-- Number rows within each node type
+SELECT
+  name,
+  node_type,
+  ROW_NUMBER() OVER (PARTITION BY node_type ORDER BY created_at) AS rn
+FROM 'workspace'
+
+-- Running total of versions
+SELECT
+  name,
+  version,
+  SUM(version) OVER (ORDER BY created_at ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
+FROM 'workspace'
+</code></pre>
+<h2 id="joins"><a class="header" href="#joins">JOINs</a></h2>
+<p>RaisinDB supports the following join types:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Join Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>INNER JOIN</code></td><td>Rows matching in both tables</td></tr>
+<tr><td><code>LEFT JOIN</code></td><td>All rows from left, matching from right</td></tr>
+<tr><td><code>RIGHT JOIN</code></td><td>All rows from right, matching from left</td></tr>
+<tr><td><code>FULL JOIN</code></td><td>All rows from both tables</td></tr>
+<tr><td><code>CROSS JOIN</code></td><td>Cartesian product</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="examples-1"><a class="header" href="#examples-1">Examples</a></h3>
+<pre><code class="language-sql">-- Join two workspaces
+SELECT a.name, b.name AS related_name
+FROM 'content' AS a
+INNER JOIN 'metadata' AS b ON a.id = b.properties-&gt;&gt;'content_id'::String
+
+-- Left join for optional data
+SELECT a.*, b.properties-&gt;&gt;'locale'::String AS locale
+FROM 'workspace' AS a
+LEFT JOIN 'translations' AS b ON a.id = b.properties-&gt;&gt;'node_id'::String
+</code></pre>
+<h3 id="semi-joins-in-subqueries"><a class="header" href="#semi-joins-in-subqueries">Semi-Joins (IN Subqueries)</a></h3>
+<p><code>IN</code> and <code>NOT IN</code> subqueries are compiled to efficient semi-joins and anti-joins:</p>
+<pre><code class="language-sql">SELECT * FROM 'workspace'
+WHERE id IN (SELECT properties-&gt;&gt;'target_id'::String FROM 'references')
+</code></pre>
+<h2 id="subqueries"><a class="header" href="#subqueries">Subqueries</a></h2>
+<p>Subqueries are supported in the following positions:</p>
+<ul>
+<li><strong>FROM clause</strong> (derived tables): <code>SELECT * FROM (SELECT ...) AS sub</code></li>
+<li><strong>IN expressions</strong>: <code>WHERE col IN (SELECT ...)</code></li>
+<li><strong>NOT IN expressions</strong>: <code>WHERE col NOT IN (SELECT ...)</code></li>
+</ul>
+<h2 id="lateral-joins"><a class="header" href="#lateral-joins">LATERAL Joins</a></h2>
+<p>LATERAL joins allow applying a scalar function to each row:</p>
+<pre><code class="language-sql">SELECT a.*, resolved.value
+FROM 'workspace' AS a,
+LATERAL RESOLVE(a.properties) AS resolved
+</code></pre>
+<h2 id="graph-queries-sqlpgq"><a class="header" href="#graph-queries-sqlpgq">Graph Queries (SQL/PGQ)</a></h2>
+<p>RaisinDB supports graph pattern matching via the SQL/PGQ standard (ISO SQL:2023) using <code>GRAPH_TABLE</code>.</p>
+<h3 id="graph_table-syntax"><a class="header" href="#graph_table-syntax">GRAPH_TABLE Syntax</a></h3>
+<pre><code class="language-sql">SELECT * FROM GRAPH_TABLE(
+  NODES_GRAPH
+  MATCH (a:User)-[:follows]-&gt;(b:User)
+  WHERE a.name = 'Alice'
+  COLUMNS (a.name AS user_name, b.name AS friend_name)
+)
+</code></pre>
+<h3 id="node-patterns"><a class="header" href="#node-patterns">Node Patterns</a></h3>
+<pre><code class="language-sql">(n)                                  -- any node
+(n:Article)                          -- with label (maps to node_type)
+(n:Article|Page)                     -- multiple labels (OR)
+(n:User WHERE n.name = 'Alice')      -- with inline filter
+</code></pre>
+<h3 id="relationship-patterns"><a class="header" href="#relationship-patterns">Relationship Patterns</a></h3>
+<pre><code class="language-sql">-[r]-&gt;                   -- any type, outgoing
+-[:follows]-&gt;            -- specific type
+-[:follows|likes]-&gt;      -- multiple types (OR)
+&lt;-[r]-                   -- incoming
+-[r]-                    -- any direction
+-[r:follows*2]-&gt;         -- exactly 2 hops
+-[r:follows*1..3]-&gt;      -- 1 to 3 hops
+-[r:follows*]-&gt;          -- variable length (1..10 default)
+-[r:follows*2..]-&gt;       -- 2 to default max (10)
+-[r:follows*..5]-&gt;       -- 1 to 5 hops
+</code></pre>
+<h3 id="graph-expressions"><a class="header" href="#graph-expressions">Graph Expressions</a></h3>
+<p>Within GRAPH_TABLE, you can use:</p>
+<ul>
+<li>Property access: <code>n.name</code>, <code>n.properties.title</code></li>
+<li>JSONPath-style access: <code>$.friend.properties.email</code></li>
+<li>JSON operators: <code>n.properties-&gt;&gt;'title'</code></li>
+<li>All comparison, logical, and arithmetic operators</li>
+<li>Functions: <code>degree(n)</code>, <code>shortestPath(a, b)</code></li>
+<li>CASE, IN, BETWEEN, LIKE, IS NULL</li>
+</ul>
+<h3 id="example-multi-hop-traversal"><a class="header" href="#example-multi-hop-traversal">Example: Multi-hop Traversal</a></h3>
+<pre><code class="language-sql">SELECT * FROM GRAPH_TABLE(
+  NODES_GRAPH
+  MATCH (user:User)-[:follows*1..3]-&gt;(friend:User)
+  WHERE user.id = 'user-123'
+  COLUMNS (
+    friend.name AS friend_name,
+    friend.properties-&gt;&gt;'email' AS email
+  )
+)
+</code></pre>
+<h2 id="ddl-statements-schema-management"><a class="header" href="#ddl-statements-schema-management">DDL Statements (Schema Management)</a></h2>
+<h3 id="create-nodetype"><a class="header" href="#create-nodetype">CREATE NODETYPE</a></h3>
+<pre><code class="language-sql">CREATE NODETYPE 'myapp:Article'
+  EXTENDS 'raisin:Page'
+  MIXINS ('myapp:Publishable', 'myapp:SEO')
+  DESCRIPTION 'Blog article content type'
+  ICON 'article'
+  PROPERTIES (
+    title String REQUIRED FULLTEXT,
+    slug String REQUIRED UNIQUE,
+    body String FULLTEXT TRANSLATABLE,
+    category String PROPERTY_INDEX,
+    tags Array OF String,
+    metadata Object {
+      author String,
+      source URL
+    } ALLOW_ADDITIONAL_PROPERTIES,
+    featured_image Resource,
+    related_article Reference
+  )
+  ALLOWED_CHILDREN ('myapp:Paragraph', 'myapp:Image')
+  COMPOUND_INDEX 'idx_category_created' ON (
+    category,
+    __created_at DESC
+  )
+  PUBLISHABLE
+  VERSIONABLE;
+</code></pre>
+<h4 id="property-types"><a class="header" href="#property-types">Property Types</a></h4>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>String</code></td><td>Text data</td></tr>
+<tr><td><code>Number</code></td><td>Numeric values (f64)</td></tr>
+<tr><td><code>Boolean</code></td><td>True/false</td></tr>
+<tr><td><code>Date</code></td><td>DateTime (ISO-8601)</td></tr>
+<tr><td><code>URL</code></td><td>URL strings</td></tr>
+<tr><td><code>Reference</code></td><td>Cross-node reference</td></tr>
+<tr><td><code>Resource</code></td><td>File/media with metadata</td></tr>
+<tr><td><code>Object { ... }</code></td><td>Nested object with inline fields</td></tr>
+<tr><td><code>Array OF Type</code></td><td>Ordered collection</td></tr>
+<tr><td><code>Composite</code></td><td>Rich content structure (blocks)</td></tr>
+<tr><td><code>Element</code></td><td>Single element in composite</td></tr>
+<tr><td><code>NodeType</code></td><td>Reference to a type definition</td></tr>
+</tbody>
+</table>
+</div>
+<h4 id="property-modifiers"><a class="header" href="#property-modifiers">Property Modifiers</a></h4>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Modifier</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>REQUIRED</code></td><td>Value must be provided</td></tr>
+<tr><td><code>UNIQUE</code></td><td>Value must be unique across nodes</td></tr>
+<tr><td><code>FULLTEXT</code></td><td>Enable Tantivy full-text search index</td></tr>
+<tr><td><code>VECTOR</code></td><td>Enable HNSW vector embedding index</td></tr>
+<tr><td><code>PROPERTY_INDEX</code></td><td>Enable RocksDB exact-match index</td></tr>
+<tr><td><code>TRANSLATABLE</code></td><td>Enable i18n translations</td></tr>
+<tr><td><code>DEFAULT value</code></td><td>Default value when not provided</td></tr>
+<tr><td><code>LABEL 'text'</code></td><td>Human-readable label for UI</td></tr>
+<tr><td><code>DESCRIPTION 'text'</code></td><td>Human-readable description</td></tr>
+<tr><td><code>ORDER N</code></td><td>Display order hint</td></tr>
+<tr><td><code>ALLOW_ADDITIONAL_PROPERTIES</code></td><td>For Object types: allow extra fields</td></tr>
+</tbody>
+</table>
+</div>
+<h4 id="nodetype-flags"><a class="header" href="#nodetype-flags">NodeType Flags</a></h4>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Flag</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>VERSIONABLE</code></td><td>Enable version history</td></tr>
+<tr><td><code>PUBLISHABLE</code></td><td>Enable draft/published workflow</td></tr>
+<tr><td><code>AUDITABLE</code></td><td>Track all changes with user and timestamp</td></tr>
+<tr><td><code>INDEXABLE</code></td><td>Include in search indexes (default: true)</td></tr>
+<tr><td><code>STRICT</code></td><td>Reject unknown properties</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="alter-nodetype"><a class="header" href="#alter-nodetype">ALTER NODETYPE</a></h3>
+<pre><code class="language-sql">ALTER NODETYPE 'myapp:Article'
+  ADD PROPERTY subtitle String FULLTEXT
+  DROP PROPERTY legacy_field
+  SET DESCRIPTION = 'Updated description';
+
+ALTER NODETYPE 'myapp:Article'
+  ADD MIXIN 'myapp:Taggable'
+  SET VERSIONABLE TRUE;
+
+ALTER NODETYPE 'myapp:Article'
+  MODIFY PROPERTY 'specs.dimensions.width' Number LABEL 'Width (cm)';
+</code></pre>
+<h3 id="drop-nodetype"><a class="header" href="#drop-nodetype">DROP NODETYPE</a></h3>
+<pre><code class="language-sql">DROP NODETYPE 'myapp:OldType';
+DROP NODETYPE 'myapp:OldType' CASCADE;
+</code></pre>
+<h3 id="createalterdrop-archetype"><a class="header" href="#createalterdrop-archetype">CREATE/ALTER/DROP ARCHETYPE</a></h3>
+<pre><code class="language-sql">CREATE ARCHETYPE 'myapp:BlogPost'
+  BASE_NODE_TYPE 'myapp:Article'
+  DESCRIPTION 'Blog post archetype'
+  FIELDS (
+    title String REQUIRED,
+    body Composite
+  );
+
+ALTER ARCHETYPE 'myapp:BlogPost'
+  ADD FIELD heading String
+  SET DESCRIPTION = 'Updated description';
+
+DROP ARCHETYPE 'myapp:BlogPost';
+DROP ARCHETYPE 'myapp:BlogPost' CASCADE;
+</code></pre>
+<h3 id="createalterdrop-elementtype"><a class="header" href="#createalterdrop-elementtype">CREATE/ALTER/DROP ELEMENTTYPE</a></h3>
+<pre><code class="language-sql">CREATE ELEMENTTYPE 'myapp:Paragraph'
+  DESCRIPTION 'Rich text paragraph'
+  FIELDS (
+    text String REQUIRED TRANSLATABLE,
+    style String
+  );
+
+ALTER ELEMENTTYPE 'myapp:Paragraph'
+  ADD FIELD alignment String DEFAULT 'left';
+
+DROP ELEMENTTYPE 'myapp:Paragraph';
+DROP ELEMENTTYPE 'myapp:Paragraph' CASCADE;
+</code></pre>
+<h3 id="createalterdrop-mixin"><a class="header" href="#createalterdrop-mixin">CREATE/ALTER/DROP MIXIN</a></h3>
+<p>Mixins are reusable property sets that can be composed into node types. Under the hood, a mixin is stored as a <code>NodeType</code> with <code>is_mixin: true</code>, but it has its own dedicated DDL syntax.</p>
+<h4 id="create-mixin"><a class="header" href="#create-mixin">CREATE MIXIN</a></h4>
+<pre><code class="language-sql">CREATE MIXIN 'myapp:SEO'
+  DESCRIPTION 'SEO metadata fields'
+  ICON 'search'
+  PROPERTIES (
+    meta_title String,
+    meta_description String,
+    og_image URL,
+    canonical_url URL
+  );
+
+CREATE MIXIN 'myapp:Timestamps'
+  DESCRIPTION 'Standard timestamp fields'
+  PROPERTIES (
+    created_at Date REQUIRED,
+    updated_at Date REQUIRED
+  );
+</code></pre>
+<p>Clauses (all optional, any order):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Clause</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>DESCRIPTION 'text'</code></td><td>Human-readable description</td></tr>
+<tr><td><code>ICON 'name'</code></td><td>Icon identifier for UI display</td></tr>
+<tr><td><code>PROPERTIES (...)</code></td><td>Property definitions (same syntax as <code>CREATE NODETYPE</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Once created, a mixin can be referenced in a <code>CREATE NODETYPE</code> statement via the <code>MIXINS</code> clause:</p>
+<pre><code class="language-sql">CREATE NODETYPE 'myapp:Article'
+  MIXINS ('myapp:SEO', 'myapp:Timestamps')
+  PROPERTIES (
+    title String REQUIRED,
+    body String
+  );
+</code></pre>
+<h4 id="alter-mixin"><a class="header" href="#alter-mixin">ALTER MIXIN</a></h4>
+<pre><code class="language-sql">ALTER MIXIN 'myapp:SEO'
+  ADD PROPERTY robots String DEFAULT 'index,follow'
+  DROP PROPERTY og_image
+  SET DESCRIPTION = 'Updated SEO fields';
+
+ALTER MIXIN 'myapp:Timestamps'
+  MODIFY PROPERTY updated_at Date REQUIRED
+  SET ICON = 'clock';
+</code></pre>
+<p>Supported alterations:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Alteration</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ADD PROPERTY name Type [modifiers]</code></td><td>Add a new property to the mixin</td></tr>
+<tr><td><code>DROP PROPERTY name</code></td><td>Remove a property from the mixin</td></tr>
+<tr><td><code>MODIFY PROPERTY name Type [modifiers]</code></td><td>Replace an existing property definition (or add if not found)</td></tr>
+<tr><td><code>SET DESCRIPTION = 'text'</code></td><td>Update the mixin description</td></tr>
+<tr><td><code>SET ICON = 'name'</code></td><td>Update the mixin icon</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>ALTER MIXIN</code> validates that the target is actually a mixin (has <code>is_mixin: true</code>). If you attempt to alter a regular node type with <code>ALTER MIXIN</code>, you will receive an error directing you to use <code>ALTER NODETYPE</code> instead.</p>
+<h4 id="drop-mixin"><a class="header" href="#drop-mixin">DROP MIXIN</a></h4>
+<pre><code class="language-sql">DROP MIXIN 'myapp:SEO';
+DROP MIXIN 'myapp:SEO' CASCADE;
+</code></pre>
+<p>The optional <code>CASCADE</code> keyword indicates that dependent node types should also be updated. Without <code>CASCADE</code>, the mixin is removed directly.</p>
+<h2 id="branch-management"><a class="header" href="#branch-management">Branch Management</a></h2>
+<p>Branches provide Git-like versioning for content.</p>
+<h3 id="create-branch"><a class="header" href="#create-branch">CREATE BRANCH</a></h3>
+<pre><code class="language-sql">CREATE BRANCH 'feature/new-layout' FROM 'main'
+CREATE BRANCH 'feature/x' FROM 'main' AT REVISION HEAD~2 DESCRIPTION 'Experimental' PROTECTED
+CREATE BRANCH 'feature/x' FROM 'main' UPSTREAM 'main' WITH HISTORY
+</code></pre>
+<h3 id="drop-branch"><a class="header" href="#drop-branch">DROP BRANCH</a></h3>
+<pre><code class="language-sql">DROP BRANCH 'feature/old'
+DROP BRANCH IF EXISTS 'feature/old'
+</code></pre>
+<h3 id="alter-branch"><a class="header" href="#alter-branch">ALTER BRANCH</a></h3>
+<pre><code class="language-sql">ALTER BRANCH 'feature/x' SET UPSTREAM 'main'
+ALTER BRANCH 'feature/x' UNSET UPSTREAM
+ALTER BRANCH 'feature/x' SET PROTECTED TRUE
+ALTER BRANCH 'feature/x' SET DESCRIPTION 'Updated description'
+ALTER BRANCH 'old-name' RENAME TO 'new-name'
+</code></pre>
+<h3 id="merge-branch"><a class="header" href="#merge-branch">MERGE BRANCH</a></h3>
+<pre><code class="language-sql">MERGE BRANCH 'feature/x' INTO 'main'
+MERGE BRANCH 'feature/x' INTO 'main' USING FAST_FORWARD
+MERGE BRANCH 'feature/x' INTO 'main' USING THREE_WAY MESSAGE 'Merge feature'
+MERGE BRANCH 'feature/x' INTO 'main' MESSAGE 'Merge' RESOLVE CONFLICTS (
+  ('node-uuid-1', KEEP_OURS),
+  ('node-uuid-2', KEEP_THEIRS),
+  ('node-uuid-3', 'en', KEEP_THEIRS),
+  ('node-uuid-4', USE_VALUE '{"title": "Merged Title"}'),
+  ('node-uuid-5', DELETE)
+)
+</code></pre>
+<p>Merge strategies:</p>
+<ul>
+<li><code>FAST_FORWARD</code> – Only if target is a direct ancestor of source</li>
+<li><code>THREE_WAY</code> – Three-way merge with conflict detection (default)</li>
+</ul>
+<p>Conflict resolution types:</p>
+<ul>
+<li><code>KEEP_OURS</code> – Keep the target branch version</li>
+<li><code>KEEP_THEIRS</code> – Keep the source branch version</li>
+<li><code>DELETE</code> – Accept deletion</li>
+<li><code>USE_VALUE 'json'</code> – Use a custom merged value</li>
+</ul>
+<h3 id="use-branch"><a class="header" href="#use-branch">USE BRANCH</a></h3>
+<pre><code class="language-sql">USE BRANCH 'feature/x'           -- Set for session
+USE LOCAL BRANCH 'feature/x'     -- Set for single statement
+SET app.branch = 'feature/x'     -- Alternative syntax
+SET LOCAL app.branch = 'feature/x'
+</code></pre>
+<h3 id="branch-inspection"><a class="header" href="#branch-inspection">Branch Inspection</a></h3>
+<pre><code class="language-sql">SHOW CURRENT BRANCH
+SHOW BRANCHES
+DESCRIBE BRANCH 'feature/x'
+SHOW DIVERGENCE 'feature/x' FROM 'main'
+SHOW CONFLICTS FOR MERGE 'feature/x' INTO 'main'
+</code></pre>
+<h2 id="transaction-control"><a class="header" href="#transaction-control">Transaction Control</a></h2>
+<pre><code class="language-sql">BEGIN;
+UPDATE nodes SET properties = '{"status": "published"}' WHERE id = 'node-123';
+COMMIT WITH MESSAGE 'Published article' ACTOR 'user-456';
+</code></pre>
+<h3 id="statements-1"><a class="header" href="#statements-1">Statements</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Statement</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>BEGIN</code> or <code>BEGIN TRANSACTION</code></td><td>Start a transaction</td></tr>
+<tr><td><code>COMMIT</code></td><td>Commit with no message</td></tr>
+<tr><td><code>COMMIT WITH MESSAGE 'msg'</code></td><td>Commit with a descriptive message</td></tr>
+<tr><td><code>COMMIT WITH MESSAGE 'msg' ACTOR 'user'</code></td><td>Commit with message and user attribution</td></tr>
+<tr><td><code>SET variable = value</code></td><td>Set session variable within transaction</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="content-operations"><a class="header" href="#content-operations">Content Operations</a></h2>
+<h3 id="order-sibling-reordering"><a class="header" href="#order-sibling-reordering">ORDER (Sibling Reordering)</a></h3>
+<p>Reorder nodes among their siblings:</p>
+<pre><code class="language-sql">ORDER 'workspace' SET path='/content/page2' ABOVE path='/content/page1'
+ORDER 'workspace' SET path='/content/page2' BELOW path='/content/page1'
+ORDER 'workspace' SET id='node-abc' ABOVE id='node-def'
+</code></pre>
+<h3 id="move-reparenting"><a class="header" href="#move-reparenting">MOVE (Reparenting)</a></h3>
+<p>Move a node to a new parent:</p>
+<pre><code class="language-sql">MOVE 'workspace' SET path='/content/old-section/page' TO path='/content/new-section'
+MOVE 'workspace' SET id='node-abc' TO id='parent-node-def'
+</code></pre>
+<h3 id="copy"><a class="header" href="#copy">COPY</a></h3>
+<p>Copy a node (or subtree) to a new parent:</p>
+<pre><code class="language-sql">COPY 'workspace' SET path='/templates/article' TO path='/content/blog'
+COPY 'workspace' SET path='/templates/article' TO path='/content/blog' AS 'my-new-article'
+COPY TREE 'workspace' SET path='/templates/section' TO path='/content'
+</code></pre>
+<h3 id="translate"><a class="header" href="#translate">TRANSLATE</a></h3>
+<p>Set locale-specific translations for node properties:</p>
+<pre><code class="language-sql">UPDATE 'workspace' FOR LOCALE 'de'
+SET properties.title = 'Deutscher Titel',
+    properties.description = 'Deutsche Beschreibung'
+WHERE path = '/content/article-1';
+
+-- Translate block content
+UPDATE 'workspace' FOR LOCALE 'fr'
+SET blocks['block-uuid-1'].text = 'Texte en francais'
+WHERE path = '/content/article-1';
+</code></pre>
+<h3 id="relate--unrelate"><a class="header" href="#relate--unrelate">RELATE / UNRELATE</a></h3>
+<p>Create or remove relationships between nodes:</p>
+<pre><code class="language-sql">-- Create a relationship
+RELATE FROM default:path='/content/article-1' TO default:path='/content/tag-rust'
+  TYPE 'tagged_with' WEIGHT 1.0
+
+-- With explicit workspaces
+RELATE FROM workspace1:id='node-abc' TO workspace2:id='node-def'
+  TYPE 'references'
+
+-- Remove a relationship
+UNRELATE FROM default:path='/content/article-1' TO default:path='/content/tag-rust'
+  TYPE 'tagged_with'
+
+-- Remove all relationships between two nodes
+UNRELATE FROM default:id='node-abc' TO default:id='node-def'
+</code></pre>
+<h3 id="restore"><a class="header" href="#restore">RESTORE</a></h3>
+<p>Restore a node (or subtree) to a previous revision:</p>
+<pre><code class="language-sql">RESTORE NODE path='/content/article-1' TO REVISION 42
+RESTORE TREE NODE id='node-abc' TO REVISION HEAD~5
+RESTORE NODE path='/content/article-1' TO REVISION 42 TRANSLATIONS ('en', 'de')
+</code></pre>
+<h2 id="parameter-binding"><a class="header" href="#parameter-binding">Parameter Binding</a></h2>
+<p>Use <code>$1</code>, <code>$2</code>, etc. for parameterized queries. Parameters are 1-indexed.</p>
+<pre><code class="language-sql">SELECT * FROM 'workspace' WHERE properties-&gt;&gt;'email'::String = $1
+SELECT * FROM 'workspace' WHERE node_type = $1 AND version &gt; $2 LIMIT $3
+</code></pre>
+<p>Parameter types are inferred from context:</p>
+<ul>
+<li>Strings are single-quoted</li>
+<li>Numbers are unquoted</li>
+<li>Booleans are <code>true</code>/<code>false</code></li>
+<li>NULL is the <code>NULL</code> keyword</li>
+<li>JSON arrays/objects are serialized and single-quoted</li>
+</ul>
+<p>Parameters can be reused:</p>
+<pre><code class="language-sql">SELECT * FROM 'workspace' WHERE id = $1 OR properties-&gt;&gt;'ref_id'::String = $1
+</code></pre>
+<h2 id="query-optimization"><a class="header" href="#query-optimization">Query Optimization</a></h2>
+<p>The query planner applies several optimizations automatically:</p>
+<ul>
+<li><strong>Constant folding</strong> – Evaluates deterministic expressions at plan time</li>
+<li><strong>Predicate pushdown</strong> – Pushes filters closer to the data source</li>
+<li><strong>Projection pruning</strong> – Reads only the columns needed</li>
+<li><strong>Hierarchy rewriting</strong> – Optimizes PATH/DEPTH function calls into efficient prefix scans</li>
+<li><strong>Common subexpression elimination</strong> – Avoids redundant computation</li>
+</ul>
+<p>Use <code>EXPLAIN</code> to inspect the query plan:</p>
+<pre><code class="language-sql">EXPLAIN SELECT * FROM 'workspace'
+  WHERE PATH_STARTS_WITH(path, '/content/')
+  AND properties-&gt;&gt;'status'::String = 'published'
+  ORDER BY created_at DESC
+  LIMIT 10
+</code></pre>
+<h2 id="limitations"><a class="header" href="#limitations">Limitations</a></h2>
+<p>The following standard SQL features are <strong>not</strong> supported:</p>
+<ul>
+<li><strong>CREATE TABLE / DROP TABLE</strong> – Tables are workspaces, managed via the API</li>
+<li><strong>ALTER TABLE</strong> – Use DDL statements (CREATE/ALTER NODETYPE) for schema changes</li>
+<li><strong>Views</strong> – Not supported</li>
+<li><strong>Stored procedures / triggers</strong> – Use serverless functions instead</li>
+<li><strong>UNION / INTERSECT / EXCEPT</strong> – Set operations are not supported</li>
+<li><strong>HAVING</strong> without GROUP BY – GROUP BY is required for HAVING</li>
+<li><strong>Recursive CTEs</strong> – WITH RECURSIVE is not supported</li>
+<li><strong>Multiple statements per query</strong> – Use <code>analyze_batch</code> or transaction blocks for multi-statement execution</li>
+<li><strong>TRUNCATE</strong> – Use DELETE without a WHERE clause</li>
+<li><strong>GRANT / REVOKE</strong> – See <a href="../architecture/sql-access-control.html">SQL Access Control Extensions</a> for RaisinDB’s access control SQL syntax</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../api/rate-limiting.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../examples/single-tenant.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../api/rate-limiting.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../examples/single-tenant.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace-2a3cd908.js"></script>
+        <script src="../mode-rust-2c9d5c9a.js"></script>
+        <script src="../editor-16ca416c.js"></script>
+        <script src="../theme-dawn-4493f9c8.js"></script>
+        <script src="../theme-tomorrow_night-9dbe62a9.js"></script>
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

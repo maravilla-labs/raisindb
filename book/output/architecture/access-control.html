@@ -1,0 +1,1199 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Access Control &amp; Authorization - RaisinDB Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="A flexible, multi-tenant content database built with Rust">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-7d500c97.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RaisinDB Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/architecture/access-control.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="access-control--authorization"><a class="header" href="#access-control--authorization">Access Control &amp; Authorization</a></h1>
+<p>RaisinDB implements a content-centric, workspace-scoped authorization system with row-level security (RLS). Rather than bolting access control onto the database as an afterthought, permissions are modeled as first-class data – stored as nodes in a dedicated workspace, resolved through role inheritance and group membership, and enforced at query time through the RLS filter.</p>
+<p>This chapter covers the full design: from the two-tier identity model and permission data structures, through the resolution pipeline, to runtime enforcement via REL conditions and field-level filtering.</p>
+<h2 id="design-philosophy"><a class="header" href="#design-philosophy">Design Philosophy</a></h2>
+<p>Three principles shape RaisinDB’s approach to authorization:</p>
+<p><strong>Content-centric.</strong> Permissions are defined in terms of content paths and node types, not API endpoints or database tables. A permission like <code>content.articles.**</code> with operations <code>[read, update]</code> directly maps to the content hierarchy. This makes policies readable by non-engineers and composable across workspaces.</p>
+<p><strong>Workspace-scoped.</strong> Each workspace is an independent authorization boundary. A user might be an <code>editor</code> in the <code>content</code> workspace, a <code>viewer</code> in <code>media</code>, and have no access to <code>analytics</code>. This mirrors how organizations actually divide responsibility over content.</p>
+<p><strong>Graph-enhanced.</strong> Because RaisinDB stores users, roles, and groups as nodes in a content graph, the same query and replication infrastructure that serves application data also serves access control data. Role inheritance is a graph traversal. Group membership is a node property. Permission changes replicate across the cluster through the same CRDT mechanisms as any other data.</p>
+<h2 id="two-tier-identity-model"><a class="header" href="#two-tier-identity-model">Two-Tier Identity Model</a></h2>
+<p>RaisinDB separates <strong>global identity</strong> from <strong>workspace-specific user accounts</strong>:</p>
+<pre><code>┌─────────────────────────────────────┐
+│         Global Identity             │
+│  (stored in raisin:system)          │
+│                                     │
+│  identity_id: "id-abc123"           │
+│  email: "alice@example.com"         │
+│  tenant_id: "acme"                  │
+│  linked_providers:                  │
+│    - oidc:google (ext: "g-789")     │
+│    - local (password)               │
+│  local_credentials: { hash: "..." } │
+└─────────────┬───────────────────────┘
+              │
+              │  WorkspaceAccess records
+              │  (one per workspace)
+              │
+    ┌─────────┼──────────┐
+    ▼                     ▼
+┌──────────────┐   ┌──────────────┐
+│ raisin:User  │   │ raisin:User  │
+│ (content ws) │   │ (media ws)   │
+│              │   │              │
+│ roles:       │   │ roles:       │
+│  - editor    │   │  - viewer    │
+│ groups:      │   │ groups:      │
+│  - team-a    │   │  - team-a    │
+└──────────────┘   └──────────────┘
+</code></pre>
+<h3 id="global-identity"><a class="header" href="#global-identity">Global Identity</a></h3>
+<p>An <code>Identity</code> (defined in <code>raisin-models/src/auth/identity.rs</code>) represents a unique person within a tenant. It is stored in the <code>raisin:system</code> workspace and carries:</p>
+<ul>
+<li><code>identity_id</code> – UUID, globally unique within the tenant</li>
+<li><code>email</code> – primary identifier, unique within tenant</li>
+<li><code>linked_providers</code> – external auth providers (OIDC, SAML, etc.)</li>
+<li><code>local_credentials</code> – optional username/password with bcrypt hashing, lockout tracking</li>
+</ul>
+<p>A single identity can have multiple authentication providers linked. For example, a user might log in via Google OIDC or a local password – both resolve to the same identity.</p>
+<h3 id="workspace-specific-user"><a class="header" href="#workspace-specific-user">Workspace-Specific User</a></h3>
+<p>A <code>raisin:User</code> node (defined in <code>raisin_user.yaml</code>) lives inside the <code>raisin:access_control</code> workspace and represents the user’s presence within a specific context. It carries workspace-local data:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>email</code></td><td>String</td><td>User’s email (indexed, unique)</td></tr>
+<tr><td><code>display_name</code></td><td>String</td><td>Display name</td></tr>
+<tr><td><code>roles</code></td><td>Array&lt;String&gt;</td><td>Direct role assignments (e.g., <code>["editor", "reviewer"]</code>)</td></tr>
+<tr><td><code>groups</code></td><td>Array&lt;String&gt;</td><td>Group memberships (e.g., <code>["team-a", "engineering"]</code>)</td></tr>
+<tr><td><code>metadata</code></td><td>Object</td><td>Custom key-value data</td></tr>
+<tr><td><code>birth_date</code></td><td>Date</td><td>For minor status calculation</td></tr>
+<tr><td><code>can_login</code></td><td>Boolean</td><td>Whether user can authenticate (default: <code>true</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Each <code>raisin:User</code> node is created with an initial structure including <code>profile</code>, <code>inbox</code>, <code>outbox</code>, <code>sent</code>, and <code>notifications</code> child nodes.</p>
+<h3 id="why-two-tiers"><a class="header" href="#why-two-tiers">Why Two Tiers?</a></h3>
+<p>This separation serves several purposes:</p>
+<ol>
+<li><strong>Authentication vs. authorization</strong> – The identity layer handles “who are you?” while the user node handles “what can you do here?” These concerns change independently.</li>
+<li><strong>Multi-workspace access</strong> – A user can have different roles in different workspaces without duplicating identity data.</li>
+<li><strong>External auth integration</strong> – The identity links to external providers; the user node is purely internal to RaisinDB.</li>
+<li><strong>Replication isolation</strong> – Workspace-specific user data replicates with the workspace. Global identity data is tenant-level.</li>
+</ol>
+<p>The bridge between the two tiers is the <code>WorkspaceAccess</code> record, described in the <a href="#workspace-access-workflows">Workspace Access Workflows</a> section.</p>
+<h2 id="the-raisinaccess_control-workspace"><a class="header" href="#the-raisinaccess_control-workspace">The raisin:access_control Workspace</a></h2>
+<p>Every repository has a built-in workspace called <code>raisin:access_control</code>. This workspace stores all authorization entities as nodes:</p>
+<pre><code>raisin:access_control/
+├── users/
+│   ├── system/
+│   │   └── anonymous          (raisin:User - physical anonymous user)
+│   ├── alice                  (raisin:User)
+│   │   ├── profile            (raisin:Profile)
+│   │   ├── inbox              (raisin:MessageFolder)
+│   │   ├── outbox             (raisin:MessageFolder)
+│   │   ├── sent               (raisin:MessageFolder)
+│   │   └── notifications      (raisin:Folder)
+│   └── bob                    (raisin:User)
+│       └── ...
+├── roles/
+│   ├── system_admin           (raisin:Role)
+│   ├── editor                 (raisin:Role)
+│   ├── viewer                 (raisin:Role)
+│   └── anonymous              (raisin:Role)
+└── groups/
+    ├── engineering             (raisin:Group)
+    └── content-team            (raisin:Group)
+</code></pre>
+<h3 id="node-types"><a class="header" href="#node-types">Node Types</a></h3>
+<p><strong>raisin:User</strong> – User accounts with roles, groups, and profile data. Each user node is the authoritative source for what that user can do in this workspace.</p>
+<p><strong>raisin:Role</strong> – Role definitions containing permissions and inheritance chains. Properties:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td>String</td><td>Role identifier (unique, indexed)</td></tr>
+<tr><td><code>description</code></td><td>String</td><td>Human-readable description</td></tr>
+<tr><td><code>inherits</code></td><td>Array&lt;String&gt;</td><td>Role IDs this role inherits from</td></tr>
+<tr><td><code>permissions</code></td><td>Array&lt;Object&gt;</td><td>Permission grant objects</td></tr>
+</tbody>
+</table>
+</div>
+<p>Roles are versionable and publishable, meaning permission changes can go through a draft/publish workflow.</p>
+<p><strong>raisin:Group</strong> – Named groups of users with assigned roles. Properties:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td>String</td><td>Group name (unique, indexed)</td></tr>
+<tr><td><code>description</code></td><td>String</td><td>Human-readable description</td></tr>
+<tr><td><code>roles</code></td><td>Array&lt;String&gt;</td><td>Roles assigned to all group members</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>raisin:AclFolder</strong> – Organizational folder that extends <code>raisin:Folder</code>. Can contain Users, Roles, Groups, and nested AclFolders. Used to organize the access control hierarchy.</p>
+<p><strong>raisin:WorkspaceAccess</strong> – Records linking global identities to workspace-specific users. Tracks access status, who granted access, and when.</p>
+<h2 id="roles--permissions"><a class="header" href="#roles--permissions">Roles &amp; Permissions</a></h2>
+<h3 id="role-definition"><a class="header" href="#role-definition">Role Definition</a></h3>
+<p>A role is a named collection of permission grants. Here is what a role node’s <code>permissions</code> array looks like as stored data:</p>
+<pre><code class="language-json">{
+  "name": "content-editor",
+  "description": "Can manage articles in the content workspace",
+  "inherits": ["viewer"],
+  "permissions": [
+    {
+      "workspace": "content",
+      "path": "articles/**",
+      "operations": ["create", "read", "update", "delete"],
+      "node_types": ["blog:Article", "blog:Draft"],
+      "except_fields": ["internal_notes"],
+      "condition": "node.created_by == auth.user_id"
+    },
+    {
+      "path": "media/**",
+      "operations": ["read"],
+      "fields": ["title", "url", "thumbnail"]
+    }
+  ]
+}
+</code></pre>
+<h3 id="permission-structure"><a class="header" href="#permission-structure">Permission Structure</a></h3>
+<p>Each permission grant (defined in <code>raisin-models/src/permissions/permission.rs</code>) contains:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>workspace</code></td><td>Option&lt;String&gt;</td><td>Workspace pattern (glob). <code>None</code> = all workspaces</td></tr>
+<tr><td><code>branch_pattern</code></td><td>Option&lt;String&gt;</td><td>Branch pattern (glob). <code>None</code> = all branches</td></tr>
+<tr><td><code>path</code></td><td>String</td><td>Path pattern for content matching</td></tr>
+<tr><td><code>node_types</code></td><td>Option&lt;Vec&lt;String&gt;&gt;</td><td>Restrict to specific node types. <code>None</code> = all types</td></tr>
+<tr><td><code>operations</code></td><td>Vec&lt;Operation&gt;</td><td>Allowed operations</td></tr>
+<tr><td><code>fields</code></td><td>Option&lt;Vec&lt;String&gt;&gt;</td><td>Field whitelist (only these fields accessible)</td></tr>
+<tr><td><code>except_fields</code></td><td>Option&lt;Vec&lt;String&gt;&gt;</td><td>Field blacklist (all fields except these)</td></tr>
+<tr><td><code>condition</code></td><td>Option&lt;String&gt;</td><td>REL expression that must evaluate to truthy</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="operations"><a class="header" href="#operations">Operations</a></h3>
+<p>Seven operations can be granted:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operation</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>create</code></td><td>Create new nodes</td></tr>
+<tr><td><code>read</code></td><td>View/query nodes</td></tr>
+<tr><td><code>update</code></td><td>Modify existing nodes</td></tr>
+<tr><td><code>delete</code></td><td>Remove nodes</td></tr>
+<tr><td><code>translate</code></td><td>Modify translations on nodes</td></tr>
+<tr><td><code>relate</code></td><td>Create relationships between nodes</td></tr>
+<tr><td><code>unrelate</code></td><td>Remove relationships between nodes</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="scope-matching"><a class="header" href="#scope-matching">Scope Matching</a></h3>
+<p>Workspace and branch patterns use glob-style matching (compiled via the <code>glob</code> crate):</p>
+<ul>
+<li><code>content</code> – exact match</li>
+<li><code>content-*</code> – matches <code>content-us</code>, <code>content-eu</code></li>
+<li><code>*</code> or empty – matches all workspaces/branches</li>
+<li><code>?</code> – matches a single character</li>
+<li><code>features/*</code> – matches <code>features/auth</code>, <code>features/login</code></li>
+</ul>
+<p>Patterns are compiled once into <code>ScopeMatcher</code> instances and cached on the <code>Permission</code> struct via <code>OnceLock</code> for repeated evaluation.</p>
+<h3 id="path-matching"><a class="header" href="#path-matching">Path Matching</a></h3>
+<p>Path patterns use a regex-based glob system (defined in <code>raisin-models/src/permissions/path_matcher.rs</code>):</p>
+<ul>
+<li><code>*</code> – matches any characters except <code>/</code> (single segment)</li>
+<li><code>**</code> – matches any characters including <code>/</code> (recursive)</li>
+<li><code>?</code> – matches any single character except <code>/</code></li>
+</ul>
+<p>Examples:</p>
+<pre><code>/articles/*          matches /articles/news, NOT /articles/news/2024
+/articles/**         matches /articles, /articles/news, /articles/a/b/c
+/users/*/profile     matches /users/alice/profile, NOT /users/a/b/profile
+/**/blog/**          matches /blog, /foo/blog/post, /a/b/blog/x/y
+/00**                matches /00, /001, /00abc, /00/child
+</code></pre>
+<p>Path matchers are pre-compiled into regex patterns and cached on each <code>Permission</code> for efficiency. When multiple permissions match the same node, the most specific pattern wins, scored by a specificity algorithm:</p>
+<ul>
+<li>Exact segment: 100 points</li>
+<li>Single wildcard <code>*</code>: 10 points</li>
+<li>Prefix with <code>**</code>: 5 points</li>
+<li>Recursive <code>**</code>: 1 point</li>
+<li>Length bonus: <code>segments * 5</code></li>
+</ul>
+<h3 id="role-inheritance"><a class="header" href="#role-inheritance">Role Inheritance</a></h3>
+<p>Roles can inherit from other roles via the <code>inherits</code> property:</p>
+<pre><code>system_admin
+    ↑ inherits
+  admin
+    ↑ inherits
+  editor
+    ↑ inherits
+  viewer
+</code></pre>
+<p>Inheritance is resolved recursively with cycle detection (implemented in <code>PermissionService::resolve_role_inheritance</code>). The algorithm uses a visited set to prevent infinite loops:</p>
+<ol>
+<li>Start with the user’s directly assigned roles</li>
+<li>For each role, check its <code>inherits</code> array</li>
+<li>Add inherited roles to the processing queue</li>
+<li>Skip roles already visited (cycle detection)</li>
+<li>Continue until the queue is empty</li>
+</ol>
+<p>All permissions from all roles in the inheritance chain are collected into a flat list.</p>
+<h2 id="groups"><a class="header" href="#groups">Groups</a></h2>
+<p>Groups provide a layer of indirection between users and roles. Instead of assigning roles to individual users, you assign roles to groups and users to groups:</p>
+<pre><code>User: alice
+  groups: ["engineering", "content-team"]
+
+Group: engineering
+  roles: ["developer", "viewer"]
+
+Group: content-team
+  roles: ["editor"]
+
+Effective roles for alice:
+  direct: []
+  from groups: ["developer", "viewer", "editor"]
+</code></pre>
+<p>Groups are looked up by their <code>name</code> property (not node ID) via <code>find_by_property</code> on the storage layer.</p>
+<p><strong>When to use groups vs. direct roles:</strong></p>
+<ul>
+<li>Use <strong>groups</strong> when multiple users share the same role set and you want to change permissions for all of them at once</li>
+<li>Use <strong>direct roles</strong> for individual exceptions or temporary elevated access</li>
+</ul>
+<h2 id="permission-resolution"><a class="header" href="#permission-resolution">Permission Resolution</a></h2>
+<p>The <code>PermissionService</code> (in <code>raisin-core/src/services/permission_service/mod.rs</code>) resolves a user’s effective permissions through this pipeline:</p>
+<pre><code>┌─────────────────┐
+│   raisin:User    │
+│   node lookup    │
+│ (by email,       │
+│  identity_id,    │
+│  or node_id)     │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐     ┌─────────────────┐
+│  Direct Roles   │     │     Groups      │
+│  from user.roles│     │  from user.groups│
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         │              ┌────────▼────────┐
+         │              │  Group Roles    │
+         │              │  from each      │
+         │              │  group.roles    │
+         │              └────────┬────────┘
+         │                       │
+         └───────────┬───────────┘
+                     │
+                     ▼
+         ┌───────────────────────┐
+         │  Deduplicate roles    │
+         │  (HashSet)            │
+         └───────────┬───────────┘
+                     │
+                     ▼
+         ┌───────────────────────┐
+         │  Resolve inheritance  │
+         │  (recursive, with     │
+         │   cycle detection)    │
+         └───────────┬───────────┘
+                     │
+                     ▼
+         ┌───────────────────────┐
+         │  Collect permissions  │
+         │  from all effective   │
+         │  roles                │
+         └───────────┬───────────┘
+                     │
+                     ▼
+         ┌───────────────────────┐
+         │  ResolvedPermissions  │
+         │  {                    │
+         │    user_id,           │
+         │    email,             │
+         │    direct_roles,      │
+         │    group_roles,       │
+         │    effective_roles,   │
+         │    groups,            │
+         │    permissions: [...],│
+         │    is_system_admin,   │
+         │    resolved_at        │
+         │  }                    │
+         └───────────────────────┘
+</code></pre>
+<p>The result is a <code>ResolvedPermissions</code> struct that contains:</p>
+<ul>
+<li><code>user_id</code> – the workspace-specific user node ID</li>
+<li><code>email</code> – for auth variable resolution in REL conditions</li>
+<li><code>direct_roles</code> – roles assigned directly to the user</li>
+<li><code>group_roles</code> – roles inherited through group membership</li>
+<li><code>effective_roles</code> – all roles after inheritance resolution (deduplicated)</li>
+<li><code>groups</code> – group IDs the user belongs to</li>
+<li><code>permissions</code> – flat list of all permission grants from all effective roles</li>
+<li><code>is_system_admin</code> – <code>true</code> if <code>system_admin</code> is among effective roles (bypasses all checks)</li>
+<li><code>resolved_at</code> – timestamp for cache TTL validation</li>
+</ul>
+<h3 id="special-cases"><a class="header" href="#special-cases">Special Cases</a></h3>
+<p><strong>System admin</strong>: If any effective role is <code>system_admin</code>, the user gets a single <code>Permission::full_access("**")</code> and <code>is_system_admin</code> is set to <code>true</code>. All subsequent permission checks short-circuit.</p>
+<p><strong>Anonymous access</strong>: Resolved by finding the physical <code>raisin:User</code> node with <code>user_id: "anonymous"</code> at <code>/users/system/anonymous</code>. This goes through the normal resolution pipeline (roles, groups, inheritance). Falls back to extracting permissions from just the <code>anonymous</code> role if no physical user node exists.</p>
+<p><strong>Deny all</strong>: An empty permissions list with user_id <code>$deny</code>. Used when anonymous access is disabled and no auth token is provided.</p>
+<h2 id="row-level-security-rls"><a class="header" href="#row-level-security-rls">Row-Level Security (RLS)</a></h2>
+<p>Permissions are enforced at query time by the RLS filter (in <code>raisin-core/src/services/rls_filter/</code>). Every node read from storage passes through this filter before being returned to the caller.</p>
+<h3 id="filter-pipeline"><a class="header" href="#filter-pipeline">Filter Pipeline</a></h3>
+<pre><code>Node from storage
+        │
+        ▼
+┌───────────────────┐
+│ System context?   │──── yes ──→ Return node (bypass)
+└───────────┬───────┘
+            │ no
+            ▼
+┌───────────────────┐
+│ Permissions       │──── none ──→ Deny (return None)
+│ resolved?         │
+└───────────┬───────┘
+            │ yes
+            ▼
+┌───────────────────┐
+│ is_system_admin?  │──── yes ──→ Return node (bypass)
+└───────────┬───────┘
+            │ no
+            ▼
+┌───────────────────┐
+│ Find matching     │──── none ──→ Deny (return None)
+│ permission        │
+│ (scope + path +   │
+│  operation +      │
+│  node_type)       │
+└───────────┬───────┘
+            │ found
+            ▼
+┌───────────────────┐
+│ Evaluate REL      │──── false ──→ Deny (return None)
+│ condition         │
+│ (if present)      │
+└───────────┬───────┘
+            │ true
+            ▼
+┌───────────────────┐
+│ Apply field       │
+│ filtering         │
+│ (whitelist or     │
+│  blacklist)       │
+└───────────┬───────┘
+            │
+            ▼
+    Return filtered node
+</code></pre>
+<h3 id="permission-matching"><a class="header" href="#permission-matching">Permission Matching</a></h3>
+<p>The <code>find_matching_permission</code> function (in <code>rls_filter/matching.rs</code>) finds the best permission for a given node and operation. It evaluates permissions in this order:</p>
+<ol>
+<li><strong>Scope match</strong> – workspace and branch patterns (fail-fast, O(1) per permission)</li>
+<li><strong>Path match</strong> – node’s path against the permission’s path pattern</li>
+<li><strong>Operation match</strong> – the permission must include the requested operation</li>
+<li><strong>Node type match</strong> – if <code>node_types</code> is set, the node’s type must be listed</li>
+<li><strong>Specificity</strong> – among all matching permissions, the most specific path pattern wins</li>
+</ol>
+<h3 id="field-filtering"><a class="header" href="#field-filtering">Field Filtering</a></h3>
+<p>After a matching permission is found, field-level filtering is applied:</p>
+<ul>
+<li><strong>Whitelist</strong> (<code>fields</code>): Only the listed fields are retained in the node’s properties. All other properties are stripped.</li>
+<li><strong>Blacklist</strong> (<code>except_fields</code>): All fields are retained except the listed ones.</li>
+<li>Whitelist takes precedence over blacklist if both are somehow set.</li>
+</ul>
+<h3 id="write-operations"><a class="header" href="#write-operations">Write Operations</a></h3>
+<p>The <code>can_perform</code> function checks whether a user can perform a specific operation (create, update, delete, etc.) on a node. It follows the same matching logic as read filtering but for the requested operation.</p>
+<p>The <code>can_create_at_path</code> function handles the special case of node creation, where no node exists yet. It checks permissions against the target path and node type.</p>
+<h2 id="rel-conditions"><a class="header" href="#rel-conditions">REL Conditions</a></h2>
+<p>REL (Raisin Expression Language) conditions enable dynamic, runtime access control. A condition is a string expression attached to a permission that must evaluate to truthy for the permission to apply.</p>
+<h3 id="available-variables"><a class="header" href="#available-variables">Available Variables</a></h3>
+<p>When a REL condition is evaluated, two objects are available in the expression context:</p>
+<p><strong><code>auth.*</code> variables:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>auth.user_id</code></td><td>String|Null</td><td>Global identity ID (from JWT <code>sub</code>)</td></tr>
+<tr><td><code>auth.local_user_id</code></td><td>String|Null</td><td>Workspace-specific user node ID</td></tr>
+<tr><td><code>auth.email</code></td><td>String|Null</td><td>User’s email address</td></tr>
+<tr><td><code>auth.is_anonymous</code></td><td>Boolean</td><td>Whether this is an anonymous request</td></tr>
+<tr><td><code>auth.is_system</code></td><td>Boolean</td><td>Whether this is a system operation</td></tr>
+<tr><td><code>auth.roles</code></td><td>Array&lt;String&gt;</td><td>Effective role IDs</td></tr>
+<tr><td><code>auth.groups</code></td><td>Array&lt;String&gt;</td><td>Group IDs</td></tr>
+<tr><td><code>auth.acting_as_ward</code></td><td>String|Null</td><td>Ward’s user ID if acting as steward</td></tr>
+<tr><td><code>auth.active_stewardship_source</code></td><td>String|Null</td><td>Stewardship relation type</td></tr>
+<tr><td><code>auth.home</code></td><td>String|Null</td><td>User’s home path in the repository</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong><code>node.*</code> variables:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>node.id</code></td><td>String</td><td>Node UUID</td></tr>
+<tr><td><code>node.name</code></td><td>String</td><td>Node name</td></tr>
+<tr><td><code>node.path</code></td><td>String</td><td>Full path in the hierarchy</td></tr>
+<tr><td><code>node.node_type</code></td><td>String</td><td>Node type (e.g., <code>blog:Article</code>)</td></tr>
+<tr><td><code>node.created_by</code></td><td>String|Null</td><td>Identity ID of the creator</td></tr>
+<tr><td><code>node.updated_by</code></td><td>String|Null</td><td>Identity ID of the last updater</td></tr>
+<tr><td><code>node.owner_id</code></td><td>String|Null</td><td>Node owner identity ID</td></tr>
+<tr><td><code>node.workspace</code></td><td>String|Null</td><td>Workspace the node belongs to</td></tr>
+<tr><td><code>node.&lt;property&gt;</code></td><td>Any</td><td>Any node property is available by key</td></tr>
+</tbody>
+</table>
+</div>
+<p>Node properties are automatically converted to REL values: strings, numbers, booleans, arrays, objects, and null are all supported. Composite types (Geometry, Element) map to null.</p>
+<h3 id="fail-closed-evaluation"><a class="header" href="#fail-closed-evaluation">Fail-Closed Evaluation</a></h3>
+<p>If a REL condition fails to parse or evaluate (e.g., referencing a non-existent variable), the result is <code>false</code> – access is denied. This is a deliberate security choice:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>match raisin_rel::eval(expr, &amp;ctx) {
+    Ok(value) =&gt; value.is_truthy(),
+    Err(_) =&gt; false, // Fail-closed: deny on error
+}
+<span class="boring">}</span></code></pre>
+<h3 id="practical-examples"><a class="header" href="#practical-examples">Practical Examples</a></h3>
+<p><strong>Ownership-based access</strong> – users can only edit their own content:</p>
+<pre><code>node.created_by == auth.user_id
+</code></pre>
+<p><strong>Role-based condition</strong> – only editors can see draft content:</p>
+<pre><code>auth.roles.contains('editor')
+</code></pre>
+<p><strong>Group-based condition</strong> – only engineering team members:</p>
+<pre><code>auth.groups.contains('engineering')
+</code></pre>
+<p><strong>Property-based condition</strong> – only published articles:</p>
+<pre><code>node.status == 'published'
+</code></pre>
+<p><strong>Home directory access</strong> – users can access content under their home path:</p>
+<pre><code>node.path.startsWith(auth.home)
+</code></pre>
+<p><strong>Combined conditions</strong> – ownership OR admin:</p>
+<pre><code>node.created_by == auth.user_id || auth.roles.contains('admin')
+</code></pre>
+<h3 id="structured-conditions-rolecondition"><a class="header" href="#structured-conditions-rolecondition">Structured Conditions (RoleCondition)</a></h3>
+<p>In addition to REL string expressions, RaisinDB supports structured conditions (defined in <code>raisin-models/src/permissions/condition.rs</code>) for programmatic use:</p>
+<ul>
+<li><code>PropertyEquals</code> – <code>author == $auth.user_id</code></li>
+<li><code>PropertyIn</code> – <code>status IN ['draft', 'review']</code></li>
+<li><code>PropertyGreaterThan</code> / <code>PropertyLessThan</code> – numeric comparisons</li>
+<li><code>UserHasRole</code> – check if user has a specific role</li>
+<li><code>UserInGroup</code> – check if user is in a specific group</li>
+<li><code>All</code> – AND composition of sub-conditions</li>
+<li><code>Any</code> – OR composition of sub-conditions</li>
+</ul>
+<p>Condition values can be literals or auth variable references (<code>$auth.user_id</code>, <code>$auth.email</code>).</p>
+<h2 id="workspace-access-workflows"><a class="header" href="#workspace-access-workflows">Workspace Access Workflows</a></h2>
+<p>The <code>WorkspaceAccess</code> record (defined in <code>raisin-models/src/auth/access.rs</code>) bridges global identities to workspace-specific users. It tracks the lifecycle of workspace access through a state machine:</p>
+<pre><code>                  ┌─────────┐
+    Request  ────►│ Pending │
+                  └────┬────┘
+                       │
+              ┌────────┼────────┐
+              ▼                 ▼
+        ┌──────────┐     ┌──────────┐
+        │  Active  │     │  Denied  │
+        └────┬─────┘     └──────────┘
+             │
+             ▼
+        ┌──────────┐
+        │ Revoked  │
+        └──────────┘
+
+                  ┌─────────┐
+    Invite  ────►│ Invited │
+                  └────┬────┘
+                       │
+              ┌────────┼────────┐
+              ▼                 ▼
+        ┌──────────┐     ┌──────────┐
+        │  Active  │     │ Declined │
+        └──────────┘     └──────────┘
+
+    Direct grant ────► Active
+
+    Suspend ────► Suspended
+</code></pre>
+<h3 id="access-statuses"><a class="header" href="#access-statuses">Access Statuses</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Status</th><th>Description</th><th style="text-align: center"><code>allows_access()</code></th><th style="text-align: center"><code>is_final()</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>Active</code></td><td>User can access the workspace</td><td style="text-align: center">yes</td><td style="text-align: center">no</td></tr>
+<tr><td><code>Pending</code></td><td>Access requested, awaiting approval</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+<tr><td><code>Invited</code></td><td>User invited, hasn’t accepted</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+<tr><td><code>Denied</code></td><td>Request was denied</td><td style="text-align: center">no</td><td style="text-align: center">yes</td></tr>
+<tr><td><code>Revoked</code></td><td>Access was revoked after being active</td><td style="text-align: center">no</td><td style="text-align: center">yes</td></tr>
+<tr><td><code>Declined</code></td><td>User declined the invitation</td><td style="text-align: center">no</td><td style="text-align: center">yes</td></tr>
+<tr><td><code>Suspended</code></td><td>Access temporarily suspended</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="request-flow"><a class="header" href="#request-flow">Request Flow</a></h3>
+<ol>
+<li>User calls the request endpoint with their identity</li>
+<li>A <code>WorkspaceAccess</code> record is created with status <code>Pending</code></li>
+<li>An admin reviews and calls <code>approve()</code> or <code>deny()</code></li>
+<li>On approval: a <code>raisin:User</code> node is created in <code>raisin:access_control</code>, the <code>user_node_id</code> is set, status becomes <code>Active</code></li>
+</ol>
+<h3 id="invitation-flow"><a class="header" href="#invitation-flow">Invitation Flow</a></h3>
+<ol>
+<li>Admin creates an invitation with target identity and initial roles</li>
+<li>A <code>WorkspaceAccess</code> record is created with status <code>Invited</code></li>
+<li>User calls <code>accept_invitation()</code> or <code>decline_invitation()</code></li>
+<li>On acceptance: a <code>raisin:User</code> node is created, status becomes <code>Active</code></li>
+</ol>
+<h3 id="direct-grant"><a class="header" href="#direct-grant">Direct Grant</a></h3>
+<p>For programmatic access (e.g., during setup), <code>WorkspaceAccess::new_active()</code> creates a record that is immediately <code>Active</code> with a pre-created user node.</p>
+<h3 id="workspaceaccess-record"><a class="header" href="#workspaceaccess-record">WorkspaceAccess Record</a></h3>
+<p>Each record tracks:</p>
+<ul>
+<li><code>identity_id</code> – global identity</li>
+<li><code>tenant_id</code>, <code>repo_id</code> – scope</li>
+<li><code>user_node_id</code> – link to the workspace-specific <code>raisin:User</code> node</li>
+<li><code>status</code> – current access status</li>
+<li><code>granted_at</code>, <code>granted_by</code> – when and who granted access</li>
+<li><code>requested_at</code> – when the request was made</li>
+<li><code>roles</code> – roles assigned in this workspace</li>
+<li><code>notes</code> – reason for access decisions</li>
+</ul>
+<h2 id="stewardship"><a class="header" href="#stewardship">Stewardship</a></h2>
+<p>RaisinDB supports a parent/guardian model where one user can act on behalf of another (the “ward”). This is relevant for families, legal guardianships, and delegated administration – any situation where one person must manage another’s account and data. The stewardship system is implemented as a built-in package (<code>raisin-stewardship</code>, version 1.0.0, <code>builtin: true</code>) that depends on the <code>raisin-relationships</code> package.</p>
+<h3 id="relation-types"><a class="header" href="#relation-types">Relation Types</a></h3>
+<p>Stewardship builds on a general-purpose relationship layer. The <code>raisin:RelationType</code> node type (from <code>relation-type.yaml</code>) defines how two entities can be related:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th style="text-align: center">Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>relation_name</code></td><td>String</td><td style="text-align: center">yes (unique)</td><td>Machine identifier (e.g., <code>PARENT_OF</code>)</td></tr>
+<tr><td><code>title</code></td><td>String</td><td style="text-align: center">yes</td><td>Human-readable label</td></tr>
+<tr><td><code>description</code></td><td>String</td><td style="text-align: center">no</td><td>Longer explanation of the relationship</td></tr>
+<tr><td><code>category</code></td><td>String</td><td style="text-align: center">no</td><td>Grouping category (<code>household</code>, <code>legal</code>, <code>organization</code>)</td></tr>
+<tr><td><code>inverse_relation_name</code></td><td>String</td><td style="text-align: center">no</td><td>The inverse relation (e.g., <code>PARENT_OF</code> inverses to <code>CHILD_OF</code>)</td></tr>
+<tr><td><code>bidirectional</code></td><td>Boolean</td><td style="text-align: center">no</td><td>If <code>true</code>, the relation applies in both directions (default: <code>false</code>)</td></tr>
+<tr><td><code>implies_stewardship</code></td><td>Boolean</td><td style="text-align: center">no</td><td>If <code>true</code>, the source entity can act as steward for the target (default: <code>false</code>)</td></tr>
+<tr><td><code>requires_minor</code></td><td>Boolean</td><td style="text-align: center">no</td><td>If <code>true</code>, the target must be a minor for the relation to be valid (default: <code>false</code>)</td></tr>
+<tr><td><code>enables_messaging</code></td><td>Boolean</td><td style="text-align: center">no</td><td>If <code>true</code>, enables direct messaging between related entities (default: <code>false</code>)</td></tr>
+<tr><td><code>icon</code></td><td>String</td><td style="text-align: center">no</td><td>Display icon identifier</td></tr>
+<tr><td><code>color</code></td><td>String</td><td style="text-align: center">no</td><td>Display color</td></tr>
+</tbody>
+</table>
+</div>
+<p>The following relation types are pre-configured:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Relation</th><th>Category</th><th>Inverse</th><th style="text-align: center">Bidirectional</th><th style="text-align: center">Implies Stewardship</th><th style="text-align: center">Requires Minor</th></tr>
+</thead>
+<tbody>
+<tr><td><code>PARENT_OF</code></td><td>household</td><td><code>CHILD_OF</code></td><td style="text-align: center">no</td><td style="text-align: center">yes</td><td style="text-align: center">yes</td></tr>
+<tr><td><code>GUARDIAN_OF</code></td><td>legal</td><td><code>WARD_OF</code></td><td style="text-align: center">no</td><td style="text-align: center">yes</td><td style="text-align: center">no</td></tr>
+<tr><td><code>SPOUSE_OF</code></td><td>household</td><td>–</td><td style="text-align: center">yes</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+<tr><td><code>SIBLING_OF</code></td><td>household</td><td>–</td><td style="text-align: center">yes</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+<tr><td><code>GRANDPARENT_OF</code></td><td>household</td><td><code>GRANDCHILD_OF</code></td><td style="text-align: center">no</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+<tr><td><code>MANAGER_OF</code></td><td>organization</td><td><code>REPORTS_TO</code></td><td style="text-align: center">no</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+<tr><td><code>ASSISTANT_OF</code></td><td>organization</td><td><code>HAS_ASSISTANT</code></td><td style="text-align: center">no</td><td style="text-align: center">no</td><td style="text-align: center">no</td></tr>
+</tbody>
+</table>
+</div>
+<p>Only relation types with <code>implies_stewardship: true</code> grant the ability to act on behalf of another user. <code>PARENT_OF</code> additionally requires the target to be a minor (determined by <code>birth_date</code> and the configured age threshold), while <code>GUARDIAN_OF</code> does not – a legal guardian can manage an adult ward’s account.</p>
+<h3 id="entity-circles"><a class="header" href="#entity-circles">Entity Circles</a></h3>
+<p>The <code>raisin:EntityCircle</code> node type groups related entities together (e.g., a family, a team):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th style="text-align: center">Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td>String</td><td style="text-align: center">yes</td><td>Circle name (e.g., “Smith Family”)</td></tr>
+<tr><td><code>circle_type</code></td><td>String</td><td style="text-align: center">no</td><td>One of: <code>family</code>, <code>team</code>, <code>org_unit</code>, <code>department</code>, <code>project</code>, <code>custom</code></td></tr>
+<tr><td><code>primary_contact_id</code></td><td>String</td><td style="text-align: center">no</td><td>User ID of the primary contact for this circle</td></tr>
+<tr><td><code>address</code></td><td>Object</td><td style="text-align: center">no</td><td>Shared address for the circle</td></tr>
+<tr><td><code>metadata</code></td><td>Object</td><td style="text-align: center">no</td><td>Custom key-value data</td></tr>
+</tbody>
+</table>
+</div>
+<p>Members are linked to a circle via the <code>MEMBER_OF</code> relation. Circles are organizational – they do not grant permissions directly, but they provide a convenient way to visualize and manage groups of related users.</p>
+<h3 id="stewardship-configuration"><a class="header" href="#stewardship-configuration">Stewardship Configuration</a></h3>
+<p>The <code>raisin:StewardshipConfig</code> node type controls how stewardship behaves within a deployment:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td>Boolean</td><td><code>false</code></td><td>Master switch for stewardship features</td></tr>
+<tr><td><code>stewardship_relation_types</code></td><td>Array</td><td><code>["PARENT_OF", "GUARDIAN_OF"]</code></td><td>Which relation types grant stewardship</td></tr>
+<tr><td><code>require_minor_for_parent</code></td><td>Boolean</td><td><code>true</code></td><td>Whether <code>PARENT_OF</code> requires the ward to be a minor</td></tr>
+<tr><td><code>allowed_workflows</code></td><td>Array</td><td><code>["invitation", "admin_assignment", "steward_creates_ward"]</code></td><td>How stewardship can be established</td></tr>
+<tr><td><code>steward_creates_ward_enabled</code></td><td>Boolean</td><td><code>false</code></td><td>Whether stewards can create ward accounts directly</td></tr>
+<tr><td><code>max_stewards_per_ward</code></td><td>Number</td><td><code>5</code></td><td>Maximum stewards for a single ward</td></tr>
+<tr><td><code>max_wards_per_steward</code></td><td>Number</td><td><code>10</code></td><td>Maximum wards for a single steward</td></tr>
+<tr><td><code>invitation_expiry_days</code></td><td>Number</td><td><code>7</code></td><td>Days before a stewardship invitation expires</td></tr>
+<tr><td><code>require_ward_consent</code></td><td>Boolean</td><td><code>true</code></td><td>Whether the ward must accept the stewardship</td></tr>
+<tr><td><code>minor_age_threshold</code></td><td>Number</td><td><code>18</code></td><td>Age below which a user is considered a minor</td></tr>
+<tr><td><code>allow_minor_login</code></td><td>Boolean</td><td><code>false</code></td><td>Whether minors can authenticate directly</td></tr>
+</tbody>
+</table>
+</div>
+<p>The default configuration (from <code>.node.yaml</code>) ships with stewardship disabled. When enabled, only <code>PARENT_OF</code> and <code>GUARDIAN_OF</code> relations grant stewardship by default, and all three establishment workflows are available.</p>
+<h3 id="stewardship-overrides"><a class="header" href="#stewardship-overrides">Stewardship Overrides</a></h3>
+<p>For situations that do not fit neatly into relation-based stewardship, the <code>raisin:StewardshipOverride</code> node type provides explicit, time-bounded delegation:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th style="text-align: center">Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>steward_id</code></td><td>String</td><td style="text-align: center">yes</td><td>User ID of the steward</td></tr>
+<tr><td><code>ward_id</code></td><td>String</td><td style="text-align: center">yes</td><td>User ID of the ward</td></tr>
+<tr><td><code>delegation_mode</code></td><td>String</td><td style="text-align: center">yes</td><td><code>"full"</code> (all permissions) or <code>"scoped"</code> (limited)</td></tr>
+<tr><td><code>scoped_permissions</code></td><td>Array</td><td style="text-align: center">no</td><td>Permission grants when <code>delegation_mode</code> is <code>"scoped"</code></td></tr>
+<tr><td><code>valid_from</code></td><td>Date</td><td style="text-align: center">no</td><td>Start of the delegation period</td></tr>
+<tr><td><code>valid_until</code></td><td>Date</td><td style="text-align: center">no</td><td>End of the delegation period</td></tr>
+<tr><td><code>status</code></td><td>String</td><td style="text-align: center">yes</td><td>One of: <code>pending</code>, <code>active</code>, <code>expired</code>, <code>revoked</code> (default: <code>pending</code>)</td></tr>
+<tr><td><code>reason</code></td><td>String</td><td style="text-align: center">no</td><td>Reason for the override</td></tr>
+</tbody>
+</table>
+</div>
+<p>Overrides enable scenarios like temporary guardianship (e.g., a caretaker for a week) or scoped delegation (e.g., a colleague can manage only a specific content area).</p>
+<h3 id="package-functions-and-triggers"><a class="header" href="#package-functions-and-triggers">Package Functions and Triggers</a></h3>
+<p>The <code>raisin-stewardship</code> package provides these functions for querying stewardship relationships:</p>
+<ul>
+<li><code>is-steward-of</code> – checks whether one user is a steward of another</li>
+<li><code>get-stewards</code> – returns all stewards for a given ward</li>
+<li><code>get-wards</code> – returns all wards for a given steward</li>
+<li>Handlers for processing invitations and requests</li>
+</ul>
+<p>Two triggers automate stewardship lifecycle events:</p>
+<ul>
+<li><code>process-ward-invitation</code> – handles the invitation workflow when a steward invites a ward</li>
+<li><code>process-stewardship-request</code> – handles the request workflow when a ward (or their representative) requests a steward</li>
+</ul>
+<h3 id="authcontext-and-audit-logging"><a class="header" href="#authcontext-and-audit-logging">AuthContext and Audit Logging</a></h3>
+<p>The <code>AuthContext</code> carries stewardship state at runtime:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub acting_as_ward: Option&lt;String&gt;,           // Ward's user ID
+pub active_stewardship_source: Option&lt;String&gt;, // Relation type or override ID
+<span class="boring">}</span></code></pre>
+<p>When a steward acts on behalf of a ward:</p>
+<ul>
+<li><code>auth.user_id</code> remains the steward’s identity</li>
+<li><code>auth.acting_as_ward</code> is set to the ward’s user ID</li>
+<li><code>auth.active_stewardship_source</code> identifies the relation type (e.g., <code>"PARENT_OF"</code>) or override ID that grants the stewardship</li>
+<li>Audit logging captures both: <code>"{steward_id}:acting_as:{ward_id}"</code></li>
+<li>REL conditions can check <code>auth.acting_as_ward</code> to apply stewardship-specific rules</li>
+</ul>
+<p>The <code>raisin:User</code> node type includes <code>birth_date</code> for minor status calculation and <code>can_login</code> to control whether guardian-created accounts can authenticate directly.</p>
+<h2 id="impersonation"><a class="header" href="#impersonation">Impersonation</a></h2>
+<p>Admin users can impersonate regular users to test permissions without switching accounts:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let ctx = AuthContext::impersonated("target_user", "admin_user");
+<span class="boring">}</span></code></pre>
+<p>When impersonation is active:</p>
+<ul>
+<li>The impersonated user’s permissions are resolved and enforced</li>
+<li><code>auth.impersonated_by</code> is set to the admin’s identity</li>
+<li>Audit logging captures both identities: <code>"{admin_id}:impersonating:{target_id}"</code></li>
+<li>The <code>TokenType::Impersonation</code> variant in the JWT tracks the admin and target</li>
+</ul>
+<p>Impersonation tokens are a distinct JWT token type, ensuring they can be identified and audited separately from regular access tokens.</p>
+<h2 id="caching-strategy"><a class="header" href="#caching-strategy">Caching Strategy</a></h2>
+<h3 id="lean-jwt-design"><a class="header" href="#lean-jwt-design">Lean JWT Design</a></h3>
+<p>RaisinDB uses intentionally small JWTs. The <code>AuthClaims</code> (in <code>raisin-models/src/auth/claims.rs</code>) contain only:</p>
+<ul>
+<li><code>sub</code> – identity ID</li>
+<li><code>email</code> – user’s email</li>
+<li><code>tenant_id</code> – tenant scope</li>
+<li><code>sid</code> – session ID</li>
+<li><code>auth_strategy</code> – how the user authenticated</li>
+<li><code>auth_time</code> – when authentication happened (for sudo mode)</li>
+<li><code>global_flags</code> – tenant-wide flags (is_tenant_admin, email_verified)</li>
+<li><code>home</code> – user’s home path (for fast path-based access without DB lookup)</li>
+<li>Standard JWT fields (exp, iat, jti, etc.)</li>
+</ul>
+<p>Workspace-specific permissions are <strong>not</strong> stored in the JWT. This avoids:</p>
+<ul>
+<li>Token size bloat (&gt;4KB with many workspaces)</li>
+<li>Stale permissions until token refresh</li>
+<li>HTTP header size limit issues</li>
+</ul>
+<h3 id="hot-lru-cache"><a class="header" href="#hot-lru-cache">Hot LRU Cache</a></h3>
+<p>Instead, permissions are resolved on first access and cached in an LRU cache (in <code>raisin-auth/src/cache/permission_cache.rs</code>):</p>
+<ul>
+<li><strong>Cache key</strong>: <code>(session_id, workspace_id)</code> tuple</li>
+<li><strong>TTL</strong>: 5 minutes (configurable)</li>
+<li><strong>Eviction</strong>: LRU when capacity is exceeded</li>
+<li><strong>Thread safety</strong>: <code>tokio::sync::RwLock</code> for concurrent read access</li>
+</ul>
+<p>The cache implements a cache-aside pattern:</p>
+<ol>
+<li>Check cache for <code>(session_id, workspace_id)</code></li>
+<li>If found and not expired, return cached permissions</li>
+<li>If miss or expired, call the resolver function (queries <code>raisin:access_control</code>)</li>
+<li>Store result in cache, return</li>
+</ol>
+<h3 id="cache-invalidation"><a class="header" href="#cache-invalidation">Cache Invalidation</a></h3>
+<p>The cache provides targeted invalidation:</p>
+<ul>
+<li><code>invalidate_session(session_id)</code> – on logout, removes all entries for a session</li>
+<li><code>invalidate_workspace(workspace_id)</code> – on permission changes, removes all entries for a workspace</li>
+<li><code>clear()</code> – full cache flush</li>
+</ul>
+<p>Permission changes (role updates, group membership changes) trigger workspace-level invalidation via the EventBus, ensuring cached permissions stay consistent with a maximum staleness of the TTL window.</p>
+<h3 id="capacity-planning"><a class="header" href="#capacity-planning">Capacity Planning</a></h3>
+<p>The cache capacity should be set based on:</p>
+<pre><code>capacity = expected_active_sessions * avg_workspaces_per_user * 1.5
+</code></pre>
+<p>For example, 1000 active sessions with an average of 3 workspaces each: <code>capacity = 1000 * 3 * 1.5 = 4500</code>.</p>
+<h2 id="graph-accelerated-acl"><a class="header" href="#graph-accelerated-acl">Graph-Accelerated ACL</a></h2>
+<p>Because RaisinDB stores authorization data as nodes and relations in a content graph, it can leverage graph algorithms to precompute access paths. The <code>raisin:GraphAlgorithmConfig</code> node type configures which algorithms run and how they are scoped.</p>
+<h3 id="graphalgorithmconfig"><a class="header" href="#graphalgorithmconfig">GraphAlgorithmConfig</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th style="text-align: center">Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>algorithm</code></td><td>String</td><td style="text-align: center">yes</td><td>Algorithm name: <code>pagerank</code>, <code>louvain</code>, <code>connected_components</code>, <code>betweenness_centrality</code>, <code>triangle_count</code>, or <code>relates_cache</code></td></tr>
+<tr><td><code>enabled</code></td><td>Boolean</td><td style="text-align: center">yes</td><td>Whether this algorithm is active (default: <code>true</code>)</td></tr>
+<tr><td><code>target</code></td><td>Object</td><td style="text-align: center">yes</td><td>Branch/revision targeting. <code>target.mode</code> is one of <code>"branch"</code>, <code>"all_branches"</code>, <code>"revision"</code>, or <code>"branch_pattern"</code></td></tr>
+<tr><td><code>scope</code></td><td>Object</td><td style="text-align: center">yes</td><td>Node scoping: which paths, node types, workspaces, and relation types to include</td></tr>
+<tr><td><code>config</code></td><td>Object</td><td style="text-align: center">no</td><td>Algorithm-specific parameters (e.g., <code>max_depth</code> and <code>cache_scope</code> for <code>relates_cache</code>)</td></tr>
+<tr><td><code>refresh</code></td><td>Object</td><td style="text-align: center">no</td><td>Refresh trigger configuration: <code>ttl_seconds</code>, <code>on_branch_change</code>, <code>on_relation_change</code>, <code>cron</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Several algorithms are available for different graph analytics use cases, but the one directly relevant to access control is <code>relates_cache</code>.</p>
+<h3 id="the-relates_cache-algorithm"><a class="header" href="#the-relates_cache-algorithm">The relates_cache Algorithm</a></h3>
+<p>REL conditions often use <code>RELATES</code> expressions to check whether the current user is connected to the target node through a chain of relations (e.g., “user is a member of a group that owns this folder”). Evaluating these paths at query time requires graph traversals that can become expensive as the graph grows.</p>
+<p>The <code>relates_cache</code> algorithm precomputes these relation paths and stores the results, turning a runtime graph traversal into a cache lookup. This is especially valuable for:</p>
+<ul>
+<li>Group membership chains (user -&gt; group -&gt; parent group -&gt; role)</li>
+<li>Stewardship paths (steward -&gt; relation -&gt; ward)</li>
+<li>Organizational hierarchies (user -&gt; department -&gt; division -&gt; org)</li>
+</ul>
+<p>The <code>config</code> object for <code>relates_cache</code> accepts:</p>
+<ul>
+<li><code>max_depth</code> – maximum traversal depth for relation paths</li>
+<li><code>cache_scope</code> – which portion of the graph to cache</li>
+</ul>
+<p>The <code>refresh</code> object controls when the cache is rebuilt:</p>
+<ul>
+<li><code>ttl_seconds</code> – time-based expiration</li>
+<li><code>on_branch_change</code> – rebuild when the target branch changes</li>
+<li><code>on_relation_change</code> – rebuild when relations in scope are modified</li>
+<li><code>cron</code> – rebuild on a cron schedule</li>
+</ul>
+<pre><code class="language-json">{
+  "node_type": "raisin:GraphAlgorithmConfig",
+  "name": "acl-relates-cache",
+  "properties": {
+    "algorithm": "relates_cache",
+    "enabled": true,
+    "target": {
+      "mode": "branch",
+      "branch": "main"
+    },
+    "scope": {
+      "workspaces": ["raisin:access_control"],
+      "relation_types": ["MEMBER_OF", "PARENT_OF", "GUARDIAN_OF"],
+      "node_types": ["raisin:User", "raisin:Group", "raisin:Role"]
+    },
+    "config": {
+      "max_depth": 5,
+      "cache_scope": "workspace"
+    },
+    "refresh": {
+      "ttl_seconds": 300,
+      "on_relation_change": true,
+      "on_branch_change": false
+    }
+  }
+}
+</code></pre>
+<p>This configuration precomputes relation paths within the <code>raisin:access_control</code> workspace on the <code>main</code> branch, covering membership, parental, and guardian relations up to 5 hops deep. The cache refreshes every 5 minutes or immediately when a relevant relation changes.</p>
+<p>The precomputed cache integrates with the RLS filter: when a REL condition references a <code>RELATES</code> expression, the filter checks the cache first. If the cache has a precomputed answer, the graph traversal is skipped entirely. If the cache misses (e.g., for a relation type not in scope), the filter falls back to a live traversal.</p>
+<h2 id="access-settings"><a class="header" href="#access-settings">Access Settings</a></h2>
+<p>Each workspace can configure its access control policies through <code>AccessSettings</code> (in <code>raisin-models/src/auth/access.rs</code>):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Setting</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>allow_access_requests</code></td><td>bool</td><td><code>true</code></td><td>Whether users can request access</td></tr>
+<tr><td><code>require_approval</code></td><td>bool</td><td><code>true</code></td><td>Whether requests need admin approval</td></tr>
+<tr><td><code>allow_invitations</code></td><td>bool</td><td><code>true</code></td><td>Whether admins can send invitations</td></tr>
+<tr><td><code>default_roles</code></td><td>Vec&lt;String&gt;</td><td><code>["viewer"]</code></td><td>Roles assigned on auto-approve</td></tr>
+<tr><td><code>max_pending_requests</code></td><td>u32</td><td>100</td><td>Maximum pending requests per workspace</td></tr>
+<tr><td><code>invitation_expiry_days</code></td><td>u32</td><td>7</td><td>Days before invitations expire</td></tr>
+</tbody>
+</table>
+</div>
+<p>When <code>require_approval</code> is <code>false</code>, access requests are auto-approved with the <code>default_roles</code>.</p>
+<h2 id="security-configuration"><a class="header" href="#security-configuration">Security Configuration</a></h2>
+<p>While <code>AccessSettings</code> controls workspace access workflows (requests, invitations, approvals), the <code>raisin:SecurityConfig</code> node type governs the security posture of the authorization system itself – default policies, anonymous access, and per-interface overrides.</p>
+<h3 id="raisinsecurityconfig"><a class="header" href="#raisinsecurityconfig">raisin:SecurityConfig</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Type</th><th style="text-align: center">Required</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>workspace</code></td><td>String (unique)</td><td style="text-align: center">yes</td><td>–</td><td>Workspace pattern this config applies to (<code>*</code> for global default)</td></tr>
+<tr><td><code>default_policy</code></td><td>String</td><td style="text-align: center">yes</td><td><code>"deny"</code></td><td>Default access policy when no permission matches: <code>"deny"</code> or <code>"allow"</code></td></tr>
+<tr><td><code>anonymous_enabled</code></td><td>Boolean</td><td style="text-align: center">no</td><td><code>false</code></td><td>Whether anonymous (unauthenticated) access is allowed</td></tr>
+<tr><td><code>anonymous_role</code></td><td>String</td><td style="text-align: center">no</td><td>–</td><td>Role ID to use for anonymous users</td></tr>
+<tr><td><code>interfaces</code></td><td>Object</td><td style="text-align: center">no</td><td>–</td><td>Per-interface configuration overrides (<code>rest</code>, <code>pgwire</code>, <code>websocket</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<p>The node type is versionable, publishable, and auditable – security policy changes go through the same draft/publish workflow as other content and leave an audit trail.</p>
+<h3 id="resolution-order"><a class="header" href="#resolution-order">Resolution Order</a></h3>
+<p>When the authorization system needs to determine the security configuration for a given workspace, it resolves settings in this order:</p>
+<pre><code>1. Specific workspace match    (workspace = "content")
+2. Global default              (workspace = "*")
+3. Hardcoded deny              (built-in fallback)
+</code></pre>
+<p>The most specific match wins. If a <code>raisin:SecurityConfig</code> node exists with <code>workspace</code> set to the exact workspace name, that configuration is used. Otherwise, the global default (<code>workspace = "*"</code>) applies. If no configuration node exists at all, the system falls back to a hardcoded deny-all policy – ensuring that a misconfiguration never results in open access.</p>
+<h3 id="initial-state"><a class="header" href="#initial-state">Initial State</a></h3>
+<p>The default <code>raisin:SecurityConfig</code> node ships in the <code>raisin:access_control</code> workspace at <code>/config/default</code>:</p>
+<ul>
+<li><code>workspace</code>: <code>"*"</code> (applies to all workspaces)</li>
+<li><code>default_policy</code>: <code>"deny"</code></li>
+<li><code>anonymous_enabled</code>: <code>false</code></li>
+</ul>
+<p>This means that out of the box, unauthenticated requests are rejected and any request that does not match an explicit permission is denied.</p>
+<h3 id="per-interface-overrides"><a class="header" href="#per-interface-overrides">Per-Interface Overrides</a></h3>
+<p>The <code>interfaces</code> object allows different security settings for each transport layer. This is useful when, for example, the REST API should allow anonymous read access for a public website, but the PGWire interface (used by internal analytics tools) should require authentication:</p>
+<pre><code class="language-json">{
+  "node_type": "raisin:SecurityConfig",
+  "name": "content-security",
+  "properties": {
+    "workspace": "content",
+    "default_policy": "deny",
+    "anonymous_enabled": true,
+    "anonymous_role": "anonymous",
+    "interfaces": {
+      "rest": {
+        "anonymous_enabled": true,
+        "anonymous_role": "anonymous"
+      },
+      "pgwire": {
+        "anonymous_enabled": false
+      },
+      "websocket": {
+        "anonymous_enabled": false
+      }
+    }
+  }
+}
+</code></pre>
+<p>In this example, the <code>content</code> workspace allows anonymous access through the REST API (using the <code>anonymous</code> role), but requires authentication for PGWire and WebSocket connections. Interface-level settings override the top-level values for that specific transport.</p>
+<h2 id="authentication-flow"><a class="header" href="#authentication-flow">Authentication Flow</a></h2>
+<p>Here is the end-to-end flow from an HTTP request to a permission-checked response:</p>
+<pre><code>1. HTTP Request arrives
+   └─ Authorization: Bearer &lt;JWT&gt;
+   └─ X-Raisin-Workspace: content
+
+2. JWT Validation (raisin-auth)
+   └─ Verify signature, check expiration
+   └─ Extract AuthClaims { sub, sid, tenant_id, ... }
+
+3. AuthContext Construction
+   └─ AuthContext::for_user(claims.sub)
+   └─ .with_email(claims.email)
+
+4. Permission Resolution (cached)
+   └─ Cache lookup: (session_id, workspace_id)
+   └─ On miss: PermissionService::resolve_for_identity_id()
+      └─ Find raisin:User by identity_id in raisin:access_control
+      └─ Extract direct roles and groups
+      └─ Resolve group roles
+      └─ Resolve role inheritance
+      └─ Collect all permissions
+      └─ Build ResolvedPermissions
+   └─ Cache result with TTL
+
+5. AuthContext enrichment
+   └─ .with_permissions(resolved)
+   └─ Syncs roles, groups, email, local_user_id
+
+6. Query Execution
+   └─ Storage reads nodes
+
+7. RLS Filtering
+   └─ For each node: filter_node(node, auth, scope)
+      └─ Find matching permission (scope + path + operation + type)
+      └─ Evaluate REL condition (if present)
+      └─ Apply field filtering
+   └─ Return only accessible, filtered nodes
+
+8. Response
+</code></pre>
+<p>For write operations, <code>can_perform()</code> or <code>can_create_at_path()</code> is called before the storage write, preventing unauthorized modifications.</p>
+<h2 id="further-reading"><a class="header" href="#further-reading">Further Reading</a></h2>
+<ul>
+<li><a href="./authentication.html">Authentication</a> – authentication strategies, JWT tokens, session management</li>
+<li><a href="./sql-access-control.html">SQL Access Control Extensions</a> – managing roles, groups, users, and permissions via SQL</li>
+<li><a href="../guides/access-control-guide.html">Access Control Practical Guide</a> – hands-on examples for setting up roles, groups, and permissions</li>
+<li><a href="./multi-tenancy.html">Multi-Tenancy</a> – how tenants provide isolation boundaries</li>
+<li><a href="./workspaces.html">Workspaces</a> – workspace model and workspace-scoped data</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/authentication.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../architecture/sql-access-control.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/authentication.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../architecture/sql-access-control.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace-2a3cd908.js"></script>
+        <script src="../mode-rust-2c9d5c9a.js"></script>
+        <script src="../editor-16ca416c.js"></script>
+        <script src="../theme-dawn-4493f9c8.js"></script>
+        <script src="../theme-tomorrow_night-9dbe62a9.js"></script>
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

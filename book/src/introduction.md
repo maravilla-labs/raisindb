@@ -132,8 +132,8 @@ Business Source License 1.1 (BSL-1.1) - see LICENSE file for details.
 
 ## Community
 
-- GitHub: [https://github.com/yourusername/raisindb](https://github.com/yourusername/raisindb)
-- Issues: [Report bugs and request features](https://github.com/yourusername/raisindb/issues)
+- GitHub: [https://github.com/maravilla-labs/raisindb](https://github.com/maravilla-labs/raisindb)
+- Issues: [Report bugs and request features](https://github.com/maravilla-labs/raisindb/issues)
 
 ---
 

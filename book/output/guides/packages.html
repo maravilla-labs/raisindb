@@ -1,0 +1,1482 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Package Management - RaisinDB Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="A flexible, multi-tenant content database built with Rust">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-7d500c97.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RaisinDB Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/guides/packages.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="rap-raisin-archive-packages"><a class="header" href="#rap-raisin-archive-packages">RAP: Raisin Archive Packages</a></h1>
+<p>RAP (Raisin Archive Package) is RaisinDB’s packaging system for bundling, distributing, and installing content. Think of it as npm or Cargo, but for RaisinDB content – node types, workspace configurations, and pre-built nodes can all be packaged into a single <code>.rap</code> file and installed into any repository.</p>
+<p>This chapter covers everything you need to know about the RAP format, from creating packages to managing dependencies and synchronizing content.</p>
+<h2 id="what-is-rap"><a class="header" href="#what-is-rap">What is RAP?</a></h2>
+<p>A <code>.rap</code> file is a self-contained, installable bundle that can include:</p>
+<ul>
+<li><strong>Node type definitions</strong> – custom types like <code>blog:Article</code>, <code>ai:Agent</code>, or <code>ecommerce:Product</code></li>
+<li><strong>Workspace configurations</strong> – pre-configured workspaces with allowed node types and folder structures</li>
+<li><strong>Content nodes</strong> – actual data nodes with properties and associated files (code, templates, assets)</li>
+</ul>
+<p>RAP solves several problems:</p>
+<ul>
+<li><strong>Starter kits</strong> – Bootstrap a new project with a <code>blog-starter</code> or <code>ecommerce-starter</code> package that installs all the types, workspaces, and seed content you need.</li>
+<li><strong>Content distribution</strong> – Share node type definitions and reusable content across teams, environments, or organizations.</li>
+<li><strong>Migration</strong> – Move structured content between RaisinDB instances by exporting from one and installing into another.</li>
+<li><strong>Modularity</strong> – Break your application into composable packages with explicit dependencies. An <code>ai-tools</code> package can depend on <code>core-functions</code> and declare exactly what it provides.</li>
+</ul>
+<h2 id="the-rap-format"><a class="header" href="#the-rap-format">The RAP Format</a></h2>
+<h3 id="archive-structure"><a class="header" href="#archive-structure">Archive Structure</a></h3>
+<p>A <code>.rap</code> file is a standard ZIP archive (using Deflate compression) with a well-defined internal layout:</p>
+<pre><code>my-package-1.0.0.rap
+  manifest.yaml              # Package metadata and configuration (required)
+  mixins/                    # Mixin definitions (installed before node types)
+    myapp_SEO.yaml
+    myapp_Timestamps.yaml
+  nodetypes/                 # Node type definitions
+    blog_Article.yaml
+    blog_Category.yaml
+  workspaces/                # Workspace configuration files
+    blog.yaml
+  content/                   # Content organized by workspace
+    blog/                    # Workspace name
+      posts/                 # Directory structure
+        welcome-post/        # Each node is a directory
+          node.yaml          # Node metadata (node_type, properties)
+          index.md           # Associated files
+        getting-started/
+          node.yaml
+          index.md
+          hero.png           # Binary assets
+</code></pre>
+<p>Every package must contain a <code>manifest.yaml</code> at the root. The other directories are optional – a package could provide only node types, only content, or any combination.</p>
+<h3 id="node-directories"><a class="header" href="#node-directories">Node Directories</a></h3>
+<p>Inside <code>content/</code>, each node is represented as a directory containing:</p>
+<ul>
+<li><code>node.yaml</code> (required) – Defines the node’s type and properties</li>
+<li>Additional files – Code files, templates, images, or any other assets associated with the node</li>
+</ul>
+<p>For example, a function node might look like:</p>
+<pre><code class="language-yaml"># content/functions/lib/my-handler/node.yaml
+node_type: raisin:Function
+properties:
+  title: My Handler
+  description: Handles incoming webhook events
+  runtime: node20
+</code></pre>
+<pre><code class="language-javascript">// content/functions/lib/my-handler/index.js
+export function handler(event) {
+  return { status: "ok", received: event.data };
+}
+</code></pre>
+<h3 id="the-manifest"><a class="header" href="#the-manifest">The Manifest</a></h3>
+<p>The manifest is the heart of every package. Here is the complete schema:</p>
+<pre><code class="language-yaml"># Required fields
+name: ai-tools                        # Unique identifier (alphanumeric, hyphens, underscores)
+version: 1.0.0                        # Semantic version string
+
+# Metadata (all optional)
+title: RaisinDB AI Tools              # Human-readable display name
+description: AI agents and chat       # Package description
+author: RaisinDB Team                 # Package author
+license: MIT                          # License identifier
+icon: bot                             # Lucide icon name for UI (default: "package")
+color: "#8B5CF6"                      # Hex color for UI display (default: "#6366F1")
+keywords:                             # Search keywords
+  - ai
+  - agents
+  - chat
+category: ai                          # Package category
+builtin: false                        # If true, auto-installed on repository creation
+
+# Dependencies
+dependencies:
+  - name: core-functions
+    version: "&gt;=1.0.0"
+
+# What this package provides
+provides:
+  mixins:
+    - ai:Conversable
+  nodetypes:
+    - ai:Agent
+    - ai:Chat
+  workspaces:
+    - functions
+  content:
+    - functions/lib/raisin/agent-handler
+
+# Workspace patches (applied during install)
+workspace_patches:
+  functions:
+    allowed_node_types:
+      add:
+        - ai:Agent
+        - ai:Chat
+    default_folder_type: "raisin:Folder"
+
+# Sync configuration (optional)
+sync:
+  remote:
+    url: "https://raisindb.example.com"
+    repo_id: "my-project"
+    branch: "main"
+    tenant_id: "default"
+  defaults:
+    mode: replace
+    on_conflict: ask
+    sync_deletions: true
+    property_merge: shallow
+  filters: []
+  conflicts: {}
+</code></pre>
+<p>Here is what each section means:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td>String</td><td>Yes</td><td>Unique package identifier. Only alphanumeric characters, hyphens, and underscores.</td></tr>
+<tr><td><code>version</code></td><td>String</td><td>Yes</td><td>Semantic version string (e.g., <code>1.0.0</code>).</td></tr>
+<tr><td><code>title</code></td><td>String</td><td>No</td><td>Human-readable display name.</td></tr>
+<tr><td><code>description</code></td><td>String</td><td>No</td><td>Brief description of the package.</td></tr>
+<tr><td><code>author</code></td><td>String</td><td>No</td><td>Package author or team.</td></tr>
+<tr><td><code>license</code></td><td>String</td><td>No</td><td>License identifier (e.g., <code>MIT</code>, <code>Apache-2.0</code>).</td></tr>
+<tr><td><code>icon</code></td><td>String</td><td>No</td><td>Lucide icon name for UI display. Defaults to <code>"package"</code>.</td></tr>
+<tr><td><code>color</code></td><td>String</td><td>No</td><td>Hex color code for UI theming. Defaults to <code>"#6366F1"</code>.</td></tr>
+<tr><td><code>keywords</code></td><td>Vec&lt;String&gt;</td><td>No</td><td>Tags for package search and discovery.</td></tr>
+<tr><td><code>category</code></td><td>String</td><td>No</td><td>Classification category.</td></tr>
+<tr><td><code>builtin</code></td><td>bool</td><td>No</td><td>When <code>true</code>, the package is automatically installed when a new repository is created.</td></tr>
+<tr><td><code>dependencies</code></td><td>Vec&lt;Dependency&gt;</td><td>No</td><td>Packages this package depends on.</td></tr>
+<tr><td><code>provides</code></td><td>Provides</td><td>No</td><td>Declares what the package contributes (mixins, node types, workspaces, content paths).</td></tr>
+<tr><td><code>workspace_patches</code></td><td>HashMap&lt;String, WorkspacePatch&gt;</td><td>No</td><td>Modifications to apply to workspace configurations during install.</td></tr>
+<tr><td><code>sync</code></td><td>SyncConfig</td><td>No</td><td>Configuration for bidirectional synchronization.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="manifest-in-rust"><a class="header" href="#manifest-in-rust">Manifest in Rust</a></h3>
+<p>The manifest maps directly to the <code>Manifest</code> struct:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::Manifest;
+
+// Parse from YAML
+let manifest = Manifest::from_yaml(yaml_str)?;
+
+// Parse from raw bytes
+let manifest = Manifest::from_bytes(raw_bytes)?;
+
+// Extract from a ZIP archive
+let manifest = Manifest::from_zip(&amp;mut zip_archive)?;
+
+// Validate (checks name format, required fields)
+manifest.validate()?;
+
+// Convert to JSON properties for a raisin:Package node
+let props = manifest.to_node_properties();
+<span class="boring">}</span></code></pre>
+<h2 id="use-cases"><a class="header" href="#use-cases">Use Cases</a></h2>
+<h3 id="starter-kits"><a class="header" href="#starter-kits">Starter Kits</a></h3>
+<p>A blog starter kit packages everything needed for a content-driven site:</p>
+<pre><code class="language-yaml">name: blog-starter
+version: 1.0.0
+title: Blog Starter Kit
+description: Complete blog setup with articles, categories, and authors
+icon: newspaper
+color: "#3B82F6"
+keywords: [blog, cms, content]
+category: starter
+
+dependencies:
+  - name: base-types
+    version: "&gt;=1.0.0"
+
+provides:
+  nodetypes:
+    - blog:Article
+    - blog:Category
+    - blog:Author
+  workspaces:
+    - blog
+  content:
+    - blog/welcome-post
+    - blog/getting-started
+
+workspace_patches:
+  blog:
+    allowed_node_types:
+      add:
+        - blog:Article
+        - blog:Category
+        - blog:Author
+</code></pre>
+<h3 id="sharing-node-types-across-teams"><a class="header" href="#sharing-node-types-across-teams">Sharing Node Types Across Teams</a></h3>
+<p>A package can provide only type definitions – no content, no workspaces:</p>
+<pre><code class="language-yaml">name: shared-types
+version: 2.0.0
+title: Shared Node Types
+provides:
+  nodetypes:
+    - shared:Document
+    - shared:MediaAsset
+    - shared:Tag
+</code></pre>
+<h3 id="function-libraries"><a class="header" href="#function-libraries">Function Libraries</a></h3>
+<p>Packages can distribute serverless functions with their code files:</p>
+<pre><code class="language-yaml">name: ai-tools
+version: 1.0.0
+dependencies:
+  - name: core-functions
+    version: "&gt;=1.0.0"
+
+provides:
+  nodetypes:
+    - ai:Agent
+    - ai:Chat
+  workspaces:
+    - functions
+  content:
+    - functions/lib/raisin/agent-handler
+    - functions/lib/raisin/chat-handler
+
+workspace_patches:
+  functions:
+    allowed_node_types:
+      add:
+        - ai:Agent
+        - ai:Chat
+</code></pre>
+<p>Each function node in the content directory includes both a <code>node.yaml</code> and the actual code files (e.g., <code>index.js</code>).</p>
+<h2 id="creating-packages"><a class="header" href="#creating-packages">Creating Packages</a></h2>
+<h3 id="using-the-packageexporter"><a class="header" href="#using-the-packageexporter">Using the PackageExporter</a></h3>
+<p>The <code>PackageExporter</code> builds <code>.rap</code> files programmatically:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{
+    Manifest, PackageExporter, ContentBuilder,
+    ExportOptions, ExportMode, Provides,
+};
+
+// Define the manifest
+let manifest = Manifest {
+    name: "my-package".to_string(),
+    version: "1.0.0".to_string(),
+    description: Some("My custom package".to_string()),
+    provides: Provides {
+        mixins: vec![],
+        nodetypes: vec!["custom:Widget".to_string()],
+        workspaces: vec!["widgets".to_string()],
+        content: vec!["widgets/default-widget".to_string()],
+    },
+    ..Default::default()
+};
+
+// Create the exporter
+let mut exporter = PackageExporter::with_manifest(manifest);
+
+// Add mixin definitions (written to mixins/ directory)
+exporter.add_mixin(
+    "custom:Styled".to_string(),
+    "name: custom:Styled\ndescription: Style properties\n".to_string(),
+);
+
+// Add node type definitions
+exporter.add_node_type(
+    "custom:Widget".to_string(),
+    "name: custom:Widget\ndescription: A reusable widget\n".to_string(),
+);
+
+// Add content using ContentBuilder
+let content = ContentBuilder::new("widgets", "default-widget", "custom:Widget")
+    .with_properties(serde_json::json!({
+        "title": "Default Widget",
+        "description": "A starter widget"
+    }))
+    .with_file("template.html", b"&lt;div&gt;Hello World&lt;/div&gt;".to_vec())
+    .build();
+exporter.add_content(content);
+
+// Build the .rap file
+let result = exporter.build()?;
+
+// result.package_data contains the ZIP bytes
+// result.files_included is the total file count
+// result.exported_at is the timestamp
+std::fs::write("my-package-1.0.0.rap", &amp;result.package_data)?;
+<span class="boring">}</span></code></pre>
+<h3 id="export-modes"><a class="header" href="#export-modes">Export Modes</a></h3>
+<p>The <code>ExportOptions</code> struct controls what gets included:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{ExportOptions, ExportMode};
+
+let options = ExportOptions {
+    // ExportMode::All -- include everything
+    // ExportMode::Filtered -- apply manifest sync filters (default)
+    export_mode: ExportMode::Filtered,
+
+    // Glob patterns to filter content
+    filter_patterns: vec!["**/*.yaml".to_string()],
+
+    // Include locally modified content
+    include_modifications: true,
+
+    // Override the version in the exported manifest
+    new_version: Some("2.0.0".to_string()),
+};
+
+let exporter = PackageExporter::new(manifest, options);
+<span class="boring">}</span></code></pre>
+<p>When <code>ExportMode::Filtered</code> is used and the manifest has a <code>sync</code> configuration, the exporter respects the sync filter rules to decide which paths to include.</p>
+<h3 id="adding-content-files-directly"><a class="header" href="#adding-content-files-directly">Adding Content Files Directly</a></h3>
+<p>For more control, you can add individual files to content entries:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut exporter = PackageExporter::with_manifest(manifest);
+
+// Add files to a specific package path
+exporter.add_content_file(
+    "content/functions/my-handler/",
+    "node.yaml",
+    b"node_type: raisin:Function\nproperties:\n  title: My Handler\n".to_vec(),
+);
+exporter.add_content_file(
+    "content/functions/my-handler/",
+    "index.js",
+    b"export function handler() { return 'hello'; }".to_vec(),
+);
+<span class="boring">}</span></code></pre>
+<h3 id="comparing-packages"><a class="header" href="#comparing-packages">Comparing Packages</a></h3>
+<p>The <code>PackageComparator</code> detects differences between a package’s original content and the current installed state:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{PackageBrowser, PackageComparator};
+
+let browser = PackageBrowser::from_bytes(&amp;package_data);
+let comparator = PackageComparator::from_package(&amp;browser)?;
+
+// Check if a file exists in the original package
+if comparator.exists_in_source("content/blog/welcome/node.yaml") {
+    // Check if installed content has been modified
+    let current_content = std::fs::read("path/to/installed/node.yaml")?;
+    if comparator.is_modified("content/blog/welcome/node.yaml", &amp;current_content) {
+        println!("Content has drifted from the package source");
+    }
+}
+
+// Iterate all source paths
+for path in comparator.source_paths() {
+    println!("Package contains: {}", path);
+}
+<span class="boring">}</span></code></pre>
+<p>The comparator uses SHA-256 hashes to detect modifications.</p>
+<h2 id="browsing-packages"><a class="header" href="#browsing-packages">Browsing Packages</a></h2>
+<p>The <code>PackageBrowser</code> lets you inspect a <code>.rap</code> file without installing it:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{PackageBrowser, EntryType};
+
+let data = std::fs::read("blog-starter-1.0.0.rap")?;
+let browser = PackageBrowser::new(data);
+// Or: PackageBrowser::from_bytes(&amp;data)
+
+// Read the manifest
+let manifest = browser.manifest()?;
+println!("Package: {} v{}", manifest.name, manifest.version);
+println!("Description: {:?}", manifest.description);
+<span class="boring">}</span></code></pre>
+<h3 id="listing-entries"><a class="header" href="#listing-entries">Listing Entries</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// List all entries in the archive
+let entries = browser.list_entries()?;
+for entry in &amp;entries {
+    let kind = match entry.entry_type {
+        EntryType::File =&gt; "FILE",
+        EntryType::Directory =&gt; "DIR ",
+    };
+    println!("{} {} ({} bytes)", kind, entry.path, entry.size);
+    if entry.compressed {
+        println!("     compressed: {} bytes", entry.compressed_size);
+    }
+}
+
+// List entries in a specific directory
+let content_entries = browser.list_directory("content")?;
+
+// List only node type definitions
+let nodetypes = browser.list_nodetypes()?;
+for path in &amp;nodetypes {
+    println!("Node type: {}", path);
+}
+
+// List content workspaces
+let workspaces = browser.list_content_workspaces()?;
+for ws in &amp;workspaces {
+    println!("Workspace: {}", ws);
+}
+<span class="boring">}</span></code></pre>
+<h3 id="reading-files"><a class="header" href="#reading-files">Reading Files</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Read a file as bytes
+let raw = browser.read_file("nodetypes/blog_Article.yaml")?;
+
+// Read a file as UTF-8 string
+let content = browser.read_file_string("manifest.yaml")?;
+
+// Check if a path exists
+if browser.exists("content/blog/welcome/node.yaml")? {
+    println!("Welcome post is included");
+}
+<span class="boring">}</span></code></pre>
+<p>Each <code>ZipEntry</code> provides:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>Path within the archive</td></tr>
+<tr><td><code>entry_type</code></td><td><code>EntryType</code></td><td><code>File</code> or <code>Directory</code></td></tr>
+<tr><td><code>size</code></td><td><code>u64</code></td><td>Uncompressed file size (0 for directories)</td></tr>
+<tr><td><code>compressed</code></td><td><code>bool</code></td><td>Whether the file uses compression</td></tr>
+<tr><td><code>compressed_size</code></td><td><code>u64</code></td><td>Compressed size on disk</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="installing-packages"><a class="header" href="#installing-packages">Installing Packages</a></h2>
+<p>The <code>PackageInstaller</code> parses a <code>.rap</code> file and extracts everything needed for installation.</p>
+<h3 id="creating-an-installer"><a class="header" href="#creating-an-installer">Creating an Installer</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::PackageInstaller;
+
+let package_data = std::fs::read("ai-tools-1.0.0.rap")?;
+let installer = PackageInstaller::new(package_data)?;
+
+// The constructor validates the manifest automatically
+let manifest = installer.manifest();
+println!("Installing {} v{}", manifest.name, manifest.version);
+<span class="boring">}</span></code></pre>
+<h3 id="extracting-mixins"><a class="header" href="#extracting-mixins">Extracting Mixins</a></h3>
+<p>Mixins must be installed <strong>before</strong> node types, since node types may reference them in their <code>mixins</code> field. The <code>get_mixins()</code> method reads definitions from the <code>mixins/</code> directory:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Get all mixin definitions from mixins/ directory
+let mixins = installer.get_mixins()?;
+for (name, definition) in &amp;mixins {
+    println!("Mixin: {}", name);
+    // Register the mixin before installing node types
+}
+<span class="boring">}</span></code></pre>
+<h3 id="extracting-node-types"><a class="header" href="#extracting-node-types">Extracting Node Types</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Get all node type definitions from nodetypes/ directory
+let node_types = installer.get_node_types()?;
+for (name, definition) in &amp;node_types {
+    println!("Node type: {}", name);
+    // definition is a serde_json::Value parsed from YAML
+}
+<span class="boring">}</span></code></pre>
+<h3 id="extracting-content"><a class="header" href="#extracting-content">Extracting Content</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::ContentNode;
+
+// Get all content nodes from content/ directory
+let content_nodes = installer.get_content()?;
+for node in &amp;content_nodes {
+    println!("Workspace: {}, Path: {}, Type: {}",
+        node.workspace, node.path, node.node_type);
+    println!("  Properties: {}", node.properties);
+
+    // Associated files (code, templates, assets)
+    for (filename, data) in &amp;node.files {
+        println!("  File: {} ({} bytes)", filename, data.len());
+    }
+}
+<span class="boring">}</span></code></pre>
+<p>Each <code>ContentNode</code> contains:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>workspace</code></td><td><code>String</code></td><td>Target workspace name</td></tr>
+<tr><td><code>path</code></td><td><code>String</code></td><td>Node path within the workspace</td></tr>
+<tr><td><code>node_type</code></td><td><code>String</code></td><td>Node type identifier (e.g., <code>raisin:Function</code>)</td></tr>
+<tr><td><code>properties</code></td><td><code>serde_json::Value</code></td><td>Node properties as JSON</td></tr>
+<tr><td><code>children</code></td><td><code>Vec&lt;ContentNode&gt;</code></td><td>Child nodes (for hierarchical content)</td></tr>
+<tr><td><code>files</code></td><td><code>HashMap&lt;String, Vec&lt;u8&gt;&gt;</code></td><td>Associated files (filename to raw bytes)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="applying-workspace-patches"><a class="header" href="#applying-workspace-patches">Applying Workspace Patches</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Get the workspace patcher from the manifest
+let patcher = installer.get_patcher();
+
+// See which workspaces need patching
+for workspace in patcher.workspaces_to_patch() {
+    println!("Needs patching: {}", workspace);
+}
+
+// Apply patches to a workspace configuration
+let config = serde_json::json!({
+    "name": "functions",
+    "allowed_node_types": ["raisin:Function", "raisin:Trigger"]
+});
+
+let patched = patcher.apply_patches("functions", config)?;
+// patched now includes the added node types from the package
+<span class="boring">}</span></code></pre>
+<h3 id="recording-results"><a class="header" href="#recording-results">Recording Results</a></h3>
+<p>After performing the actual installation (creating nodes, registering types), record the result:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let result = installer.create_install_result(
+    vec!["ai:Conversable".to_string()],                     // registered mixins
+    vec!["ai:Agent".to_string(), "ai:Chat".to_string()],    // registered types
+    vec!["functions".to_string()],                           // patched workspaces
+    vec!["functions/lib/raisin/agent-handler".to_string()],  // created content
+);
+
+println!("Installed at: {}", result.installed_at);
+println!("Mixins: {:?}", result.mixins_registered);
+println!("Types: {:?}", result.node_types_registered);
+println!("Workspaces: {:?}", result.workspaces_patched);
+println!("Content: {:?}", result.content_nodes_created);
+<span class="boring">}</span></code></pre>
+<h3 id="uninstall-results"><a class="header" href="#uninstall-results">Uninstall Results</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let uninstall = installer.create_uninstall_result(
+    vec!["functions/lib/raisin/agent-handler".to_string()],
+    false, // node_types_removed: false if other packages use them
+);
+
+println!("Removed {} content nodes", uninstall.content_nodes_removed.len());
+if !uninstall.node_types_removed {
+    println!("Node types kept (used by other packages)");
+}
+<span class="boring">}</span></code></pre>
+<h2 id="dependencies"><a class="header" href="#dependencies">Dependencies</a></h2>
+<p>Packages can declare dependencies on other packages. The <code>DependencyGraph</code> handles validation, circular dependency detection, and installation ordering.</p>
+<h3 id="declaring-dependencies"><a class="header" href="#declaring-dependencies">Declaring Dependencies</a></h3>
+<p>In the manifest:</p>
+<pre><code class="language-yaml">dependencies:
+  - name: core-functions
+    version: "&gt;=1.0.0"
+  - name: base-types
+    version: "&gt;=2.0.0"
+</code></pre>
+<p>Each dependency has:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>name</code></td><td><code>String</code></td><td>Name of the required package</td></tr>
+<tr><td><code>version</code></td><td><code>String</code></td><td>Semver version constraint</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="building-a-dependency-graph"><a class="header" href="#building-a-dependency-graph">Building a Dependency Graph</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{DependencyGraph, Manifest, Dependency};
+
+let mut graph = DependencyGraph::new();
+
+// Add packages (order doesn't matter)
+graph.add_package(Manifest {
+    name: "base-types".into(),
+    version: "1.0.0".into(),
+    ..Default::default()
+});
+
+graph.add_package(Manifest {
+    name: "core-functions".into(),
+    version: "1.0.0".into(),
+    dependencies: vec![Dependency {
+        name: "base-types".into(),
+        version: "&gt;=1.0.0".into(),
+    }],
+    ..Default::default()
+});
+
+graph.add_package(Manifest {
+    name: "ai-tools".into(),
+    version: "1.0.0".into(),
+    dependencies: vec![Dependency {
+        name: "core-functions".into(),
+        version: "&gt;=1.0.0".into(),
+    }],
+    ..Default::default()
+});
+<span class="boring">}</span></code></pre>
+<h3 id="validating-dependencies"><a class="header" href="#validating-dependencies">Validating Dependencies</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Check that all declared dependencies exist in the graph
+graph.validate_dependencies()?;
+// Returns Err(DependencyGraphError::MissingDependency { .. }) if a dep is missing
+<span class="boring">}</span></code></pre>
+<h3 id="installation-order"><a class="header" href="#installation-order">Installation Order</a></h3>
+<p>The graph uses Kahn’s algorithm (topological sort) to determine the correct installation order – dependencies are installed before the packages that need them:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let order = graph.installation_order()?;
+// Returns: ["base-types", "core-functions", "ai-tools"]
+
+// Or get the full manifests in order:
+let manifests = graph.manifests_in_order()?;
+for manifest in manifests {
+    println!("Install: {} v{}", manifest.name, manifest.version);
+}
+<span class="boring">}</span></code></pre>
+<h3 id="circular-dependency-detection"><a class="header" href="#circular-dependency-detection">Circular Dependency Detection</a></h3>
+<p>If packages form a cycle, the graph detects it and reports the exact cycle path:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut graph = DependencyGraph::new();
+graph.add_package(/* A depends on B */);
+graph.add_package(/* B depends on C */);
+graph.add_package(/* C depends on A */);
+
+match graph.installation_order() {
+    Err(DependencyGraphError::CircularDependency { cycle }) =&gt; {
+        // cycle contains: ["A", "B", "C", "A"]
+        println!("Circular dependency: {}", cycle.join(" -&gt; "));
+    }
+    _ =&gt; {}
+}
+<span class="boring">}</span></code></pre>
+<p>The error message includes a visual representation of the cycle:</p>
+<pre><code>Circular dependency detected in package dependencies:
+  &gt; A
+    |
+    v
+    B
+    |
+    v
+    C
+    |
+    v
+  &gt; A (cycle)
+
+To resolve: Remove one of these dependency relationships.
+</code></pre>
+<h3 id="diamond-dependencies"><a class="header" href="#diamond-dependencies">Diamond Dependencies</a></h3>
+<p>Diamond dependency patterns (where two packages depend on the same base package) are handled correctly:</p>
+<pre><code>    A
+   / \
+  B   C
+   \ /
+    D
+</code></pre>
+<p>The topological sort ensures <code>D</code> is installed first, then <code>B</code> and <code>C</code> (in any order), then <code>A</code>.</p>
+<h3 id="graph-queries"><a class="header" href="#graph-queries">Graph Queries</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Check if a package is in the graph
+graph.contains("ai-tools"); // true
+
+// Get a specific package node
+if let Some(node) = graph.get("ai-tools") {
+    println!("Version: {}", node.version);
+    println!("Dependencies: {:?}", node.dependencies);
+}
+
+// List all package names
+let names = graph.package_names();
+<span class="boring">}</span></code></pre>
+<h2 id="workspace-patches"><a class="header" href="#workspace-patches">Workspace Patches</a></h2>
+<p>Workspace patches let a package modify workspace configurations during installation – typically to register new node types that the package provides.</p>
+<h3 id="defining-patches"><a class="header" href="#defining-patches">Defining Patches</a></h3>
+<p>In the manifest, <code>workspace_patches</code> is a map of workspace name to patch configuration:</p>
+<pre><code class="language-yaml">workspace_patches:
+  functions:
+    allowed_node_types:
+      add:
+        - ai:Agent
+        - ai:Chat
+    default_folder_type: "raisin:Folder"
+  content:
+    allowed_node_types:
+      add:
+        - blog:Article
+</code></pre>
+<h3 id="patch-operations"><a class="header" href="#patch-operations">Patch Operations</a></h3>
+<p>Currently, workspace patches support one operation:</p>
+<ul>
+<li><strong><code>AddAllowedNodeTypes</code></strong> – Appends node types to a workspace’s <code>allowed_node_types</code> list, avoiding duplicates.</li>
+</ul>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{WorkspacePatcher, PatchOperation};
+
+let patcher = installer.get_patcher();
+
+// Inspect operations for a workspace
+if let Some(ops) = patcher.get_patches("functions") {
+    for op in ops {
+        match op {
+            PatchOperation::AddAllowedNodeTypes(types) =&gt; {
+                println!("Adding node types: {:?}", types);
+            }
+        }
+    }
+}
+<span class="boring">}</span></code></pre>
+<h3 id="applying-patches"><a class="header" href="#applying-patches">Applying Patches</a></h3>
+<p>The patcher takes a workspace configuration as JSON and returns the modified version:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let config = serde_json::json!({
+    "name": "functions",
+    "allowed_node_types": ["raisin:Function"]
+});
+
+let patched = patcher.apply_patches("functions", config)?;
+// Result: { "name": "functions", "allowed_node_types": ["raisin:Function", "ai:Agent", "ai:Chat"] }
+<span class="boring">}</span></code></pre>
+<p>Patches are idempotent – applying the same patch twice does not create duplicate entries.</p>
+<h3 id="reverse-patches"><a class="header" href="#reverse-patches">Reverse Patches</a></h3>
+<p>Currently, automatic reverse patching for uninstallation is not supported. When a package is uninstalled, the node types it added to workspace configurations remain. This is by design – removing types could break other packages or user-created content that depends on those types.</p>
+<h2 id="package-sync"><a class="header" href="#package-sync">Package Sync</a></h2>
+<p>The sync system enables bidirectional synchronization between package content and a RaisinDB server. This is useful when content evolves independently in both places and you need to reconcile changes.</p>
+<h3 id="sync-status"><a class="header" href="#sync-status">Sync Status</a></h3>
+<p>Check whether installed content has drifted from the package source:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{PackageSyncStatus, OverallSyncStatus, SyncSummary, SyncFileStatus};
+<span class="boring">}</span></code></pre>
+<p>Each file gets one of these statuses:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Status</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>SyncFileStatus::Synced</code></td><td>File is identical locally and on the server</td></tr>
+<tr><td><code>SyncFileStatus::LocalOnly</code></td><td>File exists only locally (added after install)</td></tr>
+<tr><td><code>SyncFileStatus::ServerOnly</code></td><td>File exists only in the package (deleted locally)</td></tr>
+<tr><td><code>SyncFileStatus::Modified</code></td><td>File has been modified locally</td></tr>
+<tr><td><code>SyncFileStatus::Conflict</code></td><td>Both local and server versions have changed</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="overall-status"><a class="header" href="#overall-status">Overall Status</a></h3>
+<p>The <code>OverallSyncStatus</code> summarizes the state of all files:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Status</th><th>Condition</th></tr>
+</thead>
+<tbody>
+<tr><td><code>OverallSyncStatus::Synced</code></td><td>All files are in sync</td></tr>
+<tr><td><code>OverallSyncStatus::Modified</code></td><td>Some files have changes but no conflicts</td></tr>
+<tr><td><code>OverallSyncStatus::Conflict</code></td><td>At least one file has conflicting changes</td></tr>
+</tbody>
+</table>
+</div>
+<p>The overall status is derived automatically from the <code>SyncSummary</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut summary = SyncSummary::new();
+summary.add(SyncFileStatus::Synced);
+summary.add(SyncFileStatus::Modified);
+
+println!("Total files: {}", summary.total());      // 2
+println!("Has issues: {}", summary.has_issues());    // true
+println!("Has conflicts: {}", summary.has_conflicts()); // false
+
+let overall = OverallSyncStatus::from(&amp;summary);
+// OverallSyncStatus::Modified
+<span class="boring">}</span></code></pre>
+<h3 id="file-sync-information"><a class="header" href="#file-sync-information">File Sync Information</a></h3>
+<p>Each file’s sync state is tracked with detailed metadata:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::SyncFileInfo;
+
+// SyncFileInfo contains:
+// - path: String              -- path relative to package root
+// - status: SyncFileStatus    -- current sync status
+// - workspace: String         -- containing workspace
+// - local_hash: Option&lt;String&gt;    -- SHA-256 of local content
+// - server_hash: Option&lt;String&gt;   -- SHA-256 of server content
+// - local_modified_at: Option&lt;DateTime&lt;Utc&gt;&gt;
+// - server_modified_at: Option&lt;DateTime&lt;Utc&gt;&gt;
+// - node_type: Option&lt;String&gt;     -- node type if applicable
+<span class="boring">}</span></code></pre>
+<h3 id="file-diffs"><a class="header" href="#file-diffs">File Diffs</a></h3>
+<p>For conflict resolution, the <code>FileDiff</code> type provides detailed difference information:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{FileDiff, DiffType};
+
+// DiffType::Text   -- text content that can be diffed line-by-line
+// DiffType::Binary -- binary content that cannot be diffed
+
+// FileDiff contains:
+// - path: String
+// - diff_type: DiffType
+// - local_content: Option&lt;String&gt;   -- for text files
+// - server_content: Option&lt;String&gt;  -- for text files
+// - unified_diff: Option&lt;String&gt;    -- unified diff format
+<span class="boring">}</span></code></pre>
+<h3 id="sync-results"><a class="header" href="#sync-results">Sync Results</a></h3>
+<p>After a sync operation completes, the <code>SyncResult</code> reports what happened:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::SyncResult;
+
+let result = SyncResult::new();
+
+// After sync operations populate the result:
+println!("Uploaded: {:?}", result.uploaded);
+println!("Downloaded: {:?}", result.downloaded);
+println!("Conflicts: {}", result.conflicts.len());
+println!("Skipped: {:?}", result.skipped);
+println!("Errors: {:?}", result.errors);
+
+println!("Success: {}", result.is_success());       // no errors or conflicts
+println!("Total synced: {}", result.total_synced()); // uploaded + downloaded
+<span class="boring">}</span></code></pre>
+<h3 id="content-hashing"><a class="header" href="#content-hashing">Content Hashing</a></h3>
+<p>Sync uses SHA-256 hashing to detect changes efficiently:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::compute_hash;
+
+let hash = compute_hash(b"hello world");
+// Returns: "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+<span class="boring">}</span></code></pre>
+<h2 id="sync-configuration"><a class="header" href="#sync-configuration">Sync Configuration</a></h2>
+<p>The sync system is highly configurable through the manifest’s <code>sync</code> section. Configuration follows a layered approach: defaults apply globally, filters override for specific paths, and conflict overrides target individual files.</p>
+<h3 id="remote-configuration"><a class="header" href="#remote-configuration">Remote Configuration</a></h3>
+<pre><code class="language-yaml">sync:
+  remote:
+    url: "https://raisindb.example.com"
+    repo_id: "my-project"
+    branch: "main"                    # default: "main"
+    tenant_id: "default"              # default: "default"
+    auth_profile: "production"        # optional credential profile
+    headers:                          # optional custom headers
+      X-Custom-Header: "value"
+</code></pre>
+<h3 id="sync-defaults"><a class="header" href="#sync-defaults">Sync Defaults</a></h3>
+<p>Default settings apply to all paths unless overridden by a filter:</p>
+<pre><code class="language-yaml">sync:
+  defaults:
+    mode: replace           # replace | merge | update
+    on_conflict: ask        # ask | prefer_local | prefer_server | prefer_newer | keep_both | merge_properties | abort
+    sync_deletions: true    # whether to propagate deletions
+    property_merge: shallow # shallow | deep
+</code></pre>
+<p><strong>Sync modes:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Mode</th><th>Behavior</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Replace</code></td><td>Full replacement of target with source (default)</td></tr>
+<tr><td><code>Merge</code></td><td>Combine source and target, keeping content from both</td></tr>
+<tr><td><code>Update</code></td><td>Only apply changes, preserve unmodified content</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Conflict strategies:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Strategy</th><th>Behavior</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Ask</code></td><td>Prompt for user input on each conflict (default)</td></tr>
+<tr><td><code>PreferLocal</code></td><td>Always keep the local version</td></tr>
+<tr><td><code>PreferServer</code></td><td>Always keep the server version</td></tr>
+<tr><td><code>PreferNewer</code></td><td>Use whichever version has the more recent timestamp</td></tr>
+<tr><td><code>KeepBoth</code></td><td>Create both versions with a distinguishing suffix</td></tr>
+<tr><td><code>MergeProperties</code></td><td>Attempt property-level merge of the conflicting content</td></tr>
+<tr><td><code>Abort</code></td><td>Stop the sync operation on the first conflict</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="sync-filters"><a class="header" href="#sync-filters">Sync Filters</a></h3>
+<p>Filters provide path-specific overrides. They are evaluated in order, and the <strong>last matching filter wins</strong>:</p>
+<pre><code class="language-yaml">sync:
+  filters:
+    # Merge YAML content in /content/pages, exclude drafts
+    - root: /content/pages
+      mode: merge
+      include:
+        - "**/*.yaml"
+      exclude:
+        - "drafts/**"
+        - "**/.local"
+      on_conflict: prefer_newer
+      properties:
+        include: [title, body, status]
+        exclude: [internal_notes]
+
+    # Local development content, never sync to server
+    - root: /content/dev
+      direction: local_only
+
+    # System content, pull only
+    - root: /system
+      direction: server_only
+      on_conflict: prefer_server
+
+    # Cleanup orphaned test data
+    - root: /test-data
+      type: cleanup
+</code></pre>
+<p>Each filter can override:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>root</code></td><td><code>String</code></td><td>Path prefix this filter applies to (required)</td></tr>
+<tr><td><code>mode</code></td><td><code>SyncMode</code></td><td>Override sync mode (<code>replace</code>, <code>merge</code>, <code>update</code>)</td></tr>
+<tr><td><code>direction</code></td><td><code>SyncDirection</code></td><td>Override sync direction</td></tr>
+<tr><td><code>type</code></td><td><code>FilterType</code></td><td><code>normal</code> (default) or <code>cleanup</code></td></tr>
+<tr><td><code>include</code></td><td><code>Vec&lt;String&gt;</code></td><td>Glob patterns – path must match at least one</td></tr>
+<tr><td><code>exclude</code></td><td><code>Vec&lt;String&gt;</code></td><td>Glob patterns – path must not match any</td></tr>
+<tr><td><code>on_conflict</code></td><td><code>ConflictStrategy</code></td><td>Override conflict strategy</td></tr>
+<tr><td><code>properties</code></td><td><code>PropertyFilter</code></td><td>Property-level filtering for merges</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Sync directions:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Direction</th><th>Push</th><th>Pull</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Bidirectional</code></td><td>Yes</td><td>Yes</td><td>Full two-way sync (default)</td></tr>
+<tr><td><code>LocalOnly</code></td><td>No</td><td>No</td><td>Local development content, never synced</td></tr>
+<tr><td><code>ServerOnly</code></td><td>No</td><td>Yes</td><td>Pull from server, never push</td></tr>
+<tr><td><code>PushOnly</code></td><td>Yes</td><td>No</td><td>Push to server, never pull</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="glob-patterns"><a class="header" href="#glob-patterns">Glob Patterns</a></h3>
+<p>Filters use glob pattern matching with these wildcards:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Pattern</th><th>Matches</th></tr>
+</thead>
+<tbody>
+<tr><td><code>*</code></td><td>Any sequence of characters within a single path segment</td></tr>
+<tr><td><code>**</code></td><td>Any number of path segments (zero or more)</td></tr>
+<tr><td><code>?</code></td><td>Any single character</td></tr>
+</tbody>
+</table>
+</div>
+<p>Examples:</p>
+<ul>
+<li><code>*.yaml</code> matches <code>page.yaml</code> but not <code>dir/page.yaml</code></li>
+<li><code>**/*.yaml</code> matches <code>page.yaml</code>, <code>dir/page.yaml</code>, and <code>dir/sub/page.yaml</code></li>
+<li><code>drafts/**</code> matches everything under <code>drafts/</code></li>
+<li><code>test?.yaml</code> matches <code>test1.yaml</code> but not <code>test12.yaml</code></li>
+</ul>
+<h3 id="property-filtering"><a class="header" href="#property-filtering">Property Filtering</a></h3>
+<p>For merge operations, you can control which properties are synced:</p>
+<pre><code class="language-yaml">properties:
+  include: [title, body, status]         # Only sync these properties
+  exclude: [internal_notes, debug_info]  # Never sync these
+  preserve_local: [custom_css]           # Always keep local values
+  preserve_server: [canonical_url]       # Always keep server values
+  merge_keys:                            # Keys for array merging by ID
+    items: "id"
+  merge_strategy:
+    arrays: concat      # concat | replace | unique | merge_by_key
+    objects: shallow     # shallow | deep | replace
+    scalars: prefer_local # prefer_local | prefer_server | prefer_newer
+</code></pre>
+<p><strong>Array merge modes:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Mode</th><th>Behavior</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Concat</code></td><td>Append source arrays to target (default)</td></tr>
+<tr><td><code>Replace</code></td><td>Replace target array entirely</td></tr>
+<tr><td><code>Unique</code></td><td>Combine arrays, removing duplicates</td></tr>
+<tr><td><code>MergeByKey</code></td><td>Match array items by a key field and merge individually</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Object merge modes:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Mode</th><th>Behavior</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Shallow</code></td><td>Merge top-level keys only (default)</td></tr>
+<tr><td><code>Deep</code></td><td>Recursive merge of nested objects</td></tr>
+<tr><td><code>Replace</code></td><td>Replace the entire object</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Scalar merge modes:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Mode</th><th>Behavior</th></tr>
+</thead>
+<tbody>
+<tr><td><code>PreferLocal</code></td><td>Keep the local value (default)</td></tr>
+<tr><td><code>PreferServer</code></td><td>Keep the server value</td></tr>
+<tr><td><code>PreferNewer</code></td><td>Keep whichever is newer by timestamp</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="conflict-overrides"><a class="header" href="#conflict-overrides">Conflict Overrides</a></h3>
+<p>For specific paths that need special handling, use explicit conflict overrides:</p>
+<pre><code class="language-yaml">sync:
+  conflicts:
+    "/content/pages/home":
+      strategy: prefer_local
+      backup: true                 # Create backup before overwriting
+      merge_arrays: unique         # Optional array merge mode for this path
+    "/content/pages/about":
+      strategy: prefer_server
+      backup: false
+</code></pre>
+<h3 id="sync-hooks"><a class="header" href="#sync-hooks">Sync Hooks</a></h3>
+<p>Lifecycle hooks run shell commands at key points during sync:</p>
+<pre><code class="language-yaml">sync:
+  hooks:
+    before_sync:
+      - "echo 'Starting sync...'"
+      - "npm run validate"
+    after_sync:
+      - "npm run build"
+    on_conflict:
+      - "notify-team 'Sync conflict detected'"
+</code></pre>
+<h3 id="effective-configuration-resolution"><a class="header" href="#effective-configuration-resolution">Effective Configuration Resolution</a></h3>
+<p>The sync system resolves configuration by checking in this order (most specific wins):</p>
+<ol>
+<li><strong>Conflict overrides</strong> (<code>sync.conflicts</code>) – exact path matches</li>
+<li><strong>Filters</strong> (<code>sync.filters</code>) – last matching filter by path prefix</li>
+<li><strong>Defaults</strong> (<code>sync.defaults</code>) – fallback for everything else</li>
+</ol>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::SyncConfig;
+
+let config: SyncConfig = serde_yaml::from_str(yaml)?;
+
+// Resolve effective settings for a path
+let mode = config.get_mode_for_path("/content/pages/home.yaml");
+let direction = config.get_direction_for_path("/content/dev/test.yaml");
+let strategy = config.get_conflict_strategy_for_path("/content/pages/home");
+
+// Check if a path should be synced at all
+if config.should_sync_path("/content/pages/article.yaml") {
+    // Proceed with sync
+}
+<span class="boring">}</span></code></pre>
+<h2 id="content-validation"><a class="header" href="#content-validation">Content Validation</a></h2>
+<p>Before installing a package, you can validate that all type references in its content are resolvable – either provided by the package itself or already present in the database.</p>
+<h3 id="available-types"><a class="header" href="#available-types">Available Types</a></h3>
+<p>Build a registry of known types:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{AvailableTypes, ContentValidator, Manifest};
+
+let mut available = AvailableTypes::new();
+
+// Add types from the package manifest
+available.add_from_manifest(&amp;manifest);
+
+// Add types already in the database
+available.add_node_type("raisin:Function");
+available.add_node_type("raisin:Trigger");
+available.add_mixin("raisin:publishable");
+available.add_archetype("base:Document");
+available.add_element_type("ui:Button");
+
+// Merge types from another source
+let mut other = AvailableTypes::new();
+other.add_node_type("shared:Widget");
+available.merge(&amp;other);
+
+// Query
+available.has_node_type("raisin:Function");   // true
+available.has_mixin("raisin:publishable");     // true
+available.has_archetype("base:Document");       // true
+available.has_element_type("ui:Button");        // true
+<span class="boring">}</span></code></pre>
+<p>The <code>AvailableTypes</code> struct tracks four categories:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Category</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>node_types</code></td><td>Node type identifiers (e.g., <code>blog:Article</code>)</td></tr>
+<tr><td><code>mixins</code></td><td>Mixin identifiers (e.g., <code>raisin:publishable</code>)</td></tr>
+<tr><td><code>archetypes</code></td><td>Archetype identifiers (e.g., <code>base:Document</code>)</td></tr>
+<tr><td><code>element_types</code></td><td>Element type identifiers (e.g., <code>ui:Button</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="running-validation"><a class="header" href="#running-validation">Running Validation</a></h3>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::ContentValidator;
+
+let validator = ContentValidator::new()
+    .with_package_types(package_types)
+    .with_database_types(database_types);
+
+// Validate individual references
+if let Some(warning) = validator.validate_node_type("blog:Article", "content/blog/post/node.yaml") {
+    println!("Warning: {}", warning);
+}
+
+if let Some(warning) = validator.validate_archetype("unknown:Type", "content/test/node.yaml") {
+    println!("Warning: {}", warning);
+}
+
+if let Some(warning) = validator.validate_element_type("ui:Missing", "content/page/node.yaml") {
+    println!("Warning: {}", warning);
+}
+
+if let Some(warning) = validator.validate_mixin("unknown:Mixin", "nodetypes/blog_Article.yaml") {
+    println!("Warning: {}", warning);
+}
+
+// Check availability directly
+validator.is_node_type_available("blog:Article");   // checks both package and database
+validator.is_mixin_available("raisin:publishable");
+validator.is_archetype_available("base:Document");
+validator.is_element_type_available("ui:Button");
+<span class="boring">}</span></code></pre>
+<h3 id="validation-results"><a class="header" href="#validation-results">Validation Results</a></h3>
+<p>Collect validation findings into a <code>ContentValidationResult</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_packages::{ContentValidationResult, ContentValidationWarning};
+
+let mut result = ContentValidationResult::new();
+
+// Record type references found in content
+result.add_node_type_reference("blog:Article");
+result.add_mixin_reference("myapp:SEO");
+result.add_archetype_reference("base:Document");
+result.add_element_type_reference("ui:Button");
+
+// Add warnings for missing types
+result.add_warning(ContentValidationWarning {
+    file_path: "content/blog/post/node.yaml".to_string(),
+    reference_type: "node_type".to_string(),
+    type_name: "blog:Missing".to_string(),
+    message: "Node type not found in package. It may exist in the database.".to_string(),
+});
+
+if result.has_warnings() {
+    for warning in &amp;result.warnings {
+        println!("{}", warning);
+        // Output: [content/blog/post/node.yaml] node_type: node_type 'blog:Missing' - Node type not found...
+    }
+}
+
+// Merge results from multiple validation passes
+let mut combined = ContentValidationResult::new();
+combined.merge(result);
+<span class="boring">}</span></code></pre>
+<p>Validation is advisory – warnings indicate types that aren’t in the package or the known database types, but they may still resolve at runtime if the types exist elsewhere.</p>
+<h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
+<p>All package operations return <code>PackageResult&lt;T&gt;</code>, which wraps <code>PackageError</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Error</th><th>When</th></tr>
+</thead>
+<tbody>
+<tr><td><code>InvalidPackage(String)</code></td><td>General package format issues</td></tr>
+<tr><td><code>ManifestNotFound</code></td><td>ZIP archive has no <code>manifest.yaml</code></td></tr>
+<tr><td><code>InvalidManifest(String)</code></td><td>Manifest parsing or validation failures</td></tr>
+<tr><td><code>FileNotFound(String)</code></td><td>Requested file doesn’t exist in the archive</td></tr>
+<tr><td><code>ZipError</code></td><td>Underlying ZIP format issues</td></tr>
+<tr><td><code>IoError</code></td><td>I/O failures during read/write</td></tr>
+<tr><td><code>YamlError</code></td><td>YAML parsing failures</td></tr>
+<tr><td><code>JsonError</code></td><td>JSON parsing failures</td></tr>
+<tr><td><code>AlreadyInstalled(String)</code></td><td>Package is already installed</td></tr>
+<tr><td><code>NotInstalled(String)</code></td><td>Trying to uninstall a package that isn’t installed</td></tr>
+<tr><td><code>DependencyNotSatisfied(String, String)</code></td><td>A required dependency is missing or wrong version</td></tr>
+<tr><td><code>NodeTypeConflict(String)</code></td><td>A node type name conflicts with an existing one</td></tr>
+<tr><td><code>WorkspaceNotFound(String)</code></td><td>Referenced workspace doesn’t exist</td></tr>
+<tr><td><code>StorageError(String)</code></td><td>Storage layer failures</td></tr>
+</tbody>
+</table>
+</div>
+<p>Dependency graph operations use their own error type, <code>DependencyGraphError</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Error</th><th>When</th></tr>
+</thead>
+<tbody>
+<tr><td><code>CircularDependency { cycle }</code></td><td>Packages form a dependency cycle</td></tr>
+<tr><td><code>MissingDependency { package, dependency }</code></td><td>A declared dependency isn’t in the graph</td></tr>
+<tr><td><code>TypeReferenceNotFound { package, reference_type, name }</code></td><td>A type reference can’t be resolved</td></tr>
+</tbody>
+</table>
+</div>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/indexing-and-search.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/access-control-guide.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/indexing-and-search.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/access-control-guide.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace-2a3cd908.js"></script>
+        <script src="../mode-rust-2c9d5c9a.js"></script>
+        <script src="../editor-16ca416c.js"></script>
+        <script src="../theme-dawn-4493f9c8.js"></script>
+        <script src="../theme-tomorrow_night-9dbe62a9.js"></script>
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

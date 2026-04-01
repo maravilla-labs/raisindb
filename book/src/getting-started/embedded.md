@@ -8,9 +8,9 @@ Add RaisinDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-raisin-core = { git = "https://github.com/yourusername/raisindb" }
-raisin-rocksdb = { git = "https://github.com/yourusername/raisindb" }
-raisin-models = { git = "https://github.com/yourusername/raisindb" }
+raisin-core = { git = "https://github.com/maravilla-labs/raisindb" }
+raisin-rocksdb = { git = "https://github.com/maravilla-labs/raisindb" }
+raisin-models = { git = "https://github.com/maravilla-labs/raisindb" }
 tokio = { version = "1", features = ["full"] }
 ```
 

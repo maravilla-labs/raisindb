@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["full"] }
 Clone and run the reference server:
 
 ```bash
-git clone https://github.com/yourusername/raisindb
+git clone https://github.com/maravilla-labs/raisindb
 cd raisindb
 cargo run --bin raisin-server --features "storage-rocksdb,websocket,pgwire"
 ```

@@ -1,0 +1,1406 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>REST API - RaisinDB Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="A flexible, multi-tenant content database built with Rust">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-c3b4827e.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-7d500c97.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RaisinDB Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/api/rest-api.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="rest-api-reference"><a class="header" href="#rest-api-reference">REST API Reference</a></h1>
+<p>Complete reference for the RaisinDB REST API provided by <code>raisin-server</code>.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>The <code>raisin-server</code> binary provides a complete HTTP REST API for interacting with RaisinDB. It exposes:</p>
+<ul>
+<li><strong>Repository-style routes</strong> for path-based node operations</li>
+<li><strong>NodeType management</strong> for schema definition</li>
+<li><strong>Query endpoints</strong> for filtering and searching</li>
+<li><strong>Command execution</strong> for complex operations</li>
+<li><strong>File upload/download</strong> for binary assets</li>
+<li><strong>Workspace management</strong> for configuration</li>
+<li><strong>Audit logging</strong> for change tracking</li>
+</ul>
+<h2 id="server-setup"><a class="header" href="#server-setup">Server Setup</a></h2>
+<h3 id="running-the-server"><a class="header" href="#running-the-server">Running the Server</a></h3>
+<pre><code class="language-bash"># Clone the repository
+git clone https://github.com/maravilla-labs/raisindb
+cd raisindb
+
+# Build with RocksDB storage, WebSocket, and PGWire (default features)
+cargo build --release --package raisin-server --features "storage-rocksdb,websocket,pgwire"
+
+# Run with a configuration file
+RUST_LOG=info ./target/release/raisin-server --config examples/cluster/node1.toml
+</code></pre>
+<h3 id="configuration"><a class="header" href="#configuration">Configuration</a></h3>
+<p>The server can be configured via feature flags:</p>
+<pre><code class="language-bash"># Use RocksDB storage (persistent, default)
+cargo build --release --package raisin-server --features storage-rocksdb
+
+# Use S3 for binary storage
+cargo build --release --package raisin-server --features "storage-rocksdb,s3"
+</code></pre>
+<h3 id="base-url"><a class="header" href="#base-url">Base URL</a></h3>
+<pre><code>http://localhost:8080
+</code></pre>
+<p>All endpoints are prefixed with the base URL.</p>
+<h2 id="url-structure"><a class="header" href="#url-structure">URL Structure</a></h2>
+<p>Most API endpoints follow a repository-first URL pattern:</p>
+<pre><code>/api/repository/{repo}/{branch}/head/{workspace}/...
+</code></pre>
+<ul>
+<li><code>{repo}</code> - Repository identifier (project/database)</li>
+<li><code>{branch}</code> - Branch name (e.g., <code>main</code>)</li>
+<li><code>head</code> - Indicates current state (use <code>rev/{revision}</code> for historical snapshots)</li>
+<li><code>{workspace}</code> - Workspace name</li>
+</ul>
+<p>For example, to access nodes in the <code>content</code> workspace on the <code>main</code> branch of the <code>myapp</code> repository:</p>
+<pre><code>/api/repository/myapp/main/head/content/
+</code></pre>
+<h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
+<p>Authentication is applied automatically via middleware when using the RocksDB storage backend (<code>storage-rocksdb</code> feature). The server uses optional authentication - requests with valid credentials get an authenticated context, while unauthenticated requests proceed with limited access.</p>
+<h2 id="repository-routes"><a class="header" href="#repository-routes">Repository Routes</a></h2>
+<p>Path-based CRUD operations for nodes. All repository routes follow the pattern:</p>
+<pre><code>/api/repository/{repo}/{branch}/head/{workspace}/...
+</code></pre>
+<p>In the examples below, we use <code>myapp</code> as the repo, <code>main</code> as the branch, and <code>content</code> as the workspace.</p>
+<h3 id="list-root-nodes"><a class="header" href="#list-root-nodes">List Root Nodes</a></h3>
+<p>Get all nodes at the root level of a workspace.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/repository/myapp/main/head/content/
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">[
+  {
+    "id": "abc123",
+    "name": "homepage",
+    "path": "/homepage",
+    "node_type": "myapp:Page",
+    "properties": {...},
+    "children": [],
+    "version": 1,
+    "created_at": "2024-01-01T00:00:00Z"
+  }
+]
+</code></pre>
+<h3 id="create-node-at-root"><a class="header" href="#create-node-at-root">Create Node at Root</a></h3>
+<p>Create a new node at the root of a workspace.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/
+Content-Type: application/json
+
+{
+  "name": "my-page",
+  "node_type": "myapp:Page",
+  "properties": {
+    "title": "My Page"
+  }
+}
+</code></pre>
+<p><strong>Query Parameters:</strong></p>
+<ul>
+<li><code>deep=true</code> - Auto-create missing parent folders</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "homepage",
+    "node_type": "myapp:Page",
+    "properties": {
+      "title": "Welcome"
+    }
+  }'
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "id": "abc123",
+  "name": "homepage",
+  "path": "/homepage",
+  "node_type": "myapp:Page",
+  "properties": {
+    "title": "Welcome"
+  },
+  "version": 1,
+  "created_at": "2024-01-01T00:00:00Z"
+}
+</code></pre>
+<h3 id="get-node-by-id"><a class="header" href="#get-node-by-id">Get Node by ID</a></h3>
+<p>Get a node by its unique ID.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/$ref/{id}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/repository/myapp/main/head/content/\$ref/abc123
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "id": "abc123",
+  "name": "homepage",
+  "path": "/homepage",
+  "node_type": "myapp:Page",
+  "properties": {...}
+}
+</code></pre>
+<h3 id="get-node-by-path"><a class="header" href="#get-node-by-path">Get Node by Path</a></h3>
+<p>Get a node by its path.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/{*path}
+</code></pre>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Get a node
+curl http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post
+
+# Get as YAML
+curl http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post.yaml
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "id": "abc123",
+  "name": "my-post",
+  "path": "/blog/my-post",
+  "node_type": "myapp:Article",
+  "properties": {
+    "title": "My First Post"
+  }
+}
+</code></pre>
+<h3 id="list-children"><a class="header" href="#list-children">List Children</a></h3>
+<p>List all children of a folder.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/{*path}/
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/repository/myapp/main/head/content/blog/
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">[
+  {
+    "id": "post1",
+    "name": "first-post",
+    "path": "/blog/first-post",
+    "node_type": "myapp:Article"
+  },
+  {
+    "id": "post2",
+    "name": "second-post",
+    "path": "/blog/second-post",
+    "node_type": "myapp:Article"
+  }
+]
+</code></pre>
+<h3 id="deep-listing"><a class="header" href="#deep-listing">Deep Listing</a></h3>
+<p>Get nested children with depth control.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/{*path}?level={depth}
+GET /api/repository/{repo}/{branch}/head/{workspace}/{*path}?level={depth}&amp;flatten=true
+</code></pre>
+<p><strong>Query Parameters:</strong></p>
+<ul>
+<li><code>level</code> - Depth to traverse (1-10)</li>
+<li><code>flatten</code> - If true, returns flat map; if false, returns nested structure</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<pre><code class="language-bash"># Nested structure
+curl 'http://localhost:8080/api/repository/myapp/main/head/content/blog?level=3'
+
+# Flat map
+curl 'http://localhost:8080/api/repository/myapp/main/head/content/blog?level=3&amp;flatten=true'
+</code></pre>
+<p><strong>Nested Response:</strong></p>
+<pre><code class="language-json">{
+  "/blog": {
+    "node": {...},
+    "children": {
+      "/blog/2024": {
+        "node": {...},
+        "children": {}
+      }
+    }
+  }
+}
+</code></pre>
+<p><strong>Flat Response:</strong></p>
+<pre><code class="language-json">{
+  "/blog": {...},
+  "/blog/2024": {...},
+  "/blog/2024/first-post": {...}
+}
+</code></pre>
+<h3 id="create-child-node"><a class="header" href="#create-child-node">Create Child Node</a></h3>
+<p>Create a node as a child of the path.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*parent_path}
+Content-Type: application/json
+
+{
+  "name": "child-node",
+  "node_type": "myapp:Page",
+  "properties": {...}
+}
+</code></pre>
+<p><strong>Query Parameters:</strong></p>
+<ul>
+<li><code>deep=true</code> - Auto-create missing parent folders</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST 'http://localhost:8080/api/repository/myapp/main/head/content/blog?deep=true' \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-post",
+    "node_type": "myapp:Article",
+    "properties": {
+      "title": "My First Post"
+    }
+  }'
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "id": "newid",
+  "name": "my-post",
+  "path": "/blog/my-post",
+  "node_type": "myapp:Article",
+  "properties": {
+    "title": "My First Post"
+  }
+}
+</code></pre>
+<h3 id="update-node"><a class="header" href="#update-node">Update Node</a></h3>
+<p>Update a node’s properties.</p>
+<pre><code class="language-http">PUT /api/repository/{repo}/{branch}/head/{workspace}/{*path}
+Content-Type: application/json
+
+{
+  "id": "abc123",
+  "name": "my-post",
+  "path": "/blog/my-post",
+  "node_type": "myapp:Article",
+  "properties": {
+    "title": "Updated Title"
+  }
+}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X PUT http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "abc123",
+    "name": "my-post",
+    "node_type": "myapp:Article",
+    "properties": {
+      "title": "Updated Title"
+    }
+  }'
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{"status": "ok"}
+</code></pre>
+<h3 id="delete-node"><a class="header" href="#delete-node">Delete Node</a></h3>
+<p>Delete a node by path.</p>
+<pre><code class="language-http">DELETE /api/repository/{repo}/{branch}/head/{workspace}/{*path}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X DELETE http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{"deleted": true}
+</code></pre>
+<h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
+<p>Execute operations on nodes using the <code>raisin:cmd</code> path marker.</p>
+<p><strong>Command Syntax:</strong></p>
+<pre><code>POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/{command}
+</code></pre>
+<p>Commands can also be executed via query parameter for compatibility:</p>
+<pre><code>POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}?command={command}
+</code></pre>
+<h3 id="rename-node"><a class="header" href="#rename-node">Rename Node</a></h3>
+<p>Rename a node.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/rename
+Content-Type: application/json
+
+{
+  "newName": "new-name"
+}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/old-name/raisin:cmd/rename \
+  -H "Content-Type: application/json" \
+  -d '{"newName": "new-name"}'
+</code></pre>
+<p><strong>Alternative (query parameter):</strong></p>
+<pre><code class="language-bash">curl -X POST 'http://localhost:8080/api/repository/myapp/main/head/content/blog/old-name?command=rename' \
+  -H "Content-Type: application/json" \
+  -d '{"newName": "new-name"}'
+</code></pre>
+<h3 id="move-node"><a class="header" href="#move-node">Move Node</a></h3>
+<p>Move a node to a new location.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/move
+Content-Type: application/json
+
+{
+  "targetPath": "/new/location"
+}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post/raisin:cmd/move \
+  -H "Content-Type: application/json" \
+  -d '{"targetPath": "/archive/old-posts"}'
+</code></pre>
+<h3 id="copy-node"><a class="header" href="#copy-node">Copy Node</a></h3>
+<p>Copy a single node (without children).</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/copy
+Content-Type: application/json
+
+{
+  "targetPath": "/destination/folder",
+  "newName": "copied-node"
+}
+</code></pre>
+<p><strong>Parameters:</strong></p>
+<ul>
+<li><code>targetPath</code> - Destination parent folder</li>
+<li><code>newName</code> - Optional new name for the copy</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post/raisin:cmd/copy \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetPath": "/archive",
+    "newName": "archived-post"
+  }'
+</code></pre>
+<h3 id="copy-tree"><a class="header" href="#copy-tree">Copy Tree</a></h3>
+<p>Copy a node with all its descendants.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/copy_tree
+Content-Type: application/json
+
+{
+  "targetPath": "/destination/folder",
+  "newName": "copied-folder"
+}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/2024/raisin:cmd/copy_tree \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetPath": "/archive",
+    "newName": "2024-backup"
+  }'
+</code></pre>
+<h3 id="publish-node"><a class="header" href="#publish-node">Publish Node</a></h3>
+<p>Publish a single node.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/publish
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post/raisin:cmd/publish
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{}
+</code></pre>
+<h3 id="publish-tree"><a class="header" href="#publish-tree">Publish Tree</a></h3>
+<p>Publish a node and all its descendants.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/publish_tree
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/2024/raisin:cmd/publish_tree
+</code></pre>
+<h3 id="unpublish-node"><a class="header" href="#unpublish-node">Unpublish Node</a></h3>
+<p>Unpublish a single node.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/unpublish
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post/raisin:cmd/unpublish
+</code></pre>
+<h3 id="unpublish-tree"><a class="header" href="#unpublish-tree">Unpublish Tree</a></h3>
+<p>Unpublish a node and all its descendants.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/unpublish_tree
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/2024/raisin:cmd/unpublish_tree
+</code></pre>
+<h3 id="reorder-child"><a class="header" href="#reorder-child">Reorder Child</a></h3>
+<p>Change the order of a child within its parent.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/{*path}/raisin:cmd/reorder
+Content-Type: application/json
+
+{
+  "targetPath": "/parent/sibling-node",
+  "movePosition": "after"
+}
+</code></pre>
+<p><strong>Parameters:</strong></p>
+<ul>
+<li><code>targetPath</code> - Path to sibling node</li>
+<li><code>movePosition</code> - Either <code>"before"</code> or <code>"after"</code></li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post/raisin:cmd/reorder \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetPath": "/blog/other-post",
+    "movePosition": "before"
+  }'
+</code></pre>
+<h2 id="property-path-access"><a class="header" href="#property-path-access">Property Path Access</a></h2>
+<p>Access and update specific properties within a node.</p>
+<h3 id="get-property"><a class="header" href="#get-property">Get Property</a></h3>
+<p>Get a specific property value.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/*path@property.path
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash"># Get title property
+curl http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post@title
+
+# Get nested property
+curl http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post@author.email
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">"My Post Title"
+</code></pre>
+<h3 id="update-property"><a class="header" href="#update-property">Update Property</a></h3>
+<p>Update a specific property without replacing the entire node.</p>
+<pre><code class="language-http">PUT /api/repository/{repo}/{branch}/head/{workspace}/*path@property.path
+Content-Type: application/json
+
+"new value"
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X PUT http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post@title \
+  -H "Content-Type: application/json" \
+  -d '"Updated Title"'
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{"status": "property updated"}
+</code></pre>
+<h2 id="version-history"><a class="header" href="#version-history">Version History</a></h2>
+<p>Access historical versions of nodes (requires versioning enabled).</p>
+<h3 id="list-versions"><a class="header" href="#list-versions">List Versions</a></h3>
+<p>Get all versions of a node using the <code>raisin:version</code> path marker.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/*path/raisin:version
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post/raisin:version
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">[
+  {
+    "id": "v1",
+    "node_id": "abc123",
+    "version": 1,
+    "created_at": "2024-01-01T00:00:00Z"
+  },
+  {
+    "id": "v2",
+    "node_id": "abc123",
+    "version": 2,
+    "created_at": "2024-01-02T00:00:00Z"
+  }
+]
+</code></pre>
+<h3 id="get-specific-version"><a class="header" href="#get-specific-version">Get Specific Version</a></h3>
+<p>Get a specific version of a node by version number.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/*path/raisin:version/:number
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/repository/myapp/main/head/content/blog/my-post/raisin:version/2
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "id": "v2",
+  "node_id": "abc123",
+  "version": 2,
+  "node_data": {...},
+  "created_at": "2024-01-02T00:00:00Z"
+}
+</code></pre>
+<h2 id="file-uploaddownload"><a class="header" href="#file-uploaddownload">File Upload/Download</a></h2>
+<p>Upload and download binary files.</p>
+<h3 id="upload-file"><a class="header" href="#upload-file">Upload File</a></h3>
+<p>Upload a file to a node property. If the node doesn’t exist, a new <code>raisin:Asset</code> node
+is automatically created with the filename as the <code>title</code> property.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/*path
+Content-Type: multipart/form-data
+
+&lt;file data&gt;
+</code></pre>
+<p><strong>Query Parameters:</strong></p>
+<ul>
+<li><code>inline=true</code> - Store file content as string (max 11MB, must be valid UTF-8)</li>
+<li><code>override_existing=true</code> - Replace existing file</li>
+<li><code>commit_message</code> - Custom commit message for transaction</li>
+<li><code>commit_actor</code> - Actor name for audit trail</li>
+</ul>
+<p><strong>Example (external storage - creates node if needed):</strong></p>
+<pre><code class="language-bash"># Uploads logo.png and auto-creates a raisin:Asset node at /assets/logo
+curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/assets/logo \
+  -F "file=@logo.png"
+</code></pre>
+<p><strong>Example (inline storage):</strong></p>
+<pre><code class="language-bash">curl -X POST 'http://localhost:8080/api/repository/myapp/main/head/content/docs/readme?inline=true' \
+  -F "file=@README.md"
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{"status": "file uploaded"}
+</code></pre>
+<p>The file is stored as a <code>Resource</code> property on the node:</p>
+<pre><code class="language-json">{
+  "properties": {
+    "file": {
+      "uuid": "resource-id",
+      "name": "logo.png",
+      "size": 12345,
+      "mime_type": "image/png",
+      "url": "/files/abc123.png",
+      "metadata": {
+        "storage_key": "abc123"
+      },
+      "is_loaded": true,
+      "is_external": false
+    }
+  }
+}
+</code></pre>
+<h3 id="download-file"><a class="header" href="#download-file">Download File</a></h3>
+<p>Download a file from a node property as an attachment.</p>
+<p><strong>Using command pattern (preferred):</strong></p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/*path/raisin:cmd/download
+GET /api/repository/{repo}/{branch}/head/{workspace}/*path@property/raisin:cmd/download
+</code></pre>
+<p><strong>Using query parameter:</strong></p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/*path?command=download
+GET /api/repository/{repo}/{branch}/head/{workspace}/*path@property?command=download
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash"># Download from default "file" property using command pattern
+curl http://localhost:8080/api/repository/myapp/main/head/content/assets/logo/raisin:cmd/download
+
+# Download using query parameter
+curl http://localhost:8080/api/repository/myapp/main/head/content/assets/logo?command=download
+
+# Download from specific property
+curl http://localhost:8080/api/repository/myapp/main/head/content/assets/banner@image/raisin:cmd/download
+</code></pre>
+<p><strong>Response:</strong>
+Binary file data with appropriate <code>Content-Type</code> and <code>Content-Disposition: attachment</code> headers.</p>
+<h3 id="stream-file-inline-auto-detect"><a class="header" href="#stream-file-inline-auto-detect">Stream File Inline (Auto-Detect)</a></h3>
+<p>Access a Resource property directly to stream content inline (without download prompt).
+This is useful for displaying images, serving files to browsers, or embedding content.</p>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/head/{workspace}/*path@property
+</code></pre>
+<p>When you access a property containing a <code>Resource</code> type, the content is automatically
+streamed with the correct <code>Content-Type</code> header but <strong>without</strong> <code>Content-Disposition: attachment</code>.</p>
+<p><strong>Behavior by property type:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property Type</th><th>Response</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Resource</code> (internal storage)</td><td>Streams binary content with <code>Content-Type</code></td></tr>
+<tr><td><code>Resource</code> (external URL)</td><td>307 redirect to the external URL</td></tr>
+<tr><td><code>String</code> (file-like property)</td><td>Returns as text with guessed <code>Content-Type</code></td></tr>
+<tr><td>Other types</td><td>Returns JSON</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Example - Display image in browser:</strong></p>
+<pre><code class="language-bash"># Returns image with Content-Type: image/png (no download prompt)
+curl http://localhost:8080/api/repository/myapp/main/head/content/assets/logo@file
+</code></pre>
+<p><strong>Example - Difference between streaming and download:</strong></p>
+<pre><code class="language-bash"># Stream inline (for embedding in pages, displaying images)
+curl http://localhost:8080/api/repository/myapp/main/head/content/assets/logo@file
+# Response: Content-Type: image/png
+
+# Download as file (triggers browser download dialog)
+curl http://localhost:8080/api/repository/myapp/main/head/content/assets/logo/raisin:cmd/download
+# Response: Content-Type: image/png
+#           Content-Disposition: attachment; filename="logo.png"
+</code></pre>
+<h2 id="nodetype-management"><a class="header" href="#nodetype-management">NodeType Management</a></h2>
+<p>Manage NodeType schemas. NodeTypes are scoped by repository and branch.</p>
+<h3 id="list-all-nodetypes"><a class="header" href="#list-all-nodetypes">List All NodeTypes</a></h3>
+<p>Get all NodeTypes in a repository branch.</p>
+<pre><code class="language-http">GET /api/management/{repo}/{branch}/nodetypes
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/management/myapp/main/nodetypes
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">[
+  {
+    "name": "Article",
+    "description": "Blog article",
+    "properties": [...],
+    "publishable": true
+  }
+]
+</code></pre>
+<h3 id="list-published-nodetypes"><a class="header" href="#list-published-nodetypes">List Published NodeTypes</a></h3>
+<p>Get only published NodeTypes.</p>
+<pre><code class="language-http">GET /api/management/{repo}/{branch}/nodetypes/published
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/management/myapp/main/nodetypes/published
+</code></pre>
+<h3 id="create-nodetype"><a class="header" href="#create-nodetype">Create NodeType</a></h3>
+<p>Create a new NodeType.</p>
+<pre><code class="language-http">POST /api/management/{repo}/{branch}/nodetypes
+Content-Type: application/json
+
+{
+  "name": "Article",
+  "description": "A blog article",
+  "properties": [
+    {
+      "name": "title",
+      "property_type": "String",
+      "required": true
+    }
+  ],
+  "versionable": true,
+  "publishable": true
+}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/management/myapp/main/nodetypes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Article",
+    "description": "Blog article",
+    "properties": [
+      {
+        "name": "title",
+        "property_type": "String",
+        "required": true
+      },
+      {
+        "name": "content",
+        "property_type": "String",
+        "required": true
+      }
+    ],
+    "versionable": true,
+    "publishable": true
+  }'
+</code></pre>
+<h3 id="get-nodetype"><a class="header" href="#get-nodetype">Get NodeType</a></h3>
+<p>Get a specific NodeType.</p>
+<pre><code class="language-http">GET /api/management/{repo}/{branch}/nodetypes/{name}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/management/myapp/main/nodetypes/Article
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "name": "Article",
+  "description": "Blog article",
+  "properties": [...],
+  "versionable": true,
+  "publishable": true,
+  "created_at": "2024-01-01T00:00:00Z"
+}
+</code></pre>
+<h3 id="get-resolved-nodetype"><a class="header" href="#get-resolved-nodetype">Get Resolved NodeType</a></h3>
+<p>Get a NodeType with inheritance resolved (includes properties from <code>extends</code> and <code>mixins</code>).</p>
+<pre><code class="language-http">GET /api/management/{repo}/{branch}/nodetypes/{name}/resolved
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/management/myapp/main/nodetypes/Article/resolved
+</code></pre>
+<h3 id="update-nodetype"><a class="header" href="#update-nodetype">Update NodeType</a></h3>
+<p>Update an existing NodeType.</p>
+<pre><code class="language-http">PUT /api/management/{repo}/{branch}/nodetypes/{name}
+Content-Type: application/json
+
+{
+  "name": "Article",
+  "description": "Updated description",
+  "properties": [...]
+}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X PUT http://localhost:8080/api/management/myapp/main/nodetypes/Article \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Article",
+    "description": "Updated blog article type",
+    "properties": [...]
+  }'
+</code></pre>
+<h3 id="delete-nodetype"><a class="header" href="#delete-nodetype">Delete NodeType</a></h3>
+<p>Delete a NodeType.</p>
+<pre><code class="language-http">DELETE /api/management/{repo}/{branch}/nodetypes/{name}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X DELETE http://localhost:8080/api/management/myapp/main/nodetypes/Article
+</code></pre>
+<h3 id="publish-nodetype"><a class="header" href="#publish-nodetype">Publish NodeType</a></h3>
+<p>Publish a NodeType to make it available for use.</p>
+<pre><code class="language-http">POST /api/management/{repo}/{branch}/nodetypes/{name}/publish
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/management/myapp/main/nodetypes/Article/publish
+</code></pre>
+<h3 id="unpublish-nodetype"><a class="header" href="#unpublish-nodetype">Unpublish NodeType</a></h3>
+<p>Unpublish a NodeType.</p>
+<pre><code class="language-http">POST /api/management/{repo}/{branch}/nodetypes/{name}/unpublish
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/management/myapp/main/nodetypes/Article/unpublish
+</code></pre>
+<h3 id="validate-node"><a class="header" href="#validate-node">Validate Node</a></h3>
+<p>Validate a node against its NodeType schema without saving it.</p>
+<pre><code class="language-http">POST /api/management/{repo}/{branch}/nodetypes/validate
+Content-Type: application/json
+
+{
+  "name": "test-node",
+  "node_type": "Article",
+  "properties": {
+    "title": "Test Article"
+  }
+}
+</code></pre>
+<p><strong>Note</strong>: Pass a complete Node object (including <code>name</code> and <code>node_type</code> fields).</p>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/management/myapp/main/nodetypes/validate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "test-article",
+    "node_type": "Article",
+    "properties": {
+      "title": "Test",
+      "content": "Test content"
+    }
+  }'
+</code></pre>
+<p><strong>Response (valid):</strong></p>
+<pre><code class="language-json">{
+  "valid": true,
+  "message": "Node is valid"
+}
+</code></pre>
+<p><strong>Response (invalid):</strong></p>
+<pre><code class="language-json">{
+  "valid": false,
+  "message": "Missing required property 'content' for NodeType 'Article'"
+}
+</code></pre>
+<h2 id="query-endpoints"><a class="header" href="#query-endpoints">Query Endpoints</a></h2>
+<p>Search and filter nodes.</p>
+<h3 id="simple-query"><a class="header" href="#simple-query">Simple Query</a></h3>
+<p>Query nodes by type, parent, or path with pagination.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/query
+Content-Type: application/json
+
+{
+  "nodeType": "myapp:Article",
+  "parent": "/blog",
+  "limit": 10,
+  "offset": 0
+}
+</code></pre>
+<p><strong>Parameters:</strong></p>
+<ul>
+<li><code>nodeType</code> - Filter by node type</li>
+<li><code>parent</code> - Filter by parent path</li>
+<li><code>path</code> - Get specific node by path (takes precedence)</li>
+<li><code>limit</code> - Maximum results (default: all)</li>
+<li><code>offset</code> - Offset for pagination (default: 0)</li>
+</ul>
+<p><strong>Note</strong>: You must provide at least one of: <code>path</code>, <code>parent</code>, or <code>nodeType</code>.</p>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "nodeType": "myapp:Article",
+    "limit": 10
+  }'
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "items": [
+    {
+      "id": "abc123",
+      "name": "my-article",
+      "path": "/blog/my-article",
+      "node_type": "myapp:Article",
+      "properties": {...}
+    }
+  ],
+  "page": {
+    "total": 25,
+    "limit": 10,
+    "offset": 0,
+    "nextOffset": 10
+  }
+}
+</code></pre>
+<h3 id="advanced-query-dsl"><a class="header" href="#advanced-query-dsl">Advanced Query (DSL)</a></h3>
+<p>Query nodes using structured filter expressions with operators.</p>
+<pre><code class="language-http">POST /api/repository/{repo}/{branch}/head/{workspace}/query/dsl
+Content-Type: application/json
+
+{
+  "and": [
+    {
+      "nodeType": {
+        "eq": "myapp:Article"
+      }
+    },
+    {
+      "properties.published": {
+        "eq": true
+      }
+    }
+  ],
+  "orderBy": {
+    "path": "asc"
+  },
+  "limit": 10,
+  "offset": 0
+}
+</code></pre>
+<p><strong>Query Structure:</strong></p>
+<ul>
+<li><code>and</code> - Array of filters (all must match)</li>
+<li><code>or</code> - Array of filters (any must match)</li>
+<li><code>not</code> - Negates a filter</li>
+<li><code>orderBy</code> - Sort results by field(s)</li>
+<li><code>limit</code> - Maximum results</li>
+<li><code>offset</code> - Offset for pagination</li>
+</ul>
+<p><strong>Field Operators:</strong></p>
+<ul>
+<li><code>eq</code> - Equals</li>
+<li><code>ne</code> - Not equals</li>
+<li><code>like</code> - String contains (substring match)</li>
+<li><code>in</code> - Value in array</li>
+<li><code>gt</code> - Greater than</li>
+<li><code>lt</code> - Less than</li>
+<li><code>gte</code> - Greater than or equal</li>
+<li><code>lte</code> - Less than or equal</li>
+<li><code>exists</code> - Field exists (true) or doesn’t exist (false)</li>
+<li><code>contains</code> - Array contains value</li>
+</ul>
+<p><strong>Examples:</strong></p>
+<p>Filter by node type:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/query/dsl \
+  -H "Content-Type: application/json" \
+  -d '{
+    "and": [
+      {
+        "nodeType": {
+          "eq": "myapp:Article"
+        }
+      }
+    ],
+    "limit": 10
+  }'
+</code></pre>
+<p>Filter by property value:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/query/dsl \
+  -H "Content-Type: application/json" \
+  -d '{
+    "and": [
+      {
+        "properties.published": {
+          "eq": true
+        }
+      },
+      {
+        "properties.author": {
+          "eq": "John Doe"
+        }
+      }
+    ]
+  }'
+</code></pre>
+<p>Filter by path pattern:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/query/dsl \
+  -H "Content-Type: application/json" \
+  -d '{
+    "and": [
+      {
+        "path": {
+          "like": "/blog/"
+        }
+      }
+    ]
+  }'
+</code></pre>
+<p>Multiple conditions with OR:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/query/dsl \
+  -H "Content-Type: application/json" \
+  -d '{
+    "or": [
+      {
+        "nodeType": {
+          "eq": "myapp:Article"
+        }
+      },
+      {
+        "nodeType": {
+          "eq": "myapp:Page"
+        }
+      }
+    ]
+  }'
+</code></pre>
+<p>NOT filter:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/query/dsl \
+  -H "Content-Type: application/json" \
+  -d '{
+    "not": {
+      "properties.published": {
+        "eq": true
+      }
+    }
+  }'
+</code></pre>
+<p>Range query:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/api/repository/myapp/main/head/content/query/dsl \
+  -H "Content-Type: application/json" \
+  -d '{
+    "and": [
+      {
+        "properties.price": {
+          "gte": 10
+        }
+      },
+      {
+        "properties.price": {
+          "lte": 100
+        }
+      }
+    ]
+  }'
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "items": [
+    {
+      "id": "abc123",
+      "name": "my-article",
+      "path": "/blog/my-article",
+      "node_type": "myapp:Article",
+      "properties": {
+        "published": true,
+        "author": "John Doe"
+      }
+    }
+  ],
+  "page": {
+    "total": 5,
+    "limit": 10,
+    "offset": 0,
+    "nextOffset": null
+  }
+}
+</code></pre>
+<h2 id="workspace-management"><a class="header" href="#workspace-management">Workspace Management</a></h2>
+<p>Manage workspace configurations. Workspaces are scoped to a repository.</p>
+<h3 id="list-workspaces"><a class="header" href="#list-workspaces">List Workspaces</a></h3>
+<p>Get all workspaces for a repository.</p>
+<pre><code class="language-http">GET /api/workspaces/{repo}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/workspaces/myapp
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">[
+  {
+    "name": "content",
+    "allowed_node_types": ["raisin:Folder", "myapp:Page"],
+    "allowed_root_node_types": ["raisin:Folder"]
+  }
+]
+</code></pre>
+<h3 id="get-workspace"><a class="header" href="#get-workspace">Get Workspace</a></h3>
+<p>Get a specific workspace configuration.</p>
+<pre><code class="language-http">GET /api/workspaces/{repo}/{name}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/workspaces/myapp/content
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">{
+  "name": "content",
+  "description": "Website content",
+  "allowed_node_types": [
+    "raisin:Folder",
+    "myapp:Page",
+    "myapp:Article"
+  ],
+  "allowed_root_node_types": [
+    "raisin:Folder"
+  ],
+  "created_at": "2024-01-01T00:00:00Z"
+}
+</code></pre>
+<h3 id="createupdate-workspace"><a class="header" href="#createupdate-workspace">Create/Update Workspace</a></h3>
+<p>Create or update a workspace.</p>
+<pre><code class="language-http">PUT /api/workspaces/{repo}/{name}
+Content-Type: application/json
+
+{
+  "name": "content",
+  "description": "Website content",
+  "allowed_node_types": [
+    "raisin:Folder",
+    "myapp:Page"
+  ],
+  "allowed_root_node_types": [
+    "raisin:Folder"
+  ]
+}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl -X PUT http://localhost:8080/api/workspaces/myapp/content \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "content",
+    "description": "Website content",
+    "allowed_node_types": [
+      "raisin:Folder",
+      "myapp:Page"
+    ],
+    "allowed_root_node_types": [
+      "raisin:Folder"
+    ]
+  }'
+</code></pre>
+<h2 id="audit-logs"><a class="header" href="#audit-logs">Audit Logs</a></h2>
+<p>Access audit logs for change tracking (requires audit adapter configured).</p>
+<h3 id="get-audit-logs-by-node-id"><a class="header" href="#get-audit-logs-by-node-id">Get Audit Logs by Node ID</a></h3>
+<p>Get all audit logs for a specific node.</p>
+<pre><code class="language-http">GET /api/audit/{repo}/{branch}/{workspace}/by-id/{id}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/audit/myapp/main/content/by-id/abc123
+</code></pre>
+<p><strong>Response:</strong></p>
+<pre><code class="language-json">[
+  {
+    "id": "log1",
+    "node_id": "abc123",
+    "action": "Update",
+    "timestamp": "2024-01-01T00:00:00Z",
+    "user_id": "user123"
+  }
+]
+</code></pre>
+<h3 id="get-audit-logs-by-path"><a class="header" href="#get-audit-logs-by-path">Get Audit Logs by Path</a></h3>
+<p>Get audit logs for a node by its path.</p>
+<pre><code class="language-http">GET /api/audit/{repo}/{branch}/{workspace}/{*path}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash">curl http://localhost:8080/api/audit/myapp/main/content/blog/my-post
+</code></pre>
+<h2 id="error-responses"><a class="header" href="#error-responses">Error Responses</a></h2>
+<p>The API uses standard HTTP status codes:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Status</th><th>Description</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td><code>200</code></td><td>Success</td><td>Node retrieved successfully</td></tr>
+<tr><td><code>400</code></td><td>Bad Request</td><td>Validation error, malformed JSON</td></tr>
+<tr><td><code>404</code></td><td>Not Found</td><td>Node or NodeType not found</td></tr>
+<tr><td><code>500</code></td><td>Internal Server Error</td><td>Database error, unexpected failure</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Error Response Format:</strong></p>
+<p>Most errors return a status code. Validation errors may include details in the response body:</p>
+<pre><code class="language-json">{
+  "error": "Validation error: Missing required property 'title'"
+}
+</code></pre>
+<p><strong>Common Validation Errors:</strong></p>
+<ul>
+<li>“Missing required property ‘X’” - Required property not provided</li>
+<li>“NodeType ‘X’ not found” - Invalid node_type specified</li>
+<li>“Undefined property ‘X’ in strict mode” - Extra property in strict NodeType</li>
+<li>“Property ‘X’ must be unique” - Unique constraint violation</li>
+<li>“Parent node ‘X’ not found” - Invalid parent path</li>
+<li>“Cannot change node_type” - Attempted to change NodeType on update</li>
+</ul>
+<h2 id="response-formats"><a class="header" href="#response-formats">Response Formats</a></h2>
+<h3 id="json-default"><a class="header" href="#json-default">JSON (Default)</a></h3>
+<pre><code class="language-http">GET /api/repository/myapp/main/head/content/my-page
+</code></pre>
+<pre><code class="language-json">{
+  "id": "abc123",
+  "name": "my-page",
+  "path": "/my-page",
+  "node_type": "myapp:Page",
+  "properties": {...}
+}
+</code></pre>
+<h3 id="yaml"><a class="header" href="#yaml">YAML</a></h3>
+<p>Add <code>.yaml</code> or <code>.yml</code> extension to get YAML response:</p>
+<pre><code class="language-http">GET /api/repository/myapp/main/head/content/my-page.yaml
+</code></pre>
+<pre><code class="language-yaml">id: abc123
+name: my-page
+path: /my-page
+node_type: myapp:Page
+properties:
+  title: My Page
+</code></pre>
+<h2 id="revision-routes-read-only"><a class="header" href="#revision-routes-read-only">Revision Routes (Read-Only)</a></h2>
+<p>Access historical snapshots of the repository at a specific revision. These routes are read-only.</p>
+<h3 id="get-root-at-revision"><a class="header" href="#get-root-at-revision">Get Root at Revision</a></h3>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/rev/{revision}/{workspace}/
+</code></pre>
+<h3 id="get-node-by-id-at-revision"><a class="header" href="#get-node-by-id-at-revision">Get Node by ID at Revision</a></h3>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/rev/{revision}/{workspace}/$ref/{id}
+</code></pre>
+<h3 id="get-node-by-path-at-revision"><a class="header" href="#get-node-by-path-at-revision">Get Node by Path at Revision</a></h3>
+<pre><code class="language-http">GET /api/repository/{repo}/{branch}/rev/{revision}/{workspace}/{*path}
+</code></pre>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash"># Get the state of a node at a specific revision
+curl http://localhost:8080/api/repository/myapp/main/rev/1234567890/content/blog/my-post
+</code></pre>
+<h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
+<ul>
+<li><a href="../getting-started/server.html">Standalone Server Guide</a> - Running and configuring the server</li>
+<li><a href="../guides/embedding-guide.html">Embedding Guide</a> - Using NodeService directly in your Rust app</li>
+<li><a href="../guides/multi-tenant-saas.html">Multi-Tenant SaaS</a> - Building a multi-tenant system</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/binary-storage.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../api/management-api.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/binary-storage.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../api/management-api.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace-2a3cd908.js"></script>
+        <script src="../mode-rust-2c9d5c9a.js"></script>
+        <script src="../editor-16ca416c.js"></script>
+        <script src="../theme-dawn-4493f9c8.js"></script>
+        <script src="../theme-tomorrow_night-9dbe62a9.js"></script>
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
