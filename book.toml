@@ -12,8 +12,8 @@ build-dir = "book/output"
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/yourusername/raisindb"
-edit-url-template = "https://github.com/yourusername/raisindb/edit/main/{path}"
+git-repository-url = "https://github.com/maravilla-labs/raisindb"
+edit-url-template = "https://github.com/maravilla-labs/raisindb/edit/main/{path}"
 
 [output.html.playground]
 editable = true
