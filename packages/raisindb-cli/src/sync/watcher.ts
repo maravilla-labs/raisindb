@@ -287,7 +287,7 @@ export class SyncWatcher extends EventEmitter {
    */
   private handleLocalChange(type: ChangeEvent['type'], filePath: string): void {
     // Get relative path from watch base (content/ dir if it exists)
-    const relativePath = path.relative(this.watchBase, filePath);
+    const relativePath = path.relative(this.watchBase, filePath).split(path.sep).join('/');
 
     // Ignore changes to in-flight paths (currently being synced)
     if (this.inFlightPaths.has(relativePath)) {

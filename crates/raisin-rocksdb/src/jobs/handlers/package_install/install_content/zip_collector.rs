@@ -84,11 +84,11 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 continue;
             }
 
-            // Decode namespace encoding: _raisin_access_control → raisin:access_control
+            // Decode namespace encoding: _raisin__access_control → raisin:access_control
             let raw_ws = path_parts[1];
             let workspace = if raw_ws.starts_with('_') && !raw_ws.starts_with("__") {
-                if let Some(pos) = raw_ws[1..].find('_') {
-                    format!("{}:{}", &raw_ws[1..pos + 1], &raw_ws[pos + 2..])
+                if let Some(pos) = raw_ws[1..].find("__") {
+                    format!("{}:{}", &raw_ws[1..pos + 1], &raw_ws[pos + 3..])
                 } else {
                     raw_ws.to_string()
                 }
