@@ -8,7 +8,8 @@ import { syncPackage } from './commands/sync.js';
 import { clonePackage } from './commands/clone.js';
 import { createFromServer } from './commands/create-from-server.js';
 import { initPackage } from './commands/init.js';
-import { serverInstall, serverStart, serverVersion, serverUpdate } from './commands/server.js';
+import { serverInstall, serverStart, serverVersion, serverUpdate, serverStop, serverStatus, serverLogs } from './commands/server.js';
+import { HelpDisplay } from './components/HelpDisplay.js';
 
 const program = new Command();
 
@@ -183,21 +184,67 @@ serverCmd
 
 serverCmd
   .command('start')
-  .description('Start the RaisinDB server (installs if needed)')
-  .option('--port <port>', 'HTTP port')
-  .option('--pgwire-enabled <bool>', 'Enable PostgreSQL wire protocol')
+  .description('Start the RaisinDB server (dev mode by default)')
+  .option('--port <port>', 'HTTP port (default: 8080)')
+  .option('--pgwire-port <port>', 'PostgreSQL port (default: 5432)')
   .option('--config <path>', 'Path to config file')
+  .option('--production', 'Production mode (requires secrets)')
+  .option('--verbose', 'Show server logs in terminal')
+  .option('-d, --detach', 'Run in background')
   .allowUnknownOption(true)
   .action(async (options, command) => {
     try {
-      // Pass all arguments after 'server start' to the binary
       const args = command.args || [];
       const passthrough: string[] = [];
-      if (options.port) passthrough.push('--port', options.port);
-      if (options.pgwireEnabled) passthrough.push('--pgwire-enabled', options.pgwireEnabled);
       if (options.config) passthrough.push('--config', options.config);
       passthrough.push(...args);
-      await serverStart(passthrough);
+      await serverStart(passthrough, {
+        verbose: options.verbose,
+        production: options.production,
+        detach: options.detach,
+        port: options.port,
+        pgwirePort: options.pgwirePort,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+serverCmd
+  .command('stop')
+  .description('Stop a running RaisinDB server')
+  .action(async () => {
+    try {
+      await serverStop();
+      process.exit(0);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+serverCmd
+  .command('status')
+  .description('Check server health and status')
+  .action(async () => {
+    try {
+      await serverStatus();
+      process.exit(0);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+serverCmd
+  .command('logs')
+  .description('View server logs')
+  .option('-f, --follow', 'Stream logs in real-time')
+  .option('-n, --lines <count>', 'Number of lines to show', '50')
+  .action(async (options) => {
+    try {
+      await serverLogs({ follow: options.follow, lines: options.lines });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));
       process.exit(1);
@@ -230,10 +277,10 @@ serverCmd
     }
   });
 
-// Default: Interactive shell mode
+// Interactive shell mode (explicit command)
 program
-  .command('shell', { isDefault: true })
-  .description('Start interactive shell (default)')
+  .command('shell')
+  .description('Start interactive SQL shell')
   .option('-s, --server <url>', 'Server URL to connect to')
   .option('-d, --database <name>', 'Database to use')
   .action((options) => {
@@ -247,4 +294,10 @@ program
     });
   });
 
-program.parse();
+// Show branded help when no command given
+if (process.argv.length <= 2) {
+  const { unmount } = render(<HelpDisplay version="0.1.1" />);
+  setTimeout(() => { unmount(); process.exit(0); }, 100);
+} else {
+  program.parse();
+}
