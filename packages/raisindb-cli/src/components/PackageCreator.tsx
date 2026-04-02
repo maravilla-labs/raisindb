@@ -7,7 +7,7 @@ import { SuccessMessage, ErrorMessage } from './StatusMessages.js';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
-import archiver from 'archiver';
+import AdmZip from 'adm-zip';
 import {
   validatePackageDirectory,
   getValidationSummary,
@@ -143,7 +143,7 @@ const PackageCreator: React.FC<PackageCreatorProps> = ({ onExit, onSuccess }) =>
       const outputPath = path.join(process.cwd(), `${manifest.name}-${manifest.version}.rap`);
 
       // Create ZIP archive
-      await createZipPackage(selectedDir, outputPath);
+      createZipPackage(selectedDir, outputPath);
 
       setCreatedPackage(outputPath);
       setStep('done');
@@ -158,29 +158,10 @@ const PackageCreator: React.FC<PackageCreatorProps> = ({ onExit, onSuccess }) =>
   };
 
   // Create a ZIP package from the source directory
-  const createZipPackage = (sourceDir: string, outputPath: string): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      const output = fs.createWriteStream(outputPath);
-      const archive = archiver('zip', {
-        zlib: { level: 9 } // Maximum compression
-      });
-
-      output.on('close', () => {
-        resolve();
-      });
-
-      archive.on('error', (err) => {
-        reject(err);
-      });
-
-      archive.pipe(output);
-
-      // Add all files from the source directory, preserving structure
-      // This will include manifest.yaml, nodetypes/, workspaces/, content/, etc.
-      archive.directory(sourceDir, false);
-
-      archive.finalize();
-    });
+  const createZipPackage = (sourceDir: string, outputPath: string): void => {
+    const zip = new AdmZip();
+    zip.addLocalFolder(sourceDir);
+    zip.writeZip(outputPath);
   };
 
   // Helper to collect files

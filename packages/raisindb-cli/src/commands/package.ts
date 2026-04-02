@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
-import archiver from 'archiver';
+import AdmZip from 'adm-zip';
 import ignore, { Ignore } from 'ignore';
 import React from 'react';
 import { render } from 'ink';
@@ -29,7 +29,7 @@ import { PackageValidator } from '../components/PackageValidator.js';
 /**
  * Default patterns that are always ignored when creating packages
  */
-const DEFAULT_IGNORE_PATTERNS = [
+export const DEFAULT_IGNORE_PATTERNS = [
   // Version control
   '.git',
   '.git/**',
@@ -245,7 +245,7 @@ export async function createPackage(
 
   try {
     // Create a proper ZIP archive
-    await createZipPackage(resolvedFolder, output);
+    createZipPackage(resolvedFolder, output);
     console.log(`\nPackage created successfully: ${output}`);
   } catch (error) {
     throw new Error(`Failed to create package: ${error instanceof Error ? error.message : String(error)}`);
@@ -255,7 +255,7 @@ export async function createPackage(
 /**
  * Creates an ignore filter from .gitignore and .rapignore files
  */
-function createIgnoreFilter(sourceDir: string): Ignore {
+export function createIgnoreFilter(sourceDir: string): Ignore {
   const ig = ignore();
 
   // Add default patterns
@@ -287,7 +287,7 @@ function createIgnoreFilter(sourceDir: string): Ignore {
 /**
  * Recursively collect all files in a directory
  */
-function collectFiles(dir: string, baseDir: string, files: string[] = []): string[] {
+export function collectFiles(dir: string, baseDir: string, files: string[] = []): string[] {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
 
   for (const entry of entries) {
@@ -308,47 +308,33 @@ function collectFiles(dir: string, baseDir: string, files: string[] = []): strin
 /**
  * Creates a ZIP package from the source directory, respecting .gitignore and .rapignore
  */
-function createZipPackage(sourceDir: string, outputPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(outputPath);
-    const archive = archiver('zip', {
-      zlib: { level: 9 } // Maximum compression
-    });
+export function createZipPackage(sourceDir: string, outputPath: string): void {
+  const zip = new AdmZip();
 
-    output.on('close', () => {
-      resolve();
-    });
+  // Create ignore filter from .gitignore and .rapignore
+  const ig = createIgnoreFilter(sourceDir);
 
-    archive.on('error', (err) => {
-      reject(err);
-    });
+  // Collect all files
+  const allFiles = collectFiles(sourceDir, sourceDir);
 
-    archive.pipe(output);
+  // Filter out ignored files
+  const includedFiles = allFiles.filter((file) => !ig.ignores(file));
+  const ignoredCount = allFiles.length - includedFiles.length;
 
-    // Create ignore filter from .gitignore and .rapignore
-    const ig = createIgnoreFilter(sourceDir);
+  if (ignoredCount > 0) {
+    console.log(`  Excluding ${ignoredCount} file(s) based on ignore patterns`);
+  }
 
-    // Collect all files
-    const allFiles = collectFiles(sourceDir, sourceDir);
+  // Add each non-ignored file to the archive
+  for (const file of includedFiles) {
+    const fullPath = path.join(sourceDir, file);
+    const dir = path.dirname(file);
+    zip.addLocalFile(fullPath, dir === '.' ? '' : dir);
+  }
 
-    // Filter out ignored files
-    const includedFiles = allFiles.filter((file) => !ig.ignores(file));
-    const ignoredCount = allFiles.length - includedFiles.length;
+  console.log(`  Including ${includedFiles.length} file(s) in package`);
 
-    if (ignoredCount > 0) {
-      console.log(`  Excluding ${ignoredCount} file(s) based on ignore patterns`);
-    }
-
-    // Add each non-ignored file to the archive
-    for (const file of includedFiles) {
-      const fullPath = path.join(sourceDir, file);
-      archive.file(fullPath, { name: file });
-    }
-
-    console.log(`  Including ${includedFiles.length} file(s) in package`);
-
-    archive.finalize();
-  });
+  zip.writeZip(outputPath);
 }
 
 /**
