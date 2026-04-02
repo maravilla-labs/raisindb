@@ -84,7 +84,17 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 continue;
             }
 
-            let workspace = path_parts[1].to_string();
+            // Decode namespace encoding: _raisin_access_control → raisin:access_control
+            let raw_ws = path_parts[1];
+            let workspace = if raw_ws.starts_with('_') && !raw_ws.starts_with("__") {
+                if let Some(pos) = raw_ws[1..].find('_') {
+                    format!("{}:{}", &raw_ws[1..pos + 1], &raw_ws[pos + 2..])
+                } else {
+                    raw_ws.to_string()
+                }
+            } else {
+                raw_ws.to_string()
+            };
             let filename = path_parts.last().unwrap_or(&"").to_string();
 
             // Build parent path (everything between workspace and filename)
