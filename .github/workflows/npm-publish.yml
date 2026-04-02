@@ -141,20 +141,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Resolve workspace deps
-        run: |
-          # Replace pnpm workspace:* protocol with actual published versions
-          CLIENT_VER=$(npm view @raisindb/client version 2>/dev/null || echo "0.1.0")
-          sed -i "s|\"workspace:\*\"|\"^$CLIENT_VER\"|g" package.json
-          echo "Resolved @raisindb/client to ^$CLIENT_VER"
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+        working-directory: .
 
-      - name: Install deps
-        run: npm install --no-audit --no-fund --ignore-scripts
+      - name: Build WASM packages
+        working-directory: .
+        run: |
+          cd tooling/packages/raisin-sql-wasm && bash build.sh && cd ../../..
+          cd tooling/packages/raisin-rel-wasm && bash build.sh && cd ../../..
+          cd tooling/packages/raisin-schema-wasm && bash build.sh && cd ../../..
+
+      - name: Install workspace deps
+        run: pnpm install
+        working-directory: .
 
       - name: Set version
         run: |
@@ -173,10 +186,10 @@ jobs:
           echo "VERSION=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_ENV
 
       - name: Build
-        run: npx tsc
+        run: pnpm run build
 
       - name: Publish
-        run: npm publish --access public --provenance
+        run: pnpm publish --access public --no-git-checks --provenance
 
       - name: Summary
         run: echo "Published @raisindb/cli v$VERSION" >> $GITHUB_STEP_SUMMARY

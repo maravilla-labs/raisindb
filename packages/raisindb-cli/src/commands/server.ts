@@ -123,7 +123,7 @@ async function sha256File(filePath: string): Promise<string> {
     const hash = crypto.createHash('sha256');
     const rs = fs.createReadStream(filePath);
     rs.on('error', reject);
-    rs.on('data', (chunk: Buffer) => hash.update(chunk));
+    rs.on('data', (chunk) => hash.update(chunk));
     rs.on('end', () => resolve(hash.digest('hex')));
   });
 }
