@@ -1,7 +1,9 @@
 import type { Pack } from '../types.js';
 import { contentModelingPack } from './content-modeling.js';
+import { minimalPack } from './minimal.js';
 
 const packs: Record<string, Pack> = {
+  'minimal': minimalPack,
   'content-modeling': contentModelingPack,
 };
 

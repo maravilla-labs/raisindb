@@ -28,7 +28,7 @@ export async function initPackage(folder: string, options: InitOptions): Promise
 
   const vars: TemplateVars = { packageName, workspace, description, namespace };
 
-  const pack = getPack(options.pack || 'content-modeling');
+  const pack = getPack(options.pack || 'minimal');
   const files = pack.getFiles(vars);
 
   fs.mkdirSync(targetDir, { recursive: true });
@@ -38,10 +38,11 @@ export async function initPackage(folder: string, options: InitOptions): Promise
   console.log(`  Pack:        ${pack.name}`);
   console.log(`  Workspace:   ${workspace}`);
   console.log(`  Files:       ${count}`);
+  console.log(`\nInstall AI coding skills (recommended):`);
+  console.log(`  npx skills add raisindb/raisindb/packages/raisindb-skills`);
   console.log(`\nNext steps:`);
   console.log(`  cd ${folder}`);
-  console.log(`  # Add node types to package/nodetypes/`);
-  console.log(`  cd package && raisindb package create --check .   # Validate`);
-  console.log(`  raisindb package create .                          # Build .rap`);
+  console.log(`  npx skills add raisindb/raisindb/packages/raisindb-skills`);
+  console.log(`  cd package && raisindb package create --check .`);
   console.log('');
 }

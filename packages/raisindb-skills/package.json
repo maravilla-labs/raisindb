@@ -1,0 +1,17 @@
+{
+  "name": "@raisindb/skills",
+  "version": "0.1.0",
+  "description": "Agent skills for building RaisinDB applications",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/raisindb/raisindb",
+    "directory": "packages/raisindb-skills"
+  },
+  "keywords": [
+    "raisindb",
+    "agent-skills",
+    "ai",
+    "content-database"
+  ]
+}
