@@ -189,7 +189,10 @@ jobs:
         run: pnpm run build
 
       - name: Publish
-        run: pnpm publish --access public --no-git-checks --provenance
+        run: |
+          # pnpm pack resolves workspace:* to real versions in the tarball
+          TARBALL=$(pnpm pack --no-git-checks | tail -1)
+          npm publish "$TARBALL" --access public --provenance
 
       - name: Summary
         run: echo "Published @raisindb/cli v$VERSION" >> $GITHUB_STEP_SUMMARY
