@@ -156,12 +156,58 @@ async function extractZip(archive: string, targetDir: string): Promise<void> {
 function readPid(): number | null {
   try {
     const pid = parseInt(fs.readFileSync(getPidPath(), 'utf-8').trim(), 10);
-    try { process.kill(pid, 0); return pid; } catch { fs.unlinkSync(getPidPath()); return null; }
+    if (isNaN(pid)) { removePid(); return null; }
+    // Check if process is alive AND is actually raisindb (not a reused PID)
+    try {
+      process.kill(pid, 0); // Throws if process doesn't exist
+      return pid;
+    } catch {
+      removePid();
+      return null;
+    }
   } catch { return null; }
 }
 
 function writePid(pid: number): void { fs.writeFileSync(getPidPath(), String(pid)); }
 function removePid(): void { try { fs.unlinkSync(getPidPath()); } catch {} }
+
+async function isPortInUse(port: number): Promise<boolean> {
+  const net = await import('net');
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(true));
+    server.once('listening', () => { server.close(); resolve(false); });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+async function killProcessOnPort(port: number): Promise<boolean> {
+  try {
+    const { execSync } = await import('child_process');
+    const pids = execSync(`lsof -ti:${port} 2>/dev/null || true`, { encoding: 'utf-8' }).trim();
+    if (!pids) return false;
+    for (const pidStr of pids.split('\n')) {
+      const pid = parseInt(pidStr.trim(), 10);
+      if (!isNaN(pid)) {
+        try { process.kill(pid, 'SIGTERM'); } catch {}
+      }
+    }
+    // Wait for processes to die
+    for (let i = 0; i < 20; i++) {
+      await sleep(250);
+      if (!(await isPortInUse(port))) return true;
+    }
+    // Force kill
+    for (const pidStr of pids.split('\n')) {
+      const pid = parseInt(pidStr.trim(), 10);
+      if (!isNaN(pid)) {
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
+    }
+    await sleep(500);
+    return !(await isPortInUse(port));
+  } catch { return false; }
+}
 
 // --- Install (Ink TUI) ---
 
@@ -284,7 +330,12 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
     console.log('');
   }
 
-  // Check if already running
+  const ver = await currentVersion();
+  const devMode = !options.production;
+  const httpPort = options.port || '8080';
+  const pgwirePort = options.pgwirePort || '5432';
+
+  // Check if already running (PID file)
   const existingPid = readPid();
   if (existingPid) {
     console.log(`  RaisinDB is already running (PID ${existingPid})`);
@@ -292,10 +343,18 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
     return;
   }
 
-  const ver = await currentVersion();
-  const devMode = !options.production;
-  const httpPort = options.port || '8080';
-  const pgwirePort = options.pgwirePort || '5432';
+  // Check if port is in use (stale process without PID file)
+  const httpPortNum = parseInt(httpPort, 10);
+  if (await isPortInUse(httpPortNum)) {
+    console.log(`  ${yellow('!')} Port ${httpPort} is already in use`);
+    console.log(`  Attempting to free port...`);
+    const freed = await killProcessOnPort(httpPortNum);
+    if (!freed) {
+      console.log(red(`  Could not free port ${httpPort}. Stop the process manually.`));
+      process.exit(1);
+    }
+    console.log(`  ${green('✓')} Port ${httpPort} freed`);
+  }
 
   // Build server args
   const serverArgs = [...args];
@@ -308,24 +367,25 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
   let generatedPassword: string | null = null;
 
   if (isFirstRun && devMode && !serverArgs.includes('--initial-admin-password') && !process.env.RAISIN_ADMIN_PASSWORD) {
-    // Generate a random password for first run
-    generatedPassword = crypto.randomBytes(12).toString('base64url').slice(0, 16);
+    // Generate password that satisfies: uppercase, lowercase, digit, special char
+    const base = crypto.randomBytes(12).toString('base64url').slice(0, 12);
+    generatedPassword = base + 'Aa1!';
     serverArgs.push('--initial-admin-password', generatedPassword);
   }
 
   // Set log level — quiet by default, verbose shows everything
   const rustLog = options.verbose
     ? 'info'
-    : 'warn,raisin_server=warn';
+    : 'warn,raisin_server=info';
 
   const logFile = getLogPath();
-  const logStream = createWriteStream(logFile, { flags: 'a' });
+  const logStream = fs.openSync(logFile, 'a');
 
-  // Start server process
+  // Start server process — write directly to log file, no pipes
   const child: ChildProcess = spawn(installPath, serverArgs, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', logStream, logStream],
     env: { ...process.env, RUST_LOG: rustLog },
-    detached: options.detach || false,
+    detached: true,
   });
 
   if (!child.pid) {
@@ -335,58 +395,14 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
 
   writePid(child.pid);
 
-  // Capture admin password from server output
-  let adminPassword: string | null = null;
   let serverReady = false;
   let startupError: string | null = null;
 
-  function handleLine(line: string) {
-    // Always write to log file
-    logStream.write(line + '\n');
-
-    // Parse admin password from SUPERADMIN box output
-    // Format: ║ Password:   abc123def                                              ║
-    const pwMatch = line.match(/Password:\s+(\S+)/);
-    if (pwMatch && !adminPassword) {
-      adminPassword = pwMatch[1].replace(/║/g, '').trim();
-    }
-
-    // Detect fatal errors
-    if (line.includes('JWT_SECRET is not set') || line.includes('exit code: 1')) {
-      startupError = line.replace(/.*?(JWT_SECRET|exit)/, '$1').trim();
-    }
-
-    // Show in verbose mode
-    if (options.verbose) {
-      process.stderr.write(line + '\n');
-    }
-  }
-
-  // Pipe stdout/stderr through line parser
-  let buffer = '';
-  const processData = (data: Buffer) => {
-    buffer += data.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (line.trim()) handleLine(line);
-    }
-  };
-
-  child.stdout?.on('data', processData);
-  child.stderr?.on('data', processData);
-
   // Detach the server process so Node can exit
   child.unref();
-  // Disconnect pipes after capturing initial output
-  const disconnectPipes = () => {
-    child.stdout?.removeAllListeners();
-    child.stderr?.removeAllListeners();
-    child.stdout?.destroy();
-    child.stderr?.destroy();
-  };
 
   // Wait for ready (health check)
+  const startTime = Date.now();
   console.log(`  ${dim('Starting RaisinDB...')}`);
 
   for (let i = 0; i < 30; i++) {
@@ -395,9 +411,8 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
       process.stdout.write('\x1b[1A\x1b[2K');
       console.log(red(`  Server failed to start: ${startupError}`));
       console.log(dim(`  Check logs: raisindb server logs`));
-      disconnectPipes();
       removePid();
-      logStream.end();
+      fs.closeSync(logStream);
       process.exit(1);
     }
     try {
@@ -406,14 +421,15 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
     } catch {}
   }
 
-  // Stop capturing output — let server run independently
-  disconnectPipes();
-  logStream.end();
+  // Close our handle to the log file — server keeps writing via its own fd
+  fs.closeSync(logStream);
 
   // Clear "Starting..." line
   process.stdout.write('\x1b[1A\x1b[2K');
 
-  // Render Ink banner
+  const readyTime = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
+
+  // Render banner
   const { unmount: unmountBanner } = render(
     React.createElement(ServerReady, {
       version: ver || undefined,
@@ -424,11 +440,11 @@ export async function serverStart(args: string[], options: { verbose?: boolean; 
       dataDir,
       isFirstRun,
       pid: child.pid!,
+      readyTime,
     })
   );
 
-  // Wait for animation to complete, then unmount and exit
-  await sleep(isFirstRun ? 1500 : 500);
+  await sleep(300);
   unmountBanner();
 }
 
@@ -471,16 +487,34 @@ function printBanner(ver: string | null, devMode: boolean, httpPort: string, pgw
 export async function serverStop(quiet = false): Promise<void> {
   const pid = readPid();
   if (!pid) {
-    if (!quiet) console.log('  RaisinDB is not running');
+    // No PID file — try to kill by port as fallback
+    if (await isPortInUse(8080)) {
+      await killProcessOnPort(8080);
+      if (!quiet) console.log(`  ${green('✓')} RaisinDB stopped (killed process on port 8080)`);
+    } else {
+      if (!quiet) console.log('  RaisinDB is not running');
+    }
     return;
   }
   try {
     process.kill(pid, 'SIGTERM');
+    // Wait for process to die
+    for (let i = 0; i < 20; i++) {
+      await sleep(250);
+      try { process.kill(pid, 0); } catch {
+        // Process is dead
+        removePid();
+        if (!quiet) console.log(`  ${green('✓')} RaisinDB stopped (PID ${pid})`);
+        return;
+      }
+    }
+    // Force kill if still alive
+    try { process.kill(pid, 'SIGKILL'); } catch {}
     removePid();
-    console.log(`  ${green('✓')} RaisinDB stopped (PID ${pid})`);
+    if (!quiet) console.log(`  ${green('✓')} RaisinDB force-stopped (PID ${pid})`);
   } catch {
     removePid();
-    console.log(`  Process ${pid} not found, cleaned up PID file`);
+    if (!quiet) console.log(`  ${green('✓')} Cleaned up stale PID file`);
   }
 }
 
