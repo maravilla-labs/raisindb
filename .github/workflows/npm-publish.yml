@@ -141,14 +141,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Resolve workspace deps
+        run: |
+          # Replace pnpm workspace:* protocol with actual published versions
+          CLIENT_VER=$(npm view @raisindb/client version 2>/dev/null || echo "0.1.0")
+          sed -i "s|\"workspace:\*\"|\"^$CLIENT_VER\"|g" package.json
+          echo "Resolved @raisindb/client to ^$CLIENT_VER"
 
       - name: Install deps
         run: npm install --no-audit --no-fund --ignore-scripts
