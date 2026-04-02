@@ -6,6 +6,8 @@ settings:
 
 importers:
 
+  .: {}
+
   packages/admin-console:
     dependencies:
       '@atlaskit/pragmatic-drag-and-drop':
@@ -58,7 +60,7 @@ importers:
         version: 5.1.6
       raisin-rel-wasm:
         specifier: file:../../tooling/packages/raisin-rel-wasm/pkg
-        version: file:tooling/packages/raisin-rel-wasm/pkg
+        version: link:../../tooling/packages/raisin-rel-wasm/pkg
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -168,7 +170,7 @@ importers:
         version: 4.7.0(monaco-editor@0.52.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@raisindb/sql-wasm':
         specifier: file:../../tooling/packages/raisin-sql-wasm/pkg
-        version: file:tooling/packages/raisin-sql-wasm/pkg
+        version: link:../../tooling/packages/raisin-sql-wasm/pkg
       monaco-editor:
         specifier: ^0.52.0
         version: 0.52.2
@@ -253,8 +255,8 @@ importers:
         specifier: workspace:*
         version: link:../raisin-client-js
       '@raisindb/schema-wasm':
-        specifier: file:../../tooling/packages/raisin-schema-wasm/pkg
-        version: file:tooling/packages/raisin-schema-wasm/pkg
+        specifier: workspace:*
+        version: link:../../tooling/packages/raisin-schema-wasm/pkg
       archiver:
         specifier: ^7.0.1
         version: 7.0.1
@@ -325,6 +327,12 @@ importers:
       typescript:
         specifier: ^5.3.0
         version: 5.9.3
+
+  tooling/packages/raisin-rel-wasm/pkg: {}
+
+  tooling/packages/raisin-schema-wasm/pkg: {}
+
+  tooling/packages/raisin-sql-wasm/pkg: {}
 
 packages:
 
@@ -1039,12 +1047,6 @@ packages:
   '@pkgjs/parseargs@0.11.0':
     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
     engines: {node: '>=14'}
-
-  '@raisindb/schema-wasm@file:tooling/packages/raisin-schema-wasm/pkg':
-    resolution: {directory: tooling/packages/raisin-schema-wasm/pkg, type: directory}
-
-  '@raisindb/sql-wasm@file:tooling/packages/raisin-sql-wasm/pkg':
-    resolution: {directory: tooling/packages/raisin-sql-wasm/pkg, type: directory}
 
   '@react-aria/focus@3.21.3':
     resolution: {integrity: sha512-FsquWvjSCwC2/sBk4b+OqJyONETUIXQ2vM0YdPAuC+QFQh2DT6TIBo6dOZVSezlhudDla69xFBd6JvCFq1AbUw==}
@@ -3041,9 +3043,6 @@ packages:
   raf-schd@4.0.3:
     resolution: {integrity: sha512-tQkJl2GRWh83ui2DiPTJz9wEiMN20syf+5oKfB03yYP7ioZcJwsIK8FjrtLwH1m7C7e+Tt2yYBlrOpdT+dyeIQ==}
 
-  raisin-rel-wasm@file:tooling/packages/raisin-rel-wasm/pkg:
-    resolution: {directory: tooling/packages/raisin-rel-wasm/pkg, type: directory}
-
   react-dom@18.3.1:
     resolution: {integrity: sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==}
     peerDependencies:
@@ -4270,10 +4269,6 @@ snapshots:
 
   '@pkgjs/parseargs@0.11.0':
     optional: true
-
-  '@raisindb/schema-wasm@file:tooling/packages/raisin-schema-wasm/pkg': {}
-
-  '@raisindb/sql-wasm@file:tooling/packages/raisin-sql-wasm/pkg': {}
 
   '@react-aria/focus@3.21.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
@@ -6524,8 +6519,6 @@ snapshots:
   queue-microtask@1.2.3: {}
 
   raf-schd@4.0.3: {}
-
-  raisin-rel-wasm@file:tooling/packages/raisin-rel-wasm/pkg: {}
 
   react-dom@18.3.1(react@18.3.1):
     dependencies:

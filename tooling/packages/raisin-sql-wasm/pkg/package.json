@@ -1,0 +1,13 @@
+{
+  "name": "@raisindb/sql-wasm",
+  "version": "0.1.0",
+  "description": "WASM bindings for RaisinDB SQL parser validation",
+  "main": "raisin_sql_wasm.js",
+  "types": "raisin_sql_wasm.d.ts",
+  "files": [
+    "raisin_sql_wasm_bg.wasm",
+    "raisin_sql_wasm.js",
+    "raisin_sql_wasm.d.ts"
+  ],
+  "sideEffects": false
+}

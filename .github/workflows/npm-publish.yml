@@ -30,9 +30,7 @@ jobs:
       inputs.package == 'schema-wasm'
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -81,7 +79,6 @@ jobs:
         working-directory: packages/raisin-client-js
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -126,29 +123,25 @@ jobs:
       (needs.publish-client.result == 'success' || needs.publish-client.result == 'skipped') &&
       (needs.publish-schema-wasm.result == 'success' || needs.publish-schema-wasm.result == 'skipped') &&
       (github.event_name == 'push' || inputs.package == 'all' || inputs.package == 'cli')
-    defaults:
-      run:
-        working-directory: packages/raisindb-cli
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Resolve workspace deps
-        run: |
-          CLIENT_VER=$(npm view @raisindb/client version 2>/dev/null || echo "0.1.0")
-          sed -i "s|\"workspace:\*\"|\"^$CLIENT_VER\"|g" package.json
-          echo "Resolved @raisindb/client to ^$CLIENT_VER"
-
-      - name: Install deps
-        run: npm install --no-audit --no-fund --ignore-scripts
+      - name: Install workspace deps
+        run: pnpm install
 
       - name: Set version
+        working-directory: packages/raisindb-cli
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
             VER="${GITHUB_REF_NAME#npm-v}"
@@ -165,10 +158,10 @@ jobs:
           echo "VERSION=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_ENV
 
       - name: Build
-        run: npx tsc
+        run: pnpm --filter @raisindb/cli run build
 
       - name: Publish
-        run: npm publish --access public
+        run: pnpm --filter @raisindb/cli publish --access public --no-git-checks
 
       - name: Summary
         run: echo "Published @raisindb/cli v$VERSION" >> $GITHUB_STEP_SUMMARY

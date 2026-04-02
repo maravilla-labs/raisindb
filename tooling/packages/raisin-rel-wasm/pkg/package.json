@@ -1,0 +1,17 @@
+{
+  "name": "raisin-rel-wasm",
+  "type": "module",
+  "description": "WASM bindings for Raisin Expression Language (REL)",
+  "version": "0.1.0",
+  "license": "BSL-1.1",
+  "files": [
+    "raisin_rel_wasm_bg.wasm",
+    "raisin_rel_wasm.js",
+    "raisin_rel_wasm.d.ts"
+  ],
+  "main": "raisin_rel_wasm.js",
+  "types": "raisin_rel_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@raisindb/schema-wasm",
+  "version": "0.1.0",
+  "description": "WASM bindings for RaisinDB schema validation",
+  "main": "raisin_schema_wasm.js",
+  "types": "raisin_schema_wasm.d.ts",
+  "files": [
+    "raisin_schema_wasm_bg.wasm",
+    "raisin_schema_wasm.js",
+    "raisin_schema_wasm.d.ts"
+  ],
+  "sideEffects": false
+}
