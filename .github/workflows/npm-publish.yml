@@ -191,7 +191,9 @@ jobs:
       - name: Publish
         run: |
           # pnpm pack resolves workspace:* to real versions in the tarball
-          TARBALL=$(pnpm pack --no-git-checks | tail -1)
+          pnpm pack
+          TARBALL=$(ls *.tgz)
+          echo "Publishing $TARBALL"
           npm publish "$TARBALL" --access public --provenance
 
       - name: Summary
