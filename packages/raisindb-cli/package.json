@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@raisindb/client": "workspace:*",
-    "@raisindb/schema-wasm": "file:../../tooling/packages/raisin-schema-wasm/pkg",
+    "@raisindb/schema-wasm": "^0.1.0",
     "archiver": "^7.0.1",
     "chokidar": "^3.5.3",
     "eventsource": "^3.0.5",

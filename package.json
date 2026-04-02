@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "pnpm": {
+    "overrides": {
+      "@raisindb/schema-wasm": "file:tooling/packages/raisin-schema-wasm/pkg"
+    }
+  }
+}
