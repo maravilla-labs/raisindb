@@ -151,8 +151,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install deps
-        run: pnpm install --no-frozen-lockfile
-        working-directory: .
+        run: npm install --no-audit --no-fund --ignore-scripts
 
       - name: Set version
         run: |
@@ -171,10 +170,10 @@ jobs:
           echo "VERSION=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_ENV
 
       - name: Build
-        run: pnpm run build
+        run: npx tsc
 
       - name: Publish
-        run: pnpm publish --access public --no-git-checks --provenance
+        run: npm publish --access public --provenance
 
       - name: Summary
         run: echo "Published @raisindb/cli v$VERSION" >> $GITHUB_STEP_SUMMARY
