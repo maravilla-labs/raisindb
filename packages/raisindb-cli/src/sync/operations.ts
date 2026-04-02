@@ -8,6 +8,7 @@ import yaml from 'yaml';
 import { SyncConfig } from './config.js';
 import { getToken } from '../auth.js';
 import { ChangeEvent } from './watcher.js';
+import { decodeNamespace } from '../namespace-encoding.js';
 
 /**
  * Extract a human-readable error message with cause chain
@@ -318,9 +319,8 @@ function buildServerUrl(
   config: SyncConfig,
   filePath: string
 ): { url: string; workspace: string; nodePath: string } {
-  const { decodeNamespace } = await import('../namespace-encoding.js');
   const parts = filePath.split('/');
-  const workspace = decodeNamespace(parts[0]); // e.g. "_raisin_access_control" → "raisin:access_control"
+  const workspace = decodeNamespace(parts[0]);
   const rest = parts.slice(1); // e.g. ["lib", "raisin", "ai", "agent-handler", ".node.yaml"]
 
   const filename = path.basename(filePath);
