@@ -167,8 +167,9 @@ where
     ///
     /// Priority (highest to lowest):
     /// 1. Repo-level config (node in raisin:system workspace)
-    /// 2. Tenant-level config (TenantAuthConfig in RocksDB)
-    /// 3. Global config (server config file anonymous_enabled setting)
+    /// 2. Access control stewardship config (where admin console saves it)
+    /// 3. Tenant-level config (TenantAuthConfig in RocksDB)
+    /// 4. Global config (server config file anonymous_enabled setting)
     #[cfg(feature = "storage-rocksdb")]
     pub async fn is_anonymous_enabled(&self, tenant_id: &str, repo_id: &str) -> bool {
         use raisin_storage::{NodeRepository, Storage, StorageScope};
@@ -203,7 +204,32 @@ where
                 }
             }
 
-            // 2. Check tenant-level config from RocksDB column family
+            // 2. Check access_control stewardship config (where admin console saves anonymous_enabled)
+            let stewardship_node = Storage::nodes(rocksdb.as_ref())
+                .get_by_path(
+                    StorageScope::new(tenant_id, repo_id, "main", "raisin:access_control"),
+                    "/config/stewardship",
+                    None,
+                )
+                .await
+                .ok()
+                .flatten();
+
+            if let Some(node) = stewardship_node {
+                if let Some(raisin_models::nodes::properties::PropertyValue::Boolean(enabled)) =
+                    node.properties.get("anonymous_enabled")
+                {
+                    tracing::debug!(
+                        tenant_id = %tenant_id,
+                        repo_id = %repo_id,
+                        anonymous_enabled = %enabled,
+                        "Anonymous access from access_control stewardship config"
+                    );
+                    return *enabled;
+                }
+            }
+
+            // 3. Check tenant-level config from RocksDB column family
             let tenant_config = rocksdb
                 .tenant_auth_config_repository()
                 .get_config(tenant_id)
@@ -221,7 +247,7 @@ where
                 return config.anonymous_enabled;
             }
 
-            // 3. Fall back to global config when no tenant/repo config exists
+            // 4. Fall back to global config when no tenant/repo config exists
             tracing::debug!(
                 tenant_id = %tenant_id,
                 repo_id = %repo_id,

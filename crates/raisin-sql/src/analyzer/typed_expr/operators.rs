@@ -89,6 +89,10 @@ impl BinaryOperator {
                             // The text will be parsed as a timestamp at evaluation time
                             | (DataType::TimestampTz, DataType::Text)
                             | (DataType::Text, DataType::TimestampTz)
+                            // Allow Text vs Boolean for JSON property comparisons
+                            // e.g., properties->>'hide_in_nav' != true
+                            | (DataType::Text, DataType::Boolean)
+                            | (DataType::Boolean, DataType::Text)
                     )
                 {
                     Some(DataType::Boolean)
