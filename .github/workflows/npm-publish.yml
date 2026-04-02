@@ -162,6 +162,11 @@ jobs:
           fi
           echo "VERSION=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_ENV
 
+      - name: Debug deps
+        run: |
+          ls node_modules/@raisindb/ 2>/dev/null || echo "no @raisindb dir"
+          ls node_modules/@raisindb/schema-wasm/ 2>/dev/null || echo "schema-wasm NOT installed"
+
       - name: Build
         run: npx tsc
 
