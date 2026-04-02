@@ -188,13 +188,14 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Publish
+      - name: Resolve workspace deps for publish
         run: |
-          # pnpm pack resolves workspace:* to real versions in the tarball
-          pnpm pack
-          TARBALL=$(ls *.tgz)
-          echo "Publishing $TARBALL"
-          npm publish "$TARBALL" --access public --provenance
+          CLIENT_VER=$(npm view @raisindb/client version 2>/dev/null || echo "0.1.0")
+          sed -i "s|\"workspace:\*\"|\"^$CLIENT_VER\"|g" package.json
+          echo "Resolved @raisindb/client to ^$CLIENT_VER"
+
+      - name: Publish
+        run: npm publish --access public --provenance
 
       - name: Summary
         run: echo "Published @raisindb/cli v$VERSION" >> $GITHUB_STEP_SUMMARY
