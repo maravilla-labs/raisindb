@@ -78,10 +78,9 @@ pub async fn get_package(
 
     let node_service =
         state.node_service_for_context(tenant_id, &repo, branch, workspace, auth_context);
-    let node_id = format!("package-{}", package_name);
 
     let node = node_service
-        .get(&node_id)
+        .get_by_path(&format!("/{}", package_name))
         .await
         .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;

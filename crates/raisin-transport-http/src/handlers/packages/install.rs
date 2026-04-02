@@ -40,10 +40,9 @@ pub async fn install_package(
 
     let node_service =
         state.node_service_for_context(tenant_id, &repo, branch, workspace, auth_context);
-    let node_id = format!("package-{}", package_name);
 
     let node = node_service
-        .get(&node_id)
+        .get_by_path(&format!("/{}", package_name))
         .await
         .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;
@@ -112,7 +111,7 @@ pub async fn install_package(
         workspace,
         &package_name,
         &version,
-        &node_id,
+        &node.id,
         &resource_key,
         None, // no install_mode override
     )
@@ -134,10 +133,9 @@ pub async fn uninstall_package(
 
     let node_service =
         state.node_service_for_context(tenant_id, &repo, branch, workspace, auth_context);
-    let node_id = format!("package-{}", package_name);
 
     let mut node = node_service
-        .get(&node_id)
+        .get_by_path(&format!("/{}", package_name))
         .await
         .map_err(|e| ApiError::storage_error(format!("Failed to get package node: {}", e)))?
         .ok_or_else(|| ApiError::not_found(format!("Package '{}' not found", package_name)))?;
