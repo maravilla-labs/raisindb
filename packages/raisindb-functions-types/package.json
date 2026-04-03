@@ -1,0 +1,20 @@
+{
+  "name": "@raisindb/functions-types",
+  "version": "0.1.0",
+  "description": "TypeScript type definitions for the RaisinDB server-side function runtime (QuickJS)",
+  "license": "MIT",
+  "types": "raisin.d.ts",
+  "files": ["raisin.d.ts", "index.d.ts"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/raisindb/raisindb",
+    "directory": "packages/raisindb-functions-types"
+  },
+  "keywords": [
+    "raisindb",
+    "functions",
+    "types",
+    "typescript",
+    "quickjs"
+  ]
+}

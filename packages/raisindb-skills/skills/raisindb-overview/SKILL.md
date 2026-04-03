@@ -23,7 +23,7 @@ description: "Core concepts of RaisinDB content-driven applications. Use when bu
 
 RaisinDB is a multi-tenant content database with SQL queries, graph traversal (Cypher/PGQ), real-time WebSocket subscriptions, and CRDT-based replication. You model content as typed nodes living at hierarchical paths, then build frontends that map those nodes to UI components. Every node belongs to a tenant, repository, branch, and workspace.
 
-**Key distinction**: A **repository** is the server-side database you connect to (ask the user for this name). A **workspace** is a logical content partition within a repository (defined in your package YAML). A single repository can have multiple workspaces.
+**Key distinction**: A **repository** is the server-side database you connect to (ask the user for this name). A **workspace** is a logical content partition within a repository (defined in your package YAML). A single repository can have multiple workspaces — use them to separate concerns (e.g., `content` for pages, `media` for shared files, `raisin:access_control` for users/roles).
 
 ## The Content-to-Component Pipeline
 
@@ -206,6 +206,47 @@ INSERT INTO myworkspace (path, node_type, properties)
 VALUES ($1, 'myapp:Page', $2::jsonb)
 ```
 
+## Real-Time Reactivity
+
+RaisinDB pushes events over the WebSocket when nodes change. **This is the standard pattern for all data that can change** — content pages, file uploads, dashboards, precomputed views, navigation. Never use `setTimeout` or polling. Always subscribe to events.
+
+The pattern:
+1. **Render current state** immediately (show placeholder/skeleton for data not yet available)
+2. **Subscribe** to workspace events via `workspace.events().subscribe()`
+3. **Re-fetch and re-render** when events arrive
+
+```typescript
+// Subscribe to changes in a folder (or any path pattern)
+const db = client.database(REPOSITORY);
+const workspace = db.workspace(WORKSPACE_NAME);
+const events = workspace.events();
+
+const subscription = await events.subscribe(
+  {
+    workspace: WORKSPACE_NAME,
+    path: '/my-workspace/articles/**',  // glob pattern
+    event_types: ['node:created', 'node:updated', 'node:deleted'],
+  },
+  async (event) => {
+    // Re-fetch data when anything changes
+    await reloadData();
+  }
+);
+
+// Clean up on component destroy
+onDestroy(() => subscription.unsubscribe());
+```
+
+**Event types**: `node:created`, `node:updated`, `node:deleted`, `node:reordered`
+
+**Use cases**:
+- File uploads: show skeleton while thumbnail is processing, re-render when `node:updated` fires with the thumbnail
+- Content pages: live-update when editors publish changes
+- Dashboards: re-render when precomputed summary nodes are rebuilt by triggers
+- Navigation: update when pages are added/removed
+
+**DO NOT** use `setTimeout`, `setInterval`, or polling to wait for server-side processing. The WebSocket event will arrive when the data is ready.
+
 ## Component Registries
 
 Every RaisinDB frontend needs two registries. Keep them as simple maps.
@@ -230,6 +271,20 @@ export const elementComponents: Record<string, Component<any>> = {
 
 When you add a new archetype or element type, add a YAML definition in `package/`, create the Svelte/React component, and register it in the corresponding index.
 
+## Server-Side Functions and Triggers
+
+RaisinDB runs JavaScript functions on the server, triggered by events. The runtime includes **built-in image resizing, PDF processing, and AI model access** — no external services needed.
+
+Common uses:
+- **File processing**: trigger on asset upload → resize images to thumbnails (`resource.resize()`), extract PDF text (`resource.processDocument()`), store results (`node.addResource()`)
+- **Precomputed views**: trigger on content changes → run an aggregation query → store the result as a node. The frontend reads the precomputed node instead of running expensive queries on every page load. Use this for overview lists, dashboards, feeds, statistics, and any data that changes less often than it's read.
+- **Business logic**: trigger on content changes → send notifications, validate data, update related nodes
+- **AI enrichment**: analyze uploaded images/documents → extract metadata, generate descriptions, tag content
+
+The pattern: define a **trigger** (watches for node events like Created/Updated/Deleted) and a **function** (JavaScript with access to the `raisin.*` API: nodes, SQL, HTTP, AI, binary resources, transactions). Both are YAML + JS files in your RAP package. See `raisindb-functions-triggers` skill.
+
+**Prefer precomputation over real-time queries** for data that is read frequently but changes infrequently. Instead of running a complex SQL query on every page load, have a trigger rebuild a summary node when the source data changes. The frontend then does a simple single-node fetch.
+
 ## Learning Path
 
 Read these skills next based on what you need:
@@ -240,6 +295,6 @@ Read these skills next based on what you need:
 - **Query data** -- `raisindb-sql` (SQL syntax, JSON operators, graph queries)
 - **Add languages** -- `raisindb-translations` (i18n, locale-aware content)
 - **Add auth** -- `raisindb-auth` (login, sessions, user home paths)
-- **Handle files** -- `raisindb-file-uploads` (media fields, binary storage)
+- **Handle files** -- `raisindb-file-uploads` (upload, thumbnails via server functions, signed URLs)
 - **Server logic** -- `raisindb-functions-triggers` (functions, triggers, event handling)
 - **Permissions** -- `raisindb-access-control` (roles, workspace permissions)

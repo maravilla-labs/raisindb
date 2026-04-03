@@ -434,7 +434,32 @@ export default function Feed({ loaderData }: Route.ComponentProps) {
 
 SSR flow: server runs `loader` via HTTP (fully rendered for SEO) -> React hydrates with `loaderData` -> `useHybridClient()` opens WebSocket -> once `isRealtime`, subscriptions start and UI updates live.
 
-## 11. React Provider Alternative (Client-Only)
+## 11. Real-Time Updates
+
+Components can subscribe to content changes via WebSocket events. Use this for live-updating dashboards, file browsers, or any data that changes while the user views it. See `raisindb-overview` for the full pattern.
+
+```tsx
+function FileList({ folderPath }: { folderPath: string }) {
+  const [items, setItems] = useState<Asset[]>([]);
+
+  useEffect(() => {
+    loadFiles();
+    const db = getDatabase();
+    const ws = db.workspace(WORKSPACE);
+    let sub: any;
+    ws.events().subscribe(
+      { workspace: WORKSPACE, path: folderPath + '/**',
+        event_types: ['node:created', 'node:updated', 'node:deleted'] },
+      () => loadFiles()
+    ).then(s => { sub = s; });
+    return () => sub?.unsubscribe();
+  }, [folderPath]);
+}
+```
+
+Never use `setTimeout` or polling to wait for server-side processing (thumbnails, precomputed views, etc.). Subscribe to events — the WebSocket pushes updates when data is ready.
+
+## 12. React Provider Alternative (Client-Only)
 
 For apps without SSR, use `createRaisinReact` instead of the singleton pattern:
 

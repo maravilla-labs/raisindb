@@ -430,6 +430,26 @@ An element component receives a single element object. Fields from the element t
 </section>
 ```
 
+## Real-Time Updates
+
+Pages and components can subscribe to content changes via WebSocket events. Use this for live-updating dashboards, file browsers, or any data that changes while the user is viewing it. See `raisindb-overview` for the subscription API pattern.
+
+```typescript
+// In a component — subscribe to changes on the current page's subtree
+onMount(async () => {
+  const db = client.database(REPOSITORY);
+  const ws = db.workspace(WORKSPACE_NAME);
+  const sub = await ws.events().subscribe(
+    { workspace: WORKSPACE_NAME, path: page.path + '/**',
+      event_types: ['node:created', 'node:updated', 'node:deleted'] },
+    async () => { await reloadData(); }
+  );
+  return () => sub.unsubscribe();
+});
+```
+
+Never use `setTimeout` or polling to wait for server-side processing (thumbnails, precomputed views, etc.). Subscribe to events — the WebSocket pushes updates when data is ready.
+
 ## Data Flow Summary
 
 ```

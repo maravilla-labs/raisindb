@@ -14,6 +14,7 @@ on:
         options:
           - all
           - schema-wasm
+          - functions-types
           - client
           - cli
       version:
@@ -65,6 +66,50 @@ jobs:
 
       - name: Summary
         run: echo "Published @raisindb/schema-wasm v$VERSION" >> $GITHUB_STEP_SUMMARY
+
+  publish-functions-types:
+    name: Publish @raisindb/functions-types
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      inputs.package == 'all' ||
+      inputs.package == 'functions-types'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Generate types from Rust bindings
+        run: cargo test --package raisin-functions test_generate_and_write_dts -- --nocapture
+
+      - name: Set version
+        working-directory: packages/raisindb-functions-types
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VER="${GITHUB_REF_NAME#npm-v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            VER="${{ inputs.version }}"
+          else
+            VER=""
+          fi
+          if [[ -n "$VER" ]]; then
+            npm version --no-git-tag-version "$VER" --allow-same-version
+          else
+            npm version --no-git-tag-version patch
+          fi
+          echo "VERSION=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_ENV
+
+      - name: Publish
+        working-directory: packages/raisindb-functions-types
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Summary
+        run: echo "Published @raisindb/functions-types v$VERSION" >> $GITHUB_STEP_SUMMARY
 
   publish-client:
     name: Publish @raisindb/client

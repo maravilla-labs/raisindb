@@ -7,6 +7,10 @@ description: "Server-side JavaScript functions and event-driven triggers for Rai
 
 Functions are JavaScript handlers stored as nodes inside a RAP package. Triggers watch for events (node changes, schedules, webhooks) and invoke functions when conditions match. Together they form the server-side logic layer of RaisinDB.
 
+**BEFORE writing any server-side function code:**
+1. Install types: `npm install -D @raisindb/functions-types` — then read the `raisin.d.ts` from that package. It contains the COMPLETE TypeScript API for the function runtime.
+2. ONLY use methods defined in `raisin.d.ts` — this is NOT Node.js (no `Buffer`, `fs`, no npm modules). `fetch()` IS available. ES module imports with relative paths ARE supported (`import { foo } from './utils.js'`).
+
 **MANDATORY**: After creating or modifying ANY `.yaml`, `.node.yaml`, or `.js` file in `package/`, immediately run:
 
     raisindb package create ./package --check
@@ -138,6 +142,100 @@ async function handleMoveCard(input) {
 | `beginTransaction()` | Start a transaction |
 
 The `data` object: `{ name, node_type, properties: { ... } }`
+
+### Node Resource API (Binary Files)
+
+The function runtime has a built-in Resource API for processing binary files (images, PDFs). There is NO automatic thumbnail generation — you must call these methods yourself. There are no npm modules, no Node.js globals, no external services. Only the API below exists.
+
+#### TypeScript Definitions
+
+Install `@raisindb/functions-types` for full IDE autocomplete in function projects:
+
+    npm install -D @raisindb/functions-types
+
+Key interfaces (see package for complete definitions):
+
+```typescript
+// Returned by raisin.nodes.get(workspace, path) — has resource helper methods
+interface RaisinNode {
+  id: string; path: string; name: string; node_type: string;
+  properties: Record<string, any>;
+  getResource(propertyPath: string): Resource | null;    // e.g., './file'
+  addResource(propertyPath: string, data: Resource | { base64: string; mimeType: string }): Promise<any>;
+}
+
+// Returned by node.getResource('./file') — has built-in resize/PDF processing
+interface Resource {
+  readonly mimeType: string;   // "image/jpeg", "application/pdf", etc.
+  readonly size: number;
+  readonly name: string;
+  resize(opts: { maxWidth?: number; format?: 'jpeg'|'png'|'webp'; quality?: number }): Promise<Resource>;
+  processDocument(opts?: { ocr?: boolean; generateThumbnail?: boolean; thumbnailWidth?: number }): Promise<DocumentResult>;
+  toImage(opts?: { page?: number; maxWidth?: number; format?: string }): Promise<Resource>;
+  getBinary(): Promise<string>;  // base64
+}
+```
+
+#### The ONE correct way to create a thumbnail
+
+```javascript
+// Step 1: Get the node
+const node = await raisin.nodes.get(workspace, event.node_path);
+
+// Step 2: Get the Resource handle for the uploaded file
+const resource = node.getResource('./file');
+
+// Step 3: Call resize() — this runs server-side image processing
+const thumbnail = await resource.resize({
+  maxWidth: 200,
+  format: 'jpeg',
+  quality: 80,
+});
+
+// Step 4: Store the resized image as a Resource on the node
+await node.addResource('./thumbnail', thumbnail);
+```
+
+For PDFs:
+
+```javascript
+const resource = node.getResource('./file');
+const result = await resource.processDocument({
+  generateThumbnail: true,
+  thumbnailWidth: 200,
+});
+if (result.thumbnail) {
+  await node.addResource('./thumbnail', result.thumbnail);
+}
+```
+
+#### What IS available (beyond raisin.*)
+
+- `fetch()`, `Request`, `Response`, `Headers` — W3C Fetch API (built-in, no import needed)
+- `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval` — timers
+- `import { foo } from './utils.js'` — ES module imports with relative paths
+- `console.log/debug/warn/error` — logging
+
+#### FORBIDDEN — these produce runtime errors
+
+```javascript
+// ERROR: npm modules not available (no require())
+const sharp = require('sharp');
+
+// ERROR: "Buffer is not defined" (not Node.js)
+const buf = Buffer.from(data);
+
+// ERROR: "fs is not defined" (no filesystem access)
+const data = fs.readFileSync(path);
+
+// WRONG — does not resize, just copies the reference
+await raisin.nodes.update(workspace, path, {
+  properties: { thumbnail: node.properties.file }
+});
+
+// WRONG — there is NO built-in auto-processing or "AssetProcessing job"
+// Thumbnails do NOT appear automatically. You must call resource.resize().
+```
 
 ### raisin.sql
 
@@ -390,6 +488,81 @@ provides:
   functions: [/lib/launchpad/handle-task-completed]
   triggers: [/triggers/on-task-completed]
 ```
+
+---
+
+## Precomputed Views Pattern
+
+Instead of running expensive queries on every page load, use triggers to **precompute results and store them as nodes**. The frontend fetches the precomputed node with a simple path lookup.
+
+**When to use**: overview lists, dashboards, feeds, statistics, tag clouds, "latest articles" — any data read frequently but changed infrequently.
+
+**Example**: rebuild a "latest articles" summary whenever an article is created or updated.
+
+**Trigger** (`triggers/on-article-change/.node.yaml`):
+
+```yaml
+node_type: raisin:Trigger
+properties:
+  title: Rebuild Latest Articles
+  name: on-article-change
+  enabled: true
+  trigger_type: node_event
+  config:
+    event_kinds: [Created, Updated, Deleted]
+  filters:
+    workspaces: [content]
+    node_types: [myapp:Article]
+    property_filters:
+      status: published
+  priority: 5
+  max_retries: 3
+  function_path: /lib/myapp/rebuild-latest
+```
+
+**Function** (`lib/myapp/rebuild-latest/index.js`):
+
+```javascript
+async function handler(context) {
+  const { workspace } = context.flow_input;
+
+  // Run the expensive query ONCE, server-side
+  const articles = await raisin.sql.query(
+    `SELECT id, path, name, properties->>'title'::String AS title,
+            properties->>'excerpt'::String AS excerpt,
+            properties->>'publishing_date'::String AS date
+     FROM ${workspace}
+     WHERE node_type = 'myapp:Article'
+       AND properties->>'status'::String = 'published'
+     ORDER BY properties->>'publishing_date' DESC
+     LIMIT 10`,
+    []
+  );
+  const rows = Array.isArray(articles) ? articles : (articles?.rows || []);
+
+  // Store the result as a node — frontend reads this instead of querying
+  await raisin.sql.query(
+    `UPDATE ${workspace} SET properties = properties || $1::jsonb WHERE path = $2`,
+    [JSON.stringify({ articles: rows, rebuilt_at: new Date().toISOString() }),
+     `/${workspace}/computed/latest-articles`]
+  );
+
+  return { success: true, count: rows.length };
+}
+
+module.exports = { handler };
+```
+
+**Frontend**: simple single-node fetch instead of a complex query:
+
+```typescript
+const latest = await queryOne(`
+  SELECT properties FROM content WHERE path = '/content/computed/latest-articles'
+`);
+// latest.properties.articles = [{ title, excerpt, date, path }, ...]
+```
+
+This pattern keeps page loads fast and moves computation to write-time.
 
 ---
 

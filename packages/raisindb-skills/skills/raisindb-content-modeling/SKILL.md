@@ -323,6 +323,7 @@ color: "#6366f1"
 allowed_node_types:
   - launchpad:Page
   - raisin:Folder
+  - raisin:Asset        # Required for file uploads
 
 allowed_root_node_types:
   - raisin:Folder
@@ -377,11 +378,12 @@ workspace_patches:
       add:
         - launchpad:Page
         - raisin:Folder
+        - raisin:Asset          # Required for file uploads
 ```
 
 Supported `provides` keys: `nodetypes`, `archetypes`, `elementtypes`, `mixins`, `workspaces`, `functions`, `triggers`, `flows`. Each maps to its directory (`nodetypes/`, `archetypes/`, etc.; functions use `content/functions/lib/`, triggers use `content/functions/triggers/`).
 
-Use `workspace_patches` to add allowed node types to existing workspaces without overwriting their definition.
+Use `workspace_patches` to add allowed node types to existing workspaces without overwriting their definition. Always include `raisin:Asset` if the workspace needs file uploads — without it, uploads will fail silently.
 
 ---
 
