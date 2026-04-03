@@ -5,7 +5,7 @@ Reusable AI agent skills for building RaisinDB applications. Works with Claude C
 ## Install
 
 ```bash
-npx skills add raisindb/raisindb/packages/raisindb-skills
+npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 ```
 
 ## Skills

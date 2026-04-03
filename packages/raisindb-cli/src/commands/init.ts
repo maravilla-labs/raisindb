@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { getPack } from '../templates/packs/index.js';
 import { writeFileTree } from '../templates/render.js';
 import type { TemplateVars } from '../templates/types.js';
@@ -9,6 +10,7 @@ interface InitOptions {
   name?: string;
   workspace?: string;
   description?: string;
+  skipInstall?: boolean;
 }
 
 export async function initPackage(folder: string, options: InitOptions): Promise<void> {
@@ -34,14 +36,34 @@ export async function initPackage(folder: string, options: InitOptions): Promise
   fs.mkdirSync(targetDir, { recursive: true });
   const count = writeFileTree(targetDir, files);
 
-  console.log(`\nInitialized package "${packageName}" in ${targetDir}\n`);
+  console.log(`\nInitialized "${packageName}" in ${targetDir}\n`);
   console.log(`  Pack:        ${pack.name}`);
   console.log(`  Workspace:   ${workspace}`);
   console.log(`  Files:       ${count}`);
-  console.log(`\nNext steps:`);
+
+  if (!options.skipInstall) {
+    // Run npm install
+    console.log(`\nInstalling dependencies...`);
+    try {
+      execSync('npm install', { cwd: targetDir, stdio: 'inherit' });
+    } catch {
+      console.warn('  npm install failed — run it manually: cd ' + folder + ' && npm install');
+    }
+
+    // Install agent skills
+    console.log(`\nInstalling AI agent skills...`);
+    try {
+      execSync('npx skills add maravilla-labs/raisindb/packages/raisindb-skills', {
+        cwd: targetDir,
+        stdio: 'inherit',
+      });
+    } catch {
+      console.warn('  Skills install failed — run manually: npx skills add maravilla-labs/raisindb/packages/raisindb-skills');
+    }
+  }
+
+  console.log(`\nReady! Next steps:`);
   console.log(`  cd ${folder}`);
-  console.log(`  npm install`);
-  console.log(`  npx skills add raisindb/raisindb/packages/raisindb-skills`);
   console.log(`  npm run validate`);
   console.log('');
 }

@@ -48,7 +48,7 @@ function agentMd(vars: TemplateVars): string {
 ## Setup
 
     npm install                                           # Install function types
-    npx skills add raisindb/raisindb/packages/raisindb-skills  # Install AI coding skills
+    npx skills add maravilla-labs/raisindb/packages/raisindb-skills  # Install AI coding skills
 
 ## Project Structure
 
@@ -74,7 +74,7 @@ function rootReadme(vars: TemplateVars): string {
 1. Install dependencies and AI coding skills:
 
        npm install
-       npx skills add raisindb/raisindb/packages/raisindb-skills
+       npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 
 2. Define your content model in \`package/nodetypes/\`, \`package/archetypes/\`, \`package/elementtypes/\`
 
@@ -104,7 +104,7 @@ Set up your frontend here using SvelteKit or React.
 
 Install AI coding skills for step-by-step guidance:
 
-    npx skills add raisindb/raisindb/packages/raisindb-skills
+    npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 
 Then ask your AI agent to scaffold the frontend using the
 \`raisindb-frontend-sveltekit\` or \`raisindb-frontend-react\` skill.

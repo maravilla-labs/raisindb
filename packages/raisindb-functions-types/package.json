@@ -7,7 +7,7 @@
   "files": ["raisin.d.ts", "index.d.ts"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/raisindb/raisindb",
+    "url": "https://github.com/maravilla-labs/raisindb",
     "directory": "packages/raisindb-functions-types"
   },
   "keywords": [

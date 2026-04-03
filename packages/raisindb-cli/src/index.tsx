@@ -153,6 +153,7 @@ packageCmd
   .option('-n, --name <name>', 'Package name (default: folder name)')
   .option('-w, --workspace <name>', 'Workspace name (default: package name)')
   .option('-d, --description <text>', 'Package description')
+  .option('--skip-install', 'Skip npm install and skills installation')
   .action(async (folder, options) => {
     try {
       await initPackage(folder, options);
