@@ -15,30 +15,52 @@ properties:
 `;
 }
 
+function rootPackageJson(vars: TemplateVars): string {
+  return `{
+  "name": "${vars.packageName}",
+  "private": true,
+  "scripts": {
+    "validate": "raisindb package create ./package --check",
+    "build": "raisindb package create ./package",
+    "deploy": "raisindb package deploy ./package",
+    "sync": "cd package && raisindb package sync . --watch",
+    "dev": "cd frontend && npm run dev"
+  },
+  "devDependencies": {
+    "@raisindb/functions-types": "^0.1.0"
+  }
+}
+`;
+}
+
+function gitignore(): string {
+  return `node_modules/
+*.rap
+.DS_Store
+`;
+}
+
 function agentMd(vars: TemplateVars): string {
   return `# {{packageName}} — RaisinDB Application
 
 {{description}}
 
-## AI Coding Skills
+## Setup
 
-This project uses RaisinDB. Install agent skills for full AI coding assistance:
-
-    npx skills add raisindb/raisindb/packages/raisindb-skills
-
-Skills teach your AI agent how to build both the content package and the frontend.
+    npm install                                           # Install function types
+    npx skills add raisindb/raisindb/packages/raisindb-skills  # Install AI coding skills
 
 ## Project Structure
 
     package/     — RaisinDB content package (YAML schemas, content, functions)
     frontend/    — Web frontend (SvelteKit or React)
 
-## Quick Reference
+## Commands
 
-    cd package && raisindb package create --check .   # Validate package
-    cd package && raisindb package create .            # Build .rap file
-    raisindb package upload {{packageName}}-0.1.0.rap  # Upload to server
-    cd package && raisindb package sync . --watch      # Live sync during dev
+    npm run validate    # Validate package YAML
+    npm run deploy      # Build and upload package to server
+    npm run sync        # Live sync package changes during dev
+    npm run dev         # Start frontend dev server
 `;
 }
 
@@ -49,8 +71,9 @@ function rootReadme(vars: TemplateVars): string {
 
 ## Getting Started
 
-1. Install AI coding skills (recommended):
+1. Install dependencies and AI coding skills:
 
+       npm install
        npx skills add raisindb/raisindb/packages/raisindb-skills
 
 2. Define your content model in \`package/nodetypes/\`, \`package/archetypes/\`, \`package/elementtypes/\`
@@ -59,19 +82,18 @@ function rootReadme(vars: TemplateVars): string {
 
 4. Validate your package:
 
-       cd package && raisindb package create --check .
+       npm run validate
 
-5. Build and deploy:
+5. Deploy to server:
 
-       cd package && raisindb package create .
-       raisindb package upload {{packageName}}-0.1.0.rap
+       npm run deploy
 
 6. Set up your frontend in \`frontend/\` (SvelteKit or React)
 
 ## Development
 
-    cd package && raisindb package sync . --watch   # Live sync package changes
-    cd frontend && npm run dev                      # Start frontend dev server
+    npm run sync    # Live sync package changes
+    npm run dev     # Start frontend dev server
 `;
 }
 
@@ -119,6 +141,8 @@ export const minimalPack: Pack = {
 
     return [
       // Root-level files
+      { path: 'package.json', content: rootPackageJson(vars) },
+      { path: '.gitignore', content: gitignore() },
       { path: 'AGENT.md', content: r(agentMd(vars), vars) },
       { path: 'README.md', content: r(rootReadme(vars), vars) },
 

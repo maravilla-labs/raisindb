@@ -8,12 +8,12 @@ description: "Server-side JavaScript functions and event-driven triggers for Rai
 Functions are JavaScript handlers stored as nodes inside a RAP package. Triggers watch for events (node changes, schedules, webhooks) and invoke functions when conditions match. Together they form the server-side logic layer of RaisinDB.
 
 **BEFORE writing any server-side function code:**
-1. Install types: `npm install -D @raisindb/functions-types` — then read the `raisin.d.ts` from that package. It contains the COMPLETE TypeScript API for the function runtime.
+1. Run `npm install` in the project root — this installs `@raisindb/functions-types` which contains `raisin.d.ts`, the COMPLETE TypeScript API for the function runtime. Read it before writing any code.
 2. ONLY use methods defined in `raisin.d.ts` — this is NOT Node.js (no `Buffer`, `fs`, no npm modules). `fetch()` IS available. ES module imports with relative paths ARE supported (`import { foo } from './utils.js'`).
 
 **MANDATORY**: After creating or modifying ANY `.yaml`, `.node.yaml`, or `.js` file in `package/`, immediately run:
 
-    raisindb package create ./package --check
+    npm run validate
 
 ## File Organization
 
@@ -570,6 +570,6 @@ This pattern keeps page loads fast and moves computation to write-time.
 
 **MANDATORY** — run after every YAML or JS change in `package/`:
 
-    raisindb package create ./package --check
+    npm run validate
 
 Validates that all listed functions/triggers have matching folders with `.node.yaml`, `entry_file` references exist, `function_path`/`flow_path` point to registered targets, and YAML syntax is correct. Fix all errors before proceeding.

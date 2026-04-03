@@ -228,7 +228,7 @@ RaisinDB supports **server-side functions** that run JavaScript on the server, t
 
 **Nothing happens automatically after upload** — the `raisin:Asset` node only has the `file` Resource. You build the processing logic as a trigger + function in your RAP package.
 
-**BEFORE writing function code**: Install `@raisindb/functions-types` and read its `raisin.d.ts` — it is the complete API reference. Only use methods defined there.
+**BEFORE writing function code**: Run `npm install` in the project root (installs `@raisindb/functions-types`), then read `node_modules/@raisindb/functions-types/raisin.d.ts` — it is the complete API reference. Only use methods defined there.
 
 ### Built-in Server-Side Capabilities
 

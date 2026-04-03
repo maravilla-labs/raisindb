@@ -8,6 +8,7 @@ import { syncPackage } from './commands/sync.js';
 import { clonePackage } from './commands/clone.js';
 import { createFromServer } from './commands/create-from-server.js';
 import { initPackage } from './commands/init.js';
+import { deployPackage } from './commands/deploy.js';
 import { serverInstall, serverStart, serverVersion, serverUpdate, serverStop, serverStatus, serverLogs } from './commands/server.js';
 import { HelpDisplay } from './components/HelpDisplay.js';
 
@@ -155,6 +156,21 @@ packageCmd
   .action(async (folder, options) => {
     try {
       await initPackage(folder, options);
+      process.exit(0);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+packageCmd
+  .command('deploy <folder>')
+  .description('Validate, build, and upload package in one step')
+  .option('-s, --server <url>', 'Server URL')
+  .option('-r, --repo <name>', 'Repository name')
+  .action(async (folder, options) => {
+    try {
+      await deployPackage(folder, options);
       process.exit(0);
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));

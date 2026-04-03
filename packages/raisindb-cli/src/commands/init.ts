@@ -38,11 +38,10 @@ export async function initPackage(folder: string, options: InitOptions): Promise
   console.log(`  Pack:        ${pack.name}`);
   console.log(`  Workspace:   ${workspace}`);
   console.log(`  Files:       ${count}`);
-  console.log(`\nInstall AI coding skills (recommended):`);
-  console.log(`  npx skills add raisindb/raisindb/packages/raisindb-skills`);
   console.log(`\nNext steps:`);
   console.log(`  cd ${folder}`);
+  console.log(`  npm install`);
   console.log(`  npx skills add raisindb/raisindb/packages/raisindb-skills`);
-  console.log(`  cd package && raisindb package create --check .`);
+  console.log(`  npm run validate`);
   console.log('');
 }

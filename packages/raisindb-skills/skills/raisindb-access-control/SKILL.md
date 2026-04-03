@@ -328,7 +328,7 @@ workspace_patches:
 
 **MANDATORY** — run after every YAML change in `package/`:
 
-    raisindb package create ./package --check
+    npm run validate
 
 This checks role YAML validity, required permission fields (`path`, `operations`), referenced node types, workspace patches, and folder structure. Fix all errors before proceeding.
 
@@ -344,4 +344,4 @@ This checks role YAML validity, required permission fields (`path`, `operations`
 | Hide fields | Use `except_fields: [...]` on the permission entry |
 | Expose only certain fields | Use `fields: [...]` on the permission entry |
 | Allow custom types in AC workspace | Add `workspace_patches` to `manifest.yaml` |
-| Validate package | Run `raisindb package create ./package --check` |
+| Validate package | Run `npm run validate` |

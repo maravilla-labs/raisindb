@@ -9,7 +9,7 @@ Define content schemas, page templates, and composable blocks using YAML files i
 
 **MANDATORY**: After creating or modifying ANY `.yaml` or `.node.yaml` file in `package/`, immediately run:
 
-    raisindb package create ./package --check
+    npm run validate
 
 Fix all errors before proceeding. Never skip validation.
 
@@ -438,7 +438,7 @@ properties:
 **MANDATORY** — run after every YAML change:
 
 ```bash
-raisindb package create ./package --check
+npm run validate
 ```
 
 Do NOT proceed until all errors are resolved.

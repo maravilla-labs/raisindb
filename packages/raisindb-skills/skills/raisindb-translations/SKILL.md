@@ -189,7 +189,7 @@ RaisinDB uses BCP 47 language codes: `en`, `fr`, `de`, `es`, `pt-BR`, `zh-Hans`,
 
 **MANDATORY** — run after every translation file change:
 
-    raisindb package create ./package --check
+    npm run validate
 
 Common errors:
 

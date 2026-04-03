@@ -9,9 +9,9 @@ description: "Core concepts of RaisinDB content-driven applications. Use when bu
 
 1. **Always ask the user for the repository name** before writing any frontend code. The repository is a server-side concept (like a database name) — it is NOT the same as the workspace or package name. The WebSocket URL uses the repository name: `ws://localhost:8080/sys/default/{REPOSITORY}`. Use it in `client.initSession(REPOSITORY)`, `client.database(REPOSITORY)`, and `client.loginWithEmail(email, password, REPOSITORY)`.
 
-2. **Always validate after changing any YAML in `package/`**. Run this command every time you create or modify a `.yaml` or `.node.yaml` file:
+2. **Always validate after changing any YAML in `package/`**. Run this every time you create or modify a `.yaml` or `.node.yaml` file:
 
-       raisindb package create ./package --check
+       npm run validate
 
    Do NOT skip this step. Fix any errors before proceeding.
 
@@ -104,19 +104,23 @@ my-app/
 
 ```bash
 # MANDATORY: Validate after every YAML change
-raisindb package create ./package --check
+npm run validate
 
-# Build .rap file
-cd package && raisindb package create .
-
-# Upload to server
-raisindb package upload myapp-0.1.0.rap -r myrepo
+# Deploy to server (validate + build + upload in one step)
+npm run deploy
 
 # Live sync during development (watches for changes)
-cd package && raisindb package sync . --watch
+npm run sync
 ```
 
-**RULE**: Run `raisindb package create ./package --check` after every change to any `.yaml` or `.node.yaml` file in `package/`. Never skip this. Fix all errors before moving on.
+These scripts are defined in the root `package.json` and call `raisindb` CLI commands. You can also use the CLI directly:
+
+```bash
+raisindb package create ./package --check    # Validate only
+raisindb package deploy ./package            # Validate + build + upload
+```
+
+**RULE**: Run `npm run validate` after every change to any `.yaml` or `.node.yaml` file in `package/`. Never skip this. Fix all errors before moving on.
 
 The `manifest.yaml` declares everything the package provides:
 
