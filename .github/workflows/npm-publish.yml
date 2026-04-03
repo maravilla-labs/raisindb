@@ -208,6 +208,18 @@ jobs:
           fi
           echo "VERSION=$(node -p 'require(\"./package.json\").version')" >> $GITHUB_ENV
 
+      - name: Align workspace dependency versions
+        run: |
+          VER="${{ env.VERSION }}"
+          # Update local schema-wasm pkg version so workspace:* resolves correctly
+          cd tooling/packages/raisin-schema-wasm/pkg
+          npm version --no-git-tag-version "$VER" --allow-same-version
+          cd -
+          # Same for client
+          cd packages/raisin-client-js
+          npm version --no-git-tag-version "$VER" --allow-same-version
+          cd -
+
       - name: Build
         run: pnpm --filter @raisindb/cli run build
 

@@ -64,6 +64,7 @@
   "license": "MIT",
   "files": [
     "dist",
+    "package.json",
     "README.md"
   ],
   "publishConfig": {

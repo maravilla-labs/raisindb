@@ -2,6 +2,7 @@
 import React from 'react';
 import { render } from 'ink';
 import { Command } from 'commander';
+import { createRequire } from 'module';
 import App from './app.js';
 import { createPackage, uploadPackage, listPackages, installPackage } from './commands/package.js';
 import { syncPackage } from './commands/sync.js';
@@ -14,12 +15,15 @@ import { login, logout, isAuthenticated } from './auth.js';
 import { getServer } from './config.js';
 import { HelpDisplay } from './components/HelpDisplay.js';
 
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json');
+
 const program = new Command();
 
 program
   .name('raisindb')
   .description('RaisinDB CLI - Interactive terminal interface for RaisinDB')
-  .version('0.1.0');
+  .version(pkg.version);
 
 // Package commands (offline)
 const packageCmd = program
@@ -344,7 +348,7 @@ program
 
 // Show branded help when no command given
 if (process.argv.length <= 2) {
-  const { unmount } = render(<HelpDisplay version="0.1.1" />);
+  const { unmount } = render(<HelpDisplay version={pkg.version} />);
   setTimeout(() => { unmount(); process.exit(0); }, 100);
 } else {
   program.parse();
