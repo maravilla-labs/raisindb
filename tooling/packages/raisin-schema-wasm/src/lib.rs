@@ -227,12 +227,26 @@ pub fn validate_package(files: JsValue) -> JsValue {
         }
     }
 
+    // Collect content node paths for cross-reference validation
+    let mut content_node_paths: HashMap<(String, String), String> = HashMap::new();
+    for (path, content) in &files_map {
+        if is_content_file(path) {
+            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(content) {
+                if let Some((ws, node_path)) = derive_content_node_path(path, &yaml) {
+                    content_node_paths
+                        .insert((ws, node_path.to_lowercase()), node_path);
+                }
+            }
+        }
+    }
+
     // Build validation context
     let ctx = ValidationContext {
         package_node_types,
         package_workspaces,
         package_archetypes,
         package_element_types,
+        content_node_paths,
     };
 
     // Second pass: validate all files
@@ -306,6 +320,7 @@ fn build_context(package_node_types: JsValue, package_workspaces: JsValue) -> Va
         package_workspaces: workspaces.into_iter().collect(),
         package_archetypes: HashMap::new(),
         package_element_types: HashMap::new(),
+        content_node_paths: HashMap::new(),
     }
 }
 
@@ -345,6 +360,81 @@ fn is_elementtype_file(path: &str) -> bool {
     lower.contains("elementtype") || lower.contains("elementtypes/")
 }
 
+/// Derive the content node path from a content file's path in the package.
+///
+/// Mirrors the server's `derive_content_path` + `derive_name` logic so that
+/// the CLI validator can cross-check `raisin:ref` paths against actual content.
+///
+/// Returns `(workspace, node_path)` or `None` if the path isn't a valid content file.
+fn derive_content_node_path(file_path: &str, yaml: &serde_yaml::Value) -> Option<(String, String)> {
+    let parts: Vec<&str> = file_path.split('/').collect();
+    // content/{workspace}/{path...}/{file.yaml}
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // Find the "content" segment
+    let content_idx = parts.iter().position(|&p| p == "content")?;
+    let parts = &parts[content_idx..]; // Normalize: starts at "content/"
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let workspace = parts[1].to_string();
+    let filename = *parts.last()?;
+
+    // Skip translation files ({name}.{locale}.yaml)
+    let stem = filename.trim_end_matches(".yaml").trim_end_matches(".yml");
+    if stem.contains('.') && !stem.starts_with(".node") {
+        return None;
+    }
+
+    // Derive node name: name field > properties.name > folder name > filename
+    let name = yaml
+        .get("name")
+        .and_then(|n| n.as_str())
+        .or_else(|| {
+            yaml.get("properties")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+        })
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            if stem == "node" || stem == ".node" {
+                // Use parent folder name
+                if parts.len() >= 4 {
+                    parts[parts.len() - 2].to_string()
+                } else {
+                    stem.to_string()
+                }
+            } else {
+                stem.to_string()
+            }
+        });
+
+    // Build path from directory structure (mirror server's derive_content_path)
+    let is_folder_node = filename.starts_with(".node");
+    let path_dirs = &parts[2..parts.len() - 1];
+
+    let node_path = if path_dirs.is_empty() {
+        format!("/{}", name)
+    } else if is_folder_node {
+        if path_dirs.len() == 1 {
+            format!("/{}", name)
+        } else {
+            format!(
+                "/{}/{}",
+                path_dirs[..path_dirs.len() - 1].join("/"),
+                name
+            )
+        }
+    } else {
+        format!("/{}/{}", path_dirs.join("/"), name)
+    };
+
+    Some((workspace, node_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +452,56 @@ mod tests {
         assert!(is_nodetype_file("nodetypes/foo.yaml"));
         assert!(is_nodetype_file("nodetypes/bar.yml"));
         assert!(!is_nodetype_file("manifest.yaml"));
+    }
+
+    #[test]
+    fn test_geometry_property_type_accepted() {
+        // Validate a nodetype with Geometry property — should not produce INVALID_PROPERTY_TYPE
+        let yaml = r#"
+name: test:GeoNode
+properties:
+  location:
+    type: Geometry
+    description: A geo location
+"#;
+        let ctx = ValidationContext::default();
+        let result = crate::validation::validate_nodetype(yaml, "nodetypes/geo.yaml", &ctx);
+        let has_type_error = result.errors.iter().any(|e| e.error_code == "INVALID_PROPERTY_TYPE");
+        assert!(!has_type_error, "Geometry should be a valid property type");
+    }
+
+    #[test]
+    fn test_derive_content_node_path_folder_node() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("node_type: app:Child\nproperties:\n  name: Emma").unwrap();
+        let result = derive_content_node_path("content/myws/myws/children/Emma/.node.yaml", &yaml);
+        assert_eq!(result, Some(("myws".to_string(), "/myws/children/Emma".to_string())));
+    }
+
+    #[test]
+    fn test_derive_content_node_path_explicit_name() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("node_type: app:Item\nname: MyItem").unwrap();
+        let result = derive_content_node_path("content/ws/ws/items/MyItem/.node.yaml", &yaml);
+        assert_eq!(result, Some(("ws".to_string(), "/ws/items/MyItem".to_string())));
+    }
+
+    #[test]
+    fn test_derive_content_node_path_flat_file() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("node_type: app:Page").unwrap();
+        let result = derive_content_node_path("content/ws/ws/pages/about.yaml", &yaml);
+        assert_eq!(result, Some(("ws".to_string(), "/ws/pages/about".to_string())));
+    }
+
+    #[test]
+    fn test_derive_content_node_path_root_level() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("node_type: raisin:Folder").unwrap();
+        let result = derive_content_node_path("content/ws/ws/.node.yaml", &yaml);
+        assert_eq!(result, Some(("ws".to_string(), "/ws".to_string())));
+    }
+
+    #[test]
+    fn test_derive_content_node_path_skips_translation() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("title: Hallo").unwrap();
+        let result = derive_content_node_path("content/ws/ws/pages/about.de.yaml", &yaml);
+        assert_eq!(result, None);
     }
 }

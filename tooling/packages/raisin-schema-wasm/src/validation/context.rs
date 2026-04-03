@@ -45,6 +45,8 @@ lazy_static! {
         s.insert("composite");
         s.insert("Resource");
         s.insert("resource");
+        s.insert("Geometry");
+        s.insert("geometry");
         s
     };
 }
@@ -59,6 +61,8 @@ pub struct ValidationContext {
     pub package_archetypes: HashMap<String, Archetype>,
     /// Element types defined in the current package (full definitions for field validation)
     pub package_element_types: HashMap<String, ElementType>,
+    /// Content node paths for cross-reference validation: (workspace, lowercase_path) → actual_path
+    pub content_node_paths: HashMap<(String, String), String>,
 }
 
 impl Default for ValidationContext {
@@ -68,6 +72,7 @@ impl Default for ValidationContext {
             package_workspaces: HashSet::new(),
             package_archetypes: HashMap::new(),
             package_element_types: HashMap::new(),
+            content_node_paths: HashMap::new(),
         }
     }
 }

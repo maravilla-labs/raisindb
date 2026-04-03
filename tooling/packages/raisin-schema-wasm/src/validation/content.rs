@@ -219,6 +219,30 @@ fn validate_raisin_reference(
             ));
         }
     }
+
+    // Cross-validate path-based references against known content paths
+    if let Some(Value::String(ref_path)) = map.get(&Value::String("raisin:ref".to_string())) {
+        if ref_path.starts_with('/') {
+            let ws = map
+                .get(&Value::String("raisin:workspace".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let key = (ws.to_string(), ref_path.to_lowercase());
+            if let Some(actual_path) = ctx.content_node_paths.get(&key) {
+                if actual_path != ref_path {
+                    result.add_error(ValidationError::error(
+                        file_path,
+                        &format!("{}.raisin:ref", path),
+                        codes::UNRESOLVABLE_CONTENT_REFERENCE,
+                        format!(
+                            "Reference path '{}' has wrong case. Did you mean '{}'?",
+                            ref_path, actual_path
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// Validate an element with $type field
