@@ -278,33 +278,24 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             });
         }
 
-        // Sort entries: NodeDefs by path depth first, then BinaryFiles, then TranslationFiles last
-        entries.sort_by(|a, b| {
-            let order = |e: &ContentEntry| -> u8 {
-                match e {
-                    ContentEntry::NodeDef { .. } => 0,
-                    ContentEntry::BinaryFile { .. } => 1,
-                    ContentEntry::TranslationFile { .. } => 2,
-                }
-            };
-            let ord_a = order(a);
-            let ord_b = order(b);
-            if ord_a != ord_b {
-                return ord_a.cmp(&ord_b);
-            }
-            // Within NodeDefs, sort by path depth
-            if let (
-                ContentEntry::NodeDef { node: na, .. },
-                ContentEntry::NodeDef { node: nb, .. },
-            ) = (a, b)
-            {
-                let depth_a = na.path.matches('/').count();
-                let depth_b = nb.path.matches('/').count();
-                return depth_a.cmp(&depth_b).then_with(|| na.path.cmp(&nb.path));
-            }
-            std::cmp::Ordering::Equal
-        });
+        // Topological sort: referenced nodes first, circular refs flagged for two-pass
+        let sorted = super::reference_sort::sort_by_references(entries);
 
-        Ok(entries)
+        if !sorted.circular.is_empty() {
+            tracing::warn!(
+                job_id = %job_id,
+                count = sorted.circular.len(),
+                "Found nodes with circular references — will use two-pass install"
+            );
+        }
+
+        let mut result = Vec::with_capacity(
+            sorted.ordered.len() + sorted.circular.len() + sorted.other.len(),
+        );
+        result.extend(sorted.ordered);
+        result.extend(sorted.circular);
+        result.extend(sorted.other);
+
+        Ok(result)
     }
 }

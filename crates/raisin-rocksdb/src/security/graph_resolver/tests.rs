@@ -2,6 +2,7 @@
 
 use super::*;
 use raisin_models::nodes::{FullRelation, RelationRef};
+use raisin_storage::scope::{BranchScope, StorageScope};
 use std::sync::Arc;
 
 /// Mock relation repository for testing
@@ -12,10 +13,7 @@ struct MockRelationRepo {
 impl RelationRepository for MockRelationRepo {
     fn add_relation(
         &self,
-        _tenant_id: &str,
-        _repo_id: &str,
-        _branch: &str,
-        _source_workspace: &str,
+        _scope: StorageScope<'_>,
         _source_node_id: &str,
         _source_node_type: &str,
         _relation: RelationRef,
@@ -25,10 +23,7 @@ impl RelationRepository for MockRelationRepo {
 
     fn remove_relation(
         &self,
-        _tenant_id: &str,
-        _repo_id: &str,
-        _branch: &str,
-        _source_workspace: &str,
+        _scope: StorageScope<'_>,
         _source_node_id: &str,
         _target_workspace: &str,
         _target_node_id: &str,
@@ -38,10 +33,7 @@ impl RelationRepository for MockRelationRepo {
 
     fn get_outgoing_relations(
         &self,
-        _tenant_id: &str,
-        _repo_id: &str,
-        _branch: &str,
-        _workspace: &str,
+        _scope: StorageScope<'_>,
         _node_id: &str,
         _max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<RelationRef>>> + Send {
@@ -50,10 +42,7 @@ impl RelationRepository for MockRelationRepo {
 
     fn get_incoming_relations(
         &self,
-        _tenant_id: &str,
-        _repo_id: &str,
-        _branch: &str,
-        _workspace: &str,
+        _scope: StorageScope<'_>,
         _node_id: &str,
         _max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<(String, String, RelationRef)>>> + Send {
@@ -62,10 +51,7 @@ impl RelationRepository for MockRelationRepo {
 
     fn get_relations_by_type(
         &self,
-        _tenant_id: &str,
-        _repo_id: &str,
-        _branch: &str,
-        _workspace: &str,
+        _scope: StorageScope<'_>,
         _node_id: &str,
         _target_node_type: &str,
         _max_revision: Option<&HLC>,
@@ -75,10 +61,7 @@ impl RelationRepository for MockRelationRepo {
 
     fn remove_all_relations_for_node(
         &self,
-        _tenant_id: &str,
-        _repo_id: &str,
-        _branch: &str,
-        _workspace: &str,
+        _scope: StorageScope<'_>,
         _node_id: &str,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
         async { unimplemented!() }
@@ -86,9 +69,7 @@ impl RelationRepository for MockRelationRepo {
 
     fn scan_relations_global(
         &self,
-        _tenant_id: &str,
-        _repo_id: &str,
-        _branch: &str,
+        _scope: BranchScope<'_>,
         _relation_type_filter: Option<&str>,
         _max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<(String, String, String, String, FullRelation)>>>

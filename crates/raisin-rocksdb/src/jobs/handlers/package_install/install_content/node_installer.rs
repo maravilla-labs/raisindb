@@ -30,6 +30,7 @@ use crate::jobs::handlers::package_install::content_types::{
     CONTENT_BATCH_SIZE,
 };
 use crate::jobs::handlers::package_install::handler::PackageInstallHandler;
+use crate::jobs::handlers::package_install::install_content::reference_sort::strip_path_references;
 use crate::jobs::handlers::package_install::translation::derive_node_name_from_base_path;
 use crate::jobs::handlers::package_install::types::InstallMode;
 
@@ -37,6 +38,11 @@ use super::resolve_folder_type;
 
 impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Install sorted content entries in batches
+    ///
+    /// Entries are pre-sorted by the dependency graph (topological order).
+    /// Nodes with circular references are flagged with `__deferred_references`
+    /// and handled in two passes: first installed without references, then
+    /// re-upserted with full properties once all nodes exist.
     pub(in crate::jobs::handlers::package_install) async fn install_sorted_entries(
         &self,
         entries: Vec<ContentEntry>,
@@ -52,6 +58,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         let total_entries = entries.len();
         let mut processed = 0;
 
+        // Collect nodes that need a second pass (circular references)
+        let mut deferred_nodes: Vec<(String, Node, String)> = Vec::new();
+
         for batch in entries.chunks(CONTENT_BATCH_SIZE) {
             let tx = self.storage.begin_context().await?;
             tx.set_tenant_repo(tenant_id, repo_id)?;
@@ -66,16 +75,53 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         workspace, node, ..
                     } => {
                         let folder_type = resolve_folder_type(folder_type_map, workspace);
-                        self.install_content_node(
-                            tx.as_ref(),
-                            workspace,
-                            node,
-                            job_id,
-                            install_mode,
-                            folder_type,
-                            stats,
-                        )
-                        .await?;
+                        let is_deferred =
+                            node.properties.contains_key("__deferred_references");
+
+                        if is_deferred {
+                            // Strip path-based references and install skeleton first
+                            let stripped_props = strip_path_references(&node.properties);
+                            let mut skeleton = node.as_ref().clone();
+                            skeleton.properties = stripped_props;
+
+                            tracing::debug!(
+                                job_id = %job_id,
+                                workspace = %workspace,
+                                path = %node.path,
+                                "Installing skeleton for circular-reference node"
+                            );
+
+                            self.install_content_node(
+                                tx.as_ref(),
+                                workspace,
+                                &skeleton,
+                                job_id,
+                                install_mode,
+                                folder_type,
+                                stats,
+                            )
+                            .await?;
+
+                            // Save original node for second pass
+                            let mut original = node.as_ref().clone();
+                            original.properties.remove("__deferred_references");
+                            deferred_nodes.push((
+                                workspace.clone(),
+                                original,
+                                folder_type.to_string(),
+                            ));
+                        } else {
+                            self.install_content_node(
+                                tx.as_ref(),
+                                workspace,
+                                node,
+                                job_id,
+                                install_mode,
+                                folder_type,
+                                stats,
+                            )
+                            .await?;
+                        }
                     }
                     ContentEntry::BinaryFile {
                         workspace,
@@ -135,6 +181,37 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 mode = ?install_mode,
                 "Committed content batch"
             );
+        }
+
+        // Second pass: re-upsert deferred nodes with full properties (references resolve now)
+        if !deferred_nodes.is_empty() {
+            tracing::info!(
+                job_id = %job_id,
+                count = deferred_nodes.len(),
+                "Resolving deferred references (circular dependencies)"
+            );
+
+            for batch in deferred_nodes.chunks(CONTENT_BATCH_SIZE) {
+                let tx = self.storage.begin_context().await?;
+                tx.set_tenant_repo(tenant_id, repo_id)?;
+                tx.set_branch(branch)?;
+                tx.set_actor("package-install")?;
+                tx.set_message("Package install: resolve deferred references")?;
+                tx.set_auth_context(AuthContext::system())?;
+
+                for (workspace, node, folder_type) in batch {
+                    tracing::debug!(
+                        job_id = %job_id,
+                        workspace = %workspace,
+                        path = %node.path,
+                        "Re-upserting node with resolved references"
+                    );
+                    tx.upsert_deep_node(workspace, node, folder_type).await?;
+                    stats.content_nodes_synced += 1;
+                }
+
+                tx.commit().await?;
+            }
         }
 
         Ok(())

@@ -159,6 +159,7 @@ impl ProcessingRulesRepository for ProcessingRulesRepositoryImpl {
 mod tests {
     use super::*;
     use raisin_ai::{ProcessingSettings, RuleMatcher};
+    use raisin_storage::scope::RepoScope;
     use tempfile::TempDir;
 
     fn create_test_db() -> (Arc<DB>, TempDir) {
@@ -178,8 +179,10 @@ mod tests {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
 
+        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+
         // Initially no rules
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap();
+        let rules = repo.get_rules(scope).await.unwrap();
         assert!(rules.is_none());
 
         // Set rules
@@ -190,10 +193,10 @@ mod tests {
                 .with_matcher(RuleMatcher::All),
         );
 
-        repo.set_rules("tenant1", "repo1", &rule_set).await.unwrap();
+        repo.set_rules(scope, &rule_set).await.unwrap();
 
         // Get rules back
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap().unwrap();
+        let rules = repo.get_rules(scope).await.unwrap().unwrap();
         assert_eq!(rules.rules.len(), 1);
         assert_eq!(rules.rules[0].id, "test-rule");
     }
@@ -202,12 +205,13 @@ mod tests {
     async fn test_upsert_rule() {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
+        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
 
         // Add first rule
         let rule1 = ProcessingRule::new("rule1", "Rule 1")
             .with_order(1)
             .with_matcher(RuleMatcher::All);
-        repo.upsert_rule("tenant1", "repo1", &rule1).await.unwrap();
+        repo.upsert_rule(scope, &rule1).await.unwrap();
 
         // Add second rule
         let rule2 = ProcessingRule::new("rule2", "Rule 2")
@@ -215,22 +219,22 @@ mod tests {
             .with_matcher(RuleMatcher::MimeType {
                 mime_type: "application/pdf".to_string(),
             });
-        repo.upsert_rule("tenant1", "repo1", &rule2).await.unwrap();
+        repo.upsert_rule(scope, &rule2).await.unwrap();
 
         // Verify both rules exist
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap().unwrap();
+        let rules = repo.get_rules(scope).await.unwrap().unwrap();
         assert_eq!(rules.rules.len(), 2);
 
         // Update rule1
         let rule1_updated = ProcessingRule::new("rule1", "Rule 1 Updated")
             .with_order(10)
             .with_matcher(RuleMatcher::All);
-        repo.upsert_rule("tenant1", "repo1", &rule1_updated)
+        repo.upsert_rule(scope, &rule1_updated)
             .await
             .unwrap();
 
         // Verify update
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap().unwrap();
+        let rules = repo.get_rules(scope).await.unwrap().unwrap();
         assert_eq!(rules.rules.len(), 2);
         let rule = rules.get_rule("rule1").unwrap();
         assert_eq!(rule.name, "Rule 1 Updated");
@@ -240,18 +244,19 @@ mod tests {
     async fn test_delete_rule() {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
+        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
 
         // Add rules
         let rule1 = ProcessingRule::new("rule1", "Rule 1");
         let rule2 = ProcessingRule::new("rule2", "Rule 2");
-        repo.upsert_rule("tenant1", "repo1", &rule1).await.unwrap();
-        repo.upsert_rule("tenant1", "repo1", &rule2).await.unwrap();
+        repo.upsert_rule(scope, &rule1).await.unwrap();
+        repo.upsert_rule(scope, &rule2).await.unwrap();
 
         // Delete one rule
-        repo.delete_rule("tenant1", "repo1", "rule1").await.unwrap();
+        repo.delete_rule(scope, "rule1").await.unwrap();
 
         // Verify only rule2 remains
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap().unwrap();
+        let rules = repo.get_rules(scope).await.unwrap().unwrap();
         assert_eq!(rules.rules.len(), 1);
         assert_eq!(rules.rules[0].id, "rule2");
     }
@@ -260,18 +265,18 @@ mod tests {
     async fn test_reorder_rules() {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
+        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
 
         // Add rules in order 1, 2, 3
         for i in 1..=3 {
             let rule =
                 ProcessingRule::new(format!("rule{}", i), format!("Rule {}", i)).with_order(i);
-            repo.upsert_rule("tenant1", "repo1", &rule).await.unwrap();
+            repo.upsert_rule(scope, &rule).await.unwrap();
         }
 
         // Reorder to 3, 1, 2
         repo.reorder_rules(
-            "tenant1",
-            "repo1",
+            scope,
             &[
                 "rule3".to_string(),
                 "rule1".to_string(),
@@ -282,7 +287,7 @@ mod tests {
         .unwrap();
 
         // Verify new order
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap().unwrap();
+        let rules = repo.get_rules(scope).await.unwrap().unwrap();
         assert_eq!(rules.rules[0].id, "rule3");
         assert_eq!(rules.rules[1].id, "rule1");
         assert_eq!(rules.rules[2].id, "rule2");
@@ -308,9 +313,10 @@ mod tests {
 
         let rule = ProcessingRule::new("chunk-rule", "Chunk Rule").with_settings(settings);
 
-        repo.upsert_rule("tenant1", "repo1", &rule).await.unwrap();
+        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+        repo.upsert_rule(scope, &rule).await.unwrap();
 
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap().unwrap();
+        let rules = repo.get_rules(scope).await.unwrap().unwrap();
         let loaded_rule = rules.get_rule("chunk-rule").unwrap();
         assert!(loaded_rule.settings.chunking.is_some());
         assert_eq!(
@@ -324,6 +330,7 @@ mod tests {
         use raisin_ai::ProcessingSettings;
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
+        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
 
         let settings = ProcessingSettings {
             generate_image_embedding: Some(true),
@@ -332,9 +339,9 @@ mod tests {
 
         let rule = ProcessingRule::new("image-rule", "Image Rule").with_settings(settings);
 
-        repo.upsert_rule("tenant1", "repo1", &rule).await.unwrap();
+        repo.upsert_rule(scope, &rule).await.unwrap();
 
-        let rules = repo.get_rules("tenant1", "repo1").await.unwrap().unwrap();
+        let rules = repo.get_rules(scope).await.unwrap().unwrap();
         let loaded_rule = rules.get_rule("image-rule").unwrap();
         assert_eq!(loaded_rule.settings.generate_image_embedding, Some(true));
     }

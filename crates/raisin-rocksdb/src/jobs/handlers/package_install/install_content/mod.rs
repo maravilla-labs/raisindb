@@ -22,6 +22,7 @@
 
 mod node_installer;
 mod package_assets;
+pub(super) mod reference_sort;
 mod zip_collector;
 
 pub(in crate::jobs::handlers::package_install) use self::zip_collector::CollectedEntries;

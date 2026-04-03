@@ -215,7 +215,7 @@ mod tests {
 
         let locale = LocaleCode::parse("de-DE").unwrap();
         let pointer = JsonPointer::new("/title");
-        let record = TranslationHashRecord::new("abc123".to_string(), 42);
+        let record = TranslationHashRecord::new("abc123".to_string(), raisin_hlc::HLC::new(42, 0));
 
         // Store
         store_hash_record(
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(records.len(), 1);
         let retrieved = records.get(&pointer).unwrap();
         assert_eq!(retrieved.original_hash, "abc123");
-        assert_eq!(retrieved.original_revision, 42);
+        assert_eq!(retrieved.original_revision, raisin_hlc::HLC::new(42, 0));
     }
 
     #[tokio::test]
@@ -243,15 +243,15 @@ mod tests {
         let mut records = HashMap::new();
         records.insert(
             JsonPointer::new("/title"),
-            TranslationHashRecord::new("hash1".to_string(), 1),
+            TranslationHashRecord::new("hash1".to_string(), raisin_hlc::HLC::new(1, 0)),
         );
         records.insert(
             JsonPointer::new("/description"),
-            TranslationHashRecord::new("hash2".to_string(), 1),
+            TranslationHashRecord::new("hash2".to_string(), raisin_hlc::HLC::new(1, 0)),
         );
         records.insert(
             JsonPointer::new("/content"),
-            TranslationHashRecord::new("hash3".to_string(), 1),
+            TranslationHashRecord::new("hash3".to_string(), raisin_hlc::HLC::new(1, 0)),
         );
 
         // Store batch
@@ -291,11 +291,11 @@ mod tests {
         let mut records = HashMap::new();
         records.insert(
             JsonPointer::new("/title"),
-            TranslationHashRecord::new("hash1".to_string(), 1),
+            TranslationHashRecord::new("hash1".to_string(), raisin_hlc::HLC::new(1, 0)),
         );
         records.insert(
             JsonPointer::new("/description"),
-            TranslationHashRecord::new("hash2".to_string(), 1),
+            TranslationHashRecord::new("hash2".to_string(), raisin_hlc::HLC::new(1, 0)),
         );
 
         // Store
