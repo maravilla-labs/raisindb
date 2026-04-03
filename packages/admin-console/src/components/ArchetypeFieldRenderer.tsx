@@ -11,6 +11,7 @@ import DateField from './PropertyFields/DateField'
 import SectionEditor from './PropertyFields/SectionEditor'
 import ElementEditor from './PropertyFields/ElementEditor'
 import CompositeFieldEditor from './PropertyFields/CompositeFieldEditor'
+import LocationFieldComponent from './PropertyFields/LocationField'
 import MultipleFieldWrapper from './PropertyFields/MultipleFieldWrapper'
 
 interface ArchetypeFieldRendererProps {
@@ -278,9 +279,13 @@ export default function ArchetypeFieldRenderer({
 
       case 'LocationField':
         return (
-          <StringField
-            {...commonProps}
-            placeholder="Location value"
+          <LocationFieldComponent
+            name={base.name}
+            label={base.label}
+            value={value as { lat: number; lng: number } | undefined}
+            error={error}
+            required={base.required}
+            onChange={onChange as (value: { lat: number; lng: number } | undefined) => void}
           />
         )
 
@@ -422,7 +427,15 @@ export default function ArchetypeFieldRenderer({
           <StringField {...itemProps} placeholder="Node reference path" />
         )
       case 'LocationField':
-        return <StringField {...itemProps} placeholder="Location value" />
+        return (
+          <LocationFieldComponent
+            name={itemProps.name}
+            label={itemProps.label}
+            value={itemProps.value as { lat: number; lng: number } | undefined}
+            required={itemProps.required}
+            onChange={itemProps.onChange as (value: { lat: number; lng: number } | undefined) => void}
+          />
+        )
       default:
         return (
           <StringField {...itemProps} placeholder={`Enter ${base.name}`} />

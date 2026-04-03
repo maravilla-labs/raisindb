@@ -96,36 +96,68 @@ fn rewrite_references(args: &[TypedExpr], expr: TypedExpr) -> Vec<CanonicalPredi
     vec![CanonicalPredicate::Other(expr)]
 }
 
-fn rewrite_st_dwithin(args: &[TypedExpr], expr: TypedExpr) -> Vec<CanonicalPredicate> {
-    if args.len() != 3 {
-        return vec![CanonicalPredicate::Other(expr)];
-    }
-    let (table, geometry_column, property_name) = match &args[0].expr {
+/// Extract geometry source (table, column, property_name) from an expression.
+///
+/// Handles direct property access and CAST(... AS GEOMETRY) wrappers:
+/// - `properties->>'location'` (JsonExtractText)
+/// - `properties->'location'` (JsonExtract)
+/// - `CAST(properties->>'location' AS GEOMETRY)`
+/// - Direct column reference
+/// Extract geometry source (table, column, property_name) from an expression.
+///
+/// Handles direct property access and CAST(... AS GEOMETRY) wrappers:
+/// - `properties->>'location'` (JsonExtractText)
+/// - `properties->'location'` (JsonExtract)
+/// - `CAST(properties->>'location' AS GEOMETRY)`
+/// - Direct column reference
+///
+/// Returns `(table, geometry_column, property_name)` if matched.
+pub fn extract_geometry_source(expr: &Expr) -> Option<(String, String, String)> {
+    match expr {
+        // Unwrap CAST(... AS GEOMETRY) only — reject other target types
+        Expr::Cast {
+            expr: inner,
+            target_type: crate::analyzer::DataType::Geometry,
+        } => extract_geometry_source(&inner.expr),
+
         Expr::JsonExtractText { object, key } => {
             if let Expr::Column { table, column } = &object.expr {
                 let prop = match &key.expr {
                     Expr::Literal(Literal::Text(t)) => t.clone(),
-                    _ => return vec![CanonicalPredicate::Other(expr)],
+                    _ => return None,
                 };
-                (table.clone(), column.clone(), prop)
+                Some((table.clone(), column.clone(), prop))
             } else {
-                return vec![CanonicalPredicate::Other(expr)];
+                None
             }
         }
         Expr::JsonExtract { object, key } => {
             if let Expr::Column { table, column } = &object.expr {
                 let prop = match &key.expr {
                     Expr::Literal(Literal::Text(t)) => t.clone(),
-                    _ => return vec![CanonicalPredicate::Other(expr)],
+                    _ => return None,
                 };
-                (table.clone(), column.clone(), prop)
+                Some((table.clone(), column.clone(), prop))
             } else {
-                return vec![CanonicalPredicate::Other(expr)];
+                None
             }
         }
-        Expr::Column { table, column } => (table.clone(), "properties".to_string(), column.clone()),
-        _ => return vec![CanonicalPredicate::Other(expr)],
-    };
+        Expr::Column { table, column } => {
+            Some((table.clone(), "properties".to_string(), column.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn rewrite_st_dwithin(args: &[TypedExpr], expr: TypedExpr) -> Vec<CanonicalPredicate> {
+    if args.len() != 3 {
+        return vec![CanonicalPredicate::Other(expr)];
+    }
+    let (table, geometry_column, property_name) =
+        match extract_geometry_source(&args[0].expr) {
+            Some(v) => v,
+            None => return vec![CanonicalPredicate::Other(expr)],
+        };
     let (center_lon, center_lat) = match &args[1].expr {
         Expr::Function { name, args: pa, .. }
             if name.to_uppercase() == "ST_POINT" || name.to_uppercase() == "ST_MAKEPOINT" =>

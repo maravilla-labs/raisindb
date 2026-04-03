@@ -8,7 +8,7 @@ use raisin_models::nodes::Node;
 use crate::transaction::RocksDBTransaction;
 
 use super::super::{
-    cache, indexing, metadata, ordering, references, storage, tracking, validation,
+    cache, coercion, indexing, metadata, ordering, references, storage, tracking, validation,
 };
 use super::rls;
 
@@ -23,6 +23,9 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
 
     // 2. Resolve path-based references (converts paths to UUIDs, populates raisin:path)
     references::resolve_references(tx, &mut normalized_node.properties, workspace).await?;
+
+    // 2a. Coerce LocationField properties ({lat, lng} -> GeoJSON Point)
+    coercion::coerce_location_fields(tx, &mut normalized_node).await?;
 
     // 3. Extract metadata (tenant, repo, branch)
     let (tenant_id, repo_id, branch) = metadata::extract_metadata(tx)?;
@@ -130,6 +133,13 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         &revision,
         old_path.as_deref().filter(|_| path_changed),
     )?;
+
+    // 9a. Tombstone old spatial indexes on update (before re-indexing)
+    if let Some(ref old_node) = existing_node {
+        indexing::tombstone_spatial_properties(
+            tx, &tenant_id, &repo_id, &branch, workspace, old_node, &revision,
+        )?;
+    }
 
     // 10. Index all properties
     indexing::index_node_properties(

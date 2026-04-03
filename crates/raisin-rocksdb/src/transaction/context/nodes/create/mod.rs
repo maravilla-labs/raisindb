@@ -49,6 +49,7 @@
 //! - `references`: Path-based reference resolution
 
 mod cache;
+mod coercion;
 mod core;
 mod indexing;
 mod metadata;

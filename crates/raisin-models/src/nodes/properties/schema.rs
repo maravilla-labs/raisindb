@@ -88,6 +88,8 @@ pub enum PropertyType {
     Composite,
     #[serde(alias = "resource")]
     Resource,
+    #[serde(alias = "geometry")]
+    Geometry,
 }
 
 /// Compound index definition for efficient multi-column queries.

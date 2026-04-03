@@ -155,36 +155,13 @@ impl PhysicalPlanner {
             Expr::Function { name, args, .. } if name.to_uppercase() == "ST_DWITHIN" => {
                 if args.len() == 3 {
                     // Extract geometry column/property access
-                    let (table, geometry_column, property_name) = match &args[0].expr {
-                        // properties->>'location' pattern (JsonExtractText)
-                        Expr::JsonExtractText { object, key } => {
-                            if let Expr::Column { table, column } = &object.expr {
-                                let prop_name = match &key.expr {
-                                    Expr::Literal(Literal::Text(t)) => t.clone(),
-                                    _ => return None,
-                                };
-                                (table.clone(), column.clone(), prop_name)
-                            } else {
-                                return None;
-                            }
-                        }
-                        // properties->'location' pattern (JsonExtract)
-                        Expr::JsonExtract { object, key } => {
-                            if let Expr::Column { table, column } = &object.expr {
-                                let prop_name = match &key.expr {
-                                    Expr::Literal(Literal::Text(t)) => t.clone(),
-                                    _ => return None,
-                                };
-                                (table.clone(), column.clone(), prop_name)
-                            } else {
-                                return None;
-                            }
-                        }
-                        // Direct column reference
-                        Expr::Column { table, column } => {
-                            (table.clone(), "properties".to_string(), column.clone())
-                        }
-                        _ => return None,
+                    // Supports: properties->>'loc', properties->'loc', CAST(... AS GEOMETRY), column
+                    let (table, geometry_column, property_name) = match
+                        raisin_sql::optimizer::hierarchy_rewrite::extract_geometry_source(
+                            &args[0].expr,
+                        ) {
+                        Some(v) => v,
+                        None => return None,
                     };
 
                     // Extract center point from ST_Point(lon, lat)

@@ -14,4 +14,4 @@ mod tests;
 pub use comparison_op::ComparisonOp;
 pub use helpers::{compute_depth, compute_parent_path};
 pub use predicate::CanonicalPredicate;
-pub use rewrite::rewrite_hierarchy_predicates;
+pub use rewrite::{extract_geometry_source, rewrite_hierarchy_predicates};

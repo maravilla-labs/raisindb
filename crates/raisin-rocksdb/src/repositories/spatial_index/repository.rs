@@ -4,7 +4,7 @@ use crate::{cf, cf_handle, keys, spatial};
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
 use raisin_models::nodes::properties::GeoJson;
-use rocksdb::DB;
+use rocksdb::{WriteBatch, DB};
 use std::sync::Arc;
 
 use super::SpatialIndexEntry;
@@ -62,6 +62,100 @@ impl SpatialIndexRepository {
                 self.db
                     .put_cf(cf, key, value.as_bytes())
                     .map_err(|e| Error::storage(e.to_string()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Index a geometry into a WriteBatch (for atomic commits with node data).
+    pub fn index_geometry_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        property_name: &str,
+        geometry: &GeoJson,
+        revision: &HLC,
+    ) -> Result<()> {
+        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
+
+        let geohashes = spatial::geohashes_for_geometry(geometry);
+        if geohashes.is_empty() {
+            return Ok(());
+        }
+
+        for geohash in &geohashes {
+            let key = keys::spatial_index_key_versioned(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                property_name,
+                geohash,
+                revision,
+                node_id,
+            );
+
+            if let Some((lon, lat)) = spatial::geometry_centroid(geometry) {
+                let value = format!("{},{}", lon, lat);
+                batch.put_cf(cf, key, value.as_bytes());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Tombstone spatial index entries for a node into a WriteBatch.
+    pub fn unindex_geometry_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_id: &str,
+        property_name: &str,
+        revision: &HLC,
+    ) -> Result<()> {
+        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
+
+        let prefix = keys::spatial_index_property_prefix(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            property_name,
+        );
+
+        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        for item in iter {
+            let (key, _) = item.map_err(|e| Error::storage(e.to_string()))?;
+
+            if !key.starts_with(&prefix) {
+                break;
+            }
+
+            let key_str = String::from_utf8_lossy(&key);
+            if key_str.ends_with(&format!("\0{}", node_id)) {
+                let parts: Vec<&str> = key_str.split('\0').collect();
+                if parts.len() >= 7 {
+                    let geohash = parts[6];
+                    let tombstone_key = keys::spatial_index_key_versioned(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        workspace,
+                        property_name,
+                        geohash,
+                        revision,
+                        node_id,
+                    );
+                    batch.put_cf(cf, tombstone_key, b"T");
+                }
             }
         }
 

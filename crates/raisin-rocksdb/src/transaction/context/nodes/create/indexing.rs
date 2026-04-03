@@ -5,6 +5,7 @@
 
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 
 use crate::repositories::hash_property_value;
@@ -181,6 +182,58 @@ pub(super) fn index_node_properties(
             is_published,
         );
         batch.put_cf(cf_property, updated_at_key, node.id.as_bytes());
+    }
+
+    // Index geometry properties in the spatial index (within same batch for atomicity)
+    for (prop_name, prop_value) in &node.properties {
+        if let PropertyValue::Geometry(geojson) = prop_value {
+            tx.storage.spatial_index.index_geometry_to_batch(
+                &mut batch,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &node.id,
+                prop_name,
+                geojson,
+                revision,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Tombstone old spatial index entries for a node's geometry properties.
+///
+/// Called before re-indexing during updates to prevent stale geohash entries.
+pub(super) fn tombstone_spatial_properties(
+    tx: &RocksDBTransaction,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    old_node: &Node,
+    revision: &HLC,
+) -> Result<()> {
+    let mut batch = tx
+        .batch
+        .lock()
+        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+
+    for (prop_name, prop_value) in &old_node.properties {
+        if matches!(prop_value, PropertyValue::Geometry(_)) {
+            tx.storage.spatial_index.unindex_geometry_to_batch(
+                &mut batch,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &old_node.id,
+                prop_name,
+                revision,
+            )?;
+        }
     }
 
     Ok(())

@@ -8,7 +8,7 @@ use raisin_models::nodes::Node;
 use crate::transaction::RocksDBTransaction;
 
 use super::super::{
-    cache, indexing, metadata, ordering, references, storage, tracking, validation,
+    cache, coercion, indexing, metadata, ordering, references, storage, tracking, validation,
 };
 use super::rls;
 
@@ -35,6 +35,9 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
 
     // 2. Resolve path-based references
     references::resolve_references(tx, &mut normalized_node.properties, workspace).await?;
+
+    // 2a. Coerce LocationField properties ({lat, lng} -> GeoJSON Point)
+    coercion::coerce_location_fields(tx, &mut normalized_node).await?;
 
     // 3. Extract metadata (tenant, repo, branch)
     let (tenant_id, repo_id, branch) = metadata::extract_metadata(tx)?;
