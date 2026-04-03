@@ -10,6 +10,8 @@ import { createFromServer } from './commands/create-from-server.js';
 import { initPackage } from './commands/init.js';
 import { deployPackage } from './commands/deploy.js';
 import { serverInstall, serverStart, serverVersion, serverUpdate, serverStop, serverStatus, serverLogs } from './commands/server.js';
+import { login, logout, isAuthenticated } from './auth.js';
+import { getServer } from './config.js';
 import { HelpDisplay } from './components/HelpDisplay.js';
 
 const program = new Command();
@@ -292,6 +294,35 @@ serverCmd
       console.error('Error:', error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
+  });
+
+// Authentication commands
+program
+  .command('login')
+  .description('Authenticate with a RaisinDB server (opens browser)')
+  .option('-s, --server <url>', 'Server URL (default: http://localhost:8080)')
+  .action(async (options) => {
+    const serverUrl = options.server || getServer() || 'http://localhost:8080';
+    console.log(`\nAuthenticating with ${serverUrl}...`);
+    console.log('Opening browser for login...\n');
+    try {
+      await login(serverUrl);
+      console.log('\nAuthenticated successfully. Token saved to .raisinrc');
+      console.log('All subsequent commands will use this authentication.\n');
+      process.exit(0);
+    } catch (error) {
+      console.error('Login failed:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+program
+  .command('logout')
+  .description('Clear stored authentication token')
+  .action(() => {
+    logout();
+    console.log('Logged out. Token cleared from .raisinrc');
+    process.exit(0);
   });
 
 // Interactive shell mode (explicit command)
