@@ -390,6 +390,97 @@ ORDER BY properties ->> 'publishing_date' DESC
 LIMIT 20
 ```
 
+## 14. Geospatial Functions
+
+RaisinDB supports 49 PostGIS-compatible geospatial functions. Coordinates use WGS84 (EPSG:4326) in GeoJSON `[longitude, latitude]` order.
+
+### Creating Geometries
+
+```sql
+-- Point from coordinates
+SELECT ST_POINT(-122.4194, 37.7749)
+
+-- Parse GeoJSON
+SELECT ST_GEOMFROMGEOJSON('{"type":"Polygon","coordinates":[...]}')
+
+-- Bounding box
+SELECT ST_MAKEENVELOPE(-122.5, 37.7, -122.4, 37.8)
+
+-- Line from two points
+SELECT ST_MAKELINE(ST_POINT(-122.4, 37.7), ST_POINT(-122.3, 37.8))
+```
+
+### Proximity Queries (Indexed)
+
+```sql
+-- Find stores within 5km (uses spatial index)
+SELECT name, ST_DISTANCE(location, ST_POINT($1, $2)) AS distance
+FROM stores
+WHERE ST_DWITHIN(location, ST_POINT($1, $2), 5000)
+ORDER BY distance
+
+-- Nearest 10 locations
+SELECT name, location FROM stores
+ORDER BY ST_DISTANCE(location, ST_POINT($1, $2))
+LIMIT 10
+```
+
+### Containment & Predicates
+
+```sql
+-- Points in a region
+SELECT * FROM stores
+WHERE ST_CONTAINS(
+    (SELECT boundary FROM regions WHERE name = 'Downtown'),
+    location
+)
+
+-- Overlapping zones
+SELECT a.name, b.name FROM zones a JOIN zones b
+  ON ST_INTERSECTS(a.boundary, b.boundary)
+WHERE a.id < b.id
+```
+
+### Measurements
+
+```sql
+-- Area of a region (sq meters)
+SELECT name, ST_AREA(boundary) FROM regions
+
+-- Route length (meters)
+SELECT name, ST_LENGTH(path) FROM routes
+
+-- Bearing between two cities
+SELECT ST_AZIMUTH(ST_POINT(-122.4, 37.7), ST_POINT(-73.9, 40.7))
+```
+
+### Geometry Processing
+
+```sql
+-- 2km buffer zone around a store
+SELECT ST_BUFFER(location, 2000) AS zone FROM stores WHERE id = $1
+
+-- Simplify a complex polygon
+SELECT ST_SIMPLIFY(boundary, 0.001) FROM regions
+
+-- Bounding box of a geometry
+SELECT ST_ENVELOPE(boundary) FROM regions
+
+-- Overlap area between two zones
+SELECT ST_AREA(ST_INTERSECTION(a.boundary, b.boundary))
+FROM zones a, zones b WHERE a.id = $1 AND b.id = $2
+```
+
+### Geometry Info
+
+```sql
+SELECT ST_GEOMETRYTYPE(location),  -- 'ST_Point'
+       ST_NUMPOINTS(boundary),     -- coordinate count
+       ST_ISVALID(boundary),       -- true/false
+       ST_SRID(location)           -- 4326
+FROM regions LIMIT 1
+```
+
 ## Quick Reference: Statement Summary
 
 | Operation | Syntax |
@@ -409,3 +500,4 @@ LIMIT 20
 | Hierarchy | `WHERE CHILD_OF('/path')` / `WHERE DESCENDANT_OF('/path')` |
 | Resolve | `SELECT RESOLVE(properties) FROM workspace WHERE ...` |
 | References | `WHERE REFERENCES('workspace:/path')` |
+| Geospatial | `WHERE ST_DWITHIN(location, ST_POINT($1, $2), 5000)` |

@@ -373,10 +373,7 @@ mod tests {
         storage
             .nodes()
             .create(
-                TENANT,
-                REPO,
-                BRANCH,
-                WORKSPACE,
+                raisin_storage::StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
                 node,
                 relaxed_create_options(),
             )
@@ -401,10 +398,7 @@ mod tests {
         storage
             .relations()
             .add_relation(
-                TENANT,
-                REPO,
-                BRANCH,
-                WORKSPACE,
+                raisin_storage::StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
                 source_id,
                 source_type,
                 relation,

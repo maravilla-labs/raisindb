@@ -183,6 +183,91 @@ pub fn point_to_geojson(lon: f64, lat: f64) -> Value {
     })
 }
 
+/// Convert a geo::Polygon to GeoJSON Value
+pub fn polygon_to_geojson(polygon: &Polygon) -> Value {
+    let exterior: Vec<Vec<f64>> = polygon
+        .exterior()
+        .coords()
+        .map(|c| vec![c.x, c.y])
+        .collect();
+    let mut rings = vec![exterior];
+    for interior in polygon.interiors() {
+        let ring: Vec<Vec<f64>> = interior.coords().map(|c| vec![c.x, c.y]).collect();
+        rings.push(ring);
+    }
+    serde_json::json!({"type": "Polygon", "coordinates": rings})
+}
+
+/// Convert a geo::LineString to GeoJSON Value
+pub fn linestring_to_geojson(line: &LineString) -> Value {
+    let coords: Vec<Vec<f64>> = line.coords().map(|c| vec![c.x, c.y]).collect();
+    serde_json::json!({"type": "LineString", "coordinates": coords})
+}
+
+/// Convert a slice of geo::Point to GeoJSON MultiPoint Value
+pub fn multipoint_to_geojson(points: &[Point]) -> Value {
+    let coords: Vec<Vec<f64>> = points.iter().map(|p| vec![p.x(), p.y()]).collect();
+    serde_json::json!({"type": "MultiPoint", "coordinates": coords})
+}
+
+/// Extract all coordinates from any GeoJSON geometry as Vec<[f64; 2]>
+pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
+    let geom_type = get_geometry_type(value)?;
+    let coords = value
+        .get("coordinates")
+        .ok_or_else(|| Error::Validation("GeoJSON missing 'coordinates'".to_string()))?;
+
+    let mut result = Vec::new();
+    match geom_type {
+        "Point" => {
+            let arr = coords
+                .as_array()
+                .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
+            if arr.len() >= 2 {
+                result.push([arr[0].as_f64().unwrap_or(0.0), arr[1].as_f64().unwrap_or(0.0)]);
+            }
+        }
+        "LineString" | "MultiPoint" => {
+            let arr = coords
+                .as_array()
+                .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
+            for c in arr {
+                let pair = c
+                    .as_array()
+                    .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
+                if pair.len() >= 2 {
+                    result.push([pair[0].as_f64().unwrap_or(0.0), pair[1].as_f64().unwrap_or(0.0)]);
+                }
+            }
+        }
+        "Polygon" | "MultiLineString" => {
+            let rings = coords
+                .as_array()
+                .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
+            for ring in rings {
+                let arr = ring
+                    .as_array()
+                    .ok_or_else(|| Error::Validation("Invalid ring".to_string()))?;
+                for c in arr {
+                    let pair = c
+                        .as_array()
+                        .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
+                    if pair.len() >= 2 {
+                        result.push([pair[0].as_f64().unwrap_or(0.0), pair[1].as_f64().unwrap_or(0.0)]);
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(Error::Validation(format!(
+                "Cannot extract coordinates from geometry type: {}",
+                geom_type
+            )));
+        }
+    }
+    Ok(result)
+}
+
 /// Extract centroid coordinates [lon, lat] from any geometry
 pub fn get_centroid(value: &Value) -> Result<Point, Error> {
     let geom_type = get_geometry_type(value)?;

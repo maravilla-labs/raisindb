@@ -21,7 +21,7 @@ async fn test_single_node_crud_via_rest_api() {
     println!("✅ Server started on port 8081");
 
     // Authenticate as admin
-    let token = authenticate(&server.base_url, "default", "admin", "admin123!@#")
+    let token = authenticate(&server.base_url, "default", "admin", "Admin12345!@#")
         .await
         .expect("Failed to authenticate");
 

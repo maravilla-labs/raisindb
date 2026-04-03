@@ -15,22 +15,26 @@ pub struct ServerConfig {
     pub initial_admin_password: String,
     pub cluster_node_id: Option<String>,
     pub replication_port: Option<u16>,
+    _temp_dir: Option<TempDir>, // Keep alive so data_dir isn't deleted
 }
 
 impl ServerConfig {
     /// Create a new server config with defaults
     pub fn new(port: u16) -> Self {
         let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
         Self {
             port,
-            data_dir: temp_dir.path().to_path_buf(),
-            initial_admin_password: "admin123!@#".to_string(),
+            data_dir,
+            initial_admin_password: "Admin12345!@#".to_string(),
             cluster_node_id: None,
             replication_port: None,
+            _temp_dir: Some(temp_dir),
         }
     }
 
     /// Set cluster configuration for replication
+    #[allow(dead_code)]
     pub fn with_cluster(mut self, node_id: String, replication_port: u16) -> Self {
         self.cluster_node_id = Some(node_id);
         self.replication_port = Some(replication_port);
@@ -48,7 +52,6 @@ pub struct ServerHandle {
     pub config: ServerConfig,
     pub process: Child,
     pub base_url: String,
-    _temp_dir: Option<TempDir>, // Keep temp dir alive
 }
 
 impl ServerHandle {
@@ -87,27 +90,32 @@ impl ServerHandle {
             }
         }
 
-        // Create temp dir if using default config
-        let temp_dir = if config.data_dir.to_str().unwrap().starts_with("/tmp") {
-            Some(TempDir::new().unwrap())
-        } else {
-            None
-        };
+        // Write TOML config (same approach as cluster tests)
+        let config_path = config.data_dir.join("server.toml");
+        let toml_content = format!(
+            r#"[server]
+port = {}
+bind_address = "127.0.0.1"
+data_dir = "{}"
+initial_admin_password = "{}"
+jwt_secret = "test-secret-key-for-integration-tests-only-32chars!"
+"#,
+            config.port,
+            config.data_dir.display(),
+            config.initial_admin_password,
+        );
+        std::fs::write(&config_path, &toml_content)
+            .map_err(|e| format!("Failed to write config: {}", e))?;
 
         // Start server process
         let mut cmd = Command::new(&binary_path);
         cmd.current_dir(&workspace_root)
-            .env("RUST_LOG", "info")
-            .arg("--port")
-            .arg(config.port.to_string())
-            .arg("--data-dir")
-            .arg(&config.data_dir)
-            .arg("--initial-admin-password")
-            .arg(&config.initial_admin_password)
-            .arg("--bind-address")
-            .arg("127.0.0.1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .env("RUST_LOG", "warn")
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--dev-mode")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
 
         if let Some(ref node_id) = config.cluster_node_id {
             cmd.arg("--cluster-node-id").arg(node_id);
@@ -127,11 +135,10 @@ impl ServerHandle {
             config,
             process,
             base_url: base_url.clone(),
-            _temp_dir: temp_dir,
         };
 
         // Wait for server to be ready
-        if let Err(e) = handle.wait_for_ready(Duration::from_secs(30)).await {
+        if let Err(e) = handle.wait_for_ready(Duration::from_secs(60)).await {
             handle.kill();
             return Err(e);
         }
@@ -154,7 +161,8 @@ impl ServerHandle {
             }
 
             match client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
+                Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 401 => {
+                    // 200 = healthy, 401 = server is up but requires auth (also fine)
                     println!("✅ Server on port {} is ready", self.config.port);
                     return Ok(());
                 }

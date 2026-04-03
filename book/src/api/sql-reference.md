@@ -533,18 +533,94 @@ LIMIT 10
 
 ### Geospatial Functions (PostGIS-Compatible)
 
+**Constructors:**
+
 | Function | Signature | Description |
 |---|---|---|
-| `ST_POINT(lon, lat)` | DOUBLE, DOUBLE -> GEOMETRY | Create a point |
-| `ST_GEOMFROMGEOJSON(json)` | TEXT -> GEOMETRY | Parse GeoJSON |
-| `ST_ASGEOJSON(geom)` | GEOMETRY -> TEXT | Convert to GeoJSON |
-| `ST_DISTANCE(g1, g2)` | GEOMETRY, GEOMETRY -> DOUBLE | Distance between geometries |
-| `ST_DWITHIN(g1, g2, dist)` | GEOMETRY, GEOMETRY, DOUBLE -> BOOLEAN | Within distance |
-| `ST_CONTAINS(g1, g2)` | GEOMETRY, GEOMETRY -> BOOLEAN | Contains check |
-| `ST_WITHIN(g1, g2)` | GEOMETRY, GEOMETRY -> BOOLEAN | Within check |
-| `ST_INTERSECTS(g1, g2)` | GEOMETRY, GEOMETRY -> BOOLEAN | Intersection check |
-| `ST_X(geom)` | GEOMETRY -> DOUBLE? | Get X coordinate (longitude) |
-| `ST_Y(geom)` | GEOMETRY -> DOUBLE? | Get Y coordinate (latitude) |
+| `ST_POINT(lon, lat)` | DOUBLE, DOUBLE → GEOMETRY | Create a point |
+| `ST_MAKEPOINT(x, y)` | DOUBLE, DOUBLE → GEOMETRY | Create a point (alias) |
+| `ST_GEOMFROMGEOJSON(json)` | TEXT → GEOMETRY | Parse GeoJSON |
+| `ST_MAKELINE(p1, p2)` | GEOMETRY, GEOMETRY → GEOMETRY | Create LineString from two points |
+| `ST_MAKEPOLYGON(ring)` | GEOMETRY → GEOMETRY | Create Polygon from closed LineString |
+| `ST_MAKEENVELOPE(xmin, ymin, xmax, ymax)` | DOUBLE×4 → GEOMETRY | Create bounding box Polygon |
+| `ST_COLLECT(g1, g2)` | GEOMETRY, GEOMETRY → GEOMETRY | Collect into GeometryCollection |
+
+**Output:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `ST_ASGEOJSON(geom)` | GEOMETRY → TEXT | Convert to GeoJSON string |
+
+**Measurement:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `ST_DISTANCE(g1, g2)` | GEOMETRY, GEOMETRY → DOUBLE | Distance in meters |
+| `ST_AREA(geom)` | GEOMETRY → DOUBLE | Area in square meters |
+| `ST_LENGTH(geom)` | GEOMETRY → DOUBLE | Length in meters |
+| `ST_PERIMETER(geom)` | GEOMETRY → DOUBLE | Perimeter in meters |
+| `ST_AZIMUTH(p1, p2)` | GEOMETRY, GEOMETRY → DOUBLE | Bearing in radians |
+
+**Spatial Predicates:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `ST_DWITHIN(g1, g2, dist)` | GEOMETRY, GEOMETRY, DOUBLE → BOOLEAN | Within distance (indexed) |
+| `ST_CONTAINS(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | A contains B |
+| `ST_WITHIN(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | A within B |
+| `ST_INTERSECTS(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | Geometries intersect |
+| `ST_DISJOINT(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | Geometries don't intersect |
+| `ST_EQUALS(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | Topologically equal |
+| `ST_TOUCHES(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | Boundaries touch |
+| `ST_CROSSES(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | Geometry crosses another |
+| `ST_OVERLAPS(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | Same-dimension overlap |
+| `ST_COVERS(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | A covers B |
+| `ST_COVEREDBY(g1, g2)` | GEOMETRY, GEOMETRY → BOOLEAN | A covered by B |
+
+**Processing:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `ST_BUFFER(geom, dist)` | GEOMETRY, DOUBLE → GEOMETRY | Buffer zone |
+| `ST_CENTROID(geom)` | GEOMETRY → GEOMETRY | Center point |
+| `ST_ENVELOPE(geom)` | GEOMETRY → GEOMETRY | Bounding box |
+| `ST_CONVEXHULL(geom)` | GEOMETRY → GEOMETRY | Convex hull |
+| `ST_SIMPLIFY(geom, tol)` | GEOMETRY, DOUBLE → GEOMETRY | Simplify (Douglas-Peucker) |
+| `ST_REVERSE(geom)` | GEOMETRY → GEOMETRY | Reverse coordinates |
+| `ST_BOUNDARY(geom)` | GEOMETRY → GEOMETRY | Geometry boundary |
+
+**Set Operations:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `ST_UNION(g1, g2)` | GEOMETRY, GEOMETRY → GEOMETRY | Union |
+| `ST_INTERSECTION(g1, g2)` | GEOMETRY, GEOMETRY → GEOMETRY | Intersection |
+| `ST_DIFFERENCE(g1, g2)` | GEOMETRY, GEOMETRY → GEOMETRY | Difference (A - B) |
+| `ST_SYMDIFFERENCE(g1, g2)` | GEOMETRY, GEOMETRY → GEOMETRY | Symmetric difference |
+
+**Accessors:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `ST_X(geom)` | GEOMETRY → DOUBLE? | Longitude of point |
+| `ST_Y(geom)` | GEOMETRY → DOUBLE? | Latitude of point |
+| `ST_GEOMETRYTYPE(geom)` | GEOMETRY → TEXT | Type name ("ST_Point", etc.) |
+| `ST_NUMPOINTS(geom)` | GEOMETRY → INT | Number of coordinates |
+| `ST_NUMGEOMETRIES(geom)` | GEOMETRY → INT | Number of sub-geometries |
+| `ST_SRID(geom)` | GEOMETRY → INT | SRID (always 4326) |
+| `ST_ISVALID(geom)` | GEOMETRY → BOOLEAN | Is geometry valid |
+| `ST_ISEMPTY(geom)` | GEOMETRY → BOOLEAN | Has no coordinates |
+| `ST_ISCLOSED(geom)` | GEOMETRY → BOOLEAN | Is ring closed |
+| `ST_ISSIMPLE(geom)` | GEOMETRY → BOOLEAN | No self-intersections |
+
+**Line Functions:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `ST_STARTPOINT(geom)` | GEOMETRY → GEOMETRY | First point of LineString |
+| `ST_ENDPOINT(geom)` | GEOMETRY → GEOMETRY | Last point of LineString |
+| `ST_POINTN(geom, n)` | GEOMETRY, INT → GEOMETRY | Nth point (1-based) |
+| `ST_LINEINTERPOLATEPOINT(geom, frac)` | GEOMETRY, DOUBLE → GEOMETRY | Point at fraction along line |
 
 ### System Functions
 
