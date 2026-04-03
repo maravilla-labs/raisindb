@@ -1,6 +1,6 @@
 [package]
 name = "raisin-server"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 description = "RaisinDB server binary"
 license = "BSL-1.1"
