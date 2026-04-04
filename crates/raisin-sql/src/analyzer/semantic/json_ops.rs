@@ -17,13 +17,42 @@ impl<'a> AnalyzerContext<'a> {
         typed_left: &TypedExpr,
         typed_right: &TypedExpr,
     ) -> Result<TypedExpr> {
-        // Validate: left must be JsonB, right must be Text
+        // Validate: left must be JsonB
         if !matches!(typed_left.data_type.base_type(), DataType::JsonB) {
             return Err(AnalysisError::TypeMismatch {
                 expected: "JSONB".into(),
                 actual: typed_left.data_type.to_string(),
             });
         }
+
+        // Check if right operand is a cast (e.g., 'key'::Boolean)
+        if let Expr::Cast {
+            expr: inner_expr,
+            target_type,
+        } = &typed_right.expr
+        {
+            if !matches!(inner_expr.data_type.base_type(), DataType::Text) {
+                return Err(AnalysisError::TypeMismatch {
+                    expected: "TEXT".into(),
+                    actual: inner_expr.data_type.to_string(),
+                });
+            }
+            let extract = TypedExpr::new(
+                Expr::JsonExtract {
+                    object: Box::new(typed_left.clone()),
+                    key: Box::new(inner_expr.as_ref().clone()),
+                },
+                DataType::Nullable(Box::new(DataType::JsonB)),
+            );
+            return Ok(TypedExpr::new(
+                Expr::Cast {
+                    expr: Box::new(extract),
+                    target_type: target_type.clone(),
+                },
+                DataType::Nullable(Box::new(target_type.clone())),
+            ));
+        }
+
         if !matches!(typed_right.data_type.base_type(), DataType::Text) {
             return Err(AnalysisError::TypeMismatch {
                 expected: "TEXT".into(),
@@ -45,13 +74,44 @@ impl<'a> AnalyzerContext<'a> {
         typed_left: &TypedExpr,
         typed_right: &TypedExpr,
     ) -> Result<TypedExpr> {
-        // Validate: left must be JsonB, right must be Text
+        // Validate: left must be JsonB
         if !matches!(typed_left.data_type.base_type(), DataType::JsonB) {
             return Err(AnalysisError::TypeMismatch {
                 expected: "JSONB".into(),
                 actual: typed_left.data_type.to_string(),
             });
         }
+
+        // Check if right operand is a cast (e.g., 'key'::Boolean)
+        // This is a RaisinDB convention: the cast indicates the desired return type,
+        // not a cast on the key name itself.
+        if let Expr::Cast {
+            expr: inner_expr,
+            target_type,
+        } = &typed_right.expr
+        {
+            if !matches!(inner_expr.data_type.base_type(), DataType::Text) {
+                return Err(AnalysisError::TypeMismatch {
+                    expected: "TEXT".into(),
+                    actual: inner_expr.data_type.to_string(),
+                });
+            }
+            let extract = TypedExpr::new(
+                Expr::JsonExtractText {
+                    object: Box::new(typed_left.clone()),
+                    key: Box::new(inner_expr.as_ref().clone()),
+                },
+                DataType::Nullable(Box::new(DataType::Text)),
+            );
+            return Ok(TypedExpr::new(
+                Expr::Cast {
+                    expr: Box::new(extract),
+                    target_type: target_type.clone(),
+                },
+                DataType::Nullable(Box::new(target_type.clone())),
+            ));
+        }
+
         if !matches!(typed_right.data_type.base_type(), DataType::Text) {
             return Err(AnalysisError::TypeMismatch {
                 expected: "TEXT".into(),

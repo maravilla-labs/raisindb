@@ -91,6 +91,10 @@ impl<'a> AnalyzerContext<'a> {
                     "PATH" => Ok(DataType::Path),
                     "JSONB" => Ok(DataType::JsonB),
                     "UUID" => Ok(DataType::Uuid),
+                    "GEOMETRY" => Ok(DataType::Geometry),
+                    "TSVECTOR" => Ok(DataType::TSVector),
+                    "TSQUERY" => Ok(DataType::TSQuery),
+                    "INTERVAL" => Ok(DataType::Interval),
                     _ => Err(AnalysisError::UnsupportedExpression(format!(
                         "Unsupported type: {}",
                         type_name
