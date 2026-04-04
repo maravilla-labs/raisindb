@@ -39,6 +39,9 @@ pub(crate) struct ReadCache {
     pub(crate) paths: HashMap<(String, String), Option<String>>,
     /// Cached translations: (workspace, node_id, locale) -> LocaleOverlay
     pub(crate) translations: HashMap<(String, String, String), Option<LocaleOverlay>>,
+    /// Last assigned order label per (workspace, parent_id) within this transaction.
+    /// Prevents sibling nodes in the same batch from getting identical fractional indexes.
+    pub(crate) last_order_labels: HashMap<(String, String), String>,
 }
 
 /// Conflict detection tracking

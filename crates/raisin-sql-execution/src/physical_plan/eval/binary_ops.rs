@@ -189,6 +189,7 @@ pub(super) fn eval_unary_op(
     match op {
         UnaryOperator::Not => match value {
             Literal::Boolean(b) => Ok(Literal::Boolean(!b)),
+            Literal::Null => Ok(Literal::Null),
             _ => Err(Error::Validation(
                 "NOT operator requires boolean operand".to_string(),
             )),

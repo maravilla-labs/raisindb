@@ -247,9 +247,21 @@ pub(super) fn add_ordered_child(
         (existing, false) // Preserve existing order - this is an update
     } else {
         // Calculate new label by appending - this is a new node
-        let last_label = tx
+        // Check transaction cache first (for siblings created in the same batch)
+        let cached_label = {
+            let cache = tx
+                .read_cache
+                .lock()
+                .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+            cache
+                .last_order_labels
+                .get(&(workspace.to_string(), parent_id.to_string()))
+                .cloned()
+        };
+
+        let last_label = cached_label.or(tx
             .node_repo
-            .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+            .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?);
 
         // Extract fractional part from last label (strip ::HLC suffix)
         let fractional_label = if let Some(ref last) = last_label {
@@ -276,6 +288,18 @@ pub(super) fn add_ordered_child(
         &node.id,
     );
     batch.put_cf(cf_ordered, ordered_key, node.name.as_bytes());
+
+    // Update transaction cache so next sibling in the same batch gets a unique label
+    if is_new_node {
+        let mut cache = tx
+            .read_cache
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        cache.last_order_labels.insert(
+            (workspace.to_string(), parent_id.to_string()),
+            order_label.clone(),
+        );
+    }
 
     Ok((order_label, is_new_node))
 }
@@ -321,9 +345,21 @@ pub(super) fn add_ordered_child_fast(
     let cf_ordered = cf_handle(&tx.db, cf::ORDERED_CHILDREN)?;
 
     // FAST PATH: Just append to end (no existence check)
-    let last_label = tx
+    // Check transaction cache first (for siblings created in the same batch)
+    let cached_label = {
+        let cache = tx
+            .read_cache
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        cache
+            .last_order_labels
+            .get(&(workspace.to_string(), parent_id.to_string()))
+            .cloned()
+    };
+
+    let last_label = cached_label.or(tx
         .node_repo
-        .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+        .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?);
 
     // Extract fractional part from last label (strip ::HLC suffix)
     let fractional_label = if let Some(ref last) = last_label {
@@ -348,6 +384,18 @@ pub(super) fn add_ordered_child_fast(
         &node.id,
     );
     batch.put_cf(cf_ordered, ordered_key, node.name.as_bytes());
+
+    // Update transaction cache so next sibling in the same batch gets a unique label
+    {
+        let mut cache = tx
+            .read_cache
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        cache.last_order_labels.insert(
+            (workspace.to_string(), parent_id.to_string()),
+            order_label.clone(),
+        );
+    }
 
     Ok(order_label)
 }

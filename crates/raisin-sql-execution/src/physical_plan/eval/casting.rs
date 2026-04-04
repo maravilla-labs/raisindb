@@ -118,6 +118,22 @@ pub(super) fn cast_literal(value: Literal, target_type: &DataType) -> Result<Lit
         // From TimestampTz to Text - format as ISO 8601
         (Literal::Timestamp(ts), DataType::Text) => Ok(Literal::Text(ts.to_rfc3339())),
 
+        // To Geometry (from GeoJSON text)
+        (Literal::Text(s), DataType::Geometry) => serde_json::from_str::<serde_json::Value>(&s)
+            .map(Literal::Geometry)
+            .map_err(|e| {
+                Error::Validation(format!(
+                    "Cannot cast '{}' to GEOMETRY: invalid GeoJSON: {}",
+                    s, e
+                ))
+            }),
+
+        // To Geometry (from JsonB)
+        (Literal::JsonB(v), DataType::Geometry) => Ok(Literal::Geometry(v)),
+
+        // From Geometry to Text (GeoJSON serialization)
+        (Literal::Geometry(v), DataType::Text) => Ok(Literal::Text(v.to_string())),
+
         (v, t) => Err(Error::Validation(format!("Cannot cast {:?} to {}", v, t))),
     }
 }
@@ -288,5 +304,51 @@ mod tests {
             result.is_err(),
             "Should fail to cast invalid text to timestamptz"
         );
+    }
+
+    #[test]
+    fn test_cast_text_to_geometry() {
+        let geojson = r#"{"type":"Point","coordinates":[52.207,52.9089]}"#;
+        let result = cast_literal(Literal::Text(geojson.to_string()), &DataType::Geometry);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Literal::Geometry(v) => assert_eq!(v["type"], "Point"),
+            other => panic!("Expected Geometry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cast_invalid_text_to_geometry() {
+        let result = cast_literal(Literal::Text("not json".to_string()), &DataType::Geometry);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cast_jsonb_to_geometry() {
+        let geojson = serde_json::json!({"type": "Point", "coordinates": [52.207, 52.9089]});
+        let result = cast_literal(Literal::JsonB(geojson.clone()), &DataType::Geometry);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), Literal::Geometry(v) if v == geojson));
+    }
+
+    #[test]
+    fn test_cast_geometry_to_text() {
+        let geojson = serde_json::json!({"type": "Point", "coordinates": [52.207, 52.9089]});
+        let result = cast_literal(Literal::Geometry(geojson.clone()), &DataType::Text);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Literal::Text(s) => {
+                let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+                assert_eq!(parsed, geojson);
+            }
+            other => panic!("Expected Text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cast_null_to_geometry() {
+        let result = cast_literal(Literal::Null, &DataType::Geometry);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), Literal::Null));
     }
 }

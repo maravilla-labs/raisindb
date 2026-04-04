@@ -205,20 +205,36 @@ pub(super) fn compare_literals(
     )))
 }
 
-/// Logical AND operation
+/// Logical AND operation (SQL three-valued logic)
 pub(super) fn logical_and(left: &Literal, right: &Literal) -> Result<Literal, Error> {
     match (left, right) {
         (Literal::Boolean(a), Literal::Boolean(b)) => Ok(Literal::Boolean(*a && *b)),
+        // FALSE AND NULL = FALSE, NULL AND FALSE = FALSE
+        (Literal::Boolean(false), Literal::Null) | (Literal::Null, Literal::Boolean(false)) => {
+            Ok(Literal::Boolean(false))
+        }
+        // TRUE AND NULL = NULL, NULL AND TRUE = NULL, NULL AND NULL = NULL
+        (Literal::Boolean(true), Literal::Null)
+        | (Literal::Null, Literal::Boolean(true))
+        | (Literal::Null, Literal::Null) => Ok(Literal::Null),
         _ => Err(Error::Validation(
             "AND requires boolean operands".to_string(),
         )),
     }
 }
 
-/// Logical OR operation
+/// Logical OR operation (SQL three-valued logic)
 pub(super) fn logical_or(left: &Literal, right: &Literal) -> Result<Literal, Error> {
     match (left, right) {
         (Literal::Boolean(a), Literal::Boolean(b)) => Ok(Literal::Boolean(*a || *b)),
+        // TRUE OR NULL = TRUE, NULL OR TRUE = TRUE
+        (Literal::Boolean(true), Literal::Null) | (Literal::Null, Literal::Boolean(true)) => {
+            Ok(Literal::Boolean(true))
+        }
+        // FALSE OR NULL = NULL, NULL OR FALSE = NULL, NULL OR NULL = NULL
+        (Literal::Boolean(false), Literal::Null)
+        | (Literal::Null, Literal::Boolean(false))
+        | (Literal::Null, Literal::Null) => Ok(Literal::Null),
         _ => Err(Error::Validation(
             "OR requires boolean operands".to_string(),
         )),
@@ -344,5 +360,81 @@ mod tests {
         assert!(compare_literals(&row3, &cursor, BinaryOperator::Lt).unwrap());
         assert!(!compare_literals(&row4, &cursor, BinaryOperator::Lt).unwrap());
         assert!(!compare_literals(&row5, &cursor, BinaryOperator::Lt).unwrap());
+    }
+
+    #[test]
+    fn test_logical_and_null_three_valued_logic() {
+        // Standard boolean cases
+        assert_eq!(
+            logical_and(&Literal::Boolean(true), &Literal::Boolean(true)).unwrap(),
+            Literal::Boolean(true)
+        );
+        assert_eq!(
+            logical_and(&Literal::Boolean(true), &Literal::Boolean(false)).unwrap(),
+            Literal::Boolean(false)
+        );
+        // FALSE AND NULL = FALSE
+        assert_eq!(
+            logical_and(&Literal::Boolean(false), &Literal::Null).unwrap(),
+            Literal::Boolean(false)
+        );
+        // NULL AND FALSE = FALSE
+        assert_eq!(
+            logical_and(&Literal::Null, &Literal::Boolean(false)).unwrap(),
+            Literal::Boolean(false)
+        );
+        // TRUE AND NULL = NULL
+        assert_eq!(
+            logical_and(&Literal::Boolean(true), &Literal::Null).unwrap(),
+            Literal::Null
+        );
+        // NULL AND TRUE = NULL
+        assert_eq!(
+            logical_and(&Literal::Null, &Literal::Boolean(true)).unwrap(),
+            Literal::Null
+        );
+        // NULL AND NULL = NULL
+        assert_eq!(
+            logical_and(&Literal::Null, &Literal::Null).unwrap(),
+            Literal::Null
+        );
+    }
+
+    #[test]
+    fn test_logical_or_null_three_valued_logic() {
+        // Standard boolean cases
+        assert_eq!(
+            logical_or(&Literal::Boolean(false), &Literal::Boolean(false)).unwrap(),
+            Literal::Boolean(false)
+        );
+        assert_eq!(
+            logical_or(&Literal::Boolean(true), &Literal::Boolean(false)).unwrap(),
+            Literal::Boolean(true)
+        );
+        // TRUE OR NULL = TRUE
+        assert_eq!(
+            logical_or(&Literal::Boolean(true), &Literal::Null).unwrap(),
+            Literal::Boolean(true)
+        );
+        // NULL OR TRUE = TRUE
+        assert_eq!(
+            logical_or(&Literal::Null, &Literal::Boolean(true)).unwrap(),
+            Literal::Boolean(true)
+        );
+        // FALSE OR NULL = NULL
+        assert_eq!(
+            logical_or(&Literal::Boolean(false), &Literal::Null).unwrap(),
+            Literal::Null
+        );
+        // NULL OR FALSE = NULL
+        assert_eq!(
+            logical_or(&Literal::Null, &Literal::Boolean(false)).unwrap(),
+            Literal::Null
+        );
+        // NULL OR NULL = NULL
+        assert_eq!(
+            logical_or(&Literal::Null, &Literal::Null).unwrap(),
+            Literal::Null
+        );
     }
 }
