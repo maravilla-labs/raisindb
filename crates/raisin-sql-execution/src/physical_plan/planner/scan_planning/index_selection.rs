@@ -50,7 +50,13 @@ impl PhysicalPlanner {
                 .map(|(p, _)| *p);
         }
 
-        if has_descendant_of {
+        // When SpatialDWithin is present alongside hierarchy scans, let selectivity decide
+        // (spatial index is typically more selective than path prefix scans)
+        let has_spatial = index_options
+            .iter()
+            .any(|(pred, _)| matches!(pred, CanonicalPredicate::SpatialDWithin { .. }));
+
+        if has_descendant_of && !has_spatial {
             tracing::debug!(
                 "Prioritizing DESCENDANT_OF scan over other indexes (uses efficient path prefix scan)"
             );

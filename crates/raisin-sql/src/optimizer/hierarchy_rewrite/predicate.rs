@@ -237,10 +237,18 @@ impl CanonicalPredicate {
                 let col =
                     TypedExpr::column(table.clone(), geometry_column.clone(), DataType::JsonB);
                 let key = TypedExpr::literal(Literal::Text(property_name.clone()));
-                let je = TypedExpr::new(
+                let json_extract = TypedExpr::new(
                     Expr::JsonExtractText {
                         object: Box::new(col),
                         key: Box::new(key),
+                    },
+                    DataType::Text,
+                );
+                // Wrap in CAST(... AS GEOMETRY) so runtime evaluation converts Text→Geometry
+                let je = TypedExpr::new(
+                    Expr::Cast {
+                        expr: Box::new(json_extract),
+                        target_type: DataType::Geometry,
                     },
                     DataType::Geometry,
                 );

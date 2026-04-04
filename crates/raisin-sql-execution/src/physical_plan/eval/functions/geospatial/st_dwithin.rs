@@ -101,10 +101,17 @@ impl SqlFunction for StDWithinFunction {
             ));
         }
 
-        // Extract GeoJSON values
+        // Extract GeoJSON values (accept Geometry, JsonB, or Text containing GeoJSON)
+        let geom1_parsed;
         let geom1 = match &geom1_val {
             Literal::Geometry(v) => v,
             Literal::JsonB(v) => v,
+            Literal::Text(s) => {
+                geom1_parsed = serde_json::from_str(s).map_err(|e| {
+                    Error::Validation(format!("ST_DWITHIN: invalid GeoJSON text: {}", e))
+                })?;
+                &geom1_parsed
+            }
             _ => {
                 return Err(Error::Validation(
                     "ST_DWITHIN requires GEOMETRY arguments".to_string(),
@@ -112,9 +119,16 @@ impl SqlFunction for StDWithinFunction {
             }
         };
 
+        let geom2_parsed;
         let geom2 = match &geom2_val {
             Literal::Geometry(v) => v,
             Literal::JsonB(v) => v,
+            Literal::Text(s) => {
+                geom2_parsed = serde_json::from_str(s).map_err(|e| {
+                    Error::Validation(format!("ST_DWITHIN: invalid GeoJSON text: {}", e))
+                })?;
+                &geom2_parsed
+            }
             _ => {
                 return Err(Error::Validation(
                     "ST_DWITHIN requires GEOMETRY arguments".to_string(),
