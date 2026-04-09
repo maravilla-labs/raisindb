@@ -12,6 +12,7 @@
 //! - `restore` - RESTORE statement execution
 
 mod acl;
+mod ai_config;
 mod batch;
 mod branch;
 mod handlers;
@@ -143,6 +144,10 @@ pub struct QueryEngine<S: Storage> {
     pub(crate) repository_config: Option<RepositoryConfig>,
     /// Authentication context for RLS filtering
     pub(crate) auth_context: Option<AuthContext>,
+    /// Tenant embedding config store for AI config SQL statements
+    pub(crate) embedding_config_store: Option<Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>>,
+    /// Master key for API key encryption/decryption
+    pub(crate) master_key: Option<[u8; 32]>,
 }
 
 impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static> QueryEngine<S> {
@@ -175,6 +180,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             default_actor: "anonymous".to_string(),
             repository_config: None,
             auth_context: None,
+            embedding_config_store: None,
+            master_key: None,
         }
     }
 
@@ -259,6 +266,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     /// Get the current auth context (if set)
     pub fn auth_context(&self) -> Option<&AuthContext> {
         self.auth_context.as_ref()
+    }
+
+    pub fn with_embedding_config_store(mut self, store: Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>) -> Self {
+        self.embedding_config_store = Some(store);
+        self
+    }
+
+    pub fn with_master_key(mut self, key: [u8; 32]) -> Self {
+        self.master_key = Some(key);
+        self
     }
 
     // =========================================================================
@@ -370,6 +387,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             }
             AnalyzedStatement::Acl(ref acl_stmt) => {
                 return self.execute_acl(acl_stmt).await;
+            }
+            AnalyzedStatement::AIConfig(ref stmt) => {
+                return self.execute_ai_config(stmt).await;
             }
             AnalyzedStatement::Query(_) => {
                 // Continue with query execution below

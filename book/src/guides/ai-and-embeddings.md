@@ -64,6 +64,28 @@ Models can be assigned to specific use cases:
 
 API keys are encrypted using AES-256-GCM before storage. The master encryption key should be stored securely (environment variables, secrets manager). Encrypted keys are never returned to clients.
 
+### SQL Configuration
+
+All AI and embedding configuration can also be managed via SQL (see [SQL Reference](../api/sql-reference.md#ai--embedding-configuration)):
+
+```sql
+-- Configure embedding provider via SQL
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'OpenAI'
+  SET MODEL = 'text-embedding-3-small'
+  SET API_KEY = 'sk-...'
+  SET ENABLED = true;
+
+-- View configuration
+SHOW EMBEDDING CONFIG;
+
+-- Test connection
+TEST EMBEDDING CONNECTION;
+
+-- View AI providers
+SHOW AI PROVIDERS;
+```
+
 ## Completions
 
 The `AIProviderTrait` provides a unified interface for completions across all providers.

@@ -87,6 +87,8 @@ pub enum AnalyzedStatement {
     Restore(AnalyzedRestore),
     // Access control statements (CREATE/ALTER/DROP ROLE/GROUP/USER, GRANT/REVOKE, etc.)
     Acl(crate::ast::acl::AclStatement),
+    // AI/Embedding configuration statements
+    AIConfig(crate::ast::ai_config::AIConfigStatement),
 }
 
 /// Analyzed ORDER statement for node sibling positioning

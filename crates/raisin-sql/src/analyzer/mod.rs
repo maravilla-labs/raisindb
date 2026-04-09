@@ -237,6 +237,29 @@ impl Analyzer {
             }
         }
 
+        // 2f0. Check for AI config statements
+        tracing::debug!("   Checking for AI config statements...");
+        if crate::ast::ai_config_parser::is_ai_config_statement(sql) {
+            match crate::ast::ai_config_parser::parse_ai_config(sql) {
+                Ok(Some(stmt)) => {
+                    tracing::debug!(
+                        "   AI config statement detected: {}",
+                        stmt.operation()
+                    );
+                    return Ok(AnalyzedStatement::AIConfig(stmt));
+                }
+                Ok(None) => {
+                    tracing::debug!("   Not an AI config statement, continuing...");
+                }
+                Err(e) => {
+                    return Err(AnalysisError::ParseError(format!(
+                        "AI config parse error: {}",
+                        e.message
+                    )));
+                }
+            }
+        }
+
         // 2f. Try BRANCH parser (CREATE/DROP/ALTER/MERGE BRANCH, USE/CHECKOUT BRANCH, SHOW BRANCHES)
         tracing::debug!("   Checking for BRANCH statements...");
         if crate::ast::branch_parser::is_branch_statement(sql) {

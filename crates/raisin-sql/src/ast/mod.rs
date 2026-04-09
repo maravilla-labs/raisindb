@@ -24,6 +24,8 @@
 
 pub mod acl;
 pub mod acl_parser;
+pub mod ai_config;
+pub mod ai_config_parser;
 pub mod branch;
 pub mod branch_parser;
 pub mod copy_parser;
@@ -53,6 +55,8 @@ pub mod translate_parser;
 // Re-export commonly used types and functions
 pub use acl::{AclStatement, Operation, PermissionGrant};
 pub use acl_parser::{is_acl_statement, parse_acl};
+pub use ai_config::AIConfigStatement;
+pub use ai_config_parser::{is_ai_config_statement, parse_ai_config};
 pub use branch::{
     AlterBranch, BranchAlteration, BranchStatement, CreateBranch, DropBranch, MergeBranch,
     MergeStrategy, RevisionRef,

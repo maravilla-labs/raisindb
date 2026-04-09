@@ -433,6 +433,9 @@ impl QueryPlan {
             AnalyzedStatement::Acl(acl) => {
                 output.push_str(&format!("ACL {}\n", acl.operation()));
             }
+            AnalyzedStatement::AIConfig(ai) => {
+                output.push_str(&format!("AI CONFIG {}\n", ai.operation()));
+            }
         }
 
         output.push_str("\n=== Logical Plan (Unoptimized) ===\n");

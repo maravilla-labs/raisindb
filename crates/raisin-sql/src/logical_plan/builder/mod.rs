@@ -65,6 +65,10 @@ impl<'a> PlanBuilder<'a> {
                 // ACL statements bypass the logical plan - they're executed directly
                 Ok(LogicalPlan::Empty)
             }
+            AnalyzedStatement::AIConfig(_) => {
+                // AI config statements bypass the logical plan - they're executed directly
+                Ok(LogicalPlan::Empty)
+            }
         }
     }
 }

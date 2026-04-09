@@ -215,6 +215,14 @@ pub(super) fn configure_engine_features(
         }
     }
 
+    // Wire embedding config store for SQL AI config management
+    let config_store = rocksdb_storage.tenant_embedding_config_repository();
+    engine = engine.with_embedding_config_store(Arc::new(config_store));
+
+    if let Ok(master_key) = state.get_master_key() {
+        engine = engine.with_master_key(master_key);
+    }
+
     Ok(engine)
 }
 

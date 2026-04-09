@@ -1272,6 +1272,108 @@ EXPLAIN SELECT * FROM 'workspace'
   LIMIT 10
 ```
 
+## AI & Embedding Configuration
+
+Manage AI providers, embedding configuration, and vector indexes directly via SQL.
+
+### Embedding Configuration
+
+```sql
+-- View current embedding configuration
+SHOW EMBEDDING CONFIG;
+
+-- Configure embedding provider
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'OpenAI'
+  SET MODEL = 'text-embedding-3-small'
+  SET API_KEY = 'sk-...'
+  SET ENABLED = true;
+
+-- Configure Ollama (local)
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'Ollama'
+  SET MODEL = 'nomic-embed-text'
+  SET ENABLED = true;
+
+-- Configure Ollama (remote with optional auth)
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'Ollama'
+  SET MODEL = 'nomic-embed-text'
+  SET BASE_URL = 'https://ollama.mycompany.com'
+  SET API_KEY = 'optional-auth-token'
+  SET ENABLED = true;
+
+-- Configure Voyage AI
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'Claude'
+  SET MODEL = 'voyage-3'
+  SET API_KEY = 'pa-...'
+  SET ENABLED = true;
+
+-- Disable embeddings
+ALTER EMBEDDING CONFIG SET ENABLED = false;
+
+-- Test connection to configured provider
+TEST EMBEDDING CONNECTION;
+```
+
+**Supported settings for ALTER EMBEDDING CONFIG:**
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| `PROVIDER` | String | `OpenAI`, `Claude` (Voyage AI), `Ollama`, `HuggingFace` |
+| `MODEL` | String | Model identifier (e.g., `text-embedding-3-small`) |
+| `API_KEY` | String | Provider API key (encrypted at rest) |
+| `BASE_URL` | String | Custom endpoint URL (for remote Ollama) |
+| `DIMENSIONS` | Integer | Vector dimensions (auto-set by model) |
+| `ENABLED` | Boolean | `true` or `false` |
+| `INCLUDE_NAME` | Boolean | Include node name in embedding text |
+| `INCLUDE_PATH` | Boolean | Include node path in embedding text |
+| `DISTANCE_METRIC` | String | `Cosine`, `L2`, `InnerProduct`, `Manhattan`, `Hamming` |
+| `MAX_EMBEDDINGS_PER_REPO` | Integer | Limit per repository (empty = unlimited) |
+
+### AI Provider Management
+
+```sql
+-- View configured AI providers
+SHOW AI PROVIDERS;
+
+-- View full AI configuration
+SHOW AI CONFIG;
+
+-- Add/update a provider
+ALTER AI CONFIG ADD PROVIDER 'OpenAI'
+  SET API_KEY = 'sk-...'
+  SET ENABLED = true;
+
+-- Add Ollama with custom endpoint
+ALTER AI CONFIG ADD PROVIDER 'Ollama'
+  SET ENDPOINT = 'http://gpu-server:11434'
+  SET ENABLED = true;
+
+-- Remove a provider
+ALTER AI CONFIG DROP PROVIDER 'Ollama';
+
+-- Test a specific provider
+TEST AI PROVIDER 'OpenAI';
+```
+
+### Vector Index Management
+
+```sql
+-- Check vector index health and statistics
+SHOW VECTOR INDEX HEALTH;
+
+-- Rebuild HNSW index from stored embeddings
+REBUILD VECTOR INDEX;
+
+-- Regenerate all embeddings (re-calls provider API)
+REGENERATE EMBEDDINGS;
+
+-- Verify vector index integrity
+VERIFY VECTOR INDEX;
+```
+
 ## Limitations
 
 The following standard SQL features are **not** supported:
