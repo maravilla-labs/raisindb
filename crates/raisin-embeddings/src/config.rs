@@ -80,6 +80,11 @@ pub struct TenantEmbeddingConfig {
     /// Changing this requires a full index rebuild.
     #[serde(default)]
     pub distance_metric: EmbeddingDistanceMetric,
+
+    /// Optional base URL for self-hosted or remote provider endpoints.
+    /// Used by Ollama (defaults to http://localhost:11434 if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 /// Supported embedding providers.
@@ -142,6 +147,7 @@ impl TenantEmbeddingConfig {
             max_embeddings_per_repo: None,
             chunking: None,
             distance_metric: EmbeddingDistanceMetric::default(),
+            base_url: None,
         }
     }
 

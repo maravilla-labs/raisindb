@@ -123,6 +123,7 @@ export default function TenantEmbeddingSettings() {
   const [includeName, setIncludeName] = useState(true)
   const [includePath, setIncludePath] = useState(true)
   const [maxEmbeddings, setMaxEmbeddings] = useState<number | null>(null)
+  const [baseUrl, setBaseUrl] = useState('')
 
   // Load configuration on mount
   useEffect(() => {
@@ -160,6 +161,7 @@ export default function TenantEmbeddingSettings() {
       setIncludeName(data.include_name)
       setIncludePath(data.include_path)
       setMaxEmbeddings(data.max_embeddings_per_repo)
+      setBaseUrl(data.base_url || '')
     } catch (error) {
       console.error('Failed to load config:', error)
       toast.error('Failed to load configuration', error instanceof ApiError ? error.message : 'Unknown error')
@@ -198,6 +200,7 @@ export default function TenantEmbeddingSettings() {
         include_path: includePath,
         node_type_settings: config?.node_type_settings || {},
         max_embeddings_per_repo: maxEmbeddings,
+        base_url: baseUrl || undefined,
       }
 
       const result = await embeddingsApi.setConfig(tenant, request)
@@ -439,14 +442,28 @@ export default function TenantEmbeddingSettings() {
         </div>
       </GlassCard>
 
-      {/* API Key Section */}
-      {provider !== 'Ollama' && (
+      {/* Connection Settings */}
       <GlassCard className={!enabled ? 'opacity-50 pointer-events-none' : ''}>
         <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
           <Key className="w-5 h-5 text-purple-400" />
-          API Key
+          {provider === 'Ollama' ? 'Connection Settings' : 'API Key'}
         </h2>
         <div className="space-y-4">
+          {/* Base URL field for Ollama */}
+          {provider === 'Ollama' && (
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Base URL</label>
+              <input
+                type="text"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="http://localhost:11434"
+                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+              />
+              <p className="text-xs text-gray-500 mt-1">Leave empty for local Ollama (localhost:11434). Set for remote/hosted instances.</p>
+            </div>
+          )}
+
           {config?.has_api_key && (
             <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-lg">
               <CheckCircle className="w-5 h-5 text-green-400" />
@@ -454,14 +471,16 @@ export default function TenantEmbeddingSettings() {
             </div>
           )}
 
-          <div className="relative">
-            <input
-              type={showApiKey ? 'text' : 'password'}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={config?.has_api_key ? 'Enter new API key to update' : 'Enter your API key'}
-              className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-            />
+          <div>
+            {provider === 'Ollama' && <label className="block text-sm text-gray-400 mb-1">API Key (optional, for authenticated instances)</label>}
+            <div className="relative">
+              <input
+                type={showApiKey ? 'text' : 'password'}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={provider === 'Ollama' ? 'Optional API key for remote Ollama' : config?.has_api_key ? 'Enter new API key to update' : 'Enter your API key'}
+                className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+              />
             <button
               type="button"
               onClick={() => setShowApiKey(!showApiKey)}
@@ -474,6 +493,7 @@ export default function TenantEmbeddingSettings() {
                 <Eye className="w-5 h-5 text-gray-400" />
               )}
             </button>
+          </div>
           </div>
 
           {/* Test Connection */}
@@ -522,7 +542,6 @@ export default function TenantEmbeddingSettings() {
           </div>
         </div>
       </GlassCard>
-      )}
 
       {/* Content Generation Options */}
       <GlassCard className={!enabled ? 'opacity-50 pointer-events-none' : ''}>

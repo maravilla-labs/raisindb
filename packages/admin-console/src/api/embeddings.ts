@@ -16,6 +16,7 @@ export interface ConfigResponse {
   include_path: boolean
   node_type_settings: Record<string, NodeTypeEmbeddingConfig>
   max_embeddings_per_repo: number | null
+  base_url?: string
 }
 
 export interface SetConfigRequest {
@@ -28,6 +29,7 @@ export interface SetConfigRequest {
   include_path: boolean
   node_type_settings: Record<string, NodeTypeEmbeddingConfig>
   max_embeddings_per_repo: number | null
+  base_url?: string
 }
 
 export interface TestConnectionResponse {

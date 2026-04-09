@@ -55,6 +55,10 @@ pub struct SetConfigRequest {
     /// Distance metric for vector similarity search (defaults to Cosine)
     #[serde(default)]
     pub distance_metric: Option<EmbeddingDistanceMetric>,
+
+    /// Base URL for self-hosted providers (e.g., Ollama remote instance)
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// Response body for GET config (no API key exposed)
@@ -87,6 +91,10 @@ pub struct ConfigResponse {
     /// Chunking configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunking: Option<raisin_ai::config::ChunkingConfig>,
+
+    /// Base URL for self-hosted providers
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 /// Response for test connection
@@ -150,6 +158,7 @@ pub async fn get_tenant_embedding_config(
                 include_path: cfg.include_path,
                 max_embeddings_per_repo: cfg.max_embeddings_per_repo,
                 chunking: cfg.chunking,
+                base_url: cfg.base_url,
             };
             Ok(Json(response))
         }
@@ -169,6 +178,7 @@ pub async fn get_tenant_embedding_config(
                 include_path: default_config.include_path,
                 max_embeddings_per_repo: default_config.max_embeddings_per_repo,
                 chunking: None,
+                base_url: None,
             };
             Ok(Json(response))
         }
@@ -201,6 +211,7 @@ pub async fn set_tenant_embedding_config(
         max_embeddings_per_repo: req.max_embeddings_per_repo,
         chunking: req.chunking,
         distance_metric: req.distance_metric.unwrap_or_default(),
+        base_url: req.base_url,
     };
 
     // Encrypt API key if provided
@@ -329,8 +340,13 @@ pub async fn test_embedding_connection(
             })?
     };
 
-    let provider = raisin_embeddings::create_provider(&config.provider, &api_key, &config.model)
-        .map_err(|e| {
+    let provider = raisin_embeddings::create_provider_with_url(
+        &config.provider,
+        &api_key,
+        &config.model,
+        config.base_url.as_deref(),
+    )
+    .map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {

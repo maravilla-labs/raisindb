@@ -96,6 +96,7 @@ fn migrate_tenant_embedding_config_cf(db: &Arc<DB>) -> Result<()> {
             max_embeddings_per_repo: old_config.max_embeddings_per_repo,
             chunking: None,
             distance_metric: Default::default(),
+            base_url: None,
         };
 
         let new_value = rmp_serde::to_vec(&new_config).map_err(|e| {
