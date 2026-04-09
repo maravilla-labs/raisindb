@@ -187,11 +187,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 self.execute_branch_statement(branch_stmt).await
             }
             AnalyzedStatement::Acl(ref acl_stmt) => self.execute_acl(acl_stmt).await,
-            AnalyzedStatement::AIConfig(_) => {
-                Err(Error::Validation(
-                    "AI config statements are not yet supported in execution engine".to_string(),
-                ))
-            }
+            AnalyzedStatement::AIConfig(ref stmt) => self.execute_ai_config(stmt).await,
             AnalyzedStatement::Query(_) => self.execute_query(analyzed).await,
         }
     }
