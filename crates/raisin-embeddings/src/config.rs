@@ -93,6 +93,9 @@ pub enum EmbeddingProvider {
 
     /// Local models via Ollama
     Ollama,
+
+    /// HuggingFace local inference (requires 'candle' feature)
+    HuggingFace,
 }
 
 /// Distance metric for embedding similarity search.

@@ -285,8 +285,10 @@ pub async fn test_embedding_connection(
             )
         })?;
 
-    // Check if API key is configured
-    if config.api_key_encrypted.is_none() {
+    // Ollama doesn't need an API key
+    let is_ollama = matches!(config.provider, EmbeddingProvider::Ollama);
+
+    if !is_ollama && config.api_key_encrypted.is_none() {
         return Ok(Json(TestConnectionResponse {
             success: false,
             dimensions: None,
@@ -295,8 +297,6 @@ pub async fn test_embedding_connection(
         }));
     }
 
-    // For Phase 1, just return success if config is valid
-    // Phase 2 will implement actual provider testing
     tracing::info!(
         "Test connection for tenant {} (provider: {:?}, model: {})",
         tenant_id,
@@ -304,10 +304,53 @@ pub async fn test_embedding_connection(
         config.model
     );
 
-    Ok(Json(TestConnectionResponse {
-        success: true,
-        dimensions: Some(config.dimensions),
-        model: config.model,
-        error: None,
-    }))
+    // Decrypt API key and test the provider
+    let api_key = if is_ollama {
+        String::new()
+    } else {
+        let master_key = state.get_master_key().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Master key error: {}", e),
+                }),
+            )
+        })?;
+        let encryptor = ApiKeyEncryptor::new(&master_key);
+        encryptor
+            .decrypt(config.api_key_encrypted.as_ref().unwrap())
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to decrypt API key: {}", e),
+                    }),
+                )
+            })?
+    };
+
+    let provider = raisin_embeddings::create_provider(&config.provider, &api_key, &config.model)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid provider configuration: {}", e),
+                }),
+            )
+        })?;
+
+    match provider.test_connection().await {
+        Ok(dims) => Ok(Json(TestConnectionResponse {
+            success: true,
+            dimensions: Some(dims),
+            model: config.model,
+            error: None,
+        })),
+        Err(e) => Ok(Json(TestConnectionResponse {
+            success: false,
+            dimensions: None,
+            model: config.model,
+            error: Some(format!("{}", e)),
+        })),
+    }
 }

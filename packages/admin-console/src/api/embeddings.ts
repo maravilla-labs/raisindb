@@ -8,7 +8,7 @@ export interface NodeTypeEmbeddingConfig {
 export interface ConfigResponse {
   tenant_id: string
   enabled: boolean
-  provider: 'OpenAI' | 'Claude' | 'Ollama'
+  provider: 'OpenAI' | 'Claude' | 'Ollama' | 'HuggingFace'
   model: string
   dimensions: number
   has_api_key: boolean
@@ -20,7 +20,7 @@ export interface ConfigResponse {
 
 export interface SetConfigRequest {
   enabled: boolean
-  provider: 'OpenAI' | 'Claude' | 'Ollama'
+  provider: 'OpenAI' | 'Claude' | 'Ollama' | 'HuggingFace'
   model: string
   dimensions: number
   api_key_plain?: string

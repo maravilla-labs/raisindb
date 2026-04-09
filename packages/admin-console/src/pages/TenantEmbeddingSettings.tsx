@@ -15,15 +15,25 @@ const OPENAI_MODELS = [
 ]
 
 const CLAUDE_MODELS = [
-  { id: 'voyage-large-2-instruct', name: 'Voyage Large 2 Instruct (1536 dims)', dims: 1536 },
+  { id: 'voyage-large-2-instruct', name: 'Voyage Large 2 Instruct (1024 dims)', dims: 1024 },
   { id: 'voyage-code-2', name: 'Voyage Code 2 (1536 dims)', dims: 1536 },
+  { id: 'voyage-3', name: 'Voyage 3 (1024 dims)', dims: 1024 },
+  { id: 'voyage-3-lite', name: 'Voyage 3 Lite (512 dims)', dims: 512 },
 ]
 
 const OLLAMA_MODELS = [
   { id: 'nomic-embed-text', name: 'Nomic Embed Text (768 dims)', dims: 768 },
+  { id: 'all-minilm', name: 'All-MiniLM (384 dims)', dims: 384 },
+  { id: 'mxbai-embed-large', name: 'mxbai-embed-large (1024 dims)', dims: 1024 },
+  { id: 'snowflake-arctic-embed', name: 'Snowflake Arctic Embed (1024 dims)', dims: 1024 },
 ]
 
-type Provider = 'OpenAI' | 'Claude' | 'Ollama'
+const HUGGINGFACE_MODELS = [
+  { id: 'nomic-ai/nomic-embed-text-v1.5', name: 'Nomic Embed Text v1.5 (768 dims)', dims: 768 },
+  { id: 'sentence-transformers/all-MiniLM-L6-v2', name: 'All-MiniLM-L6-v2 (384 dims)', dims: 384 },
+]
+
+type Provider = 'OpenAI' | 'Claude' | 'Ollama' | 'HuggingFace'
 
 interface ProviderCardProps {
   provider: Provider
@@ -48,6 +58,11 @@ function ProviderCard({ provider, selected, disabled, onSelect }: ProviderCardPr
       name: 'Ollama',
       description: 'Self-hosted open source models',
       icon: '🦙',
+    },
+    HuggingFace: {
+      name: 'HuggingFace',
+      description: 'Local models via Candle inference',
+      icon: '🤗',
     },
   }
 
@@ -158,7 +173,7 @@ export default function TenantEmbeddingSettings() {
       setSaving(true)
 
       // Validate
-      if (enabled && !config?.has_api_key && !apiKey) {
+      if (enabled && provider !== 'Ollama' && !config?.has_api_key && !apiKey) {
         toast.error('API Key Required', 'Please enter an API key to enable embeddings')
         return
       }
@@ -247,7 +262,7 @@ export default function TenantEmbeddingSettings() {
     setProvider(newProvider)
 
     // Reset model selection when provider changes
-    const models = newProvider === 'OpenAI' ? OPENAI_MODELS : newProvider === 'Claude' ? CLAUDE_MODELS : OLLAMA_MODELS
+    const models = newProvider === 'OpenAI' ? OPENAI_MODELS : newProvider === 'Claude' ? CLAUDE_MODELS : newProvider === 'HuggingFace' ? HUGGINGFACE_MODELS : OLLAMA_MODELS
     if (models.length > 0) {
       setModel(models[0].id)
       setDimensions(models[0].dims)
@@ -258,7 +273,7 @@ export default function TenantEmbeddingSettings() {
     setModel(modelId)
 
     // Update dimensions based on selected model
-    const models = provider === 'OpenAI' ? OPENAI_MODELS : provider === 'Claude' ? CLAUDE_MODELS : OLLAMA_MODELS
+    const models = provider === 'OpenAI' ? OPENAI_MODELS : provider === 'Claude' ? CLAUDE_MODELS : provider === 'HuggingFace' ? HUGGINGFACE_MODELS : OLLAMA_MODELS
     const selectedModel = models.find(m => m.id === modelId)
     if (selectedModel) {
       setDimensions(selectedModel.dims)
@@ -287,6 +302,8 @@ export default function TenantEmbeddingSettings() {
         return CLAUDE_MODELS
       case 'Ollama':
         return OLLAMA_MODELS
+      case 'HuggingFace':
+        return HUGGINGFACE_MODELS
       default:
         return []
     }
@@ -368,8 +385,14 @@ export default function TenantEmbeddingSettings() {
           <ProviderCard
             provider="Ollama"
             selected={provider === 'Ollama'}
-            disabled={true}
+            disabled={false}
             onSelect={() => handleProviderChange('Ollama')}
+          />
+          <ProviderCard
+            provider="HuggingFace"
+            selected={provider === 'HuggingFace'}
+            disabled={true}
+            onSelect={() => handleProviderChange('HuggingFace')}
           />
         </div>
       </GlassCard>
@@ -417,6 +440,7 @@ export default function TenantEmbeddingSettings() {
       </GlassCard>
 
       {/* API Key Section */}
+      {provider !== 'Ollama' && (
       <GlassCard className={!enabled ? 'opacity-50 pointer-events-none' : ''}>
         <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
           <Key className="w-5 h-5 text-purple-400" />
@@ -498,6 +522,7 @@ export default function TenantEmbeddingSettings() {
           </div>
         </div>
       </GlassCard>
+      )}
 
       {/* Content Generation Options */}
       <GlassCard className={!enabled ? 'opacity-50 pointer-events-none' : ''}>

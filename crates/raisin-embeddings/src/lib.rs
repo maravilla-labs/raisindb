@@ -63,5 +63,8 @@ pub use config::{EmbeddingProvider, TenantEmbeddingConfig};
 pub use crypto::{ApiKeyEncryptor, CryptoError};
 pub use embedding_storage::{EmbeddingJobStore, EmbeddingStorage};
 pub use models::{EmbeddingData, EmbeddingJob, EmbeddingJobKind};
-pub use provider::{create_provider, EmbeddingProvider as EmbeddingProviderTrait, OpenAIProvider};
+pub use provider::{
+    create_provider, create_provider_with_url, EmbeddingProvider as EmbeddingProviderTrait,
+    OllamaProvider, OpenAIProvider, VoyageProvider,
+};
 pub use storage::{StorageError, TenantEmbeddingConfigStore};
