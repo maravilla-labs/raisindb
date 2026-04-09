@@ -262,14 +262,20 @@ impl PhysicalPlanner {
             return None;
         }
 
-        // Filter out scan-level predicates that should never appear in filters
-        // These define the scan strategy and should be handled at the scan level
+        // Filter out scan-level predicates that should never appear in filters.
+        // These define the scan strategy and are handled at the scan level.
+        // Each build_*_scan method removes its own predicate from remaining,
+        // but this filter acts as a safety net.
         let filter_predicates: Vec<_> = predicates
             .iter()
             .filter(|p| {
                 !matches!(
                     p,
-                    CanonicalPredicate::ChildOf { .. } | CanonicalPredicate::PrefixRange { .. }
+                    CanonicalPredicate::ChildOf { .. }
+                        | CanonicalPredicate::PrefixRange { .. }
+                        | CanonicalPredicate::DescendantOf { .. }
+                        | CanonicalPredicate::SpatialDWithin { .. }
+                        | CanonicalPredicate::References { .. }
                 )
             })
             .collect();

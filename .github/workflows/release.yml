@@ -177,11 +177,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libssl-dev libleptonica-dev libtesseract-dev
+            pkg-config libssl-dev libleptonica-dev libtesseract-dev zlib1g-dev
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install tesseract leptonica pkg-config
+        run: brew install tesseract leptonica pkg-config zlib
 
       - name: Install NASM (Windows)
         if: runner.os == 'Windows'
@@ -218,6 +218,8 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          LIBZ_SYS_STATIC: "0"
         run: |
           cargo build --release --package raisin-server \
             --no-default-features \
