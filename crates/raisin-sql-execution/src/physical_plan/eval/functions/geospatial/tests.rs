@@ -855,3 +855,112 @@ fn test_null_propagation_makeenvelope() {
         Literal::Null
     );
 }
+
+// =========================================================================
+// Regression tests for correctness fixes
+// =========================================================================
+
+#[test]
+fn test_st_distance_point_inside_polygon_is_zero() {
+    let f = StDistanceFunction;
+    // interior_point() is inside sf_polygon()
+    let args = vec![geom_arg(interior_point()), geom_arg(sf_polygon())];
+    let result = f.evaluate(&args, &empty_row()).unwrap();
+    match result {
+        Literal::Double(d) => assert!(d < 1.0, "point inside polygon should have distance ~0, got {}", d),
+        other => panic!("expected Double, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_st_dwithin_point_near_polygon_boundary() {
+    let f = StDWithinFunction;
+    // Point just outside the west edge of sf_polygon ([-122.5, 37.7] to [-122.5, 37.8])
+    let point_near = json!({"type": "Point", "coordinates": [-122.501, 37.75]});
+    // ~111m per 0.001 degrees at this latitude -- 0.001 deg ~ 88m, so use 200m radius
+    let args = vec![geom_arg(point_near), geom_arg(sf_polygon()), double_arg(200.0)];
+    let result = f.evaluate(&args, &empty_row()).unwrap();
+    assert_eq!(result, Literal::Boolean(true));
+}
+
+#[test]
+fn test_st_buffer_circular_at_mid_latitude() {
+    let f = StBufferFunction;
+    // San Francisco latitude ~37.77
+    let args = vec![geom_arg(sf_point()), double_arg(1000.0)];
+    let result = f.evaluate(&args, &empty_row()).unwrap();
+    match result {
+        Literal::Geometry(v) => {
+            assert_eq!(v["type"], "Polygon");
+            let ring = v["coordinates"][0].as_array().unwrap();
+            // Collect all longitudes and latitudes
+            let lons: Vec<f64> = ring.iter().map(|c| c[0].as_f64().unwrap()).collect();
+            let lats: Vec<f64> = ring.iter().map(|c| c[1].as_f64().unwrap()).collect();
+            let lon_range = lons.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - lons.iter().cloned().fold(f64::INFINITY, f64::min);
+            let lat_range = lats.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - lats.iter().cloned().fold(f64::INFINITY, f64::min);
+            // At ~37.77N, longitude degrees are smaller than latitude degrees,
+            // so lon_range should be wider than lat_range
+            assert!(
+                lon_range > lat_range,
+                "lon_range ({}) should be > lat_range ({}) at mid-latitude",
+                lon_range, lat_range
+            );
+        }
+        other => panic!("expected Geometry, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_st_intersects_point_on_polygon_boundary() {
+    let f = StIntersectsFunction;
+    // Point exactly on the west edge of sf_polygon
+    let boundary_point = json!({"type": "Point", "coordinates": [-122.5, 37.75]});
+    let args = vec![geom_arg(boundary_point), geom_arg(sf_polygon())];
+    let result = f.evaluate(&args, &empty_row()).unwrap();
+    assert_eq!(result, Literal::Boolean(true));
+}
+
+#[test]
+fn test_st_touches_overlapping_polygons_false() {
+    let f = StTouchesFunction;
+    // overlap_poly_a and overlap_poly_b share interior area -- they should NOT touch
+    let args = vec![geom_arg(overlap_poly_a()), geom_arg(overlap_poly_b())];
+    let result = f.evaluate(&args, &empty_row()).unwrap();
+    assert_eq!(result, Literal::Boolean(false));
+}
+
+#[test]
+fn test_st_touches_adjacent_polygons_true() {
+    let f = StTouchesFunction;
+    // Two polygons sharing an edge at x=2
+    let poly_left = json!({"type": "Polygon", "coordinates": [[
+        [0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]
+    ]]});
+    let poly_right = json!({"type": "Polygon", "coordinates": [[
+        [2.0, 0.0], [4.0, 0.0], [4.0, 2.0], [2.0, 2.0], [2.0, 0.0]
+    ]]});
+    let args = vec![geom_arg(poly_left), geom_arg(poly_right)];
+    let result = f.evaluate(&args, &empty_row()).unwrap();
+    assert_eq!(result, Literal::Boolean(true));
+}
+
+#[test]
+fn test_st_equals_slight_float_drift() {
+    let f = StEqualsFunction;
+    let point_a = json!({"type": "Point", "coordinates": [-122.4194, 37.7749]});
+    // Add ~1e-9 drift -- well within the 1e-8 epsilon
+    let point_b = json!({"type": "Point", "coordinates": [-122.4194000009, 37.7749000009]});
+    let args = vec![geom_arg(point_a), geom_arg(point_b)];
+    let result = f.evaluate(&args, &empty_row()).unwrap();
+    assert_eq!(result, Literal::Boolean(true));
+}
+
+#[test]
+fn test_st_extract_all_coords_rejects_invalid() {
+    // Non-numeric coordinate value should produce an error
+    let bad_point = json!({"type": "Point", "coordinates": ["not_a_number", 37.0]});
+    let result = helpers::extract_all_coords(&bad_point);
+    assert!(result.is_err(), "expected error for non-numeric coordinates");
+}

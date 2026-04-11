@@ -384,8 +384,20 @@ impl SpatialIndexRepository {
                     continue;
                 }
 
-                let lon: f64 = coords[0].parse().unwrap_or(0.0);
-                let lat: f64 = coords[1].parse().unwrap_or(0.0);
+                let lon: f64 = match coords[0].parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tracing::warn!(raw = coords[0], "Failed to parse longitude from spatial index, skipping");
+                        continue;
+                    }
+                };
+                let lat: f64 = match coords[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tracing::warn!(raw = coords[1], "Failed to parse latitude from spatial index, skipping");
+                        continue;
+                    }
+                };
 
                 // Calculate exact Haversine distance
                 let distance = haversine_distance(center_lon, center_lat, lon, lat);
@@ -403,7 +415,7 @@ impl SpatialIndexRepository {
         }
 
         // Sort by distance
-        results.sort_by(|a, b| a.distance_meters.partial_cmp(&b.distance_meters).unwrap());
+        results.sort_by(|a, b| a.distance_meters.total_cmp(&b.distance_meters));
 
         // Apply limit
         results.truncate(limit);
@@ -432,7 +444,10 @@ impl SpatialIndexRepository {
         let mut results = Vec::new();
 
         while precision >= 4 && results.len() < k {
-            let center_hash = spatial::encode_point(center_lon, center_lat, precision);
+            let center_hash = match spatial::encode_point(center_lon, center_lat, precision) {
+                Some(h) => h,
+                None => break,
+            };
             let cells = spatial::center_and_neighbors(&center_hash);
 
             // Use a large radius for initial filtering, actual k-NN will sort

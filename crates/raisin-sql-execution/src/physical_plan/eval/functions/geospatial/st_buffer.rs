@@ -79,21 +79,25 @@ impl SqlFunction for StBufferFunction {
         let lon = center.x();
         let lat = center.y();
         let lat_rad = lat.to_radians();
+        let meters_per_deg_lat = 110540.0;
+        let meters_per_deg_lon = 111320.0 * lat_rad.cos();
 
-        // Convert meters to approximate degrees
-        let distance_degrees = distance_meters / 111320.0;
+        if meters_per_deg_lon.abs() < 1.0 {
+            return Err(Error::Validation(
+                "ST_BUFFER: cannot create buffer at extreme polar latitudes".to_string(),
+            ));
+        }
 
         // Create a 32-sided polygon approximating a circle
         let num_points = 32;
         let mut coords: Vec<Vec<f64>> = Vec::with_capacity(num_points + 1);
         for i in 0..num_points {
             let angle = 2.0 * std::f64::consts::PI * (i as f64) / (num_points as f64);
-            let x = lon + distance_degrees * angle.cos();
-            let y = lat + distance_degrees * angle.sin() * lat_rad.cos();
+            let x = lon + (distance_meters / meters_per_deg_lon) * angle.cos();
+            let y = lat + (distance_meters / meters_per_deg_lat) * angle.sin();
             coords.push(vec![x, y]);
         }
-        // Close the ring
-        coords.push(coords[0].clone());
+        coords.push(coords[0].clone()); // Close the ring
 
         let result = serde_json::json!({
             "type": "Polygon",

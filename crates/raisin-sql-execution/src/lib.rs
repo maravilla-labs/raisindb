@@ -103,6 +103,7 @@ pub use physical_plan::{
     PhysicalPlan,
     PhysicalPlanner,
     RocksDBIndexCatalog,
+    SchemaStats,
     Row,
     RowAccumulator,
     RowStream,

@@ -224,7 +224,9 @@ pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
                 .as_array()
                 .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
             if arr.len() >= 2 {
-                result.push([arr[0].as_f64().unwrap_or(0.0), arr[1].as_f64().unwrap_or(0.0)]);
+                let lon = arr[0].as_f64().ok_or_else(|| Error::Validation("Invalid longitude in coordinates".to_string()))?;
+                let lat = arr[1].as_f64().ok_or_else(|| Error::Validation("Invalid latitude in coordinates".to_string()))?;
+                result.push([lon, lat]);
             }
         }
         "LineString" | "MultiPoint" => {
@@ -236,7 +238,9 @@ pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
                     .as_array()
                     .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
                 if pair.len() >= 2 {
-                    result.push([pair[0].as_f64().unwrap_or(0.0), pair[1].as_f64().unwrap_or(0.0)]);
+                    let lon = pair[0].as_f64().ok_or_else(|| Error::Validation("Invalid longitude in coordinates".to_string()))?;
+                    let lat = pair[1].as_f64().ok_or_else(|| Error::Validation("Invalid latitude in coordinates".to_string()))?;
+                    result.push([lon, lat]);
                 }
             }
         }
@@ -253,7 +257,9 @@ pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
                         .as_array()
                         .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
                     if pair.len() >= 2 {
-                        result.push([pair[0].as_f64().unwrap_or(0.0), pair[1].as_f64().unwrap_or(0.0)]);
+                        let lon = pair[0].as_f64().ok_or_else(|| Error::Validation("Invalid longitude in coordinates".to_string()))?;
+                        let lat = pair[1].as_f64().ok_or_else(|| Error::Validation("Invalid latitude in coordinates".to_string()))?;
+                        result.push([lon, lat]);
                     }
                 }
             }
@@ -266,6 +272,52 @@ pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
         }
     }
     Ok(result)
+}
+
+/// Compute haversine distance between two GeoJSON geometries in meters.
+///
+/// - Point-to-Point: exact haversine distance
+/// - Point-to-LineString/Polygon: finds nearest boundary point via HaversineClosestPoint
+/// - Non-Point to Non-Point: centroid-to-centroid approximation
+pub fn compute_haversine_distance(geom1: &Value, geom2: &Value) -> Result<f64, Error> {
+    use geo::{Closest, HaversineClosestPoint, HaversineDistance, Point};
+
+    let type1 = get_geometry_type(geom1)?;
+    let type2 = get_geometry_type(geom2)?;
+
+    match (type1, type2) {
+        ("Point", "Point") => {
+            let p1 = geojson_to_point(geom1)?;
+            let p2 = geojson_to_point(geom2)?;
+            Ok(p1.haversine_distance(&p2))
+        }
+        ("Point", "LineString") => {
+            let point = geojson_to_point(geom1)?;
+            let line = geojson_to_linestring(geom2)?;
+            match line.haversine_closest_point(&point) {
+                Closest::Intersection(_) => Ok(0.0),
+                Closest::SinglePoint(closest) => Ok(point.haversine_distance(&closest)),
+                Closest::Indeterminate => Ok(point.haversine_distance(&get_centroid(geom2)?)),
+            }
+        }
+        ("LineString", "Point") => compute_haversine_distance(geom2, geom1),
+        ("Point", "Polygon") => {
+            let point = geojson_to_point(geom1)?;
+            let polygon = geojson_to_polygon(geom2)?;
+            match polygon.haversine_closest_point(&point) {
+                Closest::Intersection(_) => Ok(0.0),
+                Closest::SinglePoint(closest) => Ok(point.haversine_distance(&closest)),
+                Closest::Indeterminate => Ok(point.haversine_distance(&get_centroid(geom2)?)),
+            }
+        }
+        ("Polygon", "Point") => compute_haversine_distance(geom2, geom1),
+        _ => {
+            // Fallback: centroid-to-centroid for complex geometry pairs
+            let c1 = get_centroid(geom1)?;
+            let c2 = get_centroid(geom2)?;
+            Ok(c1.haversine_distance(&c2))
+        }
+    }
 }
 
 /// Extract centroid coordinates [lon, lat] from any geometry

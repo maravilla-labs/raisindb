@@ -83,7 +83,10 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
     let storage = ctx.storage.clone();
     let ctx_clone = ctx.clone();
     let max_revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
-    let scan_limit = limit.unwrap_or(1000);
+    // No artificial default — return all haversine-filtered results, same as
+    // PostGIS. The SQL LIMIT clause (when present) is enforced separately via
+    // the `emitted` counter in the stream below.
+    let scan_limit = limit.unwrap_or(usize::MAX);
 
     tracing::info!(
         "   SpatialDistanceScan: property='{}', center=({}, {}), radius={}m, workspace='{}', branch='{}', limit={:?}",

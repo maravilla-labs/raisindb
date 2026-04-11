@@ -15,21 +15,49 @@ impl PhysicalPlanner {
     /// - 1.00: Other/unknown predicates - not selective
     pub(in super::super) fn estimate_selectivity(&self, predicate: &CanonicalPredicate) -> f64 {
         match predicate {
-            // Equality predicates are highly selective
-            CanonicalPredicate::ColumnEq { .. } => 0.05,
+            // Equality predicates are highly selective.
+            // When schema stats are available, use 1/count for node_type and archetype
+            // columns; otherwise fall back to the default 0.05 heuristic.
+            CanonicalPredicate::ColumnEq { column, .. } => {
+                let col = column.to_lowercase();
+                if col == "node_type" {
+                    self.schema_stats
+                        .as_ref()
+                        .filter(|s| s.node_type_count > 0)
+                        .map(|s| 1.0 / s.node_type_count as f64)
+                        .unwrap_or(0.05)
+                } else if col == "archetype" {
+                    self.schema_stats
+                        .as_ref()
+                        .filter(|s| s.archetype_count > 0)
+                        .map(|s| 1.0 / s.archetype_count as f64)
+                        .unwrap_or(0.05)
+                } else {
+                    0.05
+                }
+            }
             CanonicalPredicate::JsonPropertyEq { .. } => 0.05,
             // CHILD_OF is highly selective (only direct children)
             CanonicalPredicate::ChildOf { .. } => 0.10,
             // DESCENDANT_OF is moderately selective (all descendants under a path)
             CanonicalPredicate::DescendantOf { .. } => 0.15,
-            // Spatial distance queries are moderately selective
-            // Selectivity depends on radius: smaller radius = more selective
+            // Spatial distance queries: selectivity estimated from search radius.
+            //
+            // These heuristics assume roughly uniform data distribution across
+            // the indexed geographic area. In practice, real data clusters
+            // (e.g., urban areas), so these estimates are conservative:
+            //   < 100m  -> 0.01  (neighborhood-scale: very few nodes)
+            //   < 1km   -> 0.05  (district-scale: some nodes)
+            //   < 10km  -> 0.15  (city-scale: moderate fraction)
+            //   >= 10km -> 0.30  (regional-scale: large fraction)
+            //
+            // Without per-property data density statistics, we cannot do better.
+            // For large radii (>10km) where spatial selectivity reads 0.30, a
+            // DescendantOf scan (0.15) may "win" even though the spatial index
+            // would scan fewer rows. This is acceptable: the SpatialDWithin
+            // predicate is preserved as a row-level filter in that case, so
+            // correctness is maintained.
             CanonicalPredicate::SpatialDWithin { radius_meters, .. } => {
-                // Estimate selectivity based on search radius
-                // < 100m: very selective (0.01)
-                // < 1km: selective (0.05)
-                // < 10km: moderately selective (0.15)
-                // > 10km: less selective (0.30)
                 if *radius_meters < 100.0 {
                     0.01
                 } else if *radius_meters < 1000.0 {

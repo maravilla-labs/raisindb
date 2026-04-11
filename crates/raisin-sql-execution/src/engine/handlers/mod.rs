@@ -80,6 +80,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             }
         }
 
+        // Load schema statistics for data-driven selectivity estimation
+        self.apply_schema_stats(&mut physical_planner, &self.branch)
+            .await;
+
         let physical_plan = physical_planner.plan(&optimized_plan)?;
 
         let mut explain_output = String::new();
@@ -161,6 +165,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 physical_planner.set_compound_indexes(indexes);
             }
         }
+
+        // Load schema statistics for data-driven selectivity estimation
+        self.apply_schema_stats(&mut physical_planner, &self.branch)
+            .await;
 
         let physical_plan = physical_planner.plan(&optimized)?;
 

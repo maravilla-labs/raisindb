@@ -26,6 +26,7 @@ use crate::physical_plan::executor::{execute_plan, ExecutionContext, RowStream};
 use crate::physical_plan::planner::PhysicalPlanner;
 use crate::physical_plan::IndexCatalog;
 use raisin_context::RepositoryConfig;
+use raisin_core::SharedSchemaStatsCache;
 use raisin_embeddings::embedding_storage::EmbeddingStorage;
 use raisin_embeddings::provider::EmbeddingProvider;
 use raisin_error::Error;
@@ -35,7 +36,7 @@ use raisin_models::auth::AuthContext;
 use raisin_sql::analyzer::{AnalyzedStatement, Analyzer, Catalog, StaticCatalog};
 use raisin_sql::logical_plan::PlanBuilder;
 use raisin_sql::optimizer::Optimizer;
-use raisin_storage::{BranchRepository, Storage};
+use raisin_storage::{ArchetypeRepository, BranchRepository, NodeTypeRepository, Storage};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -148,6 +149,8 @@ pub struct QueryEngine<S: Storage> {
     pub(crate) embedding_config_store: Option<Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>>,
     /// Master key for API key encryption/decryption
     pub(crate) master_key: Option<[u8; 32]>,
+    /// Shared schema stats cache for data-driven selectivity estimation
+    pub(crate) schema_stats_cache: Option<SharedSchemaStatsCache>,
 }
 
 impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static> QueryEngine<S> {
@@ -182,6 +185,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             auth_context: None,
             embedding_config_store: None,
             master_key: None,
+            schema_stats_cache: None,
         }
     }
 
@@ -276,6 +280,65 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     pub fn with_master_key(mut self, key: [u8; 32]) -> Self {
         self.master_key = Some(key);
         self
+    }
+
+    /// Set the shared schema stats cache for data-driven selectivity estimation
+    pub fn with_schema_stats_cache(mut self, cache: SharedSchemaStatsCache) -> Self {
+        self.schema_stats_cache = Some(cache);
+        self
+    }
+
+    // =========================================================================
+    // Schema Stats Loading
+    // =========================================================================
+
+    /// Load schema statistics from the cache (if configured) and apply them to the physical planner.
+    pub(crate) async fn apply_schema_stats(
+        &self,
+        physical_planner: &mut PhysicalPlanner,
+        branch: &str,
+    ) {
+        if let Some(ref stats_cache) = self.schema_stats_cache {
+            let scope_key = format!("{}:{}:{}", self.tenant_id, self.repo_id, branch);
+            let storage_ref = self.storage.clone();
+            let t = self.tenant_id.clone();
+            let r = self.repo_id.clone();
+            let b = branch.to_string();
+            if let Ok(cache_stats) = stats_cache
+                .get_or_compute(&scope_key, || {
+                    let storage_ref = storage_ref.clone();
+                    let t = t.clone();
+                    let r = r.clone();
+                    let b = b.clone();
+                    async move {
+                        let scope = raisin_storage::BranchScope::new(&t, &r, &b);
+                        let nt_count = storage_ref
+                            .node_types()
+                            .list(scope, None)
+                            .await
+                            .map(|v| v.len())
+                            .unwrap_or(0);
+                        let scope = raisin_storage::BranchScope::new(&t, &r, &b);
+                        let at_count = storage_ref
+                            .archetypes()
+                            .list(scope, None)
+                            .await
+                            .map(|v| v.len())
+                            .unwrap_or(0);
+                        Ok(raisin_core::SchemaStats {
+                            node_type_count: nt_count,
+                            archetype_count: at_count,
+                        })
+                    }
+                })
+                .await
+            {
+                physical_planner.set_schema_statistics(crate::SchemaStats {
+                    node_type_count: cache_stats.node_type_count,
+                    archetype_count: cache_stats.archetype_count,
+                });
+            }
+        }
     }
 
     // =========================================================================
@@ -441,6 +504,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 physical_planner.set_compound_indexes(indexes);
             }
         }
+
+        // Load schema statistics for data-driven selectivity estimation
+        self.apply_schema_stats(&mut physical_planner, &self.branch)
+            .await;
 
         let physical_plan = physical_planner.plan(&optimized)?;
 

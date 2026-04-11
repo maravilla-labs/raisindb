@@ -1,7 +1,8 @@
 //! Compound index matching and constant expression evaluation
 
 use super::{
-    CanonicalPredicate, CompoundIndexDefinition, Error, Expr, Literal, PhysicalPlanner, TypedExpr,
+    CanonicalPredicate, CompoundIndexDefinition, Error, Expr, Literal, PhysicalPlanner, SchemaStats,
+    TypedExpr,
 };
 
 /// Result of a successful compound index match: (index_name, matched_equality_columns, ascending)
@@ -40,6 +41,15 @@ impl PhysicalPlanner {
     /// The indexes are typically loaded from NodeType schemas.
     pub fn set_compound_indexes(&mut self, indexes: Vec<CompoundIndexDefinition>) {
         self.compound_indexes = indexes;
+    }
+
+    /// Set pre-computed schema statistics for data-driven selectivity estimation.
+    ///
+    /// When set, equality predicates on `node_type` and `archetype` columns use
+    /// `1 / count` instead of the default 0.05 heuristic. Call this before
+    /// planning queries for best results.
+    pub fn set_schema_statistics(&mut self, stats: SchemaStats) {
+        self.schema_stats = Some(stats);
     }
 
     /// Try to match a compound index for the given query pattern

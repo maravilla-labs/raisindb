@@ -2,9 +2,26 @@
 
 use super::INDEX_PRECISIONS;
 
+/// Check whether the given longitude and latitude are finite and within the
+/// valid WGS-84 range (-180..=180 lon, -90..=90 lat).
+pub(super) fn is_valid_coordinate(lon: f64, lat: f64) -> bool {
+    lon.is_finite()
+        && lat.is_finite()
+        && (-180.0..=180.0).contains(&lon)
+        && (-90.0..=90.0).contains(&lat)
+}
+
 /// Encode a point (lon, lat) to a geohash string at the specified precision
-pub fn encode_point(lon: f64, lat: f64, precision: usize) -> String {
-    geohash::encode(geohash::Coord { x: lon, y: lat }, precision).unwrap_or_default()
+pub fn encode_point(lon: f64, lat: f64, precision: usize) -> Option<String> {
+    if !is_valid_coordinate(lon, lat) {
+        return None;
+    }
+    geohash::encode(geohash::Coord { x: lon, y: lat }, precision)
+        .map_err(|e| {
+            tracing::warn!(lon, lat, precision, error = %e, "geohash encode failed");
+            e
+        })
+        .ok()
 }
 
 /// Decode a geohash to its center point (lon, lat)
@@ -30,9 +47,15 @@ pub fn geohash_bounds(hash: &str) -> Option<(f64, f64, f64, f64)> {
 
 /// Get the 8 neighboring geohash cells (Moore neighborhood)
 pub fn neighbors(hash: &str) -> Vec<String> {
+    if hash.is_empty() {
+        return Vec::new();
+    }
     geohash::neighbors(hash)
         .map(|n| vec![n.n, n.ne, n.e, n.se, n.s, n.sw, n.w, n.nw])
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(hash, error = %e, "geohash neighbors lookup failed");
+            Vec::new()
+        })
 }
 
 /// Get the center geohash and all neighbors (9 cells total)
@@ -46,7 +69,7 @@ pub fn center_and_neighbors(hash: &str) -> Vec<String> {
 pub fn multi_precision_geohashes(lon: f64, lat: f64) -> Vec<(usize, String)> {
     INDEX_PRECISIONS
         .iter()
-        .map(|&precision| (precision, encode_point(lon, lat, precision)))
+        .filter_map(|&precision| encode_point(lon, lat, precision).map(|h| (precision, h)))
         .collect()
 }
 
@@ -82,6 +105,8 @@ pub fn precision_for_radius(radius_meters: f64) -> usize {
 /// Generate geohash cells to scan for a proximity query
 pub fn cells_for_radius(center_lon: f64, center_lat: f64, radius_meters: f64) -> Vec<String> {
     let precision = precision_for_radius(radius_meters);
-    let center_hash = encode_point(center_lon, center_lat, precision);
-    center_and_neighbors(&center_hash)
+    match encode_point(center_lon, center_lat, precision) {
+        Some(center_hash) => center_and_neighbors(&center_hash),
+        None => Vec::new(),
+    }
 }

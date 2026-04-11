@@ -96,7 +96,7 @@ pub use executor::{
     execute_plan, execute_plan_batch, ExecutionContext, ExecutionError, Row, RowStream,
 };
 pub use operators::{IndexLookupParams, IndexLookupType, PhysicalPlan, VectorDistanceMetric};
-pub use planner::PhysicalPlanner;
+pub use planner::{PhysicalPlanner, SchemaStats};
 pub use types::{from_property_value, to_property_value};
 
 // DML executor types for filter classification

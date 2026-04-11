@@ -15,6 +15,7 @@ mod management;
 #[cfg(feature = "storage-rocksdb")]
 mod migrations;
 mod nodetype_init_handler;
+mod schema_stats_event_handler;
 mod sse;
 mod startup;
 mod workspace_init_handler;
@@ -148,6 +149,16 @@ async fn main() {
     // ========================================================================
 
     startup::events::register_event_handlers(storage.clone());
+
+    // Create schema stats cache and register invalidation event handler
+    let schema_stats_cache = raisin_core::new_shared_schema_stats_cache_default();
+    {
+        let event_bus = storage.event_bus();
+        event_bus.subscribe(std::sync::Arc::new(
+            schema_stats_event_handler::SchemaStatsEventHandler::new(schema_stats_cache.clone()),
+        ));
+        tracing::info!("Schema stats cache initialized with event-driven invalidation");
+    }
 
     #[cfg(feature = "storage-rocksdb")]
     startup::events::register_admin_handler(
@@ -526,6 +537,7 @@ async fn main() {
         Some(storage.clone()),
         #[cfg(feature = "storage-rocksdb")]
         Some(auth_service.clone()),
+        Some(schema_stats_cache.clone()),
     );
 
     let admin_router = Router::new()
@@ -609,6 +621,7 @@ async fn main() {
             ws_indexing_engine,
             #[cfg(feature = "storage-rocksdb")]
             ws_hnsw_engine,
+            Some(schema_stats_cache.clone()),
         ));
 
         let ws_router = Router::new()
@@ -666,6 +679,7 @@ async fn main() {
                 auth_service.clone(),
                 pgwire_indexing_engine,
                 pgwire_hnsw_engine,
+                Some(schema_stats_cache.clone()),
                 &server_config.pgwire_bind_address,
                 server_config.pgwire_port,
                 server_config.pgwire_max_connections,

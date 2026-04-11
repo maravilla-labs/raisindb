@@ -75,12 +75,15 @@ impl SqlFunction for StEqualsFunction {
             return Ok(Literal::Boolean(false));
         }
 
+        // 1e-8 degrees ≈ 1.1mm at the equator — absorbs floating-point rounding
+        const COORD_EPSILON: f64 = 1e-8;
+
         let equals = match type_a {
             "Point" => {
                 let point_a = geojson_to_point(geom_a)?;
                 let point_b = geojson_to_point(geom_b)?;
-                (point_a.x() - point_b.x()).abs() < 1e-10
-                    && (point_a.y() - point_b.y()).abs() < 1e-10
+                (point_a.x() - point_b.x()).abs() < COORD_EPSILON
+                    && (point_a.y() - point_b.y()).abs() < COORD_EPSILON
             }
             "LineString" => {
                 let line_a = geojson_to_linestring(geom_a)?;
@@ -89,7 +92,7 @@ impl SqlFunction for StEqualsFunction {
                     false
                 } else {
                     line_a.0.iter().zip(line_b.0.iter()).all(|(a, b)| {
-                        (a.x - b.x).abs() < 1e-10 && (a.y - b.y).abs() < 1e-10
+                        (a.x - b.x).abs() < COORD_EPSILON && (a.y - b.y).abs() < COORD_EPSILON
                     })
                 }
             }
@@ -102,7 +105,7 @@ impl SqlFunction for StEqualsFunction {
                     false
                 } else {
                     ext_a.0.iter().zip(ext_b.0.iter()).all(|(a, b)| {
-                        (a.x - b.x).abs() < 1e-10 && (a.y - b.y).abs() < 1e-10
+                        (a.x - b.x).abs() < COORD_EPSILON && (a.y - b.y).abs() < COORD_EPSILON
                     })
                 }
             }

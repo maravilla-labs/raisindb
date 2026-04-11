@@ -87,6 +87,7 @@ where
     pub auth_handler: Arc<RaisinAuthHandler<V, P>>,
     pub indexing_engine: Option<Arc<raisin_indexer::TantivyIndexingEngine>>,
     pub hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
+    pub schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
 }
 
 #[cfg(all(feature = "pgwire", feature = "storage-rocksdb"))]
@@ -113,15 +114,23 @@ where
             handler = handler.with_hnsw_engine(hnsw.clone());
         }
 
+        if let Some(ref cache) = self.schema_stats_cache {
+            handler = handler.with_schema_stats_cache(cache.clone());
+        }
+
         Arc::new(handler)
     }
 
     fn extended_query_handler(&self) -> Arc<RaisinExtendedQueryHandler<S, V, P>> {
-        let handler =
+        let mut handler =
             RaisinExtendedQueryHandler::new(self.storage.clone(), self.auth_handler.clone());
 
         // Note: indexing and hnsw engines can be added here when needed
         // for extended query support
+
+        if let Some(ref cache) = self.schema_stats_cache {
+            handler = handler.with_schema_stats_cache(cache.clone());
+        }
 
         Arc::new(handler)
     }
@@ -142,6 +151,7 @@ pub fn start_pgwire_server(
     auth_service: Arc<AuthService>,
     indexing_engine: Option<Arc<raisin_indexer::TantivyIndexingEngine>>,
     hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
+    schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
     bind_address: &str,
     port: u16,
     max_connections: usize,
@@ -157,6 +167,7 @@ pub fn start_pgwire_server(
         auth_handler,
         indexing_engine,
         hnsw_engine,
+        schema_stats_cache,
     };
 
     // Create pgwire config

@@ -161,7 +161,12 @@ impl PhysicalPlanner {
                             &args[0].expr,
                         ) {
                         Some(v) => v,
-                        None => return None,
+                        None => {
+                            tracing::debug!(
+                                "ST_DWITHIN spatial index skipped: could not extract geometry source from first argument"
+                            );
+                            return None;
+                        }
                     };
 
                     // Extract center point from ST_Point(lon, lat)
@@ -191,7 +196,12 @@ impl PhysicalPlanner {
                                 return None;
                             }
                         }
-                        _ => return None,
+                        _ => {
+                            tracing::debug!(
+                                "ST_DWITHIN spatial index skipped: second argument is not a literal ST_POINT/ST_MAKEPOINT"
+                            );
+                            return None;
+                        }
                     };
 
                     // Extract radius in meters
@@ -199,7 +209,12 @@ impl PhysicalPlanner {
                         Expr::Literal(Literal::Double(f)) => *f,
                         Expr::Literal(Literal::Int(i)) => *i as f64,
                         Expr::Literal(Literal::BigInt(i)) => *i as f64,
-                        _ => return None,
+                        _ => {
+                            tracing::debug!(
+                                "ST_DWITHIN spatial index skipped: radius (third argument) is not a numeric literal"
+                            );
+                            return None;
+                        }
                     };
 
                     return Some(CanonicalPredicate::SpatialDWithin {

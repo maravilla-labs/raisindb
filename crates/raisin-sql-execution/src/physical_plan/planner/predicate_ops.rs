@@ -262,10 +262,22 @@ impl PhysicalPlanner {
             return None;
         }
 
-        // Filter out scan-level predicates that should never appear in filters.
-        // These define the scan strategy and are handled at the scan level.
-        // Each build_*_scan method removes its own predicate from remaining,
-        // but this filter acts as a safety net.
+        // Filter out scan-level predicates that define the scan boundary and are
+        // inherently satisfied by the scan itself (e.g., DescendantOf is guaranteed
+        // by PrefixScan). Each build_*_scan method removes its own predicate from
+        // remaining, but this filter acts as a safety net.
+        //
+        // NOTE: SpatialDWithin is intentionally NOT filtered here. Two paths exist:
+        //
+        // 1. Spatial scan selected (build_spatial_scan): SpatialDWithin is removed
+        //    from `remaining` explicitly in build_scan.rs, so it never reaches this
+        //    function. The spatial index handles distance filtering.
+        //
+        // 2. Non-spatial scan selected (e.g., DescendantOf wins by selectivity):
+        //    SpatialDWithin stays in `remaining` and is converted back to an
+        //    ST_DWithin(...) expression via `to_expr()`, then applied as a row-level
+        //    filter. This ensures correctness — rows outside the radius are excluded
+        //    even when the spatial index is not the primary scan method.
         let filter_predicates: Vec<_> = predicates
             .iter()
             .filter(|p| {
@@ -274,7 +286,6 @@ impl PhysicalPlanner {
                     CanonicalPredicate::ChildOf { .. }
                         | CanonicalPredicate::PrefixRange { .. }
                         | CanonicalPredicate::DescendantOf { .. }
-                        | CanonicalPredicate::SpatialDWithin { .. }
                         | CanonicalPredicate::References { .. }
                 )
             })

@@ -86,6 +86,11 @@ where
             .with_catalog(Arc::new(catalog))
             .with_repository_config(repository.config.clone());
 
+        // Wire schema stats cache for data-driven selectivity estimation
+        if let Some(ref cache) = state.schema_stats_cache {
+            engine = engine.with_schema_stats_cache(cache.clone());
+        }
+
         // Clone auth context before consuming — callback needs it for function node lookups
         let callback_auth = auth_context.clone();
 

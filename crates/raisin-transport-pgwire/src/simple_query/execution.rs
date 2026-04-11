@@ -89,6 +89,11 @@ where
             }
         }
 
+        // Wire schema stats cache for data-driven selectivity estimation
+        if let Some(ref cache) = self.schema_stats_cache {
+            engine = engine.with_schema_stats_cache(cache.clone());
+        }
+
         // Execute the query using execute_batch() for proper scalar query support
         match engine.execute_batch(sql).await {
             Ok(mut row_stream) => {

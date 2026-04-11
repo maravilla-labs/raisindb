@@ -3,11 +3,10 @@
 use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::HaversineDistance;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{geojson_to_point, get_centroid, get_geometry_type};
+use super::helpers::compute_haversine_distance;
 
 /// Check if two geometries are within a specified distance
 ///
@@ -136,22 +135,7 @@ impl SqlFunction for StDWithinFunction {
             }
         };
 
-        // Get points for distance calculation
-        let point1 = if get_geometry_type(geom1)? == "Point" {
-            geojson_to_point(geom1)?
-        } else {
-            get_centroid(geom1)?
-        };
-
-        let point2 = if get_geometry_type(geom2)? == "Point" {
-            geojson_to_point(geom2)?
-        } else {
-            get_centroid(geom2)?
-        };
-
-        // Calculate Haversine distance
-        let distance = point1.haversine_distance(&point2);
-
+        let distance = compute_haversine_distance(geom1, geom2)?;
         Ok(Literal::Boolean(distance <= max_distance))
     }
 }

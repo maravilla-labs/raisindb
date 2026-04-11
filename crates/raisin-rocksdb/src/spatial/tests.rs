@@ -8,7 +8,7 @@ fn test_encode_decode_roundtrip() {
     let lon = -122.4194; // San Francisco
     let lat = 37.7749;
 
-    let hash = encode_point(lon, lat, 8);
+    let hash = encode_point(lon, lat, 8).expect("should encode");
     let (decoded_lon, decoded_lat) = decode_geohash(&hash).unwrap();
 
     assert!((decoded_lon - lon).abs() < 0.001);
@@ -17,7 +17,7 @@ fn test_encode_decode_roundtrip() {
 
 #[test]
 fn test_neighbors() {
-    let hash = encode_point(-122.4194, 37.7749, 6);
+    let hash = encode_point(-122.4194, 37.7749, 6).expect("should encode");
     let neighbor_hashes = neighbors(&hash);
 
     assert_eq!(neighbor_hashes.len(), 8);
@@ -109,4 +109,46 @@ fn test_geohashes_for_geometry() {
 
     let hashes = geohashes_for_geometry(&point);
     assert_eq!(hashes.len(), 5);
+}
+
+#[test]
+fn test_encode_point_nan_returns_none() {
+    assert!(encode_point(f64::NAN, 37.7749, 8).is_none());
+    assert!(encode_point(-122.4194, f64::NAN, 8).is_none());
+}
+
+#[test]
+fn test_encode_point_infinity_returns_none() {
+    assert!(encode_point(f64::INFINITY, 37.7749, 8).is_none());
+    assert!(encode_point(-122.4194, f64::NEG_INFINITY, 8).is_none());
+}
+
+#[test]
+fn test_encode_point_out_of_bounds_returns_none() {
+    assert!(encode_point(200.0, 37.7749, 8).is_none());
+    assert!(encode_point(-181.0, 37.7749, 8).is_none());
+    assert!(encode_point(-122.4194, 91.0, 8).is_none());
+    assert!(encode_point(-122.4194, -91.0, 8).is_none());
+}
+
+#[test]
+fn test_encode_point_boundary_values_succeed() {
+    assert!(encode_point(180.0, 90.0, 8).is_some());
+    assert!(encode_point(-180.0, -90.0, 8).is_some());
+    assert!(encode_point(0.0, 0.0, 8).is_some());
+}
+
+#[test]
+fn test_neighbors_empty_hash_returns_empty() {
+    assert!(neighbors("").is_empty());
+}
+
+#[test]
+fn test_cells_for_radius_invalid_coords() {
+    assert!(cells_for_radius(f64::NAN, 37.7749, 500.0).is_empty());
+}
+
+#[test]
+fn test_multi_precision_geohashes_invalid_coords() {
+    assert!(multi_precision_geohashes(f64::NAN, 37.7749).is_empty());
 }

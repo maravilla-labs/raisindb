@@ -36,6 +36,19 @@ use raisin_sql::logical_plan::{
 use raisin_sql::optimizer::hierarchy_rewrite::{CanonicalPredicate, ComparisonOp};
 use std::sync::Arc;
 
+/// Pre-computed schema statistics for data-driven selectivity estimation.
+///
+/// When populated via [`PhysicalPlanner::set_schema_statistics`], the planner
+/// uses these counts to derive per-column selectivity instead of falling back
+/// to hard-coded defaults (e.g. `1 / node_type_count` instead of `0.05`).
+#[derive(Debug, Clone, Default)]
+pub struct SchemaStats {
+    /// Number of distinct NodeType definitions on this branch.
+    pub node_type_count: usize,
+    /// Number of distinct Archetype definitions on this branch.
+    pub archetype_count: usize,
+}
+
 /// Buffer size for scan limit pushdown.
 /// We use a large value to ensure post-scan filtering doesn't cause
 /// fewer results than expected from the LIMIT clause.
@@ -110,6 +123,10 @@ pub struct PhysicalPlanner {
     /// Available compound indexes for the current query context.
     /// Populated from NodeType schemas when set_compound_indexes is called.
     compound_indexes: Vec<CompoundIndexDefinition>,
+    /// Optional schema statistics for data-driven selectivity estimation.
+    /// When set, equality predicates on `node_type` and `archetype` columns
+    /// use `1 / count` instead of the default 0.05 heuristic.
+    schema_stats: Option<SchemaStats>,
 }
 
 impl PhysicalPlanner {
@@ -123,6 +140,7 @@ impl PhysicalPlanner {
             default_workspace: Arc::from("default"),
             index_catalog: Arc::new(RocksDBIndexCatalog::new()),
             compound_indexes: Vec::new(),
+            schema_stats: None,
         }
     }
 
@@ -141,6 +159,7 @@ impl PhysicalPlanner {
             default_workspace: Arc::from(workspace),
             index_catalog: Arc::new(RocksDBIndexCatalog::new()),
             compound_indexes: Vec::new(),
+            schema_stats: None,
         }
     }
 
@@ -159,6 +178,7 @@ impl PhysicalPlanner {
             default_workspace: Arc::from(workspace),
             index_catalog: catalog,
             compound_indexes: Vec::new(),
+            schema_stats: None,
         }
     }
 

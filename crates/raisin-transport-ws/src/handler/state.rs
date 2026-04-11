@@ -98,6 +98,9 @@ where
     /// HNSW vector indexing engine (only available with storage-rocksdb feature)
     #[cfg(feature = "storage-rocksdb")]
     pub hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
+
+    /// Shared schema stats cache for data-driven selectivity estimation
+    pub schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
 }
 
 impl<S, B> WsState<S, B>
@@ -123,6 +126,7 @@ where
         #[cfg(feature = "storage-rocksdb")] hnsw_engine: Option<
             Arc<raisin_hnsw::HnswIndexingEngine>,
         >,
+        schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
     ) -> Self {
         let event_bus = storage.event_bus();
         let auth_service = Arc::new(JwtAuthService::new(&config.jwt_secret));
@@ -160,6 +164,7 @@ where
             indexing_engine,
             #[cfg(feature = "storage-rocksdb")]
             hnsw_engine,
+            schema_stats_cache,
         }
     }
 

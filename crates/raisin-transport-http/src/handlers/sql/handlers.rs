@@ -181,6 +181,11 @@ async fn build_engine(
 
     engine = engine::configure_engine_features(engine, state, embedding_config, rocksdb_storage)?;
 
+    // Wire schema stats cache for data-driven selectivity estimation
+    if let Some(ref cache) = state.schema_stats_cache {
+        engine = engine.with_schema_stats_cache(cache.clone());
+    }
+
     // Wire function invocation callbacks for SQL INVOKE() and INVOKE_SYNC()
     let invoke_cb = engine::create_function_invoke_callback(state, repo, callback_auth.clone());
     let invoke_sync_cb = engine::create_function_invoke_sync_callback(state, repo, callback_auth);

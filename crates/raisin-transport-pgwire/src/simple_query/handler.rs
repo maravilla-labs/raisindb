@@ -30,6 +30,9 @@ where
     /// Optional HNSW engine for vector similarity search
     #[cfg(feature = "indexing")]
     pub(super) hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
+
+    /// Shared schema stats cache for data-driven selectivity estimation
+    pub(super) schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
 }
 
 impl<S, V, P> RaisinSimpleQueryHandler<S, V, P>
@@ -47,6 +50,7 @@ where
             indexing_engine: None,
             #[cfg(feature = "indexing")]
             hnsw_engine: None,
+            schema_stats_cache: None,
         }
     }
 
@@ -64,6 +68,12 @@ where
     #[cfg(feature = "indexing")]
     pub fn with_hnsw_engine(mut self, engine: Arc<raisin_hnsw::HnswIndexingEngine>) -> Self {
         self.hnsw_engine = Some(engine);
+        self
+    }
+
+    /// Set the schema stats cache for data-driven selectivity estimation
+    pub fn with_schema_stats_cache(mut self, cache: raisin_core::SharedSchemaStatsCache) -> Self {
+        self.schema_stats_cache = Some(cache);
         self
     }
 

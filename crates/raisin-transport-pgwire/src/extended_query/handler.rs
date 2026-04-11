@@ -220,6 +220,11 @@ where
             }
         }
 
+        // Wire schema stats cache for data-driven selectivity estimation
+        if let Some(ref cache) = self.schema_stats_cache {
+            engine = engine.with_schema_stats_cache(cache.clone());
+        }
+
         // Use identity auth context if present (from SET app.user)
         // Re-fetch context to get updated identity_auth after SET app.user command
         let current_context = self.auth_handler.get_context(client).ok_or_else(|| {

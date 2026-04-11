@@ -3,7 +3,7 @@
 use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::{Contains, Intersects};
+use geo::Intersects;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
@@ -100,17 +100,17 @@ impl SqlFunction for StIntersectsFunction {
 
         // Handle supported geometry combinations
         let intersects = match (type_a, type_b) {
-            // Point intersects Polygon (same as Point within Polygon)
+            // Point intersects Polygon (includes boundary)
             ("Point", "Polygon") => {
                 let point = geojson_to_point(geom_a)?;
                 let polygon = geojson_to_polygon(geom_b)?;
-                polygon.contains(&point)
+                polygon.intersects(&point)
             }
-            // Polygon intersects Point
+            // Polygon intersects Point (includes boundary)
             ("Polygon", "Point") => {
                 let polygon = geojson_to_polygon(geom_a)?;
                 let point = geojson_to_point(geom_b)?;
-                polygon.contains(&point)
+                polygon.intersects(&point)
             }
             // Polygon intersects Polygon
             ("Polygon", "Polygon") => {

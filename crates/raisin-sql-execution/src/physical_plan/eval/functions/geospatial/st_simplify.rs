@@ -16,6 +16,11 @@ use super::helpers::{
 ///
 /// # SQL Signature
 /// `ST_SIMPLIFY(geometry, tolerance) -> GEOMETRY`
+///
+/// # Tolerance Units
+/// The tolerance is in the same units as the geometry coordinates.
+/// For WGS84/EPSG:4326 data, this means **degrees** (not meters).
+/// Example: 0.001 degrees ≈ 111 meters at the equator.
 pub struct StSimplifyFunction;
 
 impl SqlFunction for StSimplifyFunction {
@@ -75,13 +80,13 @@ impl SqlFunction for StSimplifyFunction {
             "Point" => Ok(Literal::Geometry(geom.clone())),
             "LineString" => {
                 let line = geojson_to_linestring(geom)?;
-                let simplified = line.simplify(&tolerance);
+                let simplified = line.simplify(tolerance);
                 let result = linestring_to_geojson(&simplified);
                 Ok(Literal::Geometry(result))
             }
             "Polygon" => {
                 let polygon = geojson_to_polygon(geom)?;
-                let simplified = polygon.simplify(&tolerance);
+                let simplified = polygon.simplify(tolerance);
                 let result = polygon_to_geojson(&simplified);
                 Ok(Literal::Geometry(result))
             }

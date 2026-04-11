@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
-use raisin_core::{NodeService, RaisinConnection, RepoAuditAdapter, TtlCache, WorkspaceService};
+use raisin_core::{
+    NodeService, RaisinConnection, RepoAuditAdapter, SharedSchemaStatsCache, TtlCache,
+    WorkspaceService,
+};
 use raisin_models::auth::AuthContext;
 
 use crate::upload_processors::UploadProcessorRegistry;
@@ -80,6 +83,8 @@ pub struct AppState {
     pub(crate) rocksdb_storage: Option<Arc<raisin_rocksdb::RocksDBStorage>>,
     #[cfg(feature = "storage-rocksdb")]
     pub(crate) auth_service: Option<Arc<raisin_rocksdb::AuthService>>,
+    /// Shared schema stats cache for data-driven query plan selectivity estimation
+    pub(crate) schema_stats_cache: Option<SharedSchemaStatsCache>,
 }
 
 impl AppState {
@@ -266,6 +271,7 @@ pub fn router(storage: Arc<Store>) -> Router {
         None,
         #[cfg(feature = "storage-rocksdb")]
         None, // auth_service
+        None, // schema_stats_cache
     );
     router
 }
@@ -289,6 +295,7 @@ pub fn router_with_bin_and_audit(
         Arc<raisin_rocksdb::RocksDBStorage>,
     >,
     #[cfg(feature = "storage-rocksdb")] auth_service: Option<Arc<raisin_rocksdb::AuthService>>,
+    schema_stats_cache: Option<SharedSchemaStatsCache>,
 ) -> (Router, AppState) {
     let connection = Arc::new(RaisinConnection::with_storage(storage.clone()));
 
@@ -324,6 +331,7 @@ pub fn router_with_bin_and_audit(
         rocksdb_storage,
         #[cfg(feature = "storage-rocksdb")]
         auth_service,
+        schema_stats_cache,
     };
 
     // NOTE: Global CorsLayer has been removed in favor of unified_cors_middleware

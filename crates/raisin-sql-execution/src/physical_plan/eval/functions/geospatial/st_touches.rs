@@ -72,27 +72,20 @@ impl SqlFunction for StTouchesFunction {
         let touches = match (type_a, type_b) {
             // Point-Point: never touch
             ("Point", "Point") => false,
-            // Polygon-Polygon: intersect on boundary but interiors don't overlap
             ("Polygon", "Polygon") => {
                 let polygon_a = geojson_to_polygon(geom_a)?;
                 let polygon_b = geojson_to_polygon(geom_b)?;
-                // They touch if they intersect but neither interior contains a point of the other
-                polygon_a.intersects(&polygon_b)
-                    && !polygon_a.contains(&polygon_b)
-                    && !polygon_b.contains(&polygon_a)
-                    && {
-                        // Check that interiors don't overlap:
-                        // use exterior rings to see if boundary intersection exists
-                        let ext_a = polygon_a.exterior();
-                        let ext_b = polygon_b.exterior();
-                        ext_a.intersects(ext_b)
-                            && !polygon_a
-                                .interiors()
-                                .iter()
-                                .any(|_| false)
-                            // Simplified: boundaries intersect but the polygons don't contain each other
-                            && true
-                    }
+                let ext_a = polygon_a.exterior();
+                let ext_b = polygon_b.exterior();
+                if !ext_a.intersects(ext_b) {
+                    false
+                } else {
+                    use geo::BooleanOps;
+                    use geo::Area;
+                    let intersection = polygon_a.intersection(&polygon_b);
+                    let area: f64 = intersection.unsigned_area();
+                    area < 1e-10
+                }
             }
             // Point on polygon boundary
             ("Point", "Polygon") => {
