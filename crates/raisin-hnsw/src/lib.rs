@@ -55,12 +55,13 @@ mod migration;
 mod persistence;
 pub mod types;
 
+pub use engine::metrics::VectorMetricsSnapshot;
 pub use engine::HnswIndexingEngine;
 pub use excerpt::{ExcerptFetcher, ExcerptRequest};
 pub use index::HnswIndex;
 pub use types::{
-    ChunkSearchResult, DistanceMetric, DocumentSearchResult, ScoringConfig, SearchMode,
-    SearchRequest, SearchResult, VectorPoint,
+    ChunkSearchResult, DistanceMetric, DocumentSearchResult, HnswParams, QuantizationType,
+    ScoringConfig, SearchMode, SearchRequest, SearchResult, VectorPoint,
 };
 
 // Re-export key types

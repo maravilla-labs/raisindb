@@ -178,7 +178,7 @@ impl<'a> AnalyzerContext<'a> {
         // Check if it's a known table-valued function
         if !matches!(
             table_upper.as_str(),
-            "CYPHER" | "KNN" | "NEIGHBORS" | "FULLTEXT_SEARCH" | "GRAPH_TABLE"
+            "CYPHER" | "KNN" | "NEIGHBORS" | "FULLTEXT_SEARCH" | "HYBRID_SEARCH" | "GRAPH_TABLE"
         ) {
             return Err(AnalysisError::UnsupportedStatement(format!(
                 "Unsupported table-valued function: {}",

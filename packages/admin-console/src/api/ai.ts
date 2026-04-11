@@ -17,6 +17,26 @@ export type OverlapConfig =
 // Splitter type for text chunking
 export type SplitterType = 'recursive' | 'fixed_size' | 'markdown' | 'code'
 
+// Distance metric for vector search
+export type DistanceMetric = 'Cosine' | 'L2' | 'InnerProduct' | 'Hamming'
+
+// Quantization type for vector storage
+export type QuantizationType = 'F32' | 'F16' | 'Int8'
+
+// HNSW index parameters
+export interface HnswParams {
+  connectivity: number   // M parameter, 0 = auto
+  expansion_add: number  // ef_construction, 0 = auto
+  expansion_search: number  // ef_search, 0 = auto
+}
+
+// Default HNSW params (all auto)
+export const DEFAULT_HNSW_PARAMS: HnswParams = {
+  connectivity: 0,
+  expansion_add: 0,
+  expansion_search: 0,
+}
+
 // Chunking settings for embedding generation
 export interface ChunkingSettings {
   chunk_size: number
@@ -43,6 +63,10 @@ export interface EmbeddingSettings {
   max_embeddings_per_repo?: number
   dimensions: number
   chunking?: ChunkingSettings
+  default_max_distance?: number
+  distance_metric?: DistanceMetric
+  quantization?: QuantizationType
+  hnsw_params?: HnswParams
 }
 
 // List of providers that support embeddings

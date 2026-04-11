@@ -27,10 +27,6 @@ pub enum DistanceMetric {
     /// Vectors should be normalized for consistent results.
     InnerProduct,
 
-    /// Manhattan (L1) distance: `sum(|a_i - b_i|)`.
-    /// Do NOT normalize vectors when using Manhattan.
-    Manhattan,
-
     /// Hamming distance: count of differing dimensions.
     /// Typically used with binary vectors.
     Hamming,
@@ -42,7 +38,6 @@ impl fmt::Display for DistanceMetric {
             DistanceMetric::Cosine => write!(f, "Cosine"),
             DistanceMetric::L2 => write!(f, "L2"),
             DistanceMetric::InnerProduct => write!(f, "InnerProduct"),
-            DistanceMetric::Manhattan => write!(f, "Manhattan"),
             DistanceMetric::Hamming => write!(f, "Hamming"),
         }
     }
@@ -52,6 +47,75 @@ impl DistanceMetric {
     /// Whether vectors should be normalized before indexing/searching with this metric.
     pub fn requires_normalization(&self) -> bool {
         matches!(self, DistanceMetric::Cosine | DistanceMetric::InnerProduct)
+    }
+}
+
+/// Vector quantization type for HNSW indexes.
+///
+/// Controls the precision of stored vectors, trading accuracy for memory savings.
+/// Lower precision types use less memory per vector but may reduce search quality.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuantizationType {
+    /// 32-bit floating point (default). Full precision, no compression.
+    #[default]
+    F32,
+
+    /// 16-bit floating point. ~50% memory reduction with minimal accuracy loss.
+    F16,
+
+    /// 8-bit signed integer. ~75% memory reduction, suitable for large indexes
+    /// where some accuracy loss is acceptable.
+    Int8,
+}
+
+impl fmt::Display for QuantizationType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QuantizationType::F32 => write!(f, "F32"),
+            QuantizationType::F16 => write!(f, "F16"),
+            QuantizationType::Int8 => write!(f, "Int8"),
+        }
+    }
+}
+
+/// HNSW index tuning parameters.
+///
+/// Controls the accuracy/speed/memory tradeoff of the HNSW graph.
+/// Zero values mean "use library defaults" (usearch defaults are generally good).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct HnswParams {
+    /// Graph connectivity (M parameter). Higher = more accurate, more memory.
+    /// Default: 0 (usearch default, typically 16).
+    /// Recommended range: 4-64.
+    #[serde(default)]
+    pub connectivity: usize,
+
+    /// Construction expansion factor (ef_construction). Higher = better index quality, slower build.
+    /// Default: 0 (usearch default, typically 128).
+    /// Recommended range: 100-500.
+    #[serde(default)]
+    pub expansion_add: usize,
+
+    /// Search expansion factor (ef_search). Higher = more accurate search, slower.
+    /// Default: 0 (usearch default, typically 64).
+    /// Recommended range: 10-500.
+    #[serde(default)]
+    pub expansion_search: usize,
+
+    /// Vector quantization type. Controls precision vs memory tradeoff.
+    /// Default: F32 (full precision).
+    #[serde(default)]
+    pub quantization: QuantizationType,
+}
+
+impl Default for HnswParams {
+    fn default() -> Self {
+        Self {
+            connectivity: 0,
+            expansion_add: 0,
+            expansion_search: 0,
+            quantization: QuantizationType::default(),
+        }
     }
 }
 

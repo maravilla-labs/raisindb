@@ -18,21 +18,8 @@
 use raisin_error::Result;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::translations::{JsonPointer, LocaleCode, LocaleOverlay};
+use raisin_validation::field_helpers::NON_TRANSLATABLE_KEYS;
 use std::collections::HashMap;
-
-/// Keys skipped when building translation overlays (structural, not translatable).
-const NON_TRANSLATABLE_KEYS: &[&str] = &[
-    "uuid",
-    "id",
-    "element_type",
-    "slug",
-    "node_type",
-    "archetype",
-    "parent",
-    "order",
-    "sort_order",
-    "weight",
-];
 
 /// Try to extract a locale code from a YAML filename.
 ///
@@ -139,7 +126,7 @@ pub(super) fn yaml_to_overlay(value: serde_json::Value) -> Result<LocaleOverlay>
         }
         match val {
             serde_json::Value::Array(arr) if is_uuid_section(arr) => {
-                collect_section_pointers(key, arr, &mut data);
+                collect_section_pointers(&format!("/{}", key), arr, &mut data);
             }
             _ => {
                 let pv = json_to_property_value(val);
@@ -183,51 +170,69 @@ fn validate_overlay_pointers(data: &HashMap<JsonPointer, PropertyValue>) -> Resu
 /// Convert a [`LocaleOverlay`] back to `serde_json::Value` for YAML export.
 ///
 /// Inverse of [`yaml_to_overlay`]: simple pointers become top-level keys,
-/// 3-segment pointers are grouped into UUID-keyed arrays.
+/// multi-segment pointers are reconstructed into nested UUID-keyed arrays.
 pub(in crate::jobs::handlers) fn overlay_to_yaml(overlay: &LocaleOverlay) -> serde_json::Value {
     match overlay {
         LocaleOverlay::Hidden => serde_json::json!({"hidden": true}),
         LocaleOverlay::Properties { data } => {
-            let mut top = serde_json::Map::new();
-            let mut sections: HashMap<
-                String,
-                HashMap<String, serde_json::Map<String, serde_json::Value>>,
-            > = HashMap::new();
+            let mut root = serde_json::Map::new();
 
             for (pointer, value) in data {
                 let segs = pointer.segments();
                 let jv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-
-                match segs.as_slice() {
-                    [key] => {
-                        top.insert(key.to_string(), jv);
-                    }
-                    [section, uuid, field] => {
-                        sections
-                            .entry(section.to_string())
-                            .or_default()
-                            .entry(uuid.to_string())
-                            .or_default()
-                            .insert(field.to_string(), jv);
-                    }
-                    other => {
-                        top.insert(other.join("."), jv);
-                    }
-                }
+                insert_at_path(&mut root, &segs, jv);
             }
 
-            for (name, uuid_map) in sections {
-                let arr: Vec<serde_json::Value> = uuid_map
-                    .into_iter()
-                    .map(|(uuid, mut fields)| {
-                        fields.insert("uuid".to_string(), serde_json::Value::String(uuid));
-                        serde_json::Value::Object(fields)
-                    })
-                    .collect();
-                top.insert(name, serde_json::Value::Array(arr));
-            }
+            serde_json::Value::Object(root)
+        }
+    }
+}
 
-            serde_json::Value::Object(top)
+/// Recursively insert a value into a JSON tree following segment pairs.
+///
+/// Segments follow the pattern: `[key]` for top-level fields, or
+/// `[section, uuid, field]` / `[section, uuid, nested_section, nested_uuid, field]`
+/// for UUID-keyed array navigation at arbitrary depth.
+fn insert_at_path(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    segs: &[&str],
+    value: serde_json::Value,
+) {
+    match segs {
+        [] => {}
+        [key] => {
+            root.insert(key.to_string(), value);
+        }
+        [section, uuid, rest @ ..] if !rest.is_empty() => {
+            let arr = root
+                .entry(section.to_string())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+
+            if let serde_json::Value::Array(items) = arr {
+                // Find existing object with this UUID or create one
+                let obj = if let Some(existing) = items.iter_mut().find(|item| {
+                    item.as_object()
+                        .and_then(|o| o.get("uuid"))
+                        .and_then(|u| u.as_str())
+                        == Some(uuid)
+                }) {
+                    existing.as_object_mut().unwrap()
+                } else {
+                    let mut new_obj = serde_json::Map::new();
+                    new_obj.insert(
+                        "uuid".to_string(),
+                        serde_json::Value::String(uuid.to_string()),
+                    );
+                    items.push(serde_json::Value::Object(new_obj));
+                    items.last_mut().unwrap().as_object_mut().unwrap()
+                };
+
+                insert_at_path(obj, rest, value);
+            }
+        }
+        other => {
+            // Fallback for unexpected patterns
+            root.insert(other.join("."), value);
         }
     }
 }
@@ -244,7 +249,7 @@ fn is_uuid_section(arr: &[serde_json::Value]) -> bool {
 }
 
 fn collect_section_pointers(
-    section: &str,
+    prefix: &str,
     arr: &[serde_json::Value],
     data: &mut HashMap<JsonPointer, PropertyValue>,
 ) {
@@ -259,8 +264,20 @@ fn collect_section_pointers(
             if NON_TRANSLATABLE_KEYS.contains(&field.as_str()) {
                 continue;
             }
-            let pointer = JsonPointer::new(format!("/{}/{}/{}", section, uuid, field));
-            data.insert(pointer, json_to_property_value(val));
+            match val {
+                serde_json::Value::Array(nested) if is_uuid_section(nested) => {
+                    collect_section_pointers(
+                        &format!("{}/{}/{}", prefix, uuid, field),
+                        nested,
+                        data,
+                    );
+                }
+                _ => {
+                    let pointer =
+                        JsonPointer::new(format!("{}/{}/{}", prefix, uuid, field));
+                    data.insert(pointer, json_to_property_value(val));
+                }
+            }
         }
     }
 }
@@ -384,5 +401,99 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("empty segments"), "error was: {}", err);
+    }
+
+    #[test]
+    fn test_yaml_to_overlay_nested_sections() {
+        // Nested UUID arrays should produce 5-segment pointers
+        let overlay = yaml_to_overlay(serde_json::json!({
+            "content": [
+                {
+                    "uuid": "skills-1",
+                    "heading": "Faehigkeiten",
+                    "categories": [
+                        {"uuid": "cat-frontend", "name": "Frontend"},
+                        {"uuid": "cat-backend", "name": "Backend"}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        let data = overlay.properties_ref().unwrap();
+        // heading + 2 nested names = 3 pointers
+        assert_eq!(data.len(), 3);
+        assert!(data.contains_key(&JsonPointer::new("/content/skills-1/heading")));
+        assert!(data.contains_key(&JsonPointer::new(
+            "/content/skills-1/categories/cat-frontend/name"
+        )));
+        assert!(data.contains_key(&JsonPointer::new(
+            "/content/skills-1/categories/cat-backend/name"
+        )));
+        // Entire categories array should NOT be stored as a single value
+        assert!(!data.contains_key(&JsonPointer::new("/content/skills-1/categories")));
+    }
+
+    #[test]
+    fn test_yaml_to_overlay_nested_without_uuid() {
+        // Nested arrays WITHOUT UUIDs should still produce whole-value (current behavior)
+        let overlay = yaml_to_overlay(serde_json::json!({
+            "content": [
+                {
+                    "uuid": "skills-1",
+                    "heading": "Skills",
+                    "categories": [
+                        {"name": "Frontend"},
+                        {"name": "Backend"}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        let data = overlay.properties_ref().unwrap();
+        // heading + categories as whole value = 2 pointers
+        assert_eq!(data.len(), 2);
+        assert!(data.contains_key(&JsonPointer::new("/content/skills-1/heading")));
+        assert!(data.contains_key(&JsonPointer::new("/content/skills-1/categories")));
+    }
+
+    #[test]
+    fn test_overlay_roundtrip_nested() {
+        let input = serde_json::json!({
+            "content": [
+                {
+                    "uuid": "grid-1",
+                    "heading": "Projekte",
+                    "projects": [
+                        {"uuid": "proj-1", "title": "Plattform"},
+                        {"uuid": "proj-2", "title": "Blog"}
+                    ]
+                }
+            ]
+        });
+        let overlay = yaml_to_overlay(input).unwrap();
+        let output = overlay_to_yaml(&overlay);
+
+        // Verify structure is reconstructed
+        let content = output.get("content").unwrap().as_array().unwrap();
+        let grid = content
+            .iter()
+            .find(|e| e.get("uuid").and_then(|u| u.as_str()) == Some("grid-1"))
+            .unwrap();
+        assert_eq!(
+            grid.get("heading").and_then(|v| v.as_str()),
+            Some("Projekte")
+        );
+
+        let projects = grid.get("projects").unwrap().as_array().unwrap();
+        let proj1 = projects
+            .iter()
+            .find(|p| p.get("uuid").and_then(|u| u.as_str()) == Some("proj-1"))
+            .unwrap();
+        assert_eq!(
+            proj1.get("title").and_then(|v| v.as_str()),
+            Some("Plattform")
+        );
     }
 }

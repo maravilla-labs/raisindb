@@ -343,30 +343,123 @@ pub async fn optimize_vector_index(
     }))
 }
 
-/// Restore vector index from backup.
+/// Restore vector index from embeddings stored in RocksDB.
 ///
 /// POST /api/admin/management/database/:tenant/:repo/vector/restore
+///
+/// This rebuilds the HNSW index from the embeddings column family.
+/// Use this after HNSW index files are lost or corrupted, or when
+/// restoring from a backup that only includes RocksDB data.
+///
+/// Functionally equivalent to rebuild, but semantically indicates
+/// disaster recovery rather than routine maintenance.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn restore_vector_index(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path((tenant, repo)): Path<(String, String)>,
     Query(params): Query<DatabaseOpQuery>,
 ) -> Result<Json<JobResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let branch = params.branch.unwrap_or_else(|| "main".to_string());
+    let hnsw_mgmt = match &state.hnsw_management {
+        Some(mgmt) => mgmt,
+        None => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "HNSW management not initialized".to_string(),
+                }),
+            ));
+        }
+    };
 
-    tracing::warn!(
-        "Vector index restore not yet implemented for {}/{}/{}",
+    let rocksdb_storage = match &state.rocksdb_storage {
+        Some(storage) => storage,
+        None => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "RocksDB storage not initialized".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let job_registry = rocksdb_storage.job_registry();
+    let branch = get_branch_name(&state, &tenant, &repo, params.branch).await?;
+
+    tracing::info!(
+        "Starting vector index restore for {}/{}/{}",
         tenant,
         repo,
         branch
     );
 
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResponse {
-            error: "Vector index operations not yet implemented (Phase 3)".to_string(),
-        }),
-    ))
+    let job_id = job_registry
+        .register_job(
+            JobType::VectorRebuild,
+            Some(tenant.clone()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to register job: {}", e),
+                }),
+            )
+        })?;
+
+    let mgmt = Arc::clone(hnsw_mgmt);
+    let job_registry_clone = Arc::clone(job_registry);
+    let job_id_clone = job_id.clone();
+    let tenant_clone = tenant.clone();
+    let repo_clone = repo.clone();
+    let branch_clone = branch.clone();
+    tokio::spawn(async move {
+        let _ = job_registry_clone.mark_running(&job_id_clone).await;
+
+        match mgmt
+            .rebuild_index(
+                &tenant_clone,
+                &repo_clone,
+                &branch_clone,
+                Some(job_id_clone.clone()),
+            )
+            .await
+        {
+            Ok(stats) => {
+                let result_json = serde_json::to_value(&stats).unwrap_or_default();
+                let _ = job_registry_clone
+                    .set_result(&job_id_clone, result_json)
+                    .await;
+                let _ = job_registry_clone.mark_completed(&job_id_clone).await;
+
+                tracing::info!(
+                    "Vector restore completed for {}/{}/{}: {} items processed",
+                    tenant_clone,
+                    repo_clone,
+                    branch_clone,
+                    stats.items_processed
+                );
+            }
+            Err(e) => {
+                let _ = job_registry_clone
+                    .mark_failed(&job_id_clone, e.to_string())
+                    .await;
+                tracing::error!("Vector restore failed: {}", e);
+            }
+        }
+    });
+
+    Ok(Json(JobResponse {
+        job_id: job_id.0,
+        message: format!(
+            "Vector index restore started for {}/{}/{}. Rebuilding from stored embeddings.",
+            tenant, repo, branch
+        ),
+    }))
 }
 
 /// Get vector index health.

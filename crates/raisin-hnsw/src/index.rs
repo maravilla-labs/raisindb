@@ -6,7 +6,7 @@
 //! a full graph rebuild on every mutation. usearch supports incremental
 //! insertions and deletions, and persists the full graph to disk.
 
-use crate::types::{DistanceMetric, SearchResult};
+use crate::types::{DistanceMetric, QuantizationType, SearchResult};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,9 @@ pub struct HnswIndex {
     /// Next available key for usearch
     next_key: u64,
 
+    /// Vector quantization type
+    quantization: QuantizationType,
+
     /// How the usearch index was loaded (InMemory, Viewed, or Loaded)
     load_state: IndexLoadState,
 
@@ -72,13 +75,22 @@ impl HnswIndex {
 
     /// Create a new empty HNSW index with a specific distance metric.
     pub fn with_metric(dimensions: usize, metric: DistanceMetric) -> Self {
+        Self::with_params(dimensions, metric, crate::types::HnswParams::default())
+    }
+
+    /// Create a new empty HNSW index with specific distance metric and tuning parameters.
+    pub fn with_params(
+        dimensions: usize,
+        metric: DistanceMetric,
+        params: crate::types::HnswParams,
+    ) -> Self {
         let options = IndexOptions {
             dimensions,
             metric: metric.to_usearch_metric(),
-            quantization: ScalarKind::F32,
-            connectivity: 0,
-            expansion_add: 0,
-            expansion_search: 0,
+            quantization: params.quantization.to_scalar_kind(),
+            connectivity: params.connectivity,
+            expansion_add: params.expansion_add,
+            expansion_search: params.expansion_search,
             multi: false,
         };
         let index = UsearchIndex::new(&options).expect("Failed to create usearch index");
@@ -89,6 +101,7 @@ impl HnswIndex {
             key_to_meta: HashMap::new(),
             dimensions,
             distance_metric: metric,
+            quantization: params.quantization,
             next_key: 0,
             load_state: IndexLoadState::InMemory,
             source_path: None,
@@ -100,6 +113,7 @@ impl HnswIndex {
         path: &Path,
         dimensions: usize,
         metric: DistanceMetric,
+        quantization: QuantizationType,
         node_to_key: HashMap<String, u64>,
         key_to_meta: HashMap<u64, NodeMeta>,
         next_key: u64,
@@ -107,7 +121,7 @@ impl HnswIndex {
         let options = IndexOptions {
             dimensions,
             metric: metric.to_usearch_metric(),
-            quantization: ScalarKind::F32,
+            quantization: quantization.to_scalar_kind(),
             connectivity: 0,
             expansion_add: 0,
             expansion_search: 0,
@@ -130,6 +144,7 @@ impl HnswIndex {
             key_to_meta,
             dimensions,
             distance_metric: metric,
+            quantization,
             next_key,
             load_state: IndexLoadState::Loaded,
             source_path: Some(path.to_path_buf()),
@@ -144,6 +159,7 @@ impl HnswIndex {
         path: &Path,
         dimensions: usize,
         metric: DistanceMetric,
+        quantization: QuantizationType,
         node_to_key: HashMap<String, u64>,
         key_to_meta: HashMap<u64, NodeMeta>,
         next_key: u64,
@@ -151,7 +167,7 @@ impl HnswIndex {
         let options = IndexOptions {
             dimensions,
             metric: metric.to_usearch_metric(),
-            quantization: ScalarKind::F32,
+            quantization: quantization.to_scalar_kind(),
             connectivity: 0,
             expansion_add: 0,
             expansion_search: 0,
@@ -174,6 +190,7 @@ impl HnswIndex {
             key_to_meta,
             dimensions,
             distance_metric: metric,
+            quantization,
             next_key,
             load_state: IndexLoadState::Viewed,
             source_path: Some(path.to_path_buf()),
@@ -204,7 +221,7 @@ impl HnswIndex {
         let options = IndexOptions {
             dimensions: self.dimensions,
             metric: self.distance_metric.to_usearch_metric(),
-            quantization: ScalarKind::F32,
+            quantization: self.quantization.to_scalar_kind(),
             connectivity: 0,
             expansion_add: 0,
             expansion_search: 0,
@@ -404,6 +421,10 @@ impl HnswIndex {
         self.dimensions
     }
 
+    pub(crate) fn quantization(&self) -> QuantizationType {
+        self.quantization
+    }
+
     pub(crate) fn next_key(&self) -> u64 {
         self.next_key
     }
@@ -420,16 +441,18 @@ impl DistanceMetric {
             DistanceMetric::Cosine => MetricKind::Cos,
             DistanceMetric::L2 => MetricKind::L2sq,
             DistanceMetric::InnerProduct => MetricKind::IP,
-            // Manhattan: no native L1 in usearch. Falls back to L2sq which
-            // preserves ordering for most use cases but is not a true L1 metric.
-            DistanceMetric::Manhattan => {
-                tracing::warn!(
-                    "Manhattan (L1) distance is not natively supported by usearch; \
-                     falling back to L2sq (squared Euclidean)"
-                );
-                MetricKind::L2sq
-            }
             DistanceMetric::Hamming => MetricKind::Hamming,
+        }
+    }
+}
+
+impl QuantizationType {
+    /// Convert to usearch ScalarKind.
+    pub(crate) fn to_scalar_kind(self) -> ScalarKind {
+        match self {
+            QuantizationType::F32 => ScalarKind::F32,
+            QuantizationType::F16 => ScalarKind::F16,
+            QuantizationType::Int8 => ScalarKind::I8,
         }
     }
 }
@@ -680,7 +703,6 @@ mod tests {
         assert!(DistanceMetric::Cosine.requires_normalization());
         assert!(DistanceMetric::InnerProduct.requires_normalization());
         assert!(!DistanceMetric::L2.requires_normalization());
-        assert!(!DistanceMetric::Manhattan.requires_normalization());
         assert!(!DistanceMetric::Hamming.requires_normalization());
     }
 

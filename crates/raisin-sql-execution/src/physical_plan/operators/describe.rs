@@ -239,15 +239,19 @@ impl PhysicalPlan {
                 format!("CTEScan: {}", cte_name)
             }
             PhysicalPlan::VectorScan {
+                table,
                 vector_column,
                 distance_metric,
                 k,
                 max_distance,
                 ..
             } => {
-                let mut desc = format!("VectorScan: {} {} k={}", vector_column, distance_metric, k);
+                let mut desc = format!(
+                    "VectorScan: table={}, column={}, k={}, metric={}",
+                    table, vector_column, k, distance_metric
+                );
                 if let Some(threshold) = max_distance {
-                    desc.push_str(&format!(" threshold={:.3}", threshold));
+                    desc.push_str(&format!(", max_distance={:.2}", threshold));
                 }
                 desc
             }

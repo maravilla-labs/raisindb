@@ -581,9 +581,27 @@ export interface VectorHealth {
   last_optimized: string | null
 }
 
+export interface VectorMetrics {
+  search_count: number
+  search_avg_ms: number
+  search_p99_ms: number
+  cache_hits: number
+  cache_misses: number
+  cache_hit_ratio: number
+  embeddings_added: number
+  embeddings_removed: number
+  indexes_loaded: number
+}
+
 export interface JobResponse {
   job_id: string
   message: string
+}
+
+// Vector Metrics API
+export const vectorMetricsApi = {
+  getMetrics: () =>
+    api.get<VectorMetrics>('/management/metrics/vector'),
 }
 
 // Database-level Index Management API

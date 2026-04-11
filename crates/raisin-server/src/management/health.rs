@@ -58,6 +58,17 @@ pub async fn replication_metrics_handler(
     }
 }
 
+/// Vector search metrics endpoint.
+///
+/// Returns metrics for the HNSW vector search subsystem: search latency,
+/// cache hit rates, embedding counts, etc.
+#[cfg(feature = "storage-rocksdb")]
+pub async fn vector_metrics_handler(
+    Extension(hnsw_engine): Extension<Arc<raisin_hnsw::HnswIndexingEngine>>,
+) -> Result<Json<raisin_hnsw::VectorMetricsSnapshot>, StatusCode> {
+    Ok(Json(hnsw_engine.metrics()))
+}
+
 /// Enhanced health check including monitoring status (RocksDB only).
 #[cfg(feature = "storage-rocksdb")]
 pub async fn get_health_with_monitoring(

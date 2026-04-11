@@ -163,6 +163,7 @@ where
                     &hnsw_engine,
                     master_key,
                     job,
+                    config.max_retries,
                 )
                 .await;
             }
@@ -179,6 +180,7 @@ where
         hnsw_engine: &Arc<HnswIndexingEngine>,
         master_key: [u8; 32],
         job: EmbeddingJob,
+        max_retries: usize,
     ) {
         let job_id = job.job_id.clone();
 
@@ -190,36 +192,97 @@ where
             "Processing embedding job"
         );
 
-        let result = match job.kind {
-            EmbeddingJobKind::AddNode => {
-                Self::handle_add_node(storage, embedding_storage, hnsw_engine, master_key, &job)
-                    .await
-            }
-            EmbeddingJobKind::DeleteNode => Self::handle_delete_node(hnsw_engine, &job).await,
-            EmbeddingJobKind::BranchCreated => {
-                Self::handle_branch_created(hnsw_engine, &job).await
-            }
-        };
+        let mut last_error = None;
 
-        match result {
-            Ok(()) => {
-                if let Err(e) = job_store.complete(&[job_id.clone()]) {
-                    tracing::error!(job_id = %job_id, error = %e, "Failed to mark job as complete");
-                } else {
-                    tracing::debug!(job_id = %job_id, "Completed embedding job");
-                }
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                // Exponential backoff: 1s, 2s, 4s, ...
+                let delay = Duration::from_secs(1 << (attempt - 1).min(5));
+                tracing::warn!(
+                    job_id = %job_id,
+                    attempt = attempt + 1,
+                    max_retries = max_retries,
+                    delay_secs = delay.as_secs(),
+                    "Retrying embedding job after backoff"
+                );
+                tokio::time::sleep(delay).await;
             }
-            Err(e) => {
-                tracing::error!(job_id = %job_id, error = %e, "Embedding job failed");
-                if let Err(mark_err) = job_store.fail(&job_id, &e.to_string()) {
-                    tracing::error!(
-                        job_id = %job_id,
-                        error = %mark_err,
-                        "Failed to mark job as failed"
-                    );
+
+            let result = match job.kind {
+                EmbeddingJobKind::AddNode => {
+                    Self::handle_add_node(
+                        storage,
+                        embedding_storage,
+                        hnsw_engine,
+                        master_key,
+                        &job,
+                    )
+                    .await
+                }
+                EmbeddingJobKind::DeleteNode => {
+                    Self::handle_delete_node(hnsw_engine, &job).await
+                }
+                EmbeddingJobKind::BranchCreated => {
+                    Self::handle_branch_created(hnsw_engine, &job).await
+                }
+            };
+
+            match result {
+                Ok(()) => {
+                    if let Err(e) = job_store.complete(&[job_id.clone()]) {
+                        tracing::error!(job_id = %job_id, error = %e, "Failed to mark job as complete");
+                    } else {
+                        if attempt > 0 {
+                            tracing::info!(
+                                job_id = %job_id,
+                                attempts = attempt + 1,
+                                "Embedding job succeeded after retry"
+                            );
+                        } else {
+                            tracing::debug!(job_id = %job_id, "Completed embedding job");
+                        }
+                    }
+                    return;
+                }
+                Err(e) => {
+                    // Don't retry validation errors (bad config, missing node, etc.)
+                    if Self::is_permanent_error(&e) {
+                        tracing::error!(
+                            job_id = %job_id,
+                            error = %e,
+                            "Embedding job failed with permanent error, not retrying"
+                        );
+                        let _ = job_store.fail(&job_id, &e.to_string());
+                        return;
+                    }
+                    last_error = Some(e);
                 }
             }
         }
+
+        // All retries exhausted
+        if let Some(e) = last_error {
+            tracing::error!(
+                job_id = %job_id,
+                error = %e,
+                attempts = max_retries + 1,
+                "Embedding job failed after all retries"
+            );
+            if let Err(mark_err) = job_store.fail(&job_id, &e.to_string()) {
+                tracing::error!(
+                    job_id = %job_id,
+                    error = %mark_err,
+                    "Failed to mark job as failed"
+                );
+            }
+        }
+    }
+
+    /// Check if an error is permanent (should not be retried).
+    /// Validation errors, missing configs, and not-found errors are permanent.
+    /// Backend/storage errors and provider API errors are transient (retryable).
+    fn is_permanent_error(e: &Error) -> bool {
+        matches!(e, Error::Validation(_) | Error::NotFound(_))
     }
 
     async fn handle_add_node(

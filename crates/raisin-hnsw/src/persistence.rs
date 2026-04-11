@@ -8,7 +8,7 @@
 
 use crate::index::{HnswIndex, NodeMeta};
 use crate::migration;
-use crate::types::DistanceMetric;
+use crate::types::{DistanceMetric, QuantizationType};
 use raisin_error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,6 +22,10 @@ pub(crate) struct IndexMetadata {
     pub dimensions: usize,
     pub distance_metric: DistanceMetric,
     pub next_key: u64,
+    /// Vector quantization type. Defaults to F32 for backward compatibility
+    /// with sidecar files written before this field existed.
+    #[serde(default)]
+    pub quantization: QuantizationType,
 }
 
 /// Save an HNSW index to disk as dual files (.hnsw + .hnsw.meta).
@@ -49,6 +53,7 @@ pub(crate) fn save_to_file(index: &HnswIndex, path: &Path) -> Result<()> {
         dimensions: index.dimensions(),
         distance_metric: index.distance_metric(),
         next_key: index.next_key(),
+        quantization: index.quantization(),
     };
     let json = serde_json::to_vec(&metadata).map_err(|e| {
         raisin_error::Error::storage(format!("Failed to serialize index metadata: {}", e))
@@ -95,6 +100,7 @@ fn load_new_format(path: &Path, meta_path: &Path) -> Result<HnswIndex> {
         path,
         metadata.dimensions,
         metadata.distance_metric,
+        metadata.quantization,
         metadata.node_to_key,
         metadata.key_to_meta,
         metadata.next_key,
@@ -138,6 +144,7 @@ fn view_new_format(path: &Path, meta_path: &Path) -> Result<HnswIndex> {
         path,
         metadata.dimensions,
         metadata.distance_metric,
+        metadata.quantization,
         metadata.node_to_key,
         metadata.key_to_meta,
         metadata.next_key,

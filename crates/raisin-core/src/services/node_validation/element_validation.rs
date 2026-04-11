@@ -72,6 +72,38 @@ impl<S: Storage> NodeValidator<S> {
         cache: &mut HashMap<String, ResolvedElementType>,
     ) -> Result<()> {
         match field {
+            FieldSchema::CompositeField { .. } => {
+                // When multiple + translatable sub-fields, require unique UUIDs
+                if raisin_validation::composite_requires_uuid(field) {
+                    if let PropertyValue::Array(items) = value {
+                        let mut seen = HashSet::new();
+                        for (idx, item) in items.iter().enumerate() {
+                            if let PropertyValue::Object(obj) = item {
+                                match obj.get("uuid") {
+                                    None => {
+                                        return Err(Error::Validation(format!(
+                                            "COMPOSITE_MISSING_UUID: Item {}[{}] requires a 'uuid' field because the composite has translatable sub-fields",
+                                            path, idx
+                                        )));
+                                    }
+                                    Some(PropertyValue::String(u))
+                                        if !seen.insert(u.clone()) =>
+                                    {
+                                        return Err(Error::Validation(format!(
+                                            "COMPOSITE_DUPLICATE_UUID: Duplicate uuid '{}' in composite at {}[{}]",
+                                            u, path, idx
+                                        )));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                self.validate_property_value_recursive(value, path, cache)
+                    .await
+            }
             FieldSchema::ElementField { element_type, .. } => {
                 self.validate_element_field_value(
                     element_type,

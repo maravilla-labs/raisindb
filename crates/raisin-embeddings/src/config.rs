@@ -75,6 +75,12 @@ pub struct TenantEmbeddingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunking: Option<raisin_ai::config::ChunkingConfig>,
 
+    /// Default max distance threshold for vector search.
+    /// Results beyond this threshold are filtered out.
+    /// If None, uses the engine default (0.6 for cosine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_max_distance: Option<f32>,
+
     /// Distance metric for vector similarity search.
     /// Defaults to Cosine for backward compatibility.
     /// Changing this requires a full index rebuild.
@@ -116,8 +122,6 @@ pub enum EmbeddingDistanceMetric {
     L2,
     /// Inner product distance
     InnerProduct,
-    /// Manhattan (L1) distance
-    Manhattan,
     /// Hamming distance (for binary vectors)
     Hamming,
 }
@@ -146,6 +150,7 @@ impl TenantEmbeddingConfig {
             include_path: true,
             max_embeddings_per_repo: None,
             chunking: None,
+            default_max_distance: None,
             distance_metric: EmbeddingDistanceMetric::default(),
             base_url: None,
         }

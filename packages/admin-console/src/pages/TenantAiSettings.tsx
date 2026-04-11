@@ -19,6 +19,7 @@ import {
   Cloud,
   Layers,
   Cpu,
+  SlidersHorizontal,
 } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import { ToastContainer, useToast } from '../components/Toast'
@@ -33,7 +34,10 @@ import {
   UpdateAIConfigRequest,
   EmbeddingSettings,
   SplitterType,
+  DistanceMetric,
+  QuantizationType,
   DEFAULT_CHUNKING_SETTINGS,
+  DEFAULT_HNSW_PARAMS,
   EMBEDDING_CAPABLE_PROVIDERS,
 } from '../api/ai'
 import { ApiError } from '../api/client'
@@ -57,6 +61,8 @@ interface ProviderSectionProps {
   testing: boolean
   refreshing: boolean
   testResult?: { success: boolean; error?: string }
+  /** Provider type for custom credential UI (e.g., Bedrock needs separate Access Key + Secret Key) */
+  providerType?: string
 }
 
 function ProviderSection({
@@ -75,12 +81,33 @@ function ProviderSection({
   testing,
   refreshing,
   testResult,
+  providerType,
 }: ProviderSectionProps) {
   const [expanded, setExpanded] = useState(enabled)
   const [showApiKey, setShowApiKey] = useState(false)
   const [apiKey, setApiKey] = useState('')
   const [endpoint, setEndpoint] = useState(apiEndpoint || '')
   const [showEndpoint, setShowEndpoint] = useState(false)
+
+  // Bedrock-specific state: split credentials into Access Key ID + Secret Key
+  const isBedrock = providerType === 'bedrock'
+  const [bedrockAccessKey, setBedrockAccessKey] = useState('')
+  const [bedrockSecretKey, setBedrockSecretKey] = useState('')
+  const [bedrockRegion, setBedrockRegion] = useState(apiEndpoint || 'us-east-1')
+
+  const handleBedrockCredentialChange = (accessKey: string, secretKey: string) => {
+    setBedrockAccessKey(accessKey)
+    setBedrockSecretKey(secretKey)
+    // Store as "access_key_id:secret_access_key" in the api_key field
+    if (accessKey && secretKey) {
+      onApiKeyChange(`${accessKey}:${secretKey}`)
+    }
+  }
+
+  const handleBedrockRegionChange = (region: string) => {
+    setBedrockRegion(region)
+    onEndpointChange(region)
+  }
 
   useEffect(() => {
     if (enabled) setExpanded(true)
@@ -147,65 +174,128 @@ function ProviderSection({
         {/* Expanded Content */}
         {expanded && (
           <div className="space-y-4 pt-4 border-t border-white/10">
-            {/* API Key */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
-                <Key className="w-4 h-4 text-purple-400" />
-                API Key
-              </label>
-              {apiKeyConfigured && !apiKey && (
-                <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-lg mb-2">
-                  <CheckCircle className="w-4 h-4 text-green-400" />
-                  <span className="text-green-300 text-sm font-medium">API key configured</span>
-                </div>
-              )}
-              <div className="relative">
-                <input
-                  type={showApiKey ? 'text' : 'password'}
-                  value={apiKey}
-                  onChange={(e) => handleApiKeyChange(e.target.value)}
-                  placeholder={apiKeyConfigured ? 'Enter new API key to update' : 'Enter your API key'}
-                  className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-white/10 rounded transition-colors"
-                  aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
-                >
-                  {showApiKey ? (
-                    <EyeOff className="w-5 h-5 text-gray-400" />
-                  ) : (
-                    <Eye className="w-5 h-5 text-gray-400" />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* API Endpoint (Optional) */}
-            <div>
-              <button
-                onClick={() => setShowEndpoint(!showEndpoint)}
-                className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors mb-2"
-              >
-                <Globe className="w-4 h-4" />
-                Custom API Endpoint (Optional)
-                {showEndpoint ? (
-                  <ChevronDown className="w-4 h-4" />
-                ) : (
-                  <ChevronRight className="w-4 h-4" />
+            {/* Credentials */}
+            {isBedrock ? (
+              <>
+                {/* Bedrock: Access Key ID + Secret Access Key + Region */}
+                {apiKeyConfigured && !bedrockAccessKey && !bedrockSecretKey && (
+                  <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-lg">
+                    <CheckCircle className="w-4 h-4 text-green-400" />
+                    <span className="text-green-300 text-sm font-medium">AWS credentials configured</span>
+                  </div>
                 )}
-              </button>
-              {showEndpoint && (
-                <input
-                  type="text"
-                  value={endpoint}
-                  onChange={(e) => handleEndpointChange(e.target.value)}
-                  placeholder={`Default ${name} endpoint`}
-                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
-                />
-              )}
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                    <Key className="w-4 h-4 text-purple-400" />
+                    AWS Access Key ID
+                  </label>
+                  <input
+                    type="text"
+                    value={bedrockAccessKey}
+                    onChange={(e) => handleBedrockCredentialChange(e.target.value, bedrockSecretKey)}
+                    placeholder={apiKeyConfigured ? 'Enter new Access Key ID to update' : 'AKIA...'}
+                    className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                    <Key className="w-4 h-4 text-purple-400" />
+                    AWS Secret Access Key
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={bedrockSecretKey}
+                      onChange={(e) => handleBedrockCredentialChange(bedrockAccessKey, e.target.value)}
+                      placeholder={apiKeyConfigured ? 'Enter new Secret Key to update' : 'Your secret access key'}
+                      className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-white/10 rounded transition-colors"
+                    >
+                      {showApiKey ? <EyeOff className="w-5 h-5 text-gray-400" /> : <Eye className="w-5 h-5 text-gray-400" />}
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-purple-400" />
+                    AWS Region
+                  </label>
+                  <input
+                    type="text"
+                    value={bedrockRegion}
+                    onChange={(e) => handleBedrockRegionChange(e.target.value)}
+                    placeholder="us-east-1"
+                    className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Standard providers: API Key */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                    <Key className="w-4 h-4 text-purple-400" />
+                    API Key
+                  </label>
+                  {apiKeyConfigured && !apiKey && (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-lg mb-2">
+                      <CheckCircle className="w-4 h-4 text-green-400" />
+                      <span className="text-green-300 text-sm font-medium">API key configured</span>
+                    </div>
+                  )}
+                  <div className="relative">
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={(e) => handleApiKeyChange(e.target.value)}
+                      placeholder={apiKeyConfigured ? 'Enter new API key to update' : 'Enter your API key'}
+                      className="w-full px-4 py-2 pr-12 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-white/10 rounded transition-colors"
+                      aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
+                    >
+                      {showApiKey ? (
+                        <EyeOff className="w-5 h-5 text-gray-400" />
+                      ) : (
+                        <Eye className="w-5 h-5 text-gray-400" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* API Endpoint (Optional) */}
+                <div>
+                  <button
+                    onClick={() => setShowEndpoint(!showEndpoint)}
+                    className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors mb-2"
+                  >
+                    <Globe className="w-4 h-4" />
+                    Custom API Endpoint (Optional)
+                    {showEndpoint ? (
+                      <ChevronDown className="w-4 h-4" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4" />
+                    )}
+                  </button>
+                  {showEndpoint && (
+                    <input
+                      type="text"
+                      value={endpoint}
+                      onChange={(e) => handleEndpointChange(e.target.value)}
+                      placeholder={`Default ${name} endpoint`}
+                      className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                    />
+                  )}
+                </div>
+              </>
+            )}
 
             {/* Test Connection */}
             <div className="flex items-center gap-3">
@@ -470,6 +560,7 @@ export default function TenantAiSettings() {
     include_path: true,
     dimensions: 1536,
   })
+  const [showAdvancedHnsw, setShowAdvancedHnsw] = useState(false)
 
   // Load configuration on mount
   useEffect(() => {
@@ -512,6 +603,19 @@ export default function TenantAiSettings() {
       )
     })()
 
+    // Check HNSW params changes
+    const hnswChanged = (() => {
+      const current = embeddingSettings.hnsw_params
+      const original = config.embedding_settings?.hnsw_params
+      if (!current && !original) return false
+      if (!current || !original) return true
+      return (
+        current.connectivity !== original.connectivity ||
+        current.expansion_add !== original.expansion_add ||
+        current.expansion_search !== original.expansion_search
+      )
+    })()
+
     const hasEmbeddingChanges =
       embeddingSettings.enabled !== (config.embedding_settings?.enabled ?? false) ||
       embeddingSettings.ai_provider_ref !== config.embedding_settings?.ai_provider_ref ||
@@ -520,7 +624,11 @@ export default function TenantAiSettings() {
       embeddingSettings.include_path !== (config.embedding_settings?.include_path ?? true) ||
       embeddingSettings.max_embeddings_per_repo !== config.embedding_settings?.max_embeddings_per_repo ||
       embeddingSettings.dimensions !== (config.embedding_settings?.dimensions ?? 1536) ||
-      chunkingChanged
+      embeddingSettings.default_max_distance !== config.embedding_settings?.default_max_distance ||
+      embeddingSettings.distance_metric !== config.embedding_settings?.distance_metric ||
+      embeddingSettings.quantization !== config.embedding_settings?.quantization ||
+      chunkingChanged ||
+      hnswChanged
 
     // Check local models changes (enabled by default if no config)
     const localConfig = providerMap['local']
@@ -919,6 +1027,7 @@ export default function TenantAiSettings() {
           testing={providers.bedrock.testing}
           refreshing={providers.bedrock.refreshing}
           testResult={providers.bedrock.testResult}
+          providerType="bedrock"
         />
       </div>
 
@@ -1131,6 +1240,184 @@ export default function TenantAiSettings() {
                 <p className="text-sm text-gray-400 mt-1">
                   Limit the number of embeddings per repository to control costs. Leave empty for unlimited.
                 </p>
+              </div>
+
+              {/* Distance Metric */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Distance Metric
+                </label>
+                <select
+                  value={embeddingSettings.distance_metric || 'Cosine'}
+                  onChange={(e) => setEmbeddingSettings({
+                    ...embeddingSettings,
+                    distance_metric: e.target.value as DistanceMetric,
+                    // Reset default_max_distance when metric changes
+                    default_max_distance: e.target.value === 'Cosine' ? 0.6 : embeddingSettings.default_max_distance,
+                  })}
+                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                >
+                  <option value="Cosine" className="bg-gray-900">Cosine (default)</option>
+                  <option value="L2" className="bg-gray-900">L2 (Euclidean)</option>
+                  <option value="InnerProduct" className="bg-gray-900">Inner Product</option>
+                  <option value="Hamming" className="bg-gray-900">Hamming</option>
+                </select>
+                <p className="text-sm text-gray-400 mt-1">
+                  Distance function used for vector similarity comparisons.
+                </p>
+              </div>
+
+              {/* Default Max Distance */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Default Max Distance: <span className="text-purple-400 font-mono">{(embeddingSettings.default_max_distance ?? 0.6).toFixed(2)}</span>
+                </label>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1.0"
+                  step="0.05"
+                  value={embeddingSettings.default_max_distance ?? 0.6}
+                  onChange={(e) => setEmbeddingSettings({
+                    ...embeddingSettings,
+                    default_max_distance: parseFloat(e.target.value),
+                  })}
+                  className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>0.1 (strict)</span>
+                  <span>1.0 (permissive)</span>
+                </div>
+                <p className="text-sm text-gray-400 mt-1">
+                  Default distance threshold for vector search results. Lower values return more similar results only.
+                </p>
+              </div>
+
+              {/* Quantization */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Vector Quantization
+                </label>
+                <select
+                  value={embeddingSettings.quantization || 'F32'}
+                  onChange={(e) => setEmbeddingSettings({
+                    ...embeddingSettings,
+                    quantization: e.target.value as QuantizationType,
+                  })}
+                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                >
+                  <option value="F32" className="bg-gray-900">F32 (full precision, default)</option>
+                  <option value="F16" className="bg-gray-900">F16 (half precision, 50% memory)</option>
+                  <option value="Int8" className="bg-gray-900">Int8 (quantized, 25% memory)</option>
+                </select>
+                <p className="text-sm text-gray-400 mt-1">
+                  Lower precision reduces memory usage at the cost of some accuracy.
+                </p>
+              </div>
+
+              {/* Advanced Index Parameters (HNSW) */}
+              <div className="pt-4 border-t border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedHnsw(!showAdvancedHnsw)}
+                  className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors mb-4"
+                >
+                  <SlidersHorizontal className="w-4 h-4" />
+                  Advanced Index Parameters (HNSW)
+                  {showAdvancedHnsw ? (
+                    <ChevronDown className="w-4 h-4" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4" />
+                  )}
+                </button>
+
+                {showAdvancedHnsw && (
+                  <div className="space-y-4 p-4 bg-white/5 border border-white/10 rounded-lg">
+                    <div className="flex items-start gap-3 mb-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                      <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+                      <p className="text-yellow-300 text-sm">
+                        These parameters control the HNSW index structure. Set to 0 for automatic tuning. Only change these if you understand their impact on search quality and performance.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {/* Connectivity (M) */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">
+                          Connectivity (M)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="128"
+                          value={embeddingSettings.hnsw_params?.connectivity ?? 0}
+                          onChange={(e) => setEmbeddingSettings({
+                            ...embeddingSettings,
+                            hnsw_params: {
+                              ...(embeddingSettings.hnsw_params || DEFAULT_HNSW_PARAMS),
+                              connectivity: parseInt(e.target.value) || 0,
+                            },
+                          })}
+                          placeholder="0 (auto)"
+                          className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Max edges per node. 0 = auto.
+                        </p>
+                      </div>
+
+                      {/* Expansion Add (ef_construction) */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">
+                          Build Expansion (ef)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1000"
+                          value={embeddingSettings.hnsw_params?.expansion_add ?? 0}
+                          onChange={(e) => setEmbeddingSettings({
+                            ...embeddingSettings,
+                            hnsw_params: {
+                              ...(embeddingSettings.hnsw_params || DEFAULT_HNSW_PARAMS),
+                              expansion_add: parseInt(e.target.value) || 0,
+                            },
+                          })}
+                          placeholder="0 (auto)"
+                          className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Index build quality. 0 = auto.
+                        </p>
+                      </div>
+
+                      {/* Expansion Search (ef_search) */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">
+                          Search Expansion (ef)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1000"
+                          value={embeddingSettings.hnsw_params?.expansion_search ?? 0}
+                          onChange={(e) => setEmbeddingSettings({
+                            ...embeddingSettings,
+                            hnsw_params: {
+                              ...(embeddingSettings.hnsw_params || DEFAULT_HNSW_PARAMS),
+                              expansion_search: parseInt(e.target.value) || 0,
+                            },
+                          })}
+                          placeholder="0 (auto)"
+                          className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Search accuracy. 0 = auto.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Chunking Configuration */}

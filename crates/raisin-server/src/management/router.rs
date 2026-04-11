@@ -159,6 +159,10 @@ pub fn management_router(
             "/management/metrics/replication",
             get(health::replication_metrics_handler),
         )
+        .route(
+            "/management/metrics/vector",
+            get(health::vector_metrics_handler),
+        )
         // Graph cache management endpoints
         .route(
             "/management/graph-cache/{repo}/status",

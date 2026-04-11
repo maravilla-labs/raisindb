@@ -268,4 +268,8 @@ pub mod codes {
     // Required field validation errors
     pub const MISSING_REQUIRED_ELEMENT_FIELD: &str = "MISSING_REQUIRED_ELEMENT_FIELD";
     pub const MISSING_REQUIRED_ARCHETYPE_FIELD: &str = "MISSING_REQUIRED_ARCHETYPE_FIELD";
+
+    // Composite field UUID validation errors
+    pub const COMPOSITE_MISSING_UUID: &str = "COMPOSITE_MISSING_UUID";
+    pub const COMPOSITE_DUPLICATE_UUID: &str = "COMPOSITE_DUPLICATE_UUID";
 }

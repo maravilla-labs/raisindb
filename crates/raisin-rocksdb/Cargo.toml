@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # Storage traits
 raisin-storage = { path = "../raisin-storage" }
 raisin-models = { path = "../raisin-models" }
+raisin-validation = { path = "../raisin-validation" }
 raisin-error = { path = "../raisin-error" }
 raisin-context = { path = "../raisin-context" }
 raisin-core = { path = "../raisin-core" }

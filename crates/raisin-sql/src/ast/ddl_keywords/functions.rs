@@ -77,6 +77,13 @@ pub(super) fn vector_function_keywords() -> Vec<KeywordInfo> {
             example: Some("SELECT * FROM KNN(EMBEDDING('search query'), 10)".into()),
         },
         KeywordInfo {
+            keyword: "HYBRID_SEARCH".into(),
+            category: KeywordCategory::TableFunction,
+            description: "Combined fulltext + vector search with RRF ranking. Returns merged results.".into(),
+            syntax: Some("HYBRID_SEARCH(query_text, limit)".into()),
+            example: Some("SELECT * FROM HYBRID_SEARCH('find articles about AI', 10)".into()),
+        },
+        KeywordInfo {
             keyword: "NEIGHBORS".into(),
             category: KeywordCategory::TableFunction,
             description: "Graph traversal to find connected nodes.".into(),

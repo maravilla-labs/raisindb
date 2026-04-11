@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Database, Search, Sparkles, AlertCircle, RefreshCw, Zap, Trash2, CheckCircle, XCircle, Clock, Activity, Loader2, Package, Link2, Wrench, FileText } from 'lucide-react'
+import { Database, Search, Sparkles, AlertCircle, RefreshCw, Zap, Trash2, CheckCircle, XCircle, Clock, Activity, Loader2, Package, Link2, Wrench, FileText, BarChart3 } from 'lucide-react'
 import GlassCard from './GlassCard'
 import BranchDropdown from './BranchDropdown'
 import ConfirmDialog from './ConfirmDialog'
@@ -7,11 +7,13 @@ import { repositoriesApi, type Repository } from '../api/repositories'
 import {
   databaseManagementApi,
   managementApi,
+  vectorMetricsApi,
   sseManager,
   formatBytes,
   formatDuration,
   type FulltextHealth,
   type VectorHealth,
+  type VectorMetrics,
   type JobInfo,
   type JobEvent,
   formatJobStatus,
@@ -91,6 +93,11 @@ export default function DatabaseManagementShared({
   const [propertyIndexCleanupLoading, setPropertyIndexCleanupLoading] = useState(false)
   const [propertyIndexCleanupResult, setPropertyIndexCleanupResult] = useState<any>(null)
 
+  // Vector metrics state
+  const [vectorMetrics, setVectorMetrics] = useState<VectorMetrics | null>(null)
+  const [vectorMetricsLoading, setVectorMetricsLoading] = useState(false)
+  const [vectorMetricsError, setVectorMetricsError] = useState<string | null>(null)
+
   const jobsEndRef = useRef<HTMLDivElement>(null)
   const jobsContainerRef = useRef<HTMLDivElement>(null)
 
@@ -121,6 +128,11 @@ export default function DatabaseManagementShared({
       loadVectorHealth()
     }
   }, [selectedRepo, tenant])
+
+  // Load vector metrics on mount
+  useEffect(() => {
+    loadVectorMetrics()
+  }, [])
 
   // Load workspaces when repo changes
   useEffect(() => {
@@ -345,6 +357,20 @@ export default function DatabaseManagementShared({
       setVectorHealthError(error.message || 'Failed to load health metrics')
     } finally {
       setVectorHealthLoading(false)
+    }
+  }
+
+  async function loadVectorMetrics() {
+    setVectorMetricsLoading(true)
+    setVectorMetricsError(null)
+    try {
+      const metrics = await vectorMetricsApi.getMetrics()
+      setVectorMetrics(metrics)
+    } catch (error: any) {
+      console.error('Failed to load vector metrics:', error)
+      setVectorMetricsError(error.message || 'Failed to load vector metrics')
+    } finally {
+      setVectorMetricsLoading(false)
     }
   }
 
@@ -1036,6 +1062,82 @@ export default function DatabaseManagementShared({
             <span className="font-medium">Restore Index</span>
           </button>
         </div>
+      </GlassCard>
+
+      {/* Vector Metrics Section */}
+      <GlassCard className="mb-6">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <BarChart3 className="w-6 h-6 text-indigo-400" />
+            <div>
+              <h2 className="text-xl font-semibold text-white">Vector Search Metrics</h2>
+              <p className="text-sm text-gray-400">Performance and usage statistics for vector operations</p>
+            </div>
+          </div>
+
+          <button
+            onClick={loadVectorMetrics}
+            disabled={vectorMetricsLoading}
+            className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RefreshCw className={`w-4 h-4 ${vectorMetricsLoading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
+
+        {vectorMetricsLoading && !vectorMetrics ? (
+          <div className="text-center py-8">
+            <Loader2 className="w-8 h-8 text-indigo-400 animate-spin mx-auto mb-2" />
+            <p className="text-gray-400">Loading vector metrics...</p>
+          </div>
+        ) : vectorMetricsError ? (
+          <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4">
+            <p className="text-red-300">{vectorMetricsError}</p>
+          </div>
+        ) : vectorMetrics ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Search Count</p>
+              <p className="text-lg font-semibold text-white">{vectorMetrics.search_count.toLocaleString()}</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Avg Latency</p>
+              <p className="text-lg font-semibold text-white">{vectorMetrics.search_avg_ms.toFixed(1)}ms</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">P99 Latency</p>
+              <p className="text-lg font-semibold text-white">{vectorMetrics.search_p99_ms.toFixed(1)}ms</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Cache Hit Ratio</p>
+              <p className="text-lg font-semibold text-white">{(vectorMetrics.cache_hit_ratio * 100).toFixed(1)}%</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Indexes Loaded</p>
+              <p className="text-lg font-semibold text-white">{vectorMetrics.indexes_loaded}</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Cache Hits</p>
+              <p className="text-lg font-semibold text-green-300">{vectorMetrics.cache_hits.toLocaleString()}</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Cache Misses</p>
+              <p className="text-lg font-semibold text-yellow-300">{vectorMetrics.cache_misses.toLocaleString()}</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Embeddings Added</p>
+              <p className="text-lg font-semibold text-white">{vectorMetrics.embeddings_added.toLocaleString()}</p>
+            </div>
+            <div className="p-4 bg-white/5 border border-white/10 rounded-lg">
+              <p className="text-xs text-gray-400 mb-1">Embeddings Removed</p>
+              <p className="text-lg font-semibold text-white">{vectorMetrics.embeddings_removed.toLocaleString()}</p>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-lg p-4">
+            <p className="text-indigo-300">Click "Refresh" to load vector metrics</p>
+          </div>
+        )}
       </GlassCard>
 
       {/* Reindex Database Section */}

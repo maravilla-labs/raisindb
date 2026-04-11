@@ -191,6 +191,11 @@ fn extract_results(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        let path = retrieved_doc
+            .get_first(fields.path)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         let revision = {
             let timestamp_ms = retrieved_doc
                 .get_first(fields.revision_timestamp)
@@ -211,6 +216,7 @@ fn extract_results(
             score,
             name,
             node_type,
+            path,
             revision,
         });
     }

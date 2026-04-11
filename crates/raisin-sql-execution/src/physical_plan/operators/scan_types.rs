@@ -51,8 +51,6 @@ pub enum VectorDistanceMetric {
     Cosine,
     /// Inner product (negative dot product) - pgvector <#> operator
     InnerProduct,
-    /// Manhattan (L1) distance
-    Manhattan,
     /// Hamming distance (for binary vectors)
     Hamming,
 }
@@ -63,7 +61,6 @@ impl fmt::Display for VectorDistanceMetric {
             VectorDistanceMetric::L2 => write!(f, "L2"),
             VectorDistanceMetric::Cosine => write!(f, "Cosine"),
             VectorDistanceMetric::InnerProduct => write!(f, "InnerProduct"),
-            VectorDistanceMetric::Manhattan => write!(f, "Manhattan"),
             VectorDistanceMetric::Hamming => write!(f, "Hamming"),
         }
     }
@@ -76,7 +73,6 @@ impl VectorDistanceMetric {
             VectorDistanceMetric::L2 => raisin_hnsw::DistanceMetric::L2,
             VectorDistanceMetric::Cosine => raisin_hnsw::DistanceMetric::Cosine,
             VectorDistanceMetric::InnerProduct => raisin_hnsw::DistanceMetric::InnerProduct,
-            VectorDistanceMetric::Manhattan => raisin_hnsw::DistanceMetric::Manhattan,
             VectorDistanceMetric::Hamming => raisin_hnsw::DistanceMetric::Hamming,
         }
     }

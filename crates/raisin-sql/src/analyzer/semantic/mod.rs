@@ -126,6 +126,7 @@ impl<'a> AnalyzerContext<'a> {
 
         match table_upper.as_str() {
             "FULLTEXT_SEARCH" => Some(Self::fulltext_search_table_def(table_name)),
+            "HYBRID_SEARCH" => Some(Self::hybrid_search_table_def(table_name)),
             "CYPHER" => Some(Self::cypher_table_def(table_name)),
             "GRAPH_TABLE" => Some(Self::graph_table_def(table_name)),
             "KNN" => Some(Self::knn_table_def(table_name)),
@@ -148,6 +149,27 @@ impl<'a> AnalyzerContext<'a> {
                 ColumnDef::simple("properties", DataType::JsonB),
                 ColumnDef::nullable("created_at", DataType::Text),
                 ColumnDef::nullable("updated_at", DataType::Text),
+            ],
+            primary_key: vec![],
+            indexes: vec![],
+        }
+    }
+
+    fn hybrid_search_table_def(name: &str) -> TableDef {
+        TableDef {
+            name: name.to_string(),
+            columns: vec![
+                ColumnDef::simple("node_id", DataType::Text),
+                ColumnDef::simple("workspace_id", DataType::Text),
+                ColumnDef::simple("name", DataType::Text),
+                ColumnDef::simple("path", DataType::Text),
+                ColumnDef::simple("node_type", DataType::Text),
+                ColumnDef::simple("score", DataType::Double),
+                ColumnDef::nullable("fulltext_rank", DataType::BigInt),
+                ColumnDef::nullable("vector_rank", DataType::BigInt),
+                ColumnDef::nullable("vector_distance", DataType::Double),
+                ColumnDef::simple("revision", DataType::BigInt),
+                ColumnDef::simple("properties", DataType::JsonB),
             ],
             primary_key: vec![],
             indexes: vec![],

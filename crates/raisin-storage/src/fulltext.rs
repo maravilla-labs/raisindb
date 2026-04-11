@@ -128,6 +128,9 @@ pub struct FullTextSearchResult {
     /// Node type (optional, for hybrid search)
     pub node_type: Option<String>,
 
+    /// Node path (from Tantivy stored field)
+    pub path: Option<String>,
+
     /// Revision (optional, for hybrid search)
     pub revision: Option<HLC>,
 }

@@ -210,6 +210,7 @@ pub async fn set_tenant_embedding_config(
         include_path: req.include_path,
         max_embeddings_per_repo: req.max_embeddings_per_repo,
         chunking: req.chunking,
+        default_max_distance: None,
         distance_metric: req.distance_metric.unwrap_or_default(),
         base_url: req.base_url,
     };

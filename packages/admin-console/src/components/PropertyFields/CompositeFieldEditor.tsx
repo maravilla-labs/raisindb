@@ -251,13 +251,16 @@ export default function CompositeFieldEditor({
       : undefined
 
     // In translation mode the ORIGINAL determines how many items exist and
-    // their order. Translated values are overlaid by index.
+    // their order. Translated values are overlaid by UUID (or index fallback).
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const displayItems: Record<string, unknown>[] = useMemo(() => {
       if (!translationMode || !originalItems) return items
 
       return originalItems.map((origItem, idx) => {
-        const translated = items[idx]
+        const uuid = origItem.uuid as string | undefined
+        const translated = uuid
+          ? items.find((t) => t.uuid === uuid)
+          : items[idx]
         if (!translated) return origItem
         return { ...origItem, ...translated }
       })
@@ -268,7 +271,10 @@ export default function CompositeFieldEditor({
         // Extend items array if needed (original may have more items than
         // the current translation value)
         const next = [...items]
-        while (next.length <= index) next.push({})
+        while (next.length <= index) {
+          // Gap-fill with UUID so server-side validation passes
+          next.push({ uuid: crypto.randomUUID() })
+        }
         next[index] = updated
         onChange(next)
       },
@@ -283,7 +289,7 @@ export default function CompositeFieldEditor({
     )
 
     function handleAdd() {
-      onChange([...items, {}])
+      onChange([...items, { uuid: crypto.randomUUID() }])
     }
 
     // Monitor drops for this field's composite items

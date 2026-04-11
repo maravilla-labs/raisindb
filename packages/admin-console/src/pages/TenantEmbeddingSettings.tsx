@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
-import { Sparkles, Key, Eye, EyeOff, Settings, CheckCircle, XCircle, Loader2, Info, ChevronDown, ChevronRight } from 'lucide-react'
+import { Sparkles, Key, Eye, EyeOff, Settings, CheckCircle, XCircle, Loader2, Info, ChevronDown, ChevronRight, AlertCircle, SlidersHorizontal } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { ToastContainer, useToast } from '../components/Toast'
@@ -124,6 +124,13 @@ export default function TenantEmbeddingSettings() {
   const [includePath, setIncludePath] = useState(true)
   const [maxEmbeddings, setMaxEmbeddings] = useState<number | null>(null)
   const [baseUrl, setBaseUrl] = useState('')
+  const [defaultMaxDistance, setDefaultMaxDistance] = useState(0.6)
+  const [quantization, setQuantization] = useState<'F32' | 'F16' | 'Int8'>('F32')
+  const [distanceMetric, setDistanceMetric] = useState<'Cosine' | 'L2' | 'InnerProduct' | 'Hamming'>('Cosine')
+  const [hnswConnectivity, setHnswConnectivity] = useState(0)
+  const [hnswExpansionAdd, setHnswExpansionAdd] = useState(0)
+  const [hnswExpansionSearch, setHnswExpansionSearch] = useState(0)
+  const [showHnswParams, setShowHnswParams] = useState(false)
 
   // Load configuration on mount
   useEffect(() => {
@@ -142,10 +149,12 @@ export default function TenantEmbeddingSettings() {
       includeName !== config.include_name ||
       includePath !== config.include_path ||
       maxEmbeddings !== config.max_embeddings_per_repo ||
+      defaultMaxDistance !== (config.default_max_distance ?? 0.6) ||
+      quantization !== (config.quantization ?? 'F32') ||
       apiKey !== ''
 
     setHasChanges(hasChanged)
-  }, [config, enabled, provider, model, dimensions, includeName, includePath, maxEmbeddings, apiKey])
+  }, [config, enabled, provider, model, dimensions, includeName, includePath, maxEmbeddings, apiKey, defaultMaxDistance, quantization])
 
   const loadConfig = async () => {
     try {
@@ -162,6 +171,8 @@ export default function TenantEmbeddingSettings() {
       setIncludePath(data.include_path)
       setMaxEmbeddings(data.max_embeddings_per_repo)
       setBaseUrl(data.base_url || '')
+      setDefaultMaxDistance(data.default_max_distance ?? 0.6)
+      setQuantization(data.quantization ?? 'F32')
     } catch (error) {
       console.error('Failed to load config:', error)
       toast.error('Failed to load configuration', error instanceof ApiError ? error.message : 'Unknown error')
@@ -201,6 +212,8 @@ export default function TenantEmbeddingSettings() {
         node_type_settings: config?.node_type_settings || {},
         max_embeddings_per_repo: maxEmbeddings,
         base_url: baseUrl || undefined,
+        default_max_distance: defaultMaxDistance,
+        quantization,
       }
 
       const result = await embeddingsApi.setConfig(tenant, request)
@@ -256,6 +269,8 @@ export default function TenantEmbeddingSettings() {
     setIncludeName(config.include_name)
     setIncludePath(config.include_path)
     setMaxEmbeddings(config.max_embeddings_per_repo)
+    setDefaultMaxDistance(config.default_max_distance ?? 0.6)
+    setQuantization(config.quantization ?? 'F32')
     setApiKey('')
     setHasChanges(false)
     setTestResult(null)
@@ -598,7 +613,7 @@ export default function TenantEmbeddingSettings() {
         </button>
 
         {showAdvanced && (
-          <div className="mt-4 pt-4 border-t border-white/10">
+          <div className="mt-4 pt-4 border-t border-white/10 space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
                 Max Embeddings Per Repository
@@ -614,6 +629,150 @@ export default function TenantEmbeddingSettings() {
               <p className="text-sm text-gray-400 mt-1">
                 Limit the number of nodes that can have embeddings generated per repository (leave empty for unlimited)
               </p>
+            </div>
+
+            {/* Distance Metric */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Distance Metric
+              </label>
+              <select
+                value={distanceMetric}
+                onChange={(e) => {
+                  const metric = e.target.value as 'Cosine' | 'L2' | 'InnerProduct' | 'Hamming'
+                  setDistanceMetric(metric)
+                  if (metric === 'Cosine') setDefaultMaxDistance(0.6)
+                }}
+                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+              >
+                <option value="Cosine" className="bg-gray-900">Cosine (default)</option>
+                <option value="L2" className="bg-gray-900">L2 (Euclidean)</option>
+                <option value="InnerProduct" className="bg-gray-900">Inner Product</option>
+                <option value="Hamming" className="bg-gray-900">Hamming</option>
+              </select>
+              <p className="text-sm text-gray-400 mt-1">
+                Distance function used for vector similarity comparisons.
+              </p>
+            </div>
+
+            {/* Default Max Distance */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Default Max Distance: <span className="text-purple-400 font-mono">{defaultMaxDistance.toFixed(2)}</span>
+              </label>
+              <input
+                type="range"
+                min="0.1"
+                max="1.0"
+                step="0.05"
+                value={defaultMaxDistance}
+                onChange={(e) => setDefaultMaxDistance(parseFloat(e.target.value))}
+                className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-purple-500"
+              />
+              <div className="flex justify-between text-xs text-gray-500 mt-1">
+                <span>0.1 (strict)</span>
+                <span>1.0 (permissive)</span>
+              </div>
+              <p className="text-sm text-gray-400 mt-1">
+                Default distance threshold for vector search results. Lower values return more similar results only.
+              </p>
+            </div>
+
+            {/* Quantization */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Vector Quantization
+              </label>
+              <select
+                value={quantization}
+                onChange={(e) => setQuantization(e.target.value as 'F32' | 'F16' | 'Int8')}
+                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+              >
+                <option value="F32" className="bg-gray-900">F32 (full precision, default)</option>
+                <option value="F16" className="bg-gray-900">F16 (half precision, 50% memory)</option>
+                <option value="Int8" className="bg-gray-900">Int8 (quantized, 25% memory)</option>
+              </select>
+              <p className="text-sm text-gray-400 mt-1">
+                Lower precision reduces memory usage at the cost of some accuracy.
+              </p>
+            </div>
+
+            {/* HNSW Index Parameters */}
+            <div className="pt-4 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setShowHnswParams(!showHnswParams)}
+                className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors mb-4"
+              >
+                <SlidersHorizontal className="w-4 h-4" />
+                Advanced Index Parameters (HNSW)
+                {showHnswParams ? (
+                  <ChevronDown className="w-4 h-4" />
+                ) : (
+                  <ChevronRight className="w-4 h-4" />
+                )}
+              </button>
+
+              {showHnswParams && (
+                <div className="space-y-4 p-4 bg-white/5 border border-white/10 rounded-lg">
+                  <div className="flex items-start gap-3 mb-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                    <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+                    <p className="text-yellow-300 text-sm">
+                      These parameters control the HNSW index structure. Set to 0 for automatic tuning. Only change these if you understand their impact on search quality and performance.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-2">
+                        Connectivity (M)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="128"
+                        value={hnswConnectivity}
+                        onChange={(e) => setHnswConnectivity(parseInt(e.target.value) || 0)}
+                        placeholder="0 (auto)"
+                        className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">Max edges per node. 0 = auto.</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-2">
+                        Build Expansion (ef)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="1000"
+                        value={hnswExpansionAdd}
+                        onChange={(e) => setHnswExpansionAdd(parseInt(e.target.value) || 0)}
+                        placeholder="0 (auto)"
+                        className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">Index build quality. 0 = auto.</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-2">
+                        Search Expansion (ef)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="1000"
+                        value={hnswExpansionSearch}
+                        onChange={(e) => setHnswExpansionSearch(parseInt(e.target.value) || 0)}
+                        placeholder="0 (auto)"
+                        className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-400/20 transition-all"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">Search accuracy. 0 = auto.</p>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

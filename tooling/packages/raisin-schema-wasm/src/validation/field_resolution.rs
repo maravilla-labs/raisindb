@@ -2,7 +2,7 @@
 
 use crate::errors::{codes, ValidationError, ValidationResult};
 use raisin_models::nodes::types::element::field_types::{FieldSchema, FieldSchemaBase};
-use raisin_validation::field_helpers::is_required as get_field_required;
+use raisin_validation::field_helpers::{composite_requires_uuid, is_required as get_field_required};
 use serde_yaml::Value;
 use std::collections::HashSet;
 
@@ -140,10 +140,48 @@ fn validate_nested_field(
         // CompositeField: validate each array item against nested fields
         FieldSchema::CompositeField { fields, base, .. } => {
             let field_name = &base.name;
+            let requires_uuid = composite_requires_uuid(field);
 
             // CompositeField content can be an array (repeatable) or object (single)
             match value {
                 Value::Sequence(items) => {
+                    // When multiple + translatable sub-fields, require unique UUIDs
+                    if requires_uuid {
+                        let mut seen_uuids = HashSet::new();
+                        for (i, item) in items.iter().enumerate() {
+                            if let Value::Mapping(item_map) = item {
+                                let uuid = item_map
+                                    .get(&Value::String("uuid".to_string()))
+                                    .and_then(|v| v.as_str());
+                                match uuid {
+                                    None => {
+                                        result.add_error(ValidationError::error(
+                                            file_path,
+                                            &format!("{}[{}]", field_name, i),
+                                            codes::COMPOSITE_MISSING_UUID,
+                                            format!(
+                                                "Item {}[{}] requires a 'uuid' field because the composite has translatable sub-fields",
+                                                field_name, i
+                                            ),
+                                        ));
+                                    }
+                                    Some(u) if !seen_uuids.insert(u.to_string()) => {
+                                        result.add_error(ValidationError::error(
+                                            file_path,
+                                            &format!("{}[{}].uuid", field_name, i),
+                                            codes::COMPOSITE_DUPLICATE_UUID,
+                                            format!(
+                                                "Duplicate uuid '{}' in composite at {}[{}]",
+                                                u, field_name, i
+                                            ),
+                                        ));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+
                     // Repeatable: validate each item
                     for (i, item) in items.iter().enumerate() {
                         if let Value::Mapping(item_map) = item {

@@ -42,6 +42,25 @@ impl HnswIndexingEngine {
         query: &[f32],
         k: usize,
     ) -> Result<Vec<SearchResult>> {
+        self.search_with_threshold(tenant_id, repo_id, branch, workspace_id, query, k, None)
+    }
+
+    /// Search for nearest neighbors with an optional distance threshold override.
+    ///
+    /// If `max_distance` is `None`, uses the default threshold (0.6 for cosine).
+    /// Pass `Some(threshold)` to override per-query (e.g., from SQL WHERE clause
+    /// or tenant configuration).
+    pub fn search_with_threshold(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace_id: Option<&str>,
+        query: &[f32],
+        k: usize,
+        max_distance: Option<f32>,
+    ) -> Result<Vec<SearchResult>> {
+        let start = std::time::Instant::now();
         let index_arc = self.get_or_load_index(tenant_id, repo_id, branch)?;
 
         let index = index_arc.read().unwrap();
@@ -74,32 +93,30 @@ impl HnswIndexingEngine {
 
         // Filter by distance threshold to reject results that are too far away
         //
-        // We now use COSINE DISTANCE (not L2) for normalized OpenAI embeddings:
-        //   cosine_distance = 1 - cosine_similarity = 1 - dot_product
-        //
-        // Distance interpretation:
-        //   0.0 - 0.2  = Very similar   (cosine sim > 0.80, highly relevant)
-        //   0.2 - 0.4  = Similar        (cosine sim 0.80-0.60, relevant)
-        //   0.4 - 0.6  = Weakly related (cosine sim 0.60-0.40, possibly relevant)
-        //   0.6+       = Not related    (cosine sim < 0.40, reject)
-        //
-        // NOTE: For normalized vectors, this is much faster than L2 distance
-        // and provides better semantic differentiation in high dimensions (3072D).
-        const MAX_DISTANCE: f32 = 0.6;
+        // For cosine distance on normalized vectors:
+        //   0.0 - 0.2  = Very similar   (cosine sim > 0.80)
+        //   0.2 - 0.4  = Similar        (cosine sim 0.80-0.60)
+        //   0.4 - 0.6  = Weakly related (cosine sim 0.60-0.40)
+        //   0.6+       = Not related    (cosine sim < 0.40)
+        const DEFAULT_MAX_DISTANCE: f32 = 0.6;
+        let threshold = max_distance.unwrap_or(DEFAULT_MAX_DISTANCE);
         let before_filter_count = results.len();
-        results.retain(|r| r.distance < MAX_DISTANCE);
+        results.retain(|r| r.distance < threshold);
         let after_filter_count = results.len();
 
         if before_filter_count > after_filter_count {
             tracing::info!(
                 "Filtered out {} results with distance >= {:.2}",
                 before_filter_count - after_filter_count,
-                MAX_DISTANCE
+                threshold
             );
         }
 
         // Limit to k results
         results.truncate(k);
+
+        // Record metrics
+        self.metrics.record_search(start.elapsed(), results.len());
 
         tracing::info!(
             "Returning {} vector search results (after filtering and limit)",

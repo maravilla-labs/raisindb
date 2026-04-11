@@ -51,7 +51,7 @@ fields:
   - { $type: TextField, name: headline, translatable: true }
   - { $type: TextField, name: subheadline, translatable: true }
   - { $type: TextField, name: cta_text, translatable: true }
-  - { $type: TextField, name: cta_link }  # NOT translated
+  - { $type: ReferenceField, name: cta_link }  # NOT translated (references are structural)
 ```
 
 ## Translation File Format
@@ -73,7 +73,9 @@ properties:
       headline: Launch Your Vision
       subheadline: Build, deploy, and scale your ideas with Launchpad
       cta_text: Get Started
-      cta_link: /contact
+      cta_link:
+        raisin:ref: /launchpad/contact
+        raisin:workspace: launchpad
     - uuid: intro-1
       element_type: launchpad:TextBlock
       heading: Why Launchpad?
@@ -118,6 +120,63 @@ Key rules:
 - No `node_type` or `archetype` -- those belong only in the base file.
 - No non-translatable fields (`slug`, `cta_link`, etc.).
 - `uuid` must match the base file exactly; `element_type` can be omitted.
+
+## Repeatable CompositeField Translations
+
+When a `CompositeField` has `multiple: true` and contains sub-fields marked `translatable: true`, each item in the array **must have a `uuid`** — in both the base content and translation overlays. This allows the server to merge only translatable fields per-item instead of replacing the entire array (which would lose non-translatable fields).
+
+**Element type** (`elementtypes/feature-grid.yaml`):
+
+```yaml
+fields:
+  - $type: TextField
+    name: heading
+    translatable: true
+  - $type: CompositeField
+    name: features
+    multiple: true
+    fields:
+      - { $type: TextField, name: title, required: true, translatable: true }
+      - { $type: TextField, name: description, required: true, translatable: true }
+      - { $type: TextField, name: icon }  # NOT translatable
+```
+
+**Base content** (`.node.yaml`) — each composite item needs a `uuid`:
+
+```yaml
+content:
+  - uuid: features-1
+    element_type: launchpad:FeatureGrid
+    heading: Features
+    features:
+      - uuid: feat-fast
+        icon: zap
+        title: Fast Development
+        description: Build and iterate quickly
+      - uuid: feat-scale
+        icon: trending-up
+        title: Scalable
+        description: Grows with your needs
+```
+
+**Translation overlay** (`.node.fr.yaml`) — only translatable fields + uuid:
+
+```yaml
+content:
+  - uuid: features-1
+    heading: Fonctionnalites
+    features:
+      - uuid: feat-fast
+        title: Developpement rapide
+        description: Construisez et iterez rapidement
+      - uuid: feat-scale
+        title: Evolutif
+        description: Grandit avec vos besoins
+```
+
+The `icon` field is NOT in the translation because it is not translatable. The server preserves it from the base content during merge. Without UUIDs on composite items, the validator will reject the content with `COMPOSITE_MISSING_UUID`.
+
+**Rule**: If a repeatable CompositeField has ANY sub-field with `translatable: true`, every item must have a unique `uuid`.
 
 ## Frontend Locale Store
 
@@ -198,3 +257,5 @@ Common errors:
 | `TRANSLATION_FIELD_NOT_TRANSLATABLE` | Translation includes a non-translatable field | Remove the field or add `translatable: true` to the type definition |
 | `TRANSLATION_MISSING_UUID` | Element uuid has no match in the base file | Ensure uuid matches an element in `.node.yaml` |
 | `TRANSLATION_INVALID_LOCALE` | Invalid BCP 47 code in filename | Use a valid locale code (e.g., `fr`, `de`, `pt-BR`) |
+| `COMPOSITE_MISSING_UUID` | Repeatable composite with translatable sub-fields has an item without `uuid` | Add a unique `uuid` to each item in the composite array |
+| `COMPOSITE_DUPLICATE_UUID` | Two items in the same composite array share the same `uuid` | Ensure each item has a unique `uuid` value |

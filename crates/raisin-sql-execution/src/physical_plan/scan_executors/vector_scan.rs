@@ -104,15 +104,16 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
         evaluate_query_vector(&query_vector, ctx).await?
     };
 
-    // Step 2: Call HNSW search (the index uses the metric it was created with)
+    // Step 2: Call HNSW search with distance threshold (the index uses the metric it was created with)
     let search_results = hnsw_engine
-        .search(
+        .search_with_threshold(
             &tenant_id,
             &repo_id,
             &branch,
             Some(&workspace),
             &query_vec,
             k,
+            max_distance,
         )
         .map_err(|e| Error::Backend(format!("HNSW search failed: {}", e)))?;
 
@@ -128,12 +129,6 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
         let locales_to_use = get_locales_to_use(&ctx_clone);
 
         for result in search_results {
-            if let Some(threshold) = max_distance {
-                if result.distance > threshold {
-                    continue;
-                }
-            }
-
             let node_opt = storage
                 .nodes()
                 .get(

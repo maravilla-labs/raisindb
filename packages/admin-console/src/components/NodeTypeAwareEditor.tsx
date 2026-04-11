@@ -39,6 +39,53 @@ interface NodeTypeAwareEditorProps {
   onCancel: () => void
 }
 
+/**
+ * Recursively build translation pointers for a value.
+ * Arrays of objects with `uuid` get decomposed per-item by UUID,
+ * producing granular pointers that preserve non-translatable fields.
+ * Everything else is stored as a flat value at the given prefix.
+ */
+function buildTranslationPointers(
+  prefix: string,
+  value: any,
+  original: any,
+  result: Record<string, any>,
+) {
+  // Array of objects with UUIDs — recurse per-item
+  if (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((v: any) => v && typeof v === 'object' && v.uuid)
+  ) {
+    const origByUuid = new Map<string, any>()
+    if (Array.isArray(original)) {
+      for (const item of original) {
+        if (item?.uuid) origByUuid.set(item.uuid, item)
+      }
+    }
+    for (const item of value) {
+      if (!item.uuid) continue
+      const origItem = origByUuid.get(item.uuid)
+      if (!origItem) continue // new item — skip
+      for (const [fieldName, fieldValue] of Object.entries(item)) {
+        if (fieldName === 'uuid' || fieldName === 'element_type') continue
+        if (JSON.stringify(fieldValue) !== JSON.stringify(origItem[fieldName])) {
+          buildTranslationPointers(
+            `${prefix}/${item.uuid}/${fieldName}`,
+            fieldValue,
+            origItem[fieldName],
+            result,
+          )
+        }
+      }
+    }
+    return
+  }
+
+  // Leaf value — store directly
+  result[prefix] = value
+}
+
 export default function NodeTypeAwareEditor({
   node,
   nodeType,
@@ -266,8 +313,9 @@ export default function NodeTypeAwareEditor({
     try {
       if (isTranslationMode && repo && branch && workspace && currentLocale) {
         // Build granular translation pointers.
-        // For section fields, diff per-element by UUID instead of replacing the
-        // entire array, so translations survive element reordering.
+        // For section/composite fields, diff per-element by UUID instead of
+        // replacing the entire array, so translations survive element reordering
+        // and non-translatable fields are preserved.
         const translations: Record<string, any> = {}
 
         for (const [key, value] of Object.entries(properties)) {
@@ -293,10 +341,18 @@ export default function NodeTypeAwareEditor({
               for (const [fieldName, fieldValue] of Object.entries(el)) {
                 if (fieldName === 'element_type' || fieldName === 'uuid') continue
                 if (JSON.stringify(fieldValue) !== JSON.stringify(origEl[fieldName])) {
-                  translations[`/${key}/${el.uuid}/${fieldName}`] = fieldValue
+                  buildTranslationPointers(
+                    `/${key}/${el.uuid}/${fieldName}`,
+                    fieldValue,
+                    origEl[fieldName],
+                    translations,
+                  )
                 }
               }
             }
+          } else if (fieldType === 'CompositeField') {
+            // Composite arrays with UUID items — recurse like SectionField
+            buildTranslationPointers(`/${key}`, value, original, translations)
           } else {
             // Flat property diff
             translations[`/${key}`] = value

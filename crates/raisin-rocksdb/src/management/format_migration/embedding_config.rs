@@ -95,6 +95,7 @@ fn migrate_tenant_embedding_config_cf(db: &Arc<DB>) -> Result<()> {
             include_path: old_config.include_path,
             max_embeddings_per_repo: old_config.max_embeddings_per_repo,
             chunking: None,
+            default_max_distance: None,
             distance_metric: Default::default(),
             base_url: None,
         };

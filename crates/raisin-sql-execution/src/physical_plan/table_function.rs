@@ -441,6 +441,150 @@ pub async fn execute_table_function<S: Storage + 'static>(
                 };
 
                 Ok(Box::pin(row_stream))
+            } else if function_name.eq_ignore_ascii_case("HYBRID_SEARCH") {
+                tracing::info!("HYBRID_SEARCH table function invoked");
+
+                // Extract query argument (required)
+                let query_expr = args.first().ok_or_else(|| {
+                    ExecutionError::Validation(
+                        "HYBRID_SEARCH requires at least one argument (query)".to_string(),
+                    )
+                })?;
+                let query = extract_string_literal(query_expr, &function_name, 0)?;
+
+                // Extract optional limit argument (default 10)
+                let limit = args
+                    .get(1)
+                    .and_then(|e| match &e.expr {
+                        Expr::Literal(Literal::Int(n)) => Some(*n as usize),
+                        Expr::Literal(Literal::BigInt(n)) => Some(*n as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(10);
+
+                let table_name = alias
+                    .clone()
+                    .unwrap_or_else(|| function_name.to_lowercase());
+
+                let storage = ctx.storage.clone();
+                let tenant_id = ctx.tenant_id.to_string();
+                let repo_id = ctx.repo_id.to_string();
+                let branch = ctx.branch.to_string();
+                let max_revision = ctx.max_revision;
+
+                // Get fulltext and vector engines
+                let indexing_engine = ctx.indexing_engine.clone();
+                let hnsw_engine = ctx.hnsw_engine.clone();
+                let embedding_provider = ctx.embedding_provider.clone();
+
+                use async_stream::try_stream;
+                use std::collections::HashMap;
+
+                let row_stream = try_stream! {
+                    // 1. Fulltext search (if indexing engine available)
+                    let mut fulltext_rankings: HashMap<String, usize> = HashMap::new();
+                    if let Some(ref engine) = indexing_engine {
+                        use raisin_storage::IndexingEngine;
+                        let search_query = raisin_storage::fulltext::FullTextSearchQuery {
+                            tenant_id: tenant_id.clone(),
+                            repo_id: repo_id.clone(),
+                            workspace_ids: None,
+                            branch: branch.clone(),
+                            language: "en".to_string(),
+                            query: crate::physical_plan::fulltext::convert_postgres_query(&query),
+                            limit: limit * 2,
+                            revision: max_revision,
+                        };
+                        if let Ok(results) = engine.search(&search_query) {
+                            for (rank, result) in results.iter().enumerate() {
+                                fulltext_rankings.insert(result.node_id.clone(), rank + 1);
+                            }
+                        }
+                    }
+
+                    // 2. Vector search (if HNSW engine + embedding provider available)
+                    let mut vector_rankings: HashMap<String, (usize, f32)> = HashMap::new();
+                    if let (Some(ref hnsw), Some(ref provider)) = (&hnsw_engine, &embedding_provider) {
+                        let query_embedding = provider.generate_embedding(&query).await
+                            .map_err(|e| raisin_error::Error::Backend(format!("Failed to generate embedding: {}", e)))?;
+                        let normalized = raisin_hnsw::normalize_vector(&query_embedding);
+
+                        if let Ok(results) = hnsw.search(
+                            &tenant_id, &repo_id, &branch, None, &normalized, limit * 2,
+                        ) {
+                            for (rank, result) in results.iter().enumerate() {
+                                vector_rankings.insert(result.node_id.clone(), (rank + 1, result.distance));
+                            }
+                        }
+                    }
+
+                    // 3. RRF merge: score = sum of 1/(k + rank) across lists
+                    const RRF_K: f64 = 60.0;
+                    let mut all_node_ids: Vec<String> = fulltext_rankings
+                        .keys()
+                        .chain(vector_rankings.keys())
+                        .cloned()
+                        .collect();
+                    all_node_ids.sort();
+                    all_node_ids.dedup();
+
+                    let mut scored: Vec<(String, f64, Option<usize>, Option<usize>, Option<f32>)> = all_node_ids
+                        .into_iter()
+                        .map(|node_id| {
+                            let mut score = 0.0;
+                            let ft_rank = fulltext_rankings.get(&node_id).copied();
+                            let (vec_rank, vec_dist) = vector_rankings
+                                .get(&node_id)
+                                .map(|(r, d)| (Some(*r), Some(*d)))
+                                .unwrap_or((None, None));
+
+                            if let Some(rank) = ft_rank {
+                                score += 1.0 / (RRF_K + rank as f64);
+                            }
+                            if let Some(rank) = vec_rank {
+                                score += 1.0 / (RRF_K + rank as f64);
+                            }
+
+                            (node_id, score, ft_rank, vec_rank, vec_dist)
+                        })
+                        .collect();
+
+                    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    scored.truncate(limit);
+
+                    // 4. Fetch nodes and build rows
+                    for (node_id, score, ft_rank, vec_rank, vec_dist) in scored {
+                        // Determine workspace from vector results or use default
+                        let workspace_id = "default";
+                        if let Some(node) = storage
+                            .nodes()
+                            .get(StorageScope::new(&tenant_id, &repo_id, &branch, workspace_id), &node_id, max_revision.as_ref())
+                            .await?
+                        {
+                            if node.path == "/" { continue; }
+
+                            let mut columns = IndexMap::new();
+                            columns.insert(format!("{}.node_id", table_name), PropertyValue::String(node_id));
+                            columns.insert(format!("{}.workspace_id", table_name), PropertyValue::String(workspace_id.to_string()));
+                            columns.insert(format!("{}.name", table_name), PropertyValue::String(node.name.clone()));
+                            columns.insert(format!("{}.path", table_name), PropertyValue::String(node.path.clone()));
+                            columns.insert(format!("{}.node_type", table_name), PropertyValue::String(node.node_type.clone()));
+                            columns.insert(format!("{}.score", table_name), PropertyValue::Float(score));
+                            columns.insert(format!("{}.fulltext_rank", table_name),
+                                ft_rank.map(|r| PropertyValue::Integer(r as i64)).unwrap_or(PropertyValue::Null));
+                            columns.insert(format!("{}.vector_rank", table_name),
+                                vec_rank.map(|r| PropertyValue::Integer(r as i64)).unwrap_or(PropertyValue::Null));
+                            columns.insert(format!("{}.vector_distance", table_name),
+                                vec_dist.map(|d| PropertyValue::Float(d as f64)).unwrap_or(PropertyValue::Null));
+                            columns.insert(format!("{}.revision", table_name), PropertyValue::Integer(node.version as i64));
+                            columns.insert(format!("{}.properties", table_name), PropertyValue::Object(node.properties.clone()));
+
+                            yield Row { columns };
+                        }
+                    }
+                };
+
+                Ok(Box::pin(row_stream))
             } else {
                 Err(ExecutionError::Validation(format!(
                     "Unsupported table function: {}",

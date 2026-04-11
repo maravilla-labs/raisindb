@@ -354,6 +354,7 @@ impl PhysicalPlanner {
     /// - `embedding IS NOT NULL` - Checks if node has embedding
     /// - `path = 'constant'` - Exact path match
     /// - `id = 'constant'` - Exact ID match
+    /// - Distance threshold: `distance_expr < 0.5` (handled by VectorScan)
     ///
     /// Complex predicates (NOT simple):
     /// - `path STARTS WITH '/docs'` - Requires prefix scan
@@ -388,8 +389,60 @@ impl PhysicalPlanner {
                 is_simple_column && is_literal
             }
 
+            // Distance threshold comparisons: distance_expr < literal or column_alias < literal
+            // These are handled by VectorScan's max_distance parameter
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Lt | BinaryOperator::LtEq,
+                right,
+            } => {
+                let is_numeric_literal = Self::is_numeric_literal(right);
+                let is_distance_expr = Self::is_vector_distance_expr(left)
+                    || matches!(&left.expr, Expr::Column { .. });
+                is_distance_expr && is_numeric_literal
+            }
+
+            // Also handle reversed form: literal > distance_expr
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Gt | BinaryOperator::GtEq,
+                right,
+            } => {
+                let is_numeric_literal = Self::is_numeric_literal(left);
+                let is_distance_expr = Self::is_vector_distance_expr(right)
+                    || matches!(&right.expr, Expr::Column { .. });
+                is_distance_expr && is_numeric_literal
+            }
+
             // Everything else is complex
             _ => false,
         }
+    }
+
+    /// Check if an expression is a vector distance operator or function
+    fn is_vector_distance_expr(expr: &TypedExpr) -> bool {
+        match &expr.expr {
+            Expr::BinaryOp { op, .. } => matches!(
+                op,
+                BinaryOperator::VectorL2Distance
+                    | BinaryOperator::VectorCosineDistance
+                    | BinaryOperator::VectorInnerProduct
+            ),
+            Expr::Function { name, .. } => matches!(
+                name.to_uppercase().as_str(),
+                "VECTOR_L2_DISTANCE" | "VECTOR_COSINE_DISTANCE" | "VECTOR_INNER_PRODUCT"
+            ),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a numeric literal
+    fn is_numeric_literal(expr: &TypedExpr) -> bool {
+        matches!(
+            &expr.expr,
+            Expr::Literal(Literal::Double(_))
+                | Expr::Literal(Literal::Int(_))
+                | Expr::Literal(Literal::BigInt(_))
+        )
     }
 }

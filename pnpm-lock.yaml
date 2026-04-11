@@ -334,6 +334,10 @@ importers:
         specifier: ^3.1.1
         version: 3.2.4(@types/debug@4.1.12)(@types/node@20.19.27)(jiti@2.6.1)(lightningcss@1.30.2)(tsx@4.21.0)(yaml@2.8.2)
 
+  packages/raisindb-functions-types: {}
+
+  packages/raisindb-skills: {}
+
   tooling/packages/raisin-rel-wasm/pkg: {}
 
   tooling/packages/raisin-schema-wasm/pkg: {}

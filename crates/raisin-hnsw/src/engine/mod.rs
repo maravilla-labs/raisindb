@@ -10,6 +10,7 @@
 
 mod indexing;
 mod lifecycle;
+pub mod metrics;
 mod search;
 
 #[cfg(test)]
@@ -49,6 +50,9 @@ pub struct HnswIndexingEngine {
 
     /// Default distance metric for new indexes
     distance_metric: DistanceMetric,
+
+    /// Observability metrics
+    metrics: Arc<metrics::VectorMetrics>,
 }
 
 impl HnswIndexingEngine {
@@ -108,12 +112,18 @@ impl HnswIndexingEngine {
             dirty_indexes: Arc::new(RwLock::new(HashSet::new())),
             dimensions,
             distance_metric,
+            metrics: Arc::new(metrics::VectorMetrics::new()),
         })
     }
 
     /// Get the default distance metric for this engine.
     pub fn distance_metric(&self) -> DistanceMetric {
         self.distance_metric
+    }
+
+    /// Get a snapshot of vector search metrics.
+    pub fn metrics(&self) -> metrics::VectorMetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Get or load an HNSW index for a specific context.
@@ -130,8 +140,11 @@ impl HnswIndexingEngine {
 
         // Check cache first
         if let Some(index) = self.index_cache.get(&key) {
+            self.metrics.record_cache_hit();
             return Ok(index);
         }
+
+        self.metrics.record_cache_miss();
 
         // Load from disk or create new
         let path = self.get_index_path(&key);

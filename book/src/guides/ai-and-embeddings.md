@@ -16,7 +16,7 @@ The `raisin-ai` crate provides tenant-level AI configuration with support for mu
 | Azure OpenAI | Azure-hosted OpenAI | Enterprise deployments |
 | Groq | Open-source models | Fast inference |
 | OpenRouter | Multi-provider router | Unified API |
-| AWS Bedrock | Claude, Nova, Llama | Via AWS credentials |
+| AWS Bedrock | Claude, Nova, Llama | Fully implemented, default provider |
 | Ollama | Local models | Self-hosted |
 | Custom | Any OpenAI-compatible | Custom endpoint |
 
@@ -247,6 +247,21 @@ let chunks: Vec<TextChunk> = chunker.chunk("Long document text...");
 
 Chunking is token-aware (uses tiktoken) and supports configurable overlap between chunks.
 
+### Automatic Document Chunking in the Embedding Pipeline
+
+When chunking configuration is set on the embedding config, the embedding pipeline automatically chunks long documents before generating embeddings. Each chunk is stored as a separate vector in the HNSW index, linked back to the source document. This enables accurate retrieval for documents that exceed the embedding model's context window.
+
+Configure chunking via SQL:
+
+```sql
+ALTER EMBEDDING CONFIG
+  SET CHUNKING_ENABLED = true
+  SET CHUNK_SIZE = 512
+  SET CHUNK_OVERLAP = 50;
+```
+
+Use `SearchMode::Chunks` in vector search to return individual chunks, or `SearchMode::Documents` (default) to deduplicate results by source document.
+
 ## PDF Processing
 
 With the `pdf` or `pdf-markdown` feature flags, documents can be extracted from PDF files:
@@ -437,6 +452,8 @@ When you switch embedding models, old and new embeddings coexist without conflic
 
 Embedding generation runs asynchronously through the job system. When a node is created or updated, an `EmbeddingGenerate` job is enqueued automatically (if the node type is configured for vector indexing). The background worker processes these jobs, calling the configured embedding provider and storing the result in both RocksDB and the HNSW index.
 
+The embedding worker retries transient failures (network errors, rate limits, provider timeouts) with exponential backoff. Failed jobs are retried up to a configurable maximum before being marked as permanently failed.
+
 ### Vector Index Management
 
 Administrative endpoints for managing the HNSW vector index:
@@ -453,7 +470,26 @@ POST /api/admin/management/database/{tenant}/{repo}/vector/verify
 
 # Check index health
 GET /api/admin/management/database/{tenant}/{repo}/vector/health
+
+# Restore vector index from stored data (disaster recovery)
+POST /api/admin/management/database/{tenant}/{repo}/vector/restore
+
+# Vector metrics (monitoring)
+GET /management/metrics/vector
 ```
+
+These operations are also available via SQL:
+
+```sql
+REBUILD VECTOR INDEX;
+VERIFY VECTOR INDEX;
+SHOW VECTOR INDEX HEALTH;
+REGENERATE EMBEDDINGS;
+```
+
+### Vector Metrics
+
+The `/management/metrics/vector` endpoint exposes monitoring data for the HNSW vector index, including index size, cache hit rates, query latencies, and embedding job queue depth.
 
 ## HNSW Vector Search
 
@@ -461,12 +497,14 @@ The `raisin-hnsw` crate provides fast approximate nearest neighbor (ANN) search 
 
 ### Key Properties
 
-- **Cosine distance** -- optimized for normalized embeddings (OpenAI embeddings are pre-normalized)
+- **Multiple distance metrics** -- Cosine, L2, InnerProduct, and Hamming
 - **O(log n) search** -- approximate nearest neighbor in logarithmic time
 - **Memory-bounded** -- uses Moka LRU cache to limit memory usage
 - **Multi-tenant** -- separate indexes per tenant/repo/branch
 - **Persistent** -- periodic snapshots to disk with dirty tracking
 - **Crash-safe** -- graceful shutdown ensures all dirty indexes are saved
+- **Configurable HNSW parameters** -- tune connectivity, build quality, and search accuracy
+- **Vector quantization** -- F32, F16, and Int8 storage types for memory/accuracy trade-offs
 
 ### Usage
 
@@ -523,9 +561,55 @@ let request = SearchRequest {
 
 The `ScoringConfig` controls chunk-aware ranking with `position_decay` (earlier chunks score higher) and `first_chunk_boost`.
 
+### HNSW Parameter Tuning
+
+The HNSW index supports three tuning parameters that control the trade-off between index quality, build speed, and search accuracy:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `connectivity` (M) | 16 | Max edges per node. Higher values improve recall but increase memory usage |
+| `expansion_add` (ef_construction) | 200 | Search width during index construction. Higher values improve index quality but slow down inserts |
+| `expansion_search` (ef_search) | 100 | Search width during queries. Higher values improve recall at the cost of query latency |
+
+Configure via the embedding config:
+
+```sql
+ALTER EMBEDDING CONFIG
+  SET HNSW_CONNECTIVITY = 32
+  SET HNSW_EXPANSION_ADD = 400
+  SET HNSW_EXPANSION_SEARCH = 200;
+```
+
+### Vector Quantization
+
+Vector quantization reduces memory usage by storing vectors in lower-precision formats:
+
+| Type | Bytes per Dimension | Memory Savings | Notes |
+|------|---------------------|----------------|-------|
+| `F32` | 4 | Baseline (default) | Full precision |
+| `F16` | 2 | 50% | Minimal accuracy loss for most use cases |
+| `Int8` | 1 | 75% | Best for large indexes where memory is constrained |
+
+### Distance Metrics
+
+RaisinDB supports four distance metrics for vector search:
+
+| Metric | SQL Operator | Description |
+|--------|-------------|-------------|
+| Cosine | `<=>` | Best for normalized embeddings (default) |
+| L2 (Euclidean) | `<->` | Euclidean distance |
+| InnerProduct | `<#>` | Negative dot product |
+| Hamming | -- | Bitwise distance for binary vectors |
+
+Configure the distance metric per tenant:
+
+```sql
+ALTER EMBEDDING CONFIG SET DISTANCE_METRIC = 'Cosine';
+```
+
 ### Distance Interpretation
 
-Since HNSW uses cosine distance (1 - cosine similarity):
+For cosine distance (1 - cosine similarity):
 
 | Distance | Cosine Similarity | Interpretation |
 |----------|-------------------|----------------|
@@ -533,6 +617,26 @@ Since HNSW uses cosine distance (1 - cosine similarity):
 | 0.2 - 0.4 | 0.8 - 0.6 | Semantically similar |
 | 0.4 - 0.6 | 0.6 - 0.4 | Weakly related |
 | > 0.6 | < 0.4 | Not related |
+
+### Configurable Max Distance
+
+By default, vector search results are filtered to exclude vectors beyond a maximum distance threshold. This threshold is configurable per tenant:
+
+```sql
+-- Set the default max distance threshold (default: 0.6)
+ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE = '0.5';
+```
+
+You can also filter by distance directly in SQL WHERE clauses:
+
+```sql
+-- Only return results within a specific distance
+SELECT id, name, embedding <=> EMBEDDING('query') AS distance
+FROM 'default'
+WHERE embedding <=> EMBEDDING('query') < 0.3
+ORDER BY distance
+LIMIT 10
+```
 
 ### Vector Search via SQL
 
@@ -573,6 +677,33 @@ FROM 'default'
 WHERE FULLTEXT_MATCH('database engine', 'english')
 ORDER BY embedding <=> EMBEDDING('database engine')
 LIMIT 5
+```
+
+### Hybrid Search (HYBRID_SEARCH Table Function)
+
+The `HYBRID_SEARCH` table function combines full-text search and vector search using Reciprocal Rank Fusion (RRF) to produce a single ranked result set:
+
+```sql
+-- Hybrid search combining fulltext + vector with RRF ranking
+SELECT * FROM HYBRID_SEARCH('machine learning tutorials', 10)
+
+-- With additional filtering
+SELECT id, name, properties, score
+FROM HYBRID_SEARCH('database optimization', 20)
+WHERE node_type = 'myapp:Article'
+```
+
+Hybrid search runs both a full-text Tantivy query and a vector similarity search in parallel, then merges the results using RRF scoring. This typically produces better results than either search method alone, especially for queries where keyword matching and semantic similarity complement each other.
+
+### EXPLAIN for Vector Queries
+
+Use `EXPLAIN` to inspect vector query execution plans. The output shows `VectorScan` details including the distance metric, index parameters, and number of candidates:
+
+```sql
+EXPLAIN SELECT id, name, embedding <=> EMBEDDING('query') AS distance
+FROM 'default'
+ORDER BY distance
+LIMIT 10
 ```
 
 ### Branch Operations

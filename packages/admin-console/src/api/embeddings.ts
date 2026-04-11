@@ -17,6 +17,8 @@ export interface ConfigResponse {
   node_type_settings: Record<string, NodeTypeEmbeddingConfig>
   max_embeddings_per_repo: number | null
   base_url?: string
+  default_max_distance?: number
+  quantization?: 'F32' | 'F16' | 'Int8'
 }
 
 export interface SetConfigRequest {
@@ -30,6 +32,8 @@ export interface SetConfigRequest {
   node_type_settings: Record<string, NodeTypeEmbeddingConfig>
   max_embeddings_per_repo: number | null
   base_url?: string
+  default_max_distance?: number
+  quantization?: 'F32' | 'F16' | 'Int8'
 }
 
 export interface TestConnectionResponse {

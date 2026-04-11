@@ -141,11 +141,21 @@ publishable: true
 | `MediaField` | File/image upload (maps to `Resource` property) |
 | `RichTextField` | Rich text / HTML editor |
 | `SectionField` | Container for ElementTypes -- the composition mechanism |
-| `CompositeField` | Group of sub-fields, optionally repeatable |
+| `CompositeField` | Group of sub-fields; use `multiple: true` for repeatable lists |
+| `ReferenceField` | Link to another RaisinDB node (`raisin:ref` object). Use for CTA links, related content, author, tags. Use `multiple: true` for arrays of references |
 
 ### Field Options
 
-All fields support: `name`, `title`, `required`, `translatable`, `description`.
+All fields support: `name`, `title`, `required`, `translatable`, `description`, `multiple`.
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `name` | string | Unique field identifier (required) |
+| `title` | string | Human-readable label for the editor UI |
+| `required` | boolean | Field must have a value |
+| `translatable` | boolean | Field supports translation overlays |
+| `description` | string | Help text shown in the editor |
+| `multiple` | boolean | Allow multiple values (stores as array). Works on any field type. On `CompositeField`, creates a repeatable list of structured items |
 
 ### SectionField -- Composition Mechanism
 
@@ -153,13 +163,13 @@ All fields support: `name`, `title`, `required`, `translatable`, `description`.
 
 ### CompositeField -- Repeatable Sub-Fields
 
-Use `CompositeField` with `repeatable: true` for arrays of structured objects. You can nest `SectionField` inside a `CompositeField`:
+Use `CompositeField` with `multiple: true` for repeatable arrays of structured objects. Any field type supports `multiple: true`, but on `CompositeField` it creates a list of structured items. You can nest `SectionField` inside a `CompositeField`:
 
 ```yaml
   - $type: CompositeField
     name: columns
     title: Columns
-    repeatable: true
+    multiple: true
     translatable: true
     fields:
       - $type: TextField
@@ -179,6 +189,111 @@ Use `CompositeField` with `repeatable: true` for arrays of structured objects. Y
         translatable: true
         allowed_element_types:
           - launchpad:KanbanCard
+```
+
+### UUID Rule for Repeatable CompositeFields
+
+When a repeatable `CompositeField` has ANY sub-field with `translatable: true`, each item in the content YAML **must have a unique `uuid`**. This enables per-item translation merging without losing non-translatable fields.
+
+```yaml
+# In content YAML — items need uuid when composite has translatable fields
+features:
+  - uuid: feat-1
+    title: Fast Development      # translatable
+    icon: zap                    # NOT translatable — preserved during translation
+  - uuid: feat-2
+    title: Scalable
+    icon: trending-up
+```
+
+Without UUIDs, `npm run validate` will emit `COMPOSITE_MISSING_UUID`. Duplicate UUIDs within the same array emit `COMPOSITE_DUPLICATE_UUID`.
+
+### ReferenceField — Node References
+
+Use `ReferenceField` for any link to another RaisinDB node: CTA buttons linking to pages, related articles, author references, tag links, parent categories. Do NOT use TextField for these — TextField is only for external URLs (`https://...`), email addresses, or arbitrary strings that don't point to RaisinDB nodes.
+
+**Schema definition:**
+
+```yaml
+fields:
+  - $type: ReferenceField
+    name: cta_link
+    title: CTA Link
+    config:
+      allowed_entry_types:
+        - launchpad:Page
+
+  - $type: ReferenceField
+    name: author
+    title: Author
+    required: true
+    config:
+      allowed_entry_types:
+        - myapp:Author
+```
+
+`config.allowed_entry_types` restricts which node types can be referenced. Omit it to allow any node type.
+
+**Content YAML format** — both `raisin:ref` and `raisin:workspace` are required:
+
+```yaml
+properties:
+  cta_link:
+    raisin:ref: /launchpad/contact
+    raisin:workspace: launchpad
+  author:
+    raisin:ref: /launchpad/authors/jane
+    raisin:workspace: launchpad
+```
+
+- `raisin:ref` — node path (starting with `/`) or node ID (UUID). Paths are auto-resolved to UUIDs during INSERT/UPDATE.
+- `raisin:workspace` — target workspace name. Required even for same-workspace references.
+- Referenced node must exist at INSERT/UPDATE time (path-based refs are validated).
+
+**Frontend usage** — read `raisin:path` for links:
+
+```svelte
+<a href={element.cta_link?.['raisin:path']}>{element.cta_text}</a>
+```
+
+### Multiple References
+
+Use `ReferenceField` with `multiple: true` for one-to-many node references:
+
+```yaml
+fields:
+  - $type: ReferenceField
+    name: related_articles
+    title: Related Articles
+    multiple: true
+    config:
+      allowed_entry_types:
+        - myapp:Article
+```
+
+Content YAML stores an array of references:
+
+```yaml
+properties:
+  related_articles:
+    - raisin:ref: /blog/articles/intro-to-raisin
+      raisin:workspace: blog
+    - raisin:ref: /blog/articles/advanced-queries
+      raisin:workspace: blog
+```
+
+### Querying References
+
+```sql
+-- Find all nodes that reference a specific target
+SELECT * FROM blog
+WHERE REFERENCES('blog:/articles/intro-to-raisin')
+
+-- Resolve references inline (replace raisin:ref objects with full node data)
+SELECT RESOLVE(properties) FROM blog WHERE path = $1
+
+-- Resolve with depth control (nested references, max 10)
+SELECT RESOLVE(properties, 3) FROM blog WHERE path = $1
 ```
 
 ---
@@ -216,10 +331,13 @@ fields:
     required: false
     translatable: true
 
-  - $type: TextField
+  - $type: ReferenceField
     name: cta_link
     title: CTA Button Link
     required: false
+    config:
+      allowed_entry_types:
+        - launchpad:Page
 
   - $type: MediaField
     name: background_image
@@ -241,7 +359,7 @@ Use `RichTextField` for rich text / HTML content:
 
 ### ElementType with Nested CompositeField
 
-ElementTypes can use `CompositeField` with `repeatable: true` for arrays of structured items:
+ElementTypes can use `CompositeField` with `multiple: true` for repeatable arrays of structured items:
 
 ```yaml
 name: launchpad:FeatureGrid
@@ -259,7 +377,7 @@ fields:
   - $type: CompositeField
     name: features
     title: Features
-    repeatable: true
+    multiple: true
     fields:
       - $type: TextField
         name: title
@@ -272,6 +390,103 @@ fields:
         required: true
         translatable: true
 ```
+
+### Dynamic Listing Pattern
+
+Instead of hardcoding items in a CompositeField array, model a **dynamic listing** element type that references a folder and queries children at render time. This is content-driven: editors configure *what* to show, the frontend queries for it.
+
+**Element type** (`elementtypes/content-listing.yaml`):
+
+```yaml
+name: myapp:ContentListing
+title: Content Listing
+description: Dynamically lists child nodes of a referenced folder
+icon: list
+color: "#3b82f6"
+version: 1
+
+fields:
+  - $type: TextField
+    name: heading
+    title: Section Heading
+    translatable: true
+
+  - $type: ReferenceField
+    name: source
+    title: Source Folder
+    required: true
+    config:
+      allowed_entry_types:
+        - raisin:Folder
+
+  - $type: TextField
+    name: filter_node_type
+    title: Filter by Node Type
+    description: "e.g. myapp:Project"
+
+  - $type: NumberField
+    name: limit
+    title: Max Items
+
+  - $type: TextField
+    name: sort_by
+    title: Sort By
+    description: "Property name to sort by, e.g. title, created_at"
+```
+
+**Content YAML** — just configure, no data duplication:
+
+```yaml
+content:
+  - uuid: projects-listing-1
+    element_type: myapp:ContentListing
+    heading: Featured Projects
+    source:
+      raisin:ref: /myapp/projects
+      raisin:workspace: myapp
+    filter_node_type: myapp:Project
+    limit: 6
+    sort_by: created_at
+```
+
+**Frontend component** — queries at render time:
+
+```svelte
+<script lang="ts">
+  export let element: ContentListingElement
+
+  const sourcePath = element.source?.['raisin:path']
+  const nodeType = element.filter_node_type || ''
+  const limit = element.limit || 10
+
+  // Use CHILD_OF for direct children only, or DESCENDANT_OF for
+  // the full subtree (nested folders like /projects/2025/01/post).
+  // Results are already in natural path order (no ORDER BY needed).
+  const sql = `
+    SELECT id, path, name, properties
+    FROM ${WORKSPACE}
+    WHERE DESCENDANT_OF('${sourcePath}')
+      ${nodeType ? `AND node_type = '${nodeType}'` : ''}
+    LIMIT ${limit}
+  `
+  const items = query(sql)
+</script>
+
+<section>
+  <h2>{element.heading}</h2>
+  {#each items as item}
+    <a href={item.path}>{item.properties.title}</a>
+  {/each}
+</section>
+```
+
+Choose based on your content structure:
+- `CHILD_OF('/projects')` — direct children only (flat list)
+- `DESCENDANT_OF('/projects')` — full subtree, handles nested folders like `/projects/2025/01/my-project`
+
+Results are returned in natural path order by default — no `ORDER BY` needed. Add `ORDER BY` only when sorting by a different field (e.g., `ORDER BY properties->>'created_at'::String DESC`).
+
+This pattern avoids duplicating content data in composite arrays. Editors add/remove/reorder items by managing actual nodes in the tree, and any listing element pointing to that folder updates automatically.
 
 ### Runtime Representation
 
@@ -406,7 +621,9 @@ properties:
       headline: Launch Your Vision
       subheadline: Build, deploy, and scale your ideas with Launchpad
       cta_text: Get Started
-      cta_link: /contact
+      cta_link:
+        raisin:ref: /launchpad/contact
+        raisin:workspace: launchpad
 
     - uuid: intro-1
       element_type: launchpad:TextBlock
@@ -418,7 +635,8 @@ properties:
       element_type: launchpad:FeatureGrid
       heading: Features
       features:
-        - icon: zap
+        - uuid: feat-fast
+          icon: zap
           title: Fast Development
           description: Build and iterate quickly with our modern stack
 ```
@@ -453,5 +671,7 @@ Do NOT proceed until all errors are resolved.
 | `DUPLICATE_PROPERTY` | No duplicate property names within a single NodeType |
 | `UNKNOWN_ELEMENT_TYPE` | Element type in `allowed_element_types` not in `provides.elementtypes` |
 | `MISSING_BASE_NODE_TYPE` | Archetype `base_node_type` not found in `provides.nodetypes` |
+| `COMPOSITE_MISSING_UUID` | Repeatable composite with translatable sub-fields has items without `uuid` |
+| `COMPOSITE_DUPLICATE_UUID` | Two items in the same composite array share the same `uuid` |
 
 Every type in `provides` must have a corresponding YAML file in the matching directory (`nodetypes/`, `archetypes/`, `elementtypes/`, `mixins/`, `workspaces/`). File names use kebab-case (e.g., `landing-page.yaml` for `launchpad:LandingPage`).

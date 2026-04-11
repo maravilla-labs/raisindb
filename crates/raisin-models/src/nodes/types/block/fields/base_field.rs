@@ -36,8 +36,8 @@ pub struct FieldTypeSchema {
     /// Whether the field is hidden on publish.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_hidden: Option<bool>,
-    /// Whether multiple values are allowed.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Whether multiple values are allowed (also accepts `repeatable` in YAML).
+    #[serde(skip_serializing_if = "Option::is_none", alias = "repeatable")]
     pub multiple: Option<bool>,
     /// Whether the field is a design value field.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -52,6 +52,8 @@ impl HnswIndexingEngine {
         let key = self.make_key(tenant_id, repo_id, branch);
         self.dirty_indexes.write().unwrap().insert(key);
 
+        self.metrics.record_embedding_added();
+
         Ok(())
     }
 
@@ -77,6 +79,8 @@ impl HnswIndexingEngine {
         // Mark as dirty
         let key = self.make_key(tenant_id, repo_id, branch);
         self.dirty_indexes.write().unwrap().insert(key);
+
+        self.metrics.record_embedding_removed();
 
         Ok(())
     }

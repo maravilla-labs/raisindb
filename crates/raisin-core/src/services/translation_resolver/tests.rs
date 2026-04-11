@@ -337,6 +337,113 @@ fn test_find_block_containers_with_elements() {
     assert_eq!(paths[0], "content");
 }
 
+#[test]
+fn test_merge_through_nested_uuid_arrays() {
+    let resolver = create_test_resolver();
+    let mut node = create_test_node();
+
+    // Build content with nested UUID arrays:
+    // content[skills-1].categories[cat-frontend].{name, skills}
+    let mut cat_frontend = HashMap::new();
+    cat_frontend.insert(
+        "uuid".to_string(),
+        PropertyValue::String("cat-frontend".to_string()),
+    );
+    cat_frontend.insert(
+        "name".to_string(),
+        PropertyValue::String("Frontend".to_string()),
+    );
+    cat_frontend.insert(
+        "skills".to_string(),
+        PropertyValue::String("TypeScript, Svelte".to_string()),
+    );
+
+    let mut cat_backend = HashMap::new();
+    cat_backend.insert(
+        "uuid".to_string(),
+        PropertyValue::String("cat-backend".to_string()),
+    );
+    cat_backend.insert(
+        "name".to_string(),
+        PropertyValue::String("Backend".to_string()),
+    );
+    cat_backend.insert(
+        "skills".to_string(),
+        PropertyValue::String("Node.js, Python".to_string()),
+    );
+
+    let mut skills_element = HashMap::new();
+    skills_element.insert(
+        "uuid".to_string(),
+        PropertyValue::String("skills-1".to_string()),
+    );
+    skills_element.insert(
+        "heading".to_string(),
+        PropertyValue::String("Skills".to_string()),
+    );
+    skills_element.insert(
+        "categories".to_string(),
+        PropertyValue::Array(vec![
+            PropertyValue::Object(cat_frontend),
+            PropertyValue::Object(cat_backend),
+        ]),
+    );
+
+    node.properties.insert(
+        "content".to_string(),
+        PropertyValue::Array(vec![PropertyValue::Object(skills_element)]),
+    );
+
+    // Merge a 5-segment pointer: translate only the name, not skills
+    let pointer = JsonPointer::new("/content/skills-1/categories/cat-frontend/name");
+    let value = PropertyValue::String("Frontend-Entwicklung".to_string());
+    resolver.merge_property(&mut node, &pointer, value).unwrap();
+
+    // Verify: name changed, skills preserved
+    if let Some(PropertyValue::Array(content)) = node.properties.get("content") {
+        if let Some(PropertyValue::Object(skills_el)) = content.first() {
+            if let Some(PropertyValue::Array(categories)) = skills_el.get("categories") {
+                if let Some(PropertyValue::Object(frontend)) = categories.first() {
+                    assert_eq!(
+                        frontend.get("name"),
+                        Some(&PropertyValue::String("Frontend-Entwicklung".to_string())),
+                        "name should be translated"
+                    );
+                    assert_eq!(
+                        frontend.get("skills"),
+                        Some(&PropertyValue::String("TypeScript, Svelte".to_string())),
+                        "skills should be preserved (non-translatable)"
+                    );
+                } else {
+                    panic!("Expected first category to be an object");
+                }
+
+                // Second category should be completely untouched
+                if let Some(PropertyValue::Object(backend)) = categories.get(1) {
+                    assert_eq!(
+                        backend.get("name"),
+                        Some(&PropertyValue::String("Backend".to_string())),
+                        "backend name should be unchanged"
+                    );
+                    assert_eq!(
+                        backend.get("skills"),
+                        Some(&PropertyValue::String("Node.js, Python".to_string())),
+                        "backend skills should be preserved"
+                    );
+                } else {
+                    panic!("Expected second category to be an object");
+                }
+            } else {
+                panic!("Expected categories to be an array");
+            }
+        } else {
+            panic!("Expected first content element to be an object");
+        }
+    } else {
+        panic!("Expected content to be an array");
+    }
+}
+
 // Helper functions
 
 fn create_test_resolver() -> TranslationResolver<NoopTranslationRepo> {

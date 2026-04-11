@@ -318,6 +318,39 @@ pub fn is_translatable(field: &FieldSchema) -> bool {
     }
 }
 
+/// Check if a CompositeField requires UUID on each item.
+///
+/// A CompositeField requires UUIDs when it is repeatable (`multiple: true`)
+/// AND has at least one translatable sub-field. Without UUIDs, translation
+/// overlays cannot address individual items and would replace the entire array,
+/// losing non-translatable fields.
+///
+/// Returns `false` for non-CompositeField variants.
+pub fn composite_requires_uuid(field: &FieldSchema) -> bool {
+    match field {
+        FieldSchema::CompositeField { base, fields, .. } => {
+            base.multiple.unwrap_or(false) && fields.iter().any(|f| is_translatable(f))
+        }
+        _ => false,
+    }
+}
+
+/// Structural keys that are never translatable and should be excluded from
+/// translation overlays. This is the canonical list — use it in both Rust
+/// and TypeScript validators to keep them in sync.
+pub const NON_TRANSLATABLE_KEYS: &[&str] = &[
+    "uuid",
+    "id",
+    "element_type",
+    "slug",
+    "node_type",
+    "archetype",
+    "parent",
+    "order",
+    "sort_order",
+    "weight",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +431,68 @@ mod tests {
             element_type: "Article".to_string(),
         };
         assert!(is_element_field(&element_field));
+    }
+
+    #[test]
+    fn test_composite_requires_uuid() {
+        // CompositeField with multiple + translatable sub-field → true
+        let composite = FieldSchema::CompositeField {
+            base: FieldTypeSchema {
+                name: "categories".to_string(),
+                multiple: Some(true),
+                ..Default::default()
+            },
+            fields: vec![FieldSchema::TextField {
+                base: FieldTypeSchema {
+                    name: "name".to_string(),
+                    translatable: Some(true),
+                    ..Default::default()
+                },
+                config: None,
+            }],
+            layout: None,
+        };
+        assert!(composite_requires_uuid(&composite));
+
+        // CompositeField with multiple but NO translatable sub-fields → false
+        let composite_no_translatable = FieldSchema::CompositeField {
+            base: FieldTypeSchema {
+                name: "items".to_string(),
+                multiple: Some(true),
+                ..Default::default()
+            },
+            fields: vec![FieldSchema::TextField {
+                base: FieldTypeSchema {
+                    name: "code".to_string(),
+                    ..Default::default()
+                },
+                config: None,
+            }],
+            layout: None,
+        };
+        assert!(!composite_requires_uuid(&composite_no_translatable));
+
+        // CompositeField NOT multiple → false even with translatable
+        let composite_single = FieldSchema::CompositeField {
+            base: FieldTypeSchema {
+                name: "meta".to_string(),
+                ..Default::default()
+            },
+            fields: vec![FieldSchema::TextField {
+                base: FieldTypeSchema {
+                    name: "title".to_string(),
+                    translatable: Some(true),
+                    ..Default::default()
+                },
+                config: None,
+            }],
+            layout: None,
+        };
+        assert!(!composite_requires_uuid(&composite_single));
+
+        // Non-CompositeField → false
+        let text_field = create_text_field("test", None, None);
+        assert!(!composite_requires_uuid(&text_field));
     }
 
     #[test]

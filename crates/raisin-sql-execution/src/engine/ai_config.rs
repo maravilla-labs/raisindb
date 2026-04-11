@@ -68,6 +68,13 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             config_row("include_name", &config.include_name.to_string()),
             config_row("include_path", &config.include_path.to_string()),
             config_row(
+                "default_max_distance",
+                &config
+                    .default_max_distance
+                    .map(|d| format!("{:.2}", d))
+                    .unwrap_or_else(|| "0.60 (default)".to_string()),
+            ),
+            config_row(
                 "distance_metric",
                 &format!("{:?}", config.distance_metric),
             ),
@@ -156,6 +163,20 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                             setting.value
                         ))
                     })?;
+                }
+                "DEFAULT_MAX_DISTANCE" => {
+                    config.default_max_distance = if setting.value.to_lowercase() == "none"
+                        || setting.value.to_lowercase() == "default"
+                    {
+                        None
+                    } else {
+                        Some(setting.value.parse::<f32>().map_err(|_| {
+                            Error::Validation(format!(
+                                "Invalid default_max_distance value '{}': expected float (e.g., 0.5)",
+                                setting.value
+                            ))
+                        })?)
+                    };
                 }
                 "DISTANCE_METRIC" => {
                     config.distance_metric =
@@ -383,17 +404,111 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 
     async fn execute_rebuild_vector_index(&self) -> Result<RowStream, Error> {
-        if self.hnsw_engine.is_some() {
-            ai_config_ok(
-                "Vector index rebuild queued. Use SHOW VECTOR INDEX HEALTH to check progress.",
+        let engine = self.hnsw_engine.as_ref().ok_or_else(|| {
+            Error::Validation("HNSW engine not configured".to_string())
+        })?;
+
+        let branch = self.effective_branch().await;
+
+        // Purge existing index
+        engine
+            .purge_index(&self.tenant_id, &self.repo_id, &branch, "default")
+            .map_err(|e| Error::Backend(format!("Failed to purge vector index: {}", e)))?;
+
+        // Get embedding config for dimensions
+        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
+            Error::Validation("Embedding config store not available".to_string())
+        })?;
+        let config = store
+            .get_config(&self.tenant_id)
+            .map_err(|e| Error::Backend(format!("Failed to read embedding config: {}", e)))?
+            .unwrap_or_else(|| {
+                raisin_embeddings::TenantEmbeddingConfig::new(self.tenant_id.clone())
+            });
+
+        // Create fresh index with configured dimensions
+        engine
+            .create_index_with_dimensions(
+                &self.tenant_id,
+                &self.repo_id,
+                &branch,
+                config.dimensions,
             )
+            .map_err(|e| Error::Backend(format!("Failed to create new index: {}", e)))?;
+
+        // Re-populate from embedding storage
+        if let Some(ref emb_storage) = self.embedding_storage {
+            let embeddings = emb_storage
+                .list_embeddings(&self.tenant_id, &self.repo_id, &branch, "default")
+                .map_err(|e| Error::Backend(format!("Failed to list embeddings: {}", e)))?;
+
+            let count = embeddings.len();
+            for (node_id, revision) in &embeddings {
+                if let Ok(Some(data)) = emb_storage.get_embedding(
+                    &self.tenant_id,
+                    &self.repo_id,
+                    &branch,
+                    "default",
+                    node_id,
+                    Some(revision),
+                ) {
+                    let _ = engine.add_embedding(
+                        &self.tenant_id,
+                        &self.repo_id,
+                        &branch,
+                        "default",
+                        node_id,
+                        *revision,
+                        data.vector,
+                    );
+                }
+            }
+
+            ai_config_ok(format!(
+                "Vector index rebuilt with {} embeddings",
+                count
+            ))
         } else {
-            ai_config_ok("Not implemented via SQL yet, use REST API")
+            ai_config_ok("Vector index purged. No embedding storage available to repopulate.")
         }
     }
 
     async fn execute_regenerate_embeddings(&self) -> Result<RowStream, Error> {
-        ai_config_ok("Not implemented via SQL yet, use REST API")
+        let _engine = self.hnsw_engine.as_ref().ok_or_else(|| {
+            Error::Validation("HNSW engine not configured".to_string())
+        })?;
+
+        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
+            Error::Validation("Embedding config store not available".to_string())
+        })?;
+
+        let config = store
+            .get_config(&self.tenant_id)
+            .map_err(|e| Error::Backend(format!("Failed to read embedding config: {}", e)))?;
+
+        if config.is_none() || !config.as_ref().unwrap().enabled {
+            return Err(Error::Validation(
+                "Embeddings not enabled for this tenant. Configure with ALTER EMBEDDING CONFIG first.".to_string(),
+            ));
+        }
+
+        // Count existing embeddings to give user feedback
+        let branch = self.effective_branch().await;
+        let count = if let Some(ref emb_storage) = self.embedding_storage {
+            emb_storage
+                .list_embeddings(&self.tenant_id, &self.repo_id, &branch, "default")
+                .map(|list| list.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        ai_config_ok(format!(
+            "Embedding regeneration requires the background worker. \
+             Current index has {} embeddings. \
+             To regenerate, use the REST API: POST /api/admin/management/database/{}/{}/vector/regenerate",
+            count, self.tenant_id, self.repo_id
+        ))
     }
 
     async fn execute_show_vector_index_health(&self) -> Result<RowStream, Error> {
@@ -448,7 +563,54 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 
     async fn execute_verify_vector_index(&self) -> Result<RowStream, Error> {
-        ai_config_ok("Not implemented via SQL yet, use REST API")
+        let engine = self.hnsw_engine.as_ref().ok_or_else(|| {
+            Error::Validation("HNSW engine not configured".to_string())
+        })?;
+
+        let branch = self.effective_branch().await;
+
+        // Get HNSW index count
+        let hnsw_count = match engine.stats(&self.tenant_id, &self.repo_id, &branch) {
+            Ok(stats) => stats.count,
+            Err(_) => 0,
+        };
+
+        // Get embedding storage count
+        let storage_count = if let Some(ref emb_storage) = self.embedding_storage {
+            emb_storage
+                .list_embeddings(&self.tenant_id, &self.repo_id, &branch, "default")
+                .map(|list| list.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let is_consistent = hnsw_count == storage_count;
+        let status = if is_consistent { "consistent" } else { "mismatch" };
+
+        let mut row = Row::new();
+        row.insert(
+            "status".to_string(),
+            PropertyValue::String(status.to_string()),
+        );
+        row.insert(
+            "hnsw_count".to_string(),
+            PropertyValue::Integer(hnsw_count as i64),
+        );
+        row.insert(
+            "storage_count".to_string(),
+            PropertyValue::Integer(storage_count as i64),
+        );
+        if !is_consistent {
+            row.insert(
+                "action".to_string(),
+                PropertyValue::String(
+                    "Run REBUILD VECTOR INDEX to fix".to_string(),
+                ),
+            );
+        }
+
+        ai_config_result_rows(vec![row])
     }
 
     fn decrypt_api_key(
@@ -524,10 +686,9 @@ fn parse_distance_metric(value: &str) -> Result<EmbeddingDistanceMetric, Error> 
         "COSINE" => Ok(EmbeddingDistanceMetric::Cosine),
         "L2" | "EUCLIDEAN" => Ok(EmbeddingDistanceMetric::L2),
         "INNER_PRODUCT" | "INNERPRODUCT" | "IP" => Ok(EmbeddingDistanceMetric::InnerProduct),
-        "MANHATTAN" | "L1" => Ok(EmbeddingDistanceMetric::Manhattan),
         "HAMMING" => Ok(EmbeddingDistanceMetric::Hamming),
         other => Err(Error::Validation(format!(
-            "Unknown distance metric '{}'. Supported: Cosine, L2, InnerProduct, Manhattan, Hamming",
+            "Unknown distance metric '{}'. Supported: Cosine (recommended), L2, InnerProduct, Hamming",
             other
         ))),
     }

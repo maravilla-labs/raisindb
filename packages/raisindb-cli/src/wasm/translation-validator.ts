@@ -61,9 +61,11 @@ export interface SchemaContext {
 
 /**
  * Structural / metadata keys that must not appear in translation files.
- * Mirrors the Rust constant in crates/raisin-rocksdb/.../translation.rs.
+ * Mirrors the canonical `NON_TRANSLATABLE_KEYS` constant in
+ * crates/raisin-validation/src/field_helpers.rs — keep in sync.
  */
 export const NON_TRANSLATABLE_KEYS: ReadonlySet<string> = new Set([
+  'uuid',
   'id',
   'element_type',
   'slug',
@@ -75,7 +77,11 @@ export const NON_TRANSLATABLE_KEYS: ReadonlySet<string> = new Set([
   'weight',
 ]);
 
-/** Keys that may appear in translation section items for matching but are not themselves translated. */
+/**
+ * Subset of NON_TRANSLATABLE_KEYS that serve as identity keys within
+ * section/composite items. These are silently skipped (no warning)
+ * when found in translation items, since they're needed for matching.
+ */
 const SECTION_IDENTIFIER_KEYS: ReadonlySet<string> = new Set(['uuid']);
 
 // ---------------------------------------------------------------------------
@@ -423,6 +429,10 @@ function checkSectionItems(
 
 /**
  * Check items inside a CompositeField array against sub-field translatability.
+ *
+ * When the composite has translatable sub-fields, each item must have a unique
+ * `uuid` for per-field translation overlay merging. Without UUIDs, the entire
+ * array would be replaced on translation, losing non-translatable fields.
  */
 function checkCompositeItems(
   items: unknown[],
@@ -433,6 +443,38 @@ function checkCompositeItems(
 ): void {
   if (!compositeDef.fields) return;
   const subTranslatable = collectTranslatableFields(compositeDef.fields);
+
+  // If composite has translatable sub-fields, items need unique UUIDs
+  if (subTranslatable.size > 0) {
+    const seenUuids = new Set<string>();
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const rec = item as Record<string, unknown>;
+
+      if (!rec.uuid || typeof rec.uuid !== 'string') {
+        errors.push({
+          file_path: filePath,
+          field_path: `${parentPath}[${i}]`,
+          error_code: ErrorCodes.COMPOSITE_MISSING_UUID,
+          message: `Item ${parentPath}[${i}] requires a 'uuid' field because the composite has translatable sub-fields`,
+          severity: 'error',
+          fix_type: 'manual',
+        });
+      } else if (seenUuids.has(rec.uuid)) {
+        errors.push({
+          file_path: filePath,
+          field_path: `${parentPath}[${i}].uuid`,
+          error_code: ErrorCodes.COMPOSITE_DUPLICATE_UUID,
+          message: `Duplicate uuid '${rec.uuid}' in composite at ${parentPath}[${i}]`,
+          severity: 'error',
+          fix_type: 'manual',
+        });
+      } else {
+        seenUuids.add(rec.uuid);
+      }
+    }
+  }
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];

@@ -5,8 +5,10 @@
 //! neighbor search.
 
 use super::super::{
-    Error, LogicalPlan, PhysicalPlan, PhysicalPlanner, PlanContext, VectorDistanceMetric,
+    Error, Expr, Literal, LogicalPlan, PhysicalPlan, PhysicalPlanner, PlanContext, TypedExpr,
+    VectorDistanceMetric,
 };
+use raisin_sql::analyzer::BinaryOperator;
 
 impl PhysicalPlanner {
     /// Try to optimise a `Limit { Sort { ... } }` pattern into a `VectorScan`
@@ -131,8 +133,11 @@ impl PhysicalPlanner {
                 .clone()
                 .unwrap_or_else(|| self.default_branch.to_string());
 
-            // TODO: Extract max_distance threshold from filter
-            let max_distance = None;
+            // Extract max_distance threshold from filter predicates
+            // Matches patterns like: WHERE distance_expr < 0.5, WHERE sim < 0.3
+            let max_distance = filter_opt.as_ref().and_then(|filter| {
+                self.extract_max_distance(filter, &vector_column, distance_alias.as_deref())
+            });
 
             if let Some(ref alias_name) = distance_alias {
                 tracing::info!(
@@ -171,5 +176,94 @@ impl PhysicalPlanner {
         }
 
         Ok(None)
+    }
+
+    /// Extract a max_distance threshold from a filter expression.
+    ///
+    /// Scans for patterns like:
+    /// - `embedding <=> EMBEDDING('query') < 0.5`  (direct distance comparison)
+    /// - `distance_alias < 0.5`  (comparison via alias column)
+    /// - Also handles `<=`, and reversed forms (`0.5 > expr`)
+    fn extract_max_distance(
+        &self,
+        filter: &TypedExpr,
+        _vector_column: &str,
+        distance_alias: Option<&str>,
+    ) -> Option<f32> {
+        self.extract_max_distance_from_expr(filter, distance_alias)
+    }
+
+    /// Recursively extract max_distance from an expression tree.
+    /// Handles AND-connected predicates by finding the first distance threshold.
+    fn extract_max_distance_from_expr(
+        &self,
+        expr: &TypedExpr,
+        distance_alias: Option<&str>,
+    ) -> Option<f32> {
+        match &expr.expr {
+            // AND: check both sides
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::And,
+                right,
+            } => {
+                self.extract_max_distance_from_expr(left, distance_alias)
+                    .or_else(|| self.extract_max_distance_from_expr(right, distance_alias))
+            }
+
+            // distance_expr < threshold  or  distance_expr <= threshold
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Lt | BinaryOperator::LtEq,
+                right,
+            } if self.is_distance_related(left, distance_alias) => {
+                Self::expr_to_f32(right)
+            }
+
+            // threshold > distance_expr  or  threshold >= distance_expr
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Gt | BinaryOperator::GtEq,
+                right,
+            } if self.is_distance_related(right, distance_alias) => {
+                Self::expr_to_f32(left)
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Check if an expression is related to vector distance (either a distance
+    /// operator/function or a column matching the distance alias).
+    fn is_distance_related(&self, expr: &TypedExpr, distance_alias: Option<&str>) -> bool {
+        match &expr.expr {
+            // Direct vector distance operator
+            Expr::BinaryOp { op, .. } => matches!(
+                op,
+                BinaryOperator::VectorL2Distance
+                    | BinaryOperator::VectorCosineDistance
+                    | BinaryOperator::VectorInnerProduct
+            ),
+            // Vector distance function
+            Expr::Function { name, .. } => matches!(
+                name.to_uppercase().as_str(),
+                "VECTOR_L2_DISTANCE" | "VECTOR_COSINE_DISTANCE" | "VECTOR_INNER_PRODUCT"
+            ),
+            // Column matching the distance alias (e.g., WHERE sim < 0.5)
+            Expr::Column { column, .. } => {
+                distance_alias.is_some_and(|alias| column == alias)
+            }
+            _ => false,
+        }
+    }
+
+    /// Extract a numeric literal as f32
+    fn expr_to_f32(expr: &TypedExpr) -> Option<f32> {
+        match &expr.expr {
+            Expr::Literal(Literal::Double(d)) => Some(*d as f32),
+            Expr::Literal(Literal::Int(i)) => Some(*i as f32),
+            Expr::Literal(Literal::BigInt(i)) => Some(*i as f32),
+            _ => None,
+        }
     }
 }

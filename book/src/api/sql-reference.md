@@ -529,6 +529,43 @@ SELECT *, embedding <-> EMBEDDING('search query') AS distance
 FROM 'workspace'
 ORDER BY embedding <-> EMBEDDING('search query')
 LIMIT 10
+
+-- Filter by max distance in WHERE clause
+SELECT id, name, embedding <=> EMBEDDING('query') AS distance
+FROM 'workspace'
+WHERE embedding <=> EMBEDDING('query') < 0.3
+ORDER BY distance
+LIMIT 10
+```
+
+#### HYBRID_SEARCH Table Function
+
+Combines full-text search and vector search using Reciprocal Rank Fusion (RRF):
+
+```sql
+-- Hybrid search: fulltext + vector with RRF ranking
+SELECT * FROM HYBRID_SEARCH('search query', 10)
+
+-- With additional filters
+SELECT id, name, score
+FROM HYBRID_SEARCH('database optimization', 20)
+WHERE node_type = 'myapp:Article'
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | TEXT | Search query text |
+| `k` | INT | Number of results to return |
+
+#### EXPLAIN for Vector Queries
+
+`EXPLAIN` shows `VectorScan` details for vector queries, including distance metric, HNSW parameters, and candidate count:
+
+```sql
+EXPLAIN SELECT id, name, embedding <=> EMBEDDING('query') AS distance
+FROM 'workspace'
+ORDER BY distance
+LIMIT 10
 ```
 
 ### Geospatial Functions (PostGIS-Compatible)
@@ -1313,6 +1350,9 @@ ALTER EMBEDDING CONFIG
 -- Disable embeddings
 ALTER EMBEDDING CONFIG SET ENABLED = false;
 
+-- Configure max distance threshold for search results
+ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE = '0.5';
+
 -- Test connection to configured provider
 TEST EMBEDDING CONNECTION;
 ```
@@ -1329,7 +1369,8 @@ TEST EMBEDDING CONNECTION;
 | `ENABLED` | Boolean | `true` or `false` |
 | `INCLUDE_NAME` | Boolean | Include node name in embedding text |
 | `INCLUDE_PATH` | Boolean | Include node path in embedding text |
-| `DISTANCE_METRIC` | String | `Cosine`, `L2`, `InnerProduct`, `Manhattan`, `Hamming` |
+| `DISTANCE_METRIC` | String | `Cosine`, `L2`, `InnerProduct`, `Hamming` |
+| `DEFAULT_MAX_DISTANCE` | String | Maximum distance threshold for search results (default: `0.6`) |
 | `MAX_EMBEDDINGS_PER_REPO` | Integer | Limit per repository (empty = unlimited) |
 
 ### AI Provider Management
