@@ -5,6 +5,12 @@ version: 1
 indexable: true
 index_types: [Property, Fulltext]
 properties:
+  - name: group_id
+    type: String
+    required: true
+    unique: true
+    index: [Property]
+    description: Unique group identifier used for referencing this group
   - name: name
     type: String
     required: true

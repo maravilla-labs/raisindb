@@ -5,6 +5,11 @@ version: 1
 indexable: true
 index_types: [Property, Fulltext]
 properties:
+  - name: user_id
+    type: String
+    required: false
+    index: [Property]
+    description: Links to tenant-level identity user (identity_id from auth system)
   - name: email
     type: String
     required: true
@@ -14,6 +19,11 @@ properties:
     type: String
     required: true
     index: [Fulltext]
+  - name: status
+    type: String
+    required: false
+    default: active
+    description: User status (active, inactive, deleted)
   - name: groups
     type: Array
     required: false

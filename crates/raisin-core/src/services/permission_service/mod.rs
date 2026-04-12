@@ -205,8 +205,16 @@ impl<S: Storage> PermissionService<S> {
             .and_then(as_string)
             .map(|s| s.to_string());
 
-        let direct_roles = extract_string_array(&user_node.properties, "roles");
-        let groups = extract_string_array(&user_node.properties, "groups");
+        // Normalize role/group references: strip path prefixes for backwards compatibility
+        // (older data may store "/roles/viewer" instead of bare "viewer")
+        let direct_roles: Vec<String> = extract_string_array(&user_node.properties, "roles")
+            .into_iter()
+            .map(|r| r.strip_prefix("/roles/").unwrap_or(&r).to_string())
+            .collect();
+        let groups: Vec<String> = extract_string_array(&user_node.properties, "groups")
+            .into_iter()
+            .map(|g| g.strip_prefix("/groups/").unwrap_or(&g).to_string())
+            .collect();
 
         // Resolve group roles
         let mut group_roles = Vec::new();
@@ -343,9 +351,13 @@ impl<S: Storage> PermissionService<S> {
     ) -> Result<Option<Node>> {
         use raisin_storage::NodeRepository;
 
-        eprintln!(
-            "[DEBUG find_user_by_identity_id] Searching for user with identity_id='{}' in tenant='{}', repo='{}', branch='{}', workspace='{}'",
-            identity_id, tenant_id, repo_id, branch, ACCESS_CONTROL_WORKSPACE
+        tracing::debug!(
+            identity_id = identity_id,
+            tenant_id = tenant_id,
+            repo_id = repo_id,
+            branch = branch,
+            workspace = ACCESS_CONTROL_WORKSPACE,
+            "Searching for user by identity_id"
         );
 
         let scope = StorageScope::new(tenant_id, repo_id, branch, ACCESS_CONTROL_WORKSPACE);
@@ -356,30 +368,24 @@ impl<S: Storage> PermissionService<S> {
             .find_by_property(scope, "user_id", &identity_id_value)
             .await?;
 
-        eprintln!(
-            "[DEBUG find_user_by_identity_id] Found {} nodes with user_id property = '{}'",
-            nodes.len(),
-            identity_id
+        tracing::debug!(
+            identity_id = identity_id,
+            node_count = nodes.len(),
+            "Found nodes with matching user_id property"
         );
-
-        for (i, node) in nodes.iter().enumerate() {
-            eprintln!(
-                "[DEBUG find_user_by_identity_id] Node {}: id='{}', type='{}', path='{}', properties={:?}",
-                i, node.id, node.node_type, node.path, node.properties.keys().collect::<Vec<_>>()
-            );
-        }
 
         let result = nodes.into_iter().find(|n| n.node_type == "raisin:User");
 
         if let Some(ref user) = result {
-            eprintln!(
-                "[DEBUG find_user_by_identity_id] Found raisin:User node: id='{}', path='{}'",
-                user.id, user.path
+            tracing::debug!(
+                user_node_id = %user.id,
+                user_path = %user.path,
+                "Found raisin:User node for identity"
             );
         } else {
-            eprintln!(
-                "[DEBUG find_user_by_identity_id] No raisin:User node found for identity_id='{}'",
-                identity_id
+            tracing::debug!(
+                identity_id = identity_id,
+                "No raisin:User node found for identity_id"
             );
         }
 
@@ -411,16 +417,16 @@ impl<S: Storage> PermissionService<S> {
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
-        group_name: &str,
+        group_id: &str,
     ) -> Result<Option<Node>> {
         use raisin_storage::NodeRepository;
 
         let scope = StorageScope::new(tenant_id, repo_id, branch, ACCESS_CONTROL_WORKSPACE);
-        let group_name_value = PropertyValue::String(group_name.to_string());
+        let group_id_value = PropertyValue::String(group_id.to_string());
         let nodes = self
             .storage
             .nodes()
-            .find_by_property(scope, "name", &group_name_value)
+            .find_by_property(scope, "group_id", &group_id_value)
             .await?;
 
         Ok(nodes.into_iter().find(|n| n.node_type == "raisin:Group"))

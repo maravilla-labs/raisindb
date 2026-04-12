@@ -131,10 +131,10 @@ pub async fn ensure_user_node(
 
     // No existing node found - create new one
 
-    // Build role references
+    // Build role references (bare role_id strings, not paths)
     let role_refs: Vec<PropertyValue> = default_roles
         .iter()
-        .map(|role| PropertyValue::String(format!("/roles/{}", role)))
+        .map(|role| PropertyValue::String(role.clone()))
         .collect();
 
     // Build user properties

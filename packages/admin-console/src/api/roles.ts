@@ -136,6 +136,7 @@ function migratePermission(perm: LegacyPermission): Permission {
 
 export interface Role {
   id?: string
+  path?: string
   role_id: string
   name: string
   description?: string
@@ -156,6 +157,7 @@ function nodeToRole(node: Node): Role {
 
   return {
     id: node.id,
+    path: node.path,
     role_id: node.properties?.role_id as string,
     name: node.properties?.name as string,
     description: node.properties?.description as string | undefined,
@@ -198,6 +200,7 @@ export const rolesApi = {
     const response = await sqlApi.executeQuery(repo, sql, [])
     return response.rows.map(row => ({
       id: row.id,
+      path: row.path,
       role_id: row.role_id || row.name,
       name: row.display_name || row.name,
       description: row.description,
@@ -211,8 +214,10 @@ export const rolesApi = {
       .map(nodeToRole)
   },
 
-  get: async (repo: string, branch: string, roleId: string) => {
-    const node = await nodesApi.getAtHead(repo, branch, WORKSPACE, `/${roleId}`)
+  get: async (repo: string, branch: string, rolePath: string) => {
+    // Support both bare ID (legacy) and full path
+    const path = rolePath.startsWith('/') ? rolePath : `/roles/${rolePath}`
+    const node = await nodesApi.getAtHead(repo, branch, WORKSPACE, path)
     return nodeToRole(node)
   },
 
@@ -238,28 +243,33 @@ export const rolesApi = {
   update: async (
     repo: string,
     branch: string,
-    roleId: string,
+    rolePath: string,
     role: Role,
     commit?: { message: string; actor?: string }
   ) => {
+    const path = rolePath.startsWith('/') ? rolePath : `/roles/${rolePath}`
     const request: UpdateNodeRequest = {
       properties: roleToProperties(role),
       commit,
     }
-    const node = await nodesApi.update(repo, branch, WORKSPACE, `/${roleId}`, request)
+    const node = await nodesApi.update(repo, branch, WORKSPACE, path, request)
     return nodeToRole(node)
   },
 
-  delete: (repo: string, branch: string, roleId: string) =>
-    nodesApi.delete(repo, branch, WORKSPACE, `/${roleId}`),
-
-  publish: async (repo: string, branch: string, roleId: string) => {
-    await nodesApi.publish(repo, branch, WORKSPACE, `/${roleId}`)
-    return rolesApi.get(repo, branch, roleId)
+  delete: (repo: string, branch: string, rolePath: string) => {
+    const path = rolePath.startsWith('/') ? rolePath : `/roles/${rolePath}`
+    return nodesApi.delete(repo, branch, WORKSPACE, path)
   },
 
-  unpublish: async (repo: string, branch: string, roleId: string) => {
-    await nodesApi.unpublish(repo, branch, WORKSPACE, `/${roleId}`)
-    return rolesApi.get(repo, branch, roleId)
+  publish: async (repo: string, branch: string, rolePath: string) => {
+    const path = rolePath.startsWith('/') ? rolePath : `/roles/${rolePath}`
+    await nodesApi.publish(repo, branch, WORKSPACE, path)
+    return rolesApi.get(repo, branch, path)
+  },
+
+  unpublish: async (repo: string, branch: string, rolePath: string) => {
+    const path = rolePath.startsWith('/') ? rolePath : `/roles/${rolePath}`
+    await nodesApi.unpublish(repo, branch, WORKSPACE, path)
+    return rolesApi.get(repo, branch, path)
   },
 }

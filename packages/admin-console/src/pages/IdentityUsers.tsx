@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { identityUsersApi, IdentityUser } from '../api/identity-users'
+import { identityUsersApi, IdentityUser, CreateIdentityUserRequest } from '../api/identity-users'
+import { repositoriesApi, Repository } from '../api/repositories'
 import { ApiError } from '../api/client'
 import {
   Users,
@@ -15,9 +16,185 @@ import {
   ExternalLink,
   UserX,
   UserCheck,
+  Plus,
+  X,
 } from 'lucide-react'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast, ToastContainer } from '../components/Toast'
+
+function CreateUserModal({
+  tenantId,
+  onCreated,
+  onClose,
+}: {
+  tenantId: string
+  onCreated: () => void
+  onClose: () => void
+}) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [emailVerified, setEmailVerified] = useState(false)
+  const [selectedRepos, setSelectedRepos] = useState<string[]>([])
+  const [availableRepos, setAvailableRepos] = useState<Repository[]>([])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    repositoriesApi.list().then(setAvailableRepos).catch(() => {})
+  }, [])
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+    setError(null)
+
+    try {
+      const request: CreateIdentityUserRequest = {
+        email: email.trim(),
+        password,
+        display_name: displayName.trim() || undefined,
+        email_verified: emailVerified || undefined,
+        repos: selectedRepos.length > 0 ? selectedRepos : undefined,
+        default_roles: ['viewer', 'authenticated_user'],
+      }
+      await identityUsersApi.create(tenantId, request)
+      onCreated()
+      onClose()
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Failed to create user')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="w-full max-w-lg mx-4 glass-dark rounded-xl border border-white/10 shadow-2xl">
+        <div className="flex items-center justify-between p-6 border-b border-white/10">
+          <h2 className="text-xl font-semibold text-white">Create Identity User</h2>
+          <button onClick={onClose} className="p-1 hover:bg-white/10 rounded-lg transition-colors">
+            <X className="w-5 h-5 text-zinc-400" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {error && (
+            <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-red-200">{error}</p>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-zinc-300 mb-1">
+              Email <span className="text-red-400">*</span>
+            </label>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              placeholder="user@example.com"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-zinc-300 mb-1">
+              Password <span className="text-red-400">*</span>
+            </label>
+            <input
+              type="password"
+              required
+              minLength={8}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              placeholder="Minimum 8 characters"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-zinc-300 mb-1">Display Name</label>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              placeholder="John Doe"
+            />
+          </div>
+
+          <div className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              id="email_verified"
+              checked={emailVerified}
+              onChange={(e) => setEmailVerified(e.target.checked)}
+              className="w-4 h-4 rounded border-white/20 bg-white/5 text-primary-500 focus:ring-primary-500"
+            />
+            <label htmlFor="email_verified" className="text-sm text-zinc-300">
+              Mark email as verified
+            </label>
+          </div>
+
+          {availableRepos.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-zinc-300 mb-1">
+                Create user node in repositories
+              </label>
+              <div className="space-y-2 max-h-32 overflow-y-auto">
+                {availableRepos.map((repo) => (
+                  <label key={repo.repo_id} className="flex items-center gap-2 text-sm text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={selectedRepos.includes(repo.repo_id)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedRepos([...selectedRepos, repo.repo_id])
+                        } else {
+                          setSelectedRepos(selectedRepos.filter((r) => r !== repo.repo_id))
+                        }
+                      }}
+                      className="w-4 h-4 rounded border-white/20 bg-white/5 text-primary-500 focus:ring-primary-500"
+                    />
+                    {repo.repo_id}
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">
+                A raisin:User node with default roles will be created in each selected repository
+              </p>
+            </div>
+          )}
+
+          <div className="flex items-center gap-3 pt-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex items-center gap-2 px-4 py-2 bg-primary-500 hover:bg-primary-600 disabled:bg-primary-500/50 text-white font-medium rounded-lg transition-all"
+            >
+              <Plus className="w-4 h-4" />
+              {saving ? 'Creating...' : 'Create User'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 bg-white/10 hover:bg-white/20 text-zinc-300 rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
 
 export default function IdentityUsers() {
   const { tenantId } = useAuth()
@@ -25,6 +202,7 @@ export default function IdentityUsers() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [searchEmail, setSearchEmail] = useState('')
+  const [showCreateModal, setShowCreateModal] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<{
     message: string
     onConfirm: () => void
@@ -114,6 +292,13 @@ export default function IdentityUsers() {
             Manage users who registered through the authentication system
           </p>
         </div>
+        <button
+          onClick={() => setShowCreateModal(true)}
+          className="flex items-center gap-2 px-4 py-2.5 bg-primary-500 hover:bg-primary-600 text-white font-medium rounded-lg transition-all"
+        >
+          <Plus className="w-5 h-5" />
+          Create User
+        </button>
       </div>
 
       {/* Search */}
@@ -181,7 +366,7 @@ export default function IdentityUsers() {
                     <Users className="w-12 h-12 text-zinc-600 mx-auto mb-3" />
                     <p className="text-zinc-400">No identity users found</p>
                     <p className="text-zinc-500 text-sm mt-1">
-                      Users will appear here when they register
+                      Users will appear here when they register or are created by an admin
                     </p>
                   </td>
                 </tr>
@@ -299,6 +484,17 @@ export default function IdentityUsers() {
           </table>
         </div>
       </div>
+
+      {showCreateModal && (
+        <CreateUserModal
+          tenantId={tenantId}
+          onCreated={() => {
+            showSuccess('Success', 'Identity user created')
+            loadUsers()
+          }}
+          onClose={() => setShowCreateModal(false)}
+        />
+      )}
 
       <ConfirmDialog
         open={deleteConfirm !== null}

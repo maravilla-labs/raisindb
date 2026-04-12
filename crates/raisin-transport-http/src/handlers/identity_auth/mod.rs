@@ -31,14 +31,14 @@
 mod config;
 mod config_types;
 mod constants;
-mod helpers;
+pub(crate) mod helpers;
 mod local;
 mod magic_link;
 mod oidc;
 mod profile;
 mod session;
 mod types;
-mod user_node;
+pub(crate) mod user_node;
 
 // Re-export all public types
 pub use config_types::{

@@ -168,6 +168,7 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/api/raisindb/sys/{tenant_id}/identity-users",
             get(crate::handlers::identity_users::list_identity_users)
+                .post(crate::handlers::identity_users::create_identity_user)
                 .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
         )
         .route(
@@ -175,6 +176,11 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
             get(crate::handlers::identity_users::get_identity_user)
                 .patch(crate::handlers::identity_users::update_identity_user)
                 .delete(crate::handlers::identity_users::delete_identity_user)
+                .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
+        )
+        .route(
+            "/api/raisindb/sys/{tenant_id}/identity-users/{identity_id}/link",
+            post(crate::handlers::identity_users::link_identity_user)
                 .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
         )
         // ----------------------------------------------------------------

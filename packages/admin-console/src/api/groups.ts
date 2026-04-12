@@ -5,6 +5,7 @@ const WORKSPACE = 'raisin:access_control'
 
 export interface Group {
   id?: string
+  path?: string
   group_id: string
   name: string
   description?: string
@@ -16,6 +17,7 @@ export interface Group {
 function nodeToGroup(node: Node): Group {
   return {
     id: node.id,
+    path: node.path,
     group_id: node.properties?.group_id as string,
     name: node.properties?.name as string,
     description: node.properties?.description as string | undefined,
@@ -54,14 +56,16 @@ export const groupsApi = {
     const response = await sqlApi.executeQuery(repo, sql, [])
     return response.rows.map(row => ({
       id: row.id,
+      path: row.path,
       group_id: row.group_id || row.name,
       name: row.display_name || row.name,
       description: row.description,
     }))
   },
 
-  get: async (repo: string, branch: string, groupId: string) => {
-    const node = await nodesApi.getAtHead(repo, branch, WORKSPACE, `/${groupId}`)
+  get: async (repo: string, branch: string, groupPath: string) => {
+    const path = groupPath.startsWith('/') ? groupPath : `/groups/${groupPath}`
+    const node = await nodesApi.getAtHead(repo, branch, WORKSPACE, path)
     return nodeToGroup(node)
   },
 
@@ -87,18 +91,21 @@ export const groupsApi = {
   update: async (
     repo: string,
     branch: string,
-    groupId: string,
+    groupPath: string,
     group: Group,
     commit?: { message: string; actor?: string }
   ) => {
+    const path = groupPath.startsWith('/') ? groupPath : `/groups/${groupPath}`
     const request: UpdateNodeRequest = {
       properties: groupToProperties(group),
       commit,
     }
-    const node = await nodesApi.update(repo, branch, WORKSPACE, `/${groupId}`, request)
+    const node = await nodesApi.update(repo, branch, WORKSPACE, path, request)
     return nodeToGroup(node)
   },
 
-  delete: (repo: string, branch: string, groupId: string) =>
-    nodesApi.delete(repo, branch, WORKSPACE, `/${groupId}`),
+  delete: (repo: string, branch: string, groupPath: string) => {
+    const path = groupPath.startsWith('/') ? groupPath : `/groups/${groupPath}`
+    return nodesApi.delete(repo, branch, WORKSPACE, path)
+  },
 }

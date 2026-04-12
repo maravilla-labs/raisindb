@@ -13,6 +13,15 @@ export interface IdentityUser {
   last_login_at: string | null
 }
 
+export interface CreateIdentityUserRequest {
+  email: string
+  password: string
+  display_name?: string
+  email_verified?: boolean
+  repos?: string[]
+  default_roles?: string[]
+}
+
 export interface UpdateIdentityUserRequest {
   display_name?: string
   is_active?: boolean
@@ -27,6 +36,16 @@ export interface ListIdentityUsersParams {
 }
 
 export const identityUsersApi = {
+  /**
+   * Create a new identity user (admin action)
+   */
+  create: async (tenantId: string, request: CreateIdentityUserRequest): Promise<IdentityUser> => {
+    return api.post<IdentityUser>(
+      `/api/raisindb/sys/${tenantId}/identity-users`,
+      request
+    )
+  },
+
   /**
    * List all identity users for a tenant
    */
