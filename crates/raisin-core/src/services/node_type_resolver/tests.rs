@@ -43,9 +43,7 @@ async fn create_test_node_type(
     storage
         .node_types()
         .put(
-            "test",
-            "main",
-            "main",
+            BranchScope::new("test", "main", "main"),
             node_type,
             CommitMetadata::system("create test node type"),
         )
@@ -359,14 +357,14 @@ async fn test_workspace_pin_resolves_specific_version() {
         .insert("test:Article".to_string(), Some(raisin_hlc::HLC::new(1, 0)));
     storage
         .workspaces()
-        .put("test", "main", pinned_workspace)
+        .put(RepoScope::new("test", "main"), pinned_workspace)
         .await
         .unwrap();
 
     let latest_workspace = Workspace::new("latest".to_string());
     storage
         .workspaces()
-        .put("test", "main", latest_workspace)
+        .put(RepoScope::new("test", "main"), latest_workspace)
         .await
         .unwrap();
 

@@ -13,7 +13,7 @@ use raisin_models::nodes::types::{
     NodeType,
 };
 use raisin_models::nodes::{properties::PropertyValue, Node};
-use raisin_storage::{CommitMetadata, NodeTypeRepository, Storage};
+use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
 
 #[cfg(feature = "storage-rocksdb")]
 use raisin_rocksdb::RocksDBStorage;
@@ -75,9 +75,7 @@ async fn create_test_node_type<S: Storage>(
     storage
         .node_types()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             node_type,
             CommitMetadata::system("create test node type"),
         )
@@ -387,9 +385,7 @@ async fn test_initial_structure_auto_creation() {
     storage
         .node_types()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             folder_type,
             CommitMetadata::system("create folder type"),
         )
@@ -480,9 +476,7 @@ async fn test_nested_initial_structure() {
     storage
         .node_types()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             project_type,
             CommitMetadata::system("create project node type"),
         )
@@ -571,9 +565,7 @@ async fn test_initial_structure_with_transaction_api() {
     storage
         .node_types()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             folder_type,
             CommitMetadata::system("create folder type"),
         )
@@ -711,9 +703,7 @@ async fn test_nested_initial_structure_with_transaction_api() {
     storage
         .node_types()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             project_type,
             CommitMetadata::system("create project node type"),
         )

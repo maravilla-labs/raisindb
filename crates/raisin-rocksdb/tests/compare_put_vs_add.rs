@@ -12,6 +12,7 @@ use raisin_storage::{
     BranchRepository, CreateNodeOptions, NodeRepository, RegistryRepository,
     RepositoryManagementRepository, Storage,
 };
+use raisin_storage::scope::StorageScope;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -106,10 +107,7 @@ async fn compare_put_vs_add_performance() -> Result<()> {
         let node = create_node(i);
         nodes_repo
             .create(
-                TENANT,
-                REPO,
-                BRANCH,
-                WORKSPACE,
+                StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
                 node,
                 CreateNodeOptions::default(),
             )

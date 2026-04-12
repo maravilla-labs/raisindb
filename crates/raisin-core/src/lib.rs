@@ -164,9 +164,7 @@ mod tests {
         storage
             .node_types()
             .put(
-                "default",
-                "default",
-                "main",
+                raisin_storage::scope::BranchScope::new("default", "default", "main"),
                 node_type,
                 raisin_storage::CommitMetadata::system("seed node type for tests"),
             )

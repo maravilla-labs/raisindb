@@ -6,7 +6,7 @@
 use futures::StreamExt;
 use raisin_models::nodes::Node;
 use raisin_sql_execution::{QueryEngine, StaticCatalog};
-use raisin_storage::{CreateNodeOptions, NodeRepository, Storage};
+use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -73,10 +73,7 @@ async fn setup_test_data(
     storage
         .nodes()
         .create(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             content_folder,
             CreateNodeOptions {
                 validate_parent_allows_child: false,
@@ -112,10 +109,7 @@ async fn setup_test_data(
         storage
             .nodes()
             .create(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
+                StorageScope::new(tenant_id, repo_id, branch, workspace),
                 node,
                 CreateNodeOptions {
                     validate_parent_allows_child: false,
@@ -347,10 +341,7 @@ async fn test_branch_isolation() {
     storage
         .nodes()
         .create(
-            tenant_id,
-            repo_id,
-            "main",
-            workspace,
+            StorageScope::new(tenant_id, repo_id, "main", workspace),
             main_node,
             CreateNodeOptions {
                 validate_parent_allows_child: false,
@@ -384,10 +375,7 @@ async fn test_branch_isolation() {
     storage
         .nodes()
         .create(
-            tenant_id,
-            repo_id,
-            "staging",
-            workspace,
+            StorageScope::new(tenant_id, repo_id, "staging", workspace),
             staging_node,
             CreateNodeOptions {
                 validate_parent_allows_child: false,
@@ -754,10 +742,7 @@ async fn test_json_functions() {
     storage
         .nodes()
         .create(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             test_node,
             CreateNodeOptions {
                 validate_parent_allows_child: false,

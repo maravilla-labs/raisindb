@@ -1,7 +1,7 @@
 use super::*;
 use raisin_models::nodes::types::initial_structure::{InitialChild, InitialNodeStructure};
 use raisin_storage::{
-    NodeRepository, NodeTypeRepository, Storage, StorageScope, WorkspaceRepository,
+    BranchScope, NodeRepository, NodeTypeRepository, Storage, StorageScope, WorkspaceRepository,
 };
 use raisin_storage_memory::InMemoryStorage;
 
@@ -52,7 +52,7 @@ async fn creates_root_nodes_from_initial_structure_children() {
 
     storage
         .workspaces()
-        .put("tenant", "repo", workspace.clone())
+        .put(RepoScope::new("tenant", "repo"), workspace.clone())
         .await
         .unwrap();
 
@@ -109,7 +109,7 @@ async fn creates_nested_children_from_initial_structure() {
 
     storage
         .workspaces()
-        .put("tenant", "repo", workspace.clone())
+        .put(RepoScope::new("tenant", "repo"), workspace.clone())
         .await
         .unwrap();
 
@@ -155,13 +155,13 @@ async fn test_end_to_end_repository_initialization() {
 
     let nodetype_repo = storage.node_types();
     let folder_type = nodetype_repo
-        .get(tenant_id, repo_id, "main", "raisin:Folder", None)
+        .get(BranchScope::new(tenant_id, repo_id, "main"), "raisin:Folder", None)
         .await
         .unwrap();
     assert!(folder_type.is_some(), "raisin:Folder NodeType should exist");
 
     let acl_folder_type = nodetype_repo
-        .get(tenant_id, repo_id, "main", "raisin:AclFolder", None)
+        .get(BranchScope::new(tenant_id, repo_id, "main"), "raisin:AclFolder", None)
         .await
         .unwrap();
     assert!(
@@ -175,7 +175,7 @@ async fn test_end_to_end_repository_initialization() {
 
     let workspace_repo = storage.workspaces();
     let default_workspace = workspace_repo
-        .get(tenant_id, repo_id, "default")
+        .get(RepoScope::new(tenant_id, repo_id), "default")
         .await
         .unwrap();
     assert!(
@@ -184,7 +184,7 @@ async fn test_end_to_end_repository_initialization() {
     );
 
     let access_workspace = workspace_repo
-        .get(tenant_id, repo_id, "raisin:access_control")
+        .get(RepoScope::new(tenant_id, repo_id), "raisin:access_control")
         .await
         .unwrap();
     assert!(
@@ -266,7 +266,7 @@ async fn test_deeply_nested_structure() {
 
     storage
         .workspaces()
-        .put("tenant", "repo", workspace.clone())
+        .put(RepoScope::new("tenant", "repo"), workspace.clone())
         .await
         .unwrap();
 
@@ -379,7 +379,7 @@ async fn test_mixed_siblings_and_nested_children() {
 
     storage
         .workspaces()
-        .put("tenant", "repo", workspace.clone())
+        .put(RepoScope::new("tenant", "repo"), workspace.clone())
         .await
         .unwrap();
 
@@ -501,7 +501,7 @@ async fn test_initial_structure_with_properties_and_translations() {
 
     storage
         .workspaces()
-        .put("tenant", "repo", workspace.clone())
+        .put(RepoScope::new("tenant", "repo"), workspace.clone())
         .await
         .unwrap();
 
@@ -550,7 +550,7 @@ async fn test_initial_structure_with_archetype() {
 
     storage
         .workspaces()
-        .put("tenant", "repo", workspace.clone())
+        .put(RepoScope::new("tenant", "repo"), workspace.clone())
         .await
         .unwrap();
 

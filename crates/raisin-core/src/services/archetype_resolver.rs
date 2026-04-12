@@ -232,9 +232,7 @@ mod tests {
         storage
             .archetypes()
             .upsert(
-                "test",
-                "main",
-                "main",
+                BranchScope::new("test", "main", "main"),
                 archetype,
                 CommitMetadata::system("create archetype"),
             )

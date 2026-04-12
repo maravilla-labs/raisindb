@@ -232,9 +232,7 @@ mod tests {
         storage
             .element_types()
             .upsert(
-                "test",
-                "main",
-                "main",
+                BranchScope::new("test", "main", "main"),
                 element_type,
                 CommitMetadata::system("create element type"),
             )

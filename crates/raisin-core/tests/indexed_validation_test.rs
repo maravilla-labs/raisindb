@@ -10,7 +10,7 @@ use raisin_models::nodes::properties::schema::{PropertyType, PropertyValueSchema
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::types::NodeType;
 use raisin_models::nodes::Node;
-use raisin_storage::{CommitMetadata, NodeRepository, NodeTypeRepository, Storage};
+use raisin_storage::{BranchScope, CommitMetadata, NodeRepository, NodeTypeRepository, Storage, StorageScope};
 use raisin_storage_memory::InMemoryStorage;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,9 +65,7 @@ async fn create_node_type_with_unique_property(storage: &InMemoryStorage, name: 
     storage
         .node_types()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             node_type,
             CommitMetadata::system("create unique node type"),
         )
@@ -126,10 +124,7 @@ async fn test_unique_validation_without_index() {
     storage
         .nodes()
         .create(
-            "default",
-            "default",
-            "main",
-            "ws1",
+            StorageScope::new("default", "default", "main", "ws1"),
             node1.clone(),
             raisin_storage::CreateNodeOptions::default(),
         )
@@ -172,10 +167,7 @@ async fn test_unique_validation_with_index() {
     storage
         .nodes()
         .create(
-            "default",
-            "default",
-            "main",
-            "ws1",
+            StorageScope::new("default", "default", "main", "ws1"),
             node1.clone(),
             raisin_storage::CreateNodeOptions::default(),
         )
@@ -243,10 +235,7 @@ async fn test_unique_validation_with_event_bus_integration() {
     storage
         .nodes()
         .create(
-            "default",
-            "default",
-            "main",
-            "ws1",
+            StorageScope::new("default", "default", "main", "ws1"),
             node1.clone(),
             raisin_storage::CreateNodeOptions::default(),
         )
@@ -293,10 +282,7 @@ async fn test_performance_comparison() {
         storage
             .nodes()
             .create(
-                "default",
-                "default",
-                "main",
-                "ws1",
+                StorageScope::new("default", "default", "main", "ws1"),
                 node,
                 raisin_storage::CreateNodeOptions::default(),
             )

@@ -9,7 +9,7 @@ use raisin_models::workspace::Workspace;
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::{
     BranchRepository, CreateNodeOptions, NodeRepository, RegistryRepository,
-    RepositoryManagementRepository, Storage,
+    RepositoryManagementRepository, Storage, StorageScope,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -130,10 +130,7 @@ async fn profile_node_operations() -> Result<()> {
 
             nodes
                 .create(
-                    TENANT,
-                    REPO,
-                    BRANCH,
-                    WORKSPACE,
+                    StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )

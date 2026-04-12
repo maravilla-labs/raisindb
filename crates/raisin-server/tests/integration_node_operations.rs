@@ -381,9 +381,9 @@ async fn setup_repository_and_branch() {
         REPO,
         status,
         if body_text.len() > 100 {
-            &format!("{}...", &body_text[..100])
+            format!("{}...", &body_text[..100])
         } else {
-            &body_text
+            body_text.clone()
         }
     );
 
@@ -609,9 +609,9 @@ async fn test_rename_operations_impl() {
         "    Response: {} - {}",
         status,
         if body.len() > 100 {
-            &format!("{}...", &body[..100])
+            format!("{}...", &body[..100])
         } else {
-            &body
+            body.clone()
         }
     );
     assert_eq!(status, 200, "Rename unpublished node should succeed");

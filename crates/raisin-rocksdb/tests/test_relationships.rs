@@ -3,6 +3,7 @@
 use raisin_models::nodes::RelationRef;
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::{BranchRepository, RelationRepository, Storage};
+use raisin_storage::scope::StorageScope;
 use tempfile::TempDir;
 
 async fn setup_storage() -> (RocksDBStorage, String, String, String, String) {
@@ -55,10 +56,7 @@ async fn test_add_and_get_relationships() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             relation.clone(),
@@ -69,7 +67,7 @@ async fn test_add_and_get_relationships() {
     // Get outgoing relationships from node1
     let outgoing = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, &branch, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", None)
         .await
         .unwrap();
 
@@ -82,7 +80,7 @@ async fn test_add_and_get_relationships() {
     // Get incoming relationships to node2
     let incoming = storage
         .relations()
-        .get_incoming_relations(&tenant_id, &repo_id, &branch, &workspace, "node2", None)
+        .get_incoming_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node2", None)
         .await
         .unwrap();
 
@@ -108,10 +106,7 @@ async fn test_remove_relationship() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             relation,
@@ -122,7 +117,7 @@ async fn test_remove_relationship() {
     // Verify it exists
     let outgoing = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, &branch, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(outgoing.len(), 1);
@@ -131,7 +126,7 @@ async fn test_remove_relationship() {
     let removed = storage
         .relations()
         .remove_relation(
-            &tenant_id, &repo_id, &branch, &workspace, "node1", &workspace, "node2",
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", &workspace, "node2",
         )
         .await
         .unwrap();
@@ -140,7 +135,7 @@ async fn test_remove_relationship() {
     // Verify it's gone
     let outgoing = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, &branch, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(outgoing.len(), 0);
@@ -175,10 +170,7 @@ async fn test_filter_by_type() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             rel1,
@@ -188,10 +180,7 @@ async fn test_filter_by_type() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             rel2,
@@ -201,10 +190,7 @@ async fn test_filter_by_type() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             rel3,
@@ -216,10 +202,7 @@ async fn test_filter_by_type() {
     let assets = storage
         .relations()
         .get_relations_by_type(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Asset",
             None,
@@ -234,10 +217,7 @@ async fn test_filter_by_type() {
     let pages = storage
         .relations()
         .get_relations_by_type(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             None,
@@ -269,10 +249,7 @@ async fn test_cross_workspace_relationships() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            workspace1,
+            StorageScope::new(&tenant_id, &repo_id, &branch, workspace1),
             "node1",
             "raisin:Page",
             relation,
@@ -283,7 +260,7 @@ async fn test_cross_workspace_relationships() {
     // Verify the relationship
     let outgoing = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, &branch, workspace1, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, &branch, workspace1), "node1", None)
         .await
         .unwrap();
 
@@ -293,7 +270,7 @@ async fn test_cross_workspace_relationships() {
     // Verify incoming relationship in workspace2
     let incoming = storage
         .relations()
-        .get_incoming_relations(&tenant_id, &repo_id, &branch, workspace2, "node2", None)
+        .get_incoming_relations(StorageScope::new(&tenant_id, &repo_id, &branch, workspace2), "node2", None)
         .await
         .unwrap();
 
@@ -311,10 +288,7 @@ async fn test_remove_all_relations_for_node() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             RelationRef::simple(
@@ -330,10 +304,7 @@ async fn test_remove_all_relations_for_node() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             RelationRef::simple(
@@ -349,10 +320,7 @@ async fn test_remove_all_relations_for_node() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node2",
             "raisin:Page",
             RelationRef::simple(
@@ -368,14 +336,14 @@ async fn test_remove_all_relations_for_node() {
     // Remove all relationships for node1
     storage
         .relations()
-        .remove_all_relations_for_node(&tenant_id, &repo_id, &branch, &workspace, "node1")
+        .remove_all_relations_for_node(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1")
         .await
         .unwrap();
 
     // Verify node1 has no outgoing relationships
     let outgoing = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, &branch, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(outgoing.len(), 0);
@@ -383,7 +351,7 @@ async fn test_remove_all_relations_for_node() {
     // Verify node1 has no incoming relationships
     let incoming = storage
         .relations()
-        .get_incoming_relations(&tenant_id, &repo_id, &branch, &workspace, "node1", None)
+        .get_incoming_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(incoming.len(), 0);
@@ -391,7 +359,7 @@ async fn test_remove_all_relations_for_node() {
     // Verify node2's relationship to node1 was removed
     let node2_outgoing = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, &branch, &workspace, "node2", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node2", None)
         .await
         .unwrap();
     assert_eq!(node2_outgoing.len(), 0);
@@ -432,10 +400,7 @@ async fn test_branch_isolation() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            branch1,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, branch1, &workspace),
             "node1",
             "raisin:Page",
             rel1,
@@ -453,10 +418,7 @@ async fn test_branch_isolation() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            branch2,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, branch2, &workspace),
             "node1",
             "raisin:Page",
             rel2,
@@ -467,7 +429,7 @@ async fn test_branch_isolation() {
     // Verify branch1 only sees its relationship
     let branch1_rels = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, branch1, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, branch1, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(branch1_rels.len(), 1);
@@ -477,7 +439,7 @@ async fn test_branch_isolation() {
     // Verify branch2 only sees its relationship
     let branch2_rels = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, branch2, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, branch2, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(branch2_rels.len(), 1);
@@ -513,10 +475,7 @@ async fn test_revision_time_travel() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             rel1,
@@ -534,10 +493,7 @@ async fn test_revision_time_travel() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             "raisin:Page",
             rel2,
@@ -558,10 +514,7 @@ async fn test_revision_time_travel() {
     let rels_with_both = storage
         .relations()
         .get_outgoing_relations(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             Some(&rev_with_both),
         )
@@ -576,7 +529,7 @@ async fn test_revision_time_travel() {
     storage
         .relations()
         .remove_relation(
-            &tenant_id, &repo_id, &branch, &workspace, "node1", &workspace, "node2",
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", &workspace, "node2",
         )
         .await
         .unwrap();
@@ -584,7 +537,7 @@ async fn test_revision_time_travel() {
     // Query at HEAD (after removal - should only see node3)
     let rels_after_remove = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, &branch, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(
@@ -600,10 +553,7 @@ async fn test_revision_time_travel() {
     let rels_time_travel = storage
         .relations()
         .get_outgoing_relations(
-            &tenant_id,
-            &repo_id,
-            &branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
             "node1",
             Some(&rev_with_both),
         )
@@ -647,10 +597,7 @@ async fn test_branch_and_revision_combined() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            main_branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, main_branch, &workspace),
             "node1",
             "raisin:Page",
             RelationRef::simple(
@@ -675,10 +622,7 @@ async fn test_branch_and_revision_combined() {
     storage
         .relations()
         .add_relation(
-            &tenant_id,
-            &repo_id,
-            feature_branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, feature_branch, &workspace),
             "node1",
             "raisin:Page",
             RelationRef::simple(
@@ -703,10 +647,7 @@ async fn test_branch_and_revision_combined() {
     let main_rels = storage
         .relations()
         .get_outgoing_relations(
-            &tenant_id,
-            &repo_id,
-            main_branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, main_branch, &workspace),
             "node1",
             Some(&main_rev),
         )
@@ -719,10 +660,7 @@ async fn test_branch_and_revision_combined() {
     let feature_rels = storage
         .relations()
         .get_outgoing_relations(
-            &tenant_id,
-            &repo_id,
-            feature_branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, feature_branch, &workspace),
             "node1",
             Some(&feature_rev),
         )
@@ -734,7 +672,7 @@ async fn test_branch_and_revision_combined() {
     // Verify branches are completely isolated
     let main_current = storage
         .relations()
-        .get_outgoing_relations(&tenant_id, &repo_id, main_branch, &workspace, "node1", None)
+        .get_outgoing_relations(StorageScope::new(&tenant_id, &repo_id, main_branch, &workspace), "node1", None)
         .await
         .unwrap();
     assert_eq!(main_current.len(), 1);
@@ -743,10 +681,7 @@ async fn test_branch_and_revision_combined() {
     let feature_current = storage
         .relations()
         .get_outgoing_relations(
-            &tenant_id,
-            &repo_id,
-            feature_branch,
-            &workspace,
+            StorageScope::new(&tenant_id, &repo_id, feature_branch, &workspace),
             "node1",
             None,
         )

@@ -9,8 +9,8 @@ use raisin_models::nodes::types::element::field_types::FieldSchema as ElementFie
 use raisin_models::nodes::types::element::fields::base_field::FieldTypeSchema;
 use raisin_models::nodes::types::NodeType;
 use raisin_storage::{
-    ArchetypeRepository, CommitMetadata, ElementTypeRepository, NodeRepository, NodeTypeRepository,
-    Storage, StorageScope,
+    ArchetypeRepository, BranchScope, CommitMetadata, ElementTypeRepository, NodeRepository,
+    NodeTypeRepository, Storage, StorageScope,
 };
 use raisin_storage_memory::InMemoryStorage;
 use std::collections::HashMap;
@@ -57,9 +57,7 @@ async fn create_node_type(
     storage
         .node_types()
         .put(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             node_type,
             CommitMetadata::system("create test node type"),
         )
@@ -370,9 +368,7 @@ async fn test_archetype_required_field_validation() {
     storage
         .archetypes()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             archetype,
             CommitMetadata::system("create hero archetype"),
         )
@@ -451,9 +447,7 @@ async fn test_element_type_required_field_validation() {
     storage
         .element_types()
         .upsert(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             element_type,
             CommitMetadata::system("create block element type"),
         )
@@ -548,9 +542,7 @@ async fn test_validation_with_inheritance() {
     storage
         .node_types()
         .put(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             base_type,
             CommitMetadata::system("create base node type"),
         )
@@ -593,9 +585,7 @@ async fn test_validation_with_inheritance() {
     storage
         .node_types()
         .put(
-            "default",
-            "default",
-            "main",
+            BranchScope::new("default", "default", "main"),
             child_type,
             CommitMetadata::system("create child node type"),
         )

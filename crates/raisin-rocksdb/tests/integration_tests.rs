@@ -51,6 +51,7 @@ use raisin_storage::{
     NodeRepository, NodeTypeRepository, RegistryRepository, RepositoryManagementRepository,
     RevisionRepository, Storage, UpdateNodeOptions, WorkspaceRepository,
 };
+use raisin_storage::scope::{BranchScope, StorageScope, RepoScope};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -226,9 +227,7 @@ impl TestStorage {
         };
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 folder_type,
                 CommitMetadata::system("setup standard nodetypes"),
             )
@@ -238,9 +237,7 @@ impl TestStorage {
         let page_type = self.create_test_nodetype("raisin:Page");
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 page_type,
                 CommitMetadata::system("setup standard nodetypes"),
             )
@@ -250,9 +247,7 @@ impl TestStorage {
         let doc_type = self.create_test_nodetype("raisin:Document");
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 doc_type,
                 CommitMetadata::system("setup standard nodetypes"),
             )
@@ -275,10 +270,7 @@ impl TestStorage {
             // Check if parent exists
             if nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     &parent_path,
                     None,
                 )
@@ -289,10 +281,7 @@ impl TestStorage {
                 let parent_node = self.create_test_node(&parent_path, "raisin:Folder");
                 nodes
                     .create(
-                        constants::TENANT,
-                        constants::REPO,
-                        constants::BRANCH,
-                        constants::WORKSPACE,
+                        StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                         parent_node,
                         CreateNodeOptions::default(),
                     )
@@ -304,10 +293,7 @@ impl TestStorage {
         let node = self.create_test_node(path, node_type);
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node.clone(),
                 CreateNodeOptions::default(),
             )
@@ -346,10 +332,7 @@ mod node_repository {
         let repo1_node = fixture.create_test_node("/repo1-node", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 repo1_node.clone(),
                 CreateNodeOptions::default(),
             )
@@ -386,16 +369,13 @@ mod node_repository {
         let workspace2 = Workspace::new(constants::WORKSPACE.to_string());
         storage
             .workspaces()
-            .put(constants::TENANT, "repo2", workspace2)
+            .put(RepoScope::new(constants::TENANT, "repo2"), workspace2)
             .await?;
 
         // Verify repo2 is empty (repository isolation)
         let repo2_nodes = nodes
             .list_root(
-                constants::TENANT,
-                "repo2",
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, "repo2", constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -440,16 +420,13 @@ mod node_repository {
         let tenant2_workspace = Workspace::new(constants::WORKSPACE.to_string());
         storage
             .workspaces()
-            .put("tenant2", "tenant2-repo", tenant2_workspace)
+            .put(RepoScope::new("tenant2", "tenant2-repo"), tenant2_workspace)
             .await?;
 
         // Verify tenant2 repository is empty (tenant isolation)
         let tenant2_nodes = nodes
             .list_root(
-                "tenant2",
-                "tenant2-repo",
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new("tenant2", "tenant2-repo", constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -464,16 +441,13 @@ mod node_repository {
         let workspace3 = Workspace::new("workspace3".to_string());
         storage
             .workspaces()
-            .put(constants::TENANT, constants::REPO, workspace3)
+            .put(RepoScope::new(constants::TENANT, constants::REPO), workspace3)
             .await?;
 
         // Verify workspace3 is empty (workspace isolation)
         let workspace3_nodes = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "workspace3",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "workspace3"),
                 ListOptions::default(),
             )
             .await?;
@@ -486,10 +460,7 @@ mod node_repository {
         // Verify original workspace still has its node
         let original_nodes = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -513,10 +484,7 @@ mod node_repository {
         let node1 = fixture.create_test_node("/test-node", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO, // repo1 = "test-repo"
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node1.clone(),
                 CreateNodeOptions::default(),
             )
@@ -528,10 +496,7 @@ mod node_repository {
         // List nodes in repo1
         let repo1_nodes = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -574,7 +539,7 @@ mod node_repository {
         let workspace2 = Workspace::new(constants::WORKSPACE.to_string());
         storage
             .workspaces()
-            .put(constants::TENANT, "repo2", workspace2)
+            .put(RepoScope::new(constants::TENANT, "repo2"), workspace2)
             .await?;
 
         println!("\n=== Created repo2 ===");
@@ -584,10 +549,7 @@ mod node_repository {
         eprintln!("[DEBUG] Calling list_root for repo2...");
         let repo2_nodes = nodes
             .list_root(
-                constants::TENANT,
-                "repo2", // Different repository
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, "repo2", constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -630,10 +592,7 @@ mod node_repository {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node_xxxx.clone(),
                 CreateNodeOptions::default(),
             )
@@ -641,10 +600,7 @@ mod node_repository {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node_11111.clone(),
                 CreateNodeOptions::default(),
             )
@@ -653,10 +609,7 @@ mod node_repository {
         // List root nodes and verify both are visible
         let root_nodes = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -699,16 +652,13 @@ mod node_repository {
 
         let workspace2 = Workspace::new("workspace2".to_string());
         workspaces
-            .put(constants::TENANT, constants::REPO, workspace2)
+            .put(RepoScope::new(constants::TENANT, constants::REPO), workspace2)
             .await?;
 
         // List root in second workspace - should be empty
         let root_nodes_ws2 = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "workspace2",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "workspace2"),
                 ListOptions::default(),
             )
             .await?;
@@ -752,16 +702,13 @@ mod node_repository {
         // Create workspace for repo2
         let workspace_repo2 = Workspace::new(constants::WORKSPACE.to_string());
         workspaces
-            .put(constants::TENANT, "repo2", workspace_repo2)
+            .put(RepoScope::new(constants::TENANT, "repo2"), workspace_repo2)
             .await?;
 
         // List root in repo2 - should be empty
         let root_nodes_repo2 = nodes
             .list_root(
-                constants::TENANT,
-                "repo2",
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, "repo2", constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -807,16 +754,13 @@ mod node_repository {
         // Create workspace for tenant2
         let workspace_tenant2 = Workspace::new(constants::WORKSPACE.to_string());
         workspaces
-            .put("tenant2", "repo-tenant2", workspace_tenant2)
+            .put(RepoScope::new("tenant2", "repo-tenant2"), workspace_tenant2)
             .await?;
 
         // List root in tenant2 - should be empty
         let root_nodes_tenant2 = nodes
             .list_root(
-                "tenant2",
-                "repo-tenant2",
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new("tenant2", "repo-tenant2", constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -833,10 +777,7 @@ mod node_repository {
 
         let root_nodes_original = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -863,10 +804,7 @@ mod node_repository {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node.clone(),
                 CreateNodeOptions::default(),
             )
@@ -875,10 +813,7 @@ mod node_repository {
         // Retrieve the node
         let retrieved = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_id,
                 None,
             )
@@ -908,10 +843,7 @@ mod node_repository {
         // Retrieve by path
         let retrieved = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/documents/readme",
                 None,
             )
@@ -935,10 +867,7 @@ mod node_repository {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node,
                 CreateNodeOptions::default(),
             )
@@ -947,10 +876,7 @@ mod node_repository {
         // Delete the node
         let deleted = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_id,
                 DeleteNodeOptions::default(),
             )
@@ -961,10 +887,7 @@ mod node_repository {
         // Verify it's gone
         let retrieved = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_id,
                 None,
             )
@@ -990,10 +913,7 @@ mod node_repository {
         for node in [page1, page2, folder] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -1003,10 +923,7 @@ mod node_repository {
         // List only pages
         let pages = nodes
             .list_by_type(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "raisin:Page",
                 ListOptions::default(),
             )
@@ -1034,10 +951,7 @@ mod node_repository {
         for node in [parent.clone(), child1, child2, other] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -1047,10 +961,7 @@ mod node_repository {
         // List children of /docs
         let children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.path,
                 ListOptions::default(),
             )
@@ -1078,10 +989,7 @@ mod node_repository {
         for node in [root1, root2, nested] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -1091,10 +999,7 @@ mod node_repository {
         // List root nodes (parent is "/")
         let roots = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -1121,10 +1026,7 @@ mod node_repository {
         for node in [folder1.clone(), folder2.clone(), page1.clone()] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -1135,10 +1037,7 @@ mod node_repository {
         eprintln!("\n=== Test 1: list_root() ===");
         let root_nodes = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -1173,10 +1072,7 @@ mod node_repository {
         eprintln!("\n=== Test 2: list_children('/') ===");
         let children_of_root = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/",
                 ListOptions::default(),
             )
@@ -1224,10 +1120,7 @@ mod node_repository {
         for node in [nested1.clone(), nested2.clone(), nested3.clone()] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -1238,10 +1131,7 @@ mod node_repository {
         eprintln!("\n=== Test 3: list_children('/folder1') ===");
         let folder1_children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/folder1",
                 ListOptions::default(),
             )
@@ -1270,10 +1160,7 @@ mod node_repository {
         eprintln!("\n=== Test 4: list_by_parent() with folder1 ID ===");
         let folder1_from_db = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &folder1.id,
                 None,
             )
@@ -1281,10 +1168,7 @@ mod node_repository {
             .unwrap();
         let children_by_parent = nodes
             .list_by_parent(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &folder1_from_db.id,
                 ListOptions::default(),
             )
@@ -1313,10 +1197,7 @@ mod node_repository {
         for node in [deep1, deep2] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -1327,10 +1208,7 @@ mod node_repository {
         eprintln!("\n=== Test 5: list_children('/folder1/subfolder') ===");
         let deep_children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/folder1/subfolder",
                 ListOptions::default(),
             )
@@ -1351,10 +1229,7 @@ mod node_repository {
         eprintln!("\n=== Test 6: has_children() at all levels ===");
         let root_node = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "M2016N2019L2022T",
                 None,
             )
@@ -1362,10 +1237,7 @@ mod node_repository {
             .unwrap();
         let root_has_children = nodes
             .has_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &root_node.id,
                 None,
             )
@@ -1375,10 +1247,7 @@ mod node_repository {
 
         let folder1_has_children = nodes
             .has_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &folder1.id,
                 None,
             )
@@ -1388,10 +1257,7 @@ mod node_repository {
 
         let page1_has_children = nodes
             .has_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &page1.id,
                 None,
             )
@@ -1403,10 +1269,7 @@ mod node_repository {
         eprintln!("\n=== Test 7: Empty folder (folder2) ===");
         let folder2_children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/folder2",
                 ListOptions::default(),
             )
@@ -1416,10 +1279,7 @@ mod node_repository {
 
         let folder2_has_children = nodes
             .has_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &folder2.id,
                 None,
             )
@@ -1446,10 +1306,7 @@ mod node_repository {
         for node in [parent.clone(), child, leaf.clone()] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -1459,10 +1316,7 @@ mod node_repository {
         // Parent should have children (has_children expects ID, not path)
         let has_children = nodes
             .has_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.id,
                 None,
             )
@@ -1472,10 +1326,7 @@ mod node_repository {
         // Leaf should not have children
         let has_children = nodes
             .has_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &leaf.id,
                 None,
             )
@@ -1504,10 +1355,7 @@ mod node_repository {
 
         let created = nodes
             .create_deep_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 deep_path,
                 node,
                 "raisin:Folder", // Parent node type
@@ -1524,10 +1372,7 @@ mod node_repository {
         // Verify all parent folders were created
         let content = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/content",
                 None,
             )
@@ -1539,10 +1384,7 @@ mod node_repository {
 
         let blog = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/content/blog",
                 None,
             )
@@ -1554,10 +1396,7 @@ mod node_repository {
 
         let year = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/content/blog/2024",
                 None,
             )
@@ -1570,10 +1409,7 @@ mod node_repository {
         // Verify tree structure is correct
         let children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/content/blog/2024",
                 ListOptions::default(),
             )
@@ -1603,11 +1439,11 @@ mod workspace_repository {
         let workspace = Workspace::new("test-ws".to_string());
 
         workspaces
-            .put(constants::TENANT, constants::REPO, workspace.clone())
+            .put(RepoScope::new(constants::TENANT, constants::REPO), workspace.clone())
             .await?;
 
         let retrieved = workspaces
-            .get(constants::TENANT, constants::REPO, &workspace.name)
+            .get(RepoScope::new(constants::TENANT, constants::REPO), &workspace.name)
             .await?;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, workspace.name);
@@ -1626,11 +1462,11 @@ mod workspace_repository {
         for i in 1..=3 {
             let ws = Workspace::new(format!("ws{}", i));
             workspaces
-                .put(constants::TENANT, constants::REPO, ws)
+                .put(RepoScope::new(constants::TENANT, constants::REPO), ws)
                 .await?;
         }
 
-        let all = workspaces.list(constants::TENANT, constants::REPO).await?;
+        let all = workspaces.list(RepoScope::new(constants::TENANT, constants::REPO)).await?;
         // Should include the default workspace plus 3 new ones
         assert!(all.len() >= 3);
 
@@ -1660,9 +1496,7 @@ mod nodetype_repository {
         let repo1_nodetype = fixture.create_test_nodetype("Article");
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 repo1_nodetype.clone(),
                 CommitMetadata::system("test seed repo1 nodetype"),
             )
@@ -1670,7 +1504,7 @@ mod nodetype_repository {
 
         // Verify it exists in repo1 (3 from setup_standard_nodetypes + 1 Article = 4)
         let repo1_types = node_types
-            .list(constants::TENANT, constants::REPO, constants::BRANCH, None)
+            .list(BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH), None)
             .await?;
         assert_eq!(
             repo1_types.len(),
@@ -1694,7 +1528,7 @@ mod nodetype_repository {
 
         // Verify repo2 has no NodeTypes (repository isolation)
         let repo2_types = node_types
-            .list(constants::TENANT, "repo2", constants::BRANCH, None)
+            .list(BranchScope::new(constants::TENANT, "repo2", constants::BRANCH), None)
             .await?;
         assert_eq!(
             repo2_types.len(),
@@ -1721,7 +1555,7 @@ mod nodetype_repository {
 
         // Verify tenant2 repository has no NodeTypes (tenant isolation)
         let tenant2_types = node_types
-            .list("tenant2", "tenant2-repo", constants::BRANCH, None)
+            .list(BranchScope::new("tenant2", "tenant2-repo", constants::BRANCH), None)
             .await?;
         assert_eq!(
             tenant2_types.len(),
@@ -1731,7 +1565,7 @@ mod nodetype_repository {
 
         // Verify repo1 still has its NodeTypes
         let repo1_types_final = node_types
-            .list(constants::TENANT, constants::REPO, constants::BRANCH, None)
+            .list(BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH), None)
             .await?;
         assert_eq!(
             repo1_types_final.len(),
@@ -1753,9 +1587,7 @@ mod nodetype_repository {
 
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 node_type.clone(),
                 CommitMetadata::system("test seed nodetype"),
             )
@@ -1763,9 +1595,7 @@ mod nodetype_repository {
 
         let retrieved = node_types
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 &node_type.name,
                 None,
             )
@@ -1789,9 +1619,7 @@ mod nodetype_repository {
             let nt = fixture.create_test_nodetype(&format!("test:Type{}", i));
             node_types
                 .put(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
+                    BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                     nt,
                     CommitMetadata::system("test list nodetypes"),
                 )
@@ -1799,7 +1627,7 @@ mod nodetype_repository {
         }
 
         let all = node_types
-            .list(constants::TENANT, constants::REPO, constants::BRANCH, None)
+            .list(BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH), None)
             .await?;
         assert!(all.len() >= 3);
 
@@ -1818,9 +1646,7 @@ mod nodetype_repository {
 
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 node_type,
                 CommitMetadata::system("test delete nodetype"),
             )
@@ -1828,9 +1654,7 @@ mod nodetype_repository {
 
         let deleted = node_types
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 &name,
                 CommitMetadata::system("test delete nodetype"),
             )
@@ -1839,9 +1663,7 @@ mod nodetype_repository {
 
         let retrieved = node_types
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 &name,
                 None,
             )
@@ -1864,9 +1686,7 @@ mod nodetype_repository {
 
         let revision = node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 node_type.clone(),
                 CommitMetadata::system("seed nodetype for branch copy"),
             )
@@ -1887,9 +1707,7 @@ mod nodetype_repository {
 
         let copied = node_types
             .get(
-                constants::TENANT,
-                constants::REPO,
-                feature_branch,
+                BranchScope::new(constants::TENANT, constants::REPO, feature_branch),
                 &node_type.name,
                 None,
             )
@@ -1902,9 +1720,7 @@ mod nodetype_repository {
 
         let resolved_revision = node_types
             .resolve_version_revision(
-                constants::TENANT,
-                constants::REPO,
-                feature_branch,
+                BranchScope::new(constants::TENANT, constants::REPO, feature_branch),
                 &node_type.name,
                 node_type.version.unwrap_or(1),
             )
@@ -2114,10 +1930,7 @@ mod transaction {
         storage_arc
             .nodes()
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 source.clone(),
                 raisin_storage::CreateNodeOptions::default(),
             )
@@ -2128,10 +1941,7 @@ mod transaction {
         storage_arc
             .nodes()
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 raisin_storage::CreateNodeOptions::default(),
             )
@@ -2141,10 +1951,7 @@ mod transaction {
         let source_before_tx = storage_arc
             .nodes()
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 None,
             )
@@ -2200,10 +2007,7 @@ mod transaction {
         let copied = storage_arc
             .nodes()
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/target-parent/source",
                 None,
             )
@@ -2215,10 +2019,7 @@ mod transaction {
             let children = storage_arc
                 .nodes()
                 .list_children(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     "/target-parent",
                     ListOptions::default(),
                 )
@@ -2291,7 +2092,7 @@ mod multi_tenancy {
 
         // Create workspace for tenant2
         let ws2 = Workspace::new(constants::WORKSPACE.to_string());
-        storage.workspaces().put("tenant2", "repo2", ws2).await?;
+        storage.workspaces().put(RepoScope::new("tenant2", "repo2"), ws2).await?;
 
         // Create nodes in both tenants
         let node1 = fixture.create_test_node("/node", "raisin:Page");
@@ -2299,10 +2100,7 @@ mod multi_tenancy {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node1.clone(),
                 CreateNodeOptions::default(),
             )
@@ -2310,10 +2108,7 @@ mod multi_tenancy {
 
         nodes
             .create(
-                "tenant2",
-                "repo2",
-                "main",
-                constants::WORKSPACE,
+                StorageScope::new("tenant2", "repo2", "main", constants::WORKSPACE),
                 node2.clone(),
                 CreateNodeOptions::default(),
             )
@@ -2322,10 +2117,7 @@ mod multi_tenancy {
         // Verify isolation - getting from tenant1 shouldn't return tenant2's node
         let from_tenant1 = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node1.id,
                 None,
             )
@@ -2337,10 +2129,7 @@ mod multi_tenancy {
         // Verify we can't access tenant2's node from tenant1 context
         let cross_access = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node2.id,
                 None,
             )
@@ -2372,10 +2161,7 @@ mod mvcc_time_travel {
         let mut node = fixture.create_test_node("/doc", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node.clone(),
                 CreateNodeOptions::default(),
             )
@@ -2390,10 +2176,7 @@ mod mvcc_time_travel {
         node.name = "Updated Doc".to_string();
         nodes
             .update(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node.clone(),
                 UpdateNodeOptions::default(),
             )
@@ -2448,10 +2231,7 @@ mod mvcc_time_travel {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node,
                 CreateNodeOptions::default(),
             )
@@ -2460,10 +2240,7 @@ mod mvcc_time_travel {
         // Delete the node (creates tombstone at HEAD)
         nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_id,
                 DeleteNodeOptions::default(),
             )
@@ -2472,10 +2249,7 @@ mod mvcc_time_travel {
         // get_by_path should return None (skip tombstone)
         let retrieved = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/temp",
                 None,
             )
@@ -2502,10 +2276,7 @@ mod mvcc_time_travel {
         let parent = fixture.create_test_node("/folder", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -2517,10 +2288,7 @@ mod mvcc_time_travel {
         let child1 = fixture.create_test_node("/folder/child1", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child1,
                 CreateNodeOptions::default(),
             )
@@ -2532,10 +2300,7 @@ mod mvcc_time_travel {
         let child2 = fixture.create_test_node("/folder/child2", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child2,
                 CreateNodeOptions::default(),
             )
@@ -2595,10 +2360,7 @@ mod mvcc_time_travel {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent,
                 CreateNodeOptions::default(),
             )
@@ -2606,10 +2368,7 @@ mod mvcc_time_travel {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child,
                 CreateNodeOptions::default(),
             )
@@ -2618,10 +2377,7 @@ mod mvcc_time_travel {
         // Delete child - should tombstone the ORDERED_CHILDREN entry
         nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &child_id,
                 DeleteNodeOptions::default(),
             )
@@ -2630,10 +2386,7 @@ mod mvcc_time_travel {
         // After delete, child should not appear in current children list
         let children = nodes
             .list_by_parent(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/parent",
                 ListOptions::default(),
             )
@@ -2672,10 +2425,7 @@ mod deep_traversal {
         for node in [root.clone(), folder, page] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -2739,10 +2489,7 @@ mod tree_operations {
         let source = fixture.create_test_node("/source", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 source.clone(),
                 CreateNodeOptions::default(),
             )
@@ -2752,10 +2499,7 @@ mod tree_operations {
         let parent = fixture.create_test_node("/target", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -2764,10 +2508,7 @@ mod tree_operations {
         // Copy the node
         let copied = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 "/target",
                 None,
@@ -2785,10 +2526,7 @@ mod tree_operations {
         // Verify original node still exists
         let original = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 None,
             )
@@ -2811,10 +2549,7 @@ mod tree_operations {
         for node in [source, parent] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -2824,10 +2559,7 @@ mod tree_operations {
         // Copy with new name
         let copied = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/original",
                 "/folder",
                 Some("renamed"),
@@ -2855,10 +2587,7 @@ mod tree_operations {
         // Save parent first
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -2871,10 +2600,7 @@ mod tree_operations {
         for node in [child1, child2] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -2885,10 +2611,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/destination", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -2899,10 +2622,7 @@ mod tree_operations {
         // Copy tree
         let copied_root = nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/tree",
                 "/destination",
                 None,
@@ -2924,10 +2644,7 @@ mod tree_operations {
         // Verify each child by path
         let copied_child1 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/destination/tree/child1",
                 None,
             )
@@ -2935,10 +2652,7 @@ mod tree_operations {
 
         let copied_child2 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/destination/tree/child2",
                 None,
             )
@@ -2960,10 +2674,7 @@ mod tree_operations {
         // Verify original tree still exists by getting nodes by path
         let orig_child1 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/tree/child1",
                 None,
             )
@@ -2971,10 +2682,7 @@ mod tree_operations {
 
         let orig_child2 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/tree/child2",
                 None,
             )
@@ -3004,10 +2712,7 @@ mod tree_operations {
         let parent = fixture.create_test_node("/folder", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent,
                 CreateNodeOptions::default(),
             )
@@ -3016,10 +2721,7 @@ mod tree_operations {
         // Try to copy non-existent node
         let result = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/nonexistent",
                 "/folder",
                 None,
@@ -3046,10 +2748,7 @@ mod tree_operations {
         let source = fixture.create_test_node("/source", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 source,
                 CreateNodeOptions::default(),
             )
@@ -3058,10 +2757,7 @@ mod tree_operations {
         // Try to copy to non-existent parent
         let result = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 "/nonexistent",
                 None,
@@ -3097,10 +2793,7 @@ mod tree_operations {
         for node in [parent, child] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3110,10 +2803,7 @@ mod tree_operations {
         // Try to copy parent into its own child (circular reference)
         let result = nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/parent",
                 "/parent/child",
                 None,
@@ -3144,10 +2834,7 @@ mod tree_operations {
         for node in [source, folder, existing] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3157,10 +2844,7 @@ mod tree_operations {
         // Try to copy with duplicate name
         let result = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 "/folder",
                 None,
@@ -3187,10 +2871,7 @@ mod tree_operations {
         let folder = fixture.create_test_node("/folder", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 folder,
                 CreateNodeOptions::default(),
             )
@@ -3199,10 +2880,7 @@ mod tree_operations {
         // Try to copy root node
         let result = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/",
                 "/folder",
                 None,
@@ -3234,10 +2912,7 @@ mod tree_operations {
         for node in [root.clone(), child] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3247,10 +2922,7 @@ mod tree_operations {
         // Publish tree
         nodes
             .publish_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &root.id,
             )
             .await?;
@@ -3258,10 +2930,7 @@ mod tree_operations {
         // Verify root is published
         let published_root = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &root.id,
                 None,
             )
@@ -3288,10 +2957,7 @@ mod tree_operations {
         for node in [root.clone(), child] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3301,10 +2967,7 @@ mod tree_operations {
         // Publish first
         nodes
             .publish_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &root.id,
             )
             .await?;
@@ -3312,10 +2975,7 @@ mod tree_operations {
         // Then unpublish
         nodes
             .unpublish_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &root.id,
             )
             .await?;
@@ -3323,10 +2983,7 @@ mod tree_operations {
         // Verify root is unpublished
         let unpublished_root = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &root.id,
                 None,
             )
@@ -3361,10 +3018,7 @@ mod tree_operations {
         let root = fixture.create_test_node("/products", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -3375,20 +3029,14 @@ mod tree_operations {
         let books = fixture.create_test_node("/products/books", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 electronics,
                 CreateNodeOptions::default(),
             )
             .await?;
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 books,
                 CreateNodeOptions::default(),
             )
@@ -3399,20 +3047,14 @@ mod tree_operations {
         let phones = fixture.create_test_node("/products/electronics/phones", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 laptops,
                 CreateNodeOptions::default(),
             )
             .await?;
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 phones,
                 CreateNodeOptions::default(),
             )
@@ -3423,10 +3065,7 @@ mod tree_operations {
             fixture.create_test_node("/products/electronics/laptops/gaming", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 gaming,
                 CreateNodeOptions::default(),
             )
@@ -3436,10 +3075,7 @@ mod tree_operations {
         let fiction = fixture.create_test_node("/products/books/fiction", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 fiction,
                 CreateNodeOptions::default(),
             )
@@ -3449,10 +3085,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/archive", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -3461,10 +3094,7 @@ mod tree_operations {
         // Copy the entire 3-level tree
         let copied_root = nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/products",
                 "/archive",
                 None,
@@ -3489,10 +3119,7 @@ mod tree_operations {
         for expected_path in verify_paths {
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     expected_path,
                     None,
                 )
@@ -3514,10 +3141,7 @@ mod tree_operations {
         // Verify original tree still exists
         let original_root = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/products",
                 None,
             )
@@ -3546,10 +3170,7 @@ mod tree_operations {
             let node = fixture.create_test_node(&path, "raisin:Folder");
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3562,10 +3183,7 @@ mod tree_operations {
             fixture.create_test_node("/level1/level2/level3/level4/level5/deepest", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 leaf,
                 CreateNodeOptions::default(),
             )
@@ -3575,10 +3193,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/backup", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -3587,10 +3202,7 @@ mod tree_operations {
         // Copy the entire 5-level tree
         let copied_root = nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/level1",
                 "/backup",
                 None,
@@ -3612,10 +3224,7 @@ mod tree_operations {
         for expected_path in verify_paths {
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     expected_path,
                     None,
                 )
@@ -3653,10 +3262,7 @@ mod tree_operations {
         let root = fixture.create_test_node("/menu", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -3670,10 +3276,7 @@ mod tree_operations {
             let child = fixture.create_test_node(&child_path, "raisin:Folder");
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -3686,10 +3289,7 @@ mod tree_operations {
                 let grandchild = fixture.create_test_node(&grandchild_path, "raisin:Page");
                 nodes
                     .create(
-                        constants::TENANT,
-                        constants::REPO,
-                        constants::BRANCH,
-                        constants::WORKSPACE,
+                        StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                         grandchild,
                         CreateNodeOptions::default(),
                     )
@@ -3702,10 +3302,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/nav", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -3714,10 +3311,7 @@ mod tree_operations {
         // Copy the wide tree
         let copied_root = nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/menu",
                 "/nav",
                 None,
@@ -3733,10 +3327,7 @@ mod tree_operations {
             let expected_path = original_path.replace("/menu", "/nav/menu");
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     &expected_path,
                     None,
                 )
@@ -3781,10 +3372,7 @@ mod tree_operations {
         let root = fixture.create_test_node("/docs", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -3798,10 +3386,7 @@ mod tree_operations {
         for node in [ch1, ch2, ch3] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3815,10 +3400,7 @@ mod tree_operations {
         for node in [sec1, sec2] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3829,10 +3411,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/backup", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -3841,10 +3420,7 @@ mod tree_operations {
         // Copy the tree
         nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/docs",
                 "/backup",
                 None,
@@ -3855,10 +3431,7 @@ mod tree_operations {
         // Verify order is preserved at root level
         let copied_docs = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/backup/docs",
                 None,
             )
@@ -3867,10 +3440,7 @@ mod tree_operations {
 
         let children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/backup/docs",
                 ListOptions::for_api(),
             )
@@ -3894,10 +3464,7 @@ mod tree_operations {
         // Verify order is preserved at nested level
         let copied_ch3 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/backup/docs/chapter3",
                 None,
             )
@@ -3906,10 +3473,7 @@ mod tree_operations {
 
         let sections = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/backup/docs/chapter3",
                 ListOptions::for_api(),
             )
@@ -3949,10 +3513,7 @@ mod tree_operations {
         let ws1 = fixture.create_test_node("/workspace1", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ws1,
                 CreateNodeOptions::default(),
             )
@@ -3961,10 +3522,7 @@ mod tree_operations {
         let project = fixture.create_test_node("/workspace1/project", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 project,
                 CreateNodeOptions::default(),
             )
@@ -3976,10 +3534,7 @@ mod tree_operations {
         for node in [file1, file2] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -3989,10 +3544,7 @@ mod tree_operations {
         let ws2 = fixture.create_test_node("/workspace2", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ws2,
                 CreateNodeOptions::default(),
             )
@@ -4001,10 +3553,7 @@ mod tree_operations {
         // Get project node to move
         let project_node = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace1/project",
                 None,
             )
@@ -4014,10 +3563,7 @@ mod tree_operations {
         // Move project from workspace1 to workspace2 (with all children!)
         nodes
             .move_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &project_node.id,
                 "/workspace2/project",
                 None,
@@ -4027,10 +3573,7 @@ mod tree_operations {
         // Verify moved node has correct path
         let moved = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace2/project",
                 None,
             )
@@ -4044,10 +3587,7 @@ mod tree_operations {
         // Verify children were moved and have correct paths
         let moved_file1 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace2/project/file1",
                 None,
             )
@@ -4056,10 +3596,7 @@ mod tree_operations {
 
         let moved_file2 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace2/project/file2",
                 None,
             )
@@ -4069,10 +3606,7 @@ mod tree_operations {
         // Verify old paths no longer exist
         let old_project = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace1/project",
                 None,
             )
@@ -4081,10 +3615,7 @@ mod tree_operations {
 
         let old_file1 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace1/project/file1",
                 None,
             )
@@ -4114,10 +3645,7 @@ mod tree_operations {
         let old_loc = fixture.create_test_node("/old-location", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 old_loc,
                 CreateNodeOptions::default(),
             )
@@ -4126,10 +3654,7 @@ mod tree_operations {
         let parent = fixture.create_test_node("/old-location/parent", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent,
                 CreateNodeOptions::default(),
             )
@@ -4138,10 +3663,7 @@ mod tree_operations {
         let child = fixture.create_test_node("/old-location/parent/child", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child,
                 CreateNodeOptions::default(),
             )
@@ -4151,10 +3673,7 @@ mod tree_operations {
             fixture.create_test_node("/old-location/parent/child/grandchild", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 grandchild,
                 CreateNodeOptions::default(),
             )
@@ -4163,10 +3682,7 @@ mod tree_operations {
         let new_loc = fixture.create_test_node("/new-location", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 new_loc,
                 CreateNodeOptions::default(),
             )
@@ -4175,10 +3691,7 @@ mod tree_operations {
         // Get parent node to move
         let parent_node = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/old-location/parent",
                 None,
             )
@@ -4188,10 +3701,7 @@ mod tree_operations {
         // Move the entire tree (with all descendants!)
         nodes
             .move_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent_node.id,
                 "/new-location/parent",
                 None,
@@ -4201,10 +3711,7 @@ mod tree_operations {
         // Verify moved node has correct path
         let moved = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/new-location/parent",
                 None,
             )
@@ -4221,10 +3728,7 @@ mod tree_operations {
         for path in new_paths {
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     path,
                     None,
                 )
@@ -4235,10 +3739,7 @@ mod tree_operations {
         // Verify old paths no longer exist
         let old_parent = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/old-location/parent",
                 None,
             )
@@ -4266,10 +3767,7 @@ mod tree_operations {
         let root = fixture.create_test_node("/source", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -4281,10 +3779,7 @@ mod tree_operations {
         for node in [child1, child2] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -4295,10 +3790,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/archive", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -4313,10 +3805,7 @@ mod tree_operations {
         // Get source node
         let source_node = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 None,
             )
@@ -4326,10 +3815,7 @@ mod tree_operations {
         // Get target node for parent ID
         let target_node = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/archive",
                 None,
             )
@@ -4355,10 +3841,7 @@ mod tree_operations {
 
         nodes
             .move_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &source_node.id,
                 "/archive/source",
                 Some(operation_meta),
@@ -4368,10 +3851,7 @@ mod tree_operations {
         // Verify move succeeded
         let moved_root = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/archive/source",
                 None,
             )
@@ -4398,10 +3878,7 @@ mod tree_operations {
         for expected_path in verify_paths {
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     expected_path,
                     None,
                 )
@@ -4418,10 +3895,7 @@ mod tree_operations {
         // Verify old paths no longer exist
         let old_root = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 None,
             )
@@ -4433,10 +3907,7 @@ mod tree_operations {
 
         let old_child1 = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source/child1",
                 None,
             )
@@ -4464,10 +3935,7 @@ mod tree_operations {
         let root = fixture.create_test_node("/old", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -4476,10 +3944,7 @@ mod tree_operations {
         let child = fixture.create_test_node("/old/child", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child,
                 CreateNodeOptions::default(),
             )
@@ -4488,10 +3953,7 @@ mod tree_operations {
         let grandchild = fixture.create_test_node("/old/child/grandchild", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 grandchild,
                 CreateNodeOptions::default(),
             )
@@ -4501,10 +3963,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/new", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -4519,10 +3978,7 @@ mod tree_operations {
         // Get source node
         let source_node = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/old",
                 None,
             )
@@ -4532,10 +3988,7 @@ mod tree_operations {
         // Move tree
         nodes
             .move_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &source_node.id,
                 "/new/old",
                 None,
@@ -4559,10 +4012,7 @@ mod tree_operations {
         // Verify moved nodes exist at new location
         let moved_root = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/new/old",
                 None,
             )
@@ -4574,10 +4024,7 @@ mod tree_operations {
 
         let moved_child = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/new/old/child",
                 None,
             )
@@ -4589,10 +4036,7 @@ mod tree_operations {
 
         let moved_grandchild = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/new/old/child/grandchild",
                 None,
             )
@@ -4605,10 +4049,7 @@ mod tree_operations {
         // Verify old nodes don't exist at current revision (they were deleted by move)
         let old_root = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/old",
                 None,
             )
@@ -4621,10 +4062,7 @@ mod tree_operations {
         // Verify new nodes don't exist at previous revision (they were created during move)
         let new_root_at_old_rev = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/new/old",
                 Some(&revision_before),
             )
@@ -4636,10 +4074,7 @@ mod tree_operations {
 
         let new_child_at_old_rev = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/new/old/child",
                 Some(&revision_before),
             )
@@ -4667,10 +4102,7 @@ mod tree_operations {
         let docs = fixture.create_test_node("/docs", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 docs,
                 CreateNodeOptions::default(),
             )
@@ -4680,10 +4112,7 @@ mod tree_operations {
         let chapter1 = fixture.create_test_node("/docs/chapter1", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 chapter1,
                 CreateNodeOptions::default(),
             )
@@ -4692,10 +4121,7 @@ mod tree_operations {
         let chapter2 = fixture.create_test_node("/docs/chapter2", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 chapter2,
                 CreateNodeOptions::default(),
             )
@@ -4704,10 +4130,7 @@ mod tree_operations {
         let chapter3 = fixture.create_test_node("/docs/chapter3", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 chapter3,
                 CreateNodeOptions::default(),
             )
@@ -4716,10 +4139,7 @@ mod tree_operations {
         // Verify original order
         let original_children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/docs",
                 ListOptions::for_api(),
             )
@@ -4733,10 +4153,7 @@ mod tree_operations {
         let archive = fixture.create_test_node("/archive", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 archive,
                 CreateNodeOptions::default(),
             )
@@ -4745,10 +4162,7 @@ mod tree_operations {
         // Get source node
         let source_node = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/docs",
                 None,
             )
@@ -4758,10 +4172,7 @@ mod tree_operations {
         // Move tree
         nodes
             .move_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &source_node.id,
                 "/archive/docs",
                 None,
@@ -4771,10 +4182,7 @@ mod tree_operations {
         // Verify moved tree exists
         let moved_docs = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/archive/docs",
                 None,
             )
@@ -4784,10 +4192,7 @@ mod tree_operations {
         // Verify children order is preserved
         let moved_children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/archive/docs",
                 ListOptions::for_api(),
             )
@@ -4810,10 +4215,7 @@ mod tree_operations {
         // Verify old location no longer exists
         let old_docs = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/docs",
                 None,
             )
@@ -4846,10 +4248,7 @@ mod tree_operations {
         let workspace = fixture.create_test_node("/workspace", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 workspace,
                 CreateNodeOptions::default(),
             )
@@ -4858,10 +4257,7 @@ mod tree_operations {
         let folder1 = fixture.create_test_node("/workspace/folder1", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 folder1,
                 CreateNodeOptions::default(),
             )
@@ -4870,10 +4266,7 @@ mod tree_operations {
         let doc1 = fixture.create_test_node("/workspace/folder1/doc1", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 doc1,
                 CreateNodeOptions::default(),
             )
@@ -4882,10 +4275,7 @@ mod tree_operations {
         let folder2 = fixture.create_test_node("/workspace/folder2", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 folder2,
                 CreateNodeOptions::default(),
             )
@@ -4895,10 +4285,7 @@ mod tree_operations {
         let backup = fixture.create_test_node("/backup", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 backup,
                 CreateNodeOptions::default(),
             )
@@ -4907,10 +4294,7 @@ mod tree_operations {
         // Copy the root-level workspace to backup
         let copied = nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace",
                 "/backup",
                 None,
@@ -4930,10 +4314,7 @@ mod tree_operations {
         for expected_path in verify_paths {
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     expected_path,
                     None,
                 )
@@ -4955,10 +4336,7 @@ mod tree_operations {
         // Verify original still exists
         let original = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/workspace",
                 None,
             )
@@ -4985,10 +4363,7 @@ mod tree_operations {
         let root = fixture.create_test_node("/source", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -5000,10 +4375,7 @@ mod tree_operations {
         for node in [child1, child2] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -5014,10 +4386,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/backup", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -5047,10 +4416,7 @@ mod tree_operations {
 
         let copied_root = nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/source",
                 "/backup",
                 None,
@@ -5080,10 +4446,7 @@ mod tree_operations {
         for expected_path in verify_paths {
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     expected_path,
                     None,
                 )
@@ -5115,10 +4478,7 @@ mod tree_operations {
         let root = fixture.create_test_node("/project", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 root,
                 CreateNodeOptions::default(),
             )
@@ -5127,10 +4487,7 @@ mod tree_operations {
         let level1 = fixture.create_test_node("/project/docs", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 level1,
                 CreateNodeOptions::default(),
             )
@@ -5142,10 +4499,7 @@ mod tree_operations {
         for node in [level2a, level2b] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -5156,10 +4510,7 @@ mod tree_operations {
         let target = fixture.create_test_node("/archive", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 target,
                 CreateNodeOptions::default(),
             )
@@ -5174,10 +4525,7 @@ mod tree_operations {
         // Copy the tree
         nodes
             .copy_node_tree(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/project",
                 "/archive",
                 None,
@@ -5211,10 +4559,7 @@ mod tree_operations {
         for expected_path in all_paths {
             let node = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     expected_path,
                     None,
                 )
@@ -5232,10 +4577,7 @@ mod tree_operations {
             // (it should be visible at HEAD but not at revision_before)
             let node_at_old_revision = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     expected_path,
                     Some(&revision_before),
                 )
@@ -5270,10 +4612,7 @@ mod ordering {
         let parent = fixture.create_test_node("/ordered", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -5287,10 +4626,7 @@ mod ordering {
         for node in [child1.clone(), child2.clone(), child3.clone()] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -5300,10 +4636,7 @@ mod ordering {
         // List children - should maintain insertion order
         let children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.path,
                 ListOptions::default(),
             )
@@ -5330,10 +4663,7 @@ mod ordering {
         let parent = fixture.create_test_node("/reorder-test", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -5344,20 +4674,14 @@ mod ordering {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child1.clone(),
                 CreateNodeOptions::default(),
             )
             .await?;
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child2.clone(),
                 CreateNodeOptions::default(),
             )
@@ -5373,10 +4697,7 @@ mod ordering {
         // Reorder: move child2 to position 0 (before child1)
         nodes
             .reorder_child(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.path,
                 "b", // child name
                 0,   // new position
@@ -5426,10 +4747,7 @@ mod ordering {
         // Verify new order
         let children = nodes
             .list_by_parent(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.id,
                 ListOptions::default(),
             )
@@ -5467,10 +4785,7 @@ mod ordering {
         for child in [child_a, child_b, child_c] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -5480,10 +4795,7 @@ mod ordering {
         // Reorder: move 'c' to position 0 (should be first)
         nodes
             .reorder_child(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/", // Root level parent
                 "c",
                 0,
@@ -5495,10 +4807,7 @@ mod ordering {
         // Verify order by listing root-level children
         let children = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -5537,10 +4846,7 @@ mod ordering {
         for child in [child_x, child_y, child_z] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -5550,10 +4856,7 @@ mod ordering {
         // Move 'z' before 'x' (should be first)
         nodes
             .move_child_before(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/", // Root level parent
                 "z",
                 "x",
@@ -5565,10 +4868,7 @@ mod ordering {
         // Verify order
         let children = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -5603,10 +4903,7 @@ mod ordering {
         for child in [child_p, child_q, child_r] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -5616,10 +4913,7 @@ mod ordering {
         // Move 'p' after 'r' (should be last)
         nodes
             .move_child_after(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/", // Root level parent
                 "p",
                 "r",
@@ -5631,10 +4925,7 @@ mod ordering {
         // Verify order
         let children = nodes
             .list_root(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 ListOptions::default(),
             )
             .await?;
@@ -5669,10 +4960,7 @@ mod ordering {
         let parent = fixture.create_test_node("/move-test", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -5685,10 +4973,7 @@ mod ordering {
         for child in [child_a, child_b, child_c] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -5702,10 +4987,7 @@ mod ordering {
         // Move 'c' before 'a' (should result in order: c, a, b)
         nodes
             .move_child_before(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.path,
                 "c",
                 "a",
@@ -5735,10 +5017,7 @@ mod ordering {
         // Verify order: c should be first
         let children = nodes
             .list_by_parent(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.id,
                 ListOptions::default(),
             )
@@ -5765,10 +5044,7 @@ mod ordering {
         let parent = fixture.create_test_node("/move-after-test", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -5781,10 +5057,7 @@ mod ordering {
         for child in [child_x, child_y, child_z] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -5798,10 +5071,7 @@ mod ordering {
         // Move 'x' after 'z' (should result in order: y, z, x)
         nodes
             .move_child_after(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.path,
                 "x",
                 "z",
@@ -5831,10 +5101,7 @@ mod ordering {
         // Verify order: x should be last
         let children = nodes
             .list_by_parent(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.id,
                 ListOptions::default(),
             )
@@ -5871,10 +5138,7 @@ mod ordering {
         let parent = fixture.create_test_node("/users", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -5887,10 +5151,7 @@ mod ordering {
         for child in [alice, bob, carol] {
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -5901,10 +5162,7 @@ mod ordering {
         let get_order = || async {
             let children = nodes
                 .list_children(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     "/users",
                     ListOptions::default(),
                 )
@@ -5923,10 +5181,7 @@ mod ordering {
         eprintln!("\n=== Move 1: alice BELOW bob ===");
         nodes
             .move_child_after(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/users",
                 "alice",
                 "bob",
@@ -5949,10 +5204,7 @@ mod ordering {
         eprintln!("\n=== Move 2: alice ABOVE carol ===");
         nodes
             .move_child_before(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/users",
                 "alice",
                 "carol",
@@ -5974,10 +5226,7 @@ mod ordering {
         eprintln!("\n=== Move 3: carol ABOVE bob ===");
         nodes
             .move_child_before(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/users",
                 "carol",
                 "bob",
@@ -5999,10 +5248,7 @@ mod ordering {
         eprintln!("\n=== Move 4: bob BELOW alice ===");
         nodes
             .move_child_after(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/users",
                 "bob",
                 "alice",
@@ -6028,10 +5274,7 @@ mod ordering {
         eprintln!("\n=== Move 5: alice BELOW carol (should be no-op) ===");
         nodes
             .move_child_after(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/users",
                 "alice",
                 "carol",
@@ -6053,10 +5296,7 @@ mod ordering {
         eprintln!("\n=== Move 6: bob ABOVE alice ===");
         nodes
             .move_child_before(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 "/users",
                 "bob",
                 "alice",
@@ -6089,20 +5329,14 @@ mod ordering {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent,
                 CreateNodeOptions::default(),
             )
             .await?;
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6115,10 +5349,7 @@ mod ordering {
         child.name = "Updated Child".to_string();
         nodes
             .update(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 child.clone(),
                 UpdateNodeOptions::default(),
             )
@@ -6127,10 +5358,7 @@ mod ordering {
         // Get updated child
         let updated = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &child.id,
                 None,
             )
@@ -6170,10 +5398,7 @@ mod edge_cases {
             let node = fixture.create_test_node(&path, "raisin:Folder");
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node,
                     CreateNodeOptions::default(),
                 )
@@ -6183,10 +5408,7 @@ mod edge_cases {
         // Verify we can retrieve the deepest node
         let deepest = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &path,
                 None,
             )
@@ -6210,10 +5432,7 @@ mod edge_cases {
         let parent = fixture.create_test_node("/big-folder", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6224,10 +5443,7 @@ mod edge_cases {
                 fixture.create_test_node(&format!("/big-folder/child{:03}", i), "raisin:Page");
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     child,
                     CreateNodeOptions::default(),
                 )
@@ -6237,10 +5453,7 @@ mod edge_cases {
         // List all children
         let children = nodes
             .list_by_parent(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &parent.path,
                 ListOptions::default(),
             )
@@ -6270,10 +5483,7 @@ mod edge_cases {
             let node = fixture.create_test_node(path, "raisin:Page");
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     node.clone(),
                     CreateNodeOptions::default(),
                 )
@@ -6282,10 +5492,7 @@ mod edge_cases {
             // Verify retrieval
             let retrieved = nodes
                 .get_by_path(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     path,
                     None,
                 )
@@ -6316,10 +5523,7 @@ mod edge_cases {
         // Get should return None
         let result = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 fake_id,
                 None,
             )
@@ -6329,10 +5533,7 @@ mod edge_cases {
         // Delete should return false
         let deleted = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 fake_id,
                 DeleteNodeOptions::default(),
             )
@@ -6368,10 +5569,7 @@ mod tag_repository {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 folder.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6379,10 +5577,7 @@ mod tag_repository {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 page1.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6390,10 +5585,7 @@ mod tag_repository {
 
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 page2.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6443,10 +5635,7 @@ mod tag_repository {
         // The tag name should work like a branch name since indexes were copied
         let folder_via_tag = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                "v1.0", // Using tag name as branch
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, "v1.0", constants::WORKSPACE),
                 &folder.id,
                 None, // No specific revision filter
             )
@@ -6461,10 +5650,7 @@ mod tag_repository {
         // Verify we can get nodes by path through the tag
         let page_by_path = nodes
             .get_by_path(
-                constants::TENANT,
-                constants::REPO,
-                "v1.0",
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, "v1.0", constants::WORKSPACE),
                 "/docs/page1",
                 None, // No specific revision filter
             )
@@ -6479,10 +5665,7 @@ mod tag_repository {
         // Verify child listing works through the tag
         let children = nodes
             .list_children(
-                constants::TENANT,
-                constants::REPO,
-                "v1.0",
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, "v1.0", constants::WORKSPACE),
                 "/docs",
                 ListOptions::default(), // No specific revision filter
             )
@@ -6614,10 +5797,7 @@ async fn test_branch_from_revision_lists_children() -> Result<()> {
     let folder = fixture.create_test_node("/folder", "raisin:Folder");
     nodes
         .create(
-            constants::TENANT,
-            constants::REPO,
-            constants::BRANCH,
-            constants::WORKSPACE,
+            StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
             folder.clone(),
             CreateNodeOptions::default(),
         )
@@ -6626,10 +5806,7 @@ async fn test_branch_from_revision_lists_children() -> Result<()> {
     let child1 = fixture.create_test_node("/folder/child1", "raisin:Page");
     nodes
         .create(
-            constants::TENANT,
-            constants::REPO,
-            constants::BRANCH,
-            constants::WORKSPACE,
+            StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
             child1.clone(),
             CreateNodeOptions::default(),
         )
@@ -6642,10 +5819,7 @@ async fn test_branch_from_revision_lists_children() -> Result<()> {
     let child2 = fixture.create_test_node("/folder/child2", "raisin:Page");
     nodes
         .create(
-            constants::TENANT,
-            constants::REPO,
-            constants::BRANCH,
-            constants::WORKSPACE,
+            StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
             child2.clone(),
             CreateNodeOptions::default(),
         )
@@ -6691,10 +5865,7 @@ async fn test_branch_from_revision_lists_children() -> Result<()> {
     // List children through the snapshot branch - should only see child1
     let children = nodes
         .list_children(
-            constants::TENANT,
-            constants::REPO,
-            "snapshot-branch", // Query through the new branch
-            constants::WORKSPACE,
+            StorageScope::new(constants::TENANT, constants::REPO, "snapshot-branch", constants::WORKSPACE),
             "/folder",
             ListOptions::default(), // No additional max_revision filter
         )
@@ -6710,10 +5881,7 @@ async fn test_branch_from_revision_lists_children() -> Result<()> {
     // Verify main branch still sees both children
     let main_children = nodes
         .list_children(
-            constants::TENANT,
-            constants::REPO,
-            constants::BRANCH,
-            constants::WORKSPACE,
+            StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
             "/folder",
             ListOptions::default(),
         )
@@ -6776,9 +5944,7 @@ mod validation {
         };
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 restricted_type.clone(),
                 CommitMetadata::system("Create restricted type for test"),
             )
@@ -6788,10 +5954,7 @@ mod validation {
         let parent = fixture.create_test_node("/restricted", "restricted:Container");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6801,10 +5964,7 @@ mod validation {
         let allowed_child = fixture.create_test_node("/restricted/page1", "raisin:Page");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 allowed_child,
                 CreateNodeOptions::default(),
             )
@@ -6818,10 +5978,7 @@ mod validation {
         let disallowed_child = fixture.create_test_node("/restricted/folder1", "raisin:Folder");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 disallowed_child,
                 CreateNodeOptions::default(),
             )
@@ -6874,9 +6031,7 @@ mod validation {
         };
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 wildcard_type.clone(),
                 CommitMetadata::system("Create wildcard type for test"),
             )
@@ -6885,10 +6040,7 @@ mod validation {
         let wildcard_parent = fixture.create_test_node("/wildcard", "wildcard:Container");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 wildcard_parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6900,10 +6052,7 @@ mod validation {
         assert!(
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     any_child1,
                     CreateNodeOptions::default(),
                 )
@@ -6914,10 +6063,7 @@ mod validation {
         assert!(
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     any_child2,
                     CreateNodeOptions::default(),
                 )
@@ -6957,9 +6103,7 @@ mod validation {
         };
         node_types
             .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
                 permissive_type.clone(),
                 CommitMetadata::system("Create permissive type for test"),
             )
@@ -6968,10 +6112,7 @@ mod validation {
         let permissive_parent = fixture.create_test_node("/permissive", "permissive:Container");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 permissive_parent.clone(),
                 CreateNodeOptions::default(),
             )
@@ -6983,10 +6124,7 @@ mod validation {
         assert!(
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     perm_child1,
                     CreateNodeOptions::default(),
                 )
@@ -6997,10 +6135,7 @@ mod validation {
         assert!(
             nodes
                 .create(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
+                    StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                     perm_child2,
                     CreateNodeOptions::default(),
                 )
@@ -7015,10 +6150,7 @@ mod validation {
         let source_folder = fixture.create_test_node("/source-folder", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 source_folder.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7026,10 +6158,7 @@ mod validation {
 
         let copy_result = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &source_folder.id,
                 "/restricted",
                 None, // Keep same name
@@ -7060,8 +6189,7 @@ mod validation {
         );
         workspaces
             .put(
-                constants::TENANT,
-                constants::REPO,
+                RepoScope::new(constants::TENANT, constants::REPO),
                 restricted_workspace.clone(),
             )
             .await?;
@@ -7072,10 +6200,7 @@ mod validation {
         let allowed_root = fixture.create_test_node("/folder1", "raisin:Folder");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "restricted-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "restricted-workspace"),
                 allowed_root,
                 CreateNodeOptions::default(),
             )
@@ -7089,10 +6214,7 @@ mod validation {
         let disallowed_root = fixture.create_test_node("/page1", "raisin:Page");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "restricted-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "restricted-workspace"),
                 disallowed_root,
                 CreateNodeOptions::default(),
             )
@@ -7120,10 +6242,7 @@ mod validation {
         let allowed_child = fixture.create_test_node("/folder1/page1", "raisin:Page");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "restricted-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "restricted-workspace"),
                 allowed_child,
                 CreateNodeOptions::default(),
             )
@@ -7137,10 +6256,7 @@ mod validation {
         let disallowed_child = fixture.create_test_node("/folder1/image1", "raisin:Image");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "restricted-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "restricted-workspace"),
                 disallowed_child,
                 CreateNodeOptions::default(),
             )
@@ -7172,8 +6288,7 @@ mod validation {
         );
         workspaces
             .put(
-                constants::TENANT,
-                constants::REPO,
+                RepoScope::new(constants::TENANT, constants::REPO),
                 wildcard_workspace.clone(),
             )
             .await?;
@@ -7182,10 +6297,7 @@ mod validation {
         let any_root = fixture.create_test_node("/any-type", "custom:Type");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "wildcard-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "wildcard-workspace"),
                 any_root,
                 CreateNodeOptions::default(),
             )
@@ -7202,8 +6314,7 @@ mod validation {
         // Note: Workspace::new() creates empty allowed_node_types and allowed_root_node_types by default
         workspaces
             .put(
-                constants::TENANT,
-                constants::REPO,
+                RepoScope::new(constants::TENANT, constants::REPO),
                 permissive_workspace.clone(),
             )
             .await?;
@@ -7212,10 +6323,7 @@ mod validation {
         let any_node = fixture.create_test_node("/any-node", "custom:AnyType");
         let result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "permissive-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "permissive-workspace"),
                 any_node,
                 CreateNodeOptions::default(),
             )
@@ -7244,8 +6352,7 @@ mod validation {
         );
         workspaces
             .put(
-                constants::TENANT,
-                constants::REPO,
+                RepoScope::new(constants::TENANT, constants::REPO),
                 restricted_workspace.clone(),
             )
             .await?;
@@ -7254,10 +6361,7 @@ mod validation {
         let source_image = fixture.create_test_node("/source-image", "raisin:Image");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE, // Default workspace
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE), // Default workspace
                 source_image.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7267,10 +6371,7 @@ mod validation {
         let folder = fixture.create_test_node("/folder1", "raisin:Folder");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "copy-test-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "copy-test-workspace"),
                 folder.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7279,10 +6380,7 @@ mod validation {
         // ===== Test 1: Copy should fail - raisin:Image not allowed in workspace =====
         let copy_result = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "copy-test-workspace", // Target workspace
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "copy-test-workspace"), // Target workspace
                 &source_image.id,
                 "/folder1",
                 None,
@@ -7304,10 +6402,7 @@ mod validation {
         // ===== Test 2: Move should fail - raisin:Image not allowed in workspace =====
         let move_result = nodes
             .move_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "copy-test-workspace", // Target workspace
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "copy-test-workspace"), // Target workspace
                 &source_image.id,
                 "/folder1/moved-image",
                 None,
@@ -7321,10 +6416,7 @@ mod validation {
         // ===== Test 3: Copy/Move to root should fail - raisin:Image not allowed root type =====
         let copy_to_root_result = nodes
             .copy_node(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                "copy-test-workspace",
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, "copy-test-workspace"),
                 &source_image.id,
                 "/", // Root level
                 Some("copied-image"),
@@ -7376,10 +6468,7 @@ mod delete_operations {
         );
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node_a.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7388,10 +6477,7 @@ mod delete_operations {
         // Try to delete node B - should FAIL with referential integrity error
         let delete_result = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b_id,
                 DeleteNodeOptions::default(),
             )
@@ -7417,10 +6503,7 @@ mod delete_operations {
         // Verify node B still exists (delete was blocked)
         let retrieved_b = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b_id,
                 None,
             )
@@ -7433,10 +6516,7 @@ mod delete_operations {
         // Clean up: Delete node A first (no references to it)
         let delete_a_result = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a.id,
                 DeleteNodeOptions::default(),
             )
@@ -7446,10 +6526,7 @@ mod delete_operations {
         // Now delete node B should succeed (no more references)
         let delete_b_result = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b_id,
                 DeleteNodeOptions::default(),
             )
@@ -7478,10 +6555,7 @@ mod delete_operations {
         let node_b_id = node_b.id.clone();
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node_b.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7496,10 +6570,7 @@ mod delete_operations {
         );
         relations
             .add_relation(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a.id,
                 "raisin:Page",
                 relation,
@@ -7509,10 +6580,7 @@ mod delete_operations {
         // Try to delete node B - should FAIL because node A has relation to it
         let delete_result = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b_id,
                 DeleteNodeOptions::default(),
             )
@@ -7533,10 +6601,7 @@ mod delete_operations {
         // Verify node B still exists
         let retrieved_b = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b_id,
                 None,
             )
@@ -7572,10 +6637,7 @@ mod delete_operations {
         // Delete the node - this exercises the translation cleanup code
         let deleted = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_id,
                 DeleteNodeOptions::default(),
             )
@@ -7585,10 +6647,7 @@ mod delete_operations {
         // Verify node is deleted
         let retrieved = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_id,
                 None,
             )
@@ -7617,10 +6676,7 @@ mod delete_operations {
         let node_b = fixture.create_test_node("/content/node-b", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node_b.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7630,10 +6686,7 @@ mod delete_operations {
         let node_c = fixture.create_test_node("/content/node-c", "raisin:Page");
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node_c.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7642,10 +6695,7 @@ mod delete_operations {
         // Add relations: A -> B, A -> C
         relations
             .add_relation(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a_id,
                 "raisin:Page",
                 RelationRef::simple(
@@ -7659,10 +6709,7 @@ mod delete_operations {
 
         relations
             .add_relation(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a_id,
                 "raisin:Page",
                 RelationRef::simple(
@@ -7677,10 +6724,7 @@ mod delete_operations {
         // Verify relations exist
         let outgoing_before = relations
             .get_outgoing_relations(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a_id,
                 None,
             )
@@ -7694,10 +6738,7 @@ mod delete_operations {
         // Delete node A (no incoming relations, so should succeed)
         let deleted = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a_id,
                 DeleteNodeOptions::default(),
             )
@@ -7707,10 +6748,7 @@ mod delete_operations {
         // Verify outgoing relations are cleaned up
         let outgoing_after = relations
             .get_outgoing_relations(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a_id,
                 None,
             )
@@ -7724,10 +6762,7 @@ mod delete_operations {
         // Verify incoming relations to B and C are also cleaned up
         let incoming_to_b = relations
             .get_incoming_relations(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b.id,
                 None,
             )
@@ -7740,10 +6775,7 @@ mod delete_operations {
 
         let incoming_to_c = relations
             .get_incoming_relations(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_c.id,
                 None,
             )
@@ -7783,10 +6815,7 @@ mod delete_operations {
         );
         nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node_a.clone(),
                 CreateNodeOptions::default(),
             )
@@ -7795,10 +6824,7 @@ mod delete_operations {
         // Step 1: Delete node A first (the referencing node)
         let delete_a = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a.id,
                 DeleteNodeOptions::default(),
             )
@@ -7808,10 +6834,7 @@ mod delete_operations {
         // Verify A is gone
         let retrieved_a = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_a.id,
                 None,
             )
@@ -7821,10 +6844,7 @@ mod delete_operations {
         // Step 2: Now delete node B (no more references to it)
         let delete_b = nodes
             .delete(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b_id,
                 DeleteNodeOptions::default(),
             )
@@ -7834,10 +6854,7 @@ mod delete_operations {
         // Verify B is gone
         let retrieved_b = nodes
             .get(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 &node_b_id,
                 None,
             )
@@ -7861,10 +6878,7 @@ mod delete_operations {
 
         let create_result = nodes
             .create(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
+                StorageScope::new(constants::TENANT, constants::REPO, constants::BRANCH, constants::WORKSPACE),
                 node,
                 CreateNodeOptions::default(),
             )
@@ -8108,9 +7122,7 @@ async fn test_initial_structure_with_transaction_api() -> Result<()> {
     storage
         .node_types()
         .put(
-            constants::TENANT,
-            constants::REPO,
-            constants::BRANCH,
+            BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
             file_type,
             CommitMetadata::system("create file type"),
         )
@@ -8170,9 +7182,7 @@ async fn test_initial_structure_with_transaction_api() -> Result<()> {
     storage
         .node_types()
         .put(
-            constants::TENANT,
-            constants::REPO,
-            constants::BRANCH,
+            BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
             folder_type,
             CommitMetadata::system("create folder type"),
         )

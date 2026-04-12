@@ -19,9 +19,9 @@ use raisin_models::nodes::Node;
 use raisin_models::workspace::Workspace;
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::{
-    BranchRepository, CommitMetadata, CreateNodeOptions, DeleteNodeOptions, ListOptions,
-    NodeRepository, NodeTypeRepository, PropertyIndexRepository, RegistryRepository,
-    RepositoryManagementRepository, Storage,
+    BranchRepository, BranchScope, CommitMetadata, CreateNodeOptions, DeleteNodeOptions,
+    ListOptions, NodeRepository, NodeTypeRepository, PropertyIndexRepository, RegistryRepository,
+    RepositoryManagementRepository, Storage, StorageScope,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,9 +115,7 @@ impl TestFixture {
         };
         node_types
             .put(
-                TENANT,
-                REPO,
-                BRANCH,
+                BranchScope::new(TENANT, REPO, BRANCH),
                 folder_type,
                 CommitMetadata::system("create test folder type"),
             )
@@ -153,9 +151,7 @@ impl TestFixture {
         };
         node_types
             .put(
-                TENANT,
-                REPO,
-                BRANCH,
+                BranchScope::new(TENANT, REPO, BRANCH),
                 article_type,
                 CommitMetadata::system("create test article type"),
             )
@@ -229,10 +225,7 @@ async fn create_node(
     fixture
         .nodes()
         .create(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             node.clone(),
             CreateNodeOptions::default(),
         )
@@ -246,10 +239,7 @@ async fn delete_node(fixture: &TestFixture, node_id: &str) -> Result<bool> {
     fixture
         .nodes()
         .delete(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             node_id,
             DeleteNodeOptions::default(),
         )
@@ -277,10 +267,7 @@ async fn test_deleted_node_not_in_list_by_parent() -> Result<()> {
     let children_before = fixture
         .nodes()
         .list_by_parent(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &parent.id,
             ListOptions::default(),
         )
@@ -299,10 +286,7 @@ async fn test_deleted_node_not_in_list_by_parent() -> Result<()> {
     let children_after = fixture
         .nodes()
         .list_by_parent(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &parent.id,
             ListOptions::default(),
         )
@@ -349,10 +333,7 @@ async fn test_deleted_node_not_in_scan_descendants_ordered() -> Result<()> {
     let descendants_before = fixture
         .nodes()
         .scan_descendants_ordered(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &root.id,
             ListOptions::default(),
         )
@@ -373,10 +354,7 @@ async fn test_deleted_node_not_in_scan_descendants_ordered() -> Result<()> {
     let descendants_after = fixture
         .nodes()
         .scan_descendants_ordered(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &root.id,
             ListOptions::default(),
         )
@@ -415,10 +393,7 @@ async fn test_deleted_node_not_in_property_index_find() -> Result<()> {
     let found_before = fixture
         .property_index()
         .find_by_property(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             "category",
             &PropertyValue::String("sports".to_string()),
             false, // not published_only
@@ -439,10 +414,7 @@ async fn test_deleted_node_not_in_property_index_find() -> Result<()> {
     let found_after = fixture
         .property_index()
         .find_by_property(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             "category",
             &PropertyValue::String("sports".to_string()),
             false,
@@ -487,10 +459,7 @@ async fn test_deleted_node_not_in_property_index_count() -> Result<()> {
     let count_before = fixture
         .property_index()
         .count_by_property(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             "category",
             &PropertyValue::String("tech".to_string()),
             false,
@@ -507,10 +476,7 @@ async fn test_deleted_node_not_in_property_index_count() -> Result<()> {
     let count_after = fixture
         .property_index()
         .count_by_property(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             "category",
             &PropertyValue::String("tech".to_string()),
             false,
@@ -542,10 +508,7 @@ async fn test_deleted_node_not_in_property_index_find_with_limit() -> Result<()>
     let found_before = fixture
         .property_index()
         .find_by_property_with_limit(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             "category",
             &PropertyValue::String("politics".to_string()),
             false,
@@ -562,10 +525,7 @@ async fn test_deleted_node_not_in_property_index_find_with_limit() -> Result<()>
     let found_after = fixture
         .property_index()
         .find_by_property_with_limit(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             "category",
             &PropertyValue::String("politics".to_string()),
             false,
@@ -598,7 +558,7 @@ async fn test_deleted_node_not_in_get_by_path() -> Result<()> {
     // Verify node exists
     let found = fixture
         .nodes()
-        .get_by_path(TENANT, REPO, BRANCH, WORKSPACE, "/gettest", None)
+        .get_by_path(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), "/gettest", None)
         .await?;
     assert!(found.is_some(), "Node should exist before delete");
 
@@ -608,7 +568,7 @@ async fn test_deleted_node_not_in_get_by_path() -> Result<()> {
     // Should return None
     let not_found = fixture
         .nodes()
-        .get_by_path(TENANT, REPO, BRANCH, WORKSPACE, "/gettest", None)
+        .get_by_path(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), "/gettest", None)
         .await?;
     assert!(
         not_found.is_none(),
@@ -629,7 +589,7 @@ async fn test_deleted_node_not_in_get_by_id() -> Result<()> {
     // Verify node exists
     let found = fixture
         .nodes()
-        .get(TENANT, REPO, BRANCH, WORKSPACE, &node_id, None)
+        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &node_id, None)
         .await?;
     assert!(found.is_some(), "Node should exist before delete");
 
@@ -639,7 +599,7 @@ async fn test_deleted_node_not_in_get_by_id() -> Result<()> {
     // Should return None
     let not_found = fixture
         .nodes()
-        .get(TENANT, REPO, BRANCH, WORKSPACE, &node_id, None)
+        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &node_id, None)
         .await?;
     assert!(
         not_found.is_none(),
@@ -672,7 +632,7 @@ async fn test_recreate_after_delete() -> Result<()> {
     // New node should exist
     let found = fixture
         .nodes()
-        .get_by_path(TENANT, REPO, BRANCH, WORKSPACE, "/recreate", None)
+        .get_by_path(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), "/recreate", None)
         .await?;
     assert!(found.is_some(), "Recreated node should exist");
     assert_eq!(found.unwrap().id, id2, "Should find the new node, not old");
@@ -680,7 +640,7 @@ async fn test_recreate_after_delete() -> Result<()> {
     // Old ID should still be gone
     let old_not_found = fixture
         .nodes()
-        .get(TENANT, REPO, BRANCH, WORKSPACE, &id1, None)
+        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &id1, None)
         .await?;
     assert!(
         old_not_found.is_none(),
@@ -705,10 +665,7 @@ async fn test_delete_node_with_empty_order_key() -> Result<()> {
     let children_before = fixture
         .nodes()
         .list_by_parent(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &parent.id,
             ListOptions::default(),
         )
@@ -726,10 +683,7 @@ async fn test_delete_node_with_empty_order_key() -> Result<()> {
     let children_after = fixture
         .nodes()
         .list_by_parent(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &parent.id,
             ListOptions::default(),
         )

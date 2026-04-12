@@ -67,7 +67,10 @@ async fn setup_test_environment() -> (tempfile::TempDir, Arc<Store>, axum::Route
     };
     storage
         .workspaces()
-        .put("default", "test_repo", workspace_model)
+        .put(
+            raisin_storage::RepoScope::new("default", "test_repo"),
+            workspace_model,
+        )
         .await
         .unwrap();
 

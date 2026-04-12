@@ -20,6 +20,7 @@ use raisin_storage::{
     NodeTypeRepository, RegistryRepository, RepositoryManagementRepository, Storage,
     UpdateNodeOptions,
 };
+use raisin_storage::scope::{BranchScope, StorageScope};
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -183,9 +184,7 @@ async fn seed_transaction_node_types(storage: &Arc<RocksDBStorage>) -> Result<()
     storage
         .node_types()
         .put(
-            TENANT,
-            REPO,
-            BRANCH,
+            BranchScope::new(TENANT, REPO, BRANCH),
             folder,
             CommitMetadata::system("seed folder type"),
         )
@@ -195,9 +194,7 @@ async fn seed_transaction_node_types(storage: &Arc<RocksDBStorage>) -> Result<()
     storage
         .node_types()
         .put(
-            TENANT,
-            REPO,
-            BRANCH,
+            BranchScope::new(TENANT, REPO, BRANCH),
             article,
             CommitMetadata::system("seed article type"),
         )
@@ -248,10 +245,7 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
     let parent = build_node("/articles", "raisin:Folder", "Articles");
     nodes
         .create(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             parent,
             relaxed_create_options(),
         )
@@ -260,10 +254,7 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
     let mut article = build_node("/articles/hello-world", "raisin:Article", "Hello World");
     nodes
         .create(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             article.clone(),
             relaxed_create_options(),
         )
@@ -275,7 +266,7 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
     assert_eq!(change.node.path, "/articles/hello-world");
 
     let mut stored = nodes
-        .get(TENANT, REPO, BRANCH, WORKSPACE, &article.id, None)
+        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &article.id, None)
         .await?
         .expect("node present");
     stored.properties.insert(
@@ -285,10 +276,7 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
 
     nodes
         .update(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             stored.clone(),
             relaxed_update_options(),
         )
@@ -304,10 +292,7 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
 
     nodes
         .move_node(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &article.id,
             "/articles/moved-node",
             None,
@@ -320,10 +305,7 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
 
     nodes
         .delete(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             &article.id,
             DeleteNodeOptions::default(),
         )
@@ -333,7 +315,7 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
     let change = extract_change(&op, &article.id).expect("change for delete");
     assert_eq!(change.kind, ReplicatedNodeChangeKind::Delete);
     assert!(nodes
-        .get(TENANT, REPO, BRANCH, WORKSPACE, &article.id, None)
+        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &article.id, None)
         .await?
         .is_none());
 
@@ -350,10 +332,7 @@ async fn apply_revision_captures_transaction_mutations() -> Result<()> {
     let parent = build_node("/articles", "raisin:Folder", "Articles");
     nodes
         .create(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             parent,
             relaxed_create_options(),
         )
@@ -409,7 +388,7 @@ async fn apply_revision_captures_transaction_mutations() -> Result<()> {
 
     assert!(storage
         .nodes()
-        .get(TENANT, REPO, BRANCH, WORKSPACE, &article.id, None)
+        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &article.id, None)
         .await?
         .is_none());
 

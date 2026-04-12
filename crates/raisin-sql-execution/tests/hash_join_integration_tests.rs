@@ -10,7 +10,7 @@ use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_sql_execution::physical_plan::{execute_plan, ExecutionContext, PhysicalPlan};
 use raisin_sql_execution::{Analyzer, PhysicalPlanner, QueryPlan, StaticCatalog};
-use raisin_storage::{CreateNodeOptions, NodeRepository, Storage};
+use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope};
 use raisin_storage_memory::InMemoryStorage;
 use std::sync::Arc;
 
@@ -60,10 +60,7 @@ async fn create_test_storage() -> Arc<InMemoryStorage> {
         storage
             .nodes()
             .create(
-                "test_tenant",
-                "test_repo",
-                "main",
-                "default",
+                StorageScope::new("test_tenant", "test_repo", "main", "default"),
                 user,
                 CreateNodeOptions::default(),
             )
@@ -121,10 +118,7 @@ async fn create_test_storage() -> Arc<InMemoryStorage> {
             storage
                 .nodes()
                 .create(
-                    "test_tenant",
-                    "test_repo",
-                    "main",
-                    "default",
+                    StorageScope::new("test_tenant", "test_repo", "main", "default"),
                     order,
                     CreateNodeOptions::default(),
                 )

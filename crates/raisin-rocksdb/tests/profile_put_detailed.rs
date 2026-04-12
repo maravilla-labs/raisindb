@@ -12,6 +12,7 @@ use raisin_storage::{
     BranchRepository, CreateNodeOptions, NodeRepository, RegistryRepository,
     RepositoryManagementRepository, Storage,
 };
+use raisin_storage::scope::StorageScope;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -110,10 +111,7 @@ async fn profile_put_detailed_100_nodes() -> Result<()> {
         let start = std::time::Instant::now();
         nodes_repo
             .create(
-                TENANT,
-                REPO,
-                BRANCH,
-                WORKSPACE,
+                StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
                 node,
                 CreateNodeOptions::default(),
             )
@@ -147,10 +145,7 @@ async fn profile_put_detailed_100_nodes() -> Result<()> {
         // Since we can't access internal timing directly, we'll just show total
         nodes_repo
             .create(
-                TENANT,
-                REPO,
-                BRANCH,
-                WORKSPACE,
+                StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
                 node,
                 CreateNodeOptions::default(),
             )

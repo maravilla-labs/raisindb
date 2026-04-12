@@ -529,14 +529,12 @@ async fn test_move_tree_replication() {
     );
 
     use raisin_storage::{NodeRepository, Storage as _};
+    use raisin_storage::scope::StorageScope;
 
     storage1
         .nodes()
         .move_node_tree(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "source_folder",
             "/Destination Folder",
             None,
@@ -561,10 +559,7 @@ async fn test_move_tree_replication() {
     let old_path_node1 = storage1
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Source Folder",
             None,
         )
@@ -574,10 +569,7 @@ async fn test_move_tree_replication() {
     let new_path_node1 = storage1
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder",
             None,
         )
@@ -597,10 +589,7 @@ async fn test_move_tree_replication() {
     let old_path_node2 = storage2
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Source Folder",
             None,
         )
@@ -610,10 +599,7 @@ async fn test_move_tree_replication() {
     let new_path_node2 = storage2
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder",
             None,
         )
@@ -635,10 +621,7 @@ async fn test_move_tree_replication() {
     let child_a_node1 = storage1
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder/Child A",
             None,
         )
@@ -648,10 +631,7 @@ async fn test_move_tree_replication() {
     let grandchild_node1 = storage1
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder/Child A/Grandchild A1",
             None,
         )
@@ -661,10 +641,7 @@ async fn test_move_tree_replication() {
     let child_b_node1 = storage1
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder/Child B",
             None,
         )
@@ -688,10 +665,7 @@ async fn test_move_tree_replication() {
     let child_a_node2 = storage2
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder/Child A",
             None,
         )
@@ -701,10 +675,7 @@ async fn test_move_tree_replication() {
     let grandchild_node2 = storage2
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder/Child A/Grandchild A1",
             None,
         )
@@ -714,10 +685,7 @@ async fn test_move_tree_replication() {
     let child_b_node2 = storage2
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Destination Folder/Child B",
             None,
         )
@@ -741,10 +709,7 @@ async fn test_move_tree_replication() {
     let old_child_a_node2 = storage2
         .nodes()
         .get_by_path(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+            StorageScope::new(tenant_id, repo_id, branch, workspace),
             "/Source Folder/Child A",
             None,
         )

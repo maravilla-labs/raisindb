@@ -17,7 +17,7 @@ use raisin_models::workspace::Workspace;
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::{
     BranchRepository, DeleteNodeOptions, ListOptions, NodeRepository, RegistryRepository,
-    RepositoryManagementRepository, Storage,
+    RepositoryManagementRepository, Storage, StorageScope,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -180,7 +180,7 @@ async fn test_5k_flat_storage_performance() -> Result<()> {
 
     let start = Instant::now();
     let root_nodes = nodes_repo
-        .list_root(TENANT, REPO, BRANCH, WORKSPACE, ListOptions::default())
+        .list_root(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), ListOptions::default())
         .await?;
     let list_duration = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -222,10 +222,7 @@ async fn test_5k_flat_storage_performance() -> Result<()> {
     let start = Instant::now();
     nodes_repo
         .reorder_child(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             "/",
             &middle_node.name,
             0,
@@ -249,10 +246,7 @@ async fn test_5k_flat_storage_performance() -> Result<()> {
     let start = Instant::now();
     let deleted = nodes_repo
         .delete(
-            TENANT,
-            REPO,
-            BRANCH,
-            WORKSPACE,
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
             node_to_delete,
             DeleteNodeOptions::default(),
         )

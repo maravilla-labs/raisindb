@@ -19,7 +19,7 @@ use tower::ServiceExt;
 use raisin_models::nodes::types::NodeType;
 #[cfg(feature = "storage-rocksdb")]
 use raisin_rocksdb::RocksDBStorage;
-use raisin_storage::{CommitMetadata, NodeTypeRepository, Storage};
+use raisin_storage::{BranchScope, CommitMetadata, NodeTypeRepository, Storage};
 #[cfg(not(feature = "storage-rocksdb"))]
 use raisin_storage_memory::InMemoryStorage;
 use raisin_transport_http as http;
@@ -55,9 +55,7 @@ async fn create_test_node_type<S: Storage>(storage: &S, name: &str) {
     storage
         .node_types()
         .put(
-            "test",
-            "test",
-            "main",
+            BranchScope::new("test", "test", "main"),
             test_node_type,
             CommitMetadata::system("test setup"),
         )
