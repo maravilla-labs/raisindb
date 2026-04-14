@@ -289,9 +289,8 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             );
         }
 
-        let mut result = Vec::with_capacity(
-            sorted.ordered.len() + sorted.circular.len() + sorted.other.len(),
-        );
+        let mut result =
+            Vec::with_capacity(sorted.ordered.len() + sorted.circular.len() + sorted.other.len());
         result.extend(sorted.ordered);
         result.extend(sorted.circular);
         result.extend(sorted.other);

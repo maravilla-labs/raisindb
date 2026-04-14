@@ -67,7 +67,7 @@
 //! - **Performance** - Optimized hot paths with inline hints and lazy tracing
 //! - **Graph-only semantics** - Queries only nodes that participate in relationships
 
-mod algorithms;
+pub(crate) mod algorithms;
 mod context;
 mod evaluation;
 mod executor;

@@ -156,18 +156,18 @@ impl PhysicalPlanner {
                 if args.len() == 3 {
                     // Extract geometry column/property access
                     // Supports: properties->>'loc', properties->'loc', CAST(... AS GEOMETRY), column
-                    let (table, geometry_column, property_name) = match
-                        raisin_sql::optimizer::hierarchy_rewrite::extract_geometry_source(
+                    let (table, geometry_column, property_name) =
+                        match raisin_sql::optimizer::hierarchy_rewrite::extract_geometry_source(
                             &args[0].expr,
                         ) {
-                        Some(v) => v,
-                        None => {
-                            tracing::debug!(
+                            Some(v) => v,
+                            None => {
+                                tracing::debug!(
                                 "ST_DWITHIN spatial index skipped: could not extract geometry source from first argument"
                             );
-                            return None;
-                        }
-                    };
+                                return None;
+                            }
+                        };
 
                     // Extract center point from ST_Point(lon, lat)
                     let (center_lon, center_lat) = match &args[1].expr {

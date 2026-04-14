@@ -459,6 +459,9 @@ mod tests {
         // Path-based reference stripped to Null
         assert_eq!(stripped.get("ref"), Some(&PropertyValue::Null));
         // UUID-based reference preserved
-        assert!(matches!(stripped.get("uuid_ref"), Some(PropertyValue::Reference(_))));
+        assert!(matches!(
+            stripped.get("uuid_ref"),
+            Some(PropertyValue::Reference(_))
+        ));
     }
 }

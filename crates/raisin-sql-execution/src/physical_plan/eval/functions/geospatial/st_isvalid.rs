@@ -78,11 +78,9 @@ impl SqlFunction for StIsValidFunction {
             "LineString" => {
                 if let Some(coords) = geom.get("coordinates").and_then(|v| v.as_array()) {
                     coords.len() >= 2
-                        && coords.iter().all(|c| {
-                            c.as_array()
-                                .map(|a| a.len() >= 2)
-                                .unwrap_or(false)
-                        })
+                        && coords
+                            .iter()
+                            .all(|c| c.as_array().map(|a| a.len() >= 2).unwrap_or(false))
                 } else {
                     false
                 }
@@ -95,9 +93,7 @@ impl SqlFunction for StIsValidFunction {
                                 .map(|r| {
                                     r.len() >= 4
                                         && r.iter().all(|c| {
-                                            c.as_array()
-                                                .map(|a| a.len() >= 2)
-                                                .unwrap_or(false)
+                                            c.as_array().map(|a| a.len() >= 2).unwrap_or(false)
                                         })
                                 })
                                 .unwrap_or(false)
@@ -106,17 +102,12 @@ impl SqlFunction for StIsValidFunction {
                     false
                 }
             }
-            "MultiPoint" | "MultiLineString" | "MultiPolygon" => {
-                geom.get("coordinates")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| !arr.is_empty())
-                    .unwrap_or(false)
-            }
-            "GeometryCollection" => {
-                geom.get("geometries")
-                    .and_then(|v| v.as_array())
-                    .is_some()
-            }
+            "MultiPoint" | "MultiLineString" | "MultiPolygon" => geom
+                .get("coordinates")
+                .and_then(|v| v.as_array())
+                .map(|arr| !arr.is_empty())
+                .unwrap_or(false),
+            "GeometryCollection" => geom.get("geometries").and_then(|v| v.as_array()).is_some(),
             _ => false,
         };
 

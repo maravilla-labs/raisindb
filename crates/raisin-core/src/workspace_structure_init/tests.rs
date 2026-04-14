@@ -155,13 +155,21 @@ async fn test_end_to_end_repository_initialization() {
 
     let nodetype_repo = storage.node_types();
     let folder_type = nodetype_repo
-        .get(BranchScope::new(tenant_id, repo_id, "main"), "raisin:Folder", None)
+        .get(
+            BranchScope::new(tenant_id, repo_id, "main"),
+            "raisin:Folder",
+            None,
+        )
         .await
         .unwrap();
     assert!(folder_type.is_some(), "raisin:Folder NodeType should exist");
 
     let acl_folder_type = nodetype_repo
-        .get(BranchScope::new(tenant_id, repo_id, "main"), "raisin:AclFolder", None)
+        .get(
+            BranchScope::new(tenant_id, repo_id, "main"),
+            "raisin:AclFolder",
+            None,
+        )
         .await
         .unwrap();
     assert!(

@@ -44,9 +44,7 @@ impl TestCtx {
 
     /// Create a new engine pointing at the same directory (simulates restart).
     fn new_engine(&self) -> Arc<HnswIndexingEngine> {
-        Arc::new(
-            HnswIndexingEngine::new(self.base_path.clone(), 64 * 1024 * 1024, 8).unwrap(),
-        )
+        Arc::new(HnswIndexingEngine::new(self.base_path.clone(), 64 * 1024 * 1024, 8).unwrap())
     }
 }
 
@@ -54,7 +52,9 @@ impl TestCtx {
 /// Uses a base direction with small perturbations so all vectors are within
 /// the engine's MAX_DISTANCE=0.6 threshold of the query.
 fn make_vector(seed: f32) -> Vec<f32> {
-    let raw: Vec<f32> = (0..8).map(|i| 1.0 + seed * 0.1 * (i as f32 + 1.0)).collect();
+    let raw: Vec<f32> = (0..8)
+        .map(|i| 1.0 + seed * 0.1 * (i as f32 + 1.0))
+        .collect();
     let mag = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
     raw.iter().map(|x| x / mag).collect()
 }
@@ -73,13 +73,37 @@ fn test_hnsw_add_search_roundtrip() {
     let ctx = TestCtx::new();
 
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n1", HLC::new(1, 0), make_vector(1.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n1",
+            HLC::new(1, 0),
+            make_vector(1.0),
+        )
         .unwrap();
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n2", HLC::new(2, 0), make_vector(2.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n2",
+            HLC::new(2, 0),
+            make_vector(2.0),
+        )
         .unwrap();
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n3", HLC::new(3, 0), make_vector(3.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n3",
+            HLC::new(3, 0),
+            make_vector(3.0),
+        )
         .unwrap();
 
     // Query close to n1
@@ -101,10 +125,26 @@ fn test_hnsw_persistence_across_engines() {
     let ctx = TestCtx::new();
 
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n1", HLC::new(1, 0), make_vector(1.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n1",
+            HLC::new(1, 0),
+            make_vector(1.0),
+        )
         .unwrap();
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n2", HLC::new(2, 0), make_vector(2.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n2",
+            HLC::new(2, 0),
+            make_vector(2.0),
+        )
         .unwrap();
 
     ctx.engine.snapshot_dirty_indexes().unwrap();
@@ -129,14 +169,30 @@ fn test_hnsw_mmap_view_then_mutate() {
 
     // Phase 1: add + snapshot
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n1", HLC::new(1, 0), make_vector(1.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n1",
+            HLC::new(1, 0),
+            make_vector(1.0),
+        )
         .unwrap();
     ctx.engine.snapshot_dirty_indexes().unwrap();
 
     // Phase 2: new engine (mmap view), then mutate (triggers promotion)
     let engine2 = ctx.new_engine();
     engine2
-        .add_embedding("t1", "r1", "main", "ws1", "n2", HLC::new(2, 0), make_vector(2.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n2",
+            HLC::new(2, 0),
+            make_vector(2.0),
+        )
         .unwrap();
 
     // Both vectors should be searchable
@@ -165,14 +221,24 @@ fn test_hnsw_multi_tenant_isolation() {
 
     ctx.engine
         .add_embedding(
-            "tenant-a", "r1", "main", "ws1", "na1",
-            HLC::new(1, 0), make_vector(1.0),
+            "tenant-a",
+            "r1",
+            "main",
+            "ws1",
+            "na1",
+            HLC::new(1, 0),
+            make_vector(1.0),
         )
         .unwrap();
     ctx.engine
         .add_embedding(
-            "tenant-b", "r1", "main", "ws1", "nb1",
-            HLC::new(2, 0), make_vector(2.0),
+            "tenant-b",
+            "r1",
+            "main",
+            "ws1",
+            "nb1",
+            HLC::new(2, 0),
+            make_vector(2.0),
         )
         .unwrap();
 
@@ -202,7 +268,15 @@ fn test_hnsw_branch_copy_and_search() {
     let ctx = TestCtx::new();
 
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n1", HLC::new(1, 0), make_vector(1.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n1",
+            HLC::new(1, 0),
+            make_vector(1.0),
+        )
         .unwrap();
     ctx.engine.snapshot_dirty_indexes().unwrap();
 
@@ -221,7 +295,15 @@ fn test_hnsw_branch_copy_and_search() {
 
     // Add to feature only
     ctx.engine
-        .add_embedding("t1", "r1", "feature", "ws1", "n2", HLC::new(2, 0), make_vector(1.5))
+        .add_embedding(
+            "t1",
+            "r1",
+            "feature",
+            "ws1",
+            "n2",
+            HLC::new(2, 0),
+            make_vector(1.5),
+        )
         .unwrap();
 
     // Main should NOT see n2
@@ -251,10 +333,26 @@ fn test_hnsw_purge_and_rebuild() {
     let ctx = TestCtx::new();
 
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n1", HLC::new(1, 0), make_vector(1.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n1",
+            HLC::new(1, 0),
+            make_vector(1.0),
+        )
         .unwrap();
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n2", HLC::new(2, 0), make_vector(2.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n2",
+            HLC::new(2, 0),
+            make_vector(2.0),
+        )
         .unwrap();
     ctx.engine.snapshot_dirty_indexes().unwrap();
 
@@ -269,7 +367,15 @@ fn test_hnsw_purge_and_rebuild() {
 
     // Rebuild by re-adding
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n3", HLC::new(3, 0), make_vector(3.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n3",
+            HLC::new(3, 0),
+            make_vector(3.0),
+        )
         .unwrap();
 
     let results = ctx
@@ -289,13 +395,37 @@ fn test_hnsw_remove_embedding() {
     let ctx = TestCtx::new();
 
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n1", HLC::new(1, 0), make_vector(1.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n1",
+            HLC::new(1, 0),
+            make_vector(1.0),
+        )
         .unwrap();
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n2", HLC::new(2, 0), make_vector(1.5))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n2",
+            HLC::new(2, 0),
+            make_vector(1.5),
+        )
         .unwrap();
     ctx.engine
-        .add_embedding("t1", "r1", "main", "ws1", "n3", HLC::new(3, 0), make_vector(2.0))
+        .add_embedding(
+            "t1",
+            "r1",
+            "main",
+            "ws1",
+            "n3",
+            HLC::new(3, 0),
+            make_vector(2.0),
+        )
         .unwrap();
 
     // Remove n2

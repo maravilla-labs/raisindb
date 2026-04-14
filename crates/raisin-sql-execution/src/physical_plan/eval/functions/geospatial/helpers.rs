@@ -224,8 +224,12 @@ pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
                 .as_array()
                 .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
             if arr.len() >= 2 {
-                let lon = arr[0].as_f64().ok_or_else(|| Error::Validation("Invalid longitude in coordinates".to_string()))?;
-                let lat = arr[1].as_f64().ok_or_else(|| Error::Validation("Invalid latitude in coordinates".to_string()))?;
+                let lon = arr[0].as_f64().ok_or_else(|| {
+                    Error::Validation("Invalid longitude in coordinates".to_string())
+                })?;
+                let lat = arr[1].as_f64().ok_or_else(|| {
+                    Error::Validation("Invalid latitude in coordinates".to_string())
+                })?;
                 result.push([lon, lat]);
             }
         }
@@ -238,8 +242,12 @@ pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
                     .as_array()
                     .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
                 if pair.len() >= 2 {
-                    let lon = pair[0].as_f64().ok_or_else(|| Error::Validation("Invalid longitude in coordinates".to_string()))?;
-                    let lat = pair[1].as_f64().ok_or_else(|| Error::Validation("Invalid latitude in coordinates".to_string()))?;
+                    let lon = pair[0].as_f64().ok_or_else(|| {
+                        Error::Validation("Invalid longitude in coordinates".to_string())
+                    })?;
+                    let lat = pair[1].as_f64().ok_or_else(|| {
+                        Error::Validation("Invalid latitude in coordinates".to_string())
+                    })?;
                     result.push([lon, lat]);
                 }
             }
@@ -257,8 +265,12 @@ pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
                         .as_array()
                         .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
                     if pair.len() >= 2 {
-                        let lon = pair[0].as_f64().ok_or_else(|| Error::Validation("Invalid longitude in coordinates".to_string()))?;
-                        let lat = pair[1].as_f64().ok_or_else(|| Error::Validation("Invalid latitude in coordinates".to_string()))?;
+                        let lon = pair[0].as_f64().ok_or_else(|| {
+                            Error::Validation("Invalid longitude in coordinates".to_string())
+                        })?;
+                        let lat = pair[1].as_f64().ok_or_else(|| {
+                            Error::Validation("Invalid latitude in coordinates".to_string())
+                        })?;
                         result.push([lon, lat]);
                     }
                 }

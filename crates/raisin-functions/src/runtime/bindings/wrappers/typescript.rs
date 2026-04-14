@@ -47,9 +47,13 @@ pub fn generate_dts() -> String {
     code.push_str(&generate_static_types());
 
     // Generate namespace declarations from the registry
-    code.push_str("// ==========================================================================\n");
+    code.push_str(
+        "// ==========================================================================\n",
+    );
     code.push_str("// The raisin Global Object (auto-generated from bindings registry)\n");
-    code.push_str("// ==========================================================================\n\n");
+    code.push_str(
+        "// ==========================================================================\n\n",
+    );
     code.push_str("declare namespace raisin {\n");
 
     // Group methods by category
@@ -105,9 +109,7 @@ pub fn generate_dts() -> String {
     let notify_methods = reg.methods_by_category("notify");
     if !notify_methods.is_empty() {
         code.push_str("  /** Send a notification to a user. */\n");
-        code.push_str(
-            "  function notify(options: NotifyOptions): Promise<any>;\n\n",
-        );
+        code.push_str("  function notify(options: NotifyOptions): Promise<any>;\n\n");
     }
 
     // Admin namespace
@@ -154,16 +156,24 @@ pub fn generate_dts() -> String {
     code.push_str("}\n\n");
 
     // Transaction interface
-    code.push_str("// ==========================================================================\n");
+    code.push_str(
+        "// ==========================================================================\n",
+    );
     code.push_str("// Transaction (returned by raisin.nodes.beginTransaction())\n");
-    code.push_str("// ==========================================================================\n\n");
+    code.push_str(
+        "// ==========================================================================\n\n",
+    );
     code.push_str(TRANSACTION_INTERFACE);
     code.push('\n');
 
     // Console
-    code.push_str("// ==========================================================================\n");
+    code.push_str(
+        "// ==========================================================================\n",
+    );
     code.push_str("// Console (logging)\n");
-    code.push_str("// ==========================================================================\n\n");
+    code.push_str(
+        "// ==========================================================================\n\n",
+    );
     code.push_str("declare namespace console {\n");
     code.push_str("  function log(...args: any[]): void;\n");
     code.push_str("  function debug(...args: any[]): void;\n");
@@ -172,10 +182,16 @@ pub fn generate_dts() -> String {
     code.push_str("}\n\n");
 
     // W3C Fetch API (built-in polyfill)
-    code.push_str("// ==========================================================================\n");
+    code.push_str(
+        "// ==========================================================================\n",
+    );
     code.push_str("// W3C Fetch API (built-in — no import needed)\n");
-    code.push_str("// ==========================================================================\n\n");
-    code.push_str("declare function fetch(input: string | Request, init?: RequestInit): Promise<Response>;\n");
+    code.push_str(
+        "// ==========================================================================\n\n",
+    );
+    code.push_str(
+        "declare function fetch(input: string | Request, init?: RequestInit): Promise<Response>;\n",
+    );
     code.push_str("declare function setTimeout(callback: () => void, ms?: number): number;\n");
     code.push_str("declare function clearTimeout(id: number): void;\n");
     code.push_str("declare function setInterval(callback: () => void, ms?: number): number;\n");
@@ -509,7 +525,14 @@ fn generate_ts_method_with_return(
     let args: Vec<String> = method
         .args
         .iter()
-        .map(|a| format!("{}{}: {}", a.name, optional_marker(a.arg_type), map_arg_type(a.arg_type)))
+        .map(|a| {
+            format!(
+                "{}{}: {}",
+                a.name,
+                optional_marker(a.arg_type),
+                map_arg_type(a.arg_type)
+            )
+        })
         .collect();
     let args_str = args.join(", ");
 
@@ -598,23 +621,59 @@ mod tests {
         let dts = generate_dts();
 
         // Basic structure checks
-        assert!(dts.contains("declare class Resource"), "Should have Resource class");
-        assert!(dts.contains("interface RaisinNode"), "Should have RaisinNode interface");
-        assert!(dts.contains("declare namespace raisin"), "Should have raisin namespace");
-        assert!(dts.contains("namespace nodes"), "Should have nodes namespace");
+        assert!(
+            dts.contains("declare class Resource"),
+            "Should have Resource class"
+        );
+        assert!(
+            dts.contains("interface RaisinNode"),
+            "Should have RaisinNode interface"
+        );
+        assert!(
+            dts.contains("declare namespace raisin"),
+            "Should have raisin namespace"
+        );
+        assert!(
+            dts.contains("namespace nodes"),
+            "Should have nodes namespace"
+        );
         assert!(dts.contains("namespace sql"), "Should have sql namespace");
         assert!(dts.contains("namespace ai"), "Should have ai namespace");
         assert!(dts.contains("namespace http"), "Should have http namespace");
-        assert!(dts.contains("namespace admin"), "Should have admin namespace");
-        assert!(dts.contains("function beginTransaction"), "Should have beginTransaction");
-        assert!(dts.contains("resize(options: ResizeOptions)"), "Should have resize method");
-        assert!(dts.contains("processDocument"), "Should have processDocument method");
-        assert!(dts.contains("getResource"), "Should have getResource method");
-        assert!(dts.contains("addResource"), "Should have addResource method");
-        assert!(dts.contains("declare var module"), "Should have module.exports");
+        assert!(
+            dts.contains("namespace admin"),
+            "Should have admin namespace"
+        );
+        assert!(
+            dts.contains("function beginTransaction"),
+            "Should have beginTransaction"
+        );
+        assert!(
+            dts.contains("resize(options: ResizeOptions)"),
+            "Should have resize method"
+        );
+        assert!(
+            dts.contains("processDocument"),
+            "Should have processDocument method"
+        );
+        assert!(
+            dts.contains("getResource"),
+            "Should have getResource method"
+        );
+        assert!(
+            dts.contains("addResource"),
+            "Should have addResource method"
+        );
+        assert!(
+            dts.contains("declare var module"),
+            "Should have module.exports"
+        );
 
         // Should NOT contain internal runtime details
-        assert!(!dts.contains("__raisin_internal"), "Should not expose internal APIs");
+        assert!(
+            !dts.contains("__raisin_internal"),
+            "Should not expose internal APIs"
+        );
 
         println!("Generated .d.ts: {} lines", dts.lines().count());
     }

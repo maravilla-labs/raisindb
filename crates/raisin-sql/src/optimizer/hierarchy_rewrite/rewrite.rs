@@ -153,11 +153,10 @@ fn rewrite_st_dwithin(args: &[TypedExpr], expr: TypedExpr) -> Vec<CanonicalPredi
     if args.len() != 3 {
         return vec![CanonicalPredicate::Other(expr)];
     }
-    let (table, geometry_column, property_name) =
-        match extract_geometry_source(&args[0].expr) {
-            Some(v) => v,
-            None => return vec![CanonicalPredicate::Other(expr)],
-        };
+    let (table, geometry_column, property_name) = match extract_geometry_source(&args[0].expr) {
+        Some(v) => v,
+        None => return vec![CanonicalPredicate::Other(expr)],
+    };
     let (center_lon, center_lat) = match &args[1].expr {
         Expr::Function { name, args: pa, .. }
             if name.to_uppercase() == "ST_POINT" || name.to_uppercase() == "ST_MAKEPOINT" =>

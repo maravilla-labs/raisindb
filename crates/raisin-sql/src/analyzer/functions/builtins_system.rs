@@ -454,7 +454,12 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
     // ST_MAKEENVELOPE - Create a rectangular Polygon from bounds
     registry.register(FunctionSignature {
         name: "ST_MAKEENVELOPE".into(),
-        params: vec![DataType::Double, DataType::Double, DataType::Double, DataType::Double],
+        params: vec![
+            DataType::Double,
+            DataType::Double,
+            DataType::Double,
+            DataType::Double,
+        ],
         return_type: DataType::Geometry,
         is_deterministic: true,
         category: FunctionCategory::Geospatial,

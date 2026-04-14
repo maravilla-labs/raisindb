@@ -65,7 +65,11 @@ impl GraphComputeTask {
         }
     }
 
-    /// Recompute graph algorithm for a specific branch
+    /// Recompute graph algorithm for a specific branch.
+    ///
+    /// Checks the GRAPH_PROJECTION CF for a fresh persisted projection before
+    /// doing a full relation scan. After building, persists the projection
+    /// so it survives restarts and is available for other algorithms.
     ///
     /// This method is public to allow manual recomputation via API.
     pub async fn recompute_for_branch(
@@ -77,22 +81,59 @@ impl GraphComputeTask {
         config: &GraphAlgorithmConfig,
         max_nodes: usize,
     ) -> Result<usize> {
+        use crate::graph::projection_cache::{GraphProjectionStore, ProjectionKey};
+
         let start = std::time::Instant::now();
 
         // Get current branch HEAD revision
         let revision = Self::get_branch_head(storage, tenant_id, repo_id, branch_id).await?;
 
-        // Build graph projection from scoped nodes
-        let projection = Self::build_projection(
-            storage,
-            tenant_id,
-            repo_id,
-            branch_id,
-            &revision,
-            &config.scope,
-            max_nodes,
-        )
-        .await?;
+        let projection_key = ProjectionKey {
+            tenant_id: tenant_id.to_string(),
+            repo_id: repo_id.to_string(),
+            branch: branch_id.to_string(),
+            config_id: config.id.clone(),
+        };
+
+        // Try to load a fresh projection from GRAPH_PROJECTION CF
+        let persisted = GraphProjectionStore::load_meta(&projection_key, storage)
+            .ok()
+            .flatten();
+
+        let projection = if let Some(ref meta) = persisted {
+            if !meta.is_stale() && meta.revision == revision {
+                // Fresh projection at current revision — reuse it
+                tracing::debug!(
+                    config_id = %config.id,
+                    "Reusing persisted projection (revision matches HEAD)"
+                );
+                meta.to_projection()
+            } else {
+                // Stale or wrong revision — rebuild
+                Self::build_projection(
+                    storage,
+                    tenant_id,
+                    repo_id,
+                    branch_id,
+                    &revision,
+                    &config.scope,
+                    max_nodes,
+                )
+                .await?
+            }
+        } else {
+            // No persisted projection — full build
+            Self::build_projection(
+                storage,
+                tenant_id,
+                repo_id,
+                branch_id,
+                &revision,
+                &config.scope,
+                max_nodes,
+            )
+            .await?
+        };
 
         let node_count = projection.node_count();
 
@@ -105,7 +146,8 @@ impl GraphComputeTask {
         }
 
         // Execute the algorithm
-        let result = AlgorithmExecutor::execute(config, &projection)?;
+        let mut projection = projection;
+        let result = AlgorithmExecutor::execute(config, &mut projection)?;
 
         // Build cache entries
         let ttl_seconds = config.refresh.ttl_seconds;
@@ -153,6 +195,17 @@ impl GraphComputeTask {
 
         // Invalidate in-memory cache to force reload from RocksDB
         cache_layer.invalidate(&config.id);
+
+        // Persist the projection to GRAPH_PROJECTION CF for fast restart/recovery
+        if let Err(e) =
+            GraphProjectionStore::store(&projection_key, &projection, revision.clone(), storage)
+        {
+            tracing::warn!(
+                config_id = %config.id,
+                "Failed to persist graph projection: {}",
+                e
+            );
+        }
 
         let duration_ms = start.elapsed().as_millis();
         tracing::debug!(

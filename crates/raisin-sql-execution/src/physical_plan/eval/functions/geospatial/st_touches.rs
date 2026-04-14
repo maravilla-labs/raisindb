@@ -80,8 +80,8 @@ impl SqlFunction for StTouchesFunction {
                 if !ext_a.intersects(ext_b) {
                     false
                 } else {
-                    use geo::BooleanOps;
                     use geo::Area;
+                    use geo::BooleanOps;
                     let intersection = polygon_a.intersection(&polygon_b);
                     let area: f64 = intersection.unsigned_area();
                     area < 1e-10

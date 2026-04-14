@@ -273,8 +273,7 @@ fn collect_section_pointers(
                     );
                 }
                 _ => {
-                    let pointer =
-                        JsonPointer::new(format!("{}/{}/{}", prefix, uuid, field));
+                    let pointer = JsonPointer::new(format!("{}/{}/{}", prefix, uuid, field));
                     data.insert(pointer, json_to_property_value(val));
                 }
             }

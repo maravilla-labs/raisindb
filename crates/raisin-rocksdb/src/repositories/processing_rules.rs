@@ -179,7 +179,10 @@ mod tests {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
 
-        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+        let scope = RepoScope {
+            tenant_id: "tenant1",
+            repo_id: "repo1",
+        };
 
         // Initially no rules
         let rules = repo.get_rules(scope).await.unwrap();
@@ -205,7 +208,10 @@ mod tests {
     async fn test_upsert_rule() {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
-        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+        let scope = RepoScope {
+            tenant_id: "tenant1",
+            repo_id: "repo1",
+        };
 
         // Add first rule
         let rule1 = ProcessingRule::new("rule1", "Rule 1")
@@ -229,9 +235,7 @@ mod tests {
         let rule1_updated = ProcessingRule::new("rule1", "Rule 1 Updated")
             .with_order(10)
             .with_matcher(RuleMatcher::All);
-        repo.upsert_rule(scope, &rule1_updated)
-            .await
-            .unwrap();
+        repo.upsert_rule(scope, &rule1_updated).await.unwrap();
 
         // Verify update
         let rules = repo.get_rules(scope).await.unwrap().unwrap();
@@ -244,7 +248,10 @@ mod tests {
     async fn test_delete_rule() {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
-        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+        let scope = RepoScope {
+            tenant_id: "tenant1",
+            repo_id: "repo1",
+        };
 
         // Add rules
         let rule1 = ProcessingRule::new("rule1", "Rule 1");
@@ -265,7 +272,10 @@ mod tests {
     async fn test_reorder_rules() {
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
-        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+        let scope = RepoScope {
+            tenant_id: "tenant1",
+            repo_id: "repo1",
+        };
 
         // Add rules in order 1, 2, 3
         for i in 1..=3 {
@@ -313,7 +323,10 @@ mod tests {
 
         let rule = ProcessingRule::new("chunk-rule", "Chunk Rule").with_settings(settings);
 
-        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+        let scope = RepoScope {
+            tenant_id: "tenant1",
+            repo_id: "repo1",
+        };
         repo.upsert_rule(scope, &rule).await.unwrap();
 
         let rules = repo.get_rules(scope).await.unwrap().unwrap();
@@ -330,7 +343,10 @@ mod tests {
         use raisin_ai::ProcessingSettings;
         let (db, _temp_dir) = create_test_db();
         let repo = ProcessingRulesRepositoryImpl::new(db);
-        let scope = RepoScope { tenant_id: "tenant1", repo_id: "repo1" };
+        let scope = RepoScope {
+            tenant_id: "tenant1",
+            repo_id: "repo1",
+        };
 
         let settings = ProcessingSettings {
             generate_image_embedding: Some(true),

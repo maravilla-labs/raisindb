@@ -89,9 +89,7 @@ impl SqlFunction for StBoundaryFunction {
                 let rings = geom
                     .get("coordinates")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| {
-                        Error::Validation("Polygon missing coordinates".to_string())
-                    })?;
+                    .ok_or_else(|| Error::Validation("Polygon missing coordinates".to_string()))?;
                 if rings.is_empty() {
                     return Ok(Literal::Null);
                 }

@@ -623,10 +623,7 @@ mod tests {
             VoyageProvider::get_dimensions("voyage-code-2").unwrap(),
             1536
         );
-        assert_eq!(
-            VoyageProvider::get_dimensions("voyage-3").unwrap(),
-            1024
-        );
+        assert_eq!(VoyageProvider::get_dimensions("voyage-3").unwrap(), 1024);
         assert_eq!(
             VoyageProvider::get_dimensions("voyage-3-lite").unwrap(),
             512
@@ -640,10 +637,7 @@ mod tests {
             OllamaProvider::get_dimensions("nomic-embed-text").unwrap(),
             768
         );
-        assert_eq!(
-            OllamaProvider::get_dimensions("all-minilm").unwrap(),
-            384
-        );
+        assert_eq!(OllamaProvider::get_dimensions("all-minilm").unwrap(), 384);
         assert_eq!(
             OllamaProvider::get_dimensions("mxbai-embed-large").unwrap(),
             1024

@@ -10,6 +10,7 @@
 //! - [`like_match`] - SQL LIKE pattern matching
 
 mod functions;
+mod graph_functions;
 mod like_match;
 mod operators;
 mod property_access;
@@ -202,7 +203,14 @@ pub async fn evaluate_expr<S: Storage>(
                 }
 
                 Expr::FunctionCall { name, args, .. } => {
-                    let val = evaluate_function(name, args, binding)?;
+                    let val = if graph_functions::is_graph_function(name) {
+                        graph_functions::evaluate_graph_function(
+                            name, args, binding, storage, context,
+                        )
+                        .await?
+                    } else {
+                        evaluate_function(name, args, binding)?
+                    };
                     value_stack.push(val);
                 }
 

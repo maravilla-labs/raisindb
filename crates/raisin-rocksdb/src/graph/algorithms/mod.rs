@@ -9,14 +9,17 @@ pub use registry::{AlgorithmExecutor, AlgorithmRegistry, AlgorithmResult};
 
 use crate::graph::{CachedValue, GraphCacheValue};
 use raisin_graph_algorithms::{
-    algorithms::{louvain, page_rank, triangle_count, weakly_connected_components},
+    algorithms::{
+        betweenness_centrality, bfs, cdlp, closeness_centrality, lcc, louvain, page_rank, sssp,
+        triangle_count, weakly_connected_components,
+    },
     GraphProjection,
 };
 use std::collections::HashMap;
 
 /// Execute PageRank algorithm
 pub fn execute_pagerank(
-    projection: &GraphProjection,
+    projection: &mut GraphProjection,
     damping_factor: f64,
     max_iterations: usize,
     tolerance: f64,
@@ -63,17 +66,69 @@ pub fn execute_triangle_count(projection: &GraphProjection) -> HashMap<String, C
         .collect()
 }
 
-/// Execute betweenness centrality algorithm (placeholder)
-///
-/// TODO: Implement betweenness centrality in raisin-graph-algorithms
+/// Execute betweenness centrality algorithm
 pub fn execute_betweenness_centrality(
-    _projection: &GraphProjection,
+    projection: &GraphProjection,
 ) -> HashMap<String, CachedValue> {
-    // Betweenness centrality is computationally expensive
-    // For now, return empty results
-    // TODO: Implement in raisin-graph-algorithms crate
-    tracing::warn!("Betweenness centrality not yet implemented");
-    HashMap::new()
+    let scores = betweenness_centrality(projection);
+    scores
+        .into_iter()
+        .map(|(node_id, score)| (node_id, CachedValue::Float(score)))
+        .collect()
+}
+
+/// Execute closeness centrality algorithm
+pub fn execute_closeness_centrality(projection: &GraphProjection) -> HashMap<String, CachedValue> {
+    let scores = closeness_centrality(projection);
+    scores
+        .into_iter()
+        .map(|(node_id, score)| (node_id, CachedValue::Float(score)))
+        .collect()
+}
+
+/// Execute BFS algorithm from a source node
+pub fn execute_bfs(
+    projection: &GraphProjection,
+    source_node: &str,
+) -> HashMap<String, CachedValue> {
+    let distances = bfs(projection, source_node);
+    distances
+        .into_iter()
+        .map(|(node_id, distance)| (node_id, CachedValue::Integer(distance)))
+        .collect()
+}
+
+/// Execute SSSP (Dijkstra) from a source node
+pub fn execute_sssp(
+    projection: &GraphProjection,
+    source_node: &str,
+) -> HashMap<String, CachedValue> {
+    let distances = sssp(projection, source_node);
+    distances
+        .into_iter()
+        .map(|(node_id, distance)| (node_id, CachedValue::Float(distance)))
+        .collect()
+}
+
+/// Execute CDLP (Community Detection via Label Propagation)
+pub fn execute_cdlp(
+    projection: &GraphProjection,
+    max_iterations: usize,
+) -> HashMap<String, CachedValue> {
+    let labels = cdlp(projection, max_iterations);
+    labels
+        .into_iter()
+        .map(|(node_id, label)| (node_id, CachedValue::Integer(label as u64)))
+        .collect()
+}
+
+/// Execute LCC (Local Clustering Coefficient)
+pub fn execute_lcc(projection: &GraphProjection) -> HashMap<String, CachedValue> {
+    let coefficients = lcc(projection);
+    coefficients
+        .into_iter()
+        .map(|(node_id, coeff)| (node_id, CachedValue::Float(coeff)))
+        .collect()
 }
 
 /// Build cache values from algorithm results
@@ -131,8 +186,8 @@ mod tests {
 
     #[test]
     fn test_pagerank_wrapper() {
-        let projection = create_test_graph();
-        let results = execute_pagerank(&projection, 0.85, 20, 1e-6);
+        let mut projection = create_test_graph();
+        let results = execute_pagerank(&mut projection, 0.85, 20, 1e-6);
 
         assert_eq!(results.len(), 4);
         for (_, value) in &results {
@@ -158,7 +213,6 @@ mod tests {
 
         assert_eq!(results.len(), 4);
         // All nodes should be in the same component
-        let first_component = results.values().next().unwrap().as_integer().unwrap();
         for (_, value) in &results {
             // They may not all be the same if the algorithm implementation differs
             // but they should all have a component ID
@@ -204,5 +258,79 @@ mod tests {
 
         let user1_cache = cache_values.get("user1").unwrap();
         assert_eq!(user1_cache.expires_at, 0); // Never expires
+    }
+
+    #[test]
+    fn test_bfs_wrapper() {
+        let projection = create_test_graph();
+        let results = execute_bfs(&projection, "user1");
+
+        assert_eq!(results.len(), 4);
+        // Source node should have distance 0
+        let user1_dist = results.get("user1").unwrap().as_integer().unwrap();
+        assert_eq!(user1_dist, 0);
+        for (_, value) in &results {
+            assert!(value.as_integer().is_some());
+        }
+    }
+
+    #[test]
+    fn test_sssp_wrapper() {
+        let projection = create_test_graph();
+        let results = execute_sssp(&projection, "user1");
+
+        assert_eq!(results.len(), 4);
+        // Source node should have distance 0.0
+        let user1_dist = results.get("user1").unwrap().as_float().unwrap();
+        assert!((user1_dist - 0.0).abs() < f64::EPSILON);
+        for (_, value) in &results {
+            assert!(value.as_float().is_some());
+        }
+    }
+
+    #[test]
+    fn test_cdlp_wrapper() {
+        let projection = create_test_graph();
+        let results = execute_cdlp(&projection, 10);
+
+        assert_eq!(results.len(), 4);
+        for (_, value) in &results {
+            assert!(value.as_integer().is_some());
+        }
+    }
+
+    #[test]
+    fn test_lcc_wrapper() {
+        let projection = create_test_graph();
+        let results = execute_lcc(&projection);
+
+        assert_eq!(results.len(), 4);
+        for (_, value) in &results {
+            assert!(value.as_float().is_some());
+        }
+    }
+
+    #[test]
+    fn test_betweenness_centrality_wrapper() {
+        let projection = create_test_graph();
+        let results = execute_betweenness_centrality(&projection);
+
+        assert_eq!(results.len(), 4);
+        for (_, value) in &results {
+            let score = value.as_float().expect("betweenness should return float");
+            assert!(score >= 0.0, "betweenness score should be non-negative");
+        }
+    }
+
+    #[test]
+    fn test_closeness_centrality_wrapper() {
+        let projection = create_test_graph();
+        let results = execute_closeness_centrality(&projection);
+
+        assert_eq!(results.len(), 4);
+        for (_, value) in &results {
+            let score = value.as_float().expect("closeness should return float");
+            assert!(score >= 0.0, "closeness score should be non-negative");
+        }
     }
 }

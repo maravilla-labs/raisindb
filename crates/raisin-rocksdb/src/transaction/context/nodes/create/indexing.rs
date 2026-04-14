@@ -188,14 +188,7 @@ pub(super) fn index_node_properties(
     for (prop_name, prop_value) in &node.properties {
         if let PropertyValue::Geometry(geojson) = prop_value {
             tx.storage.spatial_index.index_geometry_to_batch(
-                &mut batch,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.id,
-                prop_name,
-                geojson,
+                &mut batch, tenant_id, repo_id, branch, workspace, &node.id, prop_name, geojson,
                 revision,
             )?;
         }

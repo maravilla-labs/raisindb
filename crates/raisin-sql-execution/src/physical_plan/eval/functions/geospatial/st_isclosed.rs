@@ -63,9 +63,7 @@ impl SqlFunction for StIsClosedFunction {
                 let coords = geom
                     .get("coordinates")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| {
-                        Error::Validation("Missing coordinates array".to_string())
-                    })?;
+                    .ok_or_else(|| Error::Validation("Missing coordinates array".to_string()))?;
                 if coords.len() < 2 {
                     false
                 } else {

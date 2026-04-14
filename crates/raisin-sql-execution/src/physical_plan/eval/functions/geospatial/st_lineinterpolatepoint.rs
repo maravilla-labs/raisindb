@@ -87,7 +87,10 @@ impl SqlFunction for StLineInterpolatePointFunction {
         }
 
         if coords.len() == 1 || fraction == 0.0 {
-            return Ok(Literal::Geometry(point_to_geojson(coords[0].x, coords[0].y)));
+            return Ok(Literal::Geometry(point_to_geojson(
+                coords[0].x,
+                coords[0].y,
+            )));
         }
 
         if fraction == 1.0 {
@@ -107,7 +110,10 @@ impl SqlFunction for StLineInterpolatePointFunction {
         }
 
         if total_length == 0.0 {
-            return Ok(Literal::Geometry(point_to_geojson(coords[0].x, coords[0].y)));
+            return Ok(Literal::Geometry(point_to_geojson(
+                coords[0].x,
+                coords[0].y,
+            )));
         }
 
         let target_length = fraction * total_length;

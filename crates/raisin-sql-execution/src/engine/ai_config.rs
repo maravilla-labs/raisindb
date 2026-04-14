@@ -41,9 +41,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 
     async fn execute_show_embedding_config(&self) -> Result<RowStream, Error> {
-        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
-            Error::Validation("Embedding config store not available".to_string())
-        })?;
+        let store = self
+            .embedding_config_store
+            .as_ref()
+            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
 
         let config = store
             .get_config(&self.tenant_id)
@@ -61,10 +62,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             config_row("model", &config.model),
             config_row("dimensions", &config.dimensions.to_string()),
             config_row("has_api_key", &has_api_key.to_string()),
-            config_row(
-                "base_url",
-                config.base_url.as_deref().unwrap_or(""),
-            ),
+            config_row("base_url", config.base_url.as_deref().unwrap_or("")),
             config_row("include_name", &config.include_name.to_string()),
             config_row("include_path", &config.include_path.to_string()),
             config_row(
@@ -74,10 +72,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     .map(|d| format!("{:.2}", d))
                     .unwrap_or_else(|| "0.60 (default)".to_string()),
             ),
-            config_row(
-                "distance_metric",
-                &format!("{:?}", config.distance_metric),
-            ),
+            config_row("distance_metric", &format!("{:?}", config.distance_metric)),
             config_row(
                 "max_embeddings_per_repo",
                 &config
@@ -94,9 +89,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         &self,
         settings: &[ConfigSetting],
     ) -> Result<RowStream, Error> {
-        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
-            Error::Validation("Embedding config store not available".to_string())
-        })?;
+        let store = self
+            .embedding_config_store
+            .as_ref()
+            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
 
         let mut config = store
             .get_config(&self.tenant_id)
@@ -128,9 +124,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                         )
                     })?;
                     let encryptor = ApiKeyEncryptor::new(master_key);
-                    let encrypted = encryptor.encrypt(&setting.value).map_err(|e| {
-                        Error::Backend(format!("Failed to encrypt API key: {}", e))
-                    })?;
+                    let encrypted = encryptor
+                        .encrypt(&setting.value)
+                        .map_err(|e| Error::Backend(format!("Failed to encrypt API key: {}", e)))?;
                     config.api_key_encrypted = Some(encrypted);
                 }
                 "BASE_URL" => {
@@ -179,8 +175,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     };
                 }
                 "DISTANCE_METRIC" => {
-                    config.distance_metric =
-                        parse_distance_metric(&setting.value)?;
+                    config.distance_metric = parse_distance_metric(&setting.value)?;
                 }
                 "MAX_EMBEDDINGS_PER_REPO" => {
                     config.max_embeddings_per_repo = if setting.value.to_lowercase() == "unlimited"
@@ -213,9 +208,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 
     async fn execute_test_embedding_connection(&self) -> Result<RowStream, Error> {
-        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
-            Error::Validation("Embedding config store not available".to_string())
-        })?;
+        let store = self
+            .embedding_config_store
+            .as_ref()
+            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
 
         let config = store
             .get_config(&self.tenant_id)
@@ -249,10 +245,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     "model".to_string(),
                     PropertyValue::String(config.model.clone()),
                 );
-                row.insert(
-                    "success".to_string(),
-                    PropertyValue::Boolean(true),
-                );
+                row.insert("success".to_string(), PropertyValue::Boolean(true));
                 Ok(Box::pin(stream::once(async move { Ok(row) })))
             }
             Err(e) => {
@@ -261,19 +254,17 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     "result".to_string(),
                     PropertyValue::String(format!("Connection failed: {}", e)),
                 );
-                row.insert(
-                    "success".to_string(),
-                    PropertyValue::Boolean(false),
-                );
+                row.insert("success".to_string(), PropertyValue::Boolean(false));
                 Ok(Box::pin(stream::once(async move { Ok(row) })))
             }
         }
     }
 
     async fn execute_show_ai_providers(&self) -> Result<RowStream, Error> {
-        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
-            Error::Validation("Embedding config store not available".to_string())
-        })?;
+        let store = self
+            .embedding_config_store
+            .as_ref()
+            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
 
         let config = store
             .get_config(&self.tenant_id)
@@ -286,14 +277,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     "provider".to_string(),
                     PropertyValue::String(format!("{:?}", cfg.provider)),
                 );
-                row.insert(
-                    "model".to_string(),
-                    PropertyValue::String(cfg.model),
-                );
-                row.insert(
-                    "enabled".to_string(),
-                    PropertyValue::Boolean(cfg.enabled),
-                );
+                row.insert("model".to_string(), PropertyValue::String(cfg.model));
+                row.insert("enabled".to_string(), PropertyValue::Boolean(cfg.enabled));
                 row.insert(
                     "has_api_key".to_string(),
                     PropertyValue::Boolean(cfg.api_key_encrypted.is_some()),
@@ -312,9 +297,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         &self,
         operation: &AIConfigOperation,
     ) -> Result<RowStream, Error> {
-        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
-            Error::Validation("Embedding config store not available".to_string())
-        })?;
+        let store = self
+            .embedding_config_store
+            .as_ref()
+            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
 
         let mut config = store
             .get_config(&self.tenant_id)
@@ -336,13 +322,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                                 )
                             })?;
                             let encryptor = ApiKeyEncryptor::new(master_key);
-                            let encrypted =
-                                encryptor.encrypt(&setting.value).map_err(|e| {
-                                    Error::Backend(format!(
-                                        "Failed to encrypt API key: {}",
-                                        e
-                                    ))
-                                })?;
+                            let encrypted = encryptor.encrypt(&setting.value).map_err(|e| {
+                                Error::Backend(format!("Failed to encrypt API key: {}", e))
+                            })?;
                             config.api_key_encrypted = Some(encrypted);
                         }
                         "BASE_URL" => {
@@ -353,13 +335,12 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                             };
                         }
                         "DIMENSIONS" => {
-                            config.dimensions =
-                                setting.value.parse::<usize>().map_err(|_| {
-                                    Error::Validation(format!(
-                                        "Invalid dimensions value '{}': expected integer",
-                                        setting.value
-                                    ))
-                                })?;
+                            config.dimensions = setting.value.parse::<usize>().map_err(|_| {
+                                Error::Validation(format!(
+                                    "Invalid dimensions value '{}': expected integer",
+                                    setting.value
+                                ))
+                            })?;
                         }
                         other => {
                             return Err(Error::Validation(format!(
@@ -375,10 +356,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                     Error::Backend(format!("Failed to save embedding config: {}", e))
                 })?;
 
-                ai_config_ok(format!(
-                    "Provider '{}' configured and enabled",
-                    provider
-                ))
+                ai_config_ok(format!("Provider '{}' configured and enabled", provider))
             }
             AIConfigOperation::DropProvider { provider } => {
                 let current = format!("{:?}", config.provider);
@@ -404,9 +382,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 
     async fn execute_rebuild_vector_index(&self) -> Result<RowStream, Error> {
-        let engine = self.hnsw_engine.as_ref().ok_or_else(|| {
-            Error::Validation("HNSW engine not configured".to_string())
-        })?;
+        let engine = self
+            .hnsw_engine
+            .as_ref()
+            .ok_or_else(|| Error::Validation("HNSW engine not configured".to_string()))?;
 
         let branch = self.effective_branch().await;
 
@@ -416,9 +395,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             .map_err(|e| Error::Backend(format!("Failed to purge vector index: {}", e)))?;
 
         // Get embedding config for dimensions
-        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
-            Error::Validation("Embedding config store not available".to_string())
-        })?;
+        let store = self
+            .embedding_config_store
+            .as_ref()
+            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
         let config = store
             .get_config(&self.tenant_id)
             .map_err(|e| Error::Backend(format!("Failed to read embedding config: {}", e)))?
@@ -464,23 +444,22 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 }
             }
 
-            ai_config_ok(format!(
-                "Vector index rebuilt with {} embeddings",
-                count
-            ))
+            ai_config_ok(format!("Vector index rebuilt with {} embeddings", count))
         } else {
             ai_config_ok("Vector index purged. No embedding storage available to repopulate.")
         }
     }
 
     async fn execute_regenerate_embeddings(&self) -> Result<RowStream, Error> {
-        let _engine = self.hnsw_engine.as_ref().ok_or_else(|| {
-            Error::Validation("HNSW engine not configured".to_string())
-        })?;
+        let _engine = self
+            .hnsw_engine
+            .as_ref()
+            .ok_or_else(|| Error::Validation("HNSW engine not configured".to_string()))?;
 
-        let store = self.embedding_config_store.as_ref().ok_or_else(|| {
-            Error::Validation("Embedding config store not available".to_string())
-        })?;
+        let store = self
+            .embedding_config_store
+            .as_ref()
+            .ok_or_else(|| Error::Validation("Embedding config store not available".to_string()))?;
 
         let config = store
             .get_config(&self.tenant_id)
@@ -563,9 +542,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 
     async fn execute_verify_vector_index(&self) -> Result<RowStream, Error> {
-        let engine = self.hnsw_engine.as_ref().ok_or_else(|| {
-            Error::Validation("HNSW engine not configured".to_string())
-        })?;
+        let engine = self
+            .hnsw_engine
+            .as_ref()
+            .ok_or_else(|| Error::Validation("HNSW engine not configured".to_string()))?;
 
         let branch = self.effective_branch().await;
 
@@ -586,7 +566,11 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         };
 
         let is_consistent = hnsw_count == storage_count;
-        let status = if is_consistent { "consistent" } else { "mismatch" };
+        let status = if is_consistent {
+            "consistent"
+        } else {
+            "mismatch"
+        };
 
         let mut row = Row::new();
         row.insert(
@@ -604,9 +588,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         if !is_consistent {
             row.insert(
                 "action".to_string(),
-                PropertyValue::String(
-                    "Run REBUILD VECTOR INDEX to fix".to_string(),
-                ),
+                PropertyValue::String("Run REBUILD VECTOR INDEX to fix".to_string()),
             );
         }
 
@@ -644,14 +626,8 @@ fn config_row(key: &str, value: &str) -> Row {
 
 fn ai_config_ok(message: impl Into<String>) -> Result<RowStream, Error> {
     let mut row = Row::new();
-    row.insert(
-        "result".to_string(),
-        PropertyValue::String(message.into()),
-    );
-    row.insert(
-        "success".to_string(),
-        PropertyValue::Boolean(true),
-    );
+    row.insert("result".to_string(), PropertyValue::String(message.into()));
+    row.insert("success".to_string(), PropertyValue::Boolean(true));
     Ok(Box::pin(stream::once(async move { Ok(row) })))
 }
 

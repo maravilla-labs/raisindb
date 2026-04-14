@@ -221,9 +221,7 @@ impl EmbeddingJobHandler {
             crate::repositories::RocksDBEmbeddingStorage::new(self.storage.db().clone());
 
         // Store each chunk and add to HNSW
-        for ((chunk_content, chunk_index), embedding) in
-            chunks.iter().zip(embeddings.into_iter())
-        {
+        for ((chunk_content, chunk_index), embedding) in chunks.iter().zip(embeddings.into_iter()) {
             let chunk_node_id = if total_chunks > 1 {
                 format!("{}#{}", node_id, chunk_index)
             } else {

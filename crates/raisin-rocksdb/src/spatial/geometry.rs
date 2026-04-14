@@ -79,7 +79,11 @@ pub fn geometry_centroid(geojson: &GeoJson) -> Option<(f64, f64)> {
     centroid.filter(|&(lon, lat)| {
         let valid = is_valid_coordinate(lon, lat);
         if !valid {
-            tracing::warn!(lon, lat, "Computed geometry centroid has invalid coordinates");
+            tracing::warn!(
+                lon,
+                lat,
+                "Computed geometry centroid has invalid coordinates"
+            );
         }
         valid
     })

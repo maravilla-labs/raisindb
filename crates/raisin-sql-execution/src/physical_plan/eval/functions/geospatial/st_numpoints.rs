@@ -58,18 +58,14 @@ impl SqlFunction for StNumPointsFunction {
                 let coords = geom
                     .get("coordinates")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| {
-                        Error::Validation("Missing coordinates array".to_string())
-                    })?;
+                    .ok_or_else(|| Error::Validation("Missing coordinates array".to_string()))?;
                 coords.len() as i64
             }
             "Polygon" => {
                 let rings = geom
                     .get("coordinates")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| {
-                        Error::Validation("Missing coordinates array".to_string())
-                    })?;
+                    .ok_or_else(|| Error::Validation("Missing coordinates array".to_string()))?;
                 rings
                     .iter()
                     .filter_map(|r| r.as_array())
@@ -80,9 +76,7 @@ impl SqlFunction for StNumPointsFunction {
                 let coords = geom
                     .get("coordinates")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| {
-                        Error::Validation("Missing coordinates array".to_string())
-                    })?;
+                    .ok_or_else(|| Error::Validation("Missing coordinates array".to_string()))?;
                 coords.len() as i64
             }
             _ => {

@@ -270,10 +270,23 @@ pub async fn evaluate_closeness<S: Storage>(
     tracing::debug!("   - Building adjacency graph for closeness calculation...");
     let adjacency = build_adjacency_graph(context).await?;
 
-    // Calculate closeness centrality
+    // Count total nodes for Wasserman-Faust formula
+    let mut all_nodes = std::collections::HashSet::new();
+    for (source, neighbors) in adjacency.iter() {
+        all_nodes.insert(source.clone());
+        for (tgt_ws, tgt_id, _) in neighbors {
+            all_nodes.insert((tgt_ws.clone(), tgt_id.clone()));
+        }
+    }
+    let total_nodes = all_nodes.len();
+
+    // Calculate closeness centrality (Wasserman-Faust)
     let node_key = (node_workspace, node_id.clone());
-    let score =
-        crate::physical_plan::cypher::algorithms::closeness_centrality(&adjacency, &node_key);
+    let score = crate::physical_plan::cypher::algorithms::closeness_centrality(
+        &adjacency,
+        &node_key,
+        total_nodes,
+    );
 
     tracing::debug!("   ✓ closeness({}) = {:.6}", node_id, score);
 

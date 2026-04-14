@@ -51,9 +51,9 @@ pub mod services {
     pub mod node_validation;
     pub mod permission_cache;
     pub mod permission_service;
-    pub mod schema_stats_cache;
     pub mod reference_resolver;
     pub mod rls_filter;
+    pub mod schema_stats_cache;
     pub mod transaction;
     pub mod translation_resolver;
     pub mod translation_service;
@@ -88,12 +88,12 @@ pub use services::permission_cache::{
     new_shared_cache, new_shared_cache_default, CacheStats, PermissionCache, SharedPermissionCache,
 };
 pub use services::permission_service::{CachedPermissionService, PermissionService};
+pub use services::reference_resolver::{node_to_json_value, ReferenceResolver};
 pub use services::schema_stats_cache::{
     new_shared_cache as new_shared_schema_stats_cache,
     new_shared_cache_default as new_shared_schema_stats_cache_default, SchemaStats,
     SchemaStatsCache, SharedSchemaStatsCache,
 };
-pub use services::reference_resolver::{node_to_json_value, ReferenceResolver};
 pub use services::transaction::{Transaction, TxOperation};
 pub use services::translation_resolver::TranslationResolver;
 pub use services::translation_service::{

@@ -80,7 +80,8 @@ impl VectorMetrics {
             .fetch_add(result_count as u64, Ordering::Relaxed);
 
         let ms = duration.as_millis() as u64;
-        self.search_duration_total_ms.fetch_add(ms, Ordering::Relaxed);
+        self.search_duration_total_ms
+            .fetch_add(ms, Ordering::Relaxed);
 
         let mut samples = self.search_duration_samples.lock().unwrap();
         if samples.len() < self.max_samples {

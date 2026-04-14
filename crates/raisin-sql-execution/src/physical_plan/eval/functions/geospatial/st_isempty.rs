@@ -60,24 +60,21 @@ impl SqlFunction for StIsEmptyFunction {
                     .map(|arr| arr.is_empty())
                     .unwrap_or(true)
             }
-            "LineString" | "MultiPoint" => {
-                geom.get("coordinates")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.is_empty())
-                    .unwrap_or(true)
-            }
-            "Polygon" | "MultiLineString" | "MultiPolygon" => {
-                geom.get("coordinates")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.is_empty())
-                    .unwrap_or(true)
-            }
-            "GeometryCollection" => {
-                geom.get("geometries")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.is_empty())
-                    .unwrap_or(true)
-            }
+            "LineString" | "MultiPoint" => geom
+                .get("coordinates")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.is_empty())
+                .unwrap_or(true),
+            "Polygon" | "MultiLineString" | "MultiPolygon" => geom
+                .get("coordinates")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.is_empty())
+                .unwrap_or(true),
+            "GeometryCollection" => geom
+                .get("geometries")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.is_empty())
+                .unwrap_or(true),
             _ => true,
         };
 

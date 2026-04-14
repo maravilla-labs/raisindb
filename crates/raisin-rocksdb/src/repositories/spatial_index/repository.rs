@@ -387,14 +387,20 @@ impl SpatialIndexRepository {
                 let lon: f64 = match coords[0].parse() {
                     Ok(v) => v,
                     Err(_) => {
-                        tracing::warn!(raw = coords[0], "Failed to parse longitude from spatial index, skipping");
+                        tracing::warn!(
+                            raw = coords[0],
+                            "Failed to parse longitude from spatial index, skipping"
+                        );
                         continue;
                     }
                 };
                 let lat: f64 = match coords[1].parse() {
                     Ok(v) => v,
                     Err(_) => {
-                        tracing::warn!(raw = coords[1], "Failed to parse latitude from spatial index, skipping");
+                        tracing::warn!(
+                            raw = coords[1],
+                            "Failed to parse latitude from spatial index, skipping"
+                        );
                         continue;
                     }
                 };

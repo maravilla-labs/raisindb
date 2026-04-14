@@ -9,7 +9,10 @@ use serde_json::json;
 // ---------------------------------------------------------------------------
 
 fn geom_arg(geojson: serde_json::Value) -> TypedExpr {
-    TypedExpr::new(Expr::Literal(Literal::Geometry(geojson)), DataType::Geometry)
+    TypedExpr::new(
+        Expr::Literal(Literal::Geometry(geojson)),
+        DataType::Geometry,
+    )
 }
 
 fn double_arg(v: f64) -> TypedExpr {
@@ -89,7 +92,9 @@ fn test_st_area_polygon() {
     let args = vec![geom_arg(sf_polygon())];
     let result = f.evaluate(&args, &empty_row()).unwrap();
     match result {
-        Literal::Double(area) => assert!(area > 0.0, "polygon area should be positive, got {}", area),
+        Literal::Double(area) => {
+            assert!(area > 0.0, "polygon area should be positive, got {}", area)
+        }
         other => panic!("expected Double, got {:?}", other),
     }
 }
@@ -108,7 +113,11 @@ fn test_st_length_linestring() {
     let args = vec![geom_arg(sf_line())];
     let result = f.evaluate(&args, &empty_row()).unwrap();
     match result {
-        Literal::Double(len) => assert!(len > 0.0, "linestring length should be positive, got {}", len),
+        Literal::Double(len) => assert!(
+            len > 0.0,
+            "linestring length should be positive, got {}",
+            len
+        ),
         other => panic!("expected Double, got {:?}", other),
     }
 }
@@ -148,8 +157,11 @@ fn test_st_azimuth() {
     match result {
         Literal::Double(bearing) => {
             let two_pi = 2.0 * std::f64::consts::PI;
-            assert!(bearing >= 0.0 && bearing < two_pi,
-                "bearing should be in [0, 2pi), got {}", bearing);
+            assert!(
+                bearing >= 0.0 && bearing < two_pi,
+                "bearing should be in [0, 2pi), got {}",
+                bearing
+            );
         }
         other => panic!("expected Double, got {:?}", other),
     }
@@ -387,8 +399,16 @@ fn test_st_centroid() {
             let lon = coords[0].as_f64().unwrap();
             let lat = coords[1].as_f64().unwrap();
             // Centroid of the SF polygon should be roughly in the middle
-            assert!(lon > -122.6 && lon < -122.2, "centroid lon out of range: {}", lon);
-            assert!(lat > 37.6 && lat < 37.9, "centroid lat out of range: {}", lat);
+            assert!(
+                lon > -122.6 && lon < -122.2,
+                "centroid lon out of range: {}",
+                lon
+            );
+            assert!(
+                lat > 37.6 && lat < 37.9,
+                "centroid lat out of range: {}",
+                lat
+            );
         }
         other => panic!("expected Geometry, got {:?}", other),
     }
@@ -462,7 +482,10 @@ fn test_st_boundary_polygon() {
     let result = f.evaluate(&args, &empty_row()).unwrap();
     match result {
         Literal::Geometry(v) => {
-            assert_eq!(v["type"], "LineString", "boundary of polygon should be LineString");
+            assert_eq!(
+                v["type"], "LineString",
+                "boundary of polygon should be LineString"
+            );
         }
         other => panic!("expected Geometry, got {:?}", other),
     }
@@ -482,7 +505,8 @@ fn test_st_union() {
             let geom_type = v["type"].as_str().unwrap();
             assert!(
                 geom_type == "Polygon" || geom_type == "MultiPolygon",
-                "union should be Polygon or MultiPolygon, got {}", geom_type
+                "union should be Polygon or MultiPolygon, got {}",
+                geom_type
             );
         }
         other => panic!("expected Geometry, got {:?}", other),
@@ -498,8 +522,11 @@ fn test_st_intersection() {
         Literal::Geometry(v) => {
             let geom_type = v["type"].as_str().unwrap();
             assert!(
-                geom_type == "Polygon" || geom_type == "MultiPolygon" || geom_type == "GeometryCollection",
-                "intersection should be a geometry, got {}", geom_type
+                geom_type == "Polygon"
+                    || geom_type == "MultiPolygon"
+                    || geom_type == "GeometryCollection",
+                "intersection should be a geometry, got {}",
+                geom_type
             );
         }
         other => panic!("expected Geometry, got {:?}", other),
@@ -515,8 +542,11 @@ fn test_st_difference() {
         Literal::Geometry(v) => {
             let geom_type = v["type"].as_str().unwrap();
             assert!(
-                geom_type == "Polygon" || geom_type == "MultiPolygon" || geom_type == "GeometryCollection",
-                "difference should be a geometry, got {}", geom_type
+                geom_type == "Polygon"
+                    || geom_type == "MultiPolygon"
+                    || geom_type == "GeometryCollection",
+                "difference should be a geometry, got {}",
+                geom_type
             );
         }
         other => panic!("expected Geometry, got {:?}", other),
@@ -532,8 +562,11 @@ fn test_st_symdifference() {
         Literal::Geometry(v) => {
             let geom_type = v["type"].as_str().unwrap();
             assert!(
-                geom_type == "Polygon" || geom_type == "MultiPolygon" || geom_type == "GeometryCollection",
-                "symmetric difference should be a geometry, got {}", geom_type
+                geom_type == "Polygon"
+                    || geom_type == "MultiPolygon"
+                    || geom_type == "GeometryCollection",
+                "symmetric difference should be a geometry, got {}",
+                geom_type
             );
         }
         other => panic!("expected Geometry, got {:?}", other),
@@ -744,24 +777,77 @@ fn test_null_propagation_unary() {
     let null = vec![null_arg()];
 
     assert_eq!(StAreaFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StLengthFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StPerimeterFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StGeometryTypeFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StNumPointsFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StNumGeometriesFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StIsValidFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StIsEmptyFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StIsClosedFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StIsSimpleFunction.evaluate(&null, &row).unwrap(), Literal::Null);
+    assert_eq!(
+        StLengthFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StPerimeterFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StGeometryTypeFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StNumPointsFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StNumGeometriesFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StIsValidFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StIsEmptyFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StIsClosedFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StIsSimpleFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
     assert_eq!(StSridFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StBufferFunction.evaluate(&[null_arg(), double_arg(100.0)], &row).unwrap(), Literal::Null);
-    assert_eq!(StCentroidFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StEnvelopeFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StConvexHullFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StReverseFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StBoundaryFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StStartPointFunction.evaluate(&null, &row).unwrap(), Literal::Null);
-    assert_eq!(StEndPointFunction.evaluate(&null, &row).unwrap(), Literal::Null);
+    assert_eq!(
+        StBufferFunction
+            .evaluate(&[null_arg(), double_arg(100.0)], &row)
+            .unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StCentroidFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StEnvelopeFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StConvexHullFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StReverseFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StBoundaryFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StStartPointFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
+    assert_eq!(
+        StEndPointFunction.evaluate(&null, &row).unwrap(),
+        Literal::Null
+    );
 }
 
 #[test]
@@ -772,73 +858,103 @@ fn test_null_propagation_binary() {
 
     // First arg null
     assert_eq!(
-        StDisjointFunction.evaluate(&[null_arg(), sf.clone()], &row).unwrap(),
+        StDisjointFunction
+            .evaluate(&[null_arg(), sf.clone()], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StEqualsFunction.evaluate(&[null_arg(), sf.clone()], &row).unwrap(),
+        StEqualsFunction
+            .evaluate(&[null_arg(), sf.clone()], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StMakeLineFunction.evaluate(&[null_arg(), sf.clone()], &row).unwrap(),
+        StMakeLineFunction
+            .evaluate(&[null_arg(), sf.clone()], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StCollectFunction.evaluate(&[null_arg(), sf.clone()], &row).unwrap(),
+        StCollectFunction
+            .evaluate(&[null_arg(), sf.clone()], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StAzimuthFunction.evaluate(&[null_arg(), sf.clone()], &row).unwrap(),
+        StAzimuthFunction
+            .evaluate(&[null_arg(), sf.clone()], &row)
+            .unwrap(),
         Literal::Null
     );
 
     // Second arg null
     assert_eq!(
-        StDisjointFunction.evaluate(&[sf.clone(), null_arg()], &row).unwrap(),
+        StDisjointFunction
+            .evaluate(&[sf.clone(), null_arg()], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StEqualsFunction.evaluate(&[sf.clone(), null_arg()], &row).unwrap(),
+        StEqualsFunction
+            .evaluate(&[sf.clone(), null_arg()], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StMakeLineFunction.evaluate(&[sf.clone(), null_arg()], &row).unwrap(),
+        StMakeLineFunction
+            .evaluate(&[sf.clone(), null_arg()], &row)
+            .unwrap(),
         Literal::Null
     );
 
     // ST_MAKEPOINT with null
     assert_eq!(
-        StMakePointFunction.evaluate(&[null_arg(), double_arg(37.0)], &row).unwrap(),
+        StMakePointFunction
+            .evaluate(&[null_arg(), double_arg(37.0)], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StMakePointFunction.evaluate(&[double_arg(-122.0), null_arg()], &row).unwrap(),
+        StMakePointFunction
+            .evaluate(&[double_arg(-122.0), null_arg()], &row)
+            .unwrap(),
         Literal::Null
     );
 
     // ST_LINEINTERPOLATEPOINT with null
     assert_eq!(
-        StLineInterpolatePointFunction.evaluate(&[null_arg(), double_arg(0.5)], &row).unwrap(),
+        StLineInterpolatePointFunction
+            .evaluate(&[null_arg(), double_arg(0.5)], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StLineInterpolatePointFunction.evaluate(&[geom_arg(sf_line()), null_arg()], &row).unwrap(),
+        StLineInterpolatePointFunction
+            .evaluate(&[geom_arg(sf_line()), null_arg()], &row)
+            .unwrap(),
         Literal::Null
     );
 
     // ST_POINTN with null
     assert_eq!(
-        StPointNFunction.evaluate(&[null_arg(), int_arg(1)], &row).unwrap(),
+        StPointNFunction
+            .evaluate(&[null_arg(), int_arg(1)], &row)
+            .unwrap(),
         Literal::Null
     );
     assert_eq!(
-        StPointNFunction.evaluate(&[geom_arg(sf_line()), null_arg()], &row).unwrap(),
+        StPointNFunction
+            .evaluate(&[geom_arg(sf_line()), null_arg()], &row)
+            .unwrap(),
         Literal::Null
     );
 
     // ST_SIMPLIFY with null
     assert_eq!(
-        StSimplifyFunction.evaluate(&[null_arg(), double_arg(0.001)], &row).unwrap(),
+        StSimplifyFunction
+            .evaluate(&[null_arg(), double_arg(0.001)], &row)
+            .unwrap(),
         Literal::Null
     );
 }
@@ -848,10 +964,17 @@ fn test_null_propagation_makeenvelope() {
     let row = empty_row();
     // Any null argument should make the whole thing null
     assert_eq!(
-        StMakeEnvelopeFunction.evaluate(
-            &[null_arg(), double_arg(37.7), double_arg(-122.3), double_arg(37.8)],
-            &row
-        ).unwrap(),
+        StMakeEnvelopeFunction
+            .evaluate(
+                &[
+                    null_arg(),
+                    double_arg(37.7),
+                    double_arg(-122.3),
+                    double_arg(37.8)
+                ],
+                &row
+            )
+            .unwrap(),
         Literal::Null
     );
 }
@@ -867,7 +990,11 @@ fn test_st_distance_point_inside_polygon_is_zero() {
     let args = vec![geom_arg(interior_point()), geom_arg(sf_polygon())];
     let result = f.evaluate(&args, &empty_row()).unwrap();
     match result {
-        Literal::Double(d) => assert!(d < 1.0, "point inside polygon should have distance ~0, got {}", d),
+        Literal::Double(d) => assert!(
+            d < 1.0,
+            "point inside polygon should have distance ~0, got {}",
+            d
+        ),
         other => panic!("expected Double, got {:?}", other),
     }
 }
@@ -878,7 +1005,11 @@ fn test_st_dwithin_point_near_polygon_boundary() {
     // Point just outside the west edge of sf_polygon ([-122.5, 37.7] to [-122.5, 37.8])
     let point_near = json!({"type": "Point", "coordinates": [-122.501, 37.75]});
     // ~111m per 0.001 degrees at this latitude -- 0.001 deg ~ 88m, so use 200m radius
-    let args = vec![geom_arg(point_near), geom_arg(sf_polygon()), double_arg(200.0)];
+    let args = vec![
+        geom_arg(point_near),
+        geom_arg(sf_polygon()),
+        double_arg(200.0),
+    ];
     let result = f.evaluate(&args, &empty_row()).unwrap();
     assert_eq!(result, Literal::Boolean(true));
 }
@@ -905,7 +1036,8 @@ fn test_st_buffer_circular_at_mid_latitude() {
             assert!(
                 lon_range > lat_range,
                 "lon_range ({}) should be > lat_range ({}) at mid-latitude",
-                lon_range, lat_range
+                lon_range,
+                lat_range
             );
         }
         other => panic!("expected Geometry, got {:?}", other),
@@ -962,5 +1094,8 @@ fn test_st_extract_all_coords_rejects_invalid() {
     // Non-numeric coordinate value should produce an error
     let bad_point = json!({"type": "Point", "coordinates": ["not_a_number", 37.0]});
     let result = helpers::extract_all_coords(&bad_point);
-    assert!(result.is_err(), "expected error for non-numeric coordinates");
+    assert!(
+        result.is_err(),
+        "expected error for non-numeric coordinates"
+    );
 }

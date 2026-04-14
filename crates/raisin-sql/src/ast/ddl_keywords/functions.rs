@@ -79,7 +79,8 @@ pub(super) fn vector_function_keywords() -> Vec<KeywordInfo> {
         KeywordInfo {
             keyword: "HYBRID_SEARCH".into(),
             category: KeywordCategory::TableFunction,
-            description: "Combined fulltext + vector search with RRF ranking. Returns merged results.".into(),
+            description:
+                "Combined fulltext + vector search with RRF ranking. Returns merged results.".into(),
             syntax: Some("HYBRID_SEARCH(query_text, limit)".into()),
             example: Some("SELECT * FROM HYBRID_SEARCH('find articles about AI', 10)".into()),
         },

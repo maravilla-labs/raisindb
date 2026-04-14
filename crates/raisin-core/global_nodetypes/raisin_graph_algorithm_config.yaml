@@ -9,7 +9,7 @@ properties:
     type: String
     required: true
     index: [Property]
-    description: Algorithm name (pagerank, louvain, connected_components, betweenness_centrality, triangle_count, relates_cache)
+    description: Algorithm name (pagerank, louvain, connected_components, betweenness_centrality, triangle_count, relates_cache, bfs, sssp, cdlp, lcc)
   - name: enabled
     type: Boolean
     required: true
@@ -38,6 +38,10 @@ properties:
     # For pagerank: damping_factor, max_iterations, convergence_threshold
     # For louvain: resolution, max_iterations
     # For relates_cache: max_depth, cache_scope
+    # For bfs: source_node (required)
+    # For sssp: source_node (required)
+    # For cdlp: max_iterations (default: 10)
+    # For lcc: (no config needed)
   - name: refresh
     type: Object
     required: false

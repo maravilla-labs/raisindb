@@ -180,7 +180,10 @@ async fn test_5k_flat_storage_performance() -> Result<()> {
 
     let start = Instant::now();
     let root_nodes = nodes_repo
-        .list_root(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), ListOptions::default())
+        .list_root(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            ListOptions::default(),
+        )
         .await?;
     let list_duration = start.elapsed().as_secs_f64() * 1000.0;
 

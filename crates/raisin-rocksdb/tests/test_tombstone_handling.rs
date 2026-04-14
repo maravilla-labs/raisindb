@@ -558,7 +558,11 @@ async fn test_deleted_node_not_in_get_by_path() -> Result<()> {
     // Verify node exists
     let found = fixture
         .nodes()
-        .get_by_path(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), "/gettest", None)
+        .get_by_path(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            "/gettest",
+            None,
+        )
         .await?;
     assert!(found.is_some(), "Node should exist before delete");
 
@@ -568,7 +572,11 @@ async fn test_deleted_node_not_in_get_by_path() -> Result<()> {
     // Should return None
     let not_found = fixture
         .nodes()
-        .get_by_path(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), "/gettest", None)
+        .get_by_path(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            "/gettest",
+            None,
+        )
         .await?;
     assert!(
         not_found.is_none(),
@@ -589,7 +597,11 @@ async fn test_deleted_node_not_in_get_by_id() -> Result<()> {
     // Verify node exists
     let found = fixture
         .nodes()
-        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &node_id, None)
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &node_id,
+            None,
+        )
         .await?;
     assert!(found.is_some(), "Node should exist before delete");
 
@@ -599,7 +611,11 @@ async fn test_deleted_node_not_in_get_by_id() -> Result<()> {
     // Should return None
     let not_found = fixture
         .nodes()
-        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &node_id, None)
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &node_id,
+            None,
+        )
         .await?;
     assert!(
         not_found.is_none(),
@@ -632,7 +648,11 @@ async fn test_recreate_after_delete() -> Result<()> {
     // New node should exist
     let found = fixture
         .nodes()
-        .get_by_path(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), "/recreate", None)
+        .get_by_path(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            "/recreate",
+            None,
+        )
         .await?;
     assert!(found.is_some(), "Recreated node should exist");
     assert_eq!(found.unwrap().id, id2, "Should find the new node, not old");
@@ -640,7 +660,11 @@ async fn test_recreate_after_delete() -> Result<()> {
     // Old ID should still be gone
     let old_not_found = fixture
         .nodes()
-        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &id1, None)
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &id1,
+            None,
+        )
         .await?;
     assert!(
         old_not_found.is_none(),

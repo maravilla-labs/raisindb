@@ -206,28 +206,23 @@ impl PhysicalPlanner {
                 left,
                 op: BinaryOperator::And,
                 right,
-            } => {
-                self.extract_max_distance_from_expr(left, distance_alias)
-                    .or_else(|| self.extract_max_distance_from_expr(right, distance_alias))
-            }
+            } => self
+                .extract_max_distance_from_expr(left, distance_alias)
+                .or_else(|| self.extract_max_distance_from_expr(right, distance_alias)),
 
             // distance_expr < threshold  or  distance_expr <= threshold
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Lt | BinaryOperator::LtEq,
                 right,
-            } if self.is_distance_related(left, distance_alias) => {
-                Self::expr_to_f32(right)
-            }
+            } if self.is_distance_related(left, distance_alias) => Self::expr_to_f32(right),
 
             // threshold > distance_expr  or  threshold >= distance_expr
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Gt | BinaryOperator::GtEq,
                 right,
-            } if self.is_distance_related(right, distance_alias) => {
-                Self::expr_to_f32(left)
-            }
+            } if self.is_distance_related(right, distance_alias) => Self::expr_to_f32(left),
 
             _ => None,
         }
@@ -250,9 +245,7 @@ impl PhysicalPlanner {
                 "VECTOR_L2_DISTANCE" | "VECTOR_COSINE_DISTANCE" | "VECTOR_INNER_PRODUCT"
             ),
             // Column matching the distance alias (e.g., WHERE sim < 0.5)
-            Expr::Column { column, .. } => {
-                distance_alias.is_some_and(|alias| column == alias)
-            }
+            Expr::Column { column, .. } => distance_alias.is_some_and(|alias| column == alias),
             _ => false,
         }
     }

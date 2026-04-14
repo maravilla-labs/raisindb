@@ -90,9 +90,7 @@ impl SqlFunction for StOverlapsFunction {
             ("LineString", "LineString") => {
                 let line_a = geojson_to_linestring(geom_a)?;
                 let line_b = geojson_to_linestring(geom_b)?;
-                line_a.intersects(&line_b)
-                    && !line_a.contains(&line_b)
-                    && !line_b.contains(&line_a)
+                line_a.intersects(&line_b) && !line_a.contains(&line_b) && !line_b.contains(&line_a)
             }
             _ => {
                 // Different dimensions cannot overlap by definition

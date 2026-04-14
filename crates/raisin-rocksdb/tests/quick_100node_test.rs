@@ -79,7 +79,11 @@ async fn test_100_nodes_sequential_creation() -> Result<()> {
 
         let options = CreateNodeOptions::default();
         nodes
-            .create(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), node, options)
+            .create(
+                StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+                node,
+                options,
+            )
             .await?;
 
         if (i + 1) % 10 == 0 {
@@ -89,7 +93,10 @@ async fn test_100_nodes_sequential_creation() -> Result<()> {
 
     println!("\nListing all root nodes...");
     let root_nodes = nodes
-        .list_root(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), ListOptions::default())
+        .list_root(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            ListOptions::default(),
+        )
         .await?;
 
     println!("Found {} nodes (expected 100)", root_nodes.len());

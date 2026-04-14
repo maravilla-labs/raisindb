@@ -11,10 +11,10 @@ use raisin_replication::{
 };
 use raisin_rocksdb::replication::OperationApplicator;
 use raisin_rocksdb::{RocksDBConfig, RocksDBStorage};
+use raisin_storage::scope::StorageScope;
 use raisin_storage::{
     BranchRepository, NodeRepository, RelationRepository, Storage, TranslationRepository,
 };
-use raisin_storage::scope::StorageScope;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -115,7 +115,11 @@ async fn apply_revision_replays_full_node_state() {
 
     let node_repo = storage.nodes();
     let stored = node_repo
-        .get(StorageScope::new(tenant_id, repo_id, branch_name, workspace), &node.id, None)
+        .get(
+            StorageScope::new(tenant_id, repo_id, branch_name, workspace),
+            &node.id,
+            None,
+        )
         .await
         .unwrap()
         .expect("node must exist");
@@ -126,7 +130,11 @@ async fn apply_revision_replays_full_node_state() {
     );
 
     let fetched_by_path = node_repo
-        .get_by_path(StorageScope::new(tenant_id, repo_id, branch_name, workspace), &node.path, None)
+        .get_by_path(
+            StorageScope::new(tenant_id, repo_id, branch_name, workspace),
+            &node.path,
+            None,
+        )
         .await
         .unwrap()
         .expect("path lookup");

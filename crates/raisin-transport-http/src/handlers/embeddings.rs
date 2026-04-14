@@ -348,13 +348,13 @@ pub async fn test_embedding_connection(
         config.base_url.as_deref(),
     )
     .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid provider configuration: {}", e),
-                }),
-            )
-        })?;
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid provider configuration: {}", e),
+            }),
+        )
+    })?;
 
     match provider.test_connection().await {
         Ok(dims) => Ok(Json(TestConnectionResponse {

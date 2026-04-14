@@ -37,6 +37,8 @@ pub mod algorithms;
 pub mod background_compute;
 pub mod cache_layer;
 pub mod config;
+pub mod event_handler;
+pub mod projection_cache;
 pub mod scope;
 pub mod types;
 
@@ -44,5 +46,8 @@ pub use algorithms::{AlgorithmExecutor, AlgorithmRegistry, AlgorithmResult};
 pub use background_compute::{GraphComputeConfig, GraphComputeStats, GraphComputeTask, TickStats};
 pub use cache_layer::{CacheStats, GraphCacheLayer};
 pub use config::GraphAlgorithmConfig;
+pub use event_handler::GraphProjectionEventHandler;
+pub use projection_cache::{GraphProjectionStore, ProjectionKey};
 pub use scope::ScopeFilter;
+pub use types::PersistedProjection;
 pub use types::*;

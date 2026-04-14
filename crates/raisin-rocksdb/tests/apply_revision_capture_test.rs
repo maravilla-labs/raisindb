@@ -15,12 +15,12 @@ use raisin_replication::{
 };
 use raisin_rocksdb::fractional_index;
 use raisin_rocksdb::{OpLogRepository, RocksDBConfig, RocksDBStorage};
+use raisin_storage::scope::{BranchScope, StorageScope};
 use raisin_storage::{
     BranchRepository, CommitMetadata, CreateNodeOptions, DeleteNodeOptions, NodeRepository,
     NodeTypeRepository, RegistryRepository, RepositoryManagementRepository, Storage,
     UpdateNodeOptions,
 };
-use raisin_storage::scope::{BranchScope, StorageScope};
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -266,7 +266,11 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
     assert_eq!(change.node.path, "/articles/hello-world");
 
     let mut stored = nodes
-        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &article.id, None)
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &article.id,
+            None,
+        )
         .await?
         .expect("node present");
     stored.properties.insert(
@@ -315,7 +319,11 @@ async fn apply_revision_captures_node_mutations() -> Result<()> {
     let change = extract_change(&op, &article.id).expect("change for delete");
     assert_eq!(change.kind, ReplicatedNodeChangeKind::Delete);
     assert!(nodes
-        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &article.id, None)
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &article.id,
+            None
+        )
         .await?
         .is_none());
 
@@ -388,7 +396,11 @@ async fn apply_revision_captures_transaction_mutations() -> Result<()> {
 
     assert!(storage
         .nodes()
-        .get(StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE), &article.id, None)
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, WORKSPACE),
+            &article.id,
+            None
+        )
         .await?
         .is_none());
 

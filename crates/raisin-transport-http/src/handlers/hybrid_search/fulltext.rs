@@ -47,7 +47,9 @@ pub(super) fn perform_fulltext_search(
             node_id: result.node_id.clone(),
             name: result.name.unwrap_or_default(),
             node_type: result.node_type.unwrap_or_default(),
-            path: result.path.unwrap_or_else(|| format!("/{}", result.node_id)),
+            path: result
+                .path
+                .unwrap_or_else(|| format!("/{}", result.node_id)),
             workspace_id: result.workspace_id.clone(),
             score: 0.0, // Will be set by RRF
             fulltext_rank: Some(rank + 1),

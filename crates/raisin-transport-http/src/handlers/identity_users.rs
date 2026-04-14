@@ -341,7 +341,11 @@ pub async fn update_identity_user(
 
     // Cascade active status change to repository user nodes
     if active_changed {
-        let status = if identity.is_active { "active" } else { "inactive" };
+        let status = if identity.is_active {
+            "active"
+        } else {
+            "inactive"
+        };
         cascade_user_status(rocksdb_storage, &tenant_id, &identity_id, status).await;
     }
 
@@ -584,11 +588,7 @@ pub async fn create_identity_user(
 
     // Create new identity
     let identity_id = Uuid::new_v4().to_string();
-    let mut identity = Identity::new(
-        identity_id.clone(),
-        tenant_id.clone(),
-        req.email.clone(),
-    );
+    let mut identity = Identity::new(identity_id.clone(), tenant_id.clone(), req.email.clone());
     identity.display_name = req.display_name.clone();
     if req.email_verified.unwrap_or(false) {
         identity.email_verified = true;
@@ -619,9 +619,9 @@ pub async fn create_identity_user(
 
     // Create user nodes in specified repositories
     let repos = req.repos.unwrap_or_default();
-    let default_roles = req.default_roles.unwrap_or_else(|| {
-        vec!["viewer".to_string(), "authenticated_user".to_string()]
-    });
+    let default_roles = req
+        .default_roles
+        .unwrap_or_else(|| vec!["viewer".to_string(), "authenticated_user".to_string()]);
 
     for repo_id in &repos {
         match ensure_user_node(
@@ -654,7 +654,10 @@ pub async fn create_identity_user(
         }
     }
 
-    Ok((StatusCode::CREATED, Json(IdentityUserResponse::from(identity))))
+    Ok((
+        StatusCode::CREATED,
+        Json(IdentityUserResponse::from(identity)),
+    ))
 }
 
 /// Request to link an identity user to an existing repository user node

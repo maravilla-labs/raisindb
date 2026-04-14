@@ -14,23 +14,18 @@ use crate::projection::GraphProjection;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-/// Triangle Count
+/// Raw per-node triangle count (indexed by integer node ID).
 ///
-/// Counts the number of triangles (cycles of length 3) for each node.
-/// Returns a map of NodeID -> Count.
-/// Note: This implementation treats the graph as undirected.
-pub fn triangle_count(projection: &GraphProjection) -> HashMap<String, usize> {
+/// Counts the number of triangles each node participates in, treating the
+/// graph as undirected. Returns a `Vec<usize>` where `result[i]` is the
+/// triangle count for node with integer ID `i`.
+///
+/// This is the internal workhorse used by both `triangle_count` and `lcc`.
+pub(crate) fn triangle_count_raw(projection: &GraphProjection) -> Vec<usize> {
     let graph = projection.graph();
     let node_count = projection.node_count();
 
-    // We need efficient neighbor lookup. Csr provides sorted neighbors usually?
-    // petgraph Csr neighbors are slices.
-
-    // To treat as undirected, we need to consider both in and out neighbors.
-    // But Csr is directed. We can build an adjacency list of "undirected" neighbors first.
-    // Or we can just iterate u -> v -> w -> u.
-
-    // For efficiency, let's build a temporary adjacency list of sorted neighbors (undirected)
+    // Build undirected adjacency from directed CSR edges
     let mut adj: Vec<Vec<u32>> = vec![Vec::new(); node_count];
 
     for u in 0..node_count {
@@ -52,69 +47,17 @@ pub fn triangle_count(projection: &GraphProjection) -> HashMap<String, usize> {
 
     let mut counts = vec![0; node_count];
 
-    // Parallel iteration over nodes
-    counts.par_iter_mut().enumerate().for_each(|(u, count)| {
-        let neighbors = &adj[u];
-        let mut local_count = 0;
-
-        // For each pair of neighbors (v, w), check if they are connected
-        // Optimization: Iterate v in neighbors. Iterate w in neighbors of v.
-        // If w is also a neighbor of u, then we found a triangle.
-        // To avoid triple counting, we can enforce u < v < w.
-
-        for &v in neighbors {
-            if (v as usize) > u {
-                let v_neighbors = &adj[v as usize];
-
-                // Intersect neighbors of u and neighbors of v
-                // Since both are sorted, we can do this efficiently
-                let mut i = 0;
-                let mut j = 0;
-
-                while i < neighbors.len() && j < v_neighbors.len() {
-                    let n1 = neighbors[i];
-                    let n2 = v_neighbors[j];
-
-                    if n1 == n2 {
-                        if (n1 as usize) > (v as usize) {
-                            local_count += 1;
-                        }
-                        i += 1;
-                        j += 1;
-                    } else if n1 < n2 {
-                        i += 1;
-                    } else {
-                        j += 1;
-                    }
-                }
-            }
-        }
-
-        *count = local_count;
-    });
-
-    // The above counts triangles where u is the smallest node.
-    // But the user usually wants "number of triangles this node is part of".
-    // So we need to distribute the counts back.
-    // Actually, the standard "triangle count" metric for a node is the number of triangles it participates in.
-    // My algorithm above counts each triangle exactly once (u < v < w).
-    // So triangle (u, v, w) contributes +1 to u's count, but 0 to v and w?
-    // No, we want the local clustering coefficient numerator.
-    // So we should count all triangles for each node.
-
-    // Let's redo: For each node u, count pairs of neighbors (v, w) that are connected.
-    // This is 2 * triangles if we count ordered pairs, or 1 * triangles if unordered.
-    // Let's count unordered pairs {v, w} such that v, w in N(u) and v is connected to w.
-
+    // For each node u, count pairs of neighbors (v, w) that are connected.
+    // Each triangle (u, v, w) is counted twice per node: once via v finding w,
+    // once via w finding v. Divide by 2 for the correct count.
     counts.par_iter_mut().enumerate().for_each(|(u, count)| {
         let neighbors = &adj[u];
         let mut local_count = 0;
 
         for &v in neighbors {
-            // Check intersection of N(u) and N(v)
             let v_neighbors = &adj[v as usize];
 
-            // Count common neighbors
+            // Sorted intersection to count common neighbors
             let mut i = 0;
             let mut j = 0;
             while i < neighbors.len() && j < v_neighbors.len() {
@@ -131,12 +74,21 @@ pub fn triangle_count(projection: &GraphProjection) -> HashMap<String, usize> {
                 }
             }
         }
-        // Each triangle (u, v, w) is counted twice here: once when visiting v (finding w), once when visiting w (finding v).
-        // So divide by 2.
         *count = local_count / 2;
     });
 
-    // Map back to String IDs
+    counts
+}
+
+/// Triangle Count
+///
+/// Counts the number of triangles (cycles of length 3) for each node.
+/// Returns a map of NodeID -> Count.
+/// Note: This implementation treats the graph as undirected.
+pub fn triangle_count(projection: &GraphProjection) -> HashMap<String, usize> {
+    let counts = triangle_count_raw(projection);
+    let node_count = projection.node_count();
+
     let mut result = HashMap::with_capacity(node_count);
     for (i, &c) in counts.iter().enumerate() {
         if let Some(node_id) = projection.get_node_id(i as u32) {

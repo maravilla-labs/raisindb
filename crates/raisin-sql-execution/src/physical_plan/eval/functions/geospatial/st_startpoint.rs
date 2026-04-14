@@ -58,9 +58,7 @@ impl SqlFunction for StStartPointFunction {
         let coords = geom
             .get("coordinates")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                Error::Validation("LineString missing coordinates".to_string())
-            })?;
+            .ok_or_else(|| Error::Validation("LineString missing coordinates".to_string()))?;
 
         if coords.is_empty() {
             return Ok(Literal::Null);

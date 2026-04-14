@@ -318,13 +318,21 @@ mod tests {
         assert!(user.is_some());
 
         let role = repo
-            .get(BranchScope::new(tenant_id, repo_id, branch), "raisin:Role", None)
+            .get(
+                BranchScope::new(tenant_id, repo_id, branch),
+                "raisin:Role",
+                None,
+            )
             .await
             .unwrap();
         assert!(role.is_some());
 
         let group = repo
-            .get(BranchScope::new(tenant_id, repo_id, branch), "raisin:Group", None)
+            .get(
+                BranchScope::new(tenant_id, repo_id, branch),
+                "raisin:Group",
+                None,
+            )
             .await
             .unwrap();
         assert!(group.is_some());

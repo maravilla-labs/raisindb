@@ -78,11 +78,8 @@ impl SqlFunction for StUnionFunction {
                 let poly2 = geojson_to_polygon(geom2)?;
                 let result = poly1.union(&poly2);
                 // BooleanOps returns a MultiPolygon
-                let polys: Vec<serde_json::Value> = result
-                    .0
-                    .iter()
-                    .map(|p| polygon_to_geojson(p))
-                    .collect();
+                let polys: Vec<serde_json::Value> =
+                    result.0.iter().map(|p| polygon_to_geojson(p)).collect();
                 if polys.len() == 1 {
                     Ok(Literal::Geometry(polys.into_iter().next().unwrap()))
                 } else {

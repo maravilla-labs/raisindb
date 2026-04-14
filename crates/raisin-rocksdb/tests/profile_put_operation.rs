@@ -14,11 +14,11 @@ use raisin_error::Result;
 use raisin_models::nodes::Node;
 use raisin_models::workspace::Workspace;
 use raisin_rocksdb::RocksDBStorage;
+use raisin_storage::scope::StorageScope;
 use raisin_storage::{
     BranchRepository, CreateNodeOptions, NodeRepository, RegistryRepository,
     RepositoryManagementRepository, Storage,
 };
-use raisin_storage::scope::StorageScope;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;

@@ -73,9 +73,7 @@ impl SqlFunction for StPointNFunction {
         let coords = geom
             .get("coordinates")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                Error::Validation("LineString missing coordinates".to_string())
-            })?;
+            .ok_or_else(|| Error::Validation("LineString missing coordinates".to_string()))?;
 
         // 1-based index
         if n == 0 || n > coords.len() {

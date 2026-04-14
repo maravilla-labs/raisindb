@@ -95,9 +95,7 @@ pub fn parse_ai_config(sql: &str) -> Result<Option<AIConfigStatement>, AIConfigP
                         format!("Parse error near: '{}'", problematic.trim()),
                     )
                 }
-                nom::Err::Incomplete(_) => {
-                    (None, "Incomplete AI config statement".to_string())
-                }
+                nom::Err::Incomplete(_) => (None, "Incomplete AI config statement".to_string()),
             };
             Err(AIConfigParseError { message, position })
         }
@@ -152,12 +150,11 @@ fn config_value(input: &str) -> IResult<&str, String> {
 fn set_clause(input: &str) -> IResult<&str, ConfigSetting> {
     let (input, _) = tag_no_case("SET").parse(input)?;
     let (input, _) = multispace1.parse(input)?;
-    let (input, key) =
-        map(
-            take_while1(|c: char| c.is_alphanumeric() || c == '_'),
-            |s: &str| s.to_uppercase(),
-        )
-        .parse(input)?;
+    let (input, key) = map(
+        take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+        |s: &str| s.to_uppercase(),
+    )
+    .parse(input)?;
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0.parse(input)?;
@@ -438,7 +435,9 @@ mod tests {
 
     #[test]
     fn test_parse_test_ai_provider() {
-        let result = parse_ai_config("TEST AI PROVIDER 'openai'").unwrap().unwrap();
+        let result = parse_ai_config("TEST AI PROVIDER 'openai'")
+            .unwrap()
+            .unwrap();
         match result {
             AIConfigStatement::TestAIProvider { provider } => {
                 assert_eq!(provider, "openai");
@@ -476,7 +475,9 @@ mod tests {
     #[test]
     fn test_is_ai_config_statement() {
         // Positive cases
-        assert!(is_ai_config_statement("ALTER EMBEDDING CONFIG SET PROVIDER = 'openai'"));
+        assert!(is_ai_config_statement(
+            "ALTER EMBEDDING CONFIG SET PROVIDER = 'openai'"
+        ));
         assert!(is_ai_config_statement("SHOW EMBEDDING CONFIG"));
         assert!(is_ai_config_statement("TEST EMBEDDING CONNECTION"));
         assert!(is_ai_config_statement("ALTER AI CONFIG ADD PROVIDER 'x'"));

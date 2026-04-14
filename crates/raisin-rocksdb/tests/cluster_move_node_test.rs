@@ -528,8 +528,8 @@ async fn test_move_tree_replication() {
         "\n📝 Moving entire tree /Source Folder -> /Destination Folder using move_node_tree API"
     );
 
-    use raisin_storage::{NodeRepository, Storage as _};
     use raisin_storage::scope::StorageScope;
+    use raisin_storage::{NodeRepository, Storage as _};
 
     storage1
         .nodes()

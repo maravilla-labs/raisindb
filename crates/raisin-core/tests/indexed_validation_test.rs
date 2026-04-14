@@ -10,7 +10,9 @@ use raisin_models::nodes::properties::schema::{PropertyType, PropertyValueSchema
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::types::NodeType;
 use raisin_models::nodes::Node;
-use raisin_storage::{BranchScope, CommitMetadata, NodeRepository, NodeTypeRepository, Storage, StorageScope};
+use raisin_storage::{
+    BranchScope, CommitMetadata, NodeRepository, NodeTypeRepository, Storage, StorageScope,
+};
 use raisin_storage_memory::InMemoryStorage;
 use std::collections::HashMap;
 use std::sync::Arc;

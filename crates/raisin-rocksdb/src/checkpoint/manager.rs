@@ -158,34 +158,11 @@ impl CheckpointManager {
 
     /// List all column families in the database
     fn list_column_families(&self) -> Vec<String> {
-        vec![
-            cf::NODES.to_string(),
-            cf::EMBEDDINGS.to_string(),
-            cf::TREES.to_string(),
-            cf::REVISIONS.to_string(),
-            cf::BRANCHES.to_string(),
-            cf::PATH_INDEX.to_string(),
-            cf::PROPERTY_INDEX.to_string(),
-            cf::REFERENCE_INDEX.to_string(),
-            cf::RELATION_INDEX.to_string(),
-            cf::ORDER_INDEX.to_string(),
-            cf::ORDERED_CHILDREN.to_string(),
-            cf::NODE_TYPES.to_string(),
-            cf::ARCHETYPES.to_string(),
-            cf::ELEMENT_TYPES.to_string(),
-            cf::WORKSPACES.to_string(),
-            cf::TAGS.to_string(),
-            cf::REGISTRY.to_string(),
-            cf::TRANSLATION_DATA.to_string(),
-            cf::BLOCK_TRANSLATIONS.to_string(),
-            cf::TRANSLATION_INDEX.to_string(),
-            cf::JOB_DATA.to_string(),
-            cf::JOB_METADATA.to_string(),
-            cf::TENANT_EMBEDDING_CONFIG.to_string(),
-            cf::FULLTEXT_JOBS.to_string(),
-            cf::EMBEDDING_JOBS.to_string(),
-            cf::OPERATION_LOG.to_string(),
-        ]
+        // Use the authoritative list from all_column_families() to stay in sync
+        crate::all_column_families()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     /// Clean up old checkpoints

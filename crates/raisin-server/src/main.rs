@@ -160,6 +160,10 @@ async fn main() {
         tracing::info!("Schema stats cache initialized with event-driven invalidation");
     }
 
+    // Register graph projection event handler for event-driven invalidation
+    #[cfg(feature = "storage-rocksdb")]
+    startup::events::register_graph_projection_handler(&storage);
+
     #[cfg(feature = "storage-rocksdb")]
     startup::events::register_admin_handler(
         &storage,

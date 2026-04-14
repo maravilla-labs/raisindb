@@ -61,9 +61,7 @@ impl SqlFunction for StMakePolygonFunction {
         let coords = geom
             .get("coordinates")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                Error::Validation("LineString missing coordinates".to_string())
-            })?;
+            .ok_or_else(|| Error::Validation("LineString missing coordinates".to_string()))?;
 
         if coords.len() < 4 {
             return Err(Error::Validation(

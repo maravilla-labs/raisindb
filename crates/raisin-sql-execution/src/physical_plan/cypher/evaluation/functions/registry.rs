@@ -68,6 +68,16 @@ pub enum CypherFunction {
     /// trianglecount(node) - Get number of triangles a node participates in
     TriangleCount,
 
+    // Algorithm functions
+    /// bfs(source, target) - BFS hop distance between two nodes
+    Bfs,
+    /// sssp(source, target) - Single-source shortest path (weighted) distance
+    Sssp,
+    /// cdlp(node) - Community detection via synchronous label propagation
+    Cdlp,
+    /// lcc(node) - Local clustering coefficient
+    Lcc,
+
     // Aggregate functions
     /// count(*) or count(expr) - Count values
     Count,
@@ -124,6 +134,12 @@ impl CypherFunction {
             "communitycount" => Some(Self::CommunityCount),
             "louvain" => Some(Self::Louvain),
             "trianglecount" => Some(Self::TriangleCount),
+            "bfs" | "breadth_first_search" => Some(Self::Bfs),
+            "sssp" | "single_source_shortest_path" | "shortest_path_distance" => Some(Self::Sssp),
+            "cdlp" | "community_detection_label_propagation" | "community_detection" => {
+                Some(Self::Cdlp)
+            }
+            "lcc" | "local_clustering_coefficient" | "clustering_coefficient" => Some(Self::Lcc),
             "count" => Some(Self::Count),
             "sum" => Some(Self::Sum),
             "avg" => Some(Self::Avg),
@@ -218,6 +234,10 @@ impl CypherFunction {
             Self::TriangleCount => {
                 super::community::evaluate_triangle_count(args, binding, context).await
             }
+            Self::Bfs => super::community::evaluate_bfs(args, binding, context).await,
+            Self::Sssp => super::community::evaluate_sssp(args, binding, context).await,
+            Self::Cdlp => super::community::evaluate_cdlp(args, binding, context).await,
+            Self::Lcc => super::community::evaluate_lcc(args, binding, context).await,
             Self::Count | Self::Sum | Self::Avg | Self::Min | Self::Max | Self::Collect => {
                 // Aggregates return marker values during evaluation
                 // Actual aggregation happens in the executor's projection phase

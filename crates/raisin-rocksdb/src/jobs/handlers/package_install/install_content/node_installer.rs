@@ -75,8 +75,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         workspace, node, ..
                     } => {
                         let folder_type = resolve_folder_type(folder_type_map, workspace);
-                        let is_deferred =
-                            node.properties.contains_key("__deferred_references");
+                        let is_deferred = node.properties.contains_key("__deferred_references");
 
                         if is_deferred {
                             // Strip path-based references and install skeleton first

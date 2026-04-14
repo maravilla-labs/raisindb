@@ -16,6 +16,7 @@
 //! - Prefix-based isolation for tenants, repos, and branches
 
 mod graph_cache_keys;
+mod graph_projection_keys;
 mod identity_keys;
 mod index_keys;
 mod node_keys;
@@ -29,6 +30,7 @@ mod spatial_keys;
 
 // Re-export all public items from submodules
 pub use graph_cache_keys::*;
+pub use graph_projection_keys::*;
 pub use identity_keys::*;
 pub use index_keys::*;
 pub use node_keys::*;

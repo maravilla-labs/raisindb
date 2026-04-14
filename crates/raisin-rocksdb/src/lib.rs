@@ -208,6 +208,11 @@ pub mod cf {
     // Stores precomputed graph algorithm results (PageRank, Louvain, etc.)
     pub const GRAPH_CACHE: &str = "graph_cache";
 
+    // Graph projection configuration per branch
+    // Key format: {tenant}\0{repo}\0graph_projection\0{branch}\0{config_id}
+    // Stores graph projection configurations for subgraph extraction
+    pub const GRAPH_PROJECTION: &str = "graph_projection";
+
     // AI processing rules per repository
     // Key format: {tenant_id}\0{repo_id}
     // Stores ProcessingRuleSet for content processing configuration
@@ -261,6 +266,7 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
         cf::IDENTITY_EMAIL_INDEX,
         cf::SESSIONS,
         cf::GRAPH_CACHE,
+        cf::GRAPH_PROJECTION,
         cf::PROCESSING_RULES,
     ]
 }

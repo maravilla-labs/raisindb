@@ -1,3 +1,7 @@
+// TODO: Add per-query caching to FunctionContext (like PgqContext.algorithm_cache)
+// to avoid rebuilding the adjacency graph for each row in Cypher queries.
+// The PGQ/GRAPH_TABLE path already has this caching.
+
 //! Community detection functions for Cypher
 //!
 //! Provides functions to identify connected components and communities in graphs.
@@ -451,6 +455,197 @@ pub async fn evaluate_triangle_count<S: Storage>(
 
     tracing::debug!("   ✓ triangleCount({}) = {}", node_id, count);
     Ok(PropertyValue::Integer(count as i64))
+}
+
+/// bfs(source, target) - BFS hop distance between two nodes
+///
+/// Returns the shortest hop distance (unweighted) between source and target nodes,
+/// or -1 if no path exists.
+///
+/// # Example
+///
+/// ```cypher
+/// MATCH (a), (b)
+/// WHERE a.id = 'node1' AND b.id = 'node2'
+/// RETURN bfs(a, b) AS hopDistance
+/// ```
+pub async fn evaluate_bfs<S: Storage>(
+    args: &[Expr],
+    binding: &VariableBinding,
+    context: &FunctionContext<'_, S>,
+) -> Result<PropertyValue, Error> {
+    if args.len() != 2 {
+        return Err(Error::Validation(
+            "bfs() expects 2 arguments: bfs(source, target)".to_string(),
+        ));
+    }
+
+    tracing::debug!(" → Evaluating bfs()");
+
+    let (source_id, source_workspace) =
+        extract_node_id_workspace(&args[0], binding, context).await?;
+    let (target_id, target_workspace) =
+        extract_node_id_workspace(&args[1], binding, context).await?;
+
+    let adjacency = build_adjacency_graph(context).await?;
+
+    let source_key = (source_workspace, source_id.clone());
+    let target_key = (target_workspace, target_id.clone());
+    let distance = crate::physical_plan::cypher::algorithms::node_bfs_distance(
+        &adjacency,
+        &source_key,
+        &target_key,
+    );
+
+    match distance {
+        Some(d) => {
+            tracing::debug!("   ✓ bfs({}, {}) = {}", source_id, target_id, d);
+            Ok(PropertyValue::Integer(d as i64))
+        }
+        None => {
+            tracing::debug!("   ✓ bfs({}, {}) = -1 (no path)", source_id, target_id);
+            Ok(PropertyValue::Integer(-1))
+        }
+    }
+}
+
+/// sssp(source, target) - Single-source shortest path (weighted) distance
+///
+/// Returns the shortest weighted distance between source and target nodes,
+/// or -1.0 if no path exists. Uses uniform edge weight of 1.0.
+///
+/// # Example
+///
+/// ```cypher
+/// MATCH (a), (b)
+/// WHERE a.id = 'node1' AND b.id = 'node2'
+/// RETURN sssp(a, b) AS distance
+/// ```
+pub async fn evaluate_sssp<S: Storage>(
+    args: &[Expr],
+    binding: &VariableBinding,
+    context: &FunctionContext<'_, S>,
+) -> Result<PropertyValue, Error> {
+    if args.len() != 2 {
+        return Err(Error::Validation(
+            "sssp() expects 2 arguments: sssp(source, target)".to_string(),
+        ));
+    }
+
+    tracing::debug!(" → Evaluating sssp()");
+
+    let (source_id, source_workspace) =
+        extract_node_id_workspace(&args[0], binding, context).await?;
+    let (target_id, target_workspace) =
+        extract_node_id_workspace(&args[1], binding, context).await?;
+
+    let adjacency = build_adjacency_graph(context).await?;
+
+    let source_key = (source_workspace, source_id.clone());
+    let target_key = (target_workspace, target_id.clone());
+    let distance = crate::physical_plan::cypher::algorithms::node_sssp_distance(
+        &adjacency,
+        &source_key,
+        &target_key,
+        |_| 1.0, // uniform edge weight
+    );
+
+    match distance {
+        Some(d) => {
+            tracing::debug!("   ✓ sssp({}, {}) = {:.4}", source_id, target_id, d);
+            Ok(PropertyValue::Float(d))
+        }
+        None => {
+            tracing::debug!("   ✓ sssp({}, {}) = -1 (no path)", source_id, target_id);
+            Ok(PropertyValue::Float(-1.0))
+        }
+    }
+}
+
+/// cdlp(node) - Community detection via synchronous label propagation
+///
+/// Returns the community ID for the given node, or -1 if the node is not found.
+///
+/// # Example
+///
+/// ```cypher
+/// MATCH (n)
+/// RETURN n.id, cdlp(n) AS community
+/// ```
+pub async fn evaluate_cdlp<S: Storage>(
+    args: &[Expr],
+    binding: &VariableBinding,
+    context: &FunctionContext<'_, S>,
+) -> Result<PropertyValue, Error> {
+    if args.len() != 1 {
+        return Err(Error::Validation(
+            "cdlp() expects 1 argument: cdlp(node)".to_string(),
+        ));
+    }
+
+    tracing::debug!(" → Evaluating cdlp()");
+
+    let (node_id, node_workspace) = extract_node_id_workspace(&args[0], binding, context).await?;
+
+    let adjacency = build_adjacency_graph(context).await?;
+
+    let node_key = (node_workspace, node_id.clone());
+    let community_id =
+        crate::physical_plan::cypher::algorithms::node_cdlp_community(&adjacency, &node_key);
+
+    match community_id {
+        Some(id) => {
+            tracing::debug!("   ✓ cdlp({}) = {}", node_id, id);
+            Ok(PropertyValue::Integer(id as i64))
+        }
+        None => {
+            tracing::debug!("   ✓ cdlp({}) = -1 (node not found)", node_id);
+            Ok(PropertyValue::Integer(-1))
+        }
+    }
+}
+
+/// lcc(node) - Local clustering coefficient
+///
+/// Returns the local clustering coefficient for the given node (0.0 to 1.0),
+/// or -1.0 if the node is not found.
+///
+/// # Example
+///
+/// ```cypher
+/// MATCH (n)
+/// RETURN n.id, lcc(n) AS clustering
+/// ```
+pub async fn evaluate_lcc<S: Storage>(
+    args: &[Expr],
+    binding: &VariableBinding,
+    context: &FunctionContext<'_, S>,
+) -> Result<PropertyValue, Error> {
+    if args.len() != 1 {
+        return Err(Error::Validation(
+            "lcc() expects 1 argument: lcc(node)".to_string(),
+        ));
+    }
+
+    tracing::debug!(" → Evaluating lcc()");
+
+    let (node_id, node_workspace) = extract_node_id_workspace(&args[0], binding, context).await?;
+
+    let adjacency = build_adjacency_graph(context).await?;
+
+    let node_key = (node_workspace, node_id.clone());
+    let coefficient = crate::physical_plan::cypher::algorithms::node_lcc(&adjacency, &node_key);
+
+    match coefficient {
+        Some(c) => {
+            tracing::debug!("   ✓ lcc({}) = {:.6}", node_id, c);
+            Ok(PropertyValue::Float(c))
+        }
+        None => {
+            tracing::debug!("   ✓ lcc({}) = -1 (node not found)", node_id);
+            Ok(PropertyValue::Float(-1.0))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -25,6 +25,24 @@ pub fn register_event_handlers<S: Storage + TransactionalStorage + 'static>(stor
     tracing::info!("Event-driven architecture initialized");
 }
 
+/// Register graph projection event handler for event-driven invalidation.
+///
+/// When relations change, the handler marks affected graph projections
+/// as stale in the GRAPH_PROJECTION column family. Projections are lazily
+/// rebuilt on next algorithm access. No in-memory cache needed — RocksDB's
+/// block cache handles repeated reads.
+#[cfg(feature = "storage-rocksdb")]
+pub fn register_graph_projection_handler(storage: &Arc<raisin_rocksdb::RocksDBStorage>) {
+    let handler = Arc::new(raisin_rocksdb::graph::GraphProjectionEventHandler::new(
+        Arc::clone(storage),
+    ));
+
+    let event_bus = raisin_storage::Storage::event_bus(storage.as_ref());
+    event_bus.subscribe(handler);
+
+    tracing::info!("Graph projection event handler registered (event-driven invalidation)");
+}
+
 /// Register admin user handler.
 #[cfg(feature = "storage-rocksdb")]
 pub fn register_admin_handler(

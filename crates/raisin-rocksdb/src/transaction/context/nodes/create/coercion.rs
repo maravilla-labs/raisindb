@@ -23,10 +23,7 @@ use crate::transaction::RocksDBTransaction;
 /// If the node has an archetype, resolves it (with inheritance) to find
 /// `LocationField` definitions, then converts matching `PropertyValue::Object({lat, lng})`
 /// values to `PropertyValue::Geometry(GeoJson::Point { coordinates: [lng, lat] })`.
-pub(super) async fn coerce_location_fields(
-    tx: &RocksDBTransaction,
-    node: &mut Node,
-) -> Result<()> {
+pub(super) async fn coerce_location_fields(tx: &RocksDBTransaction, node: &mut Node) -> Result<()> {
     let archetype_name = match node.archetype.as_deref() {
         Some(name) if !name.is_empty() => name,
         _ => return Ok(()),

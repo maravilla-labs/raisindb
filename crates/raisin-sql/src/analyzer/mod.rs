@@ -242,10 +242,7 @@ impl Analyzer {
         if crate::ast::ai_config_parser::is_ai_config_statement(sql) {
             match crate::ast::ai_config_parser::parse_ai_config(sql) {
                 Ok(Some(stmt)) => {
-                    tracing::debug!(
-                        "   AI config statement detected: {}",
-                        stmt.operation()
-                    );
+                    tracing::debug!("   AI config statement detected: {}", stmt.operation());
                     return Ok(AnalyzedStatement::AIConfig(stmt));
                 }
                 Ok(None) => {

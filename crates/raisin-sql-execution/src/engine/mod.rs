@@ -146,7 +146,8 @@ pub struct QueryEngine<S: Storage> {
     /// Authentication context for RLS filtering
     pub(crate) auth_context: Option<AuthContext>,
     /// Tenant embedding config store for AI config SQL statements
-    pub(crate) embedding_config_store: Option<Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>>,
+    pub(crate) embedding_config_store:
+        Option<Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>>,
     /// Master key for API key encryption/decryption
     pub(crate) master_key: Option<[u8; 32]>,
     /// Shared schema stats cache for data-driven selectivity estimation
@@ -272,7 +273,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         self.auth_context.as_ref()
     }
 
-    pub fn with_embedding_config_store(mut self, store: Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>) -> Self {
+    pub fn with_embedding_config_store(
+        mut self,
+        store: Arc<dyn raisin_embeddings::TenantEmbeddingConfigStore>,
+    ) -> Self {
         self.embedding_config_store = Some(store);
         self
     }

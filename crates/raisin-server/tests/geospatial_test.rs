@@ -12,12 +12,7 @@ const REPO: &str = "geo_test";
 const BRANCH: &str = "main";
 const WORKSPACE: &str = "stores";
 
-async fn http_post(
-    base_url: &str,
-    path: &str,
-    token: &str,
-    body: Value,
-) -> Result<Value, String> {
+async fn http_post(base_url: &str, path: &str, token: &str, body: Value) -> Result<Value, String> {
     let client = Client::new();
     let response = client
         .post(&format!("{}{}", base_url, path))
@@ -35,12 +30,7 @@ async fn http_post(
     serde_json::from_str(&text).map_err(|_| text)
 }
 
-async fn http_put(
-    base_url: &str,
-    path: &str,
-    token: &str,
-    body: Value,
-) -> Result<(), String> {
+async fn http_put(base_url: &str, path: &str, token: &str, body: Value) -> Result<(), String> {
     let client = Client::new();
     let response = client
         .put(&format!("{}{}", base_url, path))
@@ -225,7 +215,11 @@ async fn test_geospatial_queries() {
     .await
     .expect("ST_DISTANCE failed");
     let dist = r["rows"][0]["dist"].as_f64().unwrap();
-    assert!(dist > 400_000.0 && dist < 700_000.0, "SF-LA ~559km, got {}m", dist);
+    assert!(
+        dist > 400_000.0 && dist < 700_000.0,
+        "SF-LA ~559km, got {}m",
+        dist
+    );
     println!("[PASS] SF→LA = {:.0}m", dist);
 
     // 7. ST_CONTAINS (pure computation)
@@ -331,9 +325,19 @@ async fn test_geospatial_queries() {
 
     assert!(sf_dist < 100.0, "SF should be ~0m, got {}", sf_dist);
     assert!(la_dist > 400_000.0, "LA should be >400km, got {}", la_dist);
-    assert!(ny_dist > 3_500_000.0, "NY should be >3500km, got {}", ny_dist);
-    assert!(sf_dist < la_dist && la_dist < ny_dist, "Should be ordered by distance");
-    println!("[PASS] Stored geometry: SF({:.0}m) < LA({:.0}m) < NY({:.0}m)", sf_dist, la_dist, ny_dist);
+    assert!(
+        ny_dist > 3_500_000.0,
+        "NY should be >3500km, got {}",
+        ny_dist
+    );
+    assert!(
+        sf_dist < la_dist && la_dist < ny_dist,
+        "Should be ordered by distance"
+    );
+    println!(
+        "[PASS] Stored geometry: SF({:.0}m) < LA({:.0}m) < NY({:.0}m)",
+        sf_dist, la_dist, ny_dist
+    );
 
     println!("\n=== All geospatial tests passed! ===");
 }

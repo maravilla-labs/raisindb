@@ -11,12 +11,16 @@ interface GraphConfigFormProps {
 }
 
 const ALGORITHMS = [
-  { value: 'pagerank', label: 'PageRank' },
-  { value: 'louvain', label: 'Louvain Community Detection' },
-  { value: 'connected_components', label: 'Connected Components' },
-  { value: 'triangle_count', label: 'Triangle Count' },
-  { value: 'betweenness_centrality', label: 'Betweenness Centrality' },
-  { value: 'relates_cache', label: 'RELATES Cache' },
+  { value: 'pagerank', label: 'PageRank', description: 'Rank nodes by importance based on incoming links' },
+  { value: 'bfs', label: 'BFS (Breadth-First Search)', description: 'Compute hop distances from a source node' },
+  { value: 'sssp', label: 'SSSP (Shortest Weighted Path)', description: 'Compute weighted shortest distances from a source node' },
+  { value: 'connected_components', label: 'Weakly Connected Components', description: 'Group nodes into connected components' },
+  { value: 'cdlp', label: 'CDLP (Community Detection)', description: 'Detect communities via synchronous label propagation' },
+  { value: 'louvain', label: 'Louvain Community Detection', description: 'Detect communities via hierarchical modularity optimization' },
+  { value: 'lcc', label: 'Local Clustering Coefficient', description: 'Measure how tightly clustered each node\'s neighbors are' },
+  { value: 'triangle_count', label: 'Triangle Count', description: 'Count triangles each node participates in' },
+  { value: 'betweenness_centrality', label: 'Betweenness Centrality', description: 'Identify bridge nodes on shortest paths between others' },
+  { value: 'closeness_centrality', label: 'Closeness Centrality', description: 'Measure how close a node is to all other reachable nodes' },
 ]
 
 const TARGET_MODES = [
@@ -87,6 +91,13 @@ export default function GraphConfigForm({
     // Validate ID format (alphanumeric and hyphens only)
     if (!/^[a-z0-9-]+$/.test(config.id)) {
       setError('Config ID must contain only lowercase letters, numbers, and hyphens')
+      return
+    }
+
+    // Validate source_node for BFS and SSSP
+    if ((config.algorithm === 'bfs' || config.algorithm === 'sssp') &&
+        !((config.algorithm_config.source_node as string)?.trim())) {
+      setError(`${config.algorithm.toUpperCase()} requires a Source Node ID`)
       return
     }
 
@@ -199,6 +210,9 @@ export default function GraphConfigForm({
                     </option>
                   ))}
                 </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  {ALGORITHMS.find(a => a.value === config.algorithm)?.description}
+                </p>
               </div>
             </div>
 
@@ -381,24 +395,56 @@ export default function GraphConfigForm({
               </div>
             )}
 
-            {config.algorithm === 'relates_cache' && (
+            {config.algorithm === 'bfs' && (
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Max Depth
+                  Source Node ID *
+                </label>
+                <input
+                  type="text"
+                  value={(config.algorithm_config.source_node as string) ?? ''}
+                  onChange={(e) => updateAlgorithmConfig('source_node', e.target.value)}
+                  placeholder="e.g., user-123"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                />
+                <p className="text-xs text-gray-500 mt-1">The node ID to compute distances from</p>
+              </div>
+            )}
+
+            {config.algorithm === 'sssp' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">
+                  Source Node ID *
+                </label>
+                <input
+                  type="text"
+                  value={(config.algorithm_config.source_node as string) ?? ''}
+                  onChange={(e) => updateAlgorithmConfig('source_node', e.target.value)}
+                  placeholder="e.g., hub-node-456"
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                />
+                <p className="text-xs text-gray-500 mt-1">The node ID to compute weighted shortest paths from</p>
+              </div>
+            )}
+
+            {config.algorithm === 'cdlp' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">
+                  Max Iterations
                 </label>
                 <input
                   type="number"
                   min="1"
-                  max="10"
-                  value={(config.algorithm_config.max_depth as number) ?? 2}
-                  onChange={(e) => updateAlgorithmConfig('max_depth', parseInt(e.target.value))}
+                  value={(config.algorithm_config.max_iterations as number) ?? 10}
+                  onChange={(e) => updateAlgorithmConfig('max_iterations', parseInt(e.target.value))}
                   className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white focus:outline-none focus:border-purple-500"
                 />
+                <p className="text-xs text-gray-500 mt-1">Number of label propagation iterations (LDBC default: 10)</p>
               </div>
             )}
 
-            {['connected_components', 'triangle_count', 'betweenness_centrality'].includes(config.algorithm) && (
-              <p className="text-sm text-gray-500 italic">No additional settings for this algorithm</p>
+            {['connected_components', 'triangle_count', 'lcc', 'betweenness_centrality', 'closeness_centrality'].includes(config.algorithm) && (
+              <p className="text-sm text-gray-500 italic">No additional configuration required</p>
             )}
           </section>
 

@@ -65,7 +65,8 @@ impl BedrockProvider {
         let parts: Vec<&str> = credentials.splitn(2, ':').collect();
         if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
             return Err(ProviderError::AuthenticationError(
-                "Bedrock credentials must be in format 'ACCESS_KEY_ID:SECRET_ACCESS_KEY'".to_string(),
+                "Bedrock credentials must be in format 'ACCESS_KEY_ID:SECRET_ACCESS_KEY'"
+                    .to_string(),
             ));
         }
         Ok(Self::new(region, parts[0], parts[1]))
@@ -255,10 +256,7 @@ fn build_clients(
     access_key_id: &str,
     secret_access_key: &str,
     session_token: Option<&str>,
-) -> (
-    aws_sdk_bedrockruntime::Client,
-    aws_sdk_bedrock::Client,
-) {
+) -> (aws_sdk_bedrockruntime::Client, aws_sdk_bedrock::Client) {
     use aws_sdk_bedrock as mgmt;
     use aws_sdk_bedrockruntime as rt;
 
@@ -373,8 +371,7 @@ impl AIProviderTrait for BedrockProvider {
         for msg in &request.messages {
             match msg.role {
                 Role::System => {
-                    converse =
-                        converse.system(bt::SystemContentBlock::Text(msg.content.clone()));
+                    converse = converse.system(bt::SystemContentBlock::Text(msg.content.clone()));
                 }
                 Role::User | Role::Assistant => {
                     let role = if msg.role == Role::User {
@@ -392,8 +389,7 @@ impl AIProviderTrait for BedrockProvider {
                     if let Some(tool_calls) = &msg.tool_calls {
                         for call in tool_calls {
                             let input: serde_json::Value =
-                                serde_json::from_str(&call.function.arguments)
-                                    .unwrap_or_default();
+                                serde_json::from_str(&call.function.arguments).unwrap_or_default();
                             blocks.push(bt::ContentBlock::ToolUse(
                                 bt::ToolUseBlock::builder()
                                     .tool_use_id(&call.id)

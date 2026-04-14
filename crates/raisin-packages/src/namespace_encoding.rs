@@ -89,13 +89,7 @@ mod tests {
     #[test]
     fn test_underscore_in_prefix_roundtrip() {
         // Names with underscores in the prefix should round-trip correctly
-        assert_eq!(
-            encode_namespace("my_app:thing"),
-            "_my_app__thing"
-        );
-        assert_eq!(
-            decode_namespace("_my_app__thing"),
-            "my_app:thing"
-        );
+        assert_eq!(encode_namespace("my_app:thing"), "_my_app__thing");
+        assert_eq!(decode_namespace("_my_app__thing"), "my_app:thing");
     }
 }

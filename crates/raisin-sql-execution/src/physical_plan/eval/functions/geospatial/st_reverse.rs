@@ -76,16 +76,11 @@ impl SqlFunction for StReverseFunction {
                 let rings = geom
                     .get("coordinates")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| {
-                        Error::Validation("Polygon missing coordinates".to_string())
-                    })?;
+                    .ok_or_else(|| Error::Validation("Polygon missing coordinates".to_string()))?;
                 let reversed_rings: Vec<serde_json::Value> = rings
                     .iter()
                     .map(|ring| {
-                        let mut coords = ring
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
+                        let mut coords = ring.as_array().cloned().unwrap_or_default();
                         coords.reverse();
                         serde_json::Value::Array(coords)
                     })

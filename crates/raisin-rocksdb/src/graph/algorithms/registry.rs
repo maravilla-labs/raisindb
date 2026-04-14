@@ -4,8 +4,9 @@
 //! based on the GraphAlgorithmConfig settings.
 
 use super::{
-    execute_betweenness_centrality, execute_connected_components, execute_louvain,
-    execute_pagerank, execute_triangle_count,
+    execute_betweenness_centrality, execute_bfs, execute_cdlp, execute_closeness_centrality,
+    execute_connected_components, execute_lcc, execute_louvain, execute_pagerank, execute_sssp,
+    execute_triangle_count,
 };
 use crate::graph::{CachedValue, GraphAlgorithm, GraphAlgorithmConfig, GraphCacheValue};
 use raisin_error::{Error, Result};
@@ -30,7 +31,7 @@ impl AlgorithmExecutor {
     /// Execute a graph algorithm based on configuration
     pub fn execute(
         config: &GraphAlgorithmConfig,
-        projection: &GraphProjection,
+        projection: &mut GraphProjection,
     ) -> Result<AlgorithmResult> {
         let start = std::time::Instant::now();
 
@@ -53,7 +54,25 @@ impl AlgorithmExecutor {
             }
             GraphAlgorithm::ConnectedComponents => execute_connected_components(projection),
             GraphAlgorithm::BetweennessCentrality => execute_betweenness_centrality(projection),
+            GraphAlgorithm::ClosenessCentrality => execute_closeness_centrality(projection),
             GraphAlgorithm::TriangleCount => execute_triangle_count(projection),
+            GraphAlgorithm::Bfs => {
+                let source_node = config.get_config_str("source_node").ok_or_else(|| {
+                    Error::Validation("BFS requires 'source_node' config parameter".to_string())
+                })?;
+                execute_bfs(projection, source_node)
+            }
+            GraphAlgorithm::Sssp => {
+                let source_node = config.get_config_str("source_node").ok_or_else(|| {
+                    Error::Validation("SSSP requires 'source_node' config parameter".to_string())
+                })?;
+                execute_sssp(projection, source_node)
+            }
+            GraphAlgorithm::Cdlp => {
+                let max_iterations = config.get_config_u64("max_iterations").unwrap_or(10) as usize;
+                execute_cdlp(projection, max_iterations)
+            }
+            GraphAlgorithm::Lcc => execute_lcc(projection),
             GraphAlgorithm::RelatesCache => {
                 // RELATES cache is handled separately - it needs user context
                 return Err(Error::Validation(
@@ -94,8 +113,13 @@ impl AlgorithmRegistry {
             GraphAlgorithm::Louvain => OutputType::Integer,
             GraphAlgorithm::ConnectedComponents => OutputType::Integer,
             GraphAlgorithm::BetweennessCentrality => OutputType::Float,
+            GraphAlgorithm::ClosenessCentrality => OutputType::Float,
             GraphAlgorithm::TriangleCount => OutputType::Integer,
             GraphAlgorithm::RelatesCache => OutputType::ReachabilitySet,
+            GraphAlgorithm::Bfs => OutputType::Integer,
+            GraphAlgorithm::Sssp => OutputType::Float,
+            GraphAlgorithm::Cdlp => OutputType::Integer,
+            GraphAlgorithm::Lcc => OutputType::Float,
         }
     }
 
@@ -105,24 +129,15 @@ impl AlgorithmRegistry {
 
         match algorithm {
             GraphAlgorithm::PageRank => {
-                config.insert(
-                    "damping_factor".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from_f64(0.85).unwrap()),
-                );
+                config.insert("damping_factor".to_string(), serde_json::json!(0.85));
                 config.insert(
                     "max_iterations".to_string(),
                     serde_json::Value::Number(100.into()),
                 );
-                config.insert(
-                    "convergence_threshold".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from_f64(1e-6).unwrap()),
-                );
+                config.insert("convergence_threshold".to_string(), serde_json::json!(1e-6));
             }
             GraphAlgorithm::Louvain => {
-                config.insert(
-                    "resolution".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from_f64(1.0).unwrap()),
-                );
+                config.insert("resolution".to_string(), serde_json::json!(1.0));
                 config.insert(
                     "max_iterations".to_string(),
                     serde_json::Value::Number(10.into()),
@@ -133,6 +148,24 @@ impl AlgorithmRegistry {
                 config.insert(
                     "cache_scope".to_string(),
                     serde_json::Value::String("per_user".to_string()),
+                );
+            }
+            GraphAlgorithm::Bfs => {
+                config.insert(
+                    "source_node".to_string(),
+                    serde_json::Value::String(String::new()),
+                );
+            }
+            GraphAlgorithm::Sssp => {
+                config.insert(
+                    "source_node".to_string(),
+                    serde_json::Value::String(String::new()),
+                );
+            }
+            GraphAlgorithm::Cdlp => {
+                config.insert(
+                    "max_iterations".to_string(),
+                    serde_json::Value::Number(10.into()),
                 );
             }
             _ => {
@@ -163,12 +196,25 @@ impl AlgorithmRegistry {
             GraphAlgorithm::BetweennessCentrality => {
                 "Computes betweenness centrality scores based on shortest paths"
             }
+            GraphAlgorithm::ClosenessCentrality => {
+                "Computes closeness centrality based on average shortest path distances"
+            }
             GraphAlgorithm::TriangleCount => {
                 "Counts the number of triangles each node participates in"
             }
             GraphAlgorithm::RelatesCache => {
                 "Precomputes reachability sets for RELATES permission checks"
             }
+            GraphAlgorithm::Bfs => {
+                "Computes shortest distances from a source node using breadth-first search"
+            }
+            GraphAlgorithm::Sssp => {
+                "Computes shortest weighted distances from a source node using Dijkstra's algorithm"
+            }
+            GraphAlgorithm::Cdlp => {
+                "Detects communities using synchronous label propagation (LDBC Graphalytics)"
+            }
+            GraphAlgorithm::Lcc => "Computes local clustering coefficient for each node",
         }
     }
 }
@@ -222,9 +268,9 @@ mod tests {
     #[test]
     fn test_executor_pagerank() {
         let config = make_test_config();
-        let projection = create_test_graph();
+        let mut projection = create_test_graph();
 
-        let result = AlgorithmExecutor::execute(&config, &projection).unwrap();
+        let result = AlgorithmExecutor::execute(&config, &mut projection).unwrap();
 
         assert_eq!(result.node_count, 3);
         assert!(result.execution_time_ms < 1000); // Should be fast

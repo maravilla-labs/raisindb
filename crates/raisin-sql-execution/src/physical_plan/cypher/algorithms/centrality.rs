@@ -84,26 +84,32 @@ pub fn all_degrees(adjacency: &GraphAdjacency) -> Vec<(GraphNodeId, usize)> {
     degrees
 }
 
-/// Calculate closeness centrality for a node
+/// Calculate closeness centrality for a node using the Wasserman-Faust formula.
 ///
-/// Closeness centrality measures how close a node is to all other nodes.
-/// It's the inverse of the average distance to all other reachable nodes.
+/// Uses Wasserman-Faust to handle disconnected graphs:
 ///
-/// Formula: C(v) = (N-1) / Σ d(v, u)
+/// Formula: C(v) = ((n-1) / (N-1)) * ((n-1) / Σ d(v, u))
 /// Where:
-/// - N = number of reachable nodes (including v)
+/// - n = number of reachable nodes from v (including v itself)
+/// - N = total number of nodes in the graph
 /// - d(v, u) = shortest distance from v to u
 ///
-/// For disconnected graphs, only reachable nodes are considered.
+/// For connected graphs, n == N so this reduces to the classic formula.
+/// For disconnected graphs, nodes in small components are penalized by (n-1)/(N-1).
 /// Returns 0.0 for isolated nodes (no reachable nodes).
 ///
 /// # Arguments
 /// * `adjacency` - Graph adjacency list
 /// * `node` - The node to calculate closeness for
+/// * `total_nodes` - Total number of nodes in the graph
 ///
 /// # Returns
-/// * Normalized closeness centrality score (0.0 to 1.0)
-pub fn closeness_centrality(adjacency: &GraphAdjacency, node: &GraphNodeId) -> f64 {
+/// * Wasserman-Faust closeness centrality score (0.0 to 1.0)
+pub fn closeness_centrality(
+    adjacency: &GraphAdjacency,
+    node: &GraphNodeId,
+    total_nodes: usize,
+) -> f64 {
     // Use BFS to calculate distances to all reachable nodes
     let mut queue = VecDeque::new();
     let mut distances: HashMap<(String, String), usize> = HashMap::new();
@@ -123,22 +129,17 @@ pub fn closeness_centrality(adjacency: &GraphAdjacency, node: &GraphNodeId) -> f
         }
     }
 
-    // Calculate closeness
-    let num_reachable = distances.len();
+    // Wasserman-Faust closeness centrality
+    let reachable_count = distances.len(); // includes self
+    let sum_distances: usize = distances.values().sum();
 
-    if num_reachable <= 1 {
-        // Isolated node or only self-reachable
+    if total_nodes <= 1 || reachable_count <= 1 || sum_distances == 0 {
         return 0.0;
     }
 
-    let total_distance: usize = distances.values().sum();
-
-    if total_distance == 0 {
-        return 0.0;
-    }
-
-    // Normalized closeness: (N-1) / sum of distances
-    (num_reachable - 1) as f64 / total_distance as f64
+    let n_minus_1 = (reachable_count - 1) as f64;
+    let big_n_minus_1 = (total_nodes - 1) as f64;
+    (n_minus_1 / big_n_minus_1) * (n_minus_1 / sum_distances as f64)
 }
 
 /// Calculate closeness centrality for all nodes in the graph
@@ -154,10 +155,17 @@ pub fn all_closeness_centrality(adjacency: &GraphAdjacency) -> Vec<(GraphNodeId,
         }
     }
 
+    let total_nodes = nodes.len();
+
     // Calculate closeness for each node
     let mut closeness_scores: Vec<_> = nodes
         .iter()
-        .map(|node| (node.clone(), closeness_centrality(adjacency, node)))
+        .map(|node| {
+            (
+                node.clone(),
+                closeness_centrality(adjacency, node, total_nodes),
+            )
+        })
         .collect();
 
     // Sort by closeness descending
@@ -240,19 +248,25 @@ mod tests {
 
     #[test]
     fn test_closeness_linear_graph() {
-        // Test graph: A -> B, A -> C, B -> C, C -> D
+        // Test graph: A -> B, A -> C, B -> C, C -> D (4 nodes total)
         let graph = create_test_graph();
+        let total_nodes = 4;
 
-        // A can reach A(0), B(1), C(1), D(2) = 4 total distance, N=4
-        let closeness_a = closeness_centrality(&graph, &("ws".to_string(), "A".to_string()));
-        assert!((closeness_a - 0.75).abs() < 0.01); // (4-1)/4 = 0.75
+        // A can reach B(1), C(1), D(2) -> n=4, N=4, sum=4
+        // Wasserman-Faust: (3/3) * (3/4) = 0.75
+        let closeness_a =
+            closeness_centrality(&graph, &("ws".to_string(), "A".to_string()), total_nodes);
+        assert!((closeness_a - 0.75).abs() < 0.01);
 
-        // B can reach B(0), C(1), D(2) = 3 total distance, N=3
-        let closeness_b = closeness_centrality(&graph, &("ws".to_string(), "B".to_string()));
-        assert!((closeness_b - 0.666).abs() < 0.01); // (3-1)/3 = 0.666
+        // B can reach C(1), D(2) -> n=3, N=4, sum=3
+        // Wasserman-Faust: (2/3) * (2/3) = 4/9 ≈ 0.444
+        let closeness_b =
+            closeness_centrality(&graph, &("ws".to_string(), "B".to_string()), total_nodes);
+        assert!((closeness_b - (4.0 / 9.0)).abs() < 0.01);
 
         // D has no outgoing edges, only self-reachable
-        let closeness_d = closeness_centrality(&graph, &("ws".to_string(), "D".to_string()));
+        let closeness_d =
+            closeness_centrality(&graph, &("ws".to_string(), "D".to_string()), total_nodes);
         assert_eq!(closeness_d, 0.0);
     }
 
@@ -260,7 +274,7 @@ mod tests {
     fn test_closeness_star_graph() {
         let mut graph = HashMap::new();
 
-        // Star: A -> B, A -> C, A -> D (A is hub)
+        // Star: A -> B, A -> C, A -> D (A is hub, 4 nodes total)
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
@@ -270,12 +284,16 @@ mod tests {
             ],
         );
 
-        // A can reach all nodes in 1 hop: (4-1)/(0+1+1+1) = 3/3 = 1.0
-        let closeness_a = closeness_centrality(&graph, &("ws".to_string(), "A".to_string()));
+        let total_nodes = 4;
+
+        // A can reach all nodes in 1 hop: n=4, N=4 -> (3/3)*(3/3) = 1.0
+        let closeness_a =
+            closeness_centrality(&graph, &("ws".to_string(), "A".to_string()), total_nodes);
         assert!((closeness_a - 1.0).abs() < 0.01);
 
         // B, C, D are isolated (no outgoing edges)
-        let closeness_b = closeness_centrality(&graph, &("ws".to_string(), "B".to_string()));
+        let closeness_b =
+            closeness_centrality(&graph, &("ws".to_string(), "B".to_string()), total_nodes);
         assert_eq!(closeness_b, 0.0);
     }
 
@@ -285,16 +303,21 @@ mod tests {
         let closeness = all_closeness_centrality(&graph);
 
         assert_eq!(closeness.len(), 4);
-        // C should have highest closeness: reaches C(0), D(1) = (2-1)/1 = 1.0
-        // Even though A reaches more nodes, C has lower average distance
-        assert_eq!(closeness[0].0, ("ws".to_string(), "C".to_string()));
-        assert!((closeness[0].1 - 1.0).abs() < 0.01);
+        // With Wasserman-Faust (4 nodes total):
+        // A: n=4, sum=4 -> (3/3)*(3/4) = 0.75
+        // C: n=2, sum=1 -> (1/3)*(1/1) = 0.333
+        // B: n=3, sum=3 -> (2/3)*(2/3) = 0.444
+        // D: n=1 -> 0.0
+        // A should have the highest closeness
+        assert_eq!(closeness[0].0, ("ws".to_string(), "A".to_string()));
+        assert!((closeness[0].1 - 0.75).abs() < 0.01);
     }
 
     #[test]
     fn test_closeness_isolated_node() {
         let graph = HashMap::new();
-        let closeness = closeness_centrality(&graph, &("ws".to_string(), "Isolated".to_string()));
+        let closeness =
+            closeness_centrality(&graph, &("ws".to_string(), "Isolated".to_string()), 0);
         assert_eq!(closeness, 0.0);
     }
 }

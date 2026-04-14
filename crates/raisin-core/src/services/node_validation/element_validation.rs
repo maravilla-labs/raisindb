@@ -86,9 +86,7 @@ impl<S: Storage> NodeValidator<S> {
                                             path, idx
                                         )));
                                     }
-                                    Some(PropertyValue::String(u))
-                                        if !seen.insert(u.clone()) =>
-                                    {
+                                    Some(PropertyValue::String(u)) if !seen.insert(u.clone()) => {
                                         return Err(Error::Validation(format!(
                                             "COMPOSITE_DUPLICATE_UUID: Duplicate uuid '{}' in composite at {}[{}]",
                                             u, path, idx

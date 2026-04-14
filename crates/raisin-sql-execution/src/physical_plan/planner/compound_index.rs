@@ -1,8 +1,8 @@
 //! Compound index matching and constant expression evaluation
 
 use super::{
-    CanonicalPredicate, CompoundIndexDefinition, Error, Expr, Literal, PhysicalPlanner, SchemaStats,
-    TypedExpr,
+    CanonicalPredicate, CompoundIndexDefinition, Error, Expr, Literal, PhysicalPlanner,
+    SchemaStats, TypedExpr,
 };
 
 /// Result of a successful compound index match: (index_name, matched_equality_columns, ascending)
