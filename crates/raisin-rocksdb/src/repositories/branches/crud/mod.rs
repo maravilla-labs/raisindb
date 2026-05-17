@@ -112,13 +112,7 @@ impl BranchRepository for BranchRepositoryImpl {
                     };
 
                     match job_registry
-                        .register_job(
-                            job_type.clone(),
-                            Some(tenant_id.to_string()),
-                            None,
-                            None,
-                            None,
-                        )
+                        .register_job(job_type.clone(), tenant_id.to_string(), None, None, None)
                         .await
                     {
                         Ok(job_id) => {

@@ -40,7 +40,6 @@ pub struct BackupRequest {
 
 #[derive(Deserialize)]
 pub struct ScheduleIntegrityRequest {
-    pub tenant: String,
     pub interval_minutes: u64,
 }
 

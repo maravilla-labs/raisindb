@@ -34,7 +34,7 @@ impl JobPersistence for JobMetadataStore {
         self.update(job_id, &entry)
     }
 
-    async fn delete_job(&self, job_id: &JobId) -> Result<()> {
-        self.delete(job_id)
+    async fn delete_job(&self, tenant: &str, job_id: &JobId) -> Result<()> {
+        self.delete(tenant, job_id)
     }
 }

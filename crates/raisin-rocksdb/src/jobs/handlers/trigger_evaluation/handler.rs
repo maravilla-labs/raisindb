@@ -424,7 +424,7 @@ impl TriggerEvaluationHandler {
             .job_registry
             .register_job(
                 flow_instance_job.clone(),
-                Some(context.tenant_id.clone()),
+                context.tenant_id.clone(),
                 None,
                 None,
                 trigger_match.max_retries,
@@ -474,7 +474,7 @@ impl TriggerEvaluationHandler {
             .job_registry
             .register_job(
                 function_job_type.clone(),
-                Some(context.tenant_id.clone()),
+                context.tenant_id.clone(),
                 None,
                 None,
                 trigger_match.max_retries,

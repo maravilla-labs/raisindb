@@ -27,13 +27,7 @@ impl BackgroundJobs for InMemoryStorage {
         // Register the job
         let job_id = block_on(async {
             let job_id = global_registry()
-                .register_job(
-                    JobType::IntegrityScan,
-                    Some(tenant.clone()),
-                    None,
-                    None,
-                    None,
-                )
+                .register_job(JobType::IntegrityScan, tenant.clone(), None, None, None)
                 .await?;
 
             // Mark as running

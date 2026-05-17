@@ -62,13 +62,7 @@ pub async fn verify_vector_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::VectorVerify,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::VectorVerify, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (
@@ -169,13 +163,7 @@ pub async fn rebuild_vector_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::VectorRebuild,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::VectorRebuild, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (
@@ -281,13 +269,7 @@ pub async fn optimize_vector_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::VectorOptimize,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::VectorOptimize, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (
@@ -394,13 +376,7 @@ pub async fn restore_vector_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::VectorRebuild,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::VectorRebuild, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (

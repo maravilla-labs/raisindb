@@ -62,13 +62,7 @@ pub async fn verify_fulltext_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::FulltextVerify,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::FulltextVerify, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (
@@ -169,13 +163,7 @@ pub async fn rebuild_fulltext_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::FulltextRebuild,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::FulltextRebuild, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (
@@ -276,13 +264,7 @@ pub async fn optimize_fulltext_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::FulltextOptimize,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::FulltextOptimize, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (
@@ -383,13 +365,7 @@ pub async fn purge_fulltext_index(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::FulltextPurge,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::FulltextPurge, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (

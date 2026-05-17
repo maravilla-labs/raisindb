@@ -94,7 +94,7 @@ impl AppState {
     }
 
     /// Get access to the underlying storage for NodeType operations
-    pub(crate) fn storage(&self) -> &Arc<Store> {
+    pub fn storage(&self) -> &Arc<Store> {
         &self.storage
     }
 
@@ -211,7 +211,7 @@ impl AppState {
 
     /// Get access to the authentication service (RocksDB only)
     #[cfg(feature = "storage-rocksdb")]
-    pub(crate) fn auth_service(&self) -> Option<&Arc<raisin_rocksdb::AuthService>> {
+    pub fn auth_service(&self) -> Option<&Arc<raisin_rocksdb::AuthService>> {
         self.auth_service.as_ref()
     }
 

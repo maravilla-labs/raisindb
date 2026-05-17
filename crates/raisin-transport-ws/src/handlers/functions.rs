@@ -113,7 +113,7 @@ mod inner {
 
         let job_id = rocksdb
             .job_registry()
-            .register_job(job_type, Some(TENANT_ID.to_string()), None, None, None)
+            .register_job(job_type, TENANT_ID.to_string(), None, None, None)
             .await
             .map_err(|e| WsError::StorageError(e.to_string()))?;
 

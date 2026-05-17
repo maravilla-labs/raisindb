@@ -71,7 +71,7 @@ pub async fn regenerate_vector_embeddings(
         if let raisin_storage::JobType::Custom(ref name) = job.job_type {
             if name == "EmbeddingRegeneration"
                 && matches!(job.status, JobStatus::Running | JobStatus::Executing)
-                && job.tenant.as_ref() == Some(&tenant)
+                && job.tenant == tenant
             {
                 tracing::warn!(
                     "Embedding regeneration already running for tenant '{}' (job: {})",
@@ -102,7 +102,7 @@ pub async fn regenerate_vector_embeddings(
     let job_id = job_registry
         .register_job(
             raisin_storage::JobType::Custom("EmbeddingRegeneration".to_string()),
-            Some(tenant.clone()),
+            tenant.clone(),
             None,
             None,
             None,
@@ -269,7 +269,7 @@ async fn run_embedding_regeneration(
                             JobType::EmbeddingGenerate {
                                 node_id: node_id.clone(),
                             },
-                            Some(tenant.clone()),
+                            tenant.clone(),
                             None,
                             None,
                             None,

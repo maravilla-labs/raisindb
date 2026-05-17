@@ -91,13 +91,7 @@ pub async fn reindex_start(
     );
 
     let job_id = job_registry
-        .register_job(
-            JobType::IndexRebuild,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::IndexRebuild, tenant.clone(), None, None, None)
         .await
         .map_err(|e| {
             (

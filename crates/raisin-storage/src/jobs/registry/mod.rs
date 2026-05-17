@@ -111,7 +111,7 @@ mod tests {
         let job_id = registry
             .register_job(
                 JobType::IntegrityScan,
-                Some("test_tenant".to_string()),
+                "test_tenant".to_string(),
                 None,
                 None,
                 None,
@@ -145,7 +145,7 @@ mod tests {
         // Check job info
         let info = registry.get_job_info(&job_id).await.unwrap();
         assert_eq!(info.job_type, JobType::IntegrityScan);
-        assert_eq!(info.tenant, Some("test_tenant".to_string()));
+        assert_eq!(info.tenant, "test_tenant".to_string());
         assert!(info.completed_at.is_some());
     }
 
@@ -158,7 +158,7 @@ mod tests {
         let job_id = registry
             .register_job(
                 JobType::Backup,
-                None,
+                "test_tenant".to_string(),
                 None,
                 Some(cancel_token.clone()),
                 None,
@@ -183,7 +183,13 @@ mod tests {
     async fn test_terminal_status_is_immutable() {
         let registry = JobRegistry::new();
         let job_id = registry
-            .register_job(JobType::IntegrityScan, None, None, None, None)
+            .register_job(
+                JobType::IntegrityScan,
+                "test_tenant".to_string(),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 

@@ -12,8 +12,10 @@ mod deltas;
 mod init;
 mod jobs;
 mod replication;
+mod tenant_wipe;
 mod types;
 
+pub use tenant_wipe::TenantWipeReport;
 pub use types::RestoreStats;
 
 use crate::config::RocksDBConfig;

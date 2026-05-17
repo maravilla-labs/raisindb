@@ -14,7 +14,7 @@ fn create_test_entry(id: &str) -> PersistedJobEntry {
             operation: raisin_storage::jobs::IndexOperation::AddOrUpdate,
         },
         status: JobStatus::Scheduled,
-        tenant: Some("test-tenant".to_string()),
+        tenant: "test-tenant".to_string(),
         started_at: Utc::now(),
         completed_at: None,
         error: None,
@@ -53,7 +53,7 @@ fn test_put_and_get() {
     store.put_with_context(&job_id, &entry, &context).unwrap();
 
     // Retrieve metadata
-    let retrieved = store.get(&job_id).unwrap();
+    let retrieved = store.get("test-tenant", &job_id).unwrap();
     assert!(retrieved.is_some());
     let retrieved_entry = retrieved.unwrap();
     assert_eq!(retrieved_entry.id, entry.id);
@@ -116,6 +116,42 @@ fn test_cleanup_old_jobs() {
     assert_eq!(deleted, 1);
 
     // Verify job is gone
-    let retrieved = store.get(&job_id).unwrap();
+    let retrieved = store.get("test-tenant", &job_id).unwrap();
     assert!(retrieved.is_none());
+}
+
+#[test]
+fn test_list_for_tenant_isolation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db = crate::open_db(temp_dir.path()).unwrap();
+    let store = JobMetadataStore::new(Arc::new(db));
+
+    // Create one job in tenant-a and one in tenant-b.
+    let mut ctx_a = create_test_context();
+    ctx_a.tenant_id = "tenant-a".to_string();
+    let mut ctx_b = create_test_context();
+    ctx_b.tenant_id = "tenant-b".to_string();
+
+    let job_a = JobId::new();
+    let mut entry_a = create_test_entry(&job_a.0);
+    entry_a.tenant = "tenant-a".to_string();
+    let job_b = JobId::new();
+    let mut entry_b = create_test_entry(&job_b.0);
+    entry_b.tenant = "tenant-b".to_string();
+
+    store.put_with_context(&job_a, &entry_a, &ctx_a).unwrap();
+    store.put_with_context(&job_b, &entry_b, &ctx_b).unwrap();
+
+    // Each tenant only sees its own job.
+    let only_a = store.list_for_tenant("tenant-a").unwrap();
+    assert_eq!(only_a.len(), 1);
+    assert_eq!(only_a[0].1.tenant, "tenant-a");
+
+    let only_b = store.list_for_tenant("tenant-b").unwrap();
+    assert_eq!(only_b.len(), 1);
+    assert_eq!(only_b[0].1.tenant, "tenant-b");
+
+    // Empty tenant returns nothing.
+    let none = store.list_for_tenant("tenant-c").unwrap();
+    assert!(none.is_empty());
 }

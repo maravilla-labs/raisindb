@@ -30,14 +30,14 @@ impl JobRegistry {
     /// # Arguments
     ///
     /// * `job_type` - Type of job being registered
-    /// * `tenant` - Optional tenant identifier
+    /// * `tenant` - Tenant identifier (required)
     /// * `handle` - Optional task handle for the job
     /// * `cancel_token` - Optional cancellation token
     /// * `max_retries` - Optional maximum retry attempts (default: 3, use 0 for no retries)
     pub async fn register_job(
         &self,
         job_type: JobType,
-        tenant: Option<String>,
+        tenant: String,
         handle: Option<JoinHandle<()>>,
         cancel_token: Option<Arc<tokio_util::sync::CancellationToken>>,
         max_retries: Option<u32>,
@@ -87,7 +87,7 @@ impl JobRegistry {
     /// # Arguments
     ///
     /// * `job_type` - Type of job being registered
-    /// * `tenant` - Optional tenant identifier
+    /// * `tenant` - Tenant identifier (required)
     /// * `dedup_key` - Unique key for deduplication (e.g., tool_call_path)
     /// * `max_retries` - Optional maximum retry attempts (default: 3, use 0 for no retries)
     ///
@@ -98,7 +98,7 @@ impl JobRegistry {
     pub async fn register_job_idempotent(
         &self,
         job_type: JobType,
-        tenant: Option<String>,
+        tenant: String,
         dedup_key: String,
         max_retries: Option<u32>,
     ) -> Result<Option<JobId>> {
@@ -196,7 +196,7 @@ impl JobRegistry {
     ///
     /// * `job_id` - Pre-generated job ID
     /// * `job_type` - Type of job being registered
-    /// * `tenant` - Optional tenant identifier
+    /// * `tenant` - Tenant identifier (required)
     /// * `dedup_key` - Unique key for deduplication
     /// * `max_retries` - Optional maximum retry attempts (default: 3)
     ///
@@ -208,7 +208,7 @@ impl JobRegistry {
         &self,
         job_id: JobId,
         job_type: JobType,
-        tenant: Option<String>,
+        tenant: String,
         dedup_key: String,
         max_retries: Option<u32>,
     ) -> Result<bool> {

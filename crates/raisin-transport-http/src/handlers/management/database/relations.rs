@@ -56,7 +56,7 @@ pub async fn verify_relation_integrity(
     let job_id = job_registry
         .register_job(
             JobType::RelationConsistencyCheck { repair: false },
-            Some(tenant.clone()),
+            tenant.clone(),
             None,
             None,
             None,
@@ -156,7 +156,7 @@ pub async fn repair_relation_integrity(
     let job_id = job_registry
         .register_job(
             JobType::RelationConsistencyCheck { repair: true },
-            Some(tenant.clone()),
+            tenant.clone(),
             None,
             None,
             None,

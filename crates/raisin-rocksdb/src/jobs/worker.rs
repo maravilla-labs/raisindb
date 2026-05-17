@@ -218,7 +218,7 @@ impl RocksDBWorker {
                         );
 
                         // Load job context before spawning
-                        let context = match self.job_data_store.get(&job.id)? {
+                        let context = match self.job_data_store.get(&job.tenant, &job.id)? {
                             Some(ctx) => ctx,
                             None => {
                                 let error_msg = format!("Job context not found for job {}", job.id);
@@ -437,7 +437,7 @@ async fn execute_handler_task(
             }
 
             // Delete job context data (cleanup)
-            if let Err(e) = job_data_store.delete(&job.id) {
+            if let Err(e) = job_data_store.delete(&job.tenant, &job.id) {
                 tracing::warn!(
                     job_id = %job.id,
                     error = %e,

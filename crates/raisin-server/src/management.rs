@@ -8,6 +8,8 @@
 //! - Compaction and metrics
 //! - Background job management
 
+#[cfg(feature = "storage-rocksdb")]
+pub mod admin;
 mod backup;
 pub mod dependencies;
 #[cfg(feature = "storage-rocksdb")]

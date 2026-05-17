@@ -206,7 +206,7 @@ impl ScheduledTriggerHandler {
                 .job_registry
                 .register_job(
                     function_job_type.clone(),
-                    Some(trigger_match.tenant_id.clone()),
+                    trigger_match.tenant_id.clone(),
                     None,
                     None,
                     None, // Use default max_retries for scheduled triggers

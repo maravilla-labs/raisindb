@@ -207,7 +207,7 @@ async fn create_export_job(
         };
 
         let job_id = job_registry
-            .register_job(job_type, Some(tenant_id.to_string()), None, None, None)
+            .register_job(job_type, tenant_id.to_string(), None, None, None)
             .await
             .map_err(|e| {
                 ApiError::storage_error(format!("Failed to register export job: {}", e))

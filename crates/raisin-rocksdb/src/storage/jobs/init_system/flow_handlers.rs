@@ -42,7 +42,7 @@ pub fn create_flow_resume_callback(
                 };
 
                 let job_id = job_registry
-                    .register_job(job, Some(tenant_id.clone()), None, None, None)
+                    .register_job(job, tenant_id.clone(), None, None, None)
                     .await
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!(

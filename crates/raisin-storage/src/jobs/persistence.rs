@@ -60,17 +60,10 @@ pub trait JobPersistence: Send + Sync {
     /// but not fail the in-memory update.
     async fn persist_job(&self, job_id: &JobId, job_info: &JobInfo) -> Result<()>;
 
-    /// Delete job metadata
+    /// Delete job metadata for the given tenant.
     ///
     /// Called when explicitly removing a job from the system (e.g., cleanup operations).
-    /// The implementation should remove both metadata and associated context data.
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - Unique job identifier
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the deletion fails.
-    async fn delete_job(&self, job_id: &JobId) -> Result<()>;
+    /// The implementation should remove both metadata and associated context data
+    /// under the `{tenant}\0{job_id}` key.
+    async fn delete_job(&self, tenant: &str, job_id: &JobId) -> Result<()>;
 }

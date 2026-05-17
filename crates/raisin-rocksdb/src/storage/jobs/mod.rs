@@ -61,7 +61,7 @@ impl RocksDBStorage {
                     branch: branch.to_string(),
                     workspace: workspace.to_string(),
                 },
-                Some(tenant_id.to_string()),
+                tenant_id.to_string(),
                 None,
                 None,
                 None,

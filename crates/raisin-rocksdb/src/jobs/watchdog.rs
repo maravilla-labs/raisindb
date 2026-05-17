@@ -205,7 +205,13 @@ mod tests {
 
         // Register a job
         let job_id = registry
-            .register_job(JobType::IntegrityScan, None, None, None, None)
+            .register_job(
+                JobType::IntegrityScan,
+                "test-tenant".to_string(),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 

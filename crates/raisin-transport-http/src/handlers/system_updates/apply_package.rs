@@ -341,7 +341,7 @@ async fn queue_install_job(
     let job_data_store = rocksdb.job_data_store();
 
     let job_id = job_registry
-        .register_job(job_type, Some(tenant_id.to_string()), None, None, None)
+        .register_job(job_type, tenant_id.to_string(), None, None, None)
         .await
         .map_err(|e| ApiError::internal(format!("Failed to register job: {}", e)))?;
 

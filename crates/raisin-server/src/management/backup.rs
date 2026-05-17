@@ -72,7 +72,8 @@ pub async fn start_backup(
     tracing::info!("Starting async backup to path: {:?}", backup_path);
 
     let job_id = match global_registry()
-        .register_job(JobType::Backup, None, None, None, None)
+        // tenant unknown for global backup op; phase G will tighten
+        .register_job(JobType::Backup, String::new(), None, None, None)
         .await
     {
         Ok(id) => id,
@@ -129,7 +130,7 @@ pub async fn start_repair(
     );
 
     let job_id = match global_registry()
-        .register_job(JobType::Repair, Some(tenant.clone()), None, None, None)
+        .register_job(JobType::Repair, tenant.clone(), None, None, None)
         .await
     {
         Ok(id) => id,

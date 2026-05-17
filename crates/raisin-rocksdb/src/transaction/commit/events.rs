@@ -76,7 +76,7 @@ impl RocksDBTransaction {
                 raisin_storage::jobs::JobType::TreeSnapshot {
                     revision: *new_revision,
                 },
-                Some(tenant_id.to_string()),
+                tenant_id.to_string(),
                 None,
                 None,
                 None,

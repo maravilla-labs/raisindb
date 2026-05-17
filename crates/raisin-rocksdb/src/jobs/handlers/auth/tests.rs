@@ -134,7 +134,7 @@ fn create_job_info(job_type: JobType) -> JobInfo {
         id: JobId("test-job-123".to_string()),
         job_type,
         status: raisin_storage::jobs::JobStatus::Scheduled,
-        tenant: Some("tenant-1".to_string()),
+        tenant: "tenant-1".to_string(),
         started_at: chrono::Utc::now(),
         completed_at: None,
         progress: None,

@@ -38,7 +38,7 @@ impl RocksDBStorage {
 
         for (job_id, persisted_entry) in pending {
             // Load JobContext from job_data CF
-            match self.job_data_store.get(&job_id)? {
+            match self.job_data_store.get(&persisted_entry.tenant, &job_id)? {
                 Some(_context) => {
                     // Convert PersistedJobEntry to JobInfo
                     let mut job_info = raisin_storage::jobs::JobInfo {
@@ -98,7 +98,8 @@ impl RocksDBStorage {
                     failed_to_restore += 1;
 
                     // Clean up orphaned metadata
-                    self.job_metadata_store.delete(&job_id)?;
+                    self.job_metadata_store
+                        .delete(&persisted_entry.tenant, &job_id)?;
                 }
             }
         }

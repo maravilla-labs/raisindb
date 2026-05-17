@@ -83,7 +83,7 @@ pub async fn complete_upload(
 
         // Register job
         let job_id = job_registry
-            .register_job(job_type, Some(session.tenant_id.clone()), None, None, None)
+            .register_job(job_type, session.tenant_id.clone(), None, None, None)
             .await
             .map_err(|e| ApiError::internal(format!("Failed to register completion job: {}", e)))?;
 

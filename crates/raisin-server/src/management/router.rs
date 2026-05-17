@@ -11,6 +11,8 @@ use axum::{
 use raisin_storage::{BackgroundJobs, ManagementOps};
 use std::sync::Arc;
 
+#[cfg(feature = "storage-rocksdb")]
+use super::admin;
 use super::backup;
 use super::health;
 use super::integrity;
@@ -33,14 +35,24 @@ pub fn management_router(
     graph_cache_state: Option<Arc<graph_cache::GraphCacheState>>,
     app_state: raisin_transport_http::state::AppState,
 ) -> Router {
-    use axum::{middleware::from_fn_with_state, Extension};
+    use axum::{
+        middleware::{from_fn, from_fn_with_state},
+        Extension,
+    };
     use raisin_transport_http::middleware::{
         ensure_tenant_middleware, require_admin_auth_middleware,
+        require_superadmin_token_middleware,
     };
 
     // Get data_dir before storage is moved into state
     let data_dir = storage.config().path.to_string_lossy().to_string();
-    let state = ManagementState { storage };
+    let state = ManagementState {
+        storage: storage.clone(),
+    };
+    let state_for_admin = ManagementState {
+        storage: storage.clone(),
+    };
+    drop(storage);
 
     let router = Router::new()
         // Health endpoints (enhanced with monitoring status)
@@ -208,12 +220,63 @@ pub fn management_router(
     // Apply security middlewares
     // ensure_tenant runs FIRST (outer), then require_admin (inner)
     // In Axum layers, later layers run first, so add require_admin first
-    router
+    let router = router
         .layer(from_fn_with_state(
             app_state.clone(),
             require_admin_auth_middleware,
         ))
+        .layer(from_fn_with_state(
+            app_state.clone(),
+            ensure_tenant_middleware,
+        ));
+
+    // Conditionally mount the superadmin subtree. If the env var is unset or
+    // empty, /management/admin/* routes are not registered at all (404 instead
+    // of exposing the env-var probe surface).
+    let superadmin_enabled = std::env::var("RAISIN_SUPERADMIN_TOKEN")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+
+    if !superadmin_enabled {
+        return router;
+    }
+
+    // /management/admin/* — superadmin-token gated.
+    // tenants and jobs routes use ManagementState<RocksDBStorage> (storage-only).
+    // tenants and reset-password routes use AppState (auth_service + storage).
+    let admin_jobs_router = Router::new()
+        .route("/management/admin/jobs", get(admin::jobs::list_all_jobs))
+        .route(
+            "/management/admin/jobs/purge-all",
+            post(admin::jobs::purge_all_global),
+        )
+        .route(
+            "/management/admin/jobs/force-fail-stuck",
+            post(admin::jobs::force_fail_stuck_global),
+        )
+        .with_state(state_for_admin.clone());
+
+    let admin_app_router = Router::new()
+        .route(
+            "/management/admin/tenants",
+            post(admin::tenants::provision_tenant),
+        )
+        .route(
+            "/management/admin/tenants/{tenant_id}",
+            axum::routing::delete(admin::tenants::delete_tenant),
+        )
+        .route(
+            "/management/admin/reset-password",
+            post(admin::passwords::reset_admin_password),
+        )
+        .with_state(app_state.clone());
+
+    let admin_router = admin_jobs_router
+        .merge(admin_app_router)
         .layer(from_fn_with_state(app_state, ensure_tenant_middleware))
+        .layer(from_fn(require_superadmin_token_middleware));
+
+    router.merge(admin_router)
 }
 
 /// Create the management API router (generic version for other storage backends).

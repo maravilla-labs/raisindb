@@ -96,7 +96,8 @@ pub async fn start_compaction(
     tracing::info!("Starting async compaction");
 
     let job_id = match global_registry()
-        .register_job(JobType::Compaction, None, None, None, None)
+        // tenant unknown for global compaction op; phase G will tighten
+        .register_job(JobType::Compaction, String::new(), None, None, None)
         .await
     {
         Ok(id) => id,

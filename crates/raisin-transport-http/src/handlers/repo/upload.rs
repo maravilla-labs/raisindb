@@ -250,7 +250,7 @@ async fn handle_large_package_upload<S: Storage + TransactionalStorage + 'static
             };
 
             match job_registry
-                .register_job(job_type, Some(tenant_id.to_string()), None, None, None)
+                .register_job(job_type, tenant_id.to_string(), None, None, None)
                 .await
             {
                 Ok(job_id) => {

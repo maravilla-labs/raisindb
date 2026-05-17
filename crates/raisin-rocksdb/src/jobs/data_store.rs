@@ -5,6 +5,7 @@
 //! needed by workers to process jobs. JobContext is stored separately from JobInfo
 //! to keep JobInfo lightweight.
 
+use crate::keys::job_key;
 use crate::{cf, cf_handle};
 use raisin_error::Result;
 use raisin_storage::jobs::{JobContext, JobId};
@@ -26,43 +27,30 @@ impl JobDataStore {
         Self { db }
     }
 
-    /// Store job context data
+    /// Store job context data.
     ///
-    /// # Arguments
-    /// * `job_id` - Unique identifier for the job
-    /// * `context` - Job execution context to store
-    ///
-    /// # Errors
-    /// Returns an error if serialization fails or database write fails
+    /// Key layout is `{tenant}\0{job_id}` so prefix scans / range deletes are
+    /// tenant-scoped. The tenant is sourced from the supplied `JobContext`.
     pub fn put(&self, job_id: &JobId, context: &JobContext) -> Result<()> {
         let cf = cf_handle(&self.db, cf::JOB_DATA)?;
-        let key = job_id.as_str().as_bytes();
+        let key = job_key(&context.tenant_id, job_id.as_str());
         let value = rmp_serde::to_vec(context).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to serialize job context: {}", e))
         })?;
 
-        self.db.put_cf(cf, key, value).map_err(|e| {
+        self.db.put_cf(cf, &key, value).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to store job context: {}", e))
         })?;
 
         Ok(())
     }
 
-    /// Retrieve job context data
-    ///
-    /// # Arguments
-    /// * `job_id` - Unique identifier for the job
-    ///
-    /// # Returns
-    /// Returns `Some(JobContext)` if found, `None` if not found
-    ///
-    /// # Errors
-    /// Returns an error if database read fails or deserialization fails
-    pub fn get(&self, job_id: &JobId) -> Result<Option<JobContext>> {
+    /// Retrieve job context data for the given tenant.
+    pub fn get(&self, tenant: &str, job_id: &JobId) -> Result<Option<JobContext>> {
         let cf = cf_handle(&self.db, cf::JOB_DATA)?;
-        let key = job_id.as_str().as_bytes();
+        let key = job_key(tenant, job_id.as_str());
 
-        let value = self.db.get_cf(cf, key).map_err(|e| {
+        let value = self.db.get_cf(cf, &key).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to read job context: {}", e))
         })?;
 
@@ -80,18 +68,12 @@ impl JobDataStore {
         }
     }
 
-    /// Delete job context data (cleanup after job completion)
-    ///
-    /// # Arguments
-    /// * `job_id` - Unique identifier for the job
-    ///
-    /// # Errors
-    /// Returns an error if database delete fails
-    pub fn delete(&self, job_id: &JobId) -> Result<()> {
+    /// Delete job context data (cleanup after job completion).
+    pub fn delete(&self, tenant: &str, job_id: &JobId) -> Result<()> {
         let cf = cf_handle(&self.db, cf::JOB_DATA)?;
-        let key = job_id.as_str().as_bytes();
+        let key = job_key(tenant, job_id.as_str());
 
-        self.db.delete_cf(cf, key).map_err(|e| {
+        self.db.delete_cf(cf, &key).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to delete job context: {}", e))
         })?;
 
@@ -130,14 +112,14 @@ mod tests {
         let context = create_test_context();
 
         // Initially, context should not exist
-        let result = store.get(&job_id).unwrap();
+        let result = store.get(&context.tenant_id, &job_id).unwrap();
         assert!(result.is_none());
 
         // Store context
         store.put(&job_id, &context).unwrap();
 
         // Retrieve context
-        let result = store.get(&job_id).unwrap();
+        let result = store.get(&context.tenant_id, &job_id).unwrap();
         assert!(result.is_some());
         let retrieved = result.unwrap();
         assert_eq!(retrieved.tenant_id, context.tenant_id);
@@ -148,10 +130,10 @@ mod tests {
         assert_eq!(retrieved.metadata.len(), context.metadata.len());
 
         // Delete context
-        store.delete(&job_id).unwrap();
+        store.delete(&context.tenant_id, &job_id).unwrap();
 
         // Context should no longer exist
-        let result = store.get(&job_id).unwrap();
+        let result = store.get(&context.tenant_id, &job_id).unwrap();
         assert!(result.is_none());
     }
 
@@ -175,7 +157,7 @@ mod tests {
         store.put(&job_id, &context2).unwrap();
 
         // Should retrieve second context
-        let result = store.get(&job_id).unwrap();
+        let result = store.get(&context1.tenant_id, &job_id).unwrap();
         assert!(result.is_some());
         let retrieved = result.unwrap();
         assert_eq!(retrieved.revision, raisin_hlc::HLC::new(2, 0));
@@ -190,7 +172,7 @@ mod tests {
         let job_id = JobId::new();
 
         // Deleting non-existent context should succeed (idempotent)
-        let result = store.delete(&job_id);
+        let result = store.delete("test-tenant", &job_id);
         assert!(result.is_ok());
     }
 }

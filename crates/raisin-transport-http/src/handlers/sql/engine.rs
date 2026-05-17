@@ -101,7 +101,7 @@ pub(super) fn create_job_registrar(
 
             // Register job
             let job_id = job_registry
-                .register_job(job_type, Some(tenant_id), None, None, None)
+                .register_job(job_type, tenant_id, None, None, None)
                 .await
                 .map_err(|e| {
                     raisin_error::Error::Backend(format!("Failed to register job: {}", e))
@@ -171,7 +171,7 @@ pub(super) fn create_restore_tree_registrar(
 
                 // Register job
                 let job_id = job_registry
-                    .register_job(job_type, Some(tenant_id), None, None, None)
+                    .register_job(job_type, tenant_id, None, None, None)
                     .await
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!(
@@ -280,7 +280,7 @@ pub(super) fn create_function_invoke_callback(
 
                 let job_id = rocksdb
                     .job_registry()
-                    .register_job(job_type, Some("default".to_string()), None, None, None)
+                    .register_job(job_type, "default".to_string(), None, None, None)
                     .await
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!("Failed to register job: {}", e))

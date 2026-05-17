@@ -27,7 +27,7 @@ pub struct JobInfo {
     pub id: JobId,
     pub job_type: JobType,
     pub status: JobStatus,
-    pub tenant: Option<String>,
+    pub tenant: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub progress: Option<f32>,

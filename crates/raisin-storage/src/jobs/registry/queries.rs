@@ -69,7 +69,7 @@ impl JobRegistry {
     pub async fn list_jobs_by_tenant(&self, tenant: &str) -> Vec<JobInfo> {
         let jobs = self.jobs.read().await;
         jobs.values()
-            .filter(|job| job.tenant.as_deref() == Some(tenant))
+            .filter(|job| job.tenant == tenant)
             .map(|job| job.to_job_info())
             .collect()
     }

@@ -50,7 +50,7 @@ pub async fn start_integrity_check(
     let jobs = global_registry().list_jobs().await;
     for job in jobs {
         if matches!(job.job_type, JobType::IntegrityScan)
-            && job.tenant.as_deref() == Some(&tenant)
+            && job.tenant == tenant
             && matches!(
                 job.status,
                 JobStatus::Running | JobStatus::Executing | JobStatus::Scheduled
@@ -66,13 +66,7 @@ pub async fn start_integrity_check(
 
     // Register the job
     let job_id = match global_registry()
-        .register_job(
-            JobType::IntegrityScan,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::IntegrityScan, tenant.clone(), None, None, None)
         .await
     {
         Ok(id) => id,
@@ -141,7 +135,7 @@ pub async fn start_verify_indexes(
     tracing::info!("Starting async index verification for tenant '{}'", tenant);
 
     let job_id = match global_registry()
-        .register_job(JobType::IndexVerify, Some(tenant.clone()), None, None, None)
+        .register_job(JobType::IndexVerify, tenant.clone(), None, None, None)
         .await
     {
         Ok(id) => id,
@@ -224,13 +218,7 @@ pub async fn start_rebuild_indexes(
     );
 
     let job_id = match global_registry()
-        .register_job(
-            JobType::IndexRebuild,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::IndexRebuild, tenant.clone(), None, None, None)
         .await
     {
         Ok(id) => id,
@@ -298,13 +286,7 @@ pub async fn start_cleanup_orphans(
     tracing::info!("Starting async orphan cleanup for tenant '{}'", tenant);
 
     let job_id = match global_registry()
-        .register_job(
-            JobType::OrphanCleanup,
-            Some(tenant.clone()),
-            None,
-            None,
-            None,
-        )
+        .register_job(JobType::OrphanCleanup, tenant.clone(), None, None, None)
         .await
     {
         Ok(id) => id,

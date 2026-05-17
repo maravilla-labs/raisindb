@@ -23,7 +23,7 @@ pub(super) struct JobEntry {
     pub id: JobId,
     pub job_type: JobType,
     pub status: JobStatus,
-    pub tenant: Option<String>,
+    pub tenant: String,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub error: Option<String>,

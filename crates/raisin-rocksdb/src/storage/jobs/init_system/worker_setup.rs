@@ -166,7 +166,7 @@ pub fn start_background_tasks(
                 return;
             }
 
-            let context = match job_data_store.get(&job.id) {
+            let context = match job_data_store.get(&job.tenant, &job.id) {
                 Ok(Some(ctx)) => ctx,
                 Ok(None) => {
                     tracing::warn!(

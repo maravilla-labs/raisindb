@@ -101,6 +101,205 @@ impl<S: Storage> Storage for ScopedStorage<S> {
     }
 }
 
+/// BackgroundJobs forwards to the inner storage, injecting tenant from the scope context.
+///
+/// The trait-level `tenant: &str` arg is ignored — callers using the trait method on a
+/// `ScopedStorage` get the scope's tenant. Prefer the `*_scoped()` helpers below for
+/// call sites where the lack of a tenant arg makes the intent clearer.
+#[async_trait::async_trait]
+impl<S> crate::BackgroundJobs for ScopedStorage<S>
+where
+    S: crate::BackgroundJobs + Storage + Send + Sync,
+{
+    fn start_background_jobs(&self) -> Result<crate::JobHandle> {
+        self.inner.start_background_jobs()
+    }
+
+    fn schedule_integrity_scan(
+        &self,
+        _tenant: &str,
+        interval: std::time::Duration,
+    ) -> Result<crate::JobId> {
+        self.inner
+            .schedule_integrity_scan(self.context.tenant_id(), interval)
+    }
+
+    async fn get_job_status(
+        &self,
+        _tenant: &str,
+        job_id: &crate::JobId,
+    ) -> Result<crate::JobStatus> {
+        self.inner
+            .get_job_status(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    async fn cancel_job(&self, _tenant: &str, job_id: &crate::JobId) -> Result<()> {
+        self.inner
+            .cancel_job(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    async fn delete_job(&self, _tenant: &str, job_id: &crate::JobId) -> Result<()> {
+        self.inner
+            .delete_job(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    async fn delete_jobs_batch(
+        &self,
+        _tenant: &str,
+        job_ids: &[crate::JobId],
+    ) -> (usize, usize) {
+        self.inner
+            .delete_jobs_batch(self.context.tenant_id(), job_ids)
+            .await
+    }
+
+    async fn list_jobs(&self, _tenant: &str) -> Result<Vec<crate::JobInfo>> {
+        self.inner.list_jobs(self.context.tenant_id()).await
+    }
+
+    async fn wait_for_job(
+        &self,
+        _tenant: &str,
+        job_id: &crate::JobId,
+    ) -> Result<crate::JobStatus> {
+        self.inner
+            .wait_for_job(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    async fn get_job_info(
+        &self,
+        _tenant: &str,
+        job_id: &crate::JobId,
+    ) -> Result<crate::JobInfo> {
+        self.inner
+            .get_job_info(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    async fn purge_all_jobs(&self, _tenant: &str) -> Result<usize> {
+        self.inner.purge_all_jobs(self.context.tenant_id()).await
+    }
+
+    async fn purge_orphaned_jobs(&self, _tenant: &str) -> Result<usize> {
+        self.inner
+            .purge_orphaned_jobs(self.context.tenant_id())
+            .await
+    }
+
+    async fn get_job_queue_stats(&self, _tenant: &str) -> Result<crate::JobQueueStats> {
+        self.inner
+            .get_job_queue_stats(self.context.tenant_id())
+            .await
+    }
+
+    async fn force_fail_stuck_jobs(
+        &self,
+        _tenant: &str,
+        stuck_minutes: u64,
+    ) -> Result<(usize, Vec<String>)> {
+        self.inner
+            .force_fail_stuck_jobs(self.context.tenant_id(), stuck_minutes)
+            .await
+    }
+}
+
+/// Convenience helpers that don't take an explicit tenant arg — they use the
+/// `ScopedStorage`'s context. Prefer these in server handlers built from a
+/// per-request `ScopedStorage`.
+impl<S> ScopedStorage<S>
+where
+    S: crate::BackgroundJobs + Storage + Send + Sync,
+{
+    pub async fn list_jobs_scoped(&self) -> Result<Vec<crate::JobInfo>> {
+        self.inner.list_jobs(self.context.tenant_id()).await
+    }
+
+    pub async fn get_job_info_scoped(
+        &self,
+        job_id: &crate::JobId,
+    ) -> Result<crate::JobInfo> {
+        self.inner
+            .get_job_info(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    pub async fn get_job_status_scoped(
+        &self,
+        job_id: &crate::JobId,
+    ) -> Result<crate::JobStatus> {
+        self.inner
+            .get_job_status(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    pub async fn cancel_job_scoped(&self, job_id: &crate::JobId) -> Result<()> {
+        self.inner
+            .cancel_job(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    pub async fn delete_job_scoped(&self, job_id: &crate::JobId) -> Result<()> {
+        self.inner
+            .delete_job(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    pub async fn delete_jobs_batch_scoped(
+        &self,
+        job_ids: &[crate::JobId],
+    ) -> (usize, usize) {
+        self.inner
+            .delete_jobs_batch(self.context.tenant_id(), job_ids)
+            .await
+    }
+
+    pub async fn wait_for_job_scoped(
+        &self,
+        job_id: &crate::JobId,
+    ) -> Result<crate::JobStatus> {
+        self.inner
+            .wait_for_job(self.context.tenant_id(), job_id)
+            .await
+    }
+
+    pub async fn purge_all_jobs_scoped(&self) -> Result<usize> {
+        self.inner.purge_all_jobs(self.context.tenant_id()).await
+    }
+
+    pub async fn purge_orphaned_jobs_scoped(&self) -> Result<usize> {
+        self.inner
+            .purge_orphaned_jobs(self.context.tenant_id())
+            .await
+    }
+
+    pub async fn get_job_queue_stats_scoped(&self) -> Result<crate::JobQueueStats> {
+        self.inner
+            .get_job_queue_stats(self.context.tenant_id())
+            .await
+    }
+
+    pub async fn force_fail_stuck_jobs_scoped(
+        &self,
+        stuck_minutes: u64,
+    ) -> Result<(usize, Vec<String>)> {
+        self.inner
+            .force_fail_stuck_jobs(self.context.tenant_id(), stuck_minutes)
+            .await
+    }
+
+    pub fn schedule_integrity_scan_scoped(
+        &self,
+        interval: std::time::Duration,
+    ) -> Result<crate::JobId> {
+        self.inner
+            .schedule_integrity_scan(self.context.tenant_id(), interval)
+    }
+}
+
 /// Trait for storage implementations that support native scoping
 ///
 /// This is separate from StorageExt because some implementations (like RocksStorage)

@@ -92,7 +92,7 @@ where
 
                 // Register the job
                 let job_id = job_registry
-                    .register_job(job, Some(tenant_id.clone()), None, None, None)
+                    .register_job(job, tenant_id.clone(), None, None, None)
                     .await
                     .map_err(|e| format!("Failed to register job: {}", e))?;
 

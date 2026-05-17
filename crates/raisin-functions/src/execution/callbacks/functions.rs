@@ -352,7 +352,7 @@ async fn execute_function_job(
                 trigger_name: None, // Not triggered by an event
                 execution_id: execution_id.to_string(),
             },
-            Some(tenant_id.to_string()),
+            tenant_id.to_string(),
             None,    // No handle - job system will create one
             None,    // No cancel token needed
             Some(0), // max_retries=0: caller is blocked, don't retry with backoff

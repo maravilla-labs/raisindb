@@ -11,6 +11,7 @@ mod tenant;
 pub mod types;
 
 // Re-export all public middleware functions to preserve `crate::middleware::*` paths.
+pub use auth::require_superadmin_token_middleware;
 pub use parsing::raisin_parsing_middleware;
 pub use tenant::ensure_tenant_middleware;
 pub use types::{RaisinContext, TenantInfo};

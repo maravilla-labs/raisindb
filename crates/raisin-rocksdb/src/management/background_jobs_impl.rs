@@ -10,8 +10,8 @@ use crate::RocksDBStorage;
 use async_trait::async_trait;
 use raisin_error::Result;
 use raisin_storage::{
-    BackgroundJobs, CategoryQueueDepthStats, JobHandle, JobId, JobQueueStats, PersistedStats,
-    QueueDepthStats, WorkerStats,
+    BackgroundJobs, BackgroundJobsInternal, CategoryQueueDepthStats, JobHandle, JobId,
+    JobQueueStats, PersistedStats, QueueDepthStats, WorkerStats,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,16 +88,13 @@ impl BackgroundJobs for RocksDBStorage {
         Ok(JobId(job_id))
     }
 
-    /// List all jobs from persistent storage
+    /// List all jobs from persistent storage for a tenant.
     ///
-    /// Returns all jobs (running, completed, failed) from RocksDB, not just
-    /// the ones currently in the in-memory registry. This ensures jobs persist
-    /// across server restarts.
-    async fn list_jobs(&self) -> Result<Vec<raisin_storage::JobInfo>> {
-        // Read all jobs from persistent storage (RocksDB)
-        let persisted_jobs = self.job_metadata_store().list_all()?;
+    /// Returns all jobs (running, completed, failed) from RocksDB scoped to
+    /// the `{tenant}\0` key prefix.
+    async fn list_jobs(&self, tenant: &str) -> Result<Vec<raisin_storage::JobInfo>> {
+        let persisted_jobs = self.job_metadata_store().list_for_tenant(tenant)?;
 
-        // Convert PersistedJobEntry to JobInfo
         let job_infos: Vec<raisin_storage::JobInfo> = persisted_jobs
             .into_iter()
             .map(|(job_id, entry)| raisin_storage::JobInfo {
@@ -121,23 +118,29 @@ impl BackgroundJobs for RocksDBStorage {
         Ok(job_infos)
     }
 
-    /// Get status of a specific job from the instance-based job registry
+    /// Get status of a specific job within the given tenant.
     async fn get_job_status(
         &self,
+        tenant: &str,
         job_id: &raisin_storage::JobId,
     ) -> Result<raisin_storage::JobStatus> {
-        self.job_registry().get_status(job_id).await
+        let info = self.get_job_info(tenant, job_id).await?;
+        Ok(info.status)
     }
 
-    /// Cancel a running job using the instance-based job registry
-    async fn cancel_job(&self, job_id: &raisin_storage::JobId) -> Result<()> {
+    /// Cancel a running job within the given tenant.
+    async fn cancel_job(&self, tenant: &str, job_id: &raisin_storage::JobId) -> Result<()> {
+        let _ = self.get_job_info(tenant, job_id).await?;
         self.job_registry().cancel_job(job_id).await
     }
 
-    /// Delete a job from persistent storage and in-memory registry
-    async fn delete_job(&self, job_id: &raisin_storage::JobId) -> Result<()> {
+    /// Delete a job from persistent storage and in-memory registry within the given tenant.
+    async fn delete_job(&self, tenant: &str, job_id: &raisin_storage::JobId) -> Result<()> {
+        // Ensure the job belongs to this tenant first.
+        let _ = self.get_job_info(tenant, job_id).await?;
+
         // Delete from persistent storage (RocksDB) first
-        self.job_metadata_store().delete(job_id)?;
+        self.job_metadata_store().delete(tenant, job_id)?;
 
         // Also try to delete from in-memory registry (ignore errors if not found there)
         let _ = self.job_registry().delete_job(job_id).await;
@@ -145,14 +148,26 @@ impl BackgroundJobs for RocksDBStorage {
         Ok(())
     }
 
-    /// Delete multiple jobs from persistent storage in a single batch
-    async fn delete_jobs_batch(&self, job_ids: &[raisin_storage::JobId]) -> (usize, usize) {
-        // Delete from persistent storage (RocksDB) using batch operation
-        match self.job_metadata_store().delete_batch(job_ids) {
-            Ok((deleted, skipped)) => {
-                // Also try to remove from in-memory registry (ignore failures)
-                let _ = self.job_registry().delete_jobs_batch(job_ids).await;
-                (deleted, skipped)
+    /// Delete multiple jobs from persistent storage in a single batch within the given tenant.
+    async fn delete_jobs_batch(
+        &self,
+        tenant: &str,
+        job_ids: &[raisin_storage::JobId],
+    ) -> (usize, usize) {
+        // Pre-filter to tenant-owned jobs.
+        let mut owned: Vec<raisin_storage::JobId> = Vec::with_capacity(job_ids.len());
+        let mut skipped = 0usize;
+        for id in job_ids {
+            match self.get_job_info(tenant, id).await {
+                Ok(_) => owned.push(id.clone()),
+                Err(_) => skipped += 1,
+            }
+        }
+
+        match self.job_metadata_store().delete_batch(tenant, &owned) {
+            Ok((deleted, also_skipped)) => {
+                let _ = self.job_registry().delete_jobs_batch(&owned).await;
+                (deleted, skipped + also_skipped)
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to batch delete jobs from persistent storage");
@@ -161,27 +176,63 @@ impl BackgroundJobs for RocksDBStorage {
         }
     }
 
-    /// Get full job information from the instance-based job registry
+    /// Get full job information within the given tenant.
     async fn get_job_info(
         &self,
+        tenant: &str,
         job_id: &raisin_storage::JobId,
     ) -> Result<raisin_storage::JobInfo> {
-        self.job_registry().get_job_info(job_id).await
+        // Prefer the in-memory registry, fall back to persistent storage.
+        let info = match self.job_registry().get_job_info(job_id).await {
+            Ok(info) => info,
+            Err(_) => {
+                let entry = self
+                    .job_metadata_store()
+                    .get(tenant, job_id)?
+                    .ok_or_else(|| {
+                        raisin_error::Error::NotFound(format!("Job {} not found", job_id))
+                    })?;
+                raisin_storage::JobInfo {
+                    id: job_id.clone(),
+                    job_type: entry.job_type,
+                    status: entry.status,
+                    tenant: entry.tenant,
+                    started_at: entry.started_at,
+                    completed_at: entry.completed_at,
+                    progress: entry.progress,
+                    error: entry.error,
+                    result: entry.result,
+                    retry_count: entry.retry_count,
+                    max_retries: entry.max_retries,
+                    last_heartbeat: entry.last_heartbeat,
+                    timeout_seconds: entry.timeout_seconds,
+                    next_retry_at: entry.next_retry_at,
+                }
+            }
+        };
+        if info.tenant != tenant {
+            return Err(raisin_error::Error::NotFound(format!(
+                "Job {} not found",
+                job_id
+            )));
+        }
+        Ok(info)
     }
 
-    /// Purge all jobs from persistent storage
-    async fn purge_all_jobs(&self) -> Result<usize> {
-        self.job_metadata_store().purge_all()
+    /// Purge all jobs from persistent storage for the given tenant.
+    async fn purge_all_jobs(&self, tenant: &str) -> Result<usize> {
+        self.job_metadata_store().purge_all_for_tenant(tenant)
     }
 
-    /// Purge only orphaned (undeserializable) jobs
-    async fn purge_orphaned_jobs(&self) -> Result<usize> {
-        self.job_metadata_store().purge_orphaned()
+    /// Purge orphaned (undeserializable) entries for the given tenant.
+    async fn purge_orphaned_jobs(&self, tenant: &str) -> Result<usize> {
+        self.job_metadata_store().purge_orphaned_for_tenant(tenant)
     }
 
-    /// Get job queue statistics
-    async fn get_job_queue_stats(&self) -> Result<JobQueueStats> {
-        let (total_entries, orphaned_entries) = self.job_metadata_store().count_entries()?;
+    /// Get job queue statistics for the given tenant.
+    async fn get_job_queue_stats(&self, tenant: &str) -> Result<JobQueueStats> {
+        let (total_entries, orphaned_entries) =
+            self.job_metadata_store().count_entries_for_tenant(tenant)?;
 
         let (queue, pool_size, categories) = if let Some(stats) = self.job_dispatcher_stats() {
             // Build per-category breakdown
@@ -245,14 +296,22 @@ impl BackgroundJobs for RocksDBStorage {
         })
     }
 
-    /// Force-fail jobs stuck in Running state for longer than `stuck_minutes`
-    async fn force_fail_stuck_jobs(&self, stuck_minutes: u64) -> Result<(usize, Vec<String>)> {
+    /// Force-fail jobs stuck in Running state for longer than `stuck_minutes`, scoped to tenant.
+    async fn force_fail_stuck_jobs(
+        &self,
+        tenant: &str,
+        stuck_minutes: u64,
+    ) -> Result<(usize, Vec<String>)> {
         let cutoff = chrono::Utc::now() - chrono::Duration::minutes(stuck_minutes as i64);
-        let persisted_jobs = self.job_metadata_store().list_all()?;
+        let persisted_jobs = self.job_metadata_store().list_for_tenant(tenant)?;
 
         let mut failed_ids = Vec::new();
 
         for (job_id, entry) in persisted_jobs {
+            // Defensive: list_for_tenant already filters.
+            if entry.tenant != tenant {
+                continue;
+            }
             // Only target Running jobs
             if !matches!(
                 entry.status,
@@ -297,5 +356,88 @@ impl BackgroundJobs for RocksDBStorage {
         );
 
         Ok((count, failed_ids))
+    }
+}
+
+#[async_trait]
+impl BackgroundJobsInternal for RocksDBStorage {
+    async fn list_all_jobs(&self) -> Result<Vec<raisin_storage::JobInfo>> {
+        let persisted = self.job_metadata_store().list_all_unscoped()?;
+        Ok(persisted
+            .into_iter()
+            .map(|(job_id, entry)| raisin_storage::JobInfo {
+                id: job_id,
+                job_type: entry.job_type,
+                status: entry.status,
+                tenant: entry.tenant,
+                started_at: entry.started_at,
+                completed_at: entry.completed_at,
+                progress: entry.progress,
+                error: entry.error,
+                result: entry.result,
+                retry_count: entry.retry_count,
+                max_retries: entry.max_retries,
+                last_heartbeat: entry.last_heartbeat,
+                timeout_seconds: entry.timeout_seconds,
+                next_retry_at: entry.next_retry_at,
+            })
+            .collect())
+    }
+
+    async fn purge_all_jobs_global(&self) -> Result<usize> {
+        self.job_metadata_store().purge_all()
+    }
+
+    async fn force_fail_stuck_jobs_global(
+        &self,
+        stuck_minutes: u64,
+    ) -> Result<(usize, Vec<String>)> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::minutes(stuck_minutes as i64);
+        let persisted = self.job_metadata_store().list_all_unscoped()?;
+
+        let mut failed_ids = Vec::new();
+
+        for (job_id, entry) in persisted {
+            if !matches!(
+                entry.status,
+                raisin_storage::JobStatus::Running | raisin_storage::JobStatus::Executing
+            ) {
+                continue;
+            }
+            if entry.started_at >= cutoff {
+                continue;
+            }
+
+            let error_msg = format!(
+                "Force-failed by superadmin: job stuck in Running state for >{} minutes",
+                stuck_minutes
+            );
+            let mut updated = entry.clone();
+            updated.status = raisin_storage::JobStatus::Failed(error_msg.clone());
+            updated.completed_at = Some(chrono::Utc::now());
+            updated.error = Some(error_msg.clone());
+            if let Err(e) = self.job_metadata_store().update(&job_id, &updated) {
+                tracing::warn!(job_id = %job_id, error = %e, "Failed to force-fail job (global)");
+                continue;
+            }
+            let _ = self
+                .job_registry()
+                .update_status(&job_id, raisin_storage::JobStatus::Failed(error_msg))
+                .await;
+            failed_ids.push(job_id.0);
+        }
+
+        let count = failed_ids.len();
+        tracing::warn!(
+            count = count,
+            stuck_minutes = stuck_minutes,
+            "Force-failed stuck jobs across all tenants (superadmin)"
+        );
+        Ok((count, failed_ids))
+    }
+
+    async fn restore_pending_jobs(&self) -> Result<()> {
+        // Delegate to the inherent restore_pending_jobs which returns RestoreStats.
+        self.restore_pending_jobs().await.map(|_| ())
     }
 }

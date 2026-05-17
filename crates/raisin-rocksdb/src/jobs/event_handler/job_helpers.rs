@@ -43,7 +43,7 @@ impl UnifiedJobEventHandler {
             .register_job_with_id_idempotent(
                 job_id.clone(),
                 job_type.clone(),
-                Some(context.tenant_id.clone()),
+                context.tenant_id.clone(),
                 dedup_key.clone(),
                 None,
             )

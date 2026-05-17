@@ -189,7 +189,7 @@ impl BatchIndexAggregator {
             .job_registry
             .register_job(
                 job_type.clone(),
-                Some(context.tenant_id.clone()),
+                context.tenant_id.clone(),
                 None,
                 None,
                 None,

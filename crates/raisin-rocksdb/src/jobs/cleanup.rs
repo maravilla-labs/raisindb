@@ -108,7 +108,7 @@ mod tests {
                 operation: IndexOperation::AddOrUpdate,
             },
             status: JobStatus::Completed,
-            tenant: Some("test".to_string()),
+            tenant: "test".to_string(),
             started_at: Utc::now() - chrono::Duration::hours(48),
             completed_at: Some(Utc::now() - chrono::Duration::hours(48)),
             error: None,
@@ -140,7 +140,7 @@ mod tests {
         cleanup.cleanup_old_jobs().await.unwrap();
 
         // Job should be deleted
-        let retrieved = store.get(&job_id).unwrap();
+        let retrieved = store.get("test", &job_id).unwrap();
         assert!(retrieved.is_none());
     }
 }

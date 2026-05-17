@@ -56,98 +56,151 @@ pub trait ManagementOps: Storage {
     async fn backup_all(&self, dest: &Path) -> Result<Vec<BackupInfo>>;
 }
 
-/// Background job management for storage backends
+/// Background job management for storage backends.
+///
+/// All methods operate within a single tenant scope. The tenant is taken as an
+/// explicit parameter so the trait can be safely implemented on a per-tenant
+/// view (`ScopedStorage`) as well as directly on storage backends.
+///
+/// For truly cross-tenant operations (startup restore, global admin escape
+/// hatches) see `BackgroundJobsInternal`.
 #[async_trait]
-pub trait BackgroundJobs: Storage {
+pub trait BackgroundJobs: Send + Sync {
     /// Start background jobs (integrity scanning, auto-healing, etc.)
+    ///
+    /// This is a process-wide operation, not per-tenant.
     fn start_background_jobs(&self) -> Result<crate::JobHandle>;
 
     /// Schedule an integrity scan for a tenant
     fn schedule_integrity_scan(&self, tenant: &str, interval: Duration) -> Result<crate::JobId>;
 
-    /// Get status of a background job (async for accessing shared state)
-    async fn get_job_status(&self, job_id: &crate::JobId) -> Result<crate::JobStatus> {
-        // Use global job registry by default
-        crate::jobs::global_registry().get_status(job_id).await
+    /// Get status of a background job within the given tenant.
+    async fn get_job_status(
+        &self,
+        tenant: &str,
+        job_id: &crate::JobId,
+    ) -> Result<crate::JobStatus> {
+        let info = self.get_job_info(tenant, job_id).await?;
+        Ok(info.status)
     }
 
-    /// Cancel a background job (async for accessing shared state)
-    async fn cancel_job(&self, job_id: &crate::JobId) -> Result<()> {
-        // Use global job registry by default
+    /// Cancel a background job within the given tenant.
+    async fn cancel_job(&self, tenant: &str, job_id: &crate::JobId) -> Result<()> {
+        // Ensure the job belongs to the given tenant before cancelling.
+        let _ = self.get_job_info(tenant, job_id).await?;
         crate::jobs::global_registry().cancel_job(job_id).await
     }
 
-    /// Delete a background job (async for accessing shared state)
-    async fn delete_job(&self, job_id: &crate::JobId) -> Result<()> {
-        // Use global job registry by default
+    /// Delete a background job within the given tenant.
+    async fn delete_job(&self, tenant: &str, job_id: &crate::JobId) -> Result<()> {
+        let _ = self.get_job_info(tenant, job_id).await?;
         crate::jobs::global_registry().delete_job(job_id).await
     }
 
-    /// Delete multiple background jobs in a single batch operation
+    /// Delete multiple background jobs in a single batch operation within the given tenant.
     ///
-    /// More efficient than calling delete_job in a loop - acquires locks once.
-    /// Returns (deleted_count, skipped_count) where skipped jobs are running/scheduled.
-    async fn delete_jobs_batch(&self, job_ids: &[crate::JobId]) -> (usize, usize) {
-        crate::jobs::global_registry()
-            .delete_jobs_batch(job_ids)
-            .await
+    /// Returns (deleted_count, skipped_count) where skipped jobs are running/scheduled
+    /// or belong to other tenants.
+    async fn delete_jobs_batch(&self, tenant: &str, job_ids: &[crate::JobId]) -> (usize, usize) {
+        let mut allowed: Vec<crate::JobId> = Vec::with_capacity(job_ids.len());
+        let mut skipped = 0usize;
+        for id in job_ids {
+            match self.get_job_info(tenant, id).await {
+                Ok(_) => allowed.push(id.clone()),
+                Err(_) => skipped += 1,
+            }
+        }
+        let (deleted, also_skipped) = crate::jobs::global_registry()
+            .delete_jobs_batch(&allowed)
+            .await;
+        (deleted, skipped + also_skipped)
     }
 
-    /// List all active background jobs (async for accessing shared state)
-    async fn list_jobs(&self) -> Result<Vec<crate::JobInfo>> {
-        // Use global job registry by default
-        Ok(crate::jobs::global_registry().list_jobs().await)
+    /// List all active background jobs for the given tenant.
+    async fn list_jobs(&self, tenant: &str) -> Result<Vec<crate::JobInfo>> {
+        Ok(crate::jobs::global_registry()
+            .list_jobs_by_tenant(tenant)
+            .await)
     }
 
-    /// Wait for a job to complete
-    async fn wait_for_job(&self, job_id: &crate::JobId) -> Result<crate::JobStatus> {
+    /// Wait for a job to complete within the given tenant.
+    async fn wait_for_job(&self, tenant: &str, job_id: &crate::JobId) -> Result<crate::JobStatus> {
+        let _ = self.get_job_info(tenant, job_id).await?;
         crate::jobs::global_registry()
             .wait_for_completion(job_id)
             .await
     }
 
-    /// Get full job information including results (async for accessing shared state)
-    async fn get_job_info(&self, job_id: &crate::JobId) -> Result<crate::JobInfo> {
-        // Use global job registry by default
-        crate::jobs::global_registry().get_job_info(job_id).await
+    /// Get full job information including results for the given tenant.
+    async fn get_job_info(&self, tenant: &str, job_id: &crate::JobId) -> Result<crate::JobInfo> {
+        let info = crate::jobs::global_registry().get_job_info(job_id).await?;
+        if info.tenant != tenant {
+            return Err(raisin_error::Error::NotFound(format!(
+                "Job {} not found",
+                job_id
+            )));
+        }
+        Ok(info)
     }
 
-    /// Purge all jobs from persistent storage (nuclear option)
+    /// Purge all jobs from persistent storage for the given tenant.
     ///
-    /// Deletes ALL job entries regardless of status or deserializability.
     /// Returns the number of entries purged.
-    async fn purge_all_jobs(&self) -> Result<usize> {
+    async fn purge_all_jobs(&self, _tenant: &str) -> Result<usize> {
         Err(raisin_error::Error::Validation(
             "purge_all_jobs not supported by this storage backend".to_string(),
         ))
     }
 
-    /// Purge only orphaned (undeserializable) jobs from persistent storage
-    ///
-    /// Only deletes entries that fail deserialization. Returns the number purged.
-    async fn purge_orphaned_jobs(&self) -> Result<usize> {
+    /// Purge only orphaned (undeserializable) jobs from persistent storage for the tenant.
+    async fn purge_orphaned_jobs(&self, _tenant: &str) -> Result<usize> {
         Err(raisin_error::Error::Validation(
             "purge_orphaned_jobs not supported by this storage backend".to_string(),
         ))
     }
 
-    /// Get job queue statistics including queue depths and persisted entry counts
-    async fn get_job_queue_stats(&self) -> Result<JobQueueStats> {
+    /// Get job queue statistics for the given tenant.
+    async fn get_job_queue_stats(&self, _tenant: &str) -> Result<JobQueueStats> {
         Err(raisin_error::Error::Validation(
             "get_job_queue_stats not supported by this storage backend".to_string(),
         ))
     }
 
-    /// Force-fail jobs that have been stuck in Running state for too long
+    /// Force-fail jobs that have been stuck in Running state for too long, for the given tenant.
     ///
-    /// Finds all jobs with status=Running where started_at is older than
-    /// `stuck_minutes` ago, and marks them as Failed.
     /// Returns (failed_count, list of job IDs that were force-failed).
-    async fn force_fail_stuck_jobs(&self, stuck_minutes: u64) -> Result<(usize, Vec<String>)> {
+    async fn force_fail_stuck_jobs(
+        &self,
+        _tenant: &str,
+        _stuck_minutes: u64,
+    ) -> Result<(usize, Vec<String>)> {
         Err(raisin_error::Error::Validation(
             "force_fail_stuck_jobs not supported by this storage backend".to_string(),
         ))
     }
+}
+
+/// Cross-tenant / internal job operations.
+///
+/// These methods deliberately bypass tenant scoping and are only intended
+/// for startup recovery and operator-only admin tooling. They MUST NOT be
+/// exposed on per-tenant HTTP routes.
+#[async_trait]
+pub trait BackgroundJobsInternal: Send + Sync {
+    /// List jobs across all tenants.
+    async fn list_all_jobs(&self) -> Result<Vec<crate::JobInfo>>;
+
+    /// Purge all jobs across all tenants.
+    async fn purge_all_jobs_global(&self) -> Result<usize>;
+
+    /// Force-fail stuck jobs across all tenants.
+    async fn force_fail_stuck_jobs_global(
+        &self,
+        stuck_minutes: u64,
+    ) -> Result<(usize, Vec<String>)>;
+
+    /// Restore pending jobs from persistent storage at startup.
+    async fn restore_pending_jobs(&self) -> Result<()>;
 }
 
 /// Statistics about the job queue system

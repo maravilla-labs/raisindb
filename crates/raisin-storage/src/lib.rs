@@ -68,10 +68,11 @@ pub use translations::TranslationRepository;
 
 // Re-export management types
 pub use management::{
-    BackgroundJobs, BackupInfo, CategoryQueueDepthStats, CompactionStats, HealthCheck, HealthLevel,
-    HealthStatus, IndexHealth, IndexIssue, IndexManagement, IndexReport, IndexStatus, IndexType,
-    IntegrityReport, Issue, JobQueueStats, ManagementOps, Metrics, OptimizeStats, PersistedStats,
-    QueueDepthStats, RebuildStats, RepairResult, RestoreStats, WorkerStats,
+    BackgroundJobs, BackgroundJobsInternal, BackupInfo, CategoryQueueDepthStats, CompactionStats,
+    HealthCheck, HealthLevel, HealthStatus, IndexHealth, IndexIssue, IndexManagement, IndexReport,
+    IndexStatus, IndexType, IntegrityReport, Issue, JobQueueStats, ManagementOps, Metrics,
+    OptimizeStats, PersistedStats, QueueDepthStats, RebuildStats, RepairResult, RestoreStats,
+    WorkerStats,
 };
 
 // Re-export job types from the new jobs module

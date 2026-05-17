@@ -68,7 +68,8 @@ impl JobMonitor for SseJobMonitor {
                 id: job_id.clone(),
                 job_type: raisin_storage::jobs::JobType::Custom(format!("progress:{}", progress)),
                 status: raisin_storage::jobs::JobStatus::Running,
-                tenant: None,
+                // tenant unknown at progress emit time
+                tenant: String::new(),
                 started_at: chrono::Utc::now(),
                 completed_at: None,
                 progress: Some(progress),
@@ -129,10 +130,10 @@ pub async fn job_events_stream_rocksdb(
     let tx_clone = tx.clone();
     let tenant_id_clone = tenant_id.clone();
     tokio::spawn(async move {
-        if let Ok(jobs) = storage_clone.list_jobs().await {
+        if let Ok(jobs) = storage_clone.list_jobs(&tenant_id_clone).await {
             for job in jobs {
-                // SECURITY: Filter jobs by tenant
-                if job.tenant.as_deref() != Some(&tenant_id_clone) {
+                // Defensive: should already be tenant-scoped by list_jobs.
+                if job.tenant != tenant_id_clone {
                     continue;
                 }
                 let event = JobEvent {
@@ -152,7 +153,7 @@ pub async fn job_events_stream_rocksdb(
         .filter(move |sse_event| {
             // SECURITY: Only stream events for the authenticated tenant
             match sse_event {
-                SseEvent::JobUpdate(event) => event.job_info.tenant.as_deref() == Some(&tenant_id),
+                SseEvent::JobUpdate(event) => event.job_info.tenant == tenant_id,
                 SseEvent::JobLog(entry) => {
                     // Log entries are associated with jobs; tenant filtering is done via the
                     // monitor registration (only jobs for this tenant emit logs)
@@ -201,9 +202,9 @@ where
     let registry = raisin_storage::jobs::global_registry();
     registry.monitors().add_monitor(monitor).await;
 
-    // Send initial state - all current jobs
+    // Send initial state - all current jobs (no tenant context outside RocksDB build)
     tokio::spawn(async move {
-        if let Ok(jobs) = storage.list_jobs().await {
+        if let Ok(jobs) = storage.list_jobs("").await {
             for job in jobs {
                 let event = JobEvent {
                     job_id: job.id.clone(),
@@ -276,7 +277,7 @@ struct SseEventData {
     job_type: String,
     status: String,
     old_status: Option<String>,
-    tenant: Option<String>,
+    tenant: String,
     progress: Option<f32>,
     error: Option<String>,
     timestamp: String,

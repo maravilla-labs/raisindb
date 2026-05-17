@@ -496,3 +496,40 @@ pub(super) async fn is_anonymous_enabled_for_context(
     );
     global_anonymous_enabled
 }
+
+/// Middleware that validates a static bearer token against `RAISIN_SUPERADMIN_TOKEN`.
+///
+/// Constant-time byte compare. Routes using this middleware should be
+/// conditionally mounted by the router (only when the env var is set), so
+/// middleware mismatch returns 401 rather than exposing that the env var is
+/// configured.
+pub async fn require_superadmin_token_middleware(
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let expected = match std::env::var("RAISIN_SUPERADMIN_TOKEN") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+    let auth_header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !auth_header.starts_with("Bearer ") {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let provided = &auth_header[7..];
+    if provided.len() != expected.len() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    // Constant-time compare
+    let mut diff: u8 = 0;
+    for (a, b) in provided.as_bytes().iter().zip(expected.as_bytes().iter()) {
+        diff |= a ^ b;
+    }
+    if diff != 0 {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(req).await)
+}

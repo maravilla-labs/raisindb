@@ -209,7 +209,7 @@ pub async fn handle_large_multipart_upload(
                     };
 
                     match job_registry
-                        .register_job(job_type, Some(tenant_id.to_string()), None, None, None)
+                        .register_job(job_type, tenant_id.to_string(), None, None, None)
                         .await
                     {
                         Ok(job_id) => {

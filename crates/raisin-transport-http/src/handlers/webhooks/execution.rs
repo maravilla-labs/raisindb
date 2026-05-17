@@ -235,7 +235,7 @@ async fn execute_sync(
                 .mark_completed(&job_id)
                 .await
                 .map_err(|e| ApiError::internal(e.to_string()))?;
-            let _ = rocksdb.job_data_store().delete(&job_id);
+            let _ = rocksdb.job_data_store().delete(TENANT_ID, &job_id);
 
             Ok(Json(WebhookResponse {
                 execution_id: context.execution_id,
@@ -349,7 +349,7 @@ async fn register_trigger_job(
     // Register with JobRegistry
     let job_id = rocksdb
         .job_registry()
-        .register_job(job_type, Some(TENANT_ID.to_string()), None, None, None)
+        .register_job(job_type, TENANT_ID.to_string(), None, None, None)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

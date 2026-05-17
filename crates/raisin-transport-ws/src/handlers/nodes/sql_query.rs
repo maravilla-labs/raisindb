@@ -236,7 +236,7 @@ where
 
                 let job_id = rocksdb
                     .job_registry()
-                    .register_job(job_type, Some("default".to_string()), None, None, None)
+                    .register_job(job_type, "default".to_string(), None, None, None)
                     .await
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!("Failed to register job: {}", e))

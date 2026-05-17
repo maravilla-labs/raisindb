@@ -122,7 +122,7 @@ pub async fn download_huggingface_model(
         .job_registry()
         .register_job(
             job_type,
-            Some(tenant.clone()),
+            tenant.clone(),
             None, // no handle
             None, // no cancel token
             None, // default retries

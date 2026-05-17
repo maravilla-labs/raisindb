@@ -231,7 +231,7 @@ async fn register_function_job(
                 trigger_name: Some("http".into()),
                 execution_id,
             },
-            Some(TENANT_ID.to_string()),
+            TENANT_ID.to_string(),
             None,
             None,
             None,
@@ -364,7 +364,7 @@ async fn persist_job_result(
         .mark_completed(job_id)
         .await
         .map_err(map_storage_error)?;
-    let _ = rocksdb.job_data_store().delete(job_id);
+    let _ = rocksdb.job_data_store().delete(TENANT_ID, job_id);
     Ok(())
 }
 
