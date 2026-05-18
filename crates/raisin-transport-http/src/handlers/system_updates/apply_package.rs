@@ -13,6 +13,8 @@ use raisin_storage::{NodeRepository, Storage, StorageScope, SystemUpdateReposito
 use crate::error::ApiError;
 use crate::state::AppState;
 
+use super::map_storage_err;
+
 /// Apply a single Package system update.
 ///
 /// Creates a ZIP from the embedded package files, stores the binary,
@@ -74,7 +76,7 @@ pub(super) async fn apply_package_update(
             None,
         )
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to check existing package: {}", e)))?;
+        .map_err(|e| map_storage_err("Failed to check existing package", e))?;
 
     let node_id = existing
         .as_ref()
@@ -267,7 +269,7 @@ async fn persist_package_node(
                 raisin_storage::node_operations::UpdateNodeOptions::default(),
             )
             .await
-            .map_err(|e| ApiError::internal(format!("Failed to update package node: {}", e)))?;
+            .map_err(|e| map_storage_err("Failed to update package node", e))?;
 
         tracing::info!(
             tenant_id = %tenant_id,
@@ -296,7 +298,7 @@ async fn persist_package_node(
                 raisin_storage::node_operations::CreateNodeOptions::default(),
             )
             .await
-            .map_err(|e| ApiError::internal(format!("Failed to create package node: {}", e)))?;
+            .map_err(|e| map_storage_err("Failed to create package node", e))?;
     }
     Ok(())
 }

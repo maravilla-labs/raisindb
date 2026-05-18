@@ -10,6 +10,8 @@ use raisin_storage::{
 use crate::error::ApiError;
 use crate::state::AppState;
 
+use super::map_storage_err;
+
 /// Apply a single NodeType system update.
 ///
 /// Looks up the nodetype from the provided global definitions, preserves any
@@ -47,7 +49,7 @@ pub(super) async fn apply_nodetype_update(
             None,
         )
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to get existing NodeType: {}", e)))?
+        .map_err(|e| map_storage_err("Failed to get existing NodeType", e))?
     {
         nodetype.id = existing.id;
         nodetype.created_at = existing.created_at;
@@ -65,7 +67,7 @@ pub(super) async fn apply_nodetype_update(
             CommitMetadata::system(format!("System update: {}", nodetype.name)),
         )
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to apply NodeType update: {}", e)))?;
+        .map_err(|e| map_storage_err("Failed to apply NodeType update", e))?;
 
     // Record the applied hash
     system_update_repo
@@ -82,7 +84,7 @@ pub(super) async fn apply_nodetype_update(
             },
         )
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to record applied hash: {}", e)))?;
+        .map_err(|e| map_storage_err("Failed to record applied hash", e))?;
 
     tracing::info!(
         tenant_id = %tenant_id,

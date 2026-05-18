@@ -8,6 +8,7 @@ import {
   Users,
   User,
   UserCircle,
+  Key,
   LogOut,
   X,
   Terminal,
@@ -17,17 +18,33 @@ import {
 import { useAuth } from '../contexts/AuthContext'
 import logoImage from '../assets/raisin-logo.png'
 
-const navItems = [
-  { to: '/management', icon: Activity, label: 'Dashboard', end: true },
+interface NavItem {
+  to: string
+  icon: typeof Activity
+  label: string
+  end?: boolean
+}
+
+// Per-tenant nav — visible for every authenticated tenant including
+// customers (tenantId !== 'default'). API Keys lives here so users can
+// mint tokens for the CLI and external integrations.
+const PER_TENANT_NAV: NavItem[] = [
   { to: '/management/logs', icon: Terminal, label: 'Execution Logs' },
   { to: '/management/flows', icon: Workflow, label: 'Flow Monitor' },
   { to: '/management/database', icon: Database, label: 'Database' },
   { to: '/management/ai', icon: Sparkles, label: 'AI Settings' },
   { to: '/management/auth', icon: Shield, label: 'Auth Settings' },
-  { to: '/management/rocksdb', icon: HardDrive, label: 'RocksDB' },
-  { to: '/management/jobs', icon: Clock, label: 'All Jobs' },
   { to: '/management/admin-users', icon: Users, label: 'Admin Users' },
   { to: '/management/identity-users', icon: UserCircle, label: 'Identity Users' },
+  { to: '/management/profile', icon: Key, label: 'API Keys' },
+]
+
+// Operator-only nav — cross-tenant Dashboard + RocksDB ops + job index.
+// Visible only when tenantId === 'default' (single-operator dev mode).
+const OPERATOR_NAV: NavItem[] = [
+  { to: '/management', icon: Activity, label: 'Dashboard', end: true },
+  { to: '/management/rocksdb', icon: HardDrive, label: 'RocksDB' },
+  { to: '/management/jobs', icon: Clock, label: 'All Jobs' },
 ]
 
 interface SidebarProps {
@@ -37,8 +54,13 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ isOpen, isMobile, onClose }: SidebarProps) {
-  const { user, logout, serverVersion } = useAuth()
+  const { user, logout, serverVersion, tenantId } = useAuth()
   const navigate = useNavigate()
+
+  const navItems = [
+    ...PER_TENANT_NAV,
+    ...(tenantId === 'default' ? OPERATOR_NAV : []),
+  ]
 
   // Both mobile and desktop use fixed positioning, with smooth transitions
   const baseClasses = "fixed top-0 left-0 glass-dark h-screen w-64 p-6 flex flex-col transition-all duration-300 ease-in-out z-50 border-r border-primary-900/20 select-none overscroll-none"

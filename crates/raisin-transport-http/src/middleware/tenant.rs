@@ -71,7 +71,12 @@ pub async fn ensure_tenant_middleware(
             if let Err(e) =
                 init_tenant_nodetypes((**storage).clone(), &tenant_id, &deployment_key).await
             {
-                tracing::warn!(
+                // Logged at debug because the common case is a pre-customer
+                // tenant whose default repo + branch don't exist yet; the
+                // middleware correctly skips and lets the request through.
+                // Flip RUST_LOG=raisin_transport_http::middleware=debug to
+                // surface the underlying error during investigation.
+                tracing::debug!(
                     "NodeType initialization skipped for tenant {}/{}: {}",
                     tenant_id,
                     deployment_key,

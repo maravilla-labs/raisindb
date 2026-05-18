@@ -667,12 +667,6 @@ export interface JobResponse {
   message: string
 }
 
-// Vector Metrics API
-export const vectorMetricsApi = {
-  getMetrics: () =>
-    api.get<VectorMetrics>('/management/metrics/vector'),
-}
-
 // Database-level Index Management API
 export const databaseManagementApi = {
   // Fulltext Index Operations

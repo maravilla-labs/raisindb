@@ -179,12 +179,21 @@ function App() {
           <Route path="management/*" element={<RepositoryManagement />} />
         </Route>
 
-          {/* Tenant-wide management hub — DEV MODE ONLY.
-              In multi-tenant deployments the hub is hidden and direct nav
-              redirects to the repository list. Cross-tenant ops live on
-              the superadmin routes (/management/admin/*) instead. */}
-          <Route path="/management" element={<ProtectedRoute><DevModeOnly><Layout /></DevModeOnly></ProtectedRoute>}>
-          <Route index element={<TenantManagement />} />
+          {/* Management hub. Per-tenant routes (admin-users, identity-users,
+              auth, ai, flows, database, logs, profile) are visible for any
+              authenticated tenant — they call tenant-scoped backend
+              endpoints via the v0.1.19 ScopedTenant fix.
+
+              Operator-only routes (the index Dashboard, rocksdb, jobs) are
+              wrapped in <DevModeOnly> so they only render for
+              tenantId === 'default'. Other tenants are redirected to the
+              repository list. Cross-tenant ops live on the superadmin
+              routes (/management/admin/*) instead. */}
+          <Route path="/management" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+          <Route index element={<DevModeOnly><TenantManagement /></DevModeOnly>} />
+          <Route path="rocksdb" element={<DevModeOnly><RocksDBManagement /></DevModeOnly>} />
+          <Route path="jobs" element={<DevModeOnly><JobsManagement /></DevModeOnly>} />
+
           <Route
             path="database"
             element={
@@ -196,8 +205,6 @@ function App() {
           />
           <Route path="ai" element={<TenantAiSettings />} />
           <Route path="auth" element={<TenantAuthSettings />} />
-          <Route path="rocksdb" element={<RocksDBManagement />} />
-          <Route path="jobs" element={<JobsManagement />} />
           <Route path="logs" element={<ExecutionLogs />} />
           <Route path="flows" element={<FlowExecutionMonitor />} />
           <Route path="admin-users" element={<AdminUsers />} />

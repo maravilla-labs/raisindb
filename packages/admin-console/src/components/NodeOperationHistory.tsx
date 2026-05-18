@@ -35,22 +35,24 @@ export default function NodeOperationHistory({
       // Fetch all revisions for the repository
       const allRevisions = await revisionsApi.list(repo, limit, 0, true, branch)
 
-      // Filter to only revisions that affected this node
-      // TODO: Backend should provide a node-specific endpoint
-      // For now, we'll fetch revision details and filter client-side
-      const nodeRevisions: RevisionMeta[] = []
+      // Filter to only revisions that affected this node.
+      // TODO(v0.1.21): backend node-scoped endpoint
+      // (`GET .../revisions/by-node/{node_id}`) so we don't fetch+discard.
+      // For v0.1.20 we at least issue the N detail fetches in parallel
+      // instead of sequentially — turns N×RTT into ~1×RTT.
+      const details = await Promise.all(
+        allRevisions.map((rev) =>
+          revisionsApi.get(repo, rev.number).catch((err) => {
+            console.warn(`Failed to fetch revision ${rev.number}:`, err)
+            return null
+          })
+        )
+      )
 
-      for (const rev of allRevisions) {
-        try {
-          const revisionDetail = await revisionsApi.get(repo, rev.number)
-          // Check if this revision has an operation on our node
-          if (revisionDetail.operation?.node_id === nodeId) {
-            nodeRevisions.push(revisionDetail)
-          }
-        } catch (err) {
-          console.warn(`Failed to fetch revision ${rev.number}:`, err)
-        }
-      }
+      const nodeRevisions = details.filter(
+        (revisionDetail): revisionDetail is RevisionMeta =>
+          revisionDetail !== null && revisionDetail.operation?.node_id === nodeId
+      )
 
       setRevisions(nodeRevisions)
     } catch (err) {

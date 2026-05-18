@@ -138,6 +138,7 @@ pub async fn create_repository(
     let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
+    let branches = storage.branches();
 
     // Ensure tenant is registered (will emit TenantCreated event if new)
     // This triggers admin user initialization for new tenants
@@ -146,45 +147,79 @@ pub async fn create_repository(
         .register_tenant(tenant_id, std::collections::HashMap::new())
         .await?;
 
-    // Check if repository already exists
-    if repo_mgmt.repository_exists(tenant_id, &req.repo_id).await? {
-        return Err(ApiError::repository_already_exists(&req.repo_id));
-    }
+    // The desired default branch — we need this before the repo-exists
+    // check so we can decide whether to fall through to branch-create.
+    let requested_default_branch = req
+        .default_branch
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
 
-    // Determine default language (IMMUTABLE after creation)
-    let default_language = req.default_language.unwrap_or_else(|| "en".to_string());
+    // Check whether this is a brand-new repo or a self-heal call (the repo
+    // already exists but its default branch is missing — usually because an
+    // earlier create raced with branch creation and silently dropped the
+    // branch error in pre-v0.1.20 builds).
+    let repo_exists = repo_mgmt.repository_exists(tenant_id, &req.repo_id).await?;
 
-    // Ensure supported languages includes default language
-    let mut supported_languages = req
-        .supported_languages
-        .unwrap_or_else(|| vec![default_language.clone()]);
-    if !supported_languages.contains(&default_language) {
-        supported_languages.push(default_language.clone());
-    }
+    let repo = if repo_exists {
+        let branch_exists = branches
+            .get_branch(tenant_id, &req.repo_id, &requested_default_branch)
+            .await
+            .is_ok();
+        if branch_exists {
+            return Err(ApiError::repository_already_exists(&req.repo_id));
+        }
+        // Repo exists but default branch is missing — fall through to the
+        // branch-create step so the caller can self-heal the half-created
+        // state. Return the existing repo metadata for the response.
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            repo_id = %req.repo_id,
+            default_branch = %requested_default_branch,
+            "Repository exists but default branch is missing; completing branch creation"
+        );
+        repo_mgmt
+            .get_repository(tenant_id, &req.repo_id)
+            .await?
+            .ok_or_else(|| {
+                ApiError::internal(format!(
+                    "Repository '{}' existed during check but get_repository returned None",
+                    req.repo_id
+                ))
+            })?
+    } else {
+        // Determine default language (IMMUTABLE after creation)
+        let default_language = req.default_language.unwrap_or_else(|| "en".to_string());
 
-    let config = RepositoryConfig {
-        default_branch: req.default_branch.unwrap_or_else(|| "main".to_string()),
-        description: req.description,
-        tags: std::collections::HashMap::new(),
-        default_language,
-        supported_languages,
-        locale_fallback_chains: std::collections::HashMap::new(),
+        // Ensure supported languages includes default language
+        let mut supported_languages = req
+            .supported_languages
+            .unwrap_or_else(|| vec![default_language.clone()]);
+        if !supported_languages.contains(&default_language) {
+            supported_languages.push(default_language.clone());
+        }
+
+        let config = RepositoryConfig {
+            default_branch: requested_default_branch.clone(),
+            description: req.description,
+            tags: std::collections::HashMap::new(),
+            default_language,
+            supported_languages,
+            locale_fallback_chains: std::collections::HashMap::new(),
+        };
+
+        repo_mgmt
+            .create_repository(tenant_id, &req.repo_id, config)
+            .await?
     };
 
-    let default_branch = config.default_branch.clone();
-
-    // Create the repository
-    let repo = repo_mgmt
-        .create_repository(tenant_id, &req.repo_id, config)
-        .await?;
-
-    // Create the default branch
-    let branches = storage.branches();
-    if let Err(e) = branches
+    // Create the default branch. Errors here are NOT swallowed — a half-
+    // created repo (with no main branch) is unusable downstream and was the
+    // root cause of v0.1.19's customer-facing system-updates 500s.
+    branches
         .create_branch(
             tenant_id,
             &req.repo_id,
-            &default_branch,
+            &requested_default_branch,
             "system", // created_by
             None,     // from_revision - start from scratch
             None,     // upstream_branch - main has no upstream
@@ -192,22 +227,27 @@ pub async fn create_repository(
             false,    // include_revision_history - not applicable for new repo
         )
         .await
-    {
-        tracing::warn!(
-            "Failed to create default branch '{}' for repository '{}': {}",
-            default_branch,
-            req.repo_id,
-            e
-        );
-        // Don't fail the repository creation if branch creation fails
-        // The repository is still valid, just needs manual branch creation
-    } else {
-        tracing::info!(
-            "Created default branch '{}' for repository '{}'",
-            default_branch,
-            req.repo_id
-        );
-    }
+        .map_err(|e| {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                repo_id = %req.repo_id,
+                default_branch = %requested_default_branch,
+                error = %format!("{:#}", e),
+                "Failed to create default branch for repository"
+            );
+            ApiError::internal(format!(
+                "Repository '{}' created but default branch '{}' creation failed: {}. \
+                 Retry the create call to complete branch initialization.",
+                req.repo_id, requested_default_branch, e
+            ))
+        })?;
+
+    tracing::info!(
+        tenant_id = %tenant_id,
+        repo_id = %req.repo_id,
+        default_branch = %requested_default_branch,
+        "Created default branch for repository"
+    );
 
     Ok((StatusCode::CREATED, Json(repo)))
 }

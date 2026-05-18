@@ -5,9 +5,9 @@ import BranchDropdown from './BranchDropdown'
 import ConfirmDialog from './ConfirmDialog'
 import { repositoriesApi, type Repository } from '../api/repositories'
 import {
+  adminManagementApi,
   databaseManagementApi,
   managementApi,
-  vectorMetricsApi,
   sseManager,
   formatBytes,
   formatDuration,
@@ -20,6 +20,7 @@ import {
 } from '../api/management'
 import { useToast, ToastContainer } from './Toast'
 import { workspacesApi, type Workspace } from '../api/workspaces'
+import { useAuth } from '../contexts/AuthContext'
 
 interface DatabaseManagementSharedProps {
   /** If provided, locks to this repository (disables selector) */
@@ -37,6 +38,14 @@ export default function DatabaseManagementShared({
   showBranchSelector = false,
   context,
 }: DatabaseManagementSharedProps) {
+  const { tenantId, devMode } = useAuth()
+
+  // Vector metrics expose process-wide HNSW aggregates with no tenant
+  // scoping — operator diagnostic only. We hide the widget for customer
+  // tenants and only fetch when running in dev mode against the default
+  // tenant.
+  const showVectorMetrics = devMode && tenantId === 'default'
+
   // State
   const [tenant, setTenant] = useState('default')
   const [repositories, setRepositories] = useState<Repository[]>([])
@@ -129,10 +138,12 @@ export default function DatabaseManagementShared({
     }
   }, [selectedRepo, tenant])
 
-  // Load vector metrics on mount
+  // Load vector metrics on mount (operator/dev only — see showVectorMetrics)
   useEffect(() => {
-    loadVectorMetrics()
-  }, [])
+    if (showVectorMetrics) {
+      loadVectorMetrics()
+    }
+  }, [showVectorMetrics])
 
   // Load workspaces when repo changes
   useEffect(() => {
@@ -364,7 +375,7 @@ export default function DatabaseManagementShared({
     setVectorMetricsLoading(true)
     setVectorMetricsError(null)
     try {
-      const metrics = await vectorMetricsApi.getMetrics()
+      const metrics = await adminManagementApi.getVectorMetrics()
       setVectorMetrics(metrics)
     } catch (error: any) {
       console.error('Failed to load vector metrics:', error)
@@ -1064,7 +1075,10 @@ export default function DatabaseManagementShared({
         </div>
       </GlassCard>
 
-      {/* Vector Metrics Section */}
+      {/* Vector Metrics Section — operator-only diagnostic (dev mode +
+          tenant=default). Backend returns process-wide HNSW aggregates with
+          no tenant scoping, so we hide this for customer tenants. */}
+      {showVectorMetrics && (
       <GlassCard className="mb-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
@@ -1139,6 +1153,7 @@ export default function DatabaseManagementShared({
           </div>
         )}
       </GlassCard>
+      )}
 
       {/* Reindex Database Section */}
       <GlassCard className="mb-6">

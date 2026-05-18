@@ -14,6 +14,17 @@ pub use types::{
     ApplyUpdatesRequest, ApplyUpdatesResponse, PendingUpdateInfo, PendingUpdatesResponse,
 };
 
+/// Map a storage error to an `ApiError`, preserving `NotFound → 404` via the
+/// crate-wide `From<raisin_error::Error>` impl while attaching a contextual
+/// prefix for genuine 500s. Pre-v0.1.20 sites flattened every error to 500,
+/// hiding missing branches behind opaque "INTERNAL_SERVER_ERROR".
+pub(super) fn map_storage_err(context: &str, err: raisin_error::Error) -> ApiError {
+    match err {
+        raisin_error::Error::NotFound(_) => ApiError::from(err),
+        other => ApiError::internal(format!("{}: {}", context, other)),
+    }
+}
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
