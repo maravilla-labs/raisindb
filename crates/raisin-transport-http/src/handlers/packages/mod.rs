@@ -26,7 +26,7 @@ use axum::{
 use raisin_models as models;
 use raisin_models::auth::AuthContext;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 // Re-export public handler functions
 pub use browse::{get_package_file, list_package_contents};
@@ -45,10 +45,11 @@ pub use upload::upload_package;
 pub async fn list_packages(
     State(state): State<AppState>,
     Path(repo): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<Vec<models::nodes::Node>>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
 
@@ -69,10 +70,11 @@ pub async fn list_packages(
 pub async fn get_package(
     State(state): State<AppState>,
     Path((repo, package_name)): Path<(String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<models::nodes::Node>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
 

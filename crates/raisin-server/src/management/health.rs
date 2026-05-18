@@ -1,12 +1,13 @@
 //! Health check handlers for management API.
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     response::Json,
     Extension,
 };
 use raisin_storage::ManagementOps;
+use raisin_transport_http::middleware::ScopedTenant;
 
 use super::types::ApiResponse;
 use super::ManagementState;
@@ -30,7 +31,7 @@ where
 /// Per-tenant health check.
 pub async fn get_tenant_health<S>(
     State(state): State<ManagementState<S>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<raisin_storage::HealthStatus>>, StatusCode>
 where
     S: ManagementOps + Send + Sync,

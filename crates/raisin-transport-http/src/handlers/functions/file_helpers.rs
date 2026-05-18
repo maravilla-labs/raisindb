@@ -14,7 +14,7 @@ use raisin_models::nodes::Node;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
+use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 
 #[cfg(feature = "storage-rocksdb")]
 use raisin_storage::{NodeRepository, Storage, StorageScope};
@@ -58,6 +58,7 @@ pub(super) fn validate_runnable_asset_name(name: &str) -> Result<(), ApiError> {
 /// Resolve input from JSON or node reference.
 pub(super) async fn resolve_file_input(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     input: &Option<serde_json::Value>,
     input_node_id: &Option<String>,
@@ -67,7 +68,7 @@ pub(super) async fn resolve_file_input(
     if let Some(ref node_id) = input_node_id {
         let workspace = input_workspace.as_deref().unwrap_or("content");
         let node_svc =
-            state.node_service_for_context(TENANT_ID, repo, DEFAULT_BRANCH, workspace, None);
+            state.node_service_for_context(tenant_id, repo, DEFAULT_BRANCH, workspace, None);
 
         if let Ok(Some(input_node)) = node_svc.get(node_id).await {
             return serde_json::to_value(input_node).unwrap_or(serde_json::json!({}));
@@ -126,6 +127,7 @@ pub(super) fn build_synthetic_metadata_from_name(
 #[cfg(feature = "storage-rocksdb")]
 pub(super) async fn find_parent_function_config(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     path: &str,
 ) -> Option<(NetworkPolicy, ResourceLimits)> {
@@ -136,7 +138,7 @@ pub(super) async fn find_parent_function_config(
     if let Ok(Some(node)) = storage
         .nodes()
         .get_by_path(
-            StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
+            StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
             path,
             None,
         )
@@ -174,7 +176,7 @@ pub(super) async fn find_parent_function_config(
     if let Ok(Some(node)) = storage
         .nodes()
         .get_by_path(
-            StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
+            StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
             parent_path,
             None,
         )

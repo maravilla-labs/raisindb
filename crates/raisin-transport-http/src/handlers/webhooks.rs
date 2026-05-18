@@ -17,9 +17,10 @@ pub use types::{InvokeQuery, WebhookResponse};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, Method},
-    Json,
+    Extension, Json,
 };
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 #[cfg(feature = "storage-rocksdb")]
@@ -31,6 +32,7 @@ use types::TriggerLookup;
 #[cfg(feature = "storage-rocksdb")]
 pub async fn invoke_webhook(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, webhook_id)): Path<(String, String)>,
     method: Method,
     headers: HeaderMap,
@@ -39,6 +41,7 @@ pub async fn invoke_webhook(
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
         &state,
+        &tenant_info.tenant_id,
         &repo,
         TriggerLookup::ByWebhookId(webhook_id),
         None,
@@ -54,6 +57,7 @@ pub async fn invoke_webhook(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn invoke_webhook_with_path(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, webhook_id, path_suffix)): Path<(String, String, String)>,
     method: Method,
     headers: HeaderMap,
@@ -62,6 +66,7 @@ pub async fn invoke_webhook_with_path(
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
         &state,
+        &tenant_info.tenant_id,
         &repo,
         TriggerLookup::ByWebhookId(webhook_id),
         Some(path_suffix),
@@ -77,6 +82,7 @@ pub async fn invoke_webhook_with_path(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn invoke_trigger(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, trigger_name)): Path<(String, String)>,
     method: Method,
     headers: HeaderMap,
@@ -85,6 +91,7 @@ pub async fn invoke_trigger(
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
         &state,
+        &tenant_info.tenant_id,
         &repo,
         TriggerLookup::ByName(trigger_name),
         None,
@@ -100,6 +107,7 @@ pub async fn invoke_trigger(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn invoke_trigger_with_path(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, trigger_name, path_suffix)): Path<(String, String, String)>,
     method: Method,
     headers: HeaderMap,
@@ -108,6 +116,7 @@ pub async fn invoke_trigger_with_path(
 ) -> Result<Json<WebhookResponse>, ApiError> {
     invoke_http_trigger_internal(
         &state,
+        &tenant_info.tenant_id,
         &repo,
         TriggerLookup::ByName(trigger_name),
         Some(path_suffix),

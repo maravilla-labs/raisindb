@@ -9,7 +9,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,7 @@ use raisin_models::nodes::types::NodeType;
 use raisin_storage::scope::BranchScope;
 use raisin_storage::{CommitMetadata, NodeTypeRepository, Storage};
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 #[derive(Debug, Deserialize)]
@@ -70,9 +71,10 @@ fn resolve_commit(payload: Option<NodeTypeCommitPayload>, fallback: String) -> C
 pub async fn create_node_type(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(payload): Json<NodeTypeWriteRequest>,
 ) -> Result<(StatusCode, Json<NodeType>), ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -145,8 +147,9 @@ pub async fn create_node_type(
 pub async fn list_node_types(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Vec<NodeType>>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -179,8 +182,9 @@ pub async fn list_node_types(
 pub async fn list_published_node_types(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Vec<NodeType>>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -217,8 +221,9 @@ pub async fn list_published_node_types(
 pub async fn get_node_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<NodeType>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -272,10 +277,14 @@ pub async fn get_resolved_node_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     Query(params): Query<ResolvedNodeTypeQuery>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let tenant_id = "default";
-    let resolver =
-        NodeTypeResolver::new(state.storage().clone(), tenant_id.to_string(), repo, branch);
+    let resolver = NodeTypeResolver::new(
+        state.storage().clone(),
+        tenant_info.tenant_id.clone(),
+        repo,
+        branch,
+    );
     let resolved = if let Some(workspace) = params.workspace.as_deref() {
         resolver.resolve_for_workspace(workspace, &name).await?
     } else {
@@ -300,9 +309,10 @@ pub async fn get_resolved_node_type(
 pub async fn update_node_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(payload): Json<NodeTypeWriteRequest>,
 ) -> Result<Json<NodeType>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -381,9 +391,10 @@ pub async fn update_node_type(
 pub async fn delete_node_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<NodeTypeCommitPayload>>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -413,9 +424,10 @@ pub async fn delete_node_type(
 pub async fn publish_node_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<NodeTypeCommitPayload>>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -441,9 +453,10 @@ pub async fn publish_node_type(
 pub async fn unpublish_node_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<NodeTypeCommitPayload>>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let repo_id = &repo;
     let branch_name = &branch;
 
@@ -469,15 +482,15 @@ pub async fn unpublish_node_type(
 pub async fn validate_node(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<ValidateNodeRequest>,
 ) -> Result<Json<ValidationResult>, ApiError> {
-    let tenant_id = "default";
     let repo_id = &repo;
     let branch_name = &branch;
 
     let validator = NodeValidator::new(
         state.storage().clone(),
-        tenant_id.to_string(),
+        tenant_info.tenant_id.clone(),
         repo_id.to_string(),
         branch_name.to_string(),
     );

@@ -5,7 +5,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use raisin_context::{RepositoryConfig, RepositoryInfo};
 use raisin_storage::{
@@ -13,6 +13,7 @@ use raisin_storage::{
 };
 use serde::Deserialize;
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 /// Request to create a new repository
@@ -78,9 +79,9 @@ pub struct UpdateTranslationConfigRequest {
 /// X-Tenant-ID: {tenant_id} (defaults to "default" in single-tenant mode)
 pub async fn list_repositories(
     State(state): State<AppState>,
-    // TODO: Extract tenant_id from headers when multi-tenant auth is implemented
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Vec<RepositoryInfo>>, ApiError> {
-    let tenant_id = "default"; // Single-tenant mode
+    let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
 
@@ -98,8 +99,9 @@ pub async fn list_repositories(
 pub async fn get_repository(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<RepositoryInfo>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
 
@@ -130,9 +132,10 @@ pub async fn get_repository(
 /// ```
 pub async fn create_repository(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<CreateRepositoryRequest>,
 ) -> Result<(StatusCode, Json<RepositoryInfo>), ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
 
@@ -219,9 +222,10 @@ pub async fn create_repository(
 pub async fn update_repository(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<UpdateRepositoryRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
 
@@ -284,9 +288,10 @@ pub async fn update_repository(
 pub async fn update_translation_config(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<UpdateTranslationConfigRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
 
@@ -356,8 +361,9 @@ pub async fn update_translation_config(
 pub async fn get_translation_config(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<TranslationConfigResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
 
@@ -398,8 +404,9 @@ pub struct TranslationConfigResponse {
 pub async fn delete_repository(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let storage = state.storage();
     let repo_mgmt = storage.repository_management();
 

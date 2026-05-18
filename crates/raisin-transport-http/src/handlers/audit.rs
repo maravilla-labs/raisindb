@@ -5,7 +5,7 @@ use axum::{
 use raisin_audit::AuditRepository;
 use raisin_models::auth::AuthContext;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 pub async fn audit_get_by_id(
     State(state): State<AppState>,
@@ -18,9 +18,10 @@ pub async fn audit_get_by_id(
 pub async fn audit_get_by_path(
     State(state): State<AppState>,
     Path((repo, branch, ws, node_path)): Path<(String, String, String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<Vec<raisin_models::nodes::audit_log::AuditLog>>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
     let auth_context = auth.map(|Extension(ctx)| ctx);
     let nodes_svc = state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context);
 

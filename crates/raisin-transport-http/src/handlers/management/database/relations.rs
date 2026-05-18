@@ -140,17 +140,22 @@ pub async fn repair_relation_integrity(
         branch
     );
 
-    // Get current HEAD revision for tombstone writes
+    // Get current HEAD revision for tombstone writes.
+    // Map NotFound (no repo/branch yet) to 404; everything else stays 500.
     let revision = branch_repo
         .get_head(&tenant, &repo, &branch)
         .await
-        .map_err(|e| {
-            (
+        .map_err(|e| match e {
+            raisin_error::Error::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse { error: msg }),
+            ),
+            other => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: format!("Failed to get HEAD revision: {}", e),
+                    error: format!("Failed to get HEAD revision: {}", other),
                 }),
-            )
+            ),
         })?;
 
     let job_id = job_registry

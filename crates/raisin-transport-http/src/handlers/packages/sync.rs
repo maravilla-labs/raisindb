@@ -20,7 +20,7 @@ use zip::ZipArchive;
 #[cfg(feature = "storage-rocksdb")]
 use raisin_storage::JobType;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 use super::types::{
     CreateFromSelectionRequest, CreateFromSelectionResponse, DiffResponse, SyncStatusResponse,
@@ -33,10 +33,19 @@ use super::types::{
 pub async fn get_sync_status(
     State(state): State<AppState>,
     Path((repo, branch, package_path)): Path<(String, String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<SyncStatusResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let result = get_sync_status_impl(&state, &repo, &branch, &package_path, auth_context).await?;
+    let result = get_sync_status_impl(
+        &state,
+        &tenant_info.tenant_id,
+        &repo,
+        &branch,
+        &package_path,
+        auth_context,
+    )
+    .await?;
     Ok(Json(result))
 }
 
@@ -46,10 +55,11 @@ pub async fn get_sync_status(
 pub async fn get_package_diff(
     State(state): State<AppState>,
     Path((repo, branch, package_path, file_path)): Path<(String, String, String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<DiffResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let workspace = "packages";
 
     let node_service =
@@ -122,10 +132,11 @@ pub async fn get_package_diff(
 pub async fn create_package_from_selection(
     State(state): State<AppState>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     _auth: Option<Extension<AuthContext>>,
     Json(request): Json<CreateFromSelectionRequest>,
 ) -> Result<Json<CreateFromSelectionResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let workspace = "packages";
 
     if request.name.is_empty() {
@@ -240,12 +251,12 @@ pub async fn create_package_from_selection(
 /// Get sync status for a package (implementation).
 pub(super) async fn get_sync_status_impl(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     package_path: &str,
     auth_context: Option<AuthContext>,
 ) -> Result<SyncStatusResponse, ApiError> {
-    let tenant_id = "default";
     let workspace = "packages";
 
     let node_service =

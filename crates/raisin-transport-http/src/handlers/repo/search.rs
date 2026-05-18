@@ -3,14 +3,14 @@
 //! Full-text search handler for repository content.
 
 use axum::{
-    extract::{Json, Path, State},
+    extract::{Extension, Json, Path, State},
     http::StatusCode,
 };
 #[cfg(feature = "storage-rocksdb")]
 use raisin_storage::{FullTextSearchQuery, IndexingEngine, StorageScope};
 use raisin_storage::{NodeRepository, RepositoryManagementRepository, Storage};
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct FullTextSearchRequest {
@@ -56,10 +56,11 @@ pub struct SearchResultItem {
 #[cfg(feature = "storage-rocksdb")]
 pub async fn fulltext_search(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch)): Path<(String, String)>,
     Json(req): Json<FullTextSearchRequest>,
 ) -> Result<Json<Vec<SearchResultItem>>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Check if indexing engine is available
     let engine = state.indexing_engine.as_ref().ok_or_else(|| {

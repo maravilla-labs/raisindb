@@ -18,7 +18,13 @@ use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
 use raisin_storage::{BranchRepository, Storage};
 
-use crate::{error::ApiError, middleware::RaisinContext, state::AppState, types::RepoQuery};
+use crate::{
+    error::ApiError,
+    handlers::context::RequestContext,
+    middleware::{RaisinContext, TenantInfo},
+    state::AppState,
+    types::RepoQuery,
+};
 
 use super::assets::parse_asset_command_from_path;
 use super::helpers::{get_node_version, get_property, handle_file_download, list_node_versions};
@@ -33,11 +39,13 @@ use super::translation_helpers::{
 /// deep queries, and translation resolution.
 pub async fn repo_get_root(
     State(state): State<AppState>,
-    Path((repo, branch, ws)): Path<(String, String, String)>,
-    auth: Option<Extension<AuthContext>>,
+    ctx: RequestContext,
     Query(q): Query<RepoQuery>,
 ) -> Result<Response, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = ctx.tenant_id().to_string();
+    let repo = ctx.repo().to_string();
+    let branch = ctx.branch().to_string();
+    let ws = ctx.workspace().to_string();
     tracing::info!(
         target: "raisin_http::repo",
         "repo_get_root request: tenant={} repo={} branch={} workspace={} cursor={:?} limit={:?} level={:?} format={:?} flatten={:?} lang={:?}",
@@ -54,13 +62,11 @@ pub async fn repo_get_root(
     );
 
     // Get branch HEAD revision and bound queries to it for snapshot isolation
-    let auth_context = auth.map(|Extension(ctx)| ctx);
-    let mut nodes_svc =
-        state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context);
+    let mut nodes_svc = ctx.node_service(&state);
     let revision = if let Some(branch_info) = state
         .storage()
         .branches()
-        .get_branch(tenant_id, &repo, &branch)
+        .get_branch(&tenant_id, &repo, &branch)
         .await?
     {
         nodes_svc = nodes_svc.at_revision(branch_info.head);
@@ -88,7 +94,7 @@ pub async fn repo_get_root(
         // Apply translations if lang parameter is present
         page.items = resolve_nodes_with_locale(
             &state,
-            tenant_id,
+            &tenant_id,
             &repo,
             &branch,
             &ws,
@@ -116,7 +122,7 @@ pub async fn repo_get_root(
             let array = nodes_svc.deep_children_array("/", depth).await?;
             let translated_array = resolve_array_with_locale(
                 &state,
-                tenant_id,
+                &tenant_id,
                 &repo,
                 &branch,
                 &ws,
@@ -130,7 +136,7 @@ pub async fn repo_get_root(
             let flat = nodes_svc.deep_children_flat("/", depth).await?;
             let translated_flat = resolve_flat_with_locale(
                 &state,
-                tenant_id,
+                &tenant_id,
                 &repo,
                 &branch,
                 &ws,
@@ -144,7 +150,7 @@ pub async fn repo_get_root(
             let nested = nodes_svc.deep_children_nested("/", depth).await?;
             let translated_nested = resolve_nested_with_locale(
                 &state,
-                tenant_id,
+                &tenant_id,
                 &repo,
                 &branch,
                 &ws,
@@ -160,7 +166,7 @@ pub async fn repo_get_root(
     // Simple root listing
     let nodes = nodes_svc.list_root().await?;
     let nodes = resolve_nodes_with_locale(
-        &state, tenant_id, &repo, &branch, &ws, nodes, q.lang, &revision,
+        &state, &tenant_id, &repo, &branch, &ws, nodes, q.lang, &revision,
     )
     .await?;
 
@@ -170,11 +176,12 @@ pub async fn repo_get_root(
 /// GET handler for fetching a node by its ID.
 pub async fn repo_get_by_id(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, ws, id)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<raisin_models::nodes::Node>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Get branch HEAD revision and bound queries to it for snapshot isolation
     let auth_context = auth.map(|Extension(ctx)| ctx);
@@ -233,11 +240,14 @@ pub async fn repo_get_by_id(
 /// - YAML response format
 pub async fn repo_get(
     Extension(ctx): Extension<RaisinContext>,
+    Extension(tenant_info): Extension<TenantInfo>,
     State(state): State<AppState>,
     Path((repo, branch, ws, node_path)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Query(q): Query<RepoQuery>,
 ) -> Result<Response, ApiError> {
+    let tenant_id = tenant_info.tenant_id.as_str();
+
     // Check for raisin:download or raisin:display commands in the path
     if let Some((asset_path, command)) = parse_asset_command_from_path(&ctx.cleaned_path) {
         let sig = q.sig.as_deref().unwrap_or_default();
@@ -246,6 +256,7 @@ pub async fn repo_get(
 
         return super::assets::handle_asset_command_internal(
             &state,
+            tenant_id,
             &repo,
             &branch,
             &ws,
@@ -257,8 +268,6 @@ pub async fn repo_get(
         )
         .await;
     }
-
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
 
     // Get branch HEAD revision and bound queries to it for snapshot isolation
     let auth_context = auth.map(|Extension(ctx)| ctx);

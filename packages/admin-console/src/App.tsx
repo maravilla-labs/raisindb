@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSL-1.1
 
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AuthProvider } from './contexts/AuthContext'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
 import Login from './pages/Login'
 import ChangePassword from './pages/ChangePassword'
@@ -53,6 +53,27 @@ import AgentEditor from './pages/agents/AgentEditor'
 import AgentDetail from './pages/agents/AgentDetail'
 import ConversationTrace from './pages/agents/ConversationTrace'
 import AccessControlSettings from './pages/AccessControlSettings'
+
+/**
+ * Gate the tenant-wide /management hub to dev / single-operator mode.
+ *
+ * The hub exposes server-config style operations (RocksDB compaction,
+ * dependency listing, etc.) that don't make sense to expose to a customer
+ * inside their tenant view. In multi-tenant deployments those ops live
+ * under /management/admin/* and require a superadmin token.
+ *
+ * Convention: tenantId === 'default' means single-operator local dev. Any
+ * other resolved tenant means we're inside a customer's view and the hub
+ * is hidden — direct navigation redirects to the repository list.
+ */
+function DevModeOnly({ children }: { children: React.ReactNode }) {
+  const { tenantId, isLoading } = useAuth()
+  if (isLoading) return null
+  if (tenantId !== 'default') {
+    return <Navigate to="/" replace />
+  }
+  return <>{children}</>
+}
 
 function App() {
   return (
@@ -158,8 +179,11 @@ function App() {
           <Route path="management/*" element={<RepositoryManagement />} />
         </Route>
 
-          {/* Tenant-level management (global) */}
-          <Route path="/management" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+          {/* Tenant-wide management hub — DEV MODE ONLY.
+              In multi-tenant deployments the hub is hidden and direct nav
+              redirects to the repository list. Cross-tenant ops live on
+              the superadmin routes (/management/admin/*) instead. */}
+          <Route path="/management" element={<ProtectedRoute><DevModeOnly><Layout /></DevModeOnly></ProtectedRoute>}>
           <Route index element={<TenantManagement />} />
           <Route
             path="database"

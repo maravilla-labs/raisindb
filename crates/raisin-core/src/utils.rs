@@ -90,22 +90,28 @@ pub fn sanitize_name(input: &str) -> Result<String> {
 /// use raisin_core::sign_asset_url;
 ///
 /// let secret = b"my-secret-key-32-bytes-or-more!!";
-/// let sig = sign_asset_url(secret, "media/main/head/assets/file.jpg", "download", None, 1704067200);
+/// let sig = sign_asset_url(secret, "tenant-a", "media/main/head/assets/file.jpg", "download", None, 1704067200);
 /// assert!(!sig.is_empty());
 ///
 /// // Sign with custom property path for thumbnails
-/// let thumb_sig = sign_asset_url(secret, "media/main/head/assets/file.jpg", "display", Some("thumbnail"), 1704067200);
+/// let thumb_sig = sign_asset_url(secret, "tenant-a", "media/main/head/assets/file.jpg", "display", Some("thumbnail"), 1704067200);
 /// assert!(!thumb_sig.is_empty());
 /// ```
+///
+/// Note: `tenant_id` is part of the signed payload — a URL signed in tenant A
+/// will not validate when replayed against tenant B (which would otherwise
+/// share the same `{repo}/{branch}/head/{ws}/{path}` structural shape under
+/// the shared signing secret).
 pub fn sign_asset_url(
     secret: &[u8],
+    tenant_id: &str,
     path: &str,
     command: &str,
     property_path: Option<&str>,
     expires: u64,
 ) -> String {
     let prop = property_path.unwrap_or("file");
-    let message = format!("{}:{}:{}:{}", path, command, prop, expires);
+    let message = format!("{}:{}:{}:{}:{}", tenant_id, path, command, prop, expires);
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
     let result = mac.finalize();
@@ -134,17 +140,19 @@ pub fn sign_asset_url(
 /// let secret = b"my-secret-key-32-bytes-or-more!!";
 /// let path = "media/main/head/assets/file.jpg";
 /// let expires = u64::MAX; // far future for test
-/// let sig = sign_asset_url(secret, path, "download", None, expires);
+/// let sig = sign_asset_url(secret, "tenant-a", path, "download", None, expires);
 ///
-/// assert!(verify_asset_signature(secret, path, "download", None, expires, &sig));
-/// assert!(!verify_asset_signature(secret, path, "display", None, expires, &sig)); // wrong command
+/// assert!(verify_asset_signature(secret, "tenant-a", path, "download", None, expires, &sig));
+/// assert!(!verify_asset_signature(secret, "tenant-a", path, "display", None, expires, &sig)); // wrong command
+/// assert!(!verify_asset_signature(secret, "tenant-b", path, "download", None, expires, &sig)); // wrong tenant
 ///
 /// // Verify with custom property path
-/// let thumb_sig = sign_asset_url(secret, path, "display", Some("thumbnail"), expires);
-/// assert!(verify_asset_signature(secret, path, "display", Some("thumbnail"), expires, &thumb_sig));
+/// let thumb_sig = sign_asset_url(secret, "tenant-a", path, "display", Some("thumbnail"), expires);
+/// assert!(verify_asset_signature(secret, "tenant-a", path, "display", Some("thumbnail"), expires, &thumb_sig));
 /// ```
 pub fn verify_asset_signature(
     secret: &[u8],
+    tenant_id: &str,
     path: &str,
     command: &str,
     property_path: Option<&str>,
@@ -162,7 +170,7 @@ pub fn verify_asset_signature(
     }
 
     // Verify signature with constant-time comparison
-    let expected = sign_asset_url(secret, path, command, property_path, expires);
+    let expected = sign_asset_url(secret, tenant_id, path, command, property_path, expires);
     expected.as_bytes().ct_eq(signature.as_bytes()).into()
 }
 
@@ -170,16 +178,13 @@ pub fn verify_asset_signature(
 mod tests {
     use super::*;
 
+    const TENANT: &str = "default";
+    const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!!";
+    const PATH: &str = "repo/main/head/ws/file.jpg";
+
     #[test]
     fn test_sign_asset_url() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
-        let sig = sign_asset_url(
-            secret,
-            "repo/main/head/ws/file.jpg",
-            "download",
-            None,
-            1704067200,
-        );
+        let sig = sign_asset_url(SECRET, TENANT, PATH, "download", None, 1704067200);
         assert!(!sig.is_empty());
         // Should be URL-safe base64
         assert!(!sig.contains('+'));
@@ -188,28 +193,10 @@ mod tests {
 
     #[test]
     fn test_sign_asset_url_with_property_path() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
-        let sig_default = sign_asset_url(
-            secret,
-            "repo/main/head/ws/file.jpg",
-            "download",
-            None,
-            1704067200,
-        );
-        let sig_file = sign_asset_url(
-            secret,
-            "repo/main/head/ws/file.jpg",
-            "download",
-            Some("file"),
-            1704067200,
-        );
-        let sig_thumb = sign_asset_url(
-            secret,
-            "repo/main/head/ws/file.jpg",
-            "download",
-            Some("thumbnail"),
-            1704067200,
-        );
+        let sig_default = sign_asset_url(SECRET, TENANT, PATH, "download", None, 1704067200);
+        let sig_file = sign_asset_url(SECRET, TENANT, PATH, "download", Some("file"), 1704067200);
+        let sig_thumb =
+            sign_asset_url(SECRET, TENANT, PATH, "download", Some("thumbnail"), 1704067200);
 
         // None and "file" should produce the same signature (file is default)
         assert_eq!(sig_default, sig_file);
@@ -219,27 +206,40 @@ mod tests {
 
     #[test]
     fn test_verify_valid_signature() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
-        let path = "repo/main/head/ws/file.jpg";
         let expires = u64::MAX; // Far future
-        let sig = sign_asset_url(secret, path, "download", None, expires);
+        let sig = sign_asset_url(SECRET, TENANT, PATH, "download", None, expires);
 
         assert!(verify_asset_signature(
-            secret, path, "download", None, expires, &sig
+            SECRET, TENANT, PATH, "download", None, expires, &sig
+        ));
+    }
+
+    #[test]
+    fn test_verify_rejects_cross_tenant_replay() {
+        let expires = u64::MAX;
+        let sig = sign_asset_url(SECRET, "tenant-a", PATH, "download", None, expires);
+
+        // Signature minted for tenant A must not verify against tenant B,
+        // even with identical secret + path + command + property + expiry.
+        assert!(verify_asset_signature(
+            SECRET, "tenant-a", PATH, "download", None, expires, &sig
+        ));
+        assert!(!verify_asset_signature(
+            SECRET, "tenant-b", PATH, "download", None, expires, &sig
         ));
     }
 
     #[test]
     fn test_verify_with_property_path() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
-        let path = "repo/main/head/ws/file.jpg";
         let expires = u64::MAX;
-        let sig_thumb = sign_asset_url(secret, path, "display", Some("thumbnail"), expires);
+        let sig_thumb =
+            sign_asset_url(SECRET, TENANT, PATH, "display", Some("thumbnail"), expires);
 
         // Should verify with correct property path
         assert!(verify_asset_signature(
-            secret,
-            path,
+            SECRET,
+            TENANT,
+            PATH,
             "display",
             Some("thumbnail"),
             expires,
@@ -247,11 +247,12 @@ mod tests {
         ));
         // Should fail with wrong property path
         assert!(!verify_asset_signature(
-            secret, path, "display", None, expires, &sig_thumb
+            SECRET, TENANT, PATH, "display", None, expires, &sig_thumb
         ));
         assert!(!verify_asset_signature(
-            secret,
-            path,
+            SECRET,
+            TENANT,
+            PATH,
             "display",
             Some("file"),
             expires,
@@ -261,27 +262,22 @@ mod tests {
 
     #[test]
     fn test_verify_wrong_command() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
-        let path = "repo/main/head/ws/file.jpg";
         let expires = u64::MAX;
-        let sig = sign_asset_url(secret, path, "download", None, expires);
+        let sig = sign_asset_url(SECRET, TENANT, PATH, "download", None, expires);
 
-        // Wrong command should fail
         assert!(!verify_asset_signature(
-            secret, path, "display", None, expires, &sig
+            SECRET, TENANT, PATH, "display", None, expires, &sig
         ));
     }
 
     #[test]
     fn test_verify_wrong_path() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
-        let path = "repo/main/head/ws/file.jpg";
         let expires = u64::MAX;
-        let sig = sign_asset_url(secret, path, "download", None, expires);
+        let sig = sign_asset_url(SECRET, TENANT, PATH, "download", None, expires);
 
-        // Wrong path should fail
         assert!(!verify_asset_signature(
-            secret,
+            SECRET,
+            TENANT,
             "repo/main/head/ws/other.jpg",
             "download",
             None,
@@ -292,29 +288,24 @@ mod tests {
 
     #[test]
     fn test_verify_expired() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
-        let path = "repo/main/head/ws/file.jpg";
         let expires = 1; // Already expired (Unix epoch + 1 second)
-        let sig = sign_asset_url(secret, path, "download", None, expires);
+        let sig = sign_asset_url(SECRET, TENANT, PATH, "download", None, expires);
 
-        // Expired should fail
         assert!(!verify_asset_signature(
-            secret, path, "download", None, expires, &sig
+            SECRET, TENANT, PATH, "download", None, expires, &sig
         ));
     }
 
     #[test]
     fn test_verify_wrong_secret() {
-        let secret = b"test-secret-key-32-bytes-long!!!";
         let wrong_secret = b"wrong-secret-key-32-bytes-long!!";
-        let path = "repo/main/head/ws/file.jpg";
         let expires = u64::MAX;
-        let sig = sign_asset_url(secret, path, "download", None, expires);
+        let sig = sign_asset_url(SECRET, TENANT, PATH, "download", None, expires);
 
-        // Wrong secret should fail
         assert!(!verify_asset_signature(
             wrong_secret,
-            path,
+            TENANT,
+            PATH,
             "download",
             None,
             expires,

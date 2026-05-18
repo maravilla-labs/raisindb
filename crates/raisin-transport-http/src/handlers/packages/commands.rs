@@ -12,7 +12,7 @@ use axum::{
 };
 use raisin_models::auth::AuthContext;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 use super::types::{ExportPackageRequest, InstallMode, InstallQuery, PackageCommand};
 
@@ -32,11 +32,13 @@ pub async fn handle_package_command(
     State(state): State<AppState>,
     Path((repo, branch, full_path)): Path<(String, String, String)>,
     axum::extract::Query(install_query): axum::extract::Query<InstallQuery>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
     method: axum::http::Method,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     tracing::debug!(
         auth_present = auth_context.is_some(),
@@ -52,6 +54,7 @@ pub async fn handle_package_command(
         PackageCommand::Browse { zip_path } => {
             let result = super::browse::browse_package_impl(
                 &state,
+                tenant_id,
                 &repo,
                 &branch,
                 &package_path,
@@ -64,6 +67,7 @@ pub async fn handle_package_command(
         PackageCommand::File { zip_path } => {
             super::browse::get_file_from_package_impl(
                 &state,
+                tenant_id,
                 &repo,
                 &branch,
                 &package_path,
@@ -80,6 +84,7 @@ pub async fn handle_package_command(
             }
             let result = super::install::install_package_impl(
                 &state,
+                tenant_id,
                 &repo,
                 &branch,
                 &package_path,
@@ -92,6 +97,7 @@ pub async fn handle_package_command(
         PackageCommand::DryRun { .. } => {
             let result = super::install::dry_run_impl(
                 &state,
+                tenant_id,
                 &repo,
                 &branch,
                 &package_path,
@@ -119,6 +125,7 @@ pub async fn handle_package_command(
             };
             let result = super::export::export_package_impl(
                 &state,
+                tenant_id,
                 &repo,
                 &branch,
                 &package_path,
@@ -152,6 +159,7 @@ pub async fn handle_package_command(
             }
             let result = super::sync::get_sync_status_impl(
                 &state,
+                tenant_id,
                 &repo,
                 &branch,
                 &package_path,

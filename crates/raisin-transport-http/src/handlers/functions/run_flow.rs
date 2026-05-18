@@ -12,6 +12,7 @@ use axum::{
 use raisin_models::auth::AuthContext;
 use raisin_storage::{DeleteNodeOptions, NodeRepository, Storage, StorageScope};
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 use super::helpers::map_storage_error;
@@ -19,7 +20,7 @@ use super::types::{
     CancelFlowInstanceResponse, FlowInstanceStatusResponse, ResumeFlowRequest, RunFlowRequest,
     RunFlowResponse, RunFlowTestRequest,
 };
-use super::{DEFAULT_BRANCH, SYSTEM_WORKSPACE, TENANT_ID};
+use super::{DEFAULT_BRANCH, SYSTEM_WORKSPACE};
 
 // ============================================================================
 // Shared helper
@@ -266,10 +267,11 @@ pub async fn cancel_flow_instance(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn delete_flow_instance(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
     _auth_context: Option<Extension<AuthContext>>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let scope = StorageScope::new(TENANT_ID, &repo, DEFAULT_BRANCH, SYSTEM_WORKSPACE);
+    let scope = StorageScope::new(&tenant_info.tenant_id, &repo, DEFAULT_BRANCH, SYSTEM_WORKSPACE);
 
     // Look up by path first (instance UUID), then by node ID
     let instance_path = format!("/flows/instances/{}", instance_id);

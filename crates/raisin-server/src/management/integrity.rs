@@ -4,11 +4,12 @@
 //! asynchronous background-job variant (RocksDB-specific) that returns a job ID.
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     response::Json,
 };
 use raisin_storage::{BackgroundJobs, IndexType, ManagementOps};
+use raisin_transport_http::middleware::ScopedTenant;
 
 use super::types::{ApiResponse, RebuildRequest};
 use super::ManagementState;
@@ -20,7 +21,7 @@ use super::ManagementState;
 /// Synchronous integrity check for a tenant.
 pub async fn check_integrity<S>(
     State(state): State<ManagementState<S>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<raisin_storage::IntegrityReport>>, StatusCode>
 where
     S: ManagementOps + Send + Sync,
@@ -40,7 +41,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 pub async fn start_integrity_check(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     use raisin_storage::jobs::{global_registry, JobStatus, JobType};
 
@@ -94,7 +95,7 @@ pub async fn start_integrity_check(
 #[cfg(not(feature = "storage-rocksdb"))]
 pub async fn start_integrity_check<S>(
     State(_state): State<ManagementState<S>>,
-    Path(_tenant): Path<String>,
+    ScopedTenant(_tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode>
 where
     S: ManagementOps + BackgroundJobs + Send + Sync,
@@ -110,7 +111,7 @@ where
 /// Synchronous index verification for a tenant.
 pub async fn verify_indexes<S>(
     State(state): State<ManagementState<S>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<Vec<raisin_storage::IndexIssue>>>, StatusCode>
 where
     S: ManagementOps + Send + Sync,
@@ -128,7 +129,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 pub async fn start_verify_indexes(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     use raisin_storage::jobs::{global_registry, JobType};
 
@@ -161,7 +162,7 @@ pub async fn start_verify_indexes(
 #[cfg(not(feature = "storage-rocksdb"))]
 pub async fn start_verify_indexes<S>(
     State(_state): State<ManagementState<S>>,
-    Path(_tenant): Path<String>,
+    ScopedTenant(_tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode>
 where
     S: ManagementOps + BackgroundJobs + Send + Sync,
@@ -177,7 +178,7 @@ where
 /// Synchronous index rebuild for a tenant.
 pub async fn rebuild_indexes<S>(
     State(state): State<ManagementState<S>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
     Json(req): Json<RebuildRequest>,
 ) -> Result<Json<ApiResponse<raisin_storage::RebuildStats>>, StatusCode>
 where
@@ -201,7 +202,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 pub async fn start_rebuild_indexes(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
     Json(req): Json<RebuildRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     use raisin_storage::jobs::{global_registry, JobType};
@@ -244,7 +245,7 @@ pub async fn start_rebuild_indexes(
 #[cfg(not(feature = "storage-rocksdb"))]
 pub async fn start_rebuild_indexes<S>(
     State(_state): State<ManagementState<S>>,
-    Path(_tenant): Path<String>,
+    ScopedTenant(_tenant): ScopedTenant,
     Json(_req): Json<RebuildRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode>
 where
@@ -261,7 +262,7 @@ where
 /// Synchronous orphan cleanup for a tenant.
 pub async fn cleanup_orphans<S>(
     State(state): State<ManagementState<S>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<u32>>, StatusCode>
 where
     S: ManagementOps + Send + Sync,
@@ -279,7 +280,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 pub async fn start_cleanup_orphans(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     use raisin_storage::jobs::{global_registry, JobType};
 
@@ -312,7 +313,7 @@ pub async fn start_cleanup_orphans(
 #[cfg(not(feature = "storage-rocksdb"))]
 pub async fn start_cleanup_orphans<S>(
     State(_state): State<ManagementState<S>>,
-    Path(_tenant): Path<String>,
+    ScopedTenant(_tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<String>>, StatusCode>
 where
     S: ManagementOps + BackgroundJobs + Send + Sync,
@@ -333,7 +334,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 pub async fn cleanup_property_index_orphans(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     use raisin_rocksdb::management::async_indexing::cleanup_orphaned_property_indexes;
 
@@ -436,7 +437,7 @@ pub async fn cleanup_property_index_orphans(
 #[cfg(not(feature = "storage-rocksdb"))]
 pub async fn cleanup_property_index_orphans<S>(
     State(_state): State<ManagementState<S>>,
-    Path(_tenant): Path<String>,
+    ScopedTenant(_tenant): ScopedTenant,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode>
 where
     S: ManagementOps + Send + Sync,

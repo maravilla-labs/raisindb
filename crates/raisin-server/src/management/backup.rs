@@ -4,11 +4,12 @@
 //! variants (RocksDB-specific) for backup and repair operations.
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     response::Json,
 };
 use raisin_storage::{BackgroundJobs, ManagementOps};
+use raisin_transport_http::middleware::ScopedTenant;
 
 use super::types::{ApiResponse, BackupRequest, RepairRequest};
 use super::ManagementState;
@@ -20,7 +21,7 @@ use super::ManagementState;
 /// Backup a single tenant to the given path.
 pub async fn backup_tenant<S>(
     State(state): State<ManagementState<S>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
     Json(req): Json<BackupRequest>,
 ) -> Result<Json<ApiResponse<raisin_storage::BackupInfo>>, StatusCode>
 where
@@ -118,7 +119,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 pub async fn start_repair(
     State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
-    Path(tenant): Path<String>,
+    ScopedTenant(tenant): ScopedTenant,
     Json(req): Json<RepairRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode> {
     use raisin_storage::jobs::{global_registry, JobType};
@@ -157,7 +158,7 @@ pub async fn start_repair(
 #[cfg(not(feature = "storage-rocksdb"))]
 pub async fn start_repair<S>(
     State(_state): State<ManagementState<S>>,
-    Path(_tenant): Path<String>,
+    ScopedTenant(_tenant): ScopedTenant,
     Json(_req): Json<RepairRequest>,
 ) -> Result<Json<ApiResponse<String>>, StatusCode>
 where

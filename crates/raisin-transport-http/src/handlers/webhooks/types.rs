@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-pub(in crate::handlers::webhooks) const TENANT_ID: &str = "default";
 pub(in crate::handlers::webhooks) const DEFAULT_BRANCH: &str = "main";
 pub(in crate::handlers::webhooks) const FUNCTIONS_WORKSPACE: &str = "functions";
 

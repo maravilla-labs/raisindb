@@ -17,6 +17,7 @@ mod management;
 mod packages;
 mod repository;
 
+use axum::routing::get;
 use axum::Router;
 
 use crate::state::AppState;
@@ -35,6 +36,15 @@ use crate::middleware::unified_cors_middleware;
 /// 2. Tenant middleware (outermost, applied to ALL routes)
 pub fn routes(state: AppState) -> Router {
     let mut router = Router::new();
+
+    // Admin SPA bootstrap endpoint — returns the current tenant, server
+    // version, and dev_mode flag for the admin console boot flow.
+    // Tenant is resolved by `ensure_tenant_middleware` (applied below) from
+    // the `x-tenant-id` header, defaulting to "default".
+    router = router.route(
+        "/api/admin/bootstrap",
+        get(crate::handlers::admin::bootstrap::bootstrap),
+    );
 
     // Repository content routes (uploads, workspaces, queries, audit)
     router = router.merge(repository::repository_routes(&state));

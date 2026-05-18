@@ -14,6 +14,7 @@ use raisin_sql_execution::QueryEngine;
 use raisin_storage::{RepositoryManagementRepository, Storage};
 
 use crate::error::ApiError;
+use crate::middleware::TenantInfo;
 use crate::state::AppState;
 
 use super::convert::row_to_json;
@@ -52,11 +53,12 @@ use super::types::{SqlQueryRequest, SqlQueryResponse};
 #[cfg(feature = "storage-rocksdb")]
 pub async fn execute_sql_query(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<SqlQueryRequest>,
 ) -> Result<Json<SqlQueryResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let auth_context = auth.map(|Extension(ctx)| ctx);
 
     tracing::info!("HTTP SQL Query Request");
@@ -97,11 +99,12 @@ pub async fn execute_sql_query(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn execute_sql_query_with_branch(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch)): Path<(String, String)>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<SqlQueryRequest>,
 ) -> Result<Json<SqlQueryResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let auth_context = auth.map(|Extension(ctx)| ctx);
 
     tracing::info!("HTTP SQL Query Request (with branch)");
@@ -187,8 +190,12 @@ async fn build_engine(
     }
 
     // Wire function invocation callbacks for SQL INVOKE() and INVOKE_SYNC()
-    let invoke_cb = engine::create_function_invoke_callback(state, repo, callback_auth.clone());
-    let invoke_sync_cb = engine::create_function_invoke_sync_callback(state, repo, callback_auth);
+    // tenant_id MUST come from the request — passing the wrong value lets a
+    // query in tenant T resolve functions and write job state in another tenant.
+    let invoke_cb =
+        engine::create_function_invoke_callback(state, tenant_id, repo, callback_auth.clone());
+    let invoke_sync_cb =
+        engine::create_function_invoke_sync_callback(state, tenant_id, repo, callback_auth);
     engine = engine
         .with_function_invoke(invoke_cb)
         .with_function_invoke_sync(invoke_sync_cb);

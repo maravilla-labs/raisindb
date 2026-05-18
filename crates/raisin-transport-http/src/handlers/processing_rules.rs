@@ -9,7 +9,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,7 @@ use raisin_ai::{ProcessingRule, ProcessingSettings, RuleMatchContext, RuleMatche
 use raisin_storage::scope::RepoScope;
 use raisin_storage::ProcessingRulesRepository;
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 // ============================================================================
@@ -195,9 +196,9 @@ pub struct SuccessResponse {
 pub async fn list_rules(
     Path(repo): Path<String>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<RulesListResponse>, ApiError> {
-    // Get tenant from context (default for now)
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let repo_impl = state.storage().processing_rules_repository();
 
@@ -241,8 +242,9 @@ pub async fn list_rules(
 pub async fn get_rule(
     Path((repo, rule_id)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<ProcessingRuleResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let repo_impl = state.storage().processing_rules_repository();
 
@@ -271,9 +273,10 @@ pub async fn get_rule(
 pub async fn create_rule(
     Path(repo): Path<String>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<CreateRuleRequest>,
 ) -> Result<(StatusCode, Json<ProcessingRuleResponse>), ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let repo_impl = state.storage().processing_rules_repository();
 
@@ -336,9 +339,10 @@ pub async fn create_rule(
 pub async fn update_rule(
     Path((repo, rule_id)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<UpdateRuleRequest>,
 ) -> Result<Json<ProcessingRuleResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let repo_impl = state.storage().processing_rules_repository();
 
@@ -390,8 +394,9 @@ pub async fn update_rule(
 pub async fn delete_rule(
     Path((repo, rule_id)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<SuccessResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let repo_impl = state.storage().processing_rules_repository();
 
@@ -433,9 +438,10 @@ pub async fn delete_rule(
 pub async fn reorder_rules(
     Path(repo): Path<String>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<ReorderRulesRequest>,
 ) -> Result<Json<SuccessResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     if req.rule_ids.is_empty() {
         return Err(ApiError::validation_failed("rule_ids cannot be empty"));
@@ -470,9 +476,10 @@ pub async fn reorder_rules(
 pub async fn test_rule_match(
     Path(repo): Path<String>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<TestRuleMatchRequest>,
 ) -> Result<Json<TestRuleMatchResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let repo_impl = state.storage().processing_rules_repository();
 

@@ -4,6 +4,7 @@ import { repositoriesApi, Repository, CreateRepositoryRequest } from '../api/rep
 import { AlertTriangle, Globe, Check, Database, Plus, Trash2, Calendar, Settings } from 'lucide-react'
 import logo from '../assets/raisin-logo.png'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { useAuth } from '../contexts/AuthContext'
 
 export default function RepositoryList() {
   const [repositories, setRepositories] = useState<Repository[]>([])
@@ -12,6 +13,11 @@ export default function RepositoryList() {
   const [error, setError] = useState<string | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null)
   const navigate = useNavigate()
+  // Tenant-wide management hub is dev-mode only — hide the entry point on
+  // customer-facing tenants. Server-config style ops live under
+  // /management/admin/* and aren't exposed in the customer SPA.
+  const { tenantId } = useAuth()
+  const isDevMode = tenantId === 'default'
 
   useEffect(() => {
     loadRepositories()
@@ -91,13 +97,15 @@ export default function RepositoryList() {
             <p className="text-zinc-400">Manage your content repositories</p>
           </div>
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => navigate('/management')}
-              className="flex items-center gap-2 px-6 py-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-white rounded-lg font-semibold transition-all active:scale-95"
-            >
-              <Settings className="w-5 h-5" />
-              System Management
-            </button>
+            {isDevMode && (
+              <button
+                onClick={() => navigate('/management')}
+                className="flex items-center gap-2 px-6 py-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-white rounded-lg font-semibold transition-all active:scale-95"
+              >
+                <Settings className="w-5 h-5" />
+                System Management
+              </button>
+            )}
             <button
               onClick={() => setShowCreate(true)}
               className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white rounded-lg font-semibold transition-all shadow-lg shadow-primary-500/20 active:scale-95"

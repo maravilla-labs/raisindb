@@ -8,9 +8,10 @@
 
 use axum::{
     extract::{Path, Query, State},
-    Json,
+    Extension, Json,
 };
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 use super::helpers::{
@@ -20,7 +21,7 @@ use super::helpers::{
 use super::types::{
     ExecutionRecord, FunctionDetails, FunctionSummary, GetFunctionQuery, ListFunctionsQuery,
 };
-use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
+use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 
 #[cfg(feature = "storage-rocksdb")]
 use super::helpers::job_status_label;
@@ -32,11 +33,13 @@ use raisin_storage::jobs::{JobStatus, JobType};
 /// List functions in a repository.
 pub async fn list_functions(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
     Query(query): Query<ListFunctionsQuery>,
 ) -> Result<Json<Vec<FunctionSummary>>, ApiError> {
+    let tenant_id = tenant_info.tenant_id.as_str();
     let node_svc =
-        state.node_service_for_context(TENANT_ID, &repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, None);
+        state.node_service_for_context(tenant_id, &repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, None);
 
     let nodes = node_svc
         .list_by_type("raisin:Function")
@@ -101,13 +104,15 @@ pub async fn list_functions(
 /// Get function details.
 pub async fn get_function(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, name)): Path<(String, String)>,
     Query(query): Query<GetFunctionQuery>,
 ) -> Result<Json<FunctionDetails>, ApiError> {
-    let function_node = find_function_node(&state, &repo, &name).await?;
+    let tenant_id = tenant_info.tenant_id.as_str();
+    let function_node = find_function_node(&state, tenant_id, &repo, &name).await?;
 
     let code = if query.include_code {
-        Some(load_function_code(&state, &repo, &function_node).await?)
+        Some(load_function_code(&state, tenant_id, &repo, &function_node).await?)
     } else {
         None
     };
@@ -120,17 +125,19 @@ pub async fn get_function(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn list_executions(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, name)): Path<(String, String)>,
     Query(query): Query<ListExecutionsQuery>,
 ) -> Result<Json<Vec<ExecutionRecord>>, ApiError> {
-    let function_node = find_function_node(&state, &repo, &name).await?;
+    let tenant_id = tenant_info.tenant_id.as_str();
+    let function_node = find_function_node(&state, tenant_id, &repo, &name).await?;
 
     let rocksdb = state
         .rocksdb_storage
         .as_ref()
         .ok_or_else(|| ApiError::internal("RocksDB storage not available"))?;
 
-    let jobs = rocksdb.job_registry().list_jobs_by_tenant(TENANT_ID).await;
+    let jobs = rocksdb.job_registry().list_jobs_by_tenant(tenant_id).await;
     let mut records = Vec::new();
 
     for job in jobs {
@@ -206,6 +213,7 @@ pub async fn list_executions(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn get_execution(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((_repo, _name, execution_id)): Path<(String, String, String)>,
 ) -> Result<Json<ExecutionRecord>, ApiError> {
     let rocksdb = state
@@ -213,7 +221,10 @@ pub async fn get_execution(
         .as_ref()
         .ok_or_else(|| ApiError::internal("RocksDB storage not available"))?;
 
-    let jobs = rocksdb.job_registry().list_jobs_by_tenant(TENANT_ID).await;
+    let jobs = rocksdb
+        .job_registry()
+        .list_jobs_by_tenant(&tenant_info.tenant_id)
+        .await;
     for job in jobs {
         if let JobType::FunctionExecution {
             function_path,

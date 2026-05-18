@@ -17,7 +17,7 @@ use std::collections::HashMap;
 #[cfg(feature = "storage-rocksdb")]
 use raisin_storage::JobType;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 use super::types::{
     ActionCounts, DryRunLogEntry, DryRunResponse, DryRunSummary, InstallMode, InstallResponse,
@@ -31,10 +31,11 @@ use super::types::{
 pub async fn install_package(
     State(state): State<AppState>,
     Path((repo, package_name)): Path<(String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<InstallResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
 
@@ -124,10 +125,11 @@ pub async fn install_package(
 pub async fn uninstall_package(
     State(state): State<AppState>,
     Path((repo, package_name)): Path<(String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<InstallResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
 
@@ -170,13 +172,13 @@ pub async fn uninstall_package(
 /// Install a package via the unified command endpoint.
 pub(super) async fn install_package_impl(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     package_path: &str,
     mode: InstallMode,
     auth_context: Option<AuthContext>,
 ) -> Result<InstallResponse, ApiError> {
-    let tenant_id = "default";
     let workspace = "packages";
 
     let node_service =
@@ -265,13 +267,13 @@ pub(super) async fn install_package_impl(
 /// Dry run implementation - simulates installation without making changes.
 pub(super) async fn dry_run_impl(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     package_path: &str,
     mode: InstallMode,
     auth_context: Option<AuthContext>,
 ) -> Result<DryRunResponse, ApiError> {
-    let tenant_id = "default";
     let workspace = "packages";
 
     let node_service =

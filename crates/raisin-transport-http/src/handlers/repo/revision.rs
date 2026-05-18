@@ -13,7 +13,7 @@ use raisin_hlc::HLC;
 use raisin_models as models;
 use raisin_models::auth::AuthContext;
 
-use crate::{error::ApiError, state::AppState, types::RepoQuery};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState, types::RepoQuery};
 
 use super::translation_helpers::{
     resolve_array_with_locale, resolve_flat_with_locale, resolve_nested_with_locale,
@@ -25,11 +25,12 @@ use super::translation_helpers::{
 /// GET /api/repository/{repo}/{branch}/rev/{revision}/{ws}/
 pub async fn repo_get_root_at_revision(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, revision_str, ws)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<Vec<models::nodes::Node>>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let revision: HLC = revision_str
         .parse()
@@ -56,11 +57,12 @@ pub async fn repo_get_root_at_revision(
 /// GET /api/repository/{repo}/{branch}/rev/{revision}/{ws}/$ref/{id}
 pub async fn repo_get_by_id_at_revision(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, revision_str, ws, id)): Path<(String, String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<models::nodes::Node>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let revision: HLC = revision_str
         .parse()
@@ -102,6 +104,7 @@ pub async fn repo_get_by_id_at_revision(
 /// - flatten: bool - flatten deep results (alternative to format=flat)
 pub async fn repo_get_at_revision(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, revision_str, ws, node_path)): Path<(
         String,
         String,
@@ -112,7 +115,7 @@ pub async fn repo_get_at_revision(
     auth: Option<Extension<AuthContext>>,
     Query(q): Query<RepoQuery>,
 ) -> Result<Response, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let revision: HLC = revision_str
         .parse()

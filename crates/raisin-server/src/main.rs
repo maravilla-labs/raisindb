@@ -524,6 +524,7 @@ async fn main() {
         audit_adapter,
         server_config.anonymous_enabled,
         server_config.dev_mode,
+        env!("CARGO_PKG_VERSION").to_string(),
         &server_config.cors_allowed_origins,
         #[cfg(feature = "storage-rocksdb")]
         indexing_engine,
@@ -534,7 +535,7 @@ async fn main() {
         #[cfg(feature = "storage-rocksdb")]
         embedding_job_store,
         #[cfg(feature = "storage-rocksdb")]
-        hnsw_engine,
+        hnsw_engine.clone(),
         #[cfg(feature = "storage-rocksdb")]
         hnsw_management,
         #[cfg(feature = "storage-rocksdb")]
@@ -570,6 +571,7 @@ async fn main() {
             storage.clone(),
             monitoring.clone(),
             graph_cache_state,
+            hnsw_engine.clone(),
             app_state.clone(),
         )
     };

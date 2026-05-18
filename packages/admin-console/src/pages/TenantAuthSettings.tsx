@@ -28,6 +28,7 @@ import {
   AuthProvider,
   TenantAuthSettings as AuthSettings,
 } from '../api/identity-auth'
+import { useAuth } from '../contexts/AuthContext'
 
 // Known OIDC providers with icons and defaults
 const OIDC_PROVIDERS = [
@@ -86,6 +87,10 @@ interface ProviderFormData {
 
 export default function TenantAuthSettings() {
   const { toasts, closeToast, success, error: showError } = useToast()
+  // Tenant is resolved from /api/admin/bootstrap (via AuthContext) — no
+  // longer hardcoded to "default". For multi-tenant deploys this returns
+  // the customer's tenant; for single-operator dev it stays "default".
+  const { tenantId } = useAuth()
 
   // State
   const [loading, setLoading] = useState(true)
@@ -121,9 +126,6 @@ export default function TenantAuthSettings() {
   useEffect(() => {
     loadData()
   }, [])
-
-  // TODO: Get tenant from context or URL params
-  const tenantId = 'default'
 
   const loadData = async () => {
     setLoading(true)

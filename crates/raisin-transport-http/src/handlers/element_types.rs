@@ -3,7 +3,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use serde::Deserialize;
 
@@ -12,6 +12,7 @@ use raisin_models::nodes::types::element::element_type::ElementType;
 use raisin_storage::scope::BranchScope;
 use raisin_storage::{CommitMetadata, ElementTypeRepository, Storage};
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 #[derive(Debug, Deserialize)]
@@ -49,9 +50,10 @@ fn resolve_commit(payload: Option<ElementTypeCommitPayload>, fallback: String) -
 pub async fn create_element_type(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(payload): Json<ElementTypeWriteRequest>,
 ) -> Result<(StatusCode, Json<ElementType>), ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let element_type = payload.element_type;
 
     let commit = resolve_commit(
@@ -87,8 +89,9 @@ pub async fn create_element_type(
 pub async fn list_element_types(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Vec<ElementType>>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let element_types = state
         .storage()
@@ -103,8 +106,9 @@ pub async fn list_element_types(
 pub async fn list_published_element_types(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Vec<ElementType>>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let element_types = state
         .storage()
@@ -119,8 +123,9 @@ pub async fn list_published_element_types(
 pub async fn get_element_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<ElementType>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let element_type = state
         .storage()
@@ -136,9 +141,10 @@ pub async fn get_element_type(
 pub async fn update_element_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(payload): Json<ElementTypeWriteRequest>,
 ) -> Result<Json<ElementType>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let element_type = payload.element_type;
 
     if element_type.name != name {
@@ -176,9 +182,10 @@ pub async fn update_element_type(
 pub async fn delete_element_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<ElementTypeCommitPayload>>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let commit = resolve_commit(
         maybe_commit.map(|wrapper| wrapper.0),
         format!("Delete element type {}", name),
@@ -201,9 +208,10 @@ pub async fn delete_element_type(
 pub async fn publish_element_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<ElementTypeCommitPayload>>,
 ) -> Result<Json<ElementType>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let commit = resolve_commit(
         maybe_commit.map(|wrapper| wrapper.0),
         format!("Publish element type {}", name),
@@ -231,10 +239,14 @@ pub async fn publish_element_type(
 pub async fn get_resolved_element_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let tenant_id = "default";
-    let resolver =
-        ElementTypeResolver::new(state.storage().clone(), tenant_id.to_string(), repo, branch);
+    let resolver = ElementTypeResolver::new(
+        state.storage().clone(),
+        tenant_info.tenant_id.clone(),
+        repo,
+        branch,
+    );
     let resolved = resolver.resolve(&name).await?;
 
     let response = serde_json::json!({
@@ -252,9 +264,10 @@ pub async fn get_resolved_element_type(
 pub async fn unpublish_element_type(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<ElementTypeCommitPayload>>,
 ) -> Result<Json<ElementType>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let commit = resolve_commit(
         maybe_commit.map(|wrapper| wrapper.0),
         format!("Unpublish element type {}", name),

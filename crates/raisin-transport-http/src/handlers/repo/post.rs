@@ -19,7 +19,8 @@ use raisin_storage::{transactional::TransactionalStorage, Storage};
 
 use crate::{
     error::ApiError,
-    middleware::RaisinContext,
+    handlers::context::RequestContext,
+    middleware::{RaisinContext, TenantInfo},
     state::AppState,
     types::{CommandBody, RepoQuery},
 };
@@ -33,11 +34,13 @@ const BUFFER_THRESHOLD: u64 = 100 * 1024 * 1024;
 #[axum::debug_handler]
 pub async fn repo_post_root(
     State(state): State<AppState>,
-    Path((repo, branch, ws)): Path<(String, String, String)>,
-    auth: Option<Extension<AuthContext>>,
+    ctx: RequestContext,
     Json(json_body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = ctx.tenant_id().to_string();
+    let repo = ctx.repo().to_string();
+    let branch = ctx.branch().to_string();
+    let ws = ctx.workspace().to_string();
 
     tracing::info!(
         "POST root: tenant={}, repo={}, branch={}, ws={}",
@@ -47,8 +50,7 @@ pub async fn repo_post_root(
         ws
     );
 
-    let auth_context = auth.map(|Extension(ctx)| ctx);
-    let nodes_svc = state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context);
+    let nodes_svc = ctx.node_service(&state);
 
     // Check for commit metadata
     let commit_info: Option<crate::types::CommitInfo> = json_body
@@ -122,11 +124,14 @@ pub async fn repo_post_root(
 pub async fn repo_post(
     State(state): State<AppState>,
     Extension(ctx): Extension<RaisinContext>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, ws, _node_path)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Query(q): Query<RepoQuery>,
     request: axum::http::Request<Body>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let tenant_id = tenant_info.tenant_id.as_str();
+
     // Check for raisin:sign command in the path
     if let Some(asset_path) = parse_sign_command_from_path(&ctx.cleaned_path) {
         let body_bytes = request
@@ -142,6 +147,7 @@ pub async fn repo_post(
         let response = super::assets::sign_asset_url_internal(
             &state,
             &ctx,
+            tenant_id,
             &repo,
             &branch,
             &ws,
@@ -151,8 +157,6 @@ pub async fn repo_post(
         .await?;
         return Ok((StatusCode::OK, Json(serde_json::to_value(response.0)?)));
     }
-
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
     let auth_context = auth.map(|Extension(ctx)| ctx);
     let nodes_svc =
         state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context.clone());

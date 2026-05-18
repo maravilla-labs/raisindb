@@ -22,7 +22,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 use super::types::FunctionDetails;
-use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
+use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 
 // ============================================================================
 // Node lookup helpers
@@ -31,11 +31,12 @@ use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
 /// Find a function node by name in the functions workspace.
 pub(crate) async fn find_function_node(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     name: &str,
 ) -> Result<Node, ApiError> {
     let node_svc =
-        state.node_service_for_context(TENANT_ID, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, None);
+        state.node_service_for_context(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, None);
     let nodes = node_svc
         .list_by_type("raisin:Function")
         .await
@@ -55,13 +56,14 @@ pub(crate) async fn find_function_node(
 /// Find an Asset node by ID across all workspaces.
 pub(super) async fn find_asset_node_by_id(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     node_id: &str,
     auth_context: Option<&AuthContext>,
 ) -> Result<Node, ApiError> {
     // Try functions workspace first (most common case)
     let node_svc = state.node_service_for_context(
-        TENANT_ID,
+        tenant_id,
         repo,
         DEFAULT_BRANCH,
         FUNCTIONS_WORKSPACE,
@@ -74,7 +76,7 @@ pub(super) async fn find_asset_node_by_id(
 
     // Try content workspace as fallback
     let node_svc = state.node_service_for_context(
-        TENANT_ID,
+        tenant_id,
         repo,
         DEFAULT_BRANCH,
         "content",
@@ -147,13 +149,14 @@ pub(super) fn build_function_details(
 /// property to find the asset node containing the code.
 pub(crate) async fn load_function_code(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     function_node: &Node,
 ) -> Result<String, ApiError> {
     let (code, _metadata) = raisin_functions::execution::code_loader::load_function_code(
         state.storage.as_ref(),
         state.bin.as_ref(),
-        TENANT_ID,
+        tenant_id,
         repo,
         DEFAULT_BRANCH,
         FUNCTIONS_WORKSPACE,

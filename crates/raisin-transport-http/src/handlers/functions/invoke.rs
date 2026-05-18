@@ -16,6 +16,7 @@ use axum::{
 use raisin_functions::{ExecutionContext, ExecutionMode, FunctionExecutor};
 use raisin_models::auth::AuthContext;
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 use super::helpers::{
@@ -23,7 +24,7 @@ use super::helpers::{
     parse_execution_mode, property_as_bool,
 };
 use super::types::{InlineFunctionResult, InvokeFunctionRequest, InvokeFunctionResponse};
-use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
+use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 
 #[cfg(feature = "storage-rocksdb")]
 use super::api_factory::build_function_api;
@@ -38,6 +39,7 @@ use raisin_storage::jobs::{JobContext, JobId, JobInfo, JobStatus, JobType};
 #[cfg(feature = "storage-rocksdb")]
 pub async fn invoke_function(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, name)): Path<(String, String)>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<InvokeFunctionRequest>,
@@ -48,7 +50,8 @@ pub async fn invoke_function(
         .ok_or_else(|| ApiError::internal("RocksDB storage not available"))?
         .clone();
 
-    let function_node = find_function_node(&state, &repo, &name).await?;
+    let tenant_id = tenant_info.tenant_id.as_str();
+    let function_node = find_function_node(&state, tenant_id, &repo, &name).await?;
 
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
     if req.sync && execution_mode == ExecutionMode::Async {
@@ -70,6 +73,7 @@ pub async fn invoke_function(
     let async_execution_id = nanoid::nanoid!();
     let job_id = register_function_job(
         &rocksdb,
+        tenant_id,
         &repo,
         &function_node.path,
         req.input.clone(),
@@ -86,6 +90,7 @@ pub async fn invoke_function(
 
         match execute_function_inline(
             &state,
+            tenant_id,
             &repo,
             &function_node,
             req.input,
@@ -95,7 +100,7 @@ pub async fn invoke_function(
         .await
         {
             Ok(result) => {
-                persist_job_result(&rocksdb, &job_id, &result).await?;
+                persist_job_result(&rocksdb, tenant_id, &job_id, &result).await?;
                 let response = InvokeFunctionResponse {
                     execution_id: result.execution_id.clone(),
                     sync: true,
@@ -203,6 +208,7 @@ pub async fn invoke_function(
 #[cfg(feature = "storage-rocksdb")]
 async fn register_function_job(
     rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+    tenant_id: &str,
     repo_id: &str,
     function_path: &str,
     input: serde_json::Value,
@@ -215,7 +221,7 @@ async fn register_function_job(
     metadata.insert("input".to_string(), input);
 
     let context = JobContext {
-        tenant_id: TENANT_ID.to_string(),
+        tenant_id: tenant_id.to_string(),
         repo_id: repo_id.to_string(),
         branch: DEFAULT_BRANCH.into(),
         workspace_id: FUNCTIONS_WORKSPACE.into(),
@@ -231,7 +237,7 @@ async fn register_function_job(
                 trigger_name: Some("http".into()),
                 execution_id,
             },
-            TENANT_ID.to_string(),
+            tenant_id.to_string(),
             None,
             None,
             None,
@@ -349,6 +355,7 @@ fn extract_result_fields(
 #[cfg(feature = "storage-rocksdb")]
 async fn persist_job_result(
     rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+    tenant_id: &str,
     job_id: &JobId,
     result: &InlineFunctionResult,
 ) -> Result<(), ApiError> {
@@ -364,7 +371,7 @@ async fn persist_job_result(
         .mark_completed(job_id)
         .await
         .map_err(map_storage_error)?;
-    let _ = rocksdb.job_data_store().delete(TENANT_ID, job_id);
+    let _ = rocksdb.job_data_store().delete(tenant_id, job_id);
     Ok(())
 }
 
@@ -372,13 +379,14 @@ async fn persist_job_result(
 #[cfg(feature = "storage-rocksdb")]
 async fn execute_function_inline(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     node: &raisin_models::nodes::Node,
     input: serde_json::Value,
     timeout_override: Option<u64>,
     auth_context: Option<AuthContext>,
 ) -> Result<InlineFunctionResult, ApiError> {
-    let code = load_function_code(state, repo, node).await?;
+    let code = load_function_code(state, tenant_id, repo, node).await?;
     let mut loaded = build_loaded_function(node, code)?;
 
     if let Some(timeout) = timeout_override {
@@ -395,7 +403,7 @@ async fn execute_function_inline(
         .map(|s| s.as_str())
         .unwrap_or("system");
 
-    let mut context = ExecutionContext::new(TENANT_ID, repo, DEFAULT_BRANCH, actor)
+    let mut context = ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, actor)
         .with_workspace(FUNCTIONS_WORKSPACE)
         .with_input(input)
         .with_admin_escalation(requires_admin);
@@ -415,6 +423,7 @@ async fn execute_function_inline(
     );
     let api = build_function_api(
         state,
+        tenant_id,
         repo,
         loaded.metadata.network_policy.clone(),
         tx_auth_context,

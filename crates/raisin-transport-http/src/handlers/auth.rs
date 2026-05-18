@@ -5,7 +5,7 @@
 //! These endpoints manage admin user authentication for the admin console and API access.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     response::Html,
     Extension, Json,
@@ -13,7 +13,11 @@ use axum::{
 use raisin_models::admin_user::{AdminAccessFlags, AdminInterface};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ApiError, state::AppState};
+use crate::{
+    error::ApiError,
+    middleware::{ScopedTenant, TenantInfo},
+    state::AppState,
+};
 
 #[cfg(feature = "storage-rocksdb")]
 use raisin_rocksdb::AdminClaims;
@@ -95,7 +99,7 @@ pub struct ChangePasswordRequest {
 #[cfg(feature = "storage-rocksdb")]
 pub async fn authenticate(
     State(state): State<AppState>,
-    Path(tenant_id): Path<String>,
+    ScopedTenant(tenant_id): ScopedTenant,
     Json(req): Json<AuthRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let auth_service = state
@@ -144,7 +148,7 @@ pub async fn authenticate(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn change_password(
     State(state): State<AppState>,
-    Path(tenant_id): Path<String>,
+    ScopedTenant(tenant_id): ScopedTenant,
     Extension(claims): Extension<AdminClaims>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, ApiError> {
@@ -373,14 +377,15 @@ pub async fn cli_auth_page(Query(query): Query<CliAuthQuery>) -> Html<String> {
 #[cfg(feature = "storage-rocksdb")]
 pub async fn cli_auth_login(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     axum::Form(form): axum::Form<CliLoginForm>,
 ) -> Result<Html<String>, ApiError> {
     let auth_service = state
         .auth_service()
         .ok_or_else(|| ApiError::internal("Authentication service not available"))?;
 
-    // Use default tenant for CLI auth
-    let tenant_id = "default";
+    // Use tenant from middleware (defaults to "default" in single-operator mode)
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Authenticate user
     let (_user, token) = auth_service

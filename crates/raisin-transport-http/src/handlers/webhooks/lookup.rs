@@ -9,11 +9,12 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 use super::helpers::property_as_string;
-use super::types::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
+use super::types::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 
 /// Find trigger node by webhook_id property
 pub(super) async fn find_trigger_by_webhook_id(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     webhook_id: &str,
 ) -> Result<Node, ApiError> {
@@ -21,7 +22,7 @@ pub(super) async fn find_trigger_by_webhook_id(
         .storage
         .nodes()
         .list_by_type(
-            StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
+            StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
             "raisin:Trigger",
             raisin_storage::ListOptions::default(),
         )
@@ -45,6 +46,7 @@ pub(super) async fn find_trigger_by_webhook_id(
 /// Find trigger node by unique name property
 pub(super) async fn find_trigger_by_name(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     name: &str,
 ) -> Result<Node, ApiError> {
@@ -52,7 +54,7 @@ pub(super) async fn find_trigger_by_name(
         .storage
         .nodes()
         .list_by_type(
-            StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
+            StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
             "raisin:Trigger",
             raisin_storage::ListOptions::default(),
         )

@@ -18,6 +18,7 @@ mod types;
 pub mod upload_processors;
 pub(crate) mod util;
 mod handlers {
+    pub mod admin;
     #[cfg(feature = "storage-rocksdb")]
     pub mod admin_users;
     #[cfg(feature = "storage-rocksdb")]
@@ -28,6 +29,7 @@ mod handlers {
     pub mod auth;
     pub mod branches;
     pub mod commit;
+    pub mod context;
     pub mod conversations;
     pub mod element_types;
     #[cfg(feature = "storage-rocksdb")]
@@ -41,7 +43,6 @@ mod handlers {
     pub mod identity_users;
     pub mod management;
     pub mod node_types;
-    pub mod nodes;
     pub mod packages;
     #[cfg(feature = "storage-rocksdb")]
     pub mod processing_rules;

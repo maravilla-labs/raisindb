@@ -6,10 +6,14 @@ import ActionButton from '../../components/management/ActionButton'
 import ActionResult from '../../components/management/ActionResult'
 import { managementApi, formatBytes, formatDuration, sseManager, JobEvent, databaseManagementApi } from '../../api/management'
 import ConfirmDialog from '../../components/ConfirmDialog'
+import { useAuth } from '../../contexts/AuthContext'
 
 export default function Actions() {
   const [selectedWorkspace, setSelectedWorkspace] = useState('')
   const repo = 'main' // TODO: Get from route params or context
+  // Resolved tenant from /api/admin/bootstrap — replaces the previous
+  // implicit "default" the global compaction route relied on.
+  const { tenantId } = useAuth()
 
   // Loading states
   const [compactLoading, setCompactLoading] = useState(false)
@@ -126,8 +130,10 @@ export default function Actions() {
     setCompactProgress(0)
 
     try {
-      // Start the background job
-      const response = await managementApi.startCompaction()
+      // Tenant-scoped compaction — the API client will also attach the
+      // resolved tenant header, but the path itself makes scoping explicit
+      // so it works even when an edge proxy doesn't set x-tenant-id.
+      const response = await managementApi.startTenantCompaction(tenantId)
       if (response.success && response.data) {
         setCompactJobId(response.data)
         // Job started successfully, now SSE will handle updates

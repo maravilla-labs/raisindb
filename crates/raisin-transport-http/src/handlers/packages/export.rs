@@ -18,7 +18,7 @@ use std::collections::HashMap;
 #[cfg(feature = "storage-rocksdb")]
 use raisin_storage::JobType;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 use super::types::{ExportPackageRequest, ExportResponse};
 
@@ -28,9 +28,10 @@ use super::types::{ExportPackageRequest, ExportResponse};
 pub async fn export_package(
     State(state): State<AppState>,
     Path((repo, branch, package_path)): Path<(String, String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(request): Json<ExportPackageRequest>,
 ) -> Result<Json<ExportResponse>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let workspace = "packages";
 
     let node_service = state.node_service_for_context(tenant_id, &repo, &branch, workspace, None);
@@ -59,13 +60,13 @@ pub async fn export_package(
 /// Export a package (internal command endpoint implementation).
 pub(super) async fn export_package_impl(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     package_path: &str,
     request: ExportPackageRequest,
     auth_context: Option<AuthContext>,
 ) -> Result<ExportResponse, ApiError> {
-    let tenant_id = "default";
     let workspace = "packages";
 
     let node_service =

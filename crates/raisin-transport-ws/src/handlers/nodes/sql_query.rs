@@ -100,8 +100,8 @@ where
         }
 
         // Wire INVOKE/INVOKE_SYNC callbacks for function execution from SQL
-        let invoke_cb = build_invoke_callback(state, &repo, callback_auth.clone());
-        let invoke_sync_cb = build_invoke_sync_callback(state, &repo, callback_auth);
+        let invoke_cb = build_invoke_callback(state, &tenant_id, &repo, callback_auth.clone());
+        let invoke_sync_cb = build_invoke_sync_callback(state, &tenant_id, &repo, callback_auth);
         engine = engine
             .with_function_invoke(invoke_cb)
             .with_function_invoke_sync(invoke_sync_cb);
@@ -179,6 +179,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 fn build_invoke_callback<S, B>(
     state: &Arc<WsState<S, B>>,
+    tenant_id: &str,
     repo: &str,
     _auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> raisin_sql_execution::FunctionInvokeCallback
@@ -187,11 +188,13 @@ where
     B: raisin_binary::BinaryStorage + 'static,
 {
     let ws_state = state.clone();
+    let ws_tenant = tenant_id.to_string();
     let ws_repo = repo.to_string();
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
             let ws_state = ws_state.clone();
+            let ws_tenant = ws_tenant.clone();
             let ws_repo = ws_repo.clone();
 
             Box::pin(async move {
@@ -203,7 +206,7 @@ where
                 // Find function node via canonical code_loader
                 let function_node = raisin_functions::execution::code_loader::find_function(
                     &*ws_state.storage,
-                    "default",
+                    &ws_tenant,
                     &ws_repo,
                     "main",
                     ws,
@@ -226,7 +229,7 @@ where
                 metadata.insert("input".to_string(), input);
 
                 let context = raisin_storage::jobs::JobContext {
-                    tenant_id: "default".to_string(),
+                    tenant_id: ws_tenant.clone(),
                     repo_id: ws_repo.clone(),
                     branch: "main".to_string(),
                     workspace_id: ws.to_string(),
@@ -236,7 +239,7 @@ where
 
                 let job_id = rocksdb
                     .job_registry()
-                    .register_job(job_type, "default".to_string(), None, None, None)
+                    .register_job(job_type, ws_tenant.clone(), None, None, None)
                     .await
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!("Failed to register job: {}", e))
@@ -266,6 +269,7 @@ where
 #[cfg(feature = "storage-rocksdb")]
 fn build_invoke_sync_callback<S, B>(
     state: &Arc<WsState<S, B>>,
+    tenant_id: &str,
     repo: &str,
     _auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> raisin_sql_execution::FunctionInvokeSyncCallback
@@ -274,11 +278,13 @@ where
     B: raisin_binary::BinaryStorage + 'static,
 {
     let ws_state = state.clone();
+    let ws_tenant = tenant_id.to_string();
     let ws_repo = repo.to_string();
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
             let ws_state = ws_state.clone();
+            let ws_tenant = ws_tenant.clone();
             let ws_repo = ws_repo.clone();
 
             Box::pin(async move {
@@ -287,7 +293,7 @@ where
                 // Find function node via canonical code_loader
                 let function_node = raisin_functions::execution::code_loader::find_function(
                     &*ws_state.storage,
-                    "default",
+                    &ws_tenant,
                     &ws_repo,
                     "main",
                     ws,
@@ -303,7 +309,7 @@ where
                     raisin_functions::execution::code_loader::load_function_code(
                         &*ws_state.storage,
                         &*ws_state.bin,
-                        "default",
+                        &ws_tenant,
                         &ws_repo,
                         "main",
                         ws,
@@ -328,7 +334,7 @@ where
 
                 // Build execution context
                 let context =
-                    raisin_functions::ExecutionContext::new("default", &ws_repo, "main", "system")
+                    raisin_functions::ExecutionContext::new(&ws_tenant, &ws_repo, "main", "system")
                         .with_workspace(ws)
                         .with_input(input);
 
@@ -346,14 +352,14 @@ where
 
                 let callbacks = raisin_functions::execution::callbacks::create_production_callbacks(
                     deps,
-                    "default".to_string(),
+                    ws_tenant.clone(),
                     ws_repo.clone(),
                     "main".to_string(),
                     None,
                 );
 
                 let api = Arc::new(raisin_functions::RaisinFunctionApi::new(
-                    raisin_functions::ExecutionContext::new("default", &ws_repo, "main", "system")
+                    raisin_functions::ExecutionContext::new(&ws_tenant, &ws_repo, "main", "system")
                         .with_workspace("functions"),
                     loaded.metadata.network_policy.clone(),
                     callbacks,

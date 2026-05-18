@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: BSL-1.1
 
+import {
+  AUTH_TOKEN_STORAGE_KEY,
+  getCurrentAuthToken,
+  getCurrentSuperadminToken,
+  getCurrentTenantId,
+} from './bootstrap'
+
 export interface ApiErrorResponse {
   code: string
   message: string
@@ -62,11 +69,32 @@ export function setImpersonatedUserId(userId: string | null, displayName?: strin
   }
 }
 
-// Get auth headers for manual fetch calls (SSE, streaming, etc.)
-export function getAuthHeaders(): Record<string, string> {
+/**
+ * Should the request be augmented with the dev-mode superadmin token?
+ *
+ * Only `/management/admin/*` is gated by the superadmin token middleware on
+ * the server. We never attach it to any other path so the token can't leak
+ * to handlers that don't need it.
+ */
+function shouldAttachSuperadminToken(path: string): boolean {
+  return path.startsWith('/management/admin/')
+}
+
+/**
+ * Build the auth + tenant + impersonation headers for a request.
+ *
+ * When `path` starts with `/management/admin/`, the user JWT in
+ * `Authorization` is replaced by the dev-mode superadmin token (admin routes
+ * don't run user-JWT auth — server gates them via
+ * `require_superadmin_token_middleware` reading `Authorization: Bearer`).
+ *
+ * Pass `path` from `requestRaw`; omit it for SSE/manual fetch helpers where
+ * the call site isn't on an admin route.
+ */
+function buildAuthHeaders(path?: string): Record<string, string> {
   const headers: Record<string, string> = {}
 
-  const token = localStorage.getItem('raisindb_auth_token')
+  const token = getCurrentAuthToken()
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
@@ -76,7 +104,23 @@ export function getAuthHeaders(): Record<string, string> {
     headers['X-Raisin-Impersonate'] = impersonateUserId
   }
 
+  // Always carry the resolved tenant. The middleware defaults to "default"
+  // when absent, so this is also safe in single-operator dev.
+  headers['x-tenant-id'] = getCurrentTenantId()
+
+  if (path && shouldAttachSuperadminToken(path)) {
+    const superadminToken = getCurrentSuperadminToken()
+    if (superadminToken) {
+      headers['Authorization'] = `Bearer ${superadminToken}`
+    }
+  }
+
   return headers
+}
+
+// Get auth headers for manual fetch calls (SSE, streaming, etc.)
+export function getAuthHeaders(): Record<string, string> {
+  return buildAuthHeaders()
 }
 
 // Export for use in cases where we need the raw Response (e.g., file downloads)
@@ -86,30 +130,14 @@ export async function requestRaw(
 ): Promise<Response> {
   const url = path.startsWith('http') ? path : `${path}`
 
-  // Get JWT token from localStorage
-  const token = localStorage.getItem('raisindb_auth_token')
-
-  // Get impersonated user ID (if any)
-  const impersonateUserId = getImpersonatedUserId()
-
-  // Build headers
   const headers: Record<string, string> = {
+    ...buildAuthHeaders(path),
     ...(options.headers as Record<string, string>),
   }
 
   const hasBody = options.body !== undefined && options.body !== null
   if (hasBody && !isFormData(options.body) && !('Content-Type' in headers)) {
     headers['Content-Type'] = 'application/json'
-  }
-
-  // Add Authorization header if token exists
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-
-  // Add impersonation header if set
-  if (impersonateUserId) {
-    headers['X-Raisin-Impersonate'] = impersonateUserId
   }
 
   const response = await fetch(url, {
@@ -120,7 +148,7 @@ export async function requestRaw(
   if (!response.ok) {
     // Handle 401 Unauthorized - clear auth data and redirect to login
     if (response.status === 401) {
-      localStorage.removeItem('raisindb_auth_token')
+      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
       localStorage.removeItem('raisindb_auth_user')
       // Redirect to login if not already there
       if (!window.location.pathname.includes('/login')) {

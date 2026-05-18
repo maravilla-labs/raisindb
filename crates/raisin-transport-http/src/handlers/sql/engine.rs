@@ -227,17 +227,25 @@ pub(super) fn configure_engine_features(
 }
 
 /// Create a callback for async function invocation via SQL INVOKE().
+///
+/// `tenant_id` must be the request's authoritative tenant (from `TenantInfo`);
+/// it is what binds the loaded function and its registered job to the caller's
+/// data plane. Passing the wrong value here lets a SQL query in tenant T
+/// execute functions registered in another tenant.
 pub(super) fn create_function_invoke_callback(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     _auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> FunctionInvokeCallback {
     let state = state.clone();
+    let tenant_id = tenant_id.to_string();
     let repo = repo.to_string();
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
             let state = state.clone();
+            let tenant_id = tenant_id.clone();
             let repo = repo.clone();
 
             Box::pin(async move {
@@ -250,7 +258,7 @@ pub(super) fn create_function_invoke_callback(
                 // Find function node via canonical code_loader
                 let function_node = raisin_functions::execution::code_loader::find_function(
                     state.storage.as_ref(),
-                    "default",
+                    &tenant_id,
                     &repo,
                     "main",
                     ws,
@@ -270,7 +278,7 @@ pub(super) fn create_function_invoke_callback(
                 metadata.insert("input".to_string(), input);
 
                 let context = raisin_storage::jobs::JobContext {
-                    tenant_id: "default".to_string(),
+                    tenant_id: tenant_id.clone(),
                     repo_id: repo.clone(),
                     branch: "main".to_string(),
                     workspace_id: ws.to_string(),
@@ -280,7 +288,7 @@ pub(super) fn create_function_invoke_callback(
 
                 let job_id = rocksdb
                     .job_registry()
-                    .register_job(job_type, "default".to_string(), None, None, None)
+                    .register_job(job_type, tenant_id.clone(), None, None, None)
                     .await
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!("Failed to register job: {}", e))
@@ -300,17 +308,24 @@ pub(super) fn create_function_invoke_callback(
 }
 
 /// Create a callback for sync function invocation via SQL INVOKE_SYNC().
+///
+/// See [`create_function_invoke_callback`] — the same tenant-binding rule applies:
+/// the function code AND its API surface (via `build_function_api`) are scoped
+/// to `tenant_id`.
 pub(super) fn create_function_invoke_sync_callback(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     _auth_context: Option<raisin_models::auth::AuthContext>,
 ) -> FunctionInvokeSyncCallback {
     let state = state.clone();
+    let tenant_id = tenant_id.to_string();
     let repo = repo.to_string();
 
     Arc::new(
         move |path: String, input: serde_json::Value, workspace: Option<String>| {
             let state = state.clone();
+            let tenant_id = tenant_id.clone();
             let repo = repo.clone();
 
             Box::pin(async move {
@@ -319,7 +334,7 @@ pub(super) fn create_function_invoke_sync_callback(
                 // Find function node via canonical code_loader
                 let function_node = raisin_functions::execution::code_loader::find_function(
                     state.storage.as_ref(),
-                    "default",
+                    &tenant_id,
                     &repo,
                     "main",
                     ws,
@@ -332,7 +347,7 @@ pub(super) fn create_function_invoke_sync_callback(
                     raisin_functions::execution::code_loader::load_function_code(
                         state.storage.as_ref(),
                         state.bin.as_ref(),
-                        "default",
+                        &tenant_id,
                         &repo,
                         "main",
                         ws,
@@ -357,12 +372,13 @@ pub(super) fn create_function_invoke_sync_callback(
 
                 // Build execution context and API
                 let context =
-                    raisin_functions::ExecutionContext::new("default", &repo, "main", "system")
+                    raisin_functions::ExecutionContext::new(&tenant_id, &repo, "main", "system")
                         .with_workspace(ws)
                         .with_input(input);
 
                 let api = crate::handlers::functions::build_function_api(
                     &state,
+                    &tenant_id,
                     &repo,
                     loaded.metadata.network_policy.clone(),
                     None,

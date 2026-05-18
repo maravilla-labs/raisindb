@@ -66,6 +66,7 @@ pub fn parse_sign_command_from_path(path: &str) -> Option<String> {
 /// by validating the signature and serving the binary content.
 pub async fn handle_asset_command_internal(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     ws: &str,
@@ -103,7 +104,7 @@ pub async fn handle_asset_command_internal(
     // Verify signature - include property_path in verification
     let signing_secret = state.get_signing_secret()?;
     let prop_option = if prop_name == "file" { None } else { property_path };
-    if !raisin_core::verify_asset_signature(&signing_secret, &full_path, command, prop_option, exp, sig) {
+    if !raisin_core::verify_asset_signature(&signing_secret, tenant_id, &full_path, command, prop_option, exp, sig) {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "INVALID_SIGNATURE",
@@ -111,10 +112,7 @@ pub async fn handle_asset_command_internal(
         ));
     }
 
-    // Use default tenant for signed URL access (signature already validated access)
-    let tenant_id = "default";
-
-    // Get node
+    // Get node (tenant_id passed in by caller - signature already validated access)
     let node = state
         .storage()
         .nodes()
@@ -211,14 +209,13 @@ pub async fn handle_asset_command_internal(
 pub async fn sign_asset_url_internal(
     state: &AppState,
     ctx: &RaisinContext,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     ws: &str,
     path: &str,
     request: SignAssetRequest,
 ) -> Result<Json<SignAssetResponse>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from auth context
-
     // Validate command
     if request.command != "download" && request.command != "display" {
         return Err(ApiError::validation_failed(
@@ -278,7 +275,7 @@ pub async fn sign_asset_url_internal(
     // Sign the URL - include property_path in signature for security
     let signing_secret = state.get_signing_secret()?;
     let prop_option = if property_path == "file" { None } else { Some(property_path) };
-    let signature = raisin_core::sign_asset_url(&signing_secret, &full_path, &request.command, prop_option, expires);
+    let signature = raisin_core::sign_asset_url(&signing_secret, tenant_id, &full_path, &request.command, prop_option, expires);
 
     // Get base URL from environment or use relative path
     let base_url = std::env::var("RAISINDB_BASE_URL").unwrap_or_default();

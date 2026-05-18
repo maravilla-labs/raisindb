@@ -37,7 +37,7 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ isOpen, isMobile, onClose }: SidebarProps) {
-  const { user, logout } = useAuth()
+  const { user, logout, serverVersion } = useAuth()
   const navigate = useNavigate()
 
   // Both mobile and desktop use fixed positioning, with smooth transitions
@@ -131,9 +131,9 @@ export default function Sidebar({ isOpen, isMobile, onClose }: SidebarProps) {
           <span className="font-medium">Logout</span>
         </button>
 
-        {/* Version */}
+        {/* Version — sourced from /api/admin/bootstrap */}
         <div className="text-xs text-zinc-400 text-center">
-          v0.1.0 • {new Date().getFullYear()}
+          raisindb v{serverVersion} • {new Date().getFullYear()}
         </div>
       </div>
     </aside>

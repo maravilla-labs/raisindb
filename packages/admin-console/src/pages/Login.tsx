@@ -11,7 +11,7 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
 
-  const { login } = useAuth()
+  const { login, serverVersion, tenantId } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -122,9 +122,11 @@ export default function Login() {
           </form>
         </div>
 
-        {/* Footer */}
+        {/* Footer — version and resolved tenant come from the bootstrap
+            endpoint so the operator can confirm which raisindb instance and
+            tenant context they're signing into. */}
         <div className="text-center mt-6 text-sm text-zinc-500">
-          RaisinDB v0.1.0 • {new Date().getFullYear()}
+          raisindb v{serverVersion} • tenant <span className="text-zinc-400">{tenantId}</span> • {new Date().getFullYear()}
         </div>
       </div>
     </div>

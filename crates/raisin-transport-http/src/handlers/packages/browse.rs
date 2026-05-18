@@ -18,7 +18,7 @@ use raisin_models::nodes::properties::value::PropertyValue;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 use super::types::{FileType, PackageFile, ZipContentsResponse, ZipEntry};
 
@@ -31,10 +31,11 @@ const MAX_NESTING_DEPTH: usize = 3;
 pub async fn list_package_contents(
     State(state): State<AppState>,
     Path((repo, package_name)): Path<(String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<ZipContentsResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
 
@@ -81,10 +82,11 @@ pub async fn list_package_contents(
 pub async fn get_package_file(
     State(state): State<AppState>,
     Path((repo, package_name, file_path)): Path<(String, String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Response, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
 
@@ -130,13 +132,13 @@ pub async fn get_package_file(
 /// Browse package contents at a specific path within the ZIP.
 pub(super) async fn browse_package_impl(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     package_path: &str,
     zip_path: &str,
     auth_context: Option<AuthContext>,
 ) -> Result<Vec<PackageFile>, ApiError> {
-    let tenant_id = "default";
     let workspace = "packages";
 
     let node_service =
@@ -164,13 +166,13 @@ pub(super) async fn browse_package_impl(
 /// Get a specific file from the package ZIP (command endpoint).
 pub(super) async fn get_file_from_package_impl(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     package_path: &str,
     zip_path: &str,
     auth_context: Option<AuthContext>,
 ) -> Result<Response, ApiError> {
-    let tenant_id = "default";
     let workspace = "packages";
 
     let node_service =

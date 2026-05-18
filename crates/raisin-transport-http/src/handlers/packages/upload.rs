@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 use super::types::{PackageManifest, UploadResponse};
 
@@ -43,6 +43,7 @@ use super::types::{PackageManifest, UploadResponse};
 pub async fn upload_package(
     State(state): State<AppState>,
     Path(repo): Path<String>,
+    Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
     axum_extra::TypedHeader(content_type): axum_extra::TypedHeader<
         axum_extra::headers::ContentType,
@@ -50,7 +51,7 @@ pub async fn upload_package(
     body: axum::body::Bytes,
 ) -> Result<Json<UploadResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let branch = "main";
     let workspace = "packages";
 

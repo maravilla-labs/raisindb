@@ -18,6 +18,20 @@ use super::types::{
 };
 use super::ManagementState;
 
+/// Map a storage error from a job point-lookup to an HTTP status code.
+///
+/// `raisin_error::Error::NotFound` → `404 Not Found` (covers both
+/// genuinely missing job IDs and cross-tenant access attempts — the
+/// storage layer returns `NotFound` in both cases so we never leak the
+/// existence of jobs belonging to other tenants). Everything else maps to
+/// `500 Internal Server Error`.
+fn job_lookup_status(err: &raisin_error::Error) -> StatusCode {
+    match err {
+        raisin_error::Error::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CRUD operations
 // ---------------------------------------------------------------------------
@@ -56,8 +70,18 @@ where
     {
         Ok(status) => Ok(Json(ApiResponse::ok(status))),
         Err(e) => {
-            tracing::error!("Failed to get job status: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            // 404 on tenant mismatch / missing job (no info leak); 500 otherwise.
+            let code = job_lookup_status(&e);
+            if code == StatusCode::NOT_FOUND {
+                tracing::debug!(
+                    tenant = %tenant_info.tenant_id,
+                    job_id = %job_id,
+                    "Job status lookup: not found (or different tenant)"
+                );
+            } else {
+                tracing::error!("Failed to get job status: {}", e);
+            }
+            Err(code)
         }
     }
 }
@@ -79,8 +103,17 @@ where
     {
         Ok(info) => Ok(Json(ApiResponse::ok(info))),
         Err(e) => {
-            tracing::error!("Failed to get job info: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let code = job_lookup_status(&e);
+            if code == StatusCode::NOT_FOUND {
+                tracing::debug!(
+                    tenant = %tenant_info.tenant_id,
+                    job_id = %job_id,
+                    "Job info lookup: not found (or different tenant)"
+                );
+            } else {
+                tracing::error!("Failed to get job info: {}", e);
+            }
+            Err(code)
         }
     }
 }
@@ -102,8 +135,17 @@ where
     {
         Ok(()) => Ok(Json(ApiResponse::ok(()))),
         Err(e) => {
-            tracing::error!("Failed to delete job: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let code = job_lookup_status(&e);
+            if code == StatusCode::NOT_FOUND {
+                tracing::debug!(
+                    tenant = %tenant_info.tenant_id,
+                    job_id = %job_id,
+                    "Job delete: not found (or different tenant)"
+                );
+            } else {
+                tracing::error!("Failed to delete job: {}", e);
+            }
+            Err(code)
         }
     }
 }
@@ -158,8 +200,17 @@ where
     {
         Ok(()) => Ok(Json(ApiResponse::ok(()))),
         Err(e) => {
-            tracing::error!("Failed to cancel job: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let code = job_lookup_status(&e);
+            if code == StatusCode::NOT_FOUND {
+                tracing::debug!(
+                    tenant = %tenant_info.tenant_id,
+                    job_id = %job_id,
+                    "Job cancel: not found (or different tenant)"
+                );
+            } else {
+                tracing::error!("Failed to cancel job: {}", e);
+            }
+            Err(code)
         }
     }
 }

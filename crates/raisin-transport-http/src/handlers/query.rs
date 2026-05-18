@@ -11,19 +11,17 @@ use raisin_query as rquery;
 
 use crate::{
     errors::internal_err,
+    handlers::context::RequestContext,
     state::AppState,
     types::{Page, PageMeta, QueryRequest},
 };
 
 pub async fn post_query(
     State(state): State<AppState>,
-    Path((repo, branch, ws)): Path<(String, String, String)>,
-    auth: Option<Extension<AuthContext>>,
+    ctx: RequestContext,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<Page<models::nodes::Node>>, (StatusCode, Json<crate::types::ErrorBody>)> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
-    let auth_context = auth.map(|Extension(ctx)| ctx);
-    let nodes_svc = state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context);
+    let nodes_svc = ctx.node_service(&state);
 
     // Precedence: path (exact match) over other filters; if path present, ignore type/parent.
     let mut items: Vec<models::nodes::Node> = if let Some(path) = req.path {
@@ -83,13 +81,10 @@ pub async fn post_query(
 
 pub async fn post_query_dsl(
     State(state): State<AppState>,
-    Path((repo, branch, ws)): Path<(String, String, String)>,
-    auth: Option<Extension<AuthContext>>,
+    ctx: RequestContext,
     Json(q): Json<rquery::NodeSearchQuery>,
 ) -> Result<Json<Page<models::nodes::Node>>, (StatusCode, Json<crate::types::ErrorBody>)> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
-    let auth_context = auth.map(|Extension(ctx)| ctx);
-    let nodes_svc = state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context);
+    let nodes_svc = ctx.node_service(&state);
 
     // fetch all nodes in workspace (using list_root as list_all is deprecated)
     // TODO: Use deep_children_array("/", max_depth) for full tree traversal if needed

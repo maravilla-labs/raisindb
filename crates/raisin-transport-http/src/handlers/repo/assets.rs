@@ -42,6 +42,7 @@ pub(crate) fn parse_sign_command_from_path(path: &str) -> Option<String> {
 /// Internal implementation of asset command handling.
 pub(crate) async fn handle_asset_command_internal(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     ws: &str,
@@ -85,6 +86,7 @@ pub(crate) async fn handle_asset_command_internal(
     };
     if !raisin_core::verify_asset_signature(
         &signing_secret,
+        tenant_id,
         &full_path,
         command,
         prop_option,
@@ -98,10 +100,7 @@ pub(crate) async fn handle_asset_command_internal(
         ));
     }
 
-    // Use default tenant for signed URL access (signature already validated access)
-    let tenant_id = "default";
-
-    // Get node
+    // Get node (tenant comes from request context — signature already validated access)
     let node = state
         .storage()
         .nodes()
@@ -223,13 +222,13 @@ pub struct SignAssetResponse {
 pub(crate) async fn sign_asset_url_internal(
     state: &AppState,
     ctx: &RaisinContext,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     ws: &str,
     path: &str,
     request: SignAssetRequest,
 ) -> Result<Json<SignAssetResponse>, ApiError> {
-    let _tenant_id = "default"; // TODO: Extract from auth context
 
     // Validate command
     if request.command != "download" && request.command != "display" {
@@ -254,7 +253,7 @@ pub(crate) async fn sign_asset_url_internal(
         .storage()
         .nodes()
         .get_by_path(
-            StorageScope::new("default", repo, branch, ws),
+            StorageScope::new(tenant_id, repo, branch, ws),
             &node_path,
             None,
         )
@@ -304,6 +303,7 @@ pub(crate) async fn sign_asset_url_internal(
     };
     let signature = raisin_core::sign_asset_url(
         &signing_secret,
+        tenant_id,
         &full_path,
         &request.command,
         prop_option,

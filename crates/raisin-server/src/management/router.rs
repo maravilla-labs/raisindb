@@ -3,6 +3,17 @@
 //! Provides two versions of the router:
 //! - RocksDB-specific: with concrete storage types, monitoring, auth middlewares
 //! - Generic: for other storage backends implementing `ManagementOps + BackgroundJobs`
+//!
+//! ## Tenant scoping
+//!
+//! Every `/management/*` route is tenant-scoped — either by a `{tenant}` path
+//! segment, or by reading `TenantInfo` (populated from the `x-tenant-id`
+//! header) in the handler. Truly global / cross-tenant operations live under
+//! `/management/admin/*` and are gated by `require_superadmin_token_middleware`.
+//!
+//! Customer-facing callers must never hit `/management/admin/*`. Calling a
+//! global endpoint on the customer-facing path returns 404 (the old route is
+//! deleted, not aliased).
 
 use axum::{
     routing::{get, post},
@@ -28,11 +39,13 @@ use super::graph_cache;
 /// This router is secured with:
 /// - `ensure_tenant_middleware`: Extracts tenant from `x-tenant-id` header
 /// - `require_admin_auth_middleware`: Validates admin JWT tokens
+/// - `require_superadmin_token_middleware` (admin subtree only)
 #[cfg(feature = "storage-rocksdb")]
 pub fn management_router(
     storage: Arc<raisin_rocksdb::RocksDBStorage>,
     monitoring: Arc<raisin_rocksdb::monitoring::MonitoringService>,
     graph_cache_state: Option<Arc<graph_cache::GraphCacheState>>,
+    hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
     app_state: raisin_transport_http::state::AppState,
 ) -> Router {
     use axum::{
@@ -54,18 +67,20 @@ pub fn management_router(
     };
     drop(storage);
 
+    // ------------------------------------------------------------------
+    // Per-tenant routes (always mounted)
+    //
+    // Every route below is scoped to a single tenant — either via `{tenant}`
+    // in the path, or via `Extension<TenantInfo>` derived from the request's
+    // `x-tenant-id` header. Cross-tenant ops live under `/management/admin/*`.
+    // ------------------------------------------------------------------
     let router = Router::new()
-        // Health endpoints (enhanced with monitoring status)
-        .route(
-            "/management/health",
-            get(health::get_health_with_monitoring),
-        )
-        .route("/management/health/storage", get(health::get_health))
+        // Health endpoints (per-tenant only on the customer-facing plane).
         .route(
             "/management/health/{tenant}",
             get(health::get_tenant_health),
         )
-        // Integrity endpoints
+        // Integrity endpoints — all tenant-scoped in the URL.
         .route(
             "/management/integrity/{tenant}",
             get(integrity::check_integrity),
@@ -106,27 +121,33 @@ pub fn management_router(
             "/management/integrity/{tenant}/cleanup-property-indexes",
             post(integrity::cleanup_property_index_orphans),
         )
-        // Metrics endpoints
-        .route("/management/metrics", get(maintenance::get_metrics))
+        // Per-tenant metrics — server-wide metrics live under /management/admin.
         .route(
             "/management/metrics/{tenant}",
             get(maintenance::get_tenant_metrics),
         )
-        // Maintenance endpoints
-        .route("/management/compact", post(maintenance::trigger_compaction))
-        .route(
-            "/management/compact/start",
-            post(maintenance::start_compaction),
-        )
+        // Per-tenant maintenance — global compaction lives under /management/admin.
         .route(
             "/management/compact/{tenant}",
             post(maintenance::trigger_tenant_compaction),
         )
-        // Backup endpoints
+        .route(
+            "/management/compact/{tenant}/start",
+            post(maintenance::start_tenant_compaction),
+        )
+        // Per-tenant backup — full-instance backup lives under /management/admin.
+        // Shadow the literal `/backup/all` path so axum's `{tenant}` matcher
+        // does not silently route it to `backup_tenant("all")` and leak a
+        // 401-vs-404 signal about a non-existent tenant.
+        .route(
+            "/management/backup/all",
+            post(|| async { axum::http::StatusCode::NOT_FOUND }),
+        )
         .route("/management/backup/{tenant}", post(backup::backup_tenant))
-        .route("/management/backup/all", post(backup::backup_all))
-        .route("/management/backup/all/start", post(backup::start_backup))
-        // Job management endpoints
+        // Job management endpoints — tenant-scoped via `Extension<TenantInfo>`.
+        // Point lookups 404 on cross-tenant access (no info leak); aggregate
+        // ops filter by tenant. The true cross-tenant variants live under
+        // `/management/admin/jobs/*`.
         .route("/management/jobs", get(jobs::list_jobs))
         .route("/management/jobs/{id}", get(jobs::get_job_status))
         .route("/management/jobs/{id}/info", get(jobs::get_job_info))
@@ -143,7 +164,7 @@ pub fn management_router(
             "/management/jobs/schedule/integrity",
             post(jobs::schedule_integrity_scan),
         )
-        // Job queue management endpoints
+        // Job queue management endpoints — also tenant-scoped via header.
         .route("/management/jobs/stats", get(jobs::get_job_queue_stats))
         .route("/management/jobs/purge-all", post(jobs::purge_all_jobs))
         .route(
@@ -154,7 +175,7 @@ pub fn management_router(
             "/management/jobs/force-fail-stuck",
             post(jobs::force_fail_stuck_jobs),
         )
-        // SSE streaming endpoints for real-time updates
+        // SSE streaming endpoints — filtered to the caller's tenant.
         .route(
             "/management/events/jobs",
             get(crate::sse::job_events_stream_rocksdb),
@@ -167,15 +188,7 @@ pub fn management_router(
             "/management/events/metrics",
             get(crate::sse::metrics_events_stream::<raisin_rocksdb::RocksDBStorage>),
         )
-        .route(
-            "/management/metrics/replication",
-            get(health::replication_metrics_handler),
-        )
-        .route(
-            "/management/metrics/vector",
-            get(health::vector_metrics_handler),
-        )
-        // Graph cache management endpoints
+        // Graph cache management endpoints — repo-scoped (no global form).
         .route(
             "/management/graph-cache/{repo}/status",
             get(graph_cache::get_graph_cache_status),
@@ -193,22 +206,7 @@ pub fn management_router(
             get(graph_cache::graph_cache_events_stream),
         )
         .with_state(state)
-        .layer(Extension(monitoring));
-
-    // Add dependency management routes (uses separate state for data_dir)
-    let deps_state = super::dependencies::DepsState { data_dir };
-    let deps_router = Router::new()
-        .route(
-            "/management/dependencies",
-            get(super::dependencies::list_dependencies),
-        )
-        .route(
-            "/management/dependencies/{name}/enable",
-            post(super::dependencies::enable_dependency),
-        )
-        .with_state(deps_state);
-
-    let router = router.merge(deps_router);
+        .layer(Extension(monitoring.clone()));
 
     // Add graph cache state as Extension if available
     let router = if let Some(gcs) = graph_cache_state {
@@ -217,7 +215,7 @@ pub fn management_router(
         router
     };
 
-    // Apply security middlewares
+    // Apply security middlewares to the per-tenant router
     // ensure_tenant runs FIRST (outer), then require_admin (inner)
     // In Axum layers, later layers run first, so add require_admin first
     let router = router
@@ -241,21 +239,11 @@ pub fn management_router(
         return router;
     }
 
-    // /management/admin/* — superadmin-token gated.
-    // tenants and jobs routes use ManagementState<RocksDBStorage> (storage-only).
-    // tenants and reset-password routes use AppState (auth_service + storage).
-    let admin_jobs_router = Router::new()
-        .route("/management/admin/jobs", get(admin::jobs::list_all_jobs))
-        .route(
-            "/management/admin/jobs/purge-all",
-            post(admin::jobs::purge_all_global),
-        )
-        .route(
-            "/management/admin/jobs/force-fail-stuck",
-            post(admin::jobs::force_fail_stuck_global),
-        )
-        .with_state(state_for_admin.clone());
+    // ------------------------------------------------------------------
+    // /management/admin/* — superadmin-token gated, cross-tenant
+    // ------------------------------------------------------------------
 
+    // Tenants + reset-password — use AppState (auth_service + storage).
     let admin_app_router = Router::new()
         .route(
             "/management/admin/tenants",
@@ -271,8 +259,91 @@ pub fn management_router(
         )
         .with_state(app_state.clone());
 
-    let admin_router = admin_jobs_router
-        .merge(admin_app_router)
+    // Server-wide health, metrics, maintenance, backup, jobs — use
+    // ManagementState<RocksDBStorage>.
+    let admin_global_router = Router::new()
+        // Cross-tenant job ops.
+        .route("/management/admin/jobs", get(admin::jobs::list_all_jobs))
+        .route(
+            "/management/admin/jobs/purge-all",
+            post(admin::jobs::purge_all_global),
+        )
+        .route(
+            "/management/admin/jobs/force-fail-stuck",
+            post(admin::jobs::force_fail_stuck_global),
+        )
+        // Server-wide health (moved from /management/health).
+        .route(
+            "/management/admin/health",
+            get(health::get_health_with_monitoring),
+        )
+        .route(
+            "/management/admin/health/storage",
+            get(health::get_health),
+        )
+        // Server-wide metrics (moved from /management/metrics).
+        .route("/management/admin/metrics", get(maintenance::get_metrics))
+        .route(
+            "/management/admin/metrics/replication",
+            get(health::replication_metrics_handler),
+        )
+        // /management/admin/metrics/vector requires the HNSW extension —
+        // layered below conditionally so this route only works when the
+        // engine is actually present.
+        .route(
+            "/management/admin/metrics/vector",
+            get(health::vector_metrics_handler),
+        )
+        // Cross-tenant maintenance (moved from /management/compact[/start]).
+        .route(
+            "/management/admin/compact",
+            post(maintenance::trigger_compaction),
+        )
+        .route(
+            "/management/admin/compact/start",
+            post(maintenance::start_compaction),
+        )
+        // Cross-tenant backup (moved from /management/backup/all[/start]).
+        .route(
+            "/management/admin/backup/all",
+            post(backup::backup_all),
+        )
+        .route(
+            "/management/admin/backup/all/start",
+            post(backup::start_backup),
+        )
+        .with_state(state_for_admin.clone())
+        // Monitoring extension is required by replication_metrics_handler and
+        // get_health_with_monitoring on this sub-router.
+        .layer(Extension(monitoring));
+
+    // Layer the HNSW engine onto the admin sub-router conditionally. When
+    // disabled (HNSW feature off or engine not initialised) the
+    // /management/admin/metrics/vector route returns 500 (missing-extension)
+    // on call — acceptable since the feature isn't running anyway and the
+    // route still 404s the customer-facing path.
+    let admin_global_router = if let Some(hnsw) = hnsw_engine {
+        admin_global_router.layer(Extension(hnsw))
+    } else {
+        admin_global_router
+    };
+
+    // Dependencies — server-wide config, uses its own DepsState.
+    let deps_state = super::dependencies::DepsState { data_dir };
+    let admin_deps_router = Router::new()
+        .route(
+            "/management/admin/dependencies",
+            get(super::dependencies::list_dependencies),
+        )
+        .route(
+            "/management/admin/dependencies/{name}/enable",
+            post(super::dependencies::enable_dependency),
+        )
+        .with_state(deps_state);
+
+    let admin_router = admin_app_router
+        .merge(admin_global_router)
+        .merge(admin_deps_router)
         .layer(from_fn_with_state(app_state, ensure_tenant_middleware))
         .layer(from_fn(require_superadmin_token_middleware));
 
@@ -288,13 +359,12 @@ where
     let state = ManagementState { storage };
 
     Router::new()
-        // Health endpoints
-        .route("/management/health", get(health::get_health))
+        // Per-tenant health (server-wide is operator-only).
         .route(
             "/management/health/{tenant}",
             get(health::get_tenant_health),
         )
-        // Integrity endpoints
+        // Integrity endpoints — all tenant-scoped in the URL.
         .route(
             "/management/integrity/{tenant}",
             get(integrity::check_integrity),
@@ -335,27 +405,19 @@ where
             "/management/integrity/{tenant}/cleanup-property-indexes",
             post(integrity::cleanup_property_index_orphans),
         )
-        // Metrics endpoints
-        .route("/management/metrics", get(maintenance::get_metrics))
+        // Per-tenant metrics (server-wide is operator-only).
         .route(
             "/management/metrics/{tenant}",
             get(maintenance::get_tenant_metrics),
         )
-        // Maintenance endpoints
-        .route("/management/compact", post(maintenance::trigger_compaction))
-        .route(
-            "/management/compact/start",
-            post(maintenance::start_compaction),
-        )
+        // Per-tenant maintenance (global is operator-only).
         .route(
             "/management/compact/{tenant}",
             post(maintenance::trigger_tenant_compaction),
         )
-        // Backup endpoints
+        // Per-tenant backup (full-instance is operator-only).
         .route("/management/backup/{tenant}", post(backup::backup_tenant))
-        .route("/management/backup/all", post(backup::backup_all))
-        .route("/management/backup/all/start", post(backup::start_backup))
-        // Job management endpoints
+        // Job management endpoints — tenant-scoped via header.
         .route("/management/jobs", get(jobs::list_jobs))
         .route("/management/jobs/{id}", get(jobs::get_job_status))
         .route("/management/jobs/{id}/info", get(jobs::get_job_info))
@@ -372,7 +434,7 @@ where
             "/management/jobs/schedule/integrity",
             post(jobs::schedule_integrity_scan),
         )
-        // Job queue management endpoints
+        // Job queue management endpoints — also tenant-scoped via header.
         .route("/management/jobs/stats", get(jobs::get_job_queue_stats))
         .route("/management/jobs/purge-all", post(jobs::purge_all_jobs))
         .route(
@@ -383,7 +445,7 @@ where
             "/management/jobs/force-fail-stuck",
             post(jobs::force_fail_stuck_jobs),
         )
-        // SSE streaming endpoints for real-time updates
+        // SSE streaming endpoints — filtered to the caller's tenant.
         .route(
             "/management/events/jobs",
             get(crate::sse::job_events_stream::<S>),

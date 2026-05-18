@@ -3,7 +3,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use serde::Deserialize;
 
@@ -12,6 +12,7 @@ use raisin_models::nodes::types::archetype::Archetype;
 use raisin_storage::scope::BranchScope;
 use raisin_storage::{ArchetypeRepository, CommitMetadata, Storage};
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 #[derive(Debug, Deserialize)]
@@ -51,9 +52,10 @@ fn resolve_commit(payload: Option<ArchetypeCommitPayload>, fallback: String) -> 
 pub async fn create_archetype(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(payload): Json<ArchetypeWriteRequest>,
 ) -> Result<(StatusCode, Json<Archetype>), ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let archetype = payload.archetype;
 
     use validator::Validate;
@@ -97,8 +99,9 @@ pub async fn create_archetype(
 pub async fn list_archetypes(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Vec<Archetype>>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let archetypes = state
         .storage()
@@ -115,8 +118,9 @@ pub async fn list_archetypes(
 pub async fn list_published_archetypes(
     Path((repo, branch)): Path<(String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Vec<Archetype>>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let archetypes = state
         .storage()
@@ -133,8 +137,9 @@ pub async fn list_published_archetypes(
 pub async fn get_archetype(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<Archetype>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let archetype = state
         .storage()
@@ -152,9 +157,10 @@ pub async fn get_archetype(
 pub async fn update_archetype(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(payload): Json<ArchetypeWriteRequest>,
 ) -> Result<Json<Archetype>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let archetype = payload.archetype;
 
     if archetype.name != name {
@@ -200,9 +206,10 @@ pub async fn update_archetype(
 pub async fn delete_archetype(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<ArchetypeCommitPayload>>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let commit = resolve_commit(
         maybe_commit.map(|wrapper| wrapper.0),
         format!("Delete archetype {}", name),
@@ -227,9 +234,10 @@ pub async fn delete_archetype(
 pub async fn publish_archetype(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<ArchetypeCommitPayload>>,
 ) -> Result<Json<Archetype>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let commit = resolve_commit(
         maybe_commit.map(|wrapper| wrapper.0),
         format!("Publish archetype {}", name),
@@ -257,10 +265,14 @@ pub async fn publish_archetype(
 pub async fn get_resolved_archetype(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let tenant_id = "default";
-    let resolver =
-        ArchetypeResolver::new(state.storage().clone(), tenant_id.to_string(), repo, branch);
+    let resolver = ArchetypeResolver::new(
+        state.storage().clone(),
+        tenant_info.tenant_id.clone(),
+        repo,
+        branch,
+    );
     let resolved = resolver.resolve(&name).await?;
 
     let response = serde_json::json!({
@@ -280,9 +292,10 @@ pub async fn get_resolved_archetype(
 pub async fn unpublish_archetype(
     Path((repo, branch, name)): Path<(String, String, String)>,
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     maybe_commit: Option<Json<ArchetypeCommitPayload>>,
 ) -> Result<Json<Archetype>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
     let commit = resolve_commit(
         maybe_commit.map(|wrapper| wrapper.0),
         format!("Unpublish archetype {}", name),

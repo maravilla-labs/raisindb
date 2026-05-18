@@ -46,6 +46,13 @@ impl JobDataStore {
     }
 
     /// Retrieve job context data for the given tenant.
+    ///
+    /// Defense-in-depth: the key already includes the tenant prefix, but we
+    /// also verify that the deserialized `JobContext.tenant_id` matches the
+    /// lookup tenant. If they disagree, something has gone wrong upstream
+    /// (mismatched tenants between `register_job` and `JobDataStore::put`),
+    /// so log a structured error and return `None` rather than handing a
+    /// foreign-tenant context to the worker.
     pub fn get(&self, tenant: &str, job_id: &JobId) -> Result<Option<JobContext>> {
         let cf = cf_handle(&self.db, cf::JOB_DATA)?;
         let key = job_key(tenant, job_id.as_str());
@@ -56,12 +63,25 @@ impl JobDataStore {
 
         match value {
             Some(bytes) => {
-                let context = rmp_serde::from_slice(&bytes).map_err(|e| {
+                let context: JobContext = rmp_serde::from_slice(&bytes).map_err(|e| {
                     raisin_error::Error::storage(format!(
                         "Failed to deserialize job context: {}",
                         e
                     ))
                 })?;
+
+                if context.tenant_id != tenant {
+                    tracing::error!(
+                        lookup_tenant = %tenant,
+                        stored_tenant = %context.tenant_id,
+                        job_id = %job_id,
+                        "JobContext tenant mismatch: stored context's tenant_id does \
+                         not match the lookup tenant. Returning None to avoid leaking \
+                         cross-tenant context to a worker."
+                    );
+                    return Ok(None);
+                }
+
                 Ok(Some(context))
             }
             None => Ok(None),
@@ -161,6 +181,36 @@ mod tests {
         assert!(result.is_some());
         let retrieved = result.unwrap();
         assert_eq!(retrieved.revision, raisin_hlc::HLC::new(2, 0));
+    }
+
+    #[test]
+    fn test_get_returns_none_on_tenant_mismatch() {
+        // Defense-in-depth: if a stored JobContext somehow ended up with a
+        // tenant_id that disagrees with the key prefix it was stored under,
+        // `get` should refuse to return it (and log) rather than hand a
+        // foreign-tenant context to a worker.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::open_db(temp_dir.path()).unwrap());
+        let store = JobDataStore::new(Arc::clone(&db));
+
+        let job_id = JobId::new();
+
+        // Forge a key for tenant "a" but a value whose tenant_id is "b".
+        let mut bad_context = create_test_context();
+        bad_context.tenant_id = "b".to_string();
+        let cf = cf_handle(&db, cf::JOB_DATA).unwrap();
+        let key = crate::keys::job_key("a", job_id.as_str());
+        let bytes = rmp_serde::to_vec(&bad_context).unwrap();
+        db.put_cf(cf, &key, bytes).unwrap();
+
+        // Looking up under tenant "a" must NOT return the cross-tenant context.
+        let result = store.get("a", &job_id).unwrap();
+        assert!(result.is_none(), "tenant-mismatched context should be filtered out");
+
+        // Looking up under the stored tenant "b" simply has no entry (the
+        // forged value is keyed under "a"), so it returns None too.
+        let result = store.get("b", &job_id).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]

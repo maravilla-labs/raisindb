@@ -6,6 +6,7 @@ use raisin_models::auth::AuthContext;
 
 use crate::{
     error::ApiError,
+    middleware::TenantInfo,
     state::AppState,
     types::{CommitNodeRequest, CommitResponse},
 };
@@ -18,11 +19,12 @@ use raisin_storage::{NodeRepository, Storage, StorageScope};
 /// Creates a new revision with the updated node properties.
 pub async fn commit_node_save(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, ws, path)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<CommitNodeRequest>,
 ) -> Result<Json<CommitResponse>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Get the node to update
     let auth_context = auth.map(|Extension(ctx)| ctx);
@@ -62,10 +64,11 @@ pub async fn commit_node_save(
 /// Creates a new revision with the new node.
 pub async fn commit_node_create(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, ws, _path)): Path<(String, String, String, String)>,
     Json(req): Json<CommitNodeRequest>,
 ) -> Result<Json<CommitResponse>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Parse node from request
     let node: raisin_models::nodes::Node = req
@@ -101,11 +104,12 @@ pub async fn commit_node_create(
 /// Creates a new revision with the node deleted.
 pub async fn commit_node_delete(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, ws, path)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<CommitNodeRequest>,
 ) -> Result<Json<CommitResponse>, ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Get the node to delete
     let auth_context = auth.map(|Extension(ctx)| ctx);

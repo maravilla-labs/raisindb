@@ -60,6 +60,13 @@ pub struct AppState {
     pub(crate) anonymous_enabled: bool,
     /// Development mode — allows insecure defaults for secrets.
     pub(crate) dev_mode: bool,
+    /// Server version string (sourced from raisin-server's CARGO_PKG_VERSION at startup).
+    /// Exposed to the admin SPA via the `/api/admin/bootstrap` endpoint.
+    pub(crate) server_version: String,
+    /// Snapshot of `RAISIN_SUPERADMIN_TOKEN` resolved once at startup. Held as
+    /// `Arc<str>` so the bootstrap handler can hand out a refcount clone
+    /// rather than reading `std::env::var` on every SPA boot.
+    pub(crate) superadmin_token: Option<Arc<str>>,
     /// Global CORS allowed origins from server config (TOML).
     /// Used as fallback when tenant/repo-level CORS is not configured.
     pub(crate) cors_allowed_origins: Vec<String>,
@@ -253,8 +260,9 @@ pub fn router(storage: Arc<Store>) -> Router {
         audit,
         adapter,
         anonymous_enabled,
-        false, // dev_mode disabled for test router
-        &[],   // No CORS for test router
+        false,                       // dev_mode disabled for test router
+        "0.0.0-test".to_string(),    // server_version placeholder for test router
+        &[],              // No CORS for test router
         #[cfg(feature = "storage-rocksdb")]
         None,
         #[cfg(feature = "storage-rocksdb")]
@@ -284,6 +292,7 @@ pub fn router_with_bin_and_audit(
     audit_adapter: Arc<RepoAuditAdapter<AuditRepo>>,
     anonymous_enabled: bool,
     dev_mode: bool,
+    server_version: String,
     cors_allowed_origins: &[String],
     #[cfg(feature = "storage-rocksdb")] indexing_engine: Option<Arc<TantivyIndexingEngine>>,
     #[cfg(feature = "storage-rocksdb")] tantivy_management: Option<Arc<TantivyManagement>>,
@@ -302,6 +311,18 @@ pub fn router_with_bin_and_audit(
     // Create upload processor registry with built-in processors
     let upload_processors = Arc::new(UploadProcessorRegistry::new());
 
+    // Resolve the superadmin token once at startup. We only retain it when
+    // dev_mode is on; in production the bootstrap endpoint never surfaces it
+    // so caching it would only widen the in-memory exposure.
+    let superadmin_token: Option<Arc<str>> = if dev_mode {
+        std::env::var("RAISIN_SUPERADMIN_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .map(Arc::<str>::from)
+    } else {
+        None
+    };
+
     let state = AppState {
         storage,
         connection,
@@ -312,6 +333,8 @@ pub fn router_with_bin_and_audit(
         upload_processors,
         anonymous_enabled,
         dev_mode,
+        server_version,
+        superadmin_token,
         cors_allowed_origins: cors_allowed_origins.to_vec(),
         #[cfg(feature = "storage-rocksdb")]
         cors_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(60))),

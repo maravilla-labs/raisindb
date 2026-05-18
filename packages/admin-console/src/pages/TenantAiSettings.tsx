@@ -41,9 +41,7 @@ import {
   EMBEDDING_CAPABLE_PROVIDERS,
 } from '../api/ai'
 import { ApiError } from '../api/client'
-
-// Use "default" as tenant ID for single-tenant mode
-const TENANT_ID = 'default'
+import { useAuth } from '../contexts/AuthContext'
 
 interface ProviderSectionProps {
   icon: React.ReactNode
@@ -519,6 +517,10 @@ function LocalModelsSection({ enabled, onToggle }: LocalModelsSectionProps) {
 
 export default function TenantAiSettings() {
   const toast = useToast()
+  // Tenant resolved from /api/admin/bootstrap (via AuthContext). Replaces
+  // the previous module-level `TENANT_ID = 'default'` hardcode so the AI
+  // settings target the correct tenant on multi-tenant deployments.
+  const { tenantId: TENANT_ID } = useAuth()
 
   // State
   const [config, setConfig] = useState<AIConfigResponse | null>(null)
@@ -562,10 +564,13 @@ export default function TenantAiSettings() {
   })
   const [showAdvancedHnsw, setShowAdvancedHnsw] = useState(false)
 
-  // Load configuration on mount
+  // Load configuration on mount (and when tenant changes — bootstrap
+  // settles before the first protected route renders, but re-loading on
+  // tenant change keeps the panel honest if the value updates later).
   useEffect(() => {
     loadConfig()
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [TENANT_ID])
 
   // Track changes
   useEffect(() => {

@@ -27,7 +27,8 @@ use super::file_helpers::{
 };
 use super::helpers::{find_asset_node_by_id, load_asset_code};
 use super::types::{RunFileEvent, RunFileRequest};
-use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
+use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
+use crate::middleware::TenantInfo;
 
 /// Run a JavaScript file directly by node ID (SSE streaming).
 ///
@@ -42,6 +43,7 @@ use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID};
 #[cfg(feature = "storage-rocksdb")]
 pub async fn run_file(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<RunFileRequest>,
@@ -57,6 +59,7 @@ pub async fn run_file(
 
     // Clone what we need for the async stream
     let state_clone = state.clone();
+    let tenant_clone = tenant_info.tenant_id.clone();
     let repo_clone = repo.clone();
     let auth_clone = auth_context.clone();
     let req_node_id = req.node_id.clone();
@@ -100,7 +103,7 @@ pub async fn run_file(
             (inline_code, name, synthetic_path, synthetic_id, FUNCTIONS_WORKSPACE.to_string())
         } else if let Some(node_id) = req_node_id {
             // Load from saved node (existing flow)
-            let asset_result = find_asset_node_by_id(&state_clone, &repo_clone, &node_id, auth_clone.as_ref()).await;
+            let asset_result = find_asset_node_by_id(&state_clone, &tenant_clone, &repo_clone, &node_id, auth_clone.as_ref()).await;
             let asset_node = match asset_result {
                 Ok(node) => node,
                 Err(e) => {
@@ -192,14 +195,14 @@ pub async fn run_file(
         ));
 
         // Resolve input
-        let input = resolve_file_input(&state_clone, &repo_clone, &req_input, &req_input_node_id, &req_input_workspace).await;
+        let input = resolve_file_input(&state_clone, &tenant_clone, &repo_clone, &req_input, &req_input_node_id, &req_input_workspace).await;
 
         // Build synthetic function metadata
         let mut metadata = build_synthetic_metadata_from_name(&file_name, &req_handler);
 
         // Look up parent raisin:Function node to get network_policy and resource_limits
         let lookup_path = req_function_path.as_deref().unwrap_or(&asset_path);
-        if let Some((network_policy, resource_limits)) = find_parent_function_config(&state_clone, &repo_clone, lookup_path).await {
+        if let Some((network_policy, resource_limits)) = find_parent_function_config(&state_clone, &tenant_clone, &repo_clone, lookup_path).await {
             metadata.network_policy = network_policy;
             metadata.resource_limits = resource_limits;
         }
@@ -218,7 +221,7 @@ pub async fn run_file(
         }
 
         // Execute the function
-        let context = ExecutionContext::new(TENANT_ID, &repo_clone, DEFAULT_BRANCH, "system")
+        let context = ExecutionContext::new(&tenant_clone, &repo_clone, DEFAULT_BRANCH, "system")
             .with_workspace(FUNCTIONS_WORKSPACE)
             .with_input(input);
 
@@ -227,7 +230,7 @@ pub async fn run_file(
             loaded.metadata.network_policy.http_enabled,
             loaded.metadata.network_policy.allowed_urls
         );
-        let api = build_function_api(&state_clone, &repo_clone, loaded.metadata.network_policy.clone(), None);
+        let api = build_function_api(&state_clone, &tenant_clone, &repo_clone, loaded.metadata.network_policy.clone(), None);
         let executor = FunctionExecutor::new();
 
         let exec_result = executor.execute(&loaded, context.clone(), api.clone()).await;

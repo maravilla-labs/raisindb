@@ -304,6 +304,17 @@ export const managementApi = {
   triggerTenantCompaction: (tenant: string) =>
     api.post<ApiResponse<CompactionStats>>(`/management/compact/${tenant}`),
 
+  /**
+   * Start the tenant-scoped async compaction job.
+   *
+   * This is the variant the customer-facing SPA should call. The legacy
+   * `startCompaction()` hits the global cross-tenant `/management/compact`
+   * route which is being moved to `/management/admin/compact` for operators
+   * only — those moved routes are reachable via `adminManagementApi` below.
+   */
+  startTenantCompaction: (tenant: string) =>
+    api.post<ApiResponse<string>>(`/management/compact/${tenant}/start`),
+
   // Backup endpoints
   backupTenant: (tenant: string, path: string) =>
     api.post<ApiResponse<BackupInfo>>(
@@ -382,6 +393,64 @@ export const managementApi = {
       '/management/jobs/force-fail-stuck',
       { stuck_minutes: stuckMinutes }
     ),
+}
+
+/**
+ * Cross-tenant / operator-only management endpoints.
+ *
+ * Every route here is gated server-side by `require_superadmin_token_middleware`.
+ * The api/client.ts attaches the dev-mode superadmin token automatically for
+ * any path under `/management/admin/*` — so in production these calls fail
+ * with 401 unless the token is present, which keeps them firmly operator-only.
+ *
+ * The SPA surfaces these only in the dev-mode hub (Bug #5b dev-bonus).
+ */
+export interface DependencyInfo {
+  name: string
+  enabled: boolean
+  description?: string
+}
+
+export const adminManagementApi = {
+  // Cross-tenant compaction (operator-only).
+  triggerGlobalCompaction: () =>
+    api.post<ApiResponse<CompactionStats>>('/management/admin/compact'),
+
+  startGlobalCompaction: () =>
+    api.post<ApiResponse<string>>('/management/admin/compact/start'),
+
+  // Cross-tenant backup.
+  backupAll: (path: string) =>
+    api.post<ApiResponse<BackupInfo[]>>('/management/admin/backup/all', { path }),
+
+  startBackupAll: (path: string) =>
+    api.post<ApiResponse<string>>('/management/admin/backup/all/start', { path }),
+
+  // Server-wide health / metrics (operator-only).
+  getServerHealth: () =>
+    api.get<ApiResponse<HealthStatus>>('/management/admin/health'),
+
+  getStorageHealth: () =>
+    api.get<ApiResponse<HealthStatus>>('/management/admin/health/storage'),
+
+  getServerMetrics: () =>
+    api.get<ApiResponse<Metrics>>('/management/admin/metrics'),
+
+  getReplicationMetrics: () =>
+    api.get<ApiResponse<unknown>>('/management/admin/metrics/replication'),
+
+  getVectorMetrics: () =>
+    api.get<VectorMetrics>('/management/admin/metrics/vector'),
+
+  // Server-config: loaded extensions / modules.
+  listDependencies: () =>
+    api.get<ApiResponse<DependencyInfo[]>>('/management/admin/dependencies'),
+
+  enableDependency: (name: string) =>
+    api.post<ApiResponse<void>>(`/management/admin/dependencies/${name}/enable`),
+
+  disableDependency: (name: string) =>
+    api.post<ApiResponse<void>>(`/management/admin/dependencies/${name}/disable`),
 }
 
 // SSE Event Source Manager using fetchEventSource for auth support

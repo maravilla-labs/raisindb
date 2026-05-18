@@ -6,7 +6,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use raisin_core::{TranslationService, TranslationUpdateResult};
 use raisin_hlc::HLC;
@@ -16,6 +16,7 @@ use raisin_storage::{BranchRepository, Storage, TranslationRepository};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
 
 /// Request to update a node's translation for a specific locale
@@ -76,9 +77,10 @@ pub async fn update_translation(
         String,
         String,
     )>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<UpdateTranslationRequest>,
 ) -> Result<(StatusCode, Json<TranslationResponse>), ApiError> {
-    let tenant_id = "default"; // TODO: Extract from headers/middleware
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Parse locale
     let locale = LocaleCode::parse(&locale_str)
@@ -142,8 +144,9 @@ pub async fn update_translation(
 pub async fn list_translations(
     State(state): State<AppState>,
     Path((repo, branch, workspace, node_id)): Path<(String, String, String, String)>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     let translation_repo = state.storage().translations();
 
@@ -187,8 +190,9 @@ pub async fn delete_translation(
         String,
         String,
     )>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Parse locale
     let locale = LocaleCode::parse(&locale_str)
@@ -229,9 +233,10 @@ pub async fn hide_node(
         String,
         String,
     )>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Json(req): Json<UpdateTranslationRequest>,
 ) -> Result<(StatusCode, Json<TranslationResponse>), ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Parse locale
     let locale = LocaleCode::parse(&locale_str)
@@ -279,8 +284,9 @@ pub async fn unhide_node(
         String,
         String,
     )>,
+    Extension(tenant_info): Extension<TenantInfo>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Parse locale
     let locale = LocaleCode::parse(&locale_str)

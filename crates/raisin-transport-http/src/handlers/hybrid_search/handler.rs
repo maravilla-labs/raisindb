@@ -3,12 +3,12 @@
 //! Main hybrid search handler combining fulltext and vector search.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::IntoResponse,
     Json,
 };
 
-use crate::state::AppState;
+use crate::{middleware::TenantInfo, state::AppState};
 
 use super::rrf::merge_with_rrf;
 use super::types::{HybridSearchQuery, HybridSearchResponse};
@@ -17,14 +17,14 @@ use super::types::{HybridSearchQuery, HybridSearchResponse};
 #[cfg(feature = "storage-rocksdb")]
 pub async fn hybrid_search(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
     Query(params): Query<HybridSearchQuery>,
 ) -> impl IntoResponse {
     use super::fulltext::perform_fulltext_search;
     use super::vector::perform_vector_search;
 
-    // Extract tenant from headers (for now, use "default")
-    let tenant_id = "default";
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     tracing::debug!(
         tenant = tenant_id,

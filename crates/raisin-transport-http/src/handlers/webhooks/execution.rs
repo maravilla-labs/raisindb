@@ -26,13 +26,14 @@ use super::helpers::{
 };
 use super::lookup::{find_trigger_by_name, find_trigger_by_webhook_id};
 use super::types::{
-    InvokeQuery, TriggerLookup, WebhookResponse, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, TENANT_ID,
+    InvokeQuery, TriggerLookup, WebhookResponse, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE,
 };
 
 /// Internal implementation for HTTP trigger invocation
 #[cfg(feature = "storage-rocksdb")]
 pub(super) async fn invoke_http_trigger_internal(
     state: &AppState,
+    tenant_id: &str,
     repo: &str,
     lookup: TriggerLookup,
     path_suffix: Option<String>,
@@ -49,8 +50,8 @@ pub(super) async fn invoke_http_trigger_internal(
 
     // 1. Look up the trigger node
     let trigger_node = match &lookup {
-        TriggerLookup::ByWebhookId(id) => find_trigger_by_webhook_id(state, repo, id).await?,
-        TriggerLookup::ByName(name) => find_trigger_by_name(state, repo, name).await?,
+        TriggerLookup::ByWebhookId(id) => find_trigger_by_webhook_id(state, tenant_id, repo, id).await?,
+        TriggerLookup::ByName(name) => find_trigger_by_name(state, tenant_id, repo, name).await?,
     };
 
     // 2. Verify trigger is enabled
@@ -134,6 +135,7 @@ pub(super) async fn invoke_http_trigger_internal(
         execute_sync(
             state,
             &rocksdb,
+            tenant_id,
             repo,
             &trigger_node,
             &function_path,
@@ -146,6 +148,7 @@ pub(super) async fn invoke_http_trigger_internal(
         // Asynchronous execution: queue job and return immediately
         execute_async(
             &rocksdb,
+            tenant_id,
             repo,
             &trigger_node,
             &function_path,
@@ -161,6 +164,7 @@ pub(super) async fn invoke_http_trigger_internal(
 async fn execute_sync(
     state: &AppState,
     rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+    tenant_id: &str,
     repo: &str,
     trigger_node: &Node,
     function_path: &str,
@@ -174,7 +178,8 @@ async fn execute_sync(
 
     // Register job for tracking
     let job_id =
-        register_trigger_job(rocksdb, repo, trigger_node, &execution_id, input.clone()).await?;
+        register_trigger_job(rocksdb, tenant_id, repo, trigger_node, &execution_id, input.clone())
+            .await?;
 
     // Update job status to Running
     rocksdb
@@ -188,7 +193,7 @@ async fn execute_sync(
         .storage
         .nodes()
         .get_by_path(
-            StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
+            StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE),
             function_path,
             None,
         )
@@ -197,10 +202,10 @@ async fn execute_sync(
         .ok_or_else(|| ApiError::not_found(format!("Function not found: {}", function_path)))?;
 
     // Load and execute function
-    let code = load_function_code(state, repo, &function_node).await?;
+    let code = load_function_code(state, tenant_id, repo, &function_node).await?;
     let loaded = build_loaded_function(&function_node, code)?;
 
-    let context = ExecutionContext::new(TENANT_ID, repo, DEFAULT_BRANCH, "http-trigger")
+    let context = ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, "http-trigger")
         .with_workspace(FUNCTIONS_WORKSPACE)
         .with_input(input.clone())
         .with_http_request(http_request);
@@ -210,7 +215,7 @@ async fn execute_sync(
         loaded.metadata.network_policy.http_enabled,
         loaded.metadata.network_policy.allowed_urls
     );
-    let api = build_function_api(state, repo, loaded.metadata.network_policy.clone(), None);
+    let api = build_function_api(state, tenant_id, repo, loaded.metadata.network_policy.clone(), None);
     let executor = FunctionExecutor::new();
 
     match executor
@@ -235,7 +240,7 @@ async fn execute_sync(
                 .mark_completed(&job_id)
                 .await
                 .map_err(|e| ApiError::internal(e.to_string()))?;
-            let _ = rocksdb.job_data_store().delete(TENANT_ID, &job_id);
+            let _ = rocksdb.job_data_store().delete(tenant_id, &job_id);
 
             Ok(Json(WebhookResponse {
                 execution_id: context.execution_id,
@@ -268,6 +273,7 @@ async fn execute_sync(
 #[cfg(feature = "storage-rocksdb")]
 async fn execute_async(
     rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+    tenant_id: &str,
     repo: &str,
     trigger_node: &Node,
     _function_path: &str,
@@ -275,7 +281,8 @@ async fn execute_async(
     input: serde_json::Value,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     // Register job for background execution
-    let job_id = register_trigger_job(rocksdb, repo, trigger_node, &execution_id, input).await?;
+    let job_id =
+        register_trigger_job(rocksdb, tenant_id, repo, trigger_node, &execution_id, input).await?;
 
     Ok(Json(WebhookResponse {
         execution_id,
@@ -292,6 +299,7 @@ async fn execute_async(
 #[cfg(feature = "storage-rocksdb")]
 async fn register_trigger_job(
     rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+    tenant_id: &str,
     repo: &str,
     trigger_node: &Node,
     execution_id: &str,
@@ -338,7 +346,7 @@ async fn register_trigger_job(
     metadata.insert("trigger_path".to_string(), serde_json::json!(trigger_path));
 
     let context = JobContext {
-        tenant_id: TENANT_ID.to_string(),
+        tenant_id: tenant_id.to_string(),
         repo_id: repo.to_string(),
         branch: DEFAULT_BRANCH.to_string(),
         workspace_id: FUNCTIONS_WORKSPACE.to_string(),
@@ -349,7 +357,7 @@ async fn register_trigger_job(
     // Register with JobRegistry
     let job_id = rocksdb
         .job_registry()
-        .register_job(job_type, TENANT_ID.to_string(), None, None, None)
+        .register_job(job_type, tenant_id.to_string(), None, None, None)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

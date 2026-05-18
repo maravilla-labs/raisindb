@@ -13,7 +13,12 @@ use raisin_models as models;
 use raisin_models::auth::AuthContext;
 use raisin_storage::{BranchRepository, NodeRepository, Storage, StorageScope};
 
-use crate::{error::ApiError, middleware::RaisinContext, state::AppState, types::RepoQuery};
+use crate::{
+    error::ApiError,
+    middleware::{RaisinContext, TenantInfo},
+    state::AppState,
+    types::RepoQuery,
+};
 
 /// PUT handler for updating nodes.
 ///
@@ -23,12 +28,13 @@ use crate::{error::ApiError, middleware::RaisinContext, state::AppState, types::
 pub async fn repo_put(
     State(state): State<AppState>,
     Extension(ctx): Extension<RaisinContext>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, branch, ws, _node_path)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     Query(_q): Query<RepoQuery>,
     Json(json_body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
     let auth_context = auth.map(|Extension(ctx)| ctx);
     let nodes_svc = state.node_service_for_context(tenant_id, &repo, &branch, &ws, auth_context);
 
@@ -127,12 +133,13 @@ pub async fn repo_put(
 /// - **Commit mode**: Creates a transaction with cascade delete and commits
 pub async fn repo_delete(
     Extension(ctx): Extension<RaisinContext>,
+    Extension(tenant_info): Extension<TenantInfo>,
     State(state): State<AppState>,
     Path((repo, branch, ws, _node_path)): Path<(String, String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let tenant_id = "default"; // TODO: Extract from middleware/auth
+    let tenant_id = tenant_info.tenant_id.as_str();
 
     // Get branch HEAD revision and bound queries to it for snapshot isolation
     let auth_context = auth.map(|Extension(ctx)| ctx);

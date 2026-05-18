@@ -18,7 +18,6 @@ mod run_file;
 mod run_flow;
 pub mod types;
 
-const TENANT_ID: &str = "default";
 const DEFAULT_BRANCH: &str = "main";
 const FUNCTIONS_WORKSPACE: &str = "functions";
 const SYSTEM_WORKSPACE: &str = "raisin:system";

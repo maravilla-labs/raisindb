@@ -2,9 +2,12 @@ import { useState, useEffect } from 'react'
 import { Database, Zap, BarChart3, Settings, AlertCircle, RefreshCw, XCircle, CheckCircle } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import { managementApi, formatBytes, formatDuration, sseManager, JobEvent } from '../api/management'
+import { useAuth } from '../contexts/AuthContext'
 
 export default function RocksDBManagement() {
-  const [tenant] = useState('default')
+  // Tenant comes from /api/admin/bootstrap (via AuthContext), so the
+  // SPA always compacts the customer's own data — not a hardcoded "default".
+  const { tenantId: tenant } = useAuth()
 
   // Compaction state
   const [compactLoading, setCompactLoading] = useState(false)
@@ -60,8 +63,11 @@ export default function RocksDBManagement() {
     setCompactProgress(0)
 
     try {
-      // Start the background job
-      const response = await managementApi.startCompaction()
+      // Start the tenant-scoped background job. Even on the dev hub we want
+      // tenant-scoped behavior here — the unconditional cross-tenant variant
+      // lives under /management/admin/compact and is reachable through
+      // adminManagementApi.startGlobalCompaction (TenantManagement.tsx).
+      const response = await managementApi.startTenantCompaction(tenant)
       if (response.success && response.data) {
         setCompactJobId(response.data)
         // Job started successfully, now SSE will handle updates
