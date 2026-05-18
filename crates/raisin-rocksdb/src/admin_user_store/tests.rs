@@ -158,3 +158,34 @@ fn test_tenant_isolation() {
     assert_eq!(tenant1_users[0].tenant_id, "tenant1");
     assert_eq!(tenant2_users[0].tenant_id, "tenant2");
 }
+
+#[test]
+fn test_has_users_is_strictly_tenant_scoped() {
+    // Regression: `prefix_iterator_cf` seeks but does not filter, so
+    // `iter.next()` returns whatever key is lexically next in the CF —
+    // even one belonging to a different tenant. Without the bounds
+    // check, has_users() returned true for empty tenants whose id sorts
+    // before any tenant that has users.
+    let (_dir, db) = create_test_db();
+    let store = AdminUserStore::new(db);
+
+    // Seed a user in a tenant whose id sorts AFTER our query target.
+    let later = DatabaseAdminUser::new(
+        "u-later".to_string(),
+        "admin".to_string(),
+        None,
+        "hash".to_string(),
+        "z-later-tenant".to_string(),
+    );
+    store.create_user(&later).unwrap();
+
+    // Tenant with no users at all — must return false, regardless of
+    // what other tenants exist in the CF.
+    assert!(
+        !store.has_users("a-empty-tenant").unwrap(),
+        "has_users() leaked across tenants: it should return false for an empty tenant even when a later-sorting tenant has users",
+    );
+
+    // And the populated tenant must still report true.
+    assert!(store.has_users("z-later-tenant").unwrap());
+}

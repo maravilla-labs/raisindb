@@ -249,7 +249,15 @@ impl AdminUserStore {
         Ok(users)
     }
 
-    /// Check if any admin users exist for a tenant
+    /// Check if any admin users exist for a tenant.
+    ///
+    /// `prefix_iterator_cf` seeks to the prefix position but does NOT filter
+    /// by it — `.next()` will return whichever key is lexically next in the
+    /// CF, even if it belongs to a different tenant. Without the explicit
+    /// `starts_with` bounds check this method returned `true` for every
+    /// tenant whose id sorts before any tenant that has users (e.g. anything
+    /// before "default"), which broke first-time provisioning for those
+    /// tenants. Mirrors the bounds-check pattern used by `list_users`.
     pub fn has_users(&self, tenant_id: &str) -> Result<bool> {
         let cf = self.db.cf_handle(cf::ADMIN_USERS).ok_or_else(|| {
             raisin_error::Error::Backend("admin_users column family not found".to_string())
@@ -258,7 +266,11 @@ impl AdminUserStore {
         let prefix = Self::build_tenant_prefix(tenant_id);
         let mut iter = self.db.prefix_iterator_cf(cf, &prefix);
 
-        Ok(iter.next().is_some())
+        match iter.next() {
+            Some(Ok((key, _))) => Ok(key.starts_with(&prefix)),
+            Some(Err(e)) => Err(raisin_error::Error::storage(e.to_string())),
+            None => Ok(false),
+        }
     }
 
     /// Helper: Capture a user update/create operation for replication
