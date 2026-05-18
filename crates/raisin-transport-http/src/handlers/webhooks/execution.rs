@@ -50,7 +50,9 @@ pub(super) async fn invoke_http_trigger_internal(
 
     // 1. Look up the trigger node
     let trigger_node = match &lookup {
-        TriggerLookup::ByWebhookId(id) => find_trigger_by_webhook_id(state, tenant_id, repo, id).await?,
+        TriggerLookup::ByWebhookId(id) => {
+            find_trigger_by_webhook_id(state, tenant_id, repo, id).await?
+        }
         TriggerLookup::ByName(name) => find_trigger_by_name(state, tenant_id, repo, name).await?,
     };
 
@@ -177,9 +179,15 @@ async fn execute_sync(
     };
 
     // Register job for tracking
-    let job_id =
-        register_trigger_job(rocksdb, tenant_id, repo, trigger_node, &execution_id, input.clone())
-            .await?;
+    let job_id = register_trigger_job(
+        rocksdb,
+        tenant_id,
+        repo,
+        trigger_node,
+        &execution_id,
+        input.clone(),
+    )
+    .await?;
 
     // Update job status to Running
     rocksdb
@@ -215,7 +223,13 @@ async fn execute_sync(
         loaded.metadata.network_policy.http_enabled,
         loaded.metadata.network_policy.allowed_urls
     );
-    let api = build_function_api(state, tenant_id, repo, loaded.metadata.network_policy.clone(), None);
+    let api = build_function_api(
+        state,
+        tenant_id,
+        repo,
+        loaded.metadata.network_policy.clone(),
+        None,
+    );
     let executor = FunctionExecutor::new();
 
     match executor

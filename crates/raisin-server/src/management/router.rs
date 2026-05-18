@@ -277,10 +277,7 @@ pub fn management_router(
             "/management/admin/health",
             get(health::get_health_with_monitoring),
         )
-        .route(
-            "/management/admin/health/storage",
-            get(health::get_health),
-        )
+        .route("/management/admin/health/storage", get(health::get_health))
         // Server-wide metrics (moved from /management/metrics).
         .route("/management/admin/metrics", get(maintenance::get_metrics))
         .route(
@@ -304,10 +301,7 @@ pub fn management_router(
             post(maintenance::start_compaction),
         )
         // Cross-tenant backup (moved from /management/backup/all[/start]).
-        .route(
-            "/management/admin/backup/all",
-            post(backup::backup_all),
-        )
+        .route("/management/admin/backup/all", post(backup::backup_all))
         .route(
             "/management/admin/backup/all/start",
             post(backup::start_backup),

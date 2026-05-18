@@ -3,11 +3,7 @@
 //! Each operation has a synchronous handler (generic over Storage) and an
 //! asynchronous background-job variant (RocksDB-specific) that returns a job ID.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use axum::{extract::State, http::StatusCode, response::Json};
 use raisin_storage::{BackgroundJobs, IndexType, ManagementOps};
 use raisin_transport_http::middleware::ScopedTenant;
 

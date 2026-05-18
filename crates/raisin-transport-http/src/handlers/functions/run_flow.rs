@@ -271,7 +271,12 @@ pub async fn delete_flow_instance(
     Path((repo, instance_id)): Path<(String, String)>,
     _auth_context: Option<Extension<AuthContext>>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let scope = StorageScope::new(&tenant_info.tenant_id, &repo, DEFAULT_BRANCH, SYSTEM_WORKSPACE);
+    let scope = StorageScope::new(
+        &tenant_info.tenant_id,
+        &repo,
+        DEFAULT_BRANCH,
+        SYSTEM_WORKSPACE,
+    );
 
     // Look up by path first (instance UUID), then by node ID
     let instance_path = format!("/flows/instances/{}", instance_id);

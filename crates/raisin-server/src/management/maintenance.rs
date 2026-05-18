@@ -1,10 +1,6 @@
 //! Compaction and metrics handlers for management API.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use axum::{extract::State, http::StatusCode, response::Json};
 use raisin_storage::{BackgroundJobs, ManagementOps};
 use raisin_transport_http::middleware::ScopedTenant;
 

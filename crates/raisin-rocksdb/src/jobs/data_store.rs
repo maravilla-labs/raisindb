@@ -205,7 +205,10 @@ mod tests {
 
         // Looking up under tenant "a" must NOT return the cross-tenant context.
         let result = store.get("a", &job_id).unwrap();
-        assert!(result.is_none(), "tenant-mismatched context should be filtered out");
+        assert!(
+            result.is_none(),
+            "tenant-mismatched context should be filtered out"
+        );
 
         // Looking up under the stored tenant "b" simply has no entry (the
         // forged value is keyed under "a"), so it returns None too.

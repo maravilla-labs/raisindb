@@ -195,8 +195,14 @@ mod tests {
     fn test_sign_asset_url_with_property_path() {
         let sig_default = sign_asset_url(SECRET, TENANT, PATH, "download", None, 1704067200);
         let sig_file = sign_asset_url(SECRET, TENANT, PATH, "download", Some("file"), 1704067200);
-        let sig_thumb =
-            sign_asset_url(SECRET, TENANT, PATH, "download", Some("thumbnail"), 1704067200);
+        let sig_thumb = sign_asset_url(
+            SECRET,
+            TENANT,
+            PATH,
+            "download",
+            Some("thumbnail"),
+            1704067200,
+        );
 
         // None and "file" should produce the same signature (file is default)
         assert_eq!(sig_default, sig_file);
@@ -232,8 +238,7 @@ mod tests {
     #[test]
     fn test_verify_with_property_path() {
         let expires = u64::MAX;
-        let sig_thumb =
-            sign_asset_url(SECRET, TENANT, PATH, "display", Some("thumbnail"), expires);
+        let sig_thumb = sign_asset_url(SECRET, TENANT, PATH, "display", Some("thumbnail"), expires);
 
         // Should verify with correct property path
         assert!(verify_asset_signature(

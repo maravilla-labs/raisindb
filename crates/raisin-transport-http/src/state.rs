@@ -260,9 +260,9 @@ pub fn router(storage: Arc<Store>) -> Router {
         audit,
         adapter,
         anonymous_enabled,
-        false,                       // dev_mode disabled for test router
-        "0.0.0-test".to_string(),    // server_version placeholder for test router
-        &[],              // No CORS for test router
+        false,                    // dev_mode disabled for test router
+        "0.0.0-test".to_string(), // server_version placeholder for test router
+        &[],                      // No CORS for test router
         #[cfg(feature = "storage-rocksdb")]
         None,
         #[cfg(feature = "storage-rocksdb")]

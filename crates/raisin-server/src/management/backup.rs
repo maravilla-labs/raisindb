@@ -3,11 +3,7 @@
 //! Provides synchronous backup endpoints (generic) and async background-job
 //! variants (RocksDB-specific) for backup and repair operations.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use axum::{extract::State, http::StatusCode, response::Json};
 use raisin_storage::{BackgroundJobs, ManagementOps};
 use raisin_transport_http::middleware::ScopedTenant;
 

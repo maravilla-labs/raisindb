@@ -1,11 +1,6 @@
 //! Health check handlers for management API.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    Extension,
-};
+use axum::{extract::State, http::StatusCode, response::Json, Extension};
 use raisin_storage::ManagementOps;
 use raisin_transport_http::middleware::ScopedTenant;
 

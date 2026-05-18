@@ -229,7 +229,6 @@ pub(crate) async fn sign_asset_url_internal(
     path: &str,
     request: SignAssetRequest,
 ) -> Result<Json<SignAssetResponse>, ApiError> {
-
     // Validate command
     if request.command != "download" && request.command != "display" {
         return Err(ApiError::validation_failed(

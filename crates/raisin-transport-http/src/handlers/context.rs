@@ -172,9 +172,12 @@ where
         // Extract repo, branch, workspace from path
         // Expected path format: /{repo}/{branch}/{workspace}/...
         let Path((repo, branch, workspace)): Path<(String, String, String)> =
-            Path::from_request_parts(parts, state)
-                .await
-                .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid path: expected /{repo}/{branch}/{workspace}"))?;
+            Path::from_request_parts(parts, state).await.map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid path: expected /{repo}/{branch}/{workspace}",
+                )
+            })?;
 
         Ok(RequestContext {
             tenant_id,

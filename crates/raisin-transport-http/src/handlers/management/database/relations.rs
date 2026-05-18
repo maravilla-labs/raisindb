@@ -146,10 +146,9 @@ pub async fn repair_relation_integrity(
         .get_head(&tenant, &repo, &branch)
         .await
         .map_err(|e| match e {
-            raisin_error::Error::NotFound(msg) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse { error: msg }),
-            ),
+            raisin_error::Error::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg }))
+            }
             other => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {

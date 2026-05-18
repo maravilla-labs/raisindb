@@ -82,10 +82,7 @@ pub async fn bootstrap(
     };
 
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
 
     (headers, Json(body))
 }
