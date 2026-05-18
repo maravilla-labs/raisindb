@@ -47,7 +47,6 @@ export default function DatabaseManagementShared({
   const showVectorMetrics = devMode && tenantId === 'default'
 
   // State
-  const [tenant, setTenant] = useState('default')
   const [repositories, setRepositories] = useState<Repository[]>([])
   const [selectedRepo, setSelectedRepo] = useState<string>(fixedRepository || '')
   const [branch, setBranch] = useState('main')
@@ -129,14 +128,14 @@ export default function DatabaseManagementShared({
     if (selectedRepo) {
       loadFulltextHealth()
     }
-  }, [selectedRepo, tenant])
+  }, [selectedRepo, tenantId])
 
   // Load vector health when repo changes
   useEffect(() => {
     if (selectedRepo) {
       loadVectorHealth()
     }
-  }, [selectedRepo, tenant])
+  }, [selectedRepo, tenantId])
 
   // Load vector metrics on mount (operator/dev only — see showVectorMetrics)
   useEffect(() => {
@@ -345,7 +344,7 @@ export default function DatabaseManagementShared({
     setHealthError(null)
 
     try {
-      const health = await databaseManagementApi.fulltextHealth(tenant, selectedRepo)
+      const health = await databaseManagementApi.fulltextHealth(tenantId, selectedRepo)
       setFulltextHealth(health)
     } catch (error: any) {
       console.error('Failed to load fulltext health:', error)
@@ -361,7 +360,7 @@ export default function DatabaseManagementShared({
     setVectorHealthLoading(true)
     setVectorHealthError(null)
     try {
-      const health = await databaseManagementApi.vectorHealth(tenant, selectedRepo)
+      const health = await databaseManagementApi.vectorHealth(tenantId, selectedRepo)
       setVectorHealth(health)
     } catch (error: any) {
       console.error('Failed to load vector health:', error)
@@ -424,7 +423,7 @@ export default function DatabaseManagementShared({
 
     setOperationLoading('verify')
     try {
-      const response = await databaseManagementApi.fulltextVerify(tenant, selectedRepo)
+      const response = await databaseManagementApi.fulltextVerify(tenantId, selectedRepo)
       showSuccess(`Verification started: ${response.message}`)
     } catch (error: any) {
       showErrorMsg(error.message || 'Failed to start verification')
@@ -444,7 +443,7 @@ export default function DatabaseManagementShared({
       action: async () => {
         setOperationLoading('rebuild')
         try {
-          const response = await databaseManagementApi.fulltextRebuild(tenant, selectedRepo)
+          const response = await databaseManagementApi.fulltextRebuild(tenantId, selectedRepo)
           showSuccess(`Rebuild started: ${response.message}`)
         } finally {
           setOperationLoading(null)
@@ -458,7 +457,7 @@ export default function DatabaseManagementShared({
 
     setOperationLoading('optimize')
     try {
-      const response = await databaseManagementApi.fulltextOptimize(tenant, selectedRepo)
+      const response = await databaseManagementApi.fulltextOptimize(tenantId, selectedRepo)
       showSuccess(`Optimization started: ${response.message}`)
     } catch (error: any) {
       showErrorMsg(error.message || 'Failed to start optimization')
@@ -479,7 +478,7 @@ export default function DatabaseManagementShared({
       action: async () => {
         setOperationLoading('purge')
         try {
-          const response = await databaseManagementApi.fulltextPurge(tenant, selectedRepo)
+          const response = await databaseManagementApi.fulltextPurge(tenantId, selectedRepo)
           showSuccess(`Purge started: ${response.message}`)
           setFulltextHealth(null)
         } finally {
@@ -495,7 +494,7 @@ export default function DatabaseManagementShared({
 
     setOperationLoading('vector-verify')
     try {
-      const response = await databaseManagementApi.vectorVerify(tenant, selectedRepo)
+      const response = await databaseManagementApi.vectorVerify(tenantId, selectedRepo)
       showSuccess(`Vector verification started: ${response.message}`)
     } catch (error: any) {
       showErrorMsg(error.message || 'Failed to start vector verification')
@@ -515,7 +514,7 @@ export default function DatabaseManagementShared({
       action: async () => {
         setOperationLoading('vector-rebuild')
         try {
-          const response = await databaseManagementApi.vectorRebuild(tenant, selectedRepo)
+          const response = await databaseManagementApi.vectorRebuild(tenantId, selectedRepo)
           showSuccess(`Vector rebuild started: ${response.message}`)
         } finally {
           setOperationLoading(null)
@@ -536,7 +535,7 @@ export default function DatabaseManagementShared({
     setShowRegenerateDialog(false)
     setOperationLoading('vector-regenerate')
     try {
-      const response = await databaseManagementApi.vectorRegenerate(tenant, selectedRepo, forceRegenerate)
+      const response = await databaseManagementApi.vectorRegenerate(tenantId, selectedRepo, forceRegenerate)
       showSuccess(`Embedding regeneration started: ${response.message}`)
     } catch (error: any) {
       showErrorMsg(error.message || 'Failed to start embedding regeneration')
@@ -551,7 +550,7 @@ export default function DatabaseManagementShared({
 
     setOperationLoading('vector-optimize')
     try {
-      const response = await databaseManagementApi.vectorOptimize(tenant, selectedRepo)
+      const response = await databaseManagementApi.vectorOptimize(tenantId, selectedRepo)
       showSuccess(`Vector optimization started: ${response.message}`)
     } catch (error: any) {
       showErrorMsg(error.message || 'Failed to start vector optimization')
@@ -565,7 +564,7 @@ export default function DatabaseManagementShared({
 
     setOperationLoading('vector-restore')
     try {
-      const response = await databaseManagementApi.vectorRestore(tenant, selectedRepo)
+      const response = await databaseManagementApi.vectorRestore(tenantId, selectedRepo)
       showSuccess(`Vector restore started: ${response.message}`)
     } catch (error: any) {
       showErrorMsg(error.message || 'Failed to start vector restore')
@@ -627,7 +626,7 @@ export default function DatabaseManagementShared({
 
     try {
       const response = await managementApi.startReindex(
-        tenant,
+        tenantId,
         selectedRepo,
         reindexWorkspace,
         reindexTypes,
@@ -671,7 +670,7 @@ export default function DatabaseManagementShared({
     setRelationVerifyProgress(0)
 
     try {
-      const response = await databaseManagementApi.relationsVerify(tenant, selectedRepo, branch !== 'main' ? branch : undefined)
+      const response = await databaseManagementApi.relationsVerify(tenantId, selectedRepo, branch !== 'main' ? branch : undefined)
       if (response.job_id) {
         setRelationVerifyJobId(response.job_id)
       } else {
@@ -692,7 +691,7 @@ export default function DatabaseManagementShared({
     setRelationRepairProgress(0)
 
     try {
-      const response = await databaseManagementApi.relationsRepair(tenant, selectedRepo, branch !== 'main' ? branch : undefined)
+      const response = await databaseManagementApi.relationsRepair(tenantId, selectedRepo, branch !== 'main' ? branch : undefined)
       if (response.job_id) {
         setRelationRepairJobId(response.job_id)
       } else {
@@ -720,7 +719,7 @@ export default function DatabaseManagementShared({
     setPropertyIndexCleanupResult(null)
 
     try {
-      const response = await managementApi.cleanupPropertyIndexOrphans(reindexWorkspace)
+      const response = await managementApi.cleanupPropertyIndexOrphans(tenantId)
       if (response.success && response.data) {
         const stats = response.data
         setPropertyIndexCleanupResult({
@@ -747,7 +746,7 @@ export default function DatabaseManagementShared({
   // Filter jobs
   const filteredJobs = activeJobs.filter(job => {
     if (!selectedRepo) return false
-    return job.tenant === tenant
+    return job.tenant === tenantId
   })
 
   // Count pending/running embedding generation jobs for the current tenant/repo
@@ -773,9 +772,8 @@ export default function DatabaseManagementShared({
     return <Clock className="w-4 h-4" />
   }
 
-  // Disable tenant and repo selectors in tenant context or when repository is fixed
+  // Disable repo selector in tenant context or when repository is fixed
   const isRepoSelectorDisabled = !!fixedRepository || context === 'tenant'
-  const isTenantSelectorDisabled = context === 'tenant'
 
   return (
     <div className="animate-fade-in max-w-6xl mx-auto">
@@ -787,30 +785,14 @@ export default function DatabaseManagementShared({
         </div>
         <p className="text-zinc-400">
           Manage indexes and operations for{' '}
-          <span className="text-primary-400">{tenant}/{selectedRepo || '(select repository)'}</span>
+          <span className="text-primary-400">{tenantId}/{selectedRepo || '(select repository)'}</span>
         </p>
       </div>
 
       {/* Repository Selector Section */}
       <GlassCard className="mb-6">
         <h2 className="text-xl font-semibold text-white mb-4">Repository Selection</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Tenant</label>
-            <input
-              type="text"
-              value={tenant}
-              onChange={(e) => setTenant(e.target.value)}
-              disabled={isTenantSelectorDisabled}
-              className={`w-full px-3 py-2 border rounded-lg transition-all ${
-                isTenantSelectorDisabled
-                  ? 'bg-white/5 border-white/5 text-white/30 cursor-not-allowed'
-                  : 'bg-white/5 border-white/10 text-white focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20'
-              }`}
-              placeholder="default"
-            />
-          </div>
-
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">Repository</label>
             {isRepoSelectorDisabled ? (

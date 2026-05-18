@@ -32,6 +32,7 @@ const PER_TENANT_NAV: NavItem[] = [
   { to: '/management/logs', icon: Terminal, label: 'Execution Logs' },
   { to: '/management/flows', icon: Workflow, label: 'Flow Monitor' },
   { to: '/management/database', icon: Database, label: 'Database' },
+  { to: '/management/jobs', icon: Clock, label: 'Background Jobs' },
   { to: '/management/ai', icon: Sparkles, label: 'AI Settings' },
   { to: '/management/auth', icon: Shield, label: 'Auth Settings' },
   { to: '/management/admin-users', icon: Users, label: 'Admin Users' },
@@ -39,12 +40,11 @@ const PER_TENANT_NAV: NavItem[] = [
   { to: '/management/profile', icon: Key, label: 'API Keys' },
 ]
 
-// Operator-only nav — cross-tenant Dashboard + RocksDB ops + job index.
+// Operator-only nav — cross-tenant Dashboard + RocksDB ops.
 // Visible only when tenantId === 'default' (single-operator dev mode).
 const OPERATOR_NAV: NavItem[] = [
   { to: '/management', icon: Activity, label: 'Dashboard', end: true },
   { to: '/management/rocksdb', icon: HardDrive, label: 'RocksDB' },
-  { to: '/management/jobs', icon: Clock, label: 'All Jobs' },
 ]
 
 interface SidebarProps {

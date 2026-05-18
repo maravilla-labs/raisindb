@@ -266,8 +266,14 @@ pub async fn optional_auth_middleware(
 
 /// Middleware that validates JWT tokens for ADMIN-ONLY authentication.
 ///
-/// ONLY accepts admin tokens (AdminClaims). Rejects identity user tokens
-/// with 403 Forbidden. Does NOT support impersonation.
+/// Accepts either:
+/// 1. The operator superadmin bearer token (`RAISIN_SUPERADMIN_TOKEN` env var,
+///    constant-time compare). When matched, a synthetic `AdminClaims` is
+///    constructed scoped to the request's `TenantInfo` (populated by
+///    `ensure_tenant_middleware`, which layers outside this middleware) so the
+///    same per-tenant management handlers work for the operator dashboard.
+/// 2. Admin JWT tokens (`AdminClaims`) issued by `AuthService`. Rejects
+///    identity user tokens with 403 Forbidden. Does NOT support impersonation.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn require_admin_auth_middleware(
     State(state): State<AppState>,
@@ -285,6 +291,56 @@ pub async fn require_admin_auth_middleware(
     }
 
     let token = &auth_header[7..];
+
+    // First, check for the operator superadmin bearer token. When it matches,
+    // synthesize an AdminClaims scoped to the request's TenantInfo so per-tenant
+    // management routes can be reached without provisioning a per-tenant admin
+    // JWT. Same constant-time-compare primitive as
+    // `require_superadmin_token_middleware`.
+    if let Ok(expected) = std::env::var("RAISIN_SUPERADMIN_TOKEN") {
+        if !expected.is_empty() && token.len() == expected.len() {
+            let mut diff: u8 = 0;
+            for (a, b) in token.as_bytes().iter().zip(expected.as_bytes().iter()) {
+                diff |= a ^ b;
+            }
+            if diff == 0 {
+                let tenant_id = req
+                    .extensions()
+                    .get::<TenantInfo>()
+                    .map(|t| t.tenant_id.clone())
+                    .unwrap_or_else(|| "default".to_string());
+
+                let now = chrono::Utc::now().timestamp();
+                // ~10 years; this synthetic claim never leaves the request
+                // extensions, so the expiry is purely defensive.
+                let exp = now + 60 * 60 * 24 * 365 * 10;
+
+                let admin_claims = raisin_rocksdb::AdminClaims {
+                    sub: "superadmin-bearer".to_string(),
+                    username: "superadmin".to_string(),
+                    tenant_id: tenant_id.clone(),
+                    access_flags: raisin_models::admin_user::AdminAccessFlags {
+                        console_login: true,
+                        cli_access: true,
+                        api_access: true,
+                        pgwire_access: true,
+                        can_impersonate: true,
+                    },
+                    must_change_password: false,
+                    exp,
+                    iat: now,
+                };
+
+                tracing::debug!(
+                    tenant_id = %tenant_id,
+                    "Superadmin bearer authenticated for per-tenant management endpoint"
+                );
+
+                req.extensions_mut().insert(admin_claims);
+                return Ok(next.run(req).await);
+            }
+        }
+    }
 
     let auth_service = state
         .auth_service()

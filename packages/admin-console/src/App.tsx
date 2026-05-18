@@ -86,9 +86,6 @@ function App() {
           {/* Protected routes */}
           <Route path="/change-password" element={<ProtectedRoute><ChangePassword /></ProtectedRoute>} />
 
-          {/* Entry point - Repository list */}
-          <Route path="/" element={<ProtectedRoute><RepositoryList /></ProtectedRoute>} />
-
           {/* Repository-scoped routes */}
           <Route path="/:repo" element={<ProtectedRoute><RepositoryLayout /></ProtectedRoute>}>
           <Route index element={<Navigate to="content" replace />} />
@@ -179,38 +176,47 @@ function App() {
           <Route path="management/*" element={<RepositoryManagement />} />
         </Route>
 
-          {/* Management hub. Per-tenant routes (admin-users, identity-users,
-              auth, ai, flows, database, logs, profile) are visible for any
-              authenticated tenant — they call tenant-scoped backend
-              endpoints via the v0.1.19 ScopedTenant fix.
+          {/* Layout-wrapped protected routes — sidebar + header chrome.
+              Both the landing page (`/` → RepositoryList) and the
+              `/management/*` hub render inside the same Layout so the
+              sidebar is reachable from `/admin` directly after login,
+              not only from /management/*.
 
-              Operator-only routes (the index Dashboard, rocksdb, jobs) are
+              Per-tenant /management routes (admin-users, identity-users,
+              auth, ai, flows, database, logs, profile, jobs) are visible
+              for any authenticated tenant — they call tenant-scoped
+              backend endpoints via the v0.1.19 ScopedTenant fix.
+
+              Operator-only routes (the index Dashboard, rocksdb) are
               wrapped in <DevModeOnly> so they only render for
               tenantId === 'default'. Other tenants are redirected to the
               repository list. Cross-tenant ops live on the superadmin
               routes (/management/admin/*) instead. */}
-          <Route path="/management" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-          <Route index element={<DevModeOnly><TenantManagement /></DevModeOnly>} />
-          <Route path="rocksdb" element={<DevModeOnly><RocksDBManagement /></DevModeOnly>} />
-          <Route path="jobs" element={<DevModeOnly><JobsManagement /></DevModeOnly>} />
+          <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+            <Route path="/" element={<RepositoryList />} />
+            <Route path="/management">
+              <Route index element={<DevModeOnly><TenantManagement /></DevModeOnly>} />
+              <Route path="rocksdb" element={<DevModeOnly><RocksDBManagement /></DevModeOnly>} />
+              <Route path="jobs" element={<JobsManagement />} />
 
-          <Route
-            path="database"
-            element={
-              <DatabaseManagementShared
-                showBranchSelector={true}
-                context="tenant"
+              <Route
+                path="database"
+                element={
+                  <DatabaseManagementShared
+                    showBranchSelector={true}
+                    context="tenant"
+                  />
+                }
               />
-            }
-          />
-          <Route path="ai" element={<TenantAiSettings />} />
-          <Route path="auth" element={<TenantAuthSettings />} />
-          <Route path="logs" element={<ExecutionLogs />} />
-          <Route path="flows" element={<FlowExecutionMonitor />} />
-          <Route path="admin-users" element={<AdminUsers />} />
-          <Route path="identity-users" element={<IdentityUsers />} />
-          <Route path="profile" element={<UserProfile />} />
-        </Route>
+              <Route path="ai" element={<TenantAiSettings />} />
+              <Route path="auth" element={<TenantAuthSettings />} />
+              <Route path="logs" element={<ExecutionLogs />} />
+              <Route path="flows" element={<FlowExecutionMonitor />} />
+              <Route path="admin-users" element={<AdminUsers />} />
+              <Route path="identity-users" element={<IdentityUsers />} />
+              <Route path="profile" element={<UserProfile />} />
+            </Route>
+          </Route>
         </Routes>
       </AuthProvider>
     </BrowserRouter>

@@ -1,6 +1,5 @@
 import { api } from './client'
-
-const DEFAULT_TENANT = 'default'
+import { getCurrentTenantId } from './bootstrap'
 
 export interface Revision {
   number: string  // HLC format: "timestamp-counter" (e.g., "1762780281515-0")
@@ -83,7 +82,7 @@ export const revisionsApi = {
     }
     
     const response = await api.get<ListRevisionsResponse>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/revisions?${params.toString()}`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/revisions?${params.toString()}`
     )
     // Convert to legacy format for compatibility
     return response.revisions.map(r => ({
@@ -102,7 +101,7 @@ export const revisionsApi = {
    */
   get: (repoId: string, revisionNumber: string) =>
     api.get<RevisionMeta>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/revisions/${revisionNumber}`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/revisions/${revisionNumber}`
     ),
 
   /**
@@ -111,7 +110,7 @@ export const revisionsApi = {
    */
   getChanges: (repoId: string, revisionNumber: string) =>
     api.get<NodeChange[]>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/revisions/${revisionNumber}/changes`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/revisions/${revisionNumber}/changes`
     ),
 
   /**

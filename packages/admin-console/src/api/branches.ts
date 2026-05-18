@@ -1,6 +1,5 @@
 import { api } from './client'
-
-const DEFAULT_TENANT = 'default'
+import { getCurrentTenantId } from './bootstrap'
 
 export interface Branch {
   name: string
@@ -108,7 +107,7 @@ export const branchesApi = {
    */
   list: (repoId: string) =>
     api.get<Branch[]>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches`
     ),
 
   /**
@@ -117,7 +116,7 @@ export const branchesApi = {
    */
   get: (repoId: string, name: string) =>
     api.get<Branch>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${name}`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${name}`
     ),
 
   /**
@@ -126,7 +125,7 @@ export const branchesApi = {
    */
   create: (repoId: string, data: CreateBranchRequest) =>
     api.post<Branch>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches`,
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches`,
       data
     ),
 
@@ -136,7 +135,7 @@ export const branchesApi = {
    */
   delete: (repoId: string, name: string) =>
     api.delete<void>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${name}`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${name}`
     ),
 
   /**
@@ -145,7 +144,7 @@ export const branchesApi = {
    */
   getHead: (repoId: string, name: string) =>
     api.get<HeadResponse>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${name}/head`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${name}/head`
     ),
   
   /**
@@ -162,7 +161,7 @@ export const branchesApi = {
    */
   updateHead: (repoId: string, name: string, revision: number) =>
     api.put<void>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${name}/head`,
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${name}/head`,
       { revision }
     ),
 
@@ -172,7 +171,7 @@ export const branchesApi = {
    */
   compare: (repoId: string, branch: string, baseBranch: string) =>
     api.get<BranchDivergence>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${branch}/compare/${baseBranch}`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${branch}/compare/${baseBranch}`
     ),
 
   /**
@@ -181,7 +180,7 @@ export const branchesApi = {
    */
   merge: (repoId: string, targetBranch: string, data: MergeBranchRequest) =>
     api.post<MergeResult>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${targetBranch}/merge`,
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${targetBranch}/merge`,
       data
     ),
 
@@ -191,7 +190,7 @@ export const branchesApi = {
    */
   resolveMerge: (repoId: string, targetBranch: string, data: ResolveMergeRequest) =>
     api.post<MergeResult>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${targetBranch}/resolve-merge`,
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${targetBranch}/resolve-merge`,
       data
     ),
 
@@ -201,7 +200,7 @@ export const branchesApi = {
    */
   setUpstream: (repoId: string, branchName: string, upstreamBranch: string | null) =>
     api.patch<Branch>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/branches/${branchName}/upstream`,
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${branchName}/upstream`,
       { upstream_branch: upstreamBranch }
     ),
 }
@@ -213,7 +212,7 @@ export const tagsApi = {
    */
   list: (repoId: string) =>
     api.get<Tag[]>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/tags`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/tags`
     ),
 
   /**
@@ -222,7 +221,7 @@ export const tagsApi = {
    */
   get: (repoId: string, name: string) =>
     api.get<Tag>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/tags/${name}`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/tags/${name}`
     ),
 
   /**
@@ -231,7 +230,7 @@ export const tagsApi = {
    */
   create: (repoId: string, data: CreateTagRequest) =>
     api.post<Tag>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/tags`,
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/tags`,
       data
     ),
 
@@ -241,6 +240,6 @@ export const tagsApi = {
    */
   delete: (repoId: string, name: string) =>
     api.delete<void>(
-      `/api/management/repositories/${DEFAULT_TENANT}/${repoId}/tags/${name}`
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/tags/${name}`
     ),
 }
