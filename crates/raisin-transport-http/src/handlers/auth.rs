@@ -397,18 +397,16 @@ pub async fn cli_auth_login(
         )
         .map_err(ApiError::from)?;
 
-    // Build callback URL with token
-    let callback_url = format!(
-        "http://localhost:{}/auth/callback?token={}",
-        form.port,
-        urlencoding::encode(&token)
+    // Deliver the token from the browser, not the server: the server cannot reach the user's
+    // localhost in hosted deployments. The success page does a no-cors fetch to the CLI listener.
+    let encoded_token = urlencoding::encode(&token);
+    let callback_script = format!(
+        r#"<script>fetch('http://localhost:{port}/auth/callback?token={encoded_token}', {{ mode: 'no-cors' }}).catch(function(){{}});</script>"#,
+        port = form.port,
+        encoded_token = encoded_token,
     );
 
-    // Send token to CLI callback in background (fire and forget)
-    let client = reqwest::Client::new();
-    let _ = client.get(&callback_url).send().await;
-
-    // Return success page to browser
+    // Return success page to browser, with a script that delivers the token to the local CLI.
     Ok(Html(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -465,5 +463,5 @@ pub async fn cli_auth_login(
         <p class="hint">You can close this window and return to your terminal.</p>
     </div>
 </body>
-</html>"#.to_string()))
+</html>"#.replace("</body>", &format!("{callback_script}</body>"))))
 }
