@@ -359,8 +359,10 @@ async fn main() {
             let storage_for_finder = storage.clone();
             let scheduled_trigger_finder: Option<raisin_rocksdb::ScheduledTriggerFinderCallback> = {
                 use raisin_models::nodes::properties::PropertyValue;
-                use raisin_storage::repository::RepositoryManagementRepository;
-                use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
+                use raisin_storage::{
+                    ListOptions, NodeRepository, RepositoryManagementRepository, Storage,
+                    StorageScope,
+                };
                 Some(std::sync::Arc::new(
                     move |tenant_filter, repo_filter, current_time| {
                         let storage = storage_for_finder.clone();
