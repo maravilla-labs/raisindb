@@ -2,8 +2,11 @@
  * Agent Test Chat Component
  *
  * VSCode-style split panel for testing AI agents interactively.
- * Creates a temporary conversation in the AI workspace and allows
- * sending messages to test the agent's behavior.
+ * Writes a `raisin:Conversation` + user `raisin:Message` into the operator's
+ * inbox/outbox (workspace `raisin:access_control`) and streams the agent's
+ * reply via SSE on `/api/conversations/{repo}/events`. This is the same
+ * messaging path used by the production chat UI; the trigger that fires the
+ * agent (`messaging-agent-chat`) only matches this shape.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -20,7 +23,7 @@ import {
   Trash2,
   RotateCcw,
 } from 'lucide-react'
-import { nodesApi } from '../../../../api/nodes'
+import { agentChatApi, type ChatEvent, type TestConversation } from '../../../../api/agent-chat'
 
 interface AgentTestChatProps {
   repo: string
@@ -36,7 +39,7 @@ interface Message {
   content: string
   timestamp?: string
   children?: MessageChild[]
-  finishReason?: string  // 'stop', 'tool_calls', etc.
+  finishReason?: string
 }
 
 interface MessageChild {
@@ -46,14 +49,11 @@ interface MessageChild {
   toolName?: string
   toolInput?: unknown
   expanded?: boolean
-  status?: string  // For tool calls: pending, running, completed, failed
+  status?: string
 }
 
-const AI_WORKSPACE = 'ai'
-const POLL_INTERVAL = 1500 // Poll every 1.5 seconds for responses
-
-export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: AgentTestChatProps) {
-  const [conversationPath, setConversationPath] = useState<string | null>(null)
+export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, agentId }: AgentTestChatProps) {
+  const [conversation, setConversation] = useState<TestConversation | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [inputText, setInputText] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -63,218 +63,174 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const streamAbortRef = useRef<AbortController | null>(null)
+  const assistantMessageIdRef = useRef<string | null>(null)
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Create conversation on mount
-  useEffect(() => {
-    createConversation()
-    return () => {
-      // Clean up polling on unmount
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current)
-      }
-    }
-  }, [agentPath])
-
-  // Create a new conversation for this test session
   const createConversation = useCallback(async () => {
     setIsLoading(true)
     setError(null)
     try {
-      // Generate a unique conversation name
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const conversationName = `test-${agentName}-${timestamp}`
-
-      // Create conversation in AI workspace under /conversations
-      const response = await nodesApi.create(repo, branch, AI_WORKSPACE, '/conversations', {
-        name: conversationName,
-        node_type: 'raisin:AIConversation',
-        properties: {
-          agent_ref: {
-            'raisin:ref': agentId,
-            'raisin:workspace': 'functions',
-            'raisin:path': agentPath,
-          },
-          status: 'active',
-          title: `Test: ${agentName}`,
-        },
-        commit: {
-          message: `Create test conversation for agent ${agentName}`,
-          actor: 'admin',
-        },
-      }) as unknown as { node: { path: string } }
-
-      setConversationPath(response.node.path)
+      const conv = await agentChatApi.createTestConversation({
+        repo,
+        agentPath,
+        agentId,
+        agentName,
+      })
+      setConversation(conv)
       setMessages([])
     } catch (err) {
       console.error('Failed to create conversation:', err)
-      setError('Failed to create conversation. Make sure the AI workspace exists.')
+      setError(
+        err instanceof Error
+          ? `Failed to create conversation: ${err.message}`
+          : 'Failed to create conversation. Verify that raisin-messaging is installed and you have a user identity.',
+      )
     } finally {
       setIsLoading(false)
     }
-  }, [repo, branch, agentPath, agentName])
+  }, [repo, agentPath, agentId, agentName])
 
-  // Poll for new messages from the assistant
-  const pollForResponses = useCallback(async () => {
-    if (!conversationPath) return
+  useEffect(() => {
+    createConversation()
+    return () => {
+      streamAbortRef.current?.abort()
+      streamAbortRef.current = null
+    }
+  }, [createConversation])
 
-    try {
-      const children = await nodesApi.listChildrenAtHead(repo, branch, AI_WORKSPACE, conversationPath)
+  const ensureAssistantBubble = useCallback((): string => {
+    if (assistantMessageIdRef.current) return assistantMessageIdRef.current
+    const id = `assistant-${Date.now()}`
+    assistantMessageIdRef.current = id
+    setMessages(prev => [
+      ...prev,
+      {
+        id,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date().toISOString(),
+        children: [],
+      },
+    ])
+    return id
+  }, [])
 
-      const newMessages: Message[] = []
+  const applyToAssistant = useCallback((mutator: (msg: Message) => Message) => {
+    const id = ensureAssistantBubble()
+    setMessages(prev => prev.map(m => (m.id === id ? mutator(m) : m)))
+  }, [ensureAssistantBubble])
 
-      for (const child of children) {
-        if (child.node_type === 'raisin:AIMessage') {
-          const props = child.properties || {}
-          const role = props.role as 'user' | 'assistant' | 'system'
-          const content = props.content as string || ''
-          const finishReason = props.finish_reason as string | undefined
-
-          // Check for child nodes (thoughts, tool calls)
-          const messageChildren: MessageChild[] = []
-          if (child.has_children) {
-            try {
-              const messageChildNodes = await nodesApi.listChildrenAtHead(repo, branch, AI_WORKSPACE, child.path)
-              for (const mc of messageChildNodes) {
-                const mcProps = mc.properties || {}
-                if (mc.node_type === 'raisin:AIThought') {
-                  messageChildren.push({
-                    id: mc.id,
-                    type: 'thought',
-                    content: mcProps.content as string || '',
-                  })
-                } else if (mc.node_type === 'raisin:AIToolCall') {
-                  // AIToolCall has: function_ref, arguments, status, tool_call_id
-                  const toolStatus = mcProps.status as string || 'pending'
-                  const functionRef = mcProps.function_ref as Record<string, unknown> | undefined
-                  messageChildren.push({
-                    id: mc.id,
-                    type: 'tool_call',
-                    content: `Status: ${toolStatus}`,
-                    toolName: (functionRef?.["raisin:path"] as string)?.split('/').pop() || 'unknown',
-                    toolInput: mcProps.arguments,
-                    status: toolStatus,
-                  })
-
-                  // Also fetch tool results that are children of this tool call
-                  if (mc.has_children) {
-                    try {
-                      const toolChildren = await nodesApi.listChildrenAtHead(repo, branch, AI_WORKSPACE, mc.path)
-                      for (const tc of toolChildren) {
-                        if (tc.node_type === 'raisin:AIToolResult') {
-                          const tcProps = tc.properties || {}
-                          messageChildren.push({
-                            id: tc.id,
-                            type: 'tool_result',
-                            content: JSON.stringify(tcProps.result ?? tcProps.error ?? '', null, 2),
-                            toolName: (functionRef?.["raisin:path"] as string)?.split('/').pop() || 'unknown',
-                          })
-                        }
-                      }
-                    } catch (e) {
-                      console.error('Failed to load tool result children:', e)
-                    }
-                  }
-                } else if (mc.node_type === 'raisin:AIToolResult') {
-                  // AIToolResult has: result or error
-                  const functionRef = mcProps.function_ref as Record<string, unknown> | undefined
-                  messageChildren.push({
-                    id: mc.id,
-                    type: 'tool_result',
-                    content: JSON.stringify(mcProps.result ?? mcProps.error ?? '', null, 2),
-                    toolName: (functionRef?.["raisin:path"] as string)?.split('/').pop() as string,
-                  })
+  const handleEvent = useCallback((event: ChatEvent) => {
+    switch (event.type) {
+      case 'text_chunk':
+        applyToAssistant(m => ({ ...m, content: m.content + event.text }))
+        break
+      case 'thought_chunk':
+        applyToAssistant(m => {
+          const children = m.children ? [...m.children] : []
+          const lastIdx = children.length - 1
+          if (lastIdx >= 0 && children[lastIdx].type === 'thought') {
+            children[lastIdx] = {
+              ...children[lastIdx],
+              content: children[lastIdx].content + event.text,
+            }
+          } else {
+            children.push({
+              id: `thought-${Date.now()}-${children.length}`,
+              type: 'thought',
+              content: event.text,
+            })
+          }
+          return { ...m, children }
+        })
+        break
+      case 'tool_call_started':
+        applyToAssistant(m => ({
+          ...m,
+          children: [
+            ...(m.children ?? []),
+            {
+              id: event.toolCallId,
+              type: 'tool_call',
+              content: 'Status: running',
+              toolName: event.functionName,
+              toolInput: event.arguments,
+              status: 'running',
+            },
+          ],
+        }))
+        break
+      case 'tool_call_completed':
+        applyToAssistant(m => {
+          const children = (m.children ?? []).map(c =>
+            c.id === event.toolCallId
+              ? {
+                  ...c,
+                  status: event.error ? 'failed' : 'completed',
+                  content: event.error ? `Error: ${event.error}` : 'Status: completed',
                 }
-              }
-            } catch (e) {
-              console.error('Failed to load message children:', e)
-            }
-          }
-
-          newMessages.push({
-            id: child.id,
-            role,
-            content,
-            timestamp: child.created_at,
-            children: messageChildren,
-            finishReason,
-          })
-        }
-      }
-
-      // Sort by timestamp
-      newMessages.sort((a, b) => {
-        if (!a.timestamp || !b.timestamp) return 0
-        return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-      })
-
-      setMessages(newMessages)
-
-      // Check if we got a complete response
-      // Keep polling until we have a FINAL assistant message with finish_reason: 'stop'
-      // This ensures we wait for the continuation message after tool execution
-      if (newMessages.length > 0) {
-        const lastMessage = newMessages[newMessages.length - 1]
-
-        if (lastMessage.role === 'assistant') {
-          // Check for incomplete tool calls (still running)
-          const hasIncompleteToolCalls = lastMessage.children?.some(
-            child => child.type === 'tool_call' &&
-                     child.status !== 'completed' &&
-                     child.status !== 'failed'
+              : c,
           )
+          children.push({
+            id: `result-${event.toolCallId}`,
+            type: 'tool_result',
+            content: JSON.stringify(event.error ?? event.result ?? '', null, 2),
+            toolName: event.functionName,
+          })
+          return { ...m, children }
+        })
+        break
+      case 'message_saved':
+        // A new assistant message landed in storage. If it's an assistant
+        // turn and we don't have a bubble yet, open one for subsequent
+        // chunks to attach to.
+        if (event.role === 'assistant') ensureAssistantBubble()
+        break
+      case 'done':
+        applyToAssistant(m => ({
+          ...m,
+          content: m.content || event.content || '',
+          finishReason: event.finishReason ?? 'stop',
+        }))
+        assistantMessageIdRef.current = null
+        setIsWaitingForResponse(false)
+        break
+      case 'waiting':
+        // Turn paused (e.g. plan approval). Keep the spinner up.
+        break
+      case 'log':
+        // Surface backend logs to the dev console; don't render in the chat.
+        console.debug(`[agent-handler ${event.level}]`, event.message, event.module ?? '')
+        break
+    }
+  }, [applyToAssistant, ensureAssistantBubble])
 
-          // Only stop polling when:
-          // 1. finish_reason is 'stop' or 'error' (terminal states)
-          // 2. Has actual content (the final response text)
-          // 3. No incomplete tool calls
-          //
-          // Keep polling if:
-          // - finish_reason is 'tool_calls' (waiting for continuation message)
-          // - There are incomplete tool calls
-          // - No finish_reason but has tool calls (legacy, wait for completion)
-          const isTerminalState = lastMessage.finishReason === 'stop' ||
-                                  lastMessage.finishReason === 'error'
-          const isFinalResponse = isTerminalState &&
-                                  lastMessage.content &&
-                                  lastMessage.content.trim() !== ''
-
-          if (isFinalResponse && !hasIncompleteToolCalls) {
-            setIsWaitingForResponse(false)
-            if (pollIntervalRef.current) {
-              clearInterval(pollIntervalRef.current)
-              pollIntervalRef.current = null
-            }
-          }
-          // If finish_reason is 'tool_calls' or there are incomplete tools, keep polling
-        }
+  const consumeStream = useCallback(async (streamChannel: string) => {
+    streamAbortRef.current?.abort()
+    const abort = new AbortController()
+    streamAbortRef.current = abort
+    try {
+      for await (const event of agentChatApi.streamEvents({
+        repo,
+        streamChannel,
+        signal: abort.signal,
+      })) {
+        handleEvent(event)
       }
     } catch (err) {
-      console.error('Failed to poll for responses:', err)
+      if (abort.signal.aborted) return
+      console.error('SSE stream failed:', err)
+      setError('Lost connection to agent stream. Send again to retry.')
+      setIsWaitingForResponse(false)
     }
-  }, [repo, branch, conversationPath])
+  }, [repo, handleEvent])
 
-  // Start polling when waiting for response
-  useEffect(() => {
-    if (isWaitingForResponse && !pollIntervalRef.current) {
-      pollIntervalRef.current = setInterval(pollForResponses, POLL_INTERVAL)
-    }
-    return () => {
-      if (!isWaitingForResponse && pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current)
-        pollIntervalRef.current = null
-      }
-    }
-  }, [isWaitingForResponse, pollForResponses])
-
-  // Send a message
   const handleSend = async () => {
-    if (!inputText.trim() || !conversationPath || isSending) return
+    if (!inputText.trim() || !conversation || isSending) return
 
     const messageContent = inputText.trim()
     setInputText('')
@@ -282,42 +238,40 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
     setError(null)
 
     try {
-      // Create user message
-      await nodesApi.create(repo, branch, AI_WORKSPACE, conversationPath, {
-        name: `msg-${Date.now()}`,
-        node_type: 'raisin:AIMessage',
-        properties: {
-          role: 'user',
-          content: messageContent,
-        },
-        commit: {
-          message: 'Send test message',
-          actor: 'admin',
-        },
+      // Open the SSE stream BEFORE writing the user message so we don't miss
+      // early text_chunk events.
+      setIsWaitingForResponse(true)
+      assistantMessageIdRef.current = null
+      const streamPromise = consumeStream(conversation.streamChannel)
+
+      await agentChatApi.sendUserMessage({
+        repo,
+        conversation,
+        agentId,
+        content: messageContent,
       })
 
-      // Immediately add to local state for responsive UI
-      setMessages(prev => [...prev, {
-        id: `temp-${Date.now()}`,
-        role: 'user',
-        content: messageContent,
-        timestamp: new Date().toISOString(),
-      }])
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `user-${Date.now()}`,
+          role: 'user',
+          content: messageContent,
+          timestamp: new Date().toISOString(),
+        },
+      ])
 
-      // Start polling for assistant response
-      setIsWaitingForResponse(true)
-
-      // Initial poll after a short delay
-      setTimeout(pollForResponses, 500)
+      void streamPromise
     } catch (err) {
       console.error('Failed to send message:', err)
-      setError('Failed to send message')
+      setError(err instanceof Error ? `Failed to send message: ${err.message}` : 'Failed to send message')
+      setIsWaitingForResponse(false)
+      streamAbortRef.current?.abort()
     } finally {
       setIsSending(false)
     }
   }
 
-  // Handle Enter key to send
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -325,44 +279,34 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
     }
   }
 
-  // Clear conversation and start fresh
   const handleClearChat = async () => {
-    if (conversationPath) {
+    streamAbortRef.current?.abort()
+    streamAbortRef.current = null
+    setIsWaitingForResponse(false)
+    if (conversation) {
       try {
-        // Delete the conversation
-        await nodesApi.delete(repo, branch, AI_WORKSPACE, conversationPath, {
-          commit: {
-            message: 'Delete test conversation',
-            actor: 'admin',
-          },
-        })
+        await agentChatApi.deleteConversation(repo, conversation.conversationPath)
       } catch (err) {
         console.error('Failed to delete conversation:', err)
       }
     }
-    // Create a new conversation
     await createConversation()
   }
 
-  // Toggle expand/collapse for message children
   const toggleChildExpanded = (messageId: string, childId: string) => {
     setMessages(prev => prev.map(msg => {
       if (msg.id === messageId && msg.children) {
         return {
           ...msg,
-          children: msg.children.map(child => {
-            if (child.id === childId) {
-              return { ...child, expanded: !child.expanded }
-            }
-            return child
-          }),
+          children: msg.children.map(child =>
+            child.id === childId ? { ...child, expanded: !child.expanded } : child,
+          ),
         }
       }
       return msg
     }))
   }
 
-  // Loading state
   if (isLoading) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-zinc-400">
@@ -372,8 +316,7 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
     )
   }
 
-  // Error state
-  if (error && !conversationPath) {
+  if (error && !conversation) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-red-400 p-4">
         <AlertCircle className="w-8 h-8 mb-2" />
@@ -416,7 +359,6 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
         ) : (
           messages.map((message) => (
             <div key={message.id} className={`flex gap-3 ${message.role === 'user' ? 'flex-row-reverse' : ''}`}>
-              {/* Avatar */}
               <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center ${
                 message.role === 'user' ? 'bg-blue-500/20' : 'bg-purple-500/20'
               }`}>
@@ -427,7 +369,6 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
                 )}
               </div>
 
-              {/* Content */}
               <div className={`flex-1 min-w-0 ${message.role === 'user' ? 'text-right' : ''}`}>
                 <div className={`inline-block max-w-full px-3 py-2 rounded-lg text-sm ${
                   message.role === 'user'
@@ -441,7 +382,6 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
                   </p>
                 </div>
 
-                {/* Children (thoughts, tool calls) */}
                 {message.children && message.children.length > 0 && (
                   <div className="mt-2 space-y-1">
                     {message.children.map((child) => (
@@ -506,8 +446,7 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
           ))
         )}
 
-        {/* Waiting indicator */}
-        {isWaitingForResponse && (
+        {isWaitingForResponse && !assistantMessageIdRef.current && (
           <div className="flex gap-3">
             <div className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center bg-purple-500/20">
               <Bot className="w-4 h-4 text-purple-400" />
@@ -522,14 +461,12 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Error message */}
       {error && (
         <div className="flex-shrink-0 px-3 py-2 bg-red-500/10 border-t border-red-500/20">
           <p className="text-xs text-red-400">{error}</p>
         </div>
       )}
 
-      {/* Input */}
       <div className="flex-shrink-0 p-3 border-t border-white/10 bg-black/20">
         <div className="flex gap-2">
           <textarea
@@ -540,11 +477,11 @@ export function AgentTestChat({ repo, branch, agentPath, agentName, agentId }: A
             placeholder="Type a message..."
             rows={1}
             className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-zinc-500 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 resize-none"
-            disabled={isSending || !conversationPath}
+            disabled={isSending || !conversation}
           />
           <button
             onClick={handleSend}
-            disabled={!inputText.trim() || isSending || !conversationPath}
+            disabled={!inputText.trim() || isSending || !conversation}
             className="px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {isSending ? (
