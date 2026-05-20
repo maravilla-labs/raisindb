@@ -83,7 +83,7 @@ export function RunConfigBar({
         inputWorkspace: saved.inputWorkspace || config.inputWorkspace,
       })
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [])
 
   // Save config changes

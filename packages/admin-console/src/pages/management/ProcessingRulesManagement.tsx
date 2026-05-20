@@ -128,7 +128,7 @@ export default function ProcessingRulesManagement({ repo }: ProcessingRulesManag
     } finally {
       setLoading(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [repo])
 
   useEffect(() => {

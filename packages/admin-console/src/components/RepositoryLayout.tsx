@@ -43,7 +43,7 @@ export default function RepositoryLayout() {
   const [accessControlExpanded, setAccessControlExpanded] = useState(true)
   const location = useLocation()
   const navigate = useNavigate()
-  const { user, logout } = useAuth()
+  const { user, logout, tenantId } = useAuth()
 
   // Default to main branch if not specified in URL
   const currentBranch = branch || repository?.config.default_branch || 'main'
@@ -212,7 +212,7 @@ export default function RepositoryLayout() {
       </header>
 
       {/* System Updates Banner */}
-      {repo && <SystemUpdateBanner tenant="default" repo={repo} />}
+      {repo && <SystemUpdateBanner tenant={tenantId} repo={repo} />}
 
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}

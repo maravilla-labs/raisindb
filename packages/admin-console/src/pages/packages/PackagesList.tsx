@@ -64,7 +64,6 @@ const iconNameToPascalCase = (name: string): string => {
 }
 
 // Get Lucide icon component by name
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const getIconComponent = (name: string): any => {
   const pascalName = iconNameToPascalCase(name)
   return (LucideIcons as any)[pascalName] || Package

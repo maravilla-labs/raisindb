@@ -222,7 +222,7 @@ function CompositeItemCard({
   )
 }
 
-export default function CompositeFieldEditor({
+function CompositeArrayEditor({
   name: _name,
   label,
   value,
@@ -234,8 +234,133 @@ export default function CompositeFieldEditor({
   translationMode,
   originalValue,
   defaultLanguage,
-  multiple,
 }: CompositeFieldEditorProps) {
+  const items: Record<string, unknown>[] = Array.isArray(value) ? value : []
+  const originalItems = Array.isArray(originalValue)
+    ? (originalValue as Record<string, unknown>[])
+    : undefined
+
+  // In translation mode the ORIGINAL determines how many items exist and
+  // their order. Translated values are overlaid by UUID (or index fallback).
+  const displayItems: Record<string, unknown>[] = useMemo(() => {
+    if (!translationMode || !originalItems) return items
+
+    return originalItems.map((origItem, idx) => {
+      const uuid = origItem.uuid as string | undefined
+      const translated = uuid
+        ? items.find((t) => t.uuid === uuid)
+        : items[idx]
+      if (!translated) return origItem
+      return { ...origItem, ...translated }
+    })
+  }, [translationMode, originalItems, items])
+
+  const handleUpdate = useCallback(
+    (index: number, updated: Record<string, unknown>) => {
+      // Extend items array if needed (original may have more items than
+      // the current translation value)
+      const next = [...items]
+      while (next.length <= index) {
+        // Gap-fill with UUID so server-side validation passes
+        next.push({ uuid: crypto.randomUUID() })
+      }
+      next[index] = updated
+      onChange(next)
+    },
+    [items, onChange],
+  )
+
+  const handleRemove = useCallback(
+    (index: number) => {
+      onChange(items.filter((_, i) => i !== index))
+    },
+    [items, onChange],
+  )
+
+  function handleAdd() {
+    onChange([...items, { uuid: crypto.randomUUID() }])
+  }
+
+  // Monitor drops for this field's composite items
+  useEffect(() => {
+    if (translationMode) return
+
+    const cleanup = monitorForElements({
+      canMonitor: ({ source }) => {
+        const data = source.data
+        return data.type === 'composite-item' && data.fieldName === _name
+      },
+      onDrop: ({ source, location }) => {
+        const target = location.current.dropTargets[0]
+        if (!target) return
+
+        const sourceIndex = source.data.index as number
+        const targetIndex = target.data.index as number
+        const edge = extractClosestEdge(target.data)
+
+        const reordered = reorderWithEdge({
+          list: items,
+          startIndex: sourceIndex,
+          indexOfTarget: targetIndex,
+          closestEdgeOfTarget: edge,
+          axis: 'vertical',
+        })
+
+        onChange(reordered)
+      },
+    })
+
+    return cleanup
+  }, [items, onChange, _name, translationMode])
+
+  return (
+    <div>
+      <label className="flex items-center gap-2 text-sm font-medium text-zinc-300 mb-3">
+        <Layout className="w-4 h-4 text-purple-400" />
+        {label}
+      </label>
+
+      <div className="space-y-2">
+        {displayItems.map((item, idx) => (
+          <CompositeItemCard
+            key={idx}
+            item={item}
+            index={idx}
+            fields={fields ?? []}
+            fieldName={_name}
+            originalItem={originalItems?.[idx]}
+            defaultLanguage={defaultLanguage}
+            onUpdate={handleUpdate}
+            onRemove={handleRemove}
+            repo={repo}
+            branch={branch}
+            translationMode={translationMode}
+          />
+        ))}
+      </div>
+
+      {displayItems.length === 0 && (
+        <p className="text-sm text-zinc-500 py-2">No items yet</p>
+      )}
+
+      {!translationMode && (
+        <button
+          type="button"
+          onClick={handleAdd}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 rounded text-sm transition-colors mt-2"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Add Item
+        </button>
+      )}
+
+      {error && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+export default function CompositeFieldEditor(props: CompositeFieldEditorProps) {
+  const { value, translationMode, originalValue, multiple } = props
   // Use array mode if:
   // 1. The schema says multiple: true (repeatable composite)
   // 2. The current value is already an array
@@ -243,135 +368,25 @@ export default function CompositeFieldEditor({
   const isArray =
     multiple || Array.isArray(value) || (!!translationMode && Array.isArray(originalValue))
 
-  // --- Array mode: list of composite items ---
   if (isArray) {
-    const items: Record<string, unknown>[] = Array.isArray(value) ? value : []
-    const originalItems = Array.isArray(originalValue)
-      ? (originalValue as Record<string, unknown>[])
-      : undefined
-
-    // In translation mode the ORIGINAL determines how many items exist and
-    // their order. Translated values are overlaid by UUID (or index fallback).
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    const displayItems: Record<string, unknown>[] = useMemo(() => {
-      if (!translationMode || !originalItems) return items
-
-      return originalItems.map((origItem, idx) => {
-        const uuid = origItem.uuid as string | undefined
-        const translated = uuid
-          ? items.find((t) => t.uuid === uuid)
-          : items[idx]
-        if (!translated) return origItem
-        return { ...origItem, ...translated }
-      })
-    }, [translationMode, originalItems, items])
-
-    const handleUpdate = useCallback(
-      (index: number, updated: Record<string, unknown>) => {
-        // Extend items array if needed (original may have more items than
-        // the current translation value)
-        const next = [...items]
-        while (next.length <= index) {
-          // Gap-fill with UUID so server-side validation passes
-          next.push({ uuid: crypto.randomUUID() })
-        }
-        next[index] = updated
-        onChange(next)
-      },
-      [items, onChange],
-    )
-
-    const handleRemove = useCallback(
-      (index: number) => {
-        onChange(items.filter((_, i) => i !== index))
-      },
-      [items, onChange],
-    )
-
-    function handleAdd() {
-      onChange([...items, { uuid: crypto.randomUUID() }])
-    }
-
-    // Monitor drops for this field's composite items
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useEffect(() => {
-      if (translationMode) return
-
-      const cleanup = monitorForElements({
-        canMonitor: ({ source }) => {
-          const data = source.data
-          return data.type === 'composite-item' && data.fieldName === _name
-        },
-        onDrop: ({ source, location }) => {
-          const target = location.current.dropTargets[0]
-          if (!target) return
-
-          const sourceIndex = source.data.index as number
-          const targetIndex = target.data.index as number
-          const edge = extractClosestEdge(target.data)
-
-          const reordered = reorderWithEdge({
-            list: items,
-            startIndex: sourceIndex,
-            indexOfTarget: targetIndex,
-            closestEdgeOfTarget: edge,
-            axis: 'vertical',
-          })
-
-          onChange(reordered)
-        },
-      })
-
-      return cleanup
-    }, [items, onChange, _name, translationMode])
-
-    return (
-      <div>
-        <label className="flex items-center gap-2 text-sm font-medium text-zinc-300 mb-3">
-          <Layout className="w-4 h-4 text-purple-400" />
-          {label}
-        </label>
-
-        <div className="space-y-2">
-          {displayItems.map((item, idx) => (
-            <CompositeItemCard
-              key={idx}
-              item={item}
-              index={idx}
-              fields={fields ?? []}
-              fieldName={_name}
-              originalItem={originalItems?.[idx]}
-              defaultLanguage={defaultLanguage}
-              onUpdate={handleUpdate}
-              onRemove={handleRemove}
-              repo={repo}
-              branch={branch}
-              translationMode={translationMode}
-            />
-          ))}
-        </div>
-
-        {displayItems.length === 0 && (
-          <p className="text-sm text-zinc-500 py-2">No items yet</p>
-        )}
-
-        {!translationMode && (
-          <button
-            type="button"
-            onClick={handleAdd}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 rounded text-sm transition-colors mt-2"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Add Item
-          </button>
-        )}
-
-        {error && <p className="mt-1 text-sm text-red-400">{error}</p>}
-      </div>
-    )
+    return <CompositeArrayEditor {...props} />
   }
 
-  // --- Single object mode (original behavior) ---
+  return <CompositeSingleEditor {...props} />
+}
+
+function CompositeSingleEditor({
+  label,
+  value,
+  error,
+  onChange,
+  fields,
+  repo,
+  branch,
+  translationMode,
+  originalValue,
+  defaultLanguage,
+}: CompositeFieldEditorProps) {
   const current = (value as Record<string, unknown>) ?? {}
   const originalObj = (originalValue as Record<string, unknown>) ?? undefined
 

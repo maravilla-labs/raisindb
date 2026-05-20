@@ -172,7 +172,6 @@ export function registerSemanticProviders(
     LANGUAGE_ID,
     {
       triggerCharacters: [' ', '.', '(', ',', "'"],
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async provideCompletionItems(model: any, position: any, _context: any, _token: any) {
         const word = model.getWordUntilPosition(position)
         const range = {
@@ -221,7 +220,6 @@ export function registerSemanticProviders(
     signatureHelpTriggerCharacters: ['(', ','],
     signatureHelpRetriggerCharacters: [','],
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async provideSignatureHelp(model: any, position: any, _token: any, _context: any) {
       const funcContext = findFunctionContext(model, position)
 

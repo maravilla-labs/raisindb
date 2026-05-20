@@ -18,13 +18,12 @@ import {
   DEFAULT_CHUNKING_SETTINGS,
 } from '../../api/ai'
 import { ApiError } from '../../api/client'
-
-// Use "default" as tenant ID for single-tenant mode
-const TENANT_ID = 'default'
+import { useAuth } from '../../contexts/AuthContext'
 
 export default function AISettings() {
   const { repo } = useParams<{ repo: string }>()
   const toast = useToast()
+  const { tenantId: TENANT_ID } = useAuth()
 
   // Global tenant settings
   const [tenantEmbeddingSettings, setTenantEmbeddingSettings] = useState<EmbeddingSettings | null>(null)
@@ -39,7 +38,8 @@ export default function AISettings() {
   // Load tenant AI configuration
   useEffect(() => {
     loadTenantConfig()
-  }, [])
+     
+  }, [TENANT_ID])
 
   const loadTenantConfig = async () => {
     try {

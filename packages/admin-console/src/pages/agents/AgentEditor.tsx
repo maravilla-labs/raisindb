@@ -8,9 +8,7 @@ import { agentsApi, type CreateAgentRequest, type UpdateAgentRequest } from '../
 import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider } from '../../api/ai'
 
 import { nodesApi } from '../../api/nodes'
-
-// Use "default" as tenant ID for single-tenant mode
-const TENANT_ID = 'default'
+import { useAuth } from '../../contexts/AuthContext'
 
 // Helper to convert provider array to map
 function providersArrayToMap(providers: ProviderConfigResponse[]): Record<AIProvider, ProviderConfigResponse | undefined> {
@@ -75,6 +73,7 @@ export default function AgentEditor() {
   const activeBranch = branch || 'main'
   const navigate = useNavigate()
   const isNew = agentId === 'new'
+  const { tenantId: TENANT_ID } = useAuth()
 
   // When editing an existing agent, back goes to agent detail; when creating new, back goes to list
   const backPath = isNew
@@ -118,7 +117,7 @@ export default function AgentEditor() {
     if (!isNew && agentId) {
       loadAgent()
     }
-  }, [repo, activeBranch, agentId, isNew])
+  }, [repo, activeBranch, agentId, isNew, TENANT_ID])
 
   useEffect(() => {
     // Update available models when provider changes

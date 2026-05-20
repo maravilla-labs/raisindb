@@ -150,7 +150,7 @@ export function SqlEditor({
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [repo, validatorReady])
 
   // Register the RaisinSQL language before the editor mounts

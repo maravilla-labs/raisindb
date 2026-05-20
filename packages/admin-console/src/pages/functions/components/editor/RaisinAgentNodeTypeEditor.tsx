@@ -11,13 +11,11 @@ import { Allotment } from 'allotment'
 import { useFunctionsContext, useUndoRedo } from '../../hooks'
 import { nodesApi } from '../../../../api/nodes'
 import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider } from '../../../../api/ai'
+import { useAuth } from '../../../../contexts/AuthContext'
 import CommitDialog from '../../../../components/CommitDialog'
 import { InlineFunctionPicker } from './InlineFunctionPicker'
 import { AgentTestChat } from './AgentTestChat'
 import type { EditorTab } from '../../types'
-
-// Use "default" as tenant ID for single-tenant mode
-const TENANT_ID = 'default'
 
 // Helper to convert provider array to map
 function providersArrayToMap(providers: ProviderConfigResponse[]): Record<AIProvider, ProviderConfigResponse | undefined> {
@@ -137,6 +135,7 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
     loadRootNodes,
     addLog,
   } = useFunctionsContext()
+  const { tenantId: TENANT_ID } = useAuth()
 
   // State
   const [isLoading, setIsLoading] = useState(true)
@@ -190,7 +189,7 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
     }
 
     loadConfig()
-  }, [])
+  }, [TENANT_ID])
 
   // Update available models when provider changes
   useEffect(() => {

@@ -569,7 +569,7 @@ export default function TenantAiSettings() {
   // tenant change keeps the panel honest if the value updates later).
   useEffect(() => {
     loadConfig()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [TENANT_ID])
 
   // Track changes

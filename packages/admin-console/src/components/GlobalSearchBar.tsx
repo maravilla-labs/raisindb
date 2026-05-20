@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { Search, Loader, X, Sparkles } from 'lucide-react'
 import { searchApi, type SearchResultItem } from '../api/search'
 import { embeddingsApi } from '../api/embeddings'
+import { useAuth } from '../contexts/AuthContext'
 import SearchResultsDropdown from './SearchResultsDropdown'
 
 interface GlobalSearchBarProps {
@@ -10,6 +11,7 @@ interface GlobalSearchBarProps {
 }
 
 export default function GlobalSearchBar({ repo, branch }: GlobalSearchBarProps) {
+  const { tenantId } = useAuth()
   const [query, setQuery] = useState('')
   const [isOpen, setIsOpen] = useState(false)
   const [results, setResults] = useState<SearchResultItem[]>([])
@@ -26,7 +28,7 @@ export default function GlobalSearchBar({ repo, branch }: GlobalSearchBarProps) 
   useEffect(() => {
     const checkEmbeddings = async () => {
       try {
-        const config = await embeddingsApi.getConfig('default') // TODO: get tenant from context
+        const config = await embeddingsApi.getConfig(tenantId)
         setHasEmbeddings(config.enabled && config.has_api_key)
       } catch (error) {
         console.error('Failed to check embeddings config:', error)
@@ -34,7 +36,7 @@ export default function GlobalSearchBar({ repo, branch }: GlobalSearchBarProps) 
       }
     }
     checkEmbeddings()
-  }, [])
+  }, [tenantId])
 
   // Debounced search function
   const performSearch = useCallback(async (searchQuery: string) => {

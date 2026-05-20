@@ -19,10 +19,12 @@ import {
   PendingUpdateInfo,
 } from '../api/system-updates'
 import { useToast, ToastContainer } from '../components/Toast'
+import { useAuth } from '../contexts/AuthContext'
 
 export default function SystemUpdatesPage() {
   const { repo } = useParams<{ repo: string }>()
   const navigate = useNavigate()
+  const { tenantId: tenant } = useAuth()
   const [updates, setUpdates] = useState<PendingUpdatesResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [applying, setApplying] = useState(false)
@@ -31,13 +33,12 @@ export default function SystemUpdatesPage() {
   const [forceApply, setForceApply] = useState(false)
   const { toasts, error: showError, success: showSuccess, closeToast } = useToast()
 
-  const tenant = 'default' // TODO: Get from context
-
   useEffect(() => {
     if (repo) {
       loadUpdates()
     }
-  }, [repo])
+     
+  }, [repo, tenant])
 
   async function loadUpdates() {
     if (!repo) return
