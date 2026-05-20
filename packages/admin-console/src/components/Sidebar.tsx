@@ -98,7 +98,7 @@ export default function Sidebar({ isOpen, isMobile, onClose }: SidebarProps) {
       </Link>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-2">
+      <nav className="flex-1 overflow-y-auto space-y-2">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
@@ -120,7 +120,7 @@ export default function Sidebar({ isOpen, isMobile, onClose }: SidebarProps) {
       </nav>
 
       {/* Footer */}
-      <div className="space-y-4 border-t border-white/10 pt-4">
+      <div className="flex-shrink-0 space-y-4 border-t border-white/10 pt-4">
         {/* User Info - Link to Profile */}
         {user && (
           <NavLink

@@ -8,6 +8,7 @@ allowed_node_types:
   - raisin:ProfileData
   - raisin:MessageFolder
   - raisin:Message
+  - raisin:Conversation
   - raisin:AclFolder
   - raisin:Folder
   - raisin:SecurityConfig
