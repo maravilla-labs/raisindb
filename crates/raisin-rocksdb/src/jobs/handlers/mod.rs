@@ -83,7 +83,7 @@ pub use resumable_upload::{
 };
 pub use revision_history_copy::RevisionHistoryCopyHandler;
 pub use scheduled_trigger::{
-    ScheduledTriggerFinderCallback, ScheduledTriggerHandler, ScheduledTriggerMatch,
+    cron_matches, ScheduledTriggerFinderCallback, ScheduledTriggerHandler, ScheduledTriggerMatch,
 };
 pub use snapshot::{NodeChangeInfo, SnapshotHandler, TranslationChangeInfo};
 pub use trigger_evaluation::{

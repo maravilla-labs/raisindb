@@ -247,7 +247,6 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       await agentChatApi.sendUserMessage({
         repo,
         conversation,
-        agentId,
         content: messageContent,
       })
 

@@ -346,8 +346,117 @@ async fn main() {
             let flow_callbacks = create_flow_callbacks(execution_deps.clone());
             tracing::info!("Created flow instance execution callbacks");
 
-            let scheduled_trigger_finder: Option<raisin_rocksdb::ScheduledTriggerFinderCallback> =
-                None;
+            // Scheduled trigger finder: queries every `raisin:Trigger` node in
+            // the `functions` workspace across all repos, filters by
+            // `trigger_type = "schedule"`, evaluates the cron expression
+            // against the current time, and returns matches for the handler
+            // to enqueue. The periodic enqueuer below kicks a
+            // ScheduledTriggerCheck job every minute.
+            //
+            // First cut — best-effort, untested without a running cluster.
+            // Errors on individual repos are logged and the scan continues
+            // so one broken tenant can't break everyone else's schedules.
+            let storage_for_finder = storage.clone();
+            let scheduled_trigger_finder: Option<raisin_rocksdb::ScheduledTriggerFinderCallback> = {
+                use raisin_models::nodes::properties::PropertyValue;
+                use raisin_storage::repository::RepositoryManagementRepository;
+                use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
+                Some(std::sync::Arc::new(
+                    move |tenant_filter, repo_filter, current_time| {
+                        let storage = storage_for_finder.clone();
+                        Box::pin(async move {
+                            let mut matches = Vec::new();
+                            let repos = match storage
+                                .repository_management()
+                                .list_repositories()
+                                .await
+                            {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Failed to list repositories for scheduled trigger scan");
+                                    return Ok(matches);
+                                }
+                            };
+                            for repo in repos {
+                                if let Some(ref t) = tenant_filter {
+                                    if &repo.tenant_id != t {
+                                        continue;
+                                    }
+                                }
+                                if let Some(ref r) = repo_filter {
+                                    if &repo.repo_id != r {
+                                        continue;
+                                    }
+                                }
+                                let branch = "main";
+                                let scope =
+                                    StorageScope::new(&repo.tenant_id, &repo.repo_id, branch, "functions");
+                                let triggers = match storage
+                                    .nodes()
+                                    .list_by_type(scope, "raisin:Trigger", ListOptions::default())
+                                    .await
+                                {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            tenant = %repo.tenant_id,
+                                            repo = %repo.repo_id,
+                                            error = %e,
+                                            "Failed to list triggers in repo (skipping)"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                for t in triggers {
+                                    let enabled = matches!(
+                                        t.properties.get("enabled"),
+                                        Some(PropertyValue::Boolean(true))
+                                    );
+                                    if !enabled {
+                                        continue;
+                                    }
+                                    let trigger_type = match t.properties.get("trigger_type") {
+                                        Some(PropertyValue::String(s)) => s.as_str(),
+                                        _ => continue,
+                                    };
+                                    if trigger_type != "schedule" {
+                                        continue;
+                                    }
+                                    let cron_expr = match t.properties.get("config") {
+                                        Some(PropertyValue::Object(obj)) => {
+                                            match obj.get("cron_expression") {
+                                                Some(PropertyValue::String(s)) => s.clone(),
+                                                _ => continue,
+                                            }
+                                        }
+                                        _ => continue,
+                                    };
+                                    if !raisin_rocksdb::cron_matches(&cron_expr, current_time) {
+                                        continue;
+                                    }
+                                    let function_path = match t.properties.get("function_path") {
+                                        Some(PropertyValue::String(s)) => s.clone(),
+                                        _ => continue,
+                                    };
+                                    let trigger_name = match t.properties.get("name") {
+                                        Some(PropertyValue::String(s)) => s.clone(),
+                                        _ => t.id.to_string(),
+                                    };
+                                    matches.push(raisin_rocksdb::ScheduledTriggerMatch {
+                                        function_path,
+                                        trigger_name,
+                                        tenant_id: repo.tenant_id.clone(),
+                                        repo_id: repo.repo_id.clone(),
+                                        branch: branch.to_string(),
+                                        workspace: "functions".to_string(),
+                                    });
+                                }
+                            }
+                            Ok(matches)
+                        })
+                    },
+                ))
+            };
 
             let binary_storage_callback =
                 startup::jobs::create_binary_storage_callback(bin.clone());
@@ -454,6 +563,51 @@ async fn main() {
                 pools_config.system.runtime_threads,
                 pools_config.system.max_concurrent_handlers,
             );
+            // Periodic enqueuer for scheduled trigger checks.
+            // Every 60 seconds, register a ScheduledTriggerCheck job that the
+            // handler picks up and dispatches to the finder above. Best-effort
+            // — failures are logged but don't break the loop.
+            //
+            // TODO(cluster-coordination): in a multi-node cluster every node
+            // currently runs this loop independently. Without a leader-election
+            // or single-fire guarantee, a cron-fired side effect (e.g. "send
+            // reminder email" function) will execute N times — once per node.
+            // We need to decide on the architecture before scheduled triggers
+            // are safe in clustered deployments. Options on the table:
+            //   - Leader election (one node owns the enqueuer; others sit out).
+            //   - Distributed lock per minute-tick keyed on the wall-clock
+            //     minute, claimed via the existing job registry.
+            //   - Run the enqueuer on every node but make ScheduledTriggerCheck
+            //     itself a singleton job (registry-side dedup by trigger+minute).
+            // Hold a separate session to pick one. Until then, only run with
+            // a single raisindb node in production.
+            {
+                let registry_for_loop = storage.job_registry().clone();
+                tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    interval.set_missed_tick_behavior(
+                        tokio::time::MissedTickBehavior::Skip,
+                    );
+                    // Wait one tick so we don't fire immediately at boot.
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        let job_type = raisin_storage::jobs::JobType::ScheduledTriggerCheck {
+                            tenant_id: None,
+                            repo_id: None,
+                        };
+                        if let Err(e) = registry_for_loop
+                            .register_job(job_type, "_system".to_string(), None, None, None)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to register ScheduledTriggerCheck job");
+                        }
+                    }
+                });
+                tracing::info!("Scheduled trigger enqueuer started (60s interval)");
+            }
+
             tracing::info!(
                 "Total: {} dispatcher workers across {} runtime threads",
                 total_workers,

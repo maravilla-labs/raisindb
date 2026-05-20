@@ -107,6 +107,7 @@ pub use jobs::{
     ResumableUploadHandler,
     // Flow runtime callbacks
     RocksDBFlowCallbacks,
+    cron_matches,
     ScheduledTriggerFinderCallback,
     ScheduledTriggerMatch,
     SqlExecutorCallback,

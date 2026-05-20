@@ -16,6 +16,7 @@ export interface TestConversation {
   streamChannel: string
   userId: string
   userHome: string
+  agentSlug: string
 }
 
 export interface CreateTestConversationOptions {
@@ -28,7 +29,6 @@ export interface CreateTestConversationOptions {
 export interface SendUserMessageOptions {
   repo: string
   conversation: TestConversation
-  agentId: string
   content: string
 }
 
@@ -155,7 +155,7 @@ export const agentChatApi = {
       conversation_type: 'ai_chat',
       conversation_id: conversationId,
       subject: `Test: ${agentName}`,
-      participants: [userId, `agent:${agentId}`],
+      participants: [userId, `agent:${agentSlug}`],
       stream_channel: streamChannel,
       agent_ref: { 'raisin:path': agentPath, 'raisin:workspace': 'functions' },
       unread_count: 0,
@@ -167,7 +167,7 @@ export const agentChatApi = {
       [conversationPath, JSON.stringify(properties)],
     )
 
-    return { conversationPath, conversationId, streamChannel, userId, userHome }
+    return { conversationPath, conversationId, streamChannel, userId, userHome, agentSlug }
   },
 
   /**
@@ -177,8 +177,8 @@ export const agentChatApi = {
    * then fires the agent.
    */
   async sendUserMessage(options: SendUserMessageOptions): Promise<void> {
-    const { repo, conversation, agentId, content } = options
-    const { userId, userHome, conversationId } = conversation
+    const { repo, conversation, content } = options
+    const { userId, userHome, conversationId, agentSlug } = conversation
     const messageId = crypto.randomUUID()
     const messagePath = `${userHome}/outbox/msg-${messageId}`
 
@@ -188,7 +188,7 @@ export const agentChatApi = {
       status: 'pending',
       sender_id: userId,
       sender_path: userHome,
-      recipient_id: `agent:${agentId}`,
+      recipient_id: `agent:${agentSlug}`,
       body: { content, message_text: content, thread_id: conversationId },
       conversation_id: conversationId,
       client_id: messageId,

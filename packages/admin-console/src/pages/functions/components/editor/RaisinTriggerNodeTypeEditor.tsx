@@ -5,14 +5,15 @@
  * Covers properties defined in raisin_trigger.yaml and lets you attach one or more functions.
  */
 
-import { useEffect, useCallback, useState, useRef } from 'react'
-import { Save, Undo2, Redo2, Loader2, Zap, Settings, Plus, Trash2, Globe, Copy, Check, Play, GitBranch, Unlink, Link2 } from 'lucide-react'
+import { useEffect, useCallback, useState, useRef, useMemo } from 'react'
+import { Save, Undo2, Redo2, Loader2, Zap, Settings, Plus, Trash2, Globe, Copy, Check, Play, GitBranch, Unlink, Link2, AlertCircle, Clock } from 'lucide-react'
 import { useFunctionsContext, useUndoRedo } from '../../hooks'
 import { nodesApi } from '../../../../api/nodes'
 import { functionsApi } from '../../../../api/functions'
 import CommitDialog from '../../../../components/CommitDialog'
 import { FunctionPicker } from './FunctionPicker'
 import { FlowPicker } from './FlowPicker'
+import { validateCron, CRON_PRESETS } from '../../utils/cron'
 import type {
   EditorTab,
   TriggerProperties,
@@ -768,21 +769,15 @@ export function RaisinTriggerNodeTypeEditor({ tab }: RaisinTriggerNodeTypeEditor
             )}
 
             {properties.trigger_type === 'schedule' && (
-              <div className="space-y-2">
-                <label className="block text-xs text-gray-400">Cron Expression</label>
-                <input
-                  type="text"
-                  value={properties.config?.cron_expression || ''}
-                  onChange={(e) =>
-                    handlePropertyChange('config', {
-                      ...properties.config,
-                      cron_expression: e.target.value,
-                    })
-                  }
-                  className="w-full px-3 py-2 rounded bg-black/30 border border-white/10 text-white text-sm focus:border-primary-500 focus:ring-1 focus:ring-primary-500"
-                  placeholder="0 * * * *"
-                />
-              </div>
+              <CronExpressionEditor
+                value={properties.config?.cron_expression || ''}
+                onChange={(expr) =>
+                  handlePropertyChange('config', {
+                    ...properties.config,
+                    cron_expression: expr,
+                  })
+                }
+              />
             )}
 
             {properties.trigger_type === 'http' && (
@@ -933,7 +928,9 @@ export function RaisinTriggerNodeTypeEditor({ tab }: RaisinTriggerNodeTypeEditor
               </div>
             )}
 
-            {/* Filters */}
+            {/* Filters — only apply to node-event triggers. Schedule and HTTP
+                triggers fire based on time / inbound requests, not node state. */}
+            {properties.trigger_type === 'node_event' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Workspaces (comma separated)</label>
@@ -1191,6 +1188,7 @@ export function RaisinTriggerNodeTypeEditor({ tab }: RaisinTriggerNodeTypeEditor
                 </div>
               </div>
             </div>
+            )}
           </div>
 
           {/* Execution Target */}
@@ -1344,6 +1342,112 @@ export function RaisinTriggerNodeTypeEditor({ tab }: RaisinTriggerNodeTypeEditor
           onClose={() => setPendingCommit(null)}
         />
       )}
+    </div>
+  )
+}
+
+/**
+ * Cron expression editor with live validation, human-readable description,
+ * next-fire-time preview, and a presets dropdown.
+ *
+ * Validation mirrors the server matcher in
+ * crates/raisin-rocksdb/.../scheduled_trigger.rs::cron_matches.
+ */
+function CronExpressionEditor({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (expr: string) => void
+}) {
+  const [presetsOpen, setPresetsOpen] = useState(false)
+  // Re-validate on every value change. The next-fire calculation can scan up
+  // to a year of minutes, so we memoize.
+  const validation = useMemo(() => validateCron(value), [value])
+
+  const formatNextFire = (d: Date) => {
+    const pad = (n: number) => n.toString().padStart(2, '0')
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`
+  }
+
+  return (
+    <div className="space-y-2">
+      <label className="block text-xs text-gray-400">Cron Expression</label>
+      <div className="flex gap-2 items-stretch">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className={`flex-1 px-3 py-2 rounded bg-black/30 border text-white text-sm font-mono focus:ring-1 focus:outline-none ${
+            value && !validation.valid
+              ? 'border-red-500/60 focus:border-red-500 focus:ring-red-500'
+              : 'border-white/10 focus:border-primary-500 focus:ring-primary-500'
+          }`}
+          placeholder="0 * * * *"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+        />
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setPresetsOpen(!presetsOpen)}
+            className="h-full px-3 rounded bg-black/30 border border-white/10 text-gray-300 text-sm hover:bg-black/40 hover:border-white/20 flex items-center gap-1"
+          >
+            Presets
+            <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z" clipRule="evenodd" /></svg>
+          </button>
+          {presetsOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-10"
+                onClick={() => setPresetsOpen(false)}
+              />
+              <div className="absolute right-0 mt-1 w-64 rounded-lg bg-zinc-900 border border-white/10 shadow-xl z-20 overflow-hidden">
+                {CRON_PRESETS.map((p) => (
+                  <button
+                    key={p.expr}
+                    type="button"
+                    onClick={() => {
+                      onChange(p.expr)
+                      setPresetsOpen(false)
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-white/5 flex justify-between items-center gap-3"
+                  >
+                    <span className="text-gray-200">{p.label}</span>
+                    <code className="text-xs text-gray-500 font-mono">{p.expr}</code>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {value && !validation.valid && validation.error && (
+        <div className="flex items-start gap-1.5 text-xs text-red-400">
+          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+          <span>{validation.error}</span>
+        </div>
+      )}
+
+      {validation.valid && validation.description && (
+        <div className="flex items-start gap-1.5 text-xs text-green-400">
+          <Check className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+          <span>{validation.description}</span>
+        </div>
+      )}
+
+      {validation.valid && validation.nextFire && (
+        <div className="flex items-start gap-1.5 text-xs text-gray-500">
+          <Clock className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+          <span>Next fire: {formatNextFire(validation.nextFire)}</span>
+        </div>
+      )}
+
+      <p className="text-xs text-gray-600">
+        Format: <code className="text-gray-400">minute hour day month day-of-week</code> (1=Mon, 7=Sun). Specials: <code className="text-gray-400">@hourly</code>, <code className="text-gray-400">@daily</code>, <code className="text-gray-400">@weekly</code>, <code className="text-gray-400">@monthly</code>, <code className="text-gray-400">@yearly</code>.
+      </p>
     </div>
   )
 }

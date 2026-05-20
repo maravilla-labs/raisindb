@@ -40,9 +40,9 @@ pub use handlers::{
 };
 // Additional exports for external use (transport layer callbacks)
 pub use handlers::{
-    create_trigger_matcher, FlowResumeCallback, FunctionEnabledChecker, FunctionExecutionResult,
-    FunctionExecutorCallback, ScheduledTriggerFinderCallback, ScheduledTriggerMatch, TriggerMatch,
-    TriggerMatcherCallback,
+    create_trigger_matcher, cron_matches, FlowResumeCallback, FunctionEnabledChecker,
+    FunctionExecutionResult, FunctionExecutorCallback, ScheduledTriggerFinderCallback,
+    ScheduledTriggerMatch, TriggerMatch, TriggerMatcherCallback,
 };
 pub use index_lock::{IndexKey, IndexLockManager};
 pub use metadata_store::{JobMetadataStore, PersistedJobEntry};

@@ -47,16 +47,4 @@ workspace_patches:
         - raisin:Folder
         - launchpad:Presence
         - raisin:Asset
-  "raisin:access_control":
-    allowed_node_types:
-      add:
-        - raisin:Folder
-        - raisin:Message
-        - raisin:Conversation
-        - raisin:AIConversation
-        - raisin:AIMessage
-        - raisin:AIThought
-        - raisin:AIToolCall
-        - raisin:AIToolResult
-        - raisin:AIToolSingleCallResult
-        - raisin:AIToolResultAggregator
+# Messaging / AI types now patched by raisin-messaging and ai-tools builtin packages
