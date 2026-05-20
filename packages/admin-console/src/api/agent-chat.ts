@@ -89,22 +89,50 @@ async function ensureFolderNode(repo: string, path: string, title: string): Prom
   )
 }
 
+// Operator/admin accounts in hosted tenants aren't raisin:User nodes, so
+// RAISIN_CURRENT_USER() returns null and handle-chat has no sender to
+// resolve. We auto-provision a synthetic per-agent test rig user instead.
+// One rig per agent; per-session conversations live under its inbox.
+async function ensureTestRigUser(
+  repo: string,
+  agentSlug: string,
+  agentName: string,
+  agentPath: string,
+): Promise<CurrentUser> {
+  const slug = `test-chat-${agentSlug}`
+  const userHome = `/users/internal/${slug}`
+  const userId = `test-rig:${agentSlug}`
+
+  const existing = await sqlApi.executeQuery(
+    repo,
+    `SELECT id FROM '${CHAT_WORKSPACE}' WHERE path = $1 AND node_type = 'raisin:User' LIMIT 1`,
+    [userHome],
+  )
+  if (existing?.rows?.[0]) return { userId, userHome }
+
+  await ensureFolderNode(repo, '/users', 'Users')
+  await ensureFolderNode(repo, '/users/internal', 'Internal Users')
+
+  const properties = {
+    user_id: userId,
+    email: `${slug}@raisindb.local`,
+    display_name: `Test Chat (${agentName})`,
+    status: 'active',
+    is_test_rig: true,
+    agent_ref: { 'raisin:path': agentPath, 'raisin:workspace': 'functions' },
+    created_at: new Date().toISOString(),
+  }
+
+  await sqlApi.executeQuery(
+    repo,
+    `INSERT INTO '${CHAT_WORKSPACE}' (path, node_type, properties) VALUES ($1, 'raisin:User', $2::jsonb)`,
+    [userHome, JSON.stringify(properties)],
+  )
+
+  return { userId, userHome }
+}
+
 export const agentChatApi = {
-  /**
-   * Resolve the current user's home node path via RAISIN_CURRENT_USER().
-   * Required to write into `${userHome}/inbox/...` and `${userHome}/outbox/...`.
-   */
-  async getCurrentUser(repo: string): Promise<CurrentUser> {
-    const result = await sqlApi.executeQuery(
-      repo,
-      `SELECT RAISIN_CURRENT_USER()->>'path'::String as home, RAISIN_CURRENT_USER()->>'id'::String as user_id`,
-    )
-    const row = result?.rows?.[0]
-    const userHome = row?.home as string | undefined
-    const userId = (row?.user_id as string | undefined) || userHome
-    if (!userHome) throw new Error('Current user has no home path — cannot start test chat')
-    return { userId: userId!, userHome }
-  },
 
   /**
    * Create a `raisin:Conversation` node in the user's inbox that targets the
@@ -113,7 +141,8 @@ export const agentChatApi = {
    */
   async createTestConversation(options: CreateTestConversationOptions): Promise<TestConversation> {
     const { repo, agentPath, agentId, agentName } = options
-    const { userId, userHome } = await agentChatApi.getCurrentUser(repo)
+    const agentSlug = agentPath.split('/').filter(Boolean).pop() || agentId
+    const { userId, userHome } = await ensureTestRigUser(repo, agentSlug, agentName, agentPath)
 
     const conversationId = `chat-${crypto.randomUUID()}`
     const conversationPath = `${userHome}/inbox/chats/${conversationId}`

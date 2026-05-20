@@ -930,20 +930,25 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
         </div>
           </Allotment.Pane>
 
-          {/* Test Chat Panel */}
-          {showTestChat && (
-            <Allotment.Pane preferredSize={400} minSize={300} maxSize={600}>
-              <div className="h-full border-l border-white/10">
-                <AgentTestChat
-                  repo={repo}
-                  branch={branch}
-                  agentPath={tab.path}
-                  agentName={agentNode.name}
-                  agentId={agentNode.id}
-                />
-              </div>
-            </Allotment.Pane>
-          )}
+          {/* Test Chat Panel — always rendered, visibility toggled.
+              Conditional <Allotment.Pane> children break Allotment's
+              size accounting and bleed the editor under the page header. */}
+          <Allotment.Pane
+            visible={showTestChat}
+            preferredSize={400}
+            minSize={300}
+            maxSize={600}
+          >
+            <div className="h-full border-l border-white/10">
+              <AgentTestChat
+                repo={repo}
+                branch={branch}
+                agentPath={tab.path}
+                agentName={agentNode.name}
+                agentId={agentNode.id}
+              />
+            </div>
+          </Allotment.Pane>
         </Allotment>
       </div>
 
