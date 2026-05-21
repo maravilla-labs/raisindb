@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Database, Search, Sparkles, AlertCircle, RefreshCw, Zap, Trash2, CheckCircle, XCircle, Clock, Activity, Loader2, Package, Link2, Wrench, FileText, BarChart3 } from 'lucide-react'
+import { Database, Search, Sparkles, AlertCircle, RefreshCw, Zap, Trash2, CheckCircle, XCircle, Clock, Activity, Loader2, Package, Link2, Wrench, FileText, BarChart3, ShieldAlert } from 'lucide-react'
 import GlassCard from './GlassCard'
 import BranchDropdown from './BranchDropdown'
 import ConfirmDialog from './ConfirmDialog'
@@ -12,6 +12,7 @@ import {
   formatBytes,
   formatDuration,
   type FulltextHealth,
+  type FulltextErrorStats,
   type VectorHealth,
   type VectorMetrics,
   type JobInfo,
@@ -54,6 +55,11 @@ export default function DatabaseManagementShared({
   const [fulltextHealth, setFulltextHealth] = useState<FulltextHealth | null>(null)
   const [healthLoading, setHealthLoading] = useState(false)
   const [healthError, setHealthError] = useState<string | null>(null)
+  // v0.1.30: per-(tenant, repo, branch) fulltext error counter. `null`
+  // until first load; a stats object with total === 0 means "all clear".
+  // Counters are in-memory on the server and reset across restarts, so
+  // a fresh-process state also shows as 0.
+  const [fulltextErrors, setFulltextErrors] = useState<FulltextErrorStats | null>(null)
 
   const [vectorHealth, setVectorHealth] = useState<VectorHealth | null>(null)
   const [vectorHealthLoading, setVectorHealthLoading] = useState(false)
@@ -123,12 +129,15 @@ export default function DatabaseManagementShared({
     }
   }, [fixedRepository])
 
-  // Load fulltext health when repo changes
+  // Load fulltext health + error counter when repo/branch changes.
+  // Both pulled here so the new "Index Errors" card always reflects
+  // the current selection without an extra trigger.
   useEffect(() => {
     if (selectedRepo) {
       loadFulltextHealth()
+      loadFulltextErrors()
     }
-  }, [selectedRepo, tenantId])
+  }, [selectedRepo, tenantId, branch])
 
   // Load vector health when repo changes
   useEffect(() => {
@@ -354,6 +363,19 @@ export default function DatabaseManagementShared({
     }
   }
 
+  async function loadFulltextErrors() {
+    if (!selectedRepo) return
+    try {
+      const stats = await databaseManagementApi.fulltextErrors(tenantId, selectedRepo, branch)
+      setFulltextErrors(stats)
+    } catch (error: any) {
+      // The errors endpoint should never fail except on transport
+      // issues; don't blow up the page on it. Log + leave the panel
+      // showing whatever it had last.
+      console.error('Failed to load fulltext error counters:', error)
+    }
+  }
+
   async function loadVectorHealth() {
     if (!selectedRepo) return
 
@@ -445,11 +467,60 @@ export default function DatabaseManagementShared({
         try {
           const response = await databaseManagementApi.fulltextRebuild(tenantId, selectedRepo)
           showSuccess(`Rebuild started: ${response.message}`)
+          // Rebuild deletes the on-disk index and re-indexes from
+          // RocksDB — past failures are no longer meaningful. Clear
+          // optimistically so the dashboard goes green; if new errors
+          // come in during the rebuild they'll repopulate.
+          await clearFulltextErrorsSilent()
         } finally {
           setOperationLoading(null)
         }
       },
     })
+  }
+
+  /**
+   * v0.1.29+ recovery action. Idempotent — re-indexes every node
+   * into the existing Tantivy directory so missing entries get added
+   * back. Safe on healthy indexes (just wasted I/O).
+   */
+  async function reconcileFulltext() {
+    if (!selectedRepo) return
+    setOperationLoading('reconcile')
+    try {
+      const response = await databaseManagementApi.fulltextReconcile(tenantId, selectedRepo, branch)
+      showSuccess(`Reconcile started: ${response.message}`)
+      await clearFulltextErrorsSilent()
+    } catch (error: any) {
+      showErrorMsg(error.message || 'Failed to start reconcile')
+    } finally {
+      setOperationLoading(null)
+    }
+  }
+
+  async function clearFulltextErrorsSilent() {
+    if (!selectedRepo) return
+    try {
+      await databaseManagementApi.fulltextErrorsClear(tenantId, selectedRepo, branch)
+      setFulltextErrors(null)
+    } catch (error: any) {
+      // Counter clear is best-effort. If it fails, the next poll
+      // resyncs.
+      console.warn('Failed to clear fulltext error counters:', error)
+    }
+  }
+
+  async function clearFulltextErrors() {
+    if (!selectedRepo) return
+    setOperationLoading('clear-errors')
+    try {
+      await databaseManagementApi.fulltextErrorsClear(tenantId, selectedRepo, branch)
+      setFulltextErrors(null)
+    } catch (error: any) {
+      showErrorMsg(error.message || 'Failed to clear errors')
+    } finally {
+      setOperationLoading(null)
+    }
   }
 
   async function optimizeFulltext() {
@@ -903,8 +974,63 @@ export default function DatabaseManagementShared({
           </div>
         )}
 
+        {/* v0.1.29 — Index Errors panel. Renders only when the
+            in-memory counter has recorded anything for this
+            (tenant, repo, branch). All-zero state stays hidden so
+            healthy indexes don't waste vertical space. */}
+        {fulltextErrors && (fulltextErrors.commit_errors + fulltextErrors.spawn_errors + fulltextErrors.node_fetch_errors) > 0 && (
+          <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-6">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-red-400" />
+                <div>
+                  <h3 className="text-red-200 font-semibold">Indexing errors detected</h3>
+                  <p className="text-xs text-red-300/80">
+                    Counts since server start for {tenantId}/{selectedRepo}/{branch}. Run Reconcile to re-index from the canonical node store, then clear.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={clearFulltextErrors}
+                disabled={operationLoading === 'clear-errors'}
+                className="text-xs px-2 py-1 bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 rounded transition-all disabled:opacity-50"
+              >
+                Clear counters
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <div className="bg-white/5 rounded p-2">
+                <p className="text-xs text-gray-400">Commit errors</p>
+                <p className="text-lg font-semibold text-red-200">{fulltextErrors.commit_errors}</p>
+              </div>
+              <div className="bg-white/5 rounded p-2">
+                <p className="text-xs text-gray-400">Spawn errors</p>
+                <p className="text-lg font-semibold text-red-200">{fulltextErrors.spawn_errors}</p>
+              </div>
+              <div className="bg-white/5 rounded p-2">
+                <p className="text-xs text-gray-400">Node fetch errors</p>
+                <p className="text-lg font-semibold text-red-200">{fulltextErrors.node_fetch_errors}</p>
+              </div>
+            </div>
+            {fulltextErrors.last_error && (
+              <div className="text-xs">
+                <p className="text-gray-400 mb-1">
+                  Last error
+                  {fulltextErrors.last_error_kind && <span className="text-gray-500"> ({fulltextErrors.last_error_kind})</span>}
+                  {fulltextErrors.last_error_at && (
+                    <span className="text-gray-500">
+                      {' '}— {new Date(fulltextErrors.last_error_at * 1000).toLocaleString()}
+                    </span>
+                  )}
+                </p>
+                <p className="font-mono text-red-200/90 bg-black/30 p-2 rounded break-all">{fulltextErrors.last_error}</p>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Action Buttons */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <button
             onClick={verifyFulltext}
             disabled={!selectedRepo || operationLoading === 'verify'}
@@ -921,6 +1047,19 @@ export default function DatabaseManagementShared({
           >
             <RefreshCw className="w-5 h-5" />
             <span className="font-medium">Rebuild Index</span>
+          </button>
+
+          {/* v0.1.29 recovery action. Idempotent — replays every node
+              into Tantivy without deleting the existing index, so
+              dropped entries get added back without downtime. */}
+          <button
+            onClick={reconcileFulltext}
+            disabled={!selectedRepo || operationLoading === 'reconcile'}
+            title="Re-index every node without deleting the existing index. Safe to re-run."
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-300 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Wrench className="w-5 h-5" />
+            <span className="font-medium">Reconcile</span>
           </button>
 
           <button
