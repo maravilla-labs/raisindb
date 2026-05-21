@@ -81,7 +81,9 @@ pub async fn rebuild_fulltext_index(
     let _guard = lock.lock().await;
 
     tracing::info!(
-        tenant_id, repo_id, branch,
+        tenant_id,
+        repo_id,
+        branch,
         "Acquired index lock; starting fulltext rebuild"
     );
 
@@ -144,7 +146,9 @@ pub async fn reconcile_fulltext_index(
     let _guard = lock.lock().await;
 
     tracing::info!(
-        tenant_id, repo_id, branch,
+        tenant_id,
+        repo_id,
+        branch,
         "Acquired index lock; starting fulltext reconcile"
     );
 
@@ -229,7 +233,8 @@ async fn reindex_all_workspaces(
         let engine_clone = engine.clone();
         for chunk in nodes.chunks(REBUILD_CHUNK_SIZE) {
             let chunk_vec = chunk.to_vec();
-            let ctx_clone = batch_context(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, &ctx.workspace_id);
+            let ctx_clone =
+                batch_context(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, &ctx.workspace_id);
             let engine_for_task = engine_clone.clone();
             let result = tokio::task::spawn_blocking(move || {
                 engine_for_task.do_batch_index(&ctx_clone, chunk_vec, Vec::new())
@@ -251,7 +256,9 @@ async fn reindex_all_workspaces(
     }
 
     tracing::info!(
-        tenant_id, repo_id, branch,
+        tenant_id,
+        repo_id,
+        branch,
         items_processed = total_processed,
         errors = total_errors,
         workspaces = workspaces.len(),

@@ -59,7 +59,13 @@ impl FulltextJobHandler {
         message: &str,
     ) {
         self.error_counter
-            .record(&context.tenant_id, &context.repo_id, &context.branch, kind, message)
+            .record(
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                kind,
+                message,
+            )
             .await;
     }
 

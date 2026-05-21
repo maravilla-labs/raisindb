@@ -73,6 +73,7 @@ pub use config::{CompressionType, ReplicationPeerConfig, RocksDBConfig, TenantLi
 pub use hnsw_transfer::{HnswIndexManager, HnswIndexMetadata, HnswIndexReceiver};
 pub use jobs::{
     create_trigger_matcher,
+    cron_matches,
     // Job dispatcher types
     dispatcher::DispatcherStats,
     dispatcher::JobDispatcher,
@@ -107,7 +108,6 @@ pub use jobs::{
     ResumableUploadHandler,
     // Flow runtime callbacks
     RocksDBFlowCallbacks,
-    cron_matches,
     ScheduledTriggerFinderCallback,
     ScheduledTriggerMatch,
     SqlExecutorCallback,

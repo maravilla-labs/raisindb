@@ -555,8 +555,7 @@ pub async fn get_fulltext_errors(
     State(state): State<AppState>,
     Path((tenant, repo)): Path<(String, String)>,
     Query(params): Query<DatabaseOpQuery>,
-) -> Result<Json<raisin_rocksdb::FulltextErrorStats>, (StatusCode, Json<ErrorResponse>)>
-{
+) -> Result<Json<raisin_rocksdb::FulltextErrorStats>, (StatusCode, Json<ErrorResponse>)> {
     let rocksdb_storage = match &state.rocksdb_storage {
         Some(storage) => storage,
         None => {
@@ -607,10 +606,7 @@ pub async fn clear_fulltext_errors(
         .clear(&tenant, &repo, &branch)
         .await;
 
-    tracing::info!(
-        tenant, repo, branch,
-        "Cleared fulltext error counters"
-    );
+    tracing::info!(tenant, repo, branch, "Cleared fulltext error counters");
     Ok(StatusCode::NO_CONTENT)
 }
 

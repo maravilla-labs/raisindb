@@ -391,8 +391,12 @@ async fn main() {
                                     }
                                 }
                                 let branch = "main";
-                                let scope =
-                                    StorageScope::new(&repo.tenant_id, &repo.repo_id, branch, "functions");
+                                let scope = StorageScope::new(
+                                    &repo.tenant_id,
+                                    &repo.repo_id,
+                                    branch,
+                                    "functions",
+                                );
                                 let triggers = match storage
                                     .nodes()
                                     .list_by_type(scope, "raisin:Trigger", ListOptions::default())
@@ -586,11 +590,8 @@ async fn main() {
             {
                 let registry_for_loop = storage.job_registry().clone();
                 tokio::spawn(async move {
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_secs(60));
-                    interval.set_missed_tick_behavior(
-                        tokio::time::MissedTickBehavior::Skip,
-                    );
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     // Wait one tick so we don't fire immediately at boot.
                     interval.tick().await;
                     loop {

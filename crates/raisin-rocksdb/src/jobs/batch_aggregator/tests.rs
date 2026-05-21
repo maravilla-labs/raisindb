@@ -144,10 +144,17 @@ async fn idle_flush_picks_up_single_op() {
 
     // Post-idle: the single op must now flush.
     let jobs_after = aggregator.flush_expired().await.unwrap();
-    assert_eq!(jobs_after.len(), 1, "Expected idle clause to fire exactly once");
+    assert_eq!(
+        jobs_after.len(),
+        1,
+        "Expected idle clause to fire exactly once"
+    );
 
     let counts = aggregator.pending_counts().await;
-    assert!(counts.is_empty(), "Pending map should be drained after flush");
+    assert!(
+        counts.is_empty(),
+        "Pending map should be drained after flush"
+    );
 }
 
 /// Bug A regression (the part that matters for bulk imports):

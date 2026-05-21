@@ -42,11 +42,7 @@ impl FulltextJobHandler {
         result
     }
 
-    async fn handle_batch_index_inner(
-        &self,
-        job: &JobInfo,
-        context: &JobContext,
-    ) -> Result<()> {
+    async fn handle_batch_index_inner(&self, job: &JobInfo, context: &JobContext) -> Result<()> {
         let operation_count = match &job.job_type {
             JobType::FulltextBatchIndex { operation_count } => *operation_count,
             _ => {

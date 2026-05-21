@@ -152,7 +152,12 @@ impl FulltextErrorCounter {
     /// (all-zero) stats if nothing has been recorded — the admin UI
     /// treats `total() == 0` as "all clear", which is the same
     /// observable behaviour as "no entry exists".
-    pub async fn snapshot(&self, tenant_id: &str, repo_id: &str, branch: &str) -> FulltextErrorStats {
+    pub async fn snapshot(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+    ) -> FulltextErrorStats {
         let key = ErrorCounterKey::new(tenant_id, repo_id, branch);
         self.inner
             .read()
@@ -214,8 +219,10 @@ mod tests {
     #[tokio::test]
     async fn keys_are_isolated() {
         let c = FulltextErrorCounter::new();
-        c.record("a", "r", "main", FulltextErrorKind::Commit, "x").await;
-        c.record("b", "r", "main", FulltextErrorKind::Commit, "y").await;
+        c.record("a", "r", "main", FulltextErrorKind::Commit, "x")
+            .await;
+        c.record("b", "r", "main", FulltextErrorKind::Commit, "y")
+            .await;
 
         assert_eq!(c.snapshot("a", "r", "main").await.commit_errors, 1);
         assert_eq!(c.snapshot("b", "r", "main").await.commit_errors, 1);
@@ -224,8 +231,10 @@ mod tests {
     #[tokio::test]
     async fn clear_drops_only_one_key() {
         let c = FulltextErrorCounter::new();
-        c.record("a", "r", "main", FulltextErrorKind::Commit, "x").await;
-        c.record("b", "r", "main", FulltextErrorKind::Commit, "y").await;
+        c.record("a", "r", "main", FulltextErrorKind::Commit, "x")
+            .await;
+        c.record("b", "r", "main", FulltextErrorKind::Commit, "y")
+            .await;
         c.clear("a", "r", "main").await;
 
         assert_eq!(c.snapshot("a", "r", "main").await.total(), 0);
@@ -236,7 +245,8 @@ mod tests {
     async fn long_messages_are_truncated() {
         let c = FulltextErrorCounter::new();
         let huge = "x".repeat(2000);
-        c.record("t", "r", "main", FulltextErrorKind::Commit, &huge).await;
+        c.record("t", "r", "main", FulltextErrorKind::Commit, &huge)
+            .await;
         let s = c.snapshot("t", "r", "main").await;
         let len = s.last_error.as_ref().unwrap().len();
         assert!(len <= 520, "expected truncation, got len={}", len);

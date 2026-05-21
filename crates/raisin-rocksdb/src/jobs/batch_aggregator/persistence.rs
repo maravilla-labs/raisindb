@@ -126,8 +126,7 @@ pub(super) fn scan_pending(db: &DB) -> Result<Vec<(PendingOpKey, PendingOpRecord
     let cf = cf_handle(db, cf::PENDING_BATCH_OPS)?;
     let mut out = Vec::new();
     for item in db.iterator_cf(cf, IteratorMode::Start) {
-        let (key, value) =
-            item.map_err(|e| Error::storage(format!("scan pending: {}", e)))?;
+        let (key, value) = item.map_err(|e| Error::storage(format!("scan pending: {}", e)))?;
         let record: PendingOpRecord = serde_json::from_slice(&value)
             .map_err(|e| Error::storage(format!("deserialize pending: {}", e)))?;
         out.push((key.to_vec(), record));
@@ -200,7 +199,12 @@ mod tests {
         let persist = PendingPersistence::new(db);
 
         let rec = sample_record("node-1");
-        let key = make_pending_key(&rec.tenant_id, &rec.repo_id, &rec.branch, rec.queued_at_nanos);
+        let key = make_pending_key(
+            &rec.tenant_id,
+            &rec.repo_id,
+            &rec.branch,
+            rec.queued_at_nanos,
+        );
         persist.put(&key, &rec).unwrap();
 
         let scanned = persist.scan().unwrap();
@@ -216,7 +220,12 @@ mod tests {
         let mut keys = Vec::new();
         for i in 0..5 {
             let rec = sample_record(&format!("node-{}", i));
-            let k = make_pending_key(&rec.tenant_id, &rec.repo_id, &rec.branch, rec.queued_at_nanos);
+            let k = make_pending_key(
+                &rec.tenant_id,
+                &rec.repo_id,
+                &rec.branch,
+                rec.queued_at_nanos,
+            );
             persist.put(&k, &rec).unwrap();
             keys.push(k);
         }
