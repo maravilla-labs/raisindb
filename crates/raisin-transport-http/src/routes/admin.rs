@@ -146,6 +146,10 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             post(crate::handlers::management::rebuild_fulltext_index),
         )
         .route(
+            "/api/admin/management/database/{tenant}/{repo}/fulltext/reconcile",
+            post(crate::handlers::management::reconcile_fulltext_index),
+        )
+        .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/optimize",
             post(crate::handlers::management::optimize_fulltext_index),
         )
@@ -156,6 +160,11 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/api/admin/management/database/{tenant}/{repo}/fulltext/health",
             get(crate::handlers::management::get_fulltext_health),
+        )
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/fulltext/errors",
+            get(crate::handlers::management::get_fulltext_errors)
+                .delete(crate::handlers::management::clear_fulltext_errors),
         )
         .route(
             "/api/admin/management/database/{tenant}/{repo}/vector/verify",

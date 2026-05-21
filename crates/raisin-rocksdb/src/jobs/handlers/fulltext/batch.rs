@@ -3,6 +3,7 @@
 //! Contains `handle_batch_index` for processing multiple node operations
 //! in a single Tantivy commit for dramatically improved bulk import performance.
 
+use super::error_counter::FulltextErrorKind;
 use super::handler::FulltextJobHandler;
 use raisin_error::{Error, Result};
 use raisin_indexer::BatchIndexContext;
@@ -27,6 +28,25 @@ impl FulltextJobHandler {
     /// - Single-node jobs: 1000 commits x ~50ms = ~50 seconds
     /// - Batch job: 1 commit x ~50ms = ~1 second (50x faster)
     pub async fn handle_batch_index(&self, job: &JobInfo, context: &JobContext) -> Result<()> {
+        let result = self.handle_batch_index_inner(job, context).await;
+        if let Err(e) = &result {
+            let kind = if e.to_string().starts_with("Blocking task failed") {
+                FulltextErrorKind::Spawn
+            } else if matches!(e, Error::NotFound(_)) {
+                FulltextErrorKind::NodeFetch
+            } else {
+                FulltextErrorKind::Commit
+            };
+            self.record_failure(context, kind, &e.to_string()).await;
+        }
+        result
+    }
+
+    async fn handle_batch_index_inner(
+        &self,
+        job: &JobInfo,
+        context: &JobContext,
+    ) -> Result<()> {
         let operation_count = match &job.job_type {
             JobType::FulltextBatchIndex { operation_count } => *operation_count,
             _ => {

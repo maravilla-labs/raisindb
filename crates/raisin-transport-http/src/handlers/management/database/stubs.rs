@@ -18,6 +18,21 @@ pub async fn rebuild_fulltext_index() -> (StatusCode, &'static str) {
 }
 
 #[cfg(not(feature = "storage-rocksdb"))]
+pub async fn reconcile_fulltext_index() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_IMPLEMENTED, "RocksDB feature not enabled")
+}
+
+#[cfg(not(feature = "storage-rocksdb"))]
+pub async fn get_fulltext_errors() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_IMPLEMENTED, "RocksDB feature not enabled")
+}
+
+#[cfg(not(feature = "storage-rocksdb"))]
+pub async fn clear_fulltext_errors() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_IMPLEMENTED, "RocksDB feature not enabled")
+}
+
+#[cfg(not(feature = "storage-rocksdb"))]
 pub async fn optimize_fulltext_index() -> (StatusCode, &'static str) {
     (StatusCode::NOT_IMPLEMENTED, "RocksDB feature not enabled")
 }

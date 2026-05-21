@@ -5,6 +5,10 @@
 //! for new branches.
 
 mod batch;
+mod error_counter;
 mod handler;
 
+pub use error_counter::{
+    ErrorCounterKey, FulltextErrorCounter, FulltextErrorKind, FulltextErrorStats,
+};
 pub use handler::FulltextJobHandler;

@@ -10,7 +10,7 @@ use rocksdb::WriteBatch;
 use std::collections::HashMap;
 
 /// Scan all nodes in a workspace
-pub(super) async fn scan_nodes(
+pub(crate) async fn scan_nodes(
     storage: &RocksDBStorage,
     tenant_id: &str,
     repo_id: &str,

@@ -134,6 +134,10 @@ pub use tantivy_transfer::{TantivyIndexManager, TantivyIndexMetadata, TantivyInd
 
 // Re-export replication handlers for external use
 pub use jobs::handlers::replication_sync::ReplicationSyncHandler;
+
+// Re-export the fulltext error counter so transport-http can render
+// it without needing access to the (private) `jobs` module.
+pub use jobs::handlers::{FulltextErrorCounter, FulltextErrorKind, FulltextErrorStats};
 pub use storage::{RestoreStats, RocksDBStorage};
 pub use transaction::RocksDBTransaction;
 
@@ -218,6 +222,12 @@ pub mod cf {
     // Key format: {tenant_id}\0{repo_id}
     // Stores ProcessingRuleSet for content processing configuration
     pub const PROCESSING_RULES: &str = "processing_rules";
+
+    // Pending batch aggregator operations (durability layer)
+    // Key format: {tenant}\0{repo}\0{branch}\0{queued_at_nanos_be:16}\0{uuid_bytes:16}
+    // Stores PendingOpRecord (bincode) so single-op fulltext edits survive
+    // process restarts before the aggregator's idle-flush window fires.
+    pub const PENDING_BATCH_OPS: &str = "pending_batch_ops";
 }
 
 /// Get all column family names
@@ -269,6 +279,7 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
         cf::GRAPH_CACHE,
         cf::GRAPH_PROJECTION,
         cf::PROCESSING_RULES,
+        cf::PENDING_BATCH_OPS,
     ]
 }
 

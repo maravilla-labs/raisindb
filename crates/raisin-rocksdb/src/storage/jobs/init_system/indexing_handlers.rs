@@ -9,21 +9,30 @@ use raisin_hnsw::HnswIndexingEngine;
 use raisin_indexer::tantivy_engine::TantivyIndexingEngine;
 
 use crate::jobs::{
-    CompoundIndexJobHandler, EmbeddingJobHandler, FulltextJobHandler, IndexLockManager,
-    PropertyIndexJobHandler,
+    CompoundIndexJobHandler, EmbeddingJobHandler, FulltextJobHandler, PropertyIndexJobHandler,
 };
 use crate::storage::RocksDBStorage;
 
 /// Create the fulltext indexing handler
+///
+/// Reuses the storage-owned `IndexLockManager` so the admin rebuild
+/// path (`raisin_rocksdb::management::fulltext::rebuild_fulltext_index`)
+/// can acquire the same per-(tenant,repo,branch) mutex and serialize
+/// against in-flight batch indexing instead of racing the directory.
+/// Also clones the storage-owned `FulltextErrorCounter` so the HTTP
+/// `/fulltext/errors` endpoint sees the same in-memory map the worker
+/// writes to.
 pub fn create_fulltext_handler(
     storage: Arc<RocksDBStorage>,
     tantivy_engine: Arc<TantivyIndexingEngine>,
 ) -> Arc<FulltextJobHandler> {
-    let index_lock_manager = Arc::new(IndexLockManager::new());
+    let index_lock_manager = storage.index_lock_manager().clone();
+    let error_counter = storage.fulltext_error_counter().clone();
     Arc::new(FulltextJobHandler::new(
         storage,
         tantivy_engine,
         index_lock_manager,
+        error_counter,
     ))
 }
 

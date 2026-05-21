@@ -8,7 +8,7 @@
 //!
 //! All operations are scoped to tenant/repository/branch/workspace for proper isolation.
 
-mod helpers;
+pub(crate) mod helpers;
 mod orphan_cleanup;
 mod rebuild;
 

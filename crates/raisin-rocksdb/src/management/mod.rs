@@ -40,10 +40,14 @@ pub mod format_migration;
 // Vector index management
 pub mod vector;
 
+// Fulltext (Tantivy) index management
+pub mod fulltext;
+
 // Re-exports for direct imports
 pub use background::{
     BackgroundJobStats, BackgroundJobs as BackgroundJobsImpl, BackgroundJobsConfig,
 };
+pub use fulltext::{rebuild_fulltext_index, reconcile_fulltext_index};
 pub use helpers::{list_branches, list_repositories, list_tenants, list_workspaces};
 pub use vector::{
     DimensionMismatch, HnswManagement, RebuildStats as VectorRebuildStats, VerificationReport,

@@ -641,6 +641,22 @@ export interface FulltextHealth {
   last_optimized: string | null
 }
 
+/**
+ * In-memory snapshot of the per-(tenant, repo, branch) fulltext
+ * error counter. Counts persist for the process lifetime only and
+ * reset on restart — call DELETE on the same endpoint to clear after
+ * a successful rebuild / reconcile.
+ */
+export interface FulltextErrorStats {
+  commit_errors: number
+  spawn_errors: number
+  node_fetch_errors: number
+  last_error: string | null
+  /** Unix-epoch seconds; null if no errors have been recorded yet. */
+  last_error_at: number | null
+  last_error_kind: 'commit' | 'spawn' | 'node_fetch' | null
+}
+
 export interface VectorHealth {
   memory_usage_bytes: number
   disk_usage_bytes: number
@@ -675,6 +691,26 @@ export const databaseManagementApi = {
 
   fulltextRebuild: (tenant: string, repo: string) =>
     api.post<JobResponse>(`/api/admin/management/database/${tenant}/${repo}/fulltext/rebuild`),
+
+  /**
+   * v0.1.29 recovery path: re-indexes every node without deleting
+   * the existing index. Idempotent — safe to run on healthy indexes
+   * and safe to re-run if interrupted.
+   */
+  fulltextReconcile: (tenant: string, repo: string, branch?: string) =>
+    api.post<JobResponse>(
+      `/api/admin/management/database/${tenant}/${repo}/fulltext/reconcile${branch ? `?branch=${branch}` : ''}`
+    ),
+
+  fulltextErrors: (tenant: string, repo: string, branch?: string) =>
+    api.get<FulltextErrorStats>(
+      `/api/admin/management/database/${tenant}/${repo}/fulltext/errors${branch ? `?branch=${branch}` : ''}`
+    ),
+
+  fulltextErrorsClear: (tenant: string, repo: string, branch?: string) =>
+    api.delete<void>(
+      `/api/admin/management/database/${tenant}/${repo}/fulltext/errors${branch ? `?branch=${branch}` : ''}`
+    ),
 
   fulltextOptimize: (tenant: string, repo: string) =>
     api.post<JobResponse>(`/api/admin/management/database/${tenant}/${repo}/fulltext/optimize`),

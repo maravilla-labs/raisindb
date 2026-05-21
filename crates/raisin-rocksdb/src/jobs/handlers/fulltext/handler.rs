@@ -9,6 +9,7 @@ use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{FullTextIndexJob, JobKind, RepositoryManagementRepository, Storage};
 use std::sync::Arc;
 
+use super::error_counter::{FulltextErrorCounter, FulltextErrorKind};
 use crate::jobs::{IndexKey, IndexLockManager};
 use crate::RocksDBStorage;
 
@@ -26,6 +27,10 @@ pub struct FulltextJobHandler {
     pub(super) storage: Arc<RocksDBStorage>,
     pub(super) tantivy_engine: Arc<TantivyIndexingEngine>,
     pub(super) index_lock_manager: Arc<IndexLockManager>,
+    /// Per-(tenant,repo,branch,kind) failure counter. Shared with
+    /// `RocksDBStorage` so the HTTP `/fulltext/errors` endpoint can
+    /// read the same map without going through the worker.
+    pub(super) error_counter: FulltextErrorCounter,
 }
 
 impl FulltextJobHandler {
@@ -34,12 +39,28 @@ impl FulltextJobHandler {
         storage: Arc<RocksDBStorage>,
         tantivy_engine: Arc<TantivyIndexingEngine>,
         index_lock_manager: Arc<IndexLockManager>,
+        error_counter: FulltextErrorCounter,
     ) -> Self {
         Self {
             storage,
             tantivy_engine,
             index_lock_manager,
+            error_counter,
         }
+    }
+
+    /// Record a failure on the per-(tenant,repo,branch) counter.
+    /// Called from the worker error paths; the HTTP layer reads via
+    /// `storage.fulltext_error_counter()`.
+    pub(super) async fn record_failure(
+        &self,
+        context: &JobContext,
+        kind: FulltextErrorKind,
+        message: &str,
+    ) {
+        self.error_counter
+            .record(&context.tenant_id, &context.repo_id, &context.branch, kind, message)
+            .await;
     }
 
     /// Handle fulltext index job (add/update/delete node)
@@ -69,10 +90,25 @@ impl FulltextJobHandler {
         let index_lock = self.index_lock_manager.get_lock(&index_key).await;
         let _lock_guard = index_lock.lock().await;
 
-        match operation {
+        let result = match operation {
             IndexOperation::AddOrUpdate => self.handle_add_or_update(job, context, node_id).await,
             IndexOperation::Delete => self.handle_delete(job, context, node_id).await,
+        };
+
+        if let Err(e) = &result {
+            // Classify by error origin so the admin UI can distinguish
+            // "Tantivy is broken" from "we couldn't find the node".
+            let kind = if e.to_string().starts_with("Blocking task failed") {
+                FulltextErrorKind::Spawn
+            } else if matches!(e, Error::NotFound(_)) {
+                FulltextErrorKind::NodeFetch
+            } else {
+                FulltextErrorKind::Commit
+            };
+            self.record_failure(context, kind, &e.to_string()).await;
         }
+
+        result
     }
 
     /// Handle branch copy job

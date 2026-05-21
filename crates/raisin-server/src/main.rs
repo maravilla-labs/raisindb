@@ -247,7 +247,7 @@ async fn main() {
     // ========================================================================
 
     #[cfg(feature = "storage-rocksdb")]
-    let (_worker_pool, _shutdown_token, _rt_runtime, _bg_runtime, _sys_runtime) = {
+    let (_worker_pool, shutdown_token, _rt_runtime, _bg_runtime, _sys_runtime) = {
         if storage.config().background_jobs_enabled {
             tracing::info!("Initializing unified job system...");
 
@@ -898,7 +898,65 @@ async fn main() {
     let listener = TcpListener::bind(addr)
         .await
         .expect("Failed to bind TCP listener to address");
+
+    // The batch aggregator's shutdown token is `Some` when the job
+    // system is enabled; `None` in the trimmed configurations that
+    // skip it. Either way, we still want to react to SIGTERM so axum
+    // exits cleanly — pass `None` through and `shutdown_signal` skips
+    // the aggregator cancel.
+    #[cfg(feature = "storage-rocksdb")]
+    let batch_token = shutdown_token.clone();
+    #[cfg(not(feature = "storage-rocksdb"))]
+    let batch_token: Option<tokio_util::sync::CancellationToken> = None;
+
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(batch_token))
         .await
         .expect("Failed to serve HTTP application");
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM, then cancel the batch
+/// aggregator's shutdown token so its background flush task drains
+/// the in-memory pending map (and the persisted CF) before exit.
+///
+/// Without this, `axum::serve` would block forever on the listener
+/// and `BatchIndexAggregator`'s in-memory ops could outlive the
+/// process. SIGKILL still bypasses this — that's why the
+/// `pending_batch_ops` column family exists as a second line of
+/// defense (see `batch_aggregator::persistence`).
+async fn shutdown_signal(batch_shutdown: Option<tokio_util::sync::CancellationToken>) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("SIGINT received; initiating graceful shutdown");
+        }
+        _ = terminate => {
+            tracing::info!("SIGTERM received; initiating graceful shutdown");
+        }
+    }
+
+    if let Some(token) = batch_shutdown {
+        token.cancel();
+        tracing::info!(
+            "Cancelled batch aggregator; waiting for axum to stop accepting connections"
+        );
+    } else {
+        tracing::info!("No batch aggregator running; waiting for axum to drain");
+    }
 }

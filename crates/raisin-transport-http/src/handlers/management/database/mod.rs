@@ -16,8 +16,8 @@ mod vector_embeddings;
 // Re-export all handler functions to preserve `crate::handlers::management::database::*` paths.
 #[cfg(feature = "storage-rocksdb")]
 pub use fulltext::{
-    get_fulltext_health, optimize_fulltext_index, purge_fulltext_index, rebuild_fulltext_index,
-    verify_fulltext_index,
+    clear_fulltext_errors, get_fulltext_errors, get_fulltext_health, optimize_fulltext_index,
+    purge_fulltext_index, rebuild_fulltext_index, reconcile_fulltext_index, verify_fulltext_index,
 };
 
 #[cfg(feature = "storage-rocksdb")]

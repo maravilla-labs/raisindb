@@ -6375,7 +6375,7 @@ dependencies = [
 
 [[package]]
 name = "raisin-server"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -6427,6 +6427,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.21.0",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",

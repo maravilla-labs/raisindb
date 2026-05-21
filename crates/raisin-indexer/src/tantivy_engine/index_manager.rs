@@ -81,4 +81,24 @@ impl TantivyIndexingEngine {
             .writer(WRITER_HEAP_SIZE)
             .map_err(|e| Error::storage(format!("Failed to create index writer: {}", e)))
     }
+
+    /// Drop the cached `Index` + `IndexReader` for a given key.
+    ///
+    /// Called by the rebuild path before `remove_dir_all`. Moka's
+    /// `invalidate` is asynchronous on a sync cache, so this isn't a
+    /// hard synchronization barrier on its own — the rebuild caller
+    /// must additionally hold the `IndexLockManager` lock to prevent
+    /// other code from racing back in via `get_or_create_index`.
+    pub fn invalidate_cached_index(&self, tenant_id: &str, repo_id: &str, branch: &str) {
+        let cache_key = format!("{}/{}/{}", tenant_id, repo_id, branch);
+        self.index_cache.invalidate(&cache_key);
+        self.index_cache.run_pending_tasks();
+    }
+
+    /// Read-only access to the on-disk root for this engine. Needed
+    /// by management/rebuild paths that have to `remove_dir_all` the
+    /// directory belonging to a specific (tenant, repo, branch).
+    pub fn base_path(&self) -> &std::path::Path {
+        &self.base_path
+    }
 }

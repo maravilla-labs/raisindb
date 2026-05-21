@@ -19,6 +19,7 @@
 //! - With aggregation: ~1K batch jobs = ~1K Tantivy commits = ~15-30 minutes
 
 mod core;
+mod persistence;
 #[cfg(test)]
 mod tests;
 

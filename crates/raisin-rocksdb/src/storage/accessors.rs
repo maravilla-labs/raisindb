@@ -84,6 +84,25 @@ impl RocksDBStorage {
         &self.db
     }
 
+    /// Shared per-(tenant,repo,branch) lock manager used by Tantivy
+    /// indexing.
+    ///
+    /// Both batch-indexing worker handlers and the admin rebuild path
+    /// must acquire the lock for a given key. Without this shared
+    /// mutex, a rebuild could `remove_dir_all` while a worker is
+    /// mid-commit, corrupting the index or panicking the worker.
+    pub fn index_lock_manager(&self) -> &Arc<crate::jobs::IndexLockManager> {
+        &self.index_lock_manager
+    }
+
+    /// Per-(tenant,repo,branch,kind) fulltext indexing failure
+    /// counter. Worker handlers write to it on every error path; the
+    /// HTTP layer reads via this accessor to render the admin
+    /// console's "Index Errors" card.
+    pub fn fulltext_error_counter(&self) -> &crate::jobs::handlers::FulltextErrorCounter {
+        &self.fulltext_error_counter
+    }
+
     /// Get the current configuration
     pub fn config(&self) -> &crate::config::RocksDBConfig {
         &self.config

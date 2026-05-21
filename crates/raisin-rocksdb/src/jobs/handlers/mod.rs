@@ -58,7 +58,10 @@ pub use flow_callbacks::{
 };
 pub use flow_execution::FlowExecutionHandler;
 pub use flow_instance_execution::FlowInstanceExecutionHandler;
-pub use fulltext::FulltextJobHandler;
+pub use fulltext::{
+    ErrorCounterKey as FulltextErrorCounterKey, FulltextErrorCounter, FulltextErrorKind,
+    FulltextErrorStats, FulltextJobHandler,
+};
 pub use function_execution::{
     FlowResumeCallback, FunctionEnabledChecker, FunctionExecutionHandler, FunctionExecutionResult,
     FunctionExecutorCallback,

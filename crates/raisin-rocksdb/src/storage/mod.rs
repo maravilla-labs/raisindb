@@ -109,6 +109,18 @@ pub struct RocksDBStorage {
     pub(crate) job_data_store: Arc<JobDataStore>,
     pub(crate) job_metadata_store: Arc<crate::jobs::JobMetadataStore>,
 
+    // Shared per-(tenant,repo,branch) lock for Tantivy index access.
+    // Worker handlers AND the admin rebuild path acquire the same
+    // mutex so a rebuild blocks concurrent batch indexing instead of
+    // racing against a half-deleted index directory.
+    pub(crate) index_lock_manager: Arc<crate::jobs::IndexLockManager>,
+
+    // Per-(tenant,repo,branch,kind) fulltext indexing failure counter.
+    // Owned here so the HTTP `/fulltext/errors` endpoint can read the
+    // same in-memory state the worker writes to, without going
+    // through the handler.
+    pub(crate) fulltext_error_counter: crate::jobs::handlers::FulltextErrorCounter,
+
     // Job dispatcher (set after init_job_system, used for queue stats)
     pub(crate) job_dispatcher:
         Arc<std::sync::RwLock<Option<Arc<crate::jobs::dispatcher::JobDispatcher>>>>,

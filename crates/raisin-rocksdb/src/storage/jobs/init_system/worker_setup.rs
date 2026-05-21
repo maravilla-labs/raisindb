@@ -73,17 +73,29 @@ pub fn create_worker_pool(
 }
 
 /// Create and start the batch index aggregator for efficient bulk import indexing
+///
+/// The returned aggregator is wired with RocksDB-backed durability:
+/// every `queue()` mirrors to the `pending_batch_ops` CF so single-op
+/// fulltext edits survive process restart. The returned
+/// `CancellationToken` is what `main.rs::shutdown_signal` cancels on
+/// SIGTERM/SIGINT — the poll task listens on it and calls
+/// `flush_all()` before exiting, so the graceful path empties the
+/// in-memory map (and the persisted CF) cleanly.
 pub fn start_batch_aggregator(
+    storage: Arc<RocksDBStorage>,
     job_registry: Arc<JobRegistry>,
     job_data_store: Arc<JobDataStore>,
     dispatcher: Arc<JobDispatcher>,
 ) -> (Arc<BatchIndexAggregator>, CancellationToken) {
-    let batch_aggregator = Arc::new(BatchIndexAggregator::new(
-        BatchAggregatorConfig::default(),
-        job_registry,
-        job_data_store,
-        dispatcher,
-    ));
+    let batch_aggregator = Arc::new(
+        BatchIndexAggregator::new(
+            BatchAggregatorConfig::default(),
+            job_registry,
+            job_data_store,
+            dispatcher,
+        )
+        .with_persistence(storage.db().clone()),
+    );
 
     let shutdown = CancellationToken::new();
     let aggregator_for_task = batch_aggregator.clone();

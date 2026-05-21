@@ -261,11 +261,24 @@ impl RocksDBStorage {
             &pools_config,
         );
 
-        let (batch_aggregator, _batch_shutdown) = worker_setup::start_batch_aggregator(
+        let (batch_aggregator, batch_shutdown) = worker_setup::start_batch_aggregator(
+            self.clone(),
             self.job_registry.clone(),
             self.job_data_store.clone(),
             dispatcher.clone(),
         );
+
+        // Restore any persisted pending ops from a prior process
+        // before subscribing the event handler — otherwise a hot
+        // tenant could observe a brief window where new events race
+        // with the replay and double-queue.
+        let replayed = batch_aggregator.replay_pending().await?;
+        if replayed > 0 {
+            tracing::info!(
+                replayed_pending_ops = replayed,
+                "Restored unflushed batch ops from previous run"
+            );
+        }
 
         worker_setup::subscribe_event_handler(
             self.clone(),
@@ -294,7 +307,9 @@ impl RocksDBStorage {
             "Background job system initialized with three-pool isolation"
         );
 
-        let shutdown_token = CancellationToken::new();
-        Ok((worker_pool, shutdown_token))
+        // Return the aggregator's shutdown token (not a fresh one)
+        // so `main.rs::shutdown_signal` can cancel it on SIGTERM and
+        // trigger a final `flush_all()` before the process exits.
+        Ok((worker_pool, batch_shutdown))
     }
 }
