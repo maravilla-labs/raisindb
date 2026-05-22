@@ -1,5 +1,5 @@
 name: ai-tools
-version: 1.0.18
+version: 1.0.19
 title: AI Tools Package
 description: >
   Provides AI-powered node types and tools for RaisinDB.
@@ -136,6 +136,7 @@ workspace_patches:
         - raisin:InboxTask
         - raisin:Folder
         - raisin:AgentUserContext
+        - raisin:AICostRecord
   default:
     default_folder_type: raisin:Folder
     allowed_node_types:
@@ -152,3 +153,4 @@ workspace_patches:
         - raisin:AIToolResult
         - raisin:AIToolSingleCallResult
         - raisin:AIToolResultAggregator
+        - raisin:AICostRecord

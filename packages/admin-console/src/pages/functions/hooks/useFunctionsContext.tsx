@@ -632,20 +632,22 @@ export function FunctionsProvider({ children }: { children: ReactNode }) {
     loadRootNodes()
   }, [loadRootNodes])
 
-  // Load executions when selected node changes
+  // Load executions when the selected *function* changes. Keyed on node
+  // identity (id/type), not the object reference — a re-fetched but identical
+  // node must not re-trigger a reload, which previously fed an infinite
+  // render loop that froze the IDE and stalled the Save dialog.
   useEffect(() => {
-    console.log("useEffect: Loading executions when selected node changes")
     if (selectedNode && selectedNode.node_type === 'raisin:Function') {
       loadExecutions()
     } else {
       // Clear executions when no function is selected
       setExecutions([])
     }
-  }, [selectedNode, loadExecutions])
+  }, [selectedNode?.id, selectedNode?.node_type])
 
-  // Sync expanded nodes to preferences
+  // Sync expanded nodes to preferences. setExpandedFolders is a no-op when the
+  // folder set is unchanged, so this cannot churn preferences / re-renders.
   useEffect(() => {
-    console.log("useEffect: Syncing expanded nodes to preferences")
     setExpandedFolders(Array.from(expandedNodes))
   }, [expandedNodes, setExpandedFolders])
 
@@ -683,7 +685,7 @@ export function FunctionsProvider({ children }: { children: ReactNode }) {
               // Load children to populate the tree and expand the node
               await loadNodeChildren(parentNode)
               if (cancelled) return
-              setExpandedNodes(prev => new Set(prev).add(parentNode.id))
+              setExpandedNodes(prev => (prev.has(parentNode.id) ? prev : new Set(prev).add(parentNode.id)))
             }
           } catch (e) {
             if (!cancelled) {

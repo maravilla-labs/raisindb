@@ -16,6 +16,7 @@ allowed_node_types:
   - raisin:AIPlan
   - raisin:AIToolCall
   - raisin:AIToolResult
+  - raisin:AICostRecord
   - raisin:AgentUserContext
 
 allowed_root_node_types:

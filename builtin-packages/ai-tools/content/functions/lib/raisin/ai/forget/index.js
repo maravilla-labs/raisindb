@@ -27,14 +27,16 @@ async function handler(input) {
     // Doesn't exist
   }
 
+  // "Nothing to forget" is not an error — return a graceful, idempotent result
+  // so the model treats it as done instead of retrying in a loop.
   if (!contextNode) {
-    throw new Error('No stored memory found for this user');
+    return { success: true, found: false, key, message: 'No stored memory yet — nothing to forget.' };
   }
 
   // Read current content
   const rawContent = contextNode.properties?.content;
   if (typeof rawContent !== 'string' || !rawContent.trim()) {
-    throw new Error('Memory is empty');
+    return { success: true, found: false, key, message: 'Memory is empty — nothing to forget.' };
   }
 
   const lines = rawContent.split('\n');
@@ -46,7 +48,7 @@ async function handler(input) {
   const found = filtered.length < lines.length;
 
   if (!found) {
-    throw new Error(`Key "${key}" not found in memory`);
+    return { success: true, found: false, key, message: `No memory entry for "${key}" — nothing to forget.` };
   }
 
   await raisin.nodes.update(workspace, contextNodePath, {

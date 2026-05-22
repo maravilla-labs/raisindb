@@ -93,7 +93,16 @@ export function usePreferences() {
   }, [])
 
   const setExpandedFolders = useCallback((folders: string[]) => {
-    setPreferencesState((prev) => ({ ...prev, expandedFolders: folders }))
+    setPreferencesState((prev) => {
+      // Bail out when the folder set is unchanged so we don't create a new
+      // preferences object (which would re-render the whole Functions IDE and
+      // can drive an effect/render loop).
+      const cur = prev.expandedFolders
+      if (cur.length === folders.length && cur.every((f, i) => f === folders[i])) {
+        return prev
+      }
+      return { ...prev, expandedFolders: folders }
+    })
   }, [])
 
   const toggleFolder = useCallback((path: string) => {

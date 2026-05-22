@@ -19,8 +19,6 @@ interface IDELayoutProps {
 
 export function IDELayout({ sidebar, editor, properties, output }: IDELayoutProps) {
   const {
-    repo,
-    branch,
     preferences,
     setSidebarWidth,
     setPropertiesWidth,
@@ -30,7 +28,6 @@ export function IDELayout({ sidebar, editor, properties, output }: IDELayoutProp
   // Only remount layout when repo/branch change, not on every node selection.
   // const allotmentKey = `${repo}:${branch}`
   const allotmentKey = `functions-ide-layout`
-  console.log('IDELayout render', allotmentKey, repo, branch)
   return (
     <div className="h-full flex flex-col bg-gradient-to-br from-zinc-900 via-primary-950/20 to-black">
       <Allotment
