@@ -423,6 +423,7 @@ async function handleToolResult(ctx) {
   let pendingToolCount = 0;
   let continuationExpected = false;
   let isWaiting = false;
+  let nextMsgPath = null;
 
   const assistantMsg = await raisin.nodes.get(workspace, assistantMsgPath);
   if (!assistantMsg || assistantMsg.properties?.role !== 'assistant') {
@@ -880,6 +881,7 @@ async function handleToolResult(ctx) {
       },
     });
     tx.commit();
+    nextMsgPath = nextMsg.path;
     log.step('continue', 6, 6, 'Creating continuation message', { name: continuationMsgName, terminal: effectiveFinishReason });
 
     await createCostRecord(
@@ -1043,6 +1045,16 @@ async function handleToolResult(ctx) {
       : (isWaiting ? effectiveFinishReason : (dispatchPhase === 'awaiting_results' ? 'awaiting_results' : null)),
   });
 
+  // When the turn ends here, the parent (tool-dispatching) message has
+  // finished its role. It was left at 'ready_for_model' (line ~434); clear it
+  // to 'terminal' so the in-flight guard never strands it and blocks the next
+  // user turn.
+  if (isWaiting || isTerminal) {
+    await updateOrchestrationState(workspace, assistantMsgPath, {
+      dispatch_phase: 'terminal',
+    });
+  }
+
   if (outboxCtx && isTerminal) {
     const content = response.content || TERMINAL_FALLBACK_TEXT;
     const isToolEcho = /^Calling\s+[\w-]+\s*$/.test(content.trim());
@@ -1091,6 +1103,12 @@ async function handleToolResult(ctx) {
         orchestration_queue_error: String(toolErr?.message || toolErr),
       });
     }
+    // A failed continuation must not leave a non-terminal assistant message
+    // behind — that would strand the in-flight guard and block the next turn.
+    await updateOrchestrationState(workspace, assistantMsgPath, { dispatch_phase: 'terminal' });
+    if (nextMsgPath) {
+      await updateOrchestrationState(workspace, nextMsgPath, { dispatch_phase: 'terminal' });
+    }
     // Ensure the frontend always gets a terminal event
     try {
       await emitConversationEvent('conversation:done', {
@@ -1118,6 +1136,11 @@ async function handleToolResult(ctx) {
           recovered: true,
           timestamp: new Date().toISOString(),
         }, chatPath, streamChannel);
+        // Finalize phases so the recovered turn cannot strand the in-flight guard.
+        await updateOrchestrationState(workspace, assistantMsgPath, { dispatch_phase: 'terminal' });
+        if (nextMsgPath) {
+          await updateOrchestrationState(workspace, nextMsgPath, { dispatch_phase: 'terminal' });
+        }
       } catch (_) { /* best-effort */ }
     }
   }

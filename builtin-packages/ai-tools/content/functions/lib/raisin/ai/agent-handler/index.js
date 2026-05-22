@@ -770,6 +770,9 @@ export async function handleUserMessage(context) {
         orchestration_queue_error: String(toolErr?.message || toolErr),
       });
     }
+    // A failed turn must not leave a non-terminal assistant message behind —
+    // that would strand the in-flight guard and block the next user message.
+    await updateOrchestrationState(workspace, assistantMsg.path, { dispatch_phase: 'terminal' });
     // Ensure the frontend always gets a terminal event
     try {
       await emitConversationEvent('conversation:done', {
@@ -797,6 +800,8 @@ export async function handleUserMessage(context) {
           recovered: true,
           timestamp: new Date().toISOString(),
         }, chatPath, streamChannel);
+        // Finalize phase so the recovered turn cannot strand the in-flight guard.
+        await updateOrchestrationState(workspace, assistantMsg.path, { dispatch_phase: 'terminal' });
       } catch (_) { /* best-effort */ }
     }
   }
@@ -1122,22 +1127,34 @@ async function drainQueuedUserIntent(workspace, chatPath, assistantMessagePath) 
   });
 }
 
-async function findInFlightAssistantTurn(workspace, chatPath) {
+const IN_FLIGHT_DISPATCH_PHASES = new Set([
+  'pending',
+  'queued',
+  'awaiting_results',
+  'ready_for_model',
+]);
+
+export async function findInFlightAssistantTurn(workspace, chatPath) {
+  // A turn is only "in flight" if the LATEST assistant message is still
+  // non-terminal. Earlier messages in a finished tool/continuation chain are
+  // intentionally left in a non-terminal phase (e.g. 'ready_for_model' on the
+  // original tool-dispatching message), so matching *any* non-terminal message
+  // would strand the guard forever and queue every subsequent user turn.
   const rows = await raisin.sql.query(`
     SELECT path
     FROM '${workspace}'
     WHERE CHILD_OF($1)
       AND node_type = 'raisin:Message'
       AND properties->>'role'::STRING = 'assistant'
-      AND properties->>'dispatch_phase'::STRING IN ('pending', 'queued', 'awaiting_results', 'ready_for_model')
     ORDER BY created_at DESC
     LIMIT 1
   `, [chatPath]);
 
-  if (Array.isArray(rows) && rows.length > 0) {
-    return rows[0];
-  }
-  return null;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+
+  const latest = await raisin.nodes.get(workspace, rows[0].path);
+  const phase = latest?.properties?.dispatch_phase;
+  return IN_FLIGHT_DISPATCH_PHASES.has(phase) ? rows[0] : null;
 }
 
 // ─── Tool Call Helpers ──────────────────────────────────────────────────────

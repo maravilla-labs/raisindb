@@ -28,7 +28,7 @@ pub use anthropic::AnthropicProvider;
 pub use azure_openai::AzureOpenAIProvider;
 pub use bedrock::BedrockProvider;
 pub use gemini::GeminiProvider;
-pub use groq::GroqProvider;
+pub use groq::{groq_model_supports_tools, GroqProvider};
 pub use local::LocalCandleProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;

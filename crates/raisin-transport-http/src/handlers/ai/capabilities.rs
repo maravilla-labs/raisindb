@@ -372,12 +372,13 @@ async fn get_groq_model_capabilities(
         Some(url) => GroqProvider::with_base_url(api_key.unwrap_or_default(), url),
         None => GroqProvider::new(api_key.unwrap_or_default()),
     };
-    let supports_tools = model_id.contains("llama") || model_id.contains("mixtral");
+    // Per Groq's docs all chat/LLM models support tools; only STT/TTS/guard
+    // models don't. Share the provider's classifier so this agrees with the list.
     let heuristic = CapabilitiesInfo {
         chat: true,
         embeddings: false,
         vision: model_id.contains("vision"),
-        tools: supports_tools,
+        tools: raisin_ai::providers::groq_model_supports_tools(model_id),
         streaming: true,
     };
     capabilities_from_provider_or_heuristic!(AIProvider::Groq, model_id, provider, heuristic)

@@ -11,8 +11,15 @@ use std::sync::LazyLock;
 
 /// Regex matching `<function=name>{args}</function>` blocks.
 /// Tool names may contain word chars and hyphens (e.g. `kanban-boards`).
+///
+/// The `>` after the name is optional: some models (notably Llama on Groq)
+/// emit a malformed variant that jams the JSON args directly onto the name —
+/// `<function=weather{"city":"Basel"}</function>` — which Groq's API rejects
+/// with a `failed_generation` error. Tolerating the missing `>` lets us recover
+/// the tool call instead of surfacing a raw "Failed to call a function" error.
+/// The name capture stops at `{` since `{` isn't in `[\w-]`, so both forms parse.
 static FUNCTION_CALL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<function=([\w-]+)>([\s\S]*?)</function>").unwrap());
+    LazyLock::new(|| Regex::new(r"<function=([\w-]+)>?\s*([\s\S]*?)</function>").unwrap());
 
 /// Regex matching model control tokens that should never appear in user-facing content.
 static CONTROL_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -253,6 +260,29 @@ mod tests {
         assert_eq!(calls[0].function.name, "weather");
         assert_eq!(calls[0].function.arguments, r#"{"city":"Bern"}"#);
         assert!(calls[0].id.starts_with("call_"));
+    }
+
+    #[test]
+    fn test_extract_malformed_missing_gt_separator() {
+        // Llama-on-Groq sometimes jams the args onto the name with no `>`.
+        // This is the exact shape seen in Groq's `failed_generation` errors.
+        let content = r#"<function=weather{"city": "Basel"}</function>"#;
+        let calls = extract_tool_calls_from_content(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "weather");
+        assert_eq!(calls[0].function.arguments, r#"{"city": "Basel"}"#);
+    }
+
+    #[test]
+    fn test_extract_malformed_inside_error_message() {
+        // The recovery path feeds the whole Groq error string to the extractor.
+        let content = "Failed to call a function. Please adjust your prompt. \
+            See 'failed_generation' for more details.\n\
+            Failed generation: <function=weather{\"city\": \"Basel\"}</function>";
+        let calls = extract_tool_calls_from_content(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "weather");
+        assert_eq!(calls[0].function.arguments, r#"{"city": "Basel"}"#);
     }
 
     #[test]

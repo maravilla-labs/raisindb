@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { handleUserMessage } from './index.js';
+import { handleUserMessage, findInFlightAssistantTurn } from './index.js';
 
 test('finally safety-net does not shadow original tool-processing error', async () => {
   const messagePath = '/agents/sample-assistant/inbox/chats/chat-1/msg-1';
@@ -121,6 +121,15 @@ test('queues inbound user message when another assistant turn is in-flight', asy
         if (path === replyPath) {
           return null;
         }
+        // The in-flight guard reads the latest assistant message's phase via
+        // nodes.get; return a still-running prior turn.
+        if (path === '/agents/sample-assistant/inbox/chats/chat-2/reply-to-msg-1') {
+          return {
+            path,
+            node_type: 'raisin:Message',
+            properties: { role: 'assistant', dispatch_phase: 'awaiting_results' },
+          };
+        }
         if (path === '/agents/sample-assistant') {
           return {
             path,
@@ -147,7 +156,13 @@ test('queues inbound user message when another assistant turn is in-flight', asy
     },
     sql: {
       async query(queryText) {
-        if (queryText.includes("dispatch_phase'::STRING IN")) {
+        // findInFlightAssistantTurn: latest assistant message in the conversation.
+        if (
+          queryText.includes('CHILD_OF($1)') &&
+          queryText.includes("'assistant'") &&
+          queryText.includes('ORDER BY created_at DESC') &&
+          queryText.includes('LIMIT 1')
+        ) {
           return [{ path: '/agents/sample-assistant/inbox/chats/chat-2/reply-to-msg-1' }];
         }
         return [];
@@ -171,4 +186,43 @@ test('queues inbound user message when another assistant turn is in-flight', asy
     updates.some((u) => u.path === messagePath && u.key === 'orchestration_queue_state' && u.value === 'queued'),
     'expected message to be marked queued',
   );
+});
+
+test('findInFlightAssistantTurn: latest non-terminal assistant message is in-flight', async () => {
+  globalThis.raisin = {
+    sql: { async query() { return [{ path: '/c/reply-1' }]; } },
+    nodes: {
+      async get(_workspace, path) {
+        return { path, node_type: 'raisin:Message', properties: { role: 'assistant', dispatch_phase: 'awaiting_results' } };
+      },
+    },
+  };
+  const result = await findInFlightAssistantTurn('ai', '/c');
+  assert.deepEqual(result, { path: '/c/reply-1' });
+});
+
+test('findInFlightAssistantTurn: terminal latest message is NOT in-flight (stranded earlier message ignored)', async () => {
+  // Regression for the "stuck after a tool is used" bug: the original
+  // tool-dispatching message stays at 'ready_for_model', but the query only
+  // returns the latest message (the terminal continuation), so the guard must
+  // report no in-flight turn and let the next user message through.
+  globalThis.raisin = {
+    sql: { async query() { return [{ path: '/c/continue-1-reply-1' }]; } },
+    nodes: {
+      async get(_workspace, path) {
+        return { path, node_type: 'raisin:Message', properties: { role: 'assistant', dispatch_phase: 'terminal' } };
+      },
+    },
+  };
+  const result = await findInFlightAssistantTurn('ai', '/c');
+  assert.equal(result, null);
+});
+
+test('findInFlightAssistantTurn: no assistant messages is NOT in-flight', async () => {
+  globalThis.raisin = {
+    sql: { async query() { return []; } },
+    nodes: { async get() { return null; } },
+  };
+  const result = await findInFlightAssistantTurn('ai', '/c');
+  assert.equal(result, null);
 });

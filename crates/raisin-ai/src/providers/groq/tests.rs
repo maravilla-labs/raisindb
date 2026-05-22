@@ -9,11 +9,32 @@ use crate::types::{
 
 #[test]
 fn test_validate_chat_model() {
+    // Any non-empty model name is accepted — Groq's API is the source of truth,
+    // including newer models that no hardcoded allowlist would know about.
     assert!(GroqProvider::validate_chat_model("llama-3.3-70b-versatile").is_ok());
-    assert!(GroqProvider::validate_chat_model("llama-3.1-8b-instant").is_ok());
-    assert!(GroqProvider::validate_chat_model("mixtral-8x7b-32768").is_ok());
-    assert!(GroqProvider::validate_chat_model("gemma2-9b-it").is_ok());
-    assert!(GroqProvider::validate_chat_model("invalid-model").is_err());
+    assert!(GroqProvider::validate_chat_model("allam-2-7b").is_ok());
+    assert!(GroqProvider::validate_chat_model("qwen/qwen3-32b").is_ok());
+    // Only an empty/blank name is rejected locally.
+    assert!(GroqProvider::validate_chat_model("").is_err());
+    assert!(GroqProvider::validate_chat_model("   ").is_err());
+}
+
+#[test]
+fn test_groq_model_supports_tools() {
+    // Chat / LLM models support tool use (per Groq's docs).
+    assert!(super::groq_model_supports_tools("llama-3.3-70b-versatile"));
+    assert!(super::groq_model_supports_tools("allam-2-7b"));
+    assert!(super::groq_model_supports_tools("qwen/qwen3-32b"));
+    assert!(super::groq_model_supports_tools("openai/gpt-oss-120b"));
+    assert!(super::groq_model_supports_tools("gemma2-9b-it"));
+    assert!(super::groq_model_supports_tools("groq/compound"));
+    // STT / TTS / moderation models do not.
+    assert!(!super::groq_model_supports_tools("whisper-large-v3"));
+    assert!(!super::groq_model_supports_tools("whisper-large-v3-turbo"));
+    assert!(!super::groq_model_supports_tools("canopylabs/orpheus-arabic-saudi"));
+    assert!(!super::groq_model_supports_tools("playai-tts"));
+    assert!(!super::groq_model_supports_tools("meta-llama/llama-prompt-guard-2-22m"));
+    assert!(!super::groq_model_supports_tools("openai/gpt-oss-safeguard-20b"));
 }
 
 #[test]

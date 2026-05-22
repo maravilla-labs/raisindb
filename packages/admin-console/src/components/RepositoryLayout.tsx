@@ -7,6 +7,7 @@ import BranchSwitcher from './BranchSwitcher'
 import GlobalSearchBar from './GlobalSearchBar'
 import SystemUpdateBanner from './SystemUpdateBanner'
 import ImpersonationSelector from './ImpersonationSelector'
+import CollapsedNavFlyout from './CollapsedNavFlyout'
 import logo from '../assets/raisin-logo.png'
 import {
   ChevronDown,
@@ -170,12 +171,12 @@ export default function RepositoryLayout() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gradient-to-br from-zinc-900 via-primary-950/20 to-black">
+    <div className="h-screen overflow-hidden flex flex-col bg-gradient-to-br from-zinc-900 via-primary-950/20 to-black">
       {/* Header */}
       <header className="border-b border-white/10 bg-black/30 backdrop-blur-md sticky top-0 z-40 flex-shrink-0 select-none">
         <div className="flex items-center justify-between px-6 py-4 gap-6">
           <div className="flex items-center gap-4 flex-shrink-0">
-            <Link to="/" className="flex items-center gap-3 text-xl font-bold text-white hover:text-primary-300 transition-colors">
+            <Link to="/" className="flex items-center gap-3 text-xl font-semibold tracking-tight text-white hover:text-primary-300 transition-colors">
               <img src={logo} alt="RaisinDB" className="h-8" />
               <span>RaisinDB</span>
             </Link>
@@ -214,17 +215,18 @@ export default function RepositoryLayout() {
       {/* System Updates Banner */}
       {repo && <SystemUpdateBanner tenant={tenantId} repo={repo} />}
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Sidebar */}
-        <aside className={`border-r border-white/10 bg-black/30 backdrop-blur-md flex-shrink-0 transition-all duration-300 select-none overscroll-none ${
+        <aside className={`relative z-30 border-r border-white/10 bg-black/30 backdrop-blur-md flex-shrink-0 transition-all duration-300 select-none overscroll-none ${
           sidebarCollapsed ? 'w-16' : 'w-64'
         }`}>
-          <nav className="p-4 space-y-1 relative h-full flex flex-col">
+          <nav className={`relative h-full flex flex-col ${sidebarCollapsed ? 'px-2 py-4' : 'p-4'}`}>
             {/* Collapse/Expand Button */}
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="absolute -right-3 top-6 bg-black/50 border border-white/10 rounded-full p-1 text-white/60 hover:text-white hover:bg-black/70 transition-all z-10"
+              className="absolute -right-3.5 top-5 flex items-center justify-center w-8 h-8 rounded-full bg-zinc-800 border border-white/15 text-white/70 shadow-lg shadow-black/40 hover:text-white hover:bg-primary-500/30 hover:border-primary-400/60 active:scale-95 transition-all z-20"
               title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             >
               {sidebarCollapsed ? (
                 <ChevronRight className="w-4 h-4" />
@@ -233,13 +235,18 @@ export default function RepositoryLayout() {
               )}
             </button>
 
+            {/* Scrollable nav links — lets the footer stay pinned even when
+                the Models / Access Control menus are expanded or the viewport
+                is short. */}
+            <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar space-y-1 pr-1">
+
             <Link
               to={`/${repo}/content`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/content')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Content' : ''}
             >
               <FileText className="w-5 h-5 flex-shrink-0" />
@@ -247,28 +254,37 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/workspaces`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/workspaces')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Workspaces' : ''}
             >
               <FolderOpen className="w-5 h-5 flex-shrink-0" />
               {!sidebarCollapsed && <span>Workspaces</span>}
             </Link>
             <div className="space-y-1">
+              <CollapsedNavFlyout
+                enabled={sidebarCollapsed}
+                label="Models"
+                items={[
+                  { to: `/${repo}/nodetypes`, icon: Tag, label: 'Node Types', active: isActive('/nodetypes') },
+                  { to: `/${repo}/archetypes`, icon: Puzzle, label: 'Archetypes', active: isActive('/archetypes') },
+                  { to: `/${repo}/elementtypes`, icon: Shapes, label: 'Elements', active: isActive('/elementtypes') },
+                ]}
+              >
               <div
                 className={`flex items-center rounded-lg transition-colors ${
                   modelsActive
                     ? 'bg-primary-500 text-white font-semibold'
                     : 'text-white/80 hover:bg-white/5 hover:text-white'
-                } ${sidebarCollapsed ? 'justify-center' : 'gap-3 px-4 py-2'}`}
+                } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
                 title={sidebarCollapsed ? 'Models' : ''}
               >
                 <Link
                   to={`/${repo}/models`}
-                  className={`flex items-center gap-3 flex-1 ${sidebarCollapsed ? 'justify-center px-4 py-2' : ''}`}
+                  className={`flex items-center gap-3 flex-1 ${sidebarCollapsed ? 'justify-center' : ''}`}
                 >
                   <Layers className="w-5 h-5 flex-shrink-0" />
                   {!sidebarCollapsed && <span>Models</span>}
@@ -284,7 +300,10 @@ export default function RepositoryLayout() {
                   </button>
                 )}
               </div>
-              {(modelsExpanded || sidebarCollapsed) && (
+              </CollapsedNavFlyout>
+              {/* Inline nested sub-items only in expanded mode; collapsed mode
+                  uses the hover flyout above. */}
+              {!sidebarCollapsed && modelsExpanded && (
                 <div className={`${sidebarCollapsed ? 'flex flex-col items-center gap-1' : 'pl-8 space-y-1'}`}>
                   <Link
                     to={`/${repo}/nodetypes`}
@@ -326,17 +345,28 @@ export default function RepositoryLayout() {
               )}
             </div>
             <div className="space-y-1">
+              <CollapsedNavFlyout
+                enabled={sidebarCollapsed}
+                label="Access Control"
+                items={[
+                  { to: `/${repo}/users`, icon: User, label: 'Users', active: isActive('/users') },
+                  { to: `/${repo}/roles`, icon: Shield, label: 'Roles', active: isActive('/roles') },
+                  { to: `/${repo}/groups`, icon: Users, label: 'Groups', active: isActive('/groups') },
+                  { to: `/${repo}/relation-types`, icon: Link2, label: 'Relation Types', active: isActive('/relation-types') },
+                  { to: `/${repo}/access-control/settings`, icon: Settings, label: 'Settings', active: isActive('/access-control/settings') },
+                ]}
+              >
               <div
                 className={`flex items-center rounded-lg transition-colors ${
                   accessControlActive
                     ? 'bg-primary-500 text-white font-semibold'
                     : 'text-white/80 hover:bg-white/5 hover:text-white'
-                } ${sidebarCollapsed ? 'justify-center' : 'gap-3 px-4 py-2'}`}
+                } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
                 title={sidebarCollapsed ? 'Access Control' : ''}
               >
                 <Link
                   to={`/${repo}/users`}
-                  className={`flex items-center gap-3 flex-1 ${sidebarCollapsed ? 'justify-center px-4 py-2' : ''}`}
+                  className={`flex items-center gap-3 flex-1 ${sidebarCollapsed ? 'justify-center' : ''}`}
                 >
                   <Shield className="w-5 h-5 flex-shrink-0" />
                   {!sidebarCollapsed && <span>Access Control</span>}
@@ -352,7 +382,8 @@ export default function RepositoryLayout() {
                   </button>
                 )}
               </div>
-              {(accessControlExpanded || sidebarCollapsed) && (
+              </CollapsedNavFlyout>
+              {!sidebarCollapsed && accessControlExpanded && (
                 <div className={`${sidebarCollapsed ? 'flex flex-col items-center gap-1' : 'pl-8 space-y-1'}`}>
                   <Link
                     to={`/${repo}/users`}
@@ -419,11 +450,11 @@ export default function RepositoryLayout() {
             </div>
             <Link
               to={`/${repo}/branches`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/branches')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Branches' : ''}
             >
               <GitBranch className="w-5 h-5 flex-shrink-0" />
@@ -431,11 +462,11 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/functions/${currentBranch}`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/functions')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Functions' : ''}
             >
               <Code className="w-5 h-5 flex-shrink-0" />
@@ -443,11 +474,11 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/logs`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/logs')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Logs' : ''}
             >
               <Terminal className="w-5 h-5 flex-shrink-0" />
@@ -455,11 +486,11 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/flows`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/flows')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Flows' : ''}
             >
               <Workflow className="w-5 h-5 flex-shrink-0" />
@@ -467,11 +498,11 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/agents`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/agents')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'AI' : ''}
             >
               <Bot className="w-5 h-5 flex-shrink-0" />
@@ -479,11 +510,11 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/packages`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/packages')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Packages' : ''}
             >
               <Package className="w-5 h-5 flex-shrink-0" />
@@ -491,11 +522,11 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/query`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/query')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Query' : ''}
             >
               <Search className="w-5 h-5 flex-shrink-0" />
@@ -503,11 +534,11 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/settings`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/settings')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Settings' : ''}
             >
               <Settings className="w-5 h-5 flex-shrink-0" />
@@ -515,23 +546,23 @@ export default function RepositoryLayout() {
             </Link>
             <Link
               to={`/${repo}/management`}
-              className={`flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+              className={`flex items-center rounded-lg transition-colors ${
                 isActive('/management')
                   ? 'bg-primary-500 text-white font-semibold'
                   : 'text-white/80 hover:bg-white/5 hover:text-white'
-              } ${sidebarCollapsed ? 'justify-center' : ''}`}
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
               title={sidebarCollapsed ? 'Management' : ''}
             >
               <Wrench className="w-5 h-5 flex-shrink-0" />
               {!sidebarCollapsed && <span>Management</span>}
             </Link>
 
-            {/* Spacer to push footer to bottom */}
-            <div className="flex-1"></div>
+            </div>
+            {/* end scrollable nav links */}
 
-            {/* Footer with user info and logout */}
+            {/* Footer with user info and logout — pinned to the bottom */}
             {!sidebarCollapsed && (
-              <div className="space-y-3 border-t border-white/10 pt-4 mt-4">
+              <div className="flex-shrink-0 space-y-3 border-t border-white/10 pt-4 mt-4">
                 {/* User Info */}
                 {user && (
                   <div className="px-3 py-2 rounded-lg bg-white/5">
@@ -553,7 +584,7 @@ export default function RepositoryLayout() {
 
             {/* Collapsed sidebar - just logout icon */}
             {sidebarCollapsed && (
-              <div className="border-t border-white/10 pt-4 mt-4">
+              <div className="flex-shrink-0 border-t border-white/10 pt-4 mt-4">
                 <button
                   onClick={handleLogout}
                   className="w-full flex items-center justify-center p-2 rounded-lg text-white/80 hover:bg-red-500/10 hover:text-red-400 transition-all duration-200"

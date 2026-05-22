@@ -3,11 +3,13 @@
 //! Uses Groq's OpenAI-compatible API for chat completions.
 //! Groq specializes in fast inference for open-source models.
 //!
-//! Supported models:
-//! - llama-3.3-70b-versatile (Meta's Llama 3.3, 70B parameters)
-//! - llama-3.1-8b-instant (Meta's Llama 3.1, 8B parameters, optimized for speed)
-//! - mixtral-8x7b-32768 (Mistral's Mixtral MoE, 32K context)
-//! - gemma2-9b-it (Google's Gemma 2, 9B parameters)
+//! The set of available models is fetched live from Groq's `/models` endpoint
+//! ([`GroqProvider::fetch_models`]) rather than hardcoded — Groq adds and
+//! decommissions models frequently, so any static allowlist drifts out of sync.
+//! Every model Groq returns is listed; Groq's `/models` does not tag
+//! capabilities, so per-model tool-call support is inferred by name via
+//! [`groq_model_supports_tools`] (per Groq's docs all chat/LLM models support
+//! tool use; speech-to-text, text-to-speech, and moderation guards do not).
 
 #[cfg(test)]
 mod tests;
@@ -36,6 +38,26 @@ pub struct GroqProvider {
     client: Client,
     base_url: String,
     cache: Arc<ModelCache>,
+}
+
+/// Returns `true` if a Groq model supports tool/function calling.
+///
+/// Groq's `/models` endpoint does not report capabilities, but per Groq's docs
+/// all of its chat/LLM models support tool use. The only models that don't are
+/// the non-chat ones it returns alongside them: speech-to-text (Whisper),
+/// text-to-speech (PlayAI/Orpheus TTS), and moderation/guard classifiers. We
+/// detect those by stable name markers — the categories outlive individual
+/// model versions, so this is far more durable than an allowlist.
+pub fn groq_model_supports_tools(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    const NON_TOOL_MARKERS: &[&str] = &[
+        "whisper", // speech-to-text
+        "tts",     // text-to-speech
+        "orpheus", // text-to-speech (canopylabs)
+        "playai",  // text-to-speech
+        "guard",   // moderation/classifier (llama-guard, prompt-guard, safeguard)
+    ];
+    !NON_TOOL_MARKERS.iter().any(|marker| id.contains(marker))
 }
 
 impl GroqProvider {
@@ -83,26 +105,30 @@ impl GroqProvider {
             .await
             .map_err(|e| ProviderError::DeserializationError(e.to_string()))?;
 
-        // Convert Groq models to our ModelInfo format
-        let models = models_response
+        // Convert every Groq model to our ModelInfo format. We list all of them
+        // (incl. whisper/TTS/guard) and instead annotate tool-call support per
+        // model. Sort by id so the list is stable across refreshes — Groq
+        // returns models in a non-deterministic order otherwise.
+        let mut models: Vec<ModelInfo> = models_response
             .data
             .into_iter()
             .map(|model| self.convert_groq_model(model))
             .collect();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
 
         Ok(models)
     }
 
-    /// Converts a Groq model to our ModelInfo format
+    /// Converts a Groq model to our ModelInfo format.
+    ///
+    /// Tool-call support is inferred per model via [`groq_model_supports_tools`];
+    /// every Groq model is treated as chat-capable so it stays listed.
     fn convert_groq_model(&self, model: GroqModel) -> ModelInfo {
-        // All Groq models support chat and streaming
-        let supports_tools = !model.id.contains("whisper"); // Audio models don't support tools
-
         let capabilities = ModelCapabilities {
             chat: true,
             embeddings: false, // Groq doesn't provide embedding models
             vision: false,     // Groq doesn't support vision yet
-            tools: supports_tools,
+            tools: groq_model_supports_tools(&model.id),
             streaming: true,
         };
 
@@ -128,30 +154,19 @@ impl GroqProvider {
             }))
     }
 
-    /// Validates that the model is supported for chat
+    /// Validates the requested chat model.
+    ///
+    /// Groq's catalog changes frequently, so we do NOT keep a hardcoded
+    /// allowlist (it inevitably rejects valid new models and lists
+    /// decommissioned ones). We only guard against an empty model name; Groq's
+    /// API is the source of truth and returns a clear error for unknown models.
     fn validate_chat_model(model: &str) -> Result<()> {
-        const SUPPORTED_MODELS: &[&str] = &[
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "llama-3.1-70b-versatile",
-            "llama-3.2-1b-preview",
-            "llama-3.2-3b-preview",
-            "llama-3.2-11b-vision-preview",
-            "llama-3.2-90b-vision-preview",
-            "mixtral-8x7b-32768",
-            "gemma2-9b-it",
-            "gemma-7b-it",
-        ];
-
-        if SUPPORTED_MODELS.iter().any(|m| model.starts_with(m)) {
-            Ok(())
-        } else {
-            Err(ProviderError::InvalidModel(format!(
-                "Unsupported chat model: {}. Supported models: {}",
-                model,
-                SUPPORTED_MODELS.join(", ")
-            )))
+        if model.trim().is_empty() {
+            return Err(ProviderError::InvalidModel(
+                "Model name must not be empty".to_string(),
+            ));
         }
+        Ok(())
     }
 
     /// Applies structured output settings from `ResponseFormat` to the request.

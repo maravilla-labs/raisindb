@@ -1,11 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Save, Bot, Plus, Trash2, ArrowUp, ArrowDown, Pencil, Check, X } from 'lucide-react'
 import GlassCard from '../../components/GlassCard'
 import TagSelector from '../../components/TagSelector'
 import { useToast, ToastContainer } from '../../components/Toast'
 import { agentsApi, type CreateAgentRequest, type UpdateAgentRequest } from '../../api/agents'
-import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider } from '../../api/ai'
+import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider, type ModelUseCase } from '../../api/ai'
+
+/** A selectable model plus the capability info needed to flag tool support. */
+interface AvailableModel {
+  id: string
+  useCases: ModelUseCase[]
+}
 
 import { nodesApi } from '../../api/nodes'
 import { useAuth } from '../../contexts/AuthContext'
@@ -105,7 +111,9 @@ export default function AgentEditor() {
   })
 
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null)
-  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
+  // Guards the one-time provider normalization after config + agent load.
+  const didNormalizeProviderRef = useRef(false)
   const [availableFunctions, setAvailableFunctions] = useState<string[]>([])
   const [newRule, setNewRule] = useState('')
   const [editingRuleIndex, setEditingRuleIndex] = useState<number | null>(null)
@@ -119,22 +127,56 @@ export default function AgentEditor() {
     }
   }, [repo, activeBranch, agentId, isNew, TENANT_ID])
 
+  // If the saved provider isn't actually configured (e.g. the default
+  // 'openai' while only Groq has an API key), the provider <select> shows a
+  // configured option while state still points at the unconfigured one, so the
+  // model lookup misses and the Model field degrades to a free-text box.
+  // Select the first configured provider so the model chooser activates.
   useEffect(() => {
-    // Update available models when provider changes
-    if (aiConfig && formData.provider) {
+    if (!aiConfig || loading || didNormalizeProviderRef.current) return
+    const configured = aiConfig.providers
+      .filter((p) => p.enabled && p.has_api_key)
+      .map((p) => p.provider)
+    if (configured.length === 0) return
+    didNormalizeProviderRef.current = true
+    if (!configured.includes(formData.provider)) {
+      setFormData(prev => ({ ...prev, provider: configured[0] as Provider, model: '' }))
+    }
+  }, [aiConfig, loading, formData.provider])
+
+  // Update available models when the provider changes. Prefer the models from
+  // the static AI config; if the provider lists none there, fetch its live
+  // model list so the Model field is always a real chooser (not a text box).
+  useEffect(() => {
+    let cancelled = false
+    async function loadModels() {
+      if (!aiConfig || !formData.provider) {
+        setAvailableModels([])
+        return
+      }
       const providerMap = providersArrayToMap(aiConfig.providers)
       const providerConfig = providerMap[formData.provider]
-      if (providerConfig?.models) {
-        const models = providerConfig.models.map((m) => m.model_id)
-        setAvailableModels(models)
-
-        // If current model is not available in new provider, clear it
-        if (formData.model && !models.includes(formData.model)) {
-          setFormData(prev => ({ ...prev, model: models[0] || '' }))
+      let models: AvailableModel[] =
+        providerConfig?.models?.map((m) => ({ id: m.model_id, useCases: m.use_cases })) ?? []
+      if (models.length === 0) {
+        try {
+          const res = await aiApi.getAvailableModels(TENANT_ID, { provider: formData.provider })
+          models = res.models.map((m) => ({ id: m.model_id, useCases: m.use_cases }))
+        } catch (err) {
+          console.error('Failed to load models for provider', formData.provider, err)
         }
-      } else {
-        setAvailableModels([])
       }
+      if (cancelled) return
+      setAvailableModels(models)
+      // If the current model isn't offered by this provider, default to the first.
+      const ids = models.map((m) => m.id)
+      if (formData.model && ids.length > 0 && !ids.includes(formData.model)) {
+        setFormData(prev => ({ ...prev, model: ids[0] || '' }))
+      }
+    }
+    loadModels()
+    return () => {
+      cancelled = true
     }
   }, [formData.provider, aiConfig])
 
@@ -432,7 +474,9 @@ export default function AgentEditor() {
                 >
                   <option value="">Select a model</option>
                   {availableModels.map(model => (
-                    <option key={model} value={model}>{model}</option>
+                    <option key={model.id} value={model.id}>
+                      {model.id}{model.useCases.includes('agent') ? '' : ' · no tools'}
+                    </option>
                   ))}
                 </select>
               ) : (
@@ -637,6 +681,18 @@ export default function AgentEditor() {
               placeholder="Select functions..."
               helperText="Select functions this agent can use"
             />
+            {formData.tools.length > 0 &&
+            availableModels.some(m => m.id === formData.model && !m.useCases.includes('agent')) ? (
+              <p className="text-xs text-amber-500 mt-1">
+                ⚠ The selected model doesn’t support tool calling, but this agent has{' '}
+                {formData.tools.length} tool{formData.tools.length === 1 ? '' : 's'} assigned —
+                tool calls will fail. Pick a model without the “· no tools” marker.
+              </p>
+            ) : (
+              <p className="text-xs text-amber-500/80 mt-1">
+                Note: Make sure your selected model supports tool calling
+              </p>
+            )}
           </div>
 
           {/* Rules */}

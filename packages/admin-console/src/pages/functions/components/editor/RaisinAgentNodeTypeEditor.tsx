@@ -10,7 +10,13 @@ import { Save, Undo2, Redo2, Loader2, Bot, Plus, Trash2, MessageSquare, PanelRig
 import { Allotment } from 'allotment'
 import { useFunctionsContext, useUndoRedo } from '../../hooks'
 import { nodesApi } from '../../../../api/nodes'
-import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider } from '../../../../api/ai'
+import { aiApi, type AIConfig, type ProviderConfigResponse, type AIProvider, type ModelUseCase } from '../../../../api/ai'
+
+/** A selectable model plus the capability info needed to flag tool support. */
+interface AvailableModel {
+  id: string
+  useCases: ModelUseCase[]
+}
 import { useAuth } from '../../../../contexts/AuthContext'
 import CommitDialog from '../../../../components/CommitDialog'
 import { InlineFunctionPicker } from './InlineFunctionPicker'
@@ -142,7 +148,7 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
   const [pendingCommit, setPendingCommit] = useState<{ properties: AgentProperties } | null>(null)
   const [agentNode, setAgentNode] = useState<AgentNode | null>(null)
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null)
-  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
   const [newRule, setNewRule] = useState('')
   const [showTestChat, setShowTestChat] = useState(false)
   const [editingRuleIndex, setEditingRuleIndex] = useState<number | null>(null)
@@ -162,6 +168,8 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
 
   // Ref for keyboard shortcuts
   const containerRef = useRef<HTMLDivElement>(null)
+  // Guards the one-time provider normalization after config + node load.
+  const didNormalizeProviderRef = useRef(false)
 
   // Find agent node from tree
   const findAgentNode = useCallback((nodeList: typeof nodes, path: string): AgentNode | null => {
@@ -191,22 +199,57 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
     loadConfig()
   }, [TENANT_ID])
 
-  // Update available models when provider changes
+  // If the saved provider isn't actually configured (e.g. the default
+  // 'openai' while only Groq has an API key), the provider <select> would show
+  // a configured option while state still points at the unconfigured one — so
+  // the model lookup misses and the Model field degrades to a free-text box.
+  // Select the first configured provider so the model chooser activates. Done
+  // via resetProperties so opening the editor isn't flagged as an unsaved edit.
   useEffect(() => {
-    if (aiConfig && properties.provider) {
+    if (!aiConfig || isLoading || didNormalizeProviderRef.current) return
+    const configured = aiConfig.providers
+      .filter((p) => p.enabled && p.has_api_key)
+      .map((p) => p.provider)
+    if (configured.length === 0) return
+    didNormalizeProviderRef.current = true
+    if (!configured.includes(properties.provider)) {
+      resetProperties({ ...properties, provider: configured[0] as Provider, model: '' })
+    }
+  }, [aiConfig, isLoading, properties, resetProperties])
+
+  // Update available models when the provider changes. Prefer the models from
+  // the static AI config; if the provider lists none there, fetch its live
+  // model list so the Model field is always a real chooser (not a text box).
+  useEffect(() => {
+    let cancelled = false
+    async function loadModels() {
+      if (!aiConfig || !properties.provider) {
+        setAvailableModels([])
+        return
+      }
       const providerMap = providersArrayToMap(aiConfig.providers)
       const providerConfig = providerMap[properties.provider]
-      if (providerConfig?.models) {
-        const models = providerConfig.models.map((m) => m.model_id)
-        setAvailableModels(models)
-
-        // If current model is not available in new provider, clear it
-        if (properties.model && !models.includes(properties.model)) {
-          setProperties({ ...properties, model: models[0] || '' })
+      let models: AvailableModel[] =
+        providerConfig?.models?.map((m) => ({ id: m.model_id, useCases: m.use_cases })) ?? []
+      if (models.length === 0) {
+        try {
+          const res = await aiApi.getAvailableModels(TENANT_ID, { provider: properties.provider })
+          models = res.models.map((m) => ({ id: m.model_id, useCases: m.use_cases }))
+        } catch (err) {
+          console.error('Failed to load models for provider', properties.provider, err)
         }
-      } else {
-        setAvailableModels([])
       }
+      if (cancelled) return
+      setAvailableModels(models)
+      // If the current model isn't offered by this provider, default to the first.
+      const ids = models.map((m) => m.id)
+      if (properties.model && ids.length > 0 && !ids.includes(properties.model)) {
+        setProperties({ ...properties, model: ids[0] || '' })
+      }
+    }
+    loadModels()
+    return () => {
+      cancelled = true
     }
   }, [properties.provider, aiConfig])
 
@@ -573,7 +616,9 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
                   >
                     <option value="">Select a model</option>
                     {availableModels.map(model => (
-                      <option key={model} value={model}>{model}</option>
+                      <option key={model.id} value={model.id}>
+                        {model.id}{model.useCases.includes('agent') ? '' : ' · no tools'}
+                      </option>
                     ))}
                   </select>
                 ) : (
@@ -704,9 +749,18 @@ export function RaisinAgentNodeTypeEditor({ tab }: RaisinAgentNodeTypeEditorProp
                 placeholder="Search functions..."
                 helperText="Select functions this agent can use as tools"
               />
-              <p className="text-xs text-amber-500/80 mt-1">
-                Note: Make sure your selected model supports tool calling
-              </p>
+              {properties.tools.length > 0 &&
+              availableModels.some(m => m.id === properties.model && !m.useCases.includes('agent')) ? (
+                <p className="text-xs text-amber-500 mt-1">
+                  ⚠ The selected model doesn’t support tool calling, but this agent has{' '}
+                  {properties.tools.length} tool{properties.tools.length === 1 ? '' : 's'} assigned —
+                  tool calls will fail. Pick a model without the “· no tools” marker.
+                </p>
+              ) : (
+                <p className="text-xs text-amber-500/80 mt-1">
+                  Note: Make sure your selected model supports tool calling
+                </p>
+              )}
             </div>
 
             {/* History Compaction */}

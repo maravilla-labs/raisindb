@@ -115,12 +115,13 @@ impl AIProviderTrait for GroqProvider {
     }
 
     fn available_models(&self) -> Vec<String> {
+        // Static fallback only — the authoritative list comes from
+        // `list_available_models()` (Groq's live /models endpoint). Keep this to
+        // a couple of currently-supported models; do not reintroduce a large
+        // hardcoded list, as Groq decommissions models regularly.
         vec![
             "llama-3.3-70b-versatile".to_string(),
             "llama-3.1-8b-instant".to_string(),
-            "llama-3.1-70b-versatile".to_string(),
-            "mixtral-8x7b-32768".to_string(),
-            "gemma2-9b-it".to_string(),
         ]
     }
 

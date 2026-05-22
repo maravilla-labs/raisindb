@@ -24,6 +24,7 @@ import {
   RotateCcw,
 } from 'lucide-react'
 import { agentChatApi, type ChatEvent, type TestConversation } from '../../../../api/agent-chat'
+import MarkdownRenderer from '../../../../components/MarkdownRenderer'
 
 interface AgentTestChatProps {
   repo: string
@@ -52,6 +53,11 @@ interface MessageChild {
   status?: string
 }
 
+// Safety net: if the agent emits no SSE events for this long, assume the turn
+// stalled (the backend silently dropped it) and surface a retry instead of an
+// endless spinner. Slightly below the agent functions' 120s execution timeout.
+const INACTIVITY_TIMEOUT_MS = 90_000
+
 export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, agentId }: AgentTestChatProps) {
   const [conversation, setConversation] = useState<TestConversation | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -65,10 +71,36 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const streamAbortRef = useRef<AbortController | null>(null)
   const assistantMessageIdRef = useRef<string | null>(null)
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearInactivityTimer = useCallback(() => {
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current)
+      inactivityTimerRef.current = null
+    }
+  }, [])
+
+  // (Re)start the inactivity timer. Called when a turn begins and reset on
+  // every received event, so long-but-active tool runs aren't killed — only a
+  // genuine silent stall (zero events) trips it.
+  const armInactivityTimer = useCallback(() => {
+    clearInactivityTimer()
+    inactivityTimerRef.current = setTimeout(() => {
+      inactivityTimerRef.current = null
+      streamAbortRef.current?.abort()
+      streamAbortRef.current = null
+      assistantMessageIdRef.current = null
+      setIsWaitingForResponse(false)
+      setError('The agent did not respond in time. Send your message again to retry.')
+    }, INACTIVITY_TIMEOUT_MS)
+  }, [clearInactivityTimer])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Clear any pending inactivity timer when the component unmounts.
+  useEffect(() => () => clearInactivityTimer(), [clearInactivityTimer])
 
   const createConversation = useCallback(async () => {
     setIsLoading(true)
@@ -125,6 +157,8 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
   }, [ensureAssistantBubble])
 
   const handleEvent = useCallback((event: ChatEvent) => {
+    // Any event means the turn is still alive — push the stall deadline out.
+    armInactivityTimer()
     switch (event.type) {
       case 'text_chunk':
         applyToAssistant(m => ({ ...m, content: m.content + event.text }))
@@ -198,16 +232,19 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
         }))
         assistantMessageIdRef.current = null
         setIsWaitingForResponse(false)
+        clearInactivityTimer()
         break
       case 'waiting':
-        // Turn paused (e.g. plan approval). Keep the spinner up.
+        // Turn paused (e.g. plan approval). Keep the spinner up but stop the
+        // stall timer — the agent is intentionally waiting on the user.
+        clearInactivityTimer()
         break
       case 'log':
         // Surface backend logs to the dev console; don't render in the chat.
         console.debug(`[agent-handler ${event.level}]`, event.message, event.module ?? '')
         break
     }
-  }, [applyToAssistant, ensureAssistantBubble])
+  }, [applyToAssistant, ensureAssistantBubble, armInactivityTimer, clearInactivityTimer])
 
   const consumeStream = useCallback(async (streamChannel: string) => {
     streamAbortRef.current?.abort()
@@ -226,8 +263,9 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       console.error('SSE stream failed:', err)
       setError('Lost connection to agent stream. Send again to retry.')
       setIsWaitingForResponse(false)
+      clearInactivityTimer()
     }
-  }, [repo, handleEvent])
+  }, [repo, handleEvent, clearInactivityTimer])
 
   const handleSend = async () => {
     if (!inputText.trim() || !conversation || isSending) return
@@ -242,6 +280,7 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       // early text_chunk events.
       setIsWaitingForResponse(true)
       assistantMessageIdRef.current = null
+      armInactivityTimer()
       const streamPromise = consumeStream(conversation.streamChannel)
 
       await agentChatApi.sendUserMessage({
@@ -265,6 +304,7 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       console.error('Failed to send message:', err)
       setError(err instanceof Error ? `Failed to send message: ${err.message}` : 'Failed to send message')
       setIsWaitingForResponse(false)
+      clearInactivityTimer()
       streamAbortRef.current?.abort()
     } finally {
       setIsSending(false)
@@ -281,6 +321,7 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
   const handleClearChat = async () => {
     streamAbortRef.current?.abort()
     streamAbortRef.current = null
+    clearInactivityTimer()
     setIsWaitingForResponse(false)
     if (conversation) {
       try {
@@ -374,11 +415,18 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
                     ? 'bg-blue-500/20 text-blue-100'
                     : 'bg-white/5 text-zinc-200'
                 }`}>
-                  <p className="whitespace-pre-wrap break-words">
-                    {message.content || (message.children?.some(c => c.type === 'tool_call')
-                      ? <span className="text-zinc-400 italic">Using tools...</span>
-                      : '')}
-                  </p>
+                  {message.role === 'assistant' && message.content ? (
+                    // Render the agent's reply as markdown (code, lists, tables, etc.).
+                    <div className="text-left text-sm [&_p]:mb-2 [&_p:first-child]:mt-0 [&_:last-child]:!mb-0">
+                      <MarkdownRenderer content={message.content} />
+                    </div>
+                  ) : (
+                    <p className="whitespace-pre-wrap break-words">
+                      {message.content || (message.children?.some(c => c.type === 'tool_call')
+                        ? <span className="text-zinc-400 italic">Using tools...</span>
+                        : '')}
+                    </p>
+                  )}
                 </div>
 
                 {message.children && message.children.length > 0 && (
