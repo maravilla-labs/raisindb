@@ -156,44 +156,158 @@ pub async fn evaluate_async(
             }
         }
 
-        // For method calls - eval synchronously since methods don't need async
+        // Method calls: the method itself is synchronous, but its receiver or
+        // arguments may contain RELATES (e.g. `… || auth.groups.contains("x")`
+        // routed async because a sibling clause has RELATES). Async-resolve the
+        // receiver + args, then dispatch via the shared sync method dispatch.
+        // (BUG-1: this arm used to return an error, which fails closed to Deny
+        // for any policy mixing RELATES with a method call.)
         Expr::MethodCall {
             object,
-            method: _method,
+            method,
             args,
         } => {
-            // For method calls, use the sync evaluator since methods themselves are sync
-            // We only need async for traversing to get to the method call
             let obj_val = Box::pin(evaluate_async(object, ctx, resolver)).await?;
+            // Null-safe: don't evaluate args on a null receiver.
             if obj_val == Value::Null {
                 return Ok(Value::Null);
             }
 
-            // Build a temporary method call expression with evaluated object
-            // This is a bit hacky but avoids duplicating all the method logic
-            // In practice, args should be simple enough that sync eval works
-            let mut _arg_values = Vec::new();
+            let mut arg_vals = Vec::with_capacity(args.len());
             for arg in args {
-                _arg_values.push(Box::pin(evaluate_async(arg, ctx, resolver)).await?);
+                arg_vals.push(Box::pin(evaluate_async(arg, ctx, resolver)).await?);
             }
 
-            // We need to call the method - but we can't easily reuse eval_method
-            // So let's just delegate to the sync evaluator for the final method call
-            // This works because by this point we've resolved any async parts
-
-            // Actually, we need to rebuild an expression or duplicate the method logic
-            // For now, let's use evaluate on a literal and handle methods separately
-            // This is a limitation - method calls in async contexts need more work
-            Err(EvalError::type_error(
-                "method call in async context",
-                "simple property access",
-                "method call - not yet fully supported in async evaluation",
-            ))
+            super::evaluator::eval_method_on_values(&obj_val, method, &arg_vals)
         }
 
         Expr::Grouped(inner) => Box::pin(evaluate_async(inner, ctx, resolver)).await,
 
         // Delegate simple expressions to the synchronous evaluator
         Expr::Literal(_) | Expr::Variable(_) => super::evaluator::evaluate(expr, ctx),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::resolver::NoOpResolver;
+    use crate::parser::parse;
+
+    fn ctx(v: serde_json::Value) -> EvalContext {
+        EvalContext::from_json(v).expect("valid context json")
+    }
+
+    /// A resolver whose `has_path` always returns a fixed answer — lets a test
+    /// drive the RELATES side without a real graph.
+    struct FixedResolver(bool);
+
+    #[async_trait::async_trait]
+    impl RelationResolver for FixedResolver {
+        async fn has_path(
+            &self,
+            _source_id: &str,
+            _target_id: &str,
+            _relation_types: &[String],
+            _min_depth: u32,
+            _max_depth: u32,
+            _direction: crate::ast::RelDirection,
+        ) -> Result<bool, EvalError> {
+            Ok(self.0)
+        }
+    }
+
+    async fn eval(expr: &str, v: serde_json::Value, resolver: &dyn RelationResolver) -> Value {
+        let parsed = parse(expr).expect("parse");
+        evaluate_async(&parsed, &ctx(v), resolver)
+            .await
+            .expect("evaluate_async should not error")
+    }
+
+    #[tokio::test]
+    async fn bug1_relates_or_method_no_longer_errors() {
+        // The exact BUG-1 shape: RELATES `||` a method call. The whole tree
+        // routes async (it contains RELATES); previously the method-call arm
+        // errored → fail-closed Deny for everyone. Now, with the RELATES side
+        // false (NoOpResolver), the `contains` carries the result.
+        let v = serde_json::json!({
+            "auth": {"user_id": "u1", "groups": ["admin"]},
+            "node": {"owner": "u2"}
+        });
+        let got = eval(
+            "node.owner RELATES auth.user_id VIA 'guardian' || auth.groups.contains('admin')",
+            v,
+            &NoOpResolver,
+        )
+        .await;
+        assert_eq!(got, Value::Boolean(true));
+    }
+
+    #[tokio::test]
+    async fn method_on_left_of_and_with_relates() {
+        // Method call evaluated async on the left of `&&`, RELATES on the right.
+        let v = serde_json::json!({
+            "auth": {"user_id": "u1", "groups": ["admin"]},
+            "node": {"owner": "u2"}
+        });
+        let got = eval(
+            "auth.groups.contains('admin') && node.owner RELATES auth.user_id VIA 'guardian'",
+            v,
+            &NoOpResolver,
+        )
+        .await;
+        // contains == true, RELATES == false → false (no error).
+        assert_eq!(got, Value::Boolean(false));
+    }
+
+    #[tokio::test]
+    async fn chained_methods_evaluate_async() {
+        // Method chaining inside an async tree (sibling RELATES forces async).
+        let v = serde_json::json!({
+            "auth": {"user_id": "u1", "name": "  Bob  "},
+            "node": {"owner": "u2"}
+        });
+        let got = eval(
+            "auth.name.trim().toLowerCase() == 'bob' || node.owner RELATES auth.user_id VIA 'g'",
+            v,
+            &NoOpResolver,
+        )
+        .await;
+        assert_eq!(got, Value::Boolean(true));
+    }
+
+    #[tokio::test]
+    async fn null_safe_receiver_in_async_tree() {
+        // A method on a missing (null) receiver returns null, not an error,
+        // even on the async path.
+        let v = serde_json::json!({
+            "auth": {"user_id": "u1"},
+            "node": {"owner": "u2"}
+        });
+        let got = eval(
+            "auth.missing.contains('x') || node.owner RELATES auth.user_id VIA 'g'",
+            v,
+            &NoOpResolver,
+        )
+        .await;
+        // null (not truthy) OR false → false.
+        assert_eq!(got, Value::Boolean(false));
+    }
+
+    #[tokio::test]
+    async fn relates_true_short_circuits_method() {
+        // RELATES true on the left of `||` must short-circuit so the method on
+        // the right is never evaluated.
+        let v = serde_json::json!({
+            "auth": {"user_id": "u1", "groups": []},
+            "node": {"owner": "u2"}
+        });
+        let got = eval(
+            "node.owner RELATES auth.user_id VIA 'g' || auth.groups.contains('admin')",
+            v,
+            &FixedResolver(true),
+        )
+        .await;
+        assert_eq!(got, Value::Boolean(true));
     }
 }

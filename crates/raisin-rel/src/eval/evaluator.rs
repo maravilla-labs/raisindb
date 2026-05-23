@@ -195,8 +195,11 @@ fn eval_unary(op: UnOp, expr: &Expr, ctx: &EvalContext) -> Result<Value, EvalErr
     }
 }
 
-/// Evaluate a method call (expr.method(args))
-/// Null-safe: calling method on null returns null (like JS ?.)
+/// Evaluate a method call (expr.method(args)).
+///
+/// Resolves the receiver and arguments synchronously, then dispatches via the
+/// shared [`eval_method_on_values`]. Null-safe: a null receiver short-circuits
+/// to null *before* arguments are evaluated (matching JS `?.`).
 fn eval_method(
     object: &Expr,
     method: &str,
@@ -205,125 +208,122 @@ fn eval_method(
 ) -> Result<Value, EvalError> {
     let obj_val = evaluate(object, ctx)?;
 
-    // Null-safe: method call on null returns null
+    // Null-safe: method call on null returns null (don't evaluate args).
     if obj_val == Value::Null {
+        return Ok(Value::Null);
+    }
+
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_vals.push(evaluate(arg, ctx)?);
+    }
+
+    eval_method_on_values(&obj_val, method, &arg_vals)
+}
+
+/// Dispatch a method on an already-evaluated receiver + argument values.
+///
+/// Shared by the sync [`eval_method`] and the async evaluator's `MethodCall`
+/// arm (`super::async_evaluator`), exactly as [`eval_binary_values`] is shared
+/// for binary ops. Methods are synchronous, so once a caller has resolved the
+/// receiver/args (sync *or* async — e.g. an arg containing `RELATES`) the
+/// dispatch is identical. Null-safe: a null receiver returns null.
+pub fn eval_method_on_values(
+    obj_val: &Value,
+    method: &str,
+    arg_vals: &[Value],
+) -> Result<Value, EvalError> {
+    // Null-safe: method call on null returns null.
+    if *obj_val == Value::Null {
         return Ok(Value::Null);
     }
 
     match method {
         // === Universal methods (work on String, Array, Object) ===
-        "length" => eval_length(&obj_val),
-        "isEmpty" => eval_is_empty(&obj_val),
-        "isNotEmpty" => eval_is_not_empty(&obj_val),
+        "length" => eval_length(obj_val),
+        "isEmpty" => eval_is_empty(obj_val),
+        "isNotEmpty" => eval_is_not_empty(obj_val),
 
         // === Polymorphic method: contains ===
         "contains" => {
-            check_arg_count(method, args, 1)?;
-            let needle = evaluate(&args[0], ctx)?;
-            eval_contains(&obj_val, &needle)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_contains(obj_val, &arg_vals[0])
         }
 
         // === String methods ===
         "startsWith" => {
-            check_arg_count(method, args, 1)?;
-            let prefix = evaluate(&args[0], ctx)?;
-            eval_starts_with(&obj_val, &prefix)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_starts_with(obj_val, &arg_vals[0])
         }
         "endsWith" => {
-            check_arg_count(method, args, 1)?;
-            let suffix = evaluate(&args[0], ctx)?;
-            eval_ends_with(&obj_val, &suffix)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_ends_with(obj_val, &arg_vals[0])
         }
         "toLowerCase" => {
-            check_arg_count(method, args, 0)?;
-            eval_to_lower_case(&obj_val)
+            check_arg_count(method, arg_vals.len(), 0)?;
+            eval_to_lower_case(obj_val)
         }
         "toUpperCase" => {
-            check_arg_count(method, args, 0)?;
-            eval_to_upper_case(&obj_val)
+            check_arg_count(method, arg_vals.len(), 0)?;
+            eval_to_upper_case(obj_val)
         }
         "trim" => {
-            check_arg_count(method, args, 0)?;
-            eval_trim(&obj_val)
+            check_arg_count(method, arg_vals.len(), 0)?;
+            eval_trim(obj_val)
         }
         "substring" => {
-            if args.is_empty() || args.len() > 2 {
-                return Err(EvalError::wrong_arg_count(method, 1, args.len()));
+            if arg_vals.is_empty() || arg_vals.len() > 2 {
+                return Err(EvalError::wrong_arg_count(method, 1, arg_vals.len()));
             }
-            let start = evaluate(&args[0], ctx)?;
-            let end = if args.len() > 1 {
-                Some(evaluate(&args[1], ctx)?)
-            } else {
-                None
-            };
-            eval_substring(&obj_val, &start, end.as_ref())
+            eval_substring(obj_val, &arg_vals[0], arg_vals.get(1))
         }
 
         // === Array methods ===
         "first" => {
-            check_arg_count(method, args, 0)?;
-            eval_first(&obj_val)
+            check_arg_count(method, arg_vals.len(), 0)?;
+            eval_first(obj_val)
         }
         "last" => {
-            check_arg_count(method, args, 0)?;
-            eval_last(&obj_val)
+            check_arg_count(method, arg_vals.len(), 0)?;
+            eval_last(obj_val)
         }
         "indexOf" => {
-            check_arg_count(method, args, 1)?;
-            let element = evaluate(&args[0], ctx)?;
-            eval_index_of(&obj_val, &element)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_index_of(obj_val, &arg_vals[0])
         }
-        "join" => {
-            let separator = if !args.is_empty() {
-                Some(evaluate(&args[0], ctx)?)
-            } else {
-                None
-            };
-            eval_join(&obj_val, separator.as_ref())
-        }
+        "join" => eval_join(obj_val, arg_vals.first()),
 
         // === Path methods ===
-        "parent" => {
-            let levels = if !args.is_empty() {
-                Some(evaluate(&args[0], ctx)?)
-            } else {
-                None
-            };
-            eval_parent(&obj_val, levels.as_ref())
-        }
+        "parent" => eval_parent(obj_val, arg_vals.first()),
         "ancestor" => {
-            check_arg_count(method, args, 1)?;
-            let depth = evaluate(&args[0], ctx)?;
-            eval_ancestor(&obj_val, &depth)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_ancestor(obj_val, &arg_vals[0])
         }
         "ancestorOf" => {
-            check_arg_count(method, args, 1)?;
-            let other = evaluate(&args[0], ctx)?;
-            eval_ancestor_of(&obj_val, &other)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_ancestor_of(obj_val, &arg_vals[0])
         }
         "descendantOf" => {
-            check_arg_count(method, args, 1)?;
-            let parent = evaluate(&args[0], ctx)?;
-            eval_descendant_of(&obj_val, &parent)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_descendant_of(obj_val, &arg_vals[0])
         }
         "childOf" => {
-            check_arg_count(method, args, 1)?;
-            let parent = evaluate(&args[0], ctx)?;
-            eval_child_of(&obj_val, &parent)
+            check_arg_count(method, arg_vals.len(), 1)?;
+            eval_child_of(obj_val, &arg_vals[0])
         }
         "depth" => {
-            check_arg_count(method, args, 0)?;
-            eval_depth(&obj_val)
+            check_arg_count(method, arg_vals.len(), 0)?;
+            eval_depth(obj_val)
         }
 
         _ => Err(EvalError::unknown_method(method)),
     }
 }
 
-/// Check argument count
-fn check_arg_count(method: &str, args: &[Expr], expected: usize) -> Result<(), EvalError> {
-    if args.len() != expected {
-        Err(EvalError::wrong_arg_count(method, expected, args.len()))
+/// Check that an argument count matches what a method expects.
+fn check_arg_count(method: &str, got: usize, expected: usize) -> Result<(), EvalError> {
+    if got != expected {
+        Err(EvalError::wrong_arg_count(method, expected, got))
     } else {
         Ok(())
     }
