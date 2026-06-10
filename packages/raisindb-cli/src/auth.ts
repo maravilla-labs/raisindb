@@ -137,9 +137,78 @@ export function isAuthenticated(): boolean {
 }
 
 /**
- * Gets the current authentication token
+ * Gets the current authentication token.
+ *
+ * Resolution order (env wins over config file, CI-friendly):
+ *   1. RAISINDB_TOKEN environment variable
+ *   2. .raisinrc config file
  */
 export function getToken(): string | null {
+  const envToken = process.env.RAISINDB_TOKEN;
+  if (envToken && envToken.trim() !== '') {
+    return envToken.trim();
+  }
   const config = loadConfig();
   return config.token;
+}
+
+export interface PasswordLoginResult {
+  token: string;
+  /** Unix timestamp (seconds) when the token expires, if reported by the server */
+  expiresAt?: number;
+  username?: string;
+}
+
+/**
+ * Non-interactive login with username/password (system user auth).
+ *
+ * POSTs to {server}/api/raisindb/sys/{tenant}/auth and stores the
+ * resulting token + server in the CLI config (.raisinrc).
+ */
+export async function loginWithPassword(
+  serverUrl: string,
+  username: string,
+  password: string,
+  tenant: string = 'default'
+): Promise<PasswordLoginResult> {
+  const url = `${serverUrl.replace(/\/$/, '')}/api/raisindb/sys/${encodeURIComponent(tenant)}/auth`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Authentication failed: HTTP ${response.status}${text ? ` - ${text}` : ''}`);
+  }
+
+  const data = (await response.json()) as {
+    token?: string;
+    expires_at?: number;
+    username?: string;
+  };
+
+  if (!data.token) {
+    throw new Error('Authentication response did not contain a token');
+  }
+
+  const config = loadConfig();
+  config.server = serverUrl;
+  config.token = data.token;
+  saveConfig(config);
+
+  return { token: data.token, expiresAt: data.expires_at, username: data.username };
+}
+
+/**
+ * Non-interactive login with an existing token.
+ * Stores server + token in the CLI config (.raisinrc).
+ */
+export function loginWithToken(serverUrl: string, token: string): void {
+  const config = loadConfig();
+  config.server = serverUrl;
+  config.token = token;
+  saveConfig(config);
 }

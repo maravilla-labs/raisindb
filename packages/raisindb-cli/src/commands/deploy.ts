@@ -2,15 +2,18 @@ import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
 import { createPackage } from './package.js';
-import { uploadPackage } from './package.js';
+import { uploadPackage, installPackage } from './package.js';
 
 interface DeployOptions {
   server?: string;
   repo?: string;
+  /** Also install the package after upload (deploy alone only uploads). */
+  install?: boolean;
 }
 
 /**
  * Deploy a package: validate → build .rap → upload to server.
+ * With `--install` it also installs the uploaded package.
  * Reads manifest.yaml for the package name and version automatically.
  */
 export async function deployPackage(folder: string, options: DeployOptions): Promise<void> {
@@ -49,5 +52,10 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
     fs.unlinkSync(rapFile);
   }
 
-  console.log(`\nDeployed ${manifest.name} v${manifest.version} successfully.`);
+  // Step 4 (optional): Install
+  if (options.install) {
+    await installPackage(manifest.name, options.server, options.repo);
+  }
+
+  console.log(`\nDeployed ${manifest.name} v${manifest.version} successfully${options.install ? ' (installed)' : ''}.`);
 }

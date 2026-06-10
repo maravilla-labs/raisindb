@@ -83,10 +83,17 @@ export async function syncPackage(
   // Load or create sync config
   let config = loadSyncConfig(packageDir);
   if (!config) {
-    console.log('No sync configuration found. Running interactive setup...');
-    config = await promptForSyncConfig(packageDir, options);
-    saveSyncConfig(packageDir, config);
-    console.log(`Sync configuration saved to ${packageDir}/.raisin-sync.yaml`);
+    if (options.repo) {
+      // Non-interactive: build an ephemeral config from flags/env. No
+      // .raisin-sync.yaml is written — keeps package dirs clean and works
+      // the same in CI: raisindb sync ./package --repo myapp --watch
+      config = await promptForSyncConfig(packageDir, options);
+    } else {
+      console.log('No sync configuration found. Running interactive setup...');
+      config = await promptForSyncConfig(packageDir, options);
+      saveSyncConfig(packageDir, config);
+      console.log(`Sync configuration saved to ${packageDir}/.raisin-sync.yaml`);
+    }
   }
 
   // Apply command-line overrides
@@ -96,7 +103,9 @@ export async function syncPackage(
   // Verify authentication
   const token = getToken();
   if (!token) {
-    throw new Error('Not authenticated. Run "raisindb shell" and use /login first.');
+    throw new Error(
+      'Not authenticated. Run "raisindb login --server <url>" first (or set RAISINDB_TOKEN).'
+    );
   }
 
   // Execute appropriate sync mode
@@ -379,6 +388,8 @@ async function runWatchMode(
     ],
     watchExtensions: ['.yaml', '.yml', '.json', '.md', '.js', '.py', '.star'],
     localOnly: pushOnly,
+    // Surface manifest/nodetype/workspace edits as re-deploy suggestions
+    watchStructural: true,
   });
 
   // Set up sync operation options — use watcher's watchBase for content resolution
@@ -443,6 +454,16 @@ async function runWatchMode(
     }
   });
 
+  // Non-TTY (CI, logs, piped output): plain line output instead of the Ink UI.
+  // Attaches its own listeners before start so no event (esp. 'error') is lost.
+  if (!process.stdout.isTTY) {
+    return runPlainWatch(watcher, packageDir, config);
+  }
+
+  // An 'error' emitted during start() (e.g. server event subscription failed)
+  // must not crash watch mode before the UI attaches its own handler.
+  watcher.on('error', () => {});
+
   // Start watcher
   await watcher.start();
 
@@ -461,6 +482,60 @@ async function runWatchMode(
         },
       })
     );
+  });
+}
+
+/**
+ * Plain-line watch output for non-TTY environments (CI / piped logs).
+ * One line per event, no ANSI UI. Exits on SIGINT/SIGTERM.
+ */
+async function runPlainWatch(
+  watcher: SyncWatcher,
+  packageDir: string,
+  config: SyncConfig
+): Promise<void> {
+  const ts = () => new Date().toISOString();
+
+  console.log(`[watch] watching ${packageDir}`);
+  console.log(
+    `[watch] target ${config.server} repo=${config.repository} branch=${config.branch}`
+  );
+
+  watcher.on('localReady', () => console.log(`[watch] local watcher ready`));
+  watcher.on('serverConnected', () => console.log(`[watch] connected to server`));
+  watcher.on('serverSubscribed', () => console.log(`[watch] subscribed to server events`));
+  watcher.on('error', (error: Error) => {
+    console.error(`[watch] ${ts()} error: ${error.message}`);
+  });
+  watcher.on('localChange', (event: ChangeEvent) => {
+    console.log(`[watch] ${ts()} ${event.type}: ${event.path}`);
+  });
+  watcher.on('structuralChange', (event: { path: string }) => {
+    console.log(
+      `[watch] ${ts()} structural change: ${event.path} — not synced; run "raisindb deploy ${packageDir} --repo ${config.repository} --install" to apply`
+    );
+  });
+  watcher.on('syncResult', (result: { success: boolean; path: string; operation: string; error?: string; details?: string }) => {
+    if (result.success) {
+      console.log(`[watch] ${ts()} ${result.operation === 'pull' ? 'pulled' : 'pushed'}: ${result.path}`);
+    } else {
+      console.error(
+        `[watch] ${ts()} ${result.operation} failed: ${result.path}: ${result.error}${result.details ? `\n  ${result.details.replace(/\n/g, '\n  ')}` : ''}`
+      );
+    }
+  });
+
+  // Listeners are attached — now start watching
+  await watcher.start();
+
+  return new Promise((resolve) => {
+    const stop = async () => {
+      console.log('[watch] stopping...');
+      await watcher.stop();
+      resolve();
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
   });
 }
 

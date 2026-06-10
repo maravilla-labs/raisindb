@@ -96,9 +96,17 @@ export function saveConfig(config: Config): void {
 }
 
 /**
- * Gets the current server URL
+ * Gets the current server URL.
+ *
+ * Resolution order (env wins over config file, CI-friendly):
+ *   1. RAISINDB_SERVER environment variable
+ *   2. .raisinrc config file
  */
 export function getServer(): string | null {
+  const envServer = process.env.RAISINDB_SERVER;
+  if (envServer && envServer.trim() !== '') {
+    return envServer.trim();
+  }
   const config = loadConfig();
   return config.server;
 }
@@ -113,9 +121,17 @@ export function setServer(server: string): void {
 }
 
 /**
- * Gets the default repository/database
+ * Gets the default repository/database.
+ *
+ * Resolution order (env wins over config file, CI-friendly):
+ *   1. RAISINDB_REPO environment variable
+ *   2. .raisinrc config file
  */
 export function getDefaultRepo(): string | null {
+  const envRepo = process.env.RAISINDB_REPO;
+  if (envRepo && envRepo.trim() !== '') {
+    return envRepo.trim();
+  }
   const config = loadConfig();
   return config.default_repo;
 }

@@ -13,6 +13,7 @@ import {
   partitionTranslationFiles,
   validateTranslationFiles,
 } from './translation-validator.js';
+import { mergeFlowResults, validatePackageFlows } from '../flow/package-doctor.js';
 
 // Dynamic import for WASM module (nodejs target)
 let wasmModule: typeof import('@raisindb/schema-wasm') | null = null;
@@ -202,7 +203,11 @@ export function collectPackageFiles(packageDir: string): Record<string, string> 
 }
 
 /**
- * Validate a package directory
+ * Validate a package directory.
+ *
+ * Runs the WASM schema validator, the translation validator, and the flow
+ * doctor (static analysis of every raisin:Flow node's workflow_data) in a
+ * single pass; flow doctor errors fail validation like schema errors.
  */
 export async function validatePackageDirectory(
   packageDir: string
@@ -211,7 +216,8 @@ export async function validatePackageDirectory(
   const { translationFiles, nonTranslationFiles } = partitionTranslationFiles(files);
   const wasmResults = await validatePackage(nonTranslationFiles);
   const translationResults = validateTranslationFiles(translationFiles, files);
-  return { ...wasmResults, ...translationResults };
+  const flowResults = validatePackageFlows(packageDir, files);
+  return mergeFlowResults({ ...wasmResults, ...translationResults }, flowResults);
 }
 
 /**

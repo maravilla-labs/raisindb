@@ -131,6 +131,14 @@ export function WatchMode({
       addLogEntry('info', 'Watch mode stopped');
     };
 
+    const handleStructuralChange = (event: { path: string }) => {
+      addLogEntry(
+        'info',
+        'Structural change (not synced) — run "raisindb deploy --install" to apply',
+        event.path
+      );
+    };
+
     const handleSyncResult = (result: SyncResult) => {
       if (result.success) {
         const verb = result.operation === 'push' ? 'Pushed' : 'Pulled';
@@ -151,6 +159,7 @@ export function WatchMode({
     watcher.on('serverSubscribed', handleServerSubscribed);
     watcher.on('stopped', handleStopped);
     watcher.on('syncResult', handleSyncResult);
+    watcher.on('structuralChange', handleStructuralChange);
 
     return () => {
       watcher.off('status', handleStatus);
@@ -163,6 +172,7 @@ export function WatchMode({
       watcher.off('serverSubscribed', handleServerSubscribed);
       watcher.off('stopped', handleStopped);
       watcher.off('syncResult', handleSyncResult);
+      watcher.off('structuralChange', handleStructuralChange);
     };
   }, [watcher]);
 

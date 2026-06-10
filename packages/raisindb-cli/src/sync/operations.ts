@@ -8,7 +8,9 @@ import yaml from 'yaml';
 import { SyncConfig } from './config.js';
 import { getToken } from '../auth.js';
 import { ChangeEvent } from './watcher.js';
-import { decodeNamespace } from '../namespace-encoding.js';
+import { mapChangeToNode, parseTranslationLocale } from './mapping.js';
+
+export { parseTranslationLocale } from './mapping.js';
 
 /**
  * Extract a human-readable error message with cause chain
@@ -68,41 +70,6 @@ export interface SyncOperationOptions {
   dryRun?: boolean;
   /** Force overwrite */
   force?: boolean;
-}
-
-/**
- * Parse a translation locale from a YAML filename.
- *
- * `.node.de.yaml` -> "de"
- * `.node.fr.yaml` -> "fr"
- * `about.de.yaml` -> "de"
- * `.node.yaml` -> null
- * `.node.index.js.yaml` -> null
- */
-export function parseTranslationLocale(filename: string): string | null {
-  if (!filename.endsWith('.yaml')) return null;
-
-  const withoutYaml = filename.slice(0, -'.yaml'.length);
-
-  if (filename.startsWith('.node.')) {
-    const inner = withoutYaml.slice('.node.'.length);
-    if (!inner) return null;
-    // Valid BCP 47: 2-3 letter language, optional hyphen + 2-4 letter region
-    if (/^[a-zA-Z]{2,3}(-[a-zA-Z]{2,4}|\d{3})?$/.test(inner)) {
-      return inner;
-    }
-    return null;
-  }
-
-  // Named file: about.de.yaml
-  const dotPos = withoutYaml.lastIndexOf('.');
-  if (dotPos < 0) return null;
-  const candidate = withoutYaml.slice(dotPos + 1);
-  if (!candidate) return null;
-  if (/^[a-zA-Z]{2,3}(-[a-zA-Z]{2,4}|\d{3})?$/.test(candidate)) {
-    return candidate;
-  }
-  return null;
 }
 
 /**
@@ -317,21 +284,12 @@ function toHttpUrl(server: string): string {
 
 function buildServerUrl(
   config: SyncConfig,
-  filePath: string
+  filePath: string,
+  explicitName?: string
 ): { url: string; workspace: string; nodePath: string } {
-  const parts = filePath.split('/');
-  const workspace = decodeNamespace(parts[0]);
-  const rest = parts.slice(1); // e.g. ["lib", "raisin", "ai", "agent-handler", ".node.yaml"]
-
-  const filename = path.basename(filePath);
-  let nodePath: string;
-
-  if (filename === '.node.yaml') {
-    // .node.yaml describes the directory node itself
-    nodePath = rest.slice(0, -1).join('/'); // drop ".node.yaml"
-  } else {
-    nodePath = rest.join('/');
-  }
+  const mapped = mapChangeToNode(filePath, explicitName);
+  const workspace = mapped.workspace || filePath.split('/')[0];
+  const nodePath = mapped.nodePath ?? filePath.split('/').slice(1).join('/');
 
   const httpServer = toHttpUrl(config.server);
   const url = `${httpServer}/api/repository/${config.repository}/${config.branch}/head/${workspace}/${nodePath}`;
@@ -348,9 +306,105 @@ const CODE_MIME_TYPES: Record<string, string> = {
 };
 
 /**
- * Push a code file (.js, .py, .star) to the server via multipart upload.
+ * Push a code file (.js, .py, .star) as the inline `code` property of its
+ * raisin:Asset node — the same shape examples/shiftboard/setup.mjs uses.
  *
- * Code files are raisin:Asset nodes that require a `file` property.
+ * The function runtime prefers the inline `code` property over the stored
+ * binary, so this makes edits live immediately. If the asset node does not
+ * exist yet, it is created under its parent (function) node.
+ */
+async function pushCodeInline(
+  filePath: string,
+  options: SyncOperationOptions
+): Promise<SyncResult> {
+  const { contentBase, config } = options;
+  const fullPath = path.join(contentBase, filePath);
+  const timestamp = Date.now();
+  const { url, nodePath } = buildServerUrl(config, filePath);
+
+  try {
+    const token = getToken();
+    if (!token) {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: 'Not authenticated',
+        timestamp,
+      };
+    }
+
+    const code = fs.readFileSync(fullPath, 'utf-8');
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+
+    // Read-modify-write: PUT replaces all properties, so fetch the existing
+    // ones first to preserve the required `file` resource etc.
+    let response = await fetch(url, { headers });
+
+    if (response.ok) {
+      const node = (await response.json()) as {
+        properties?: Record<string, unknown>;
+      };
+      const properties = { ...(node.properties || {}), code };
+      response = await fetch(url, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ properties }),
+      });
+    }
+
+    if (response.status === 404) {
+      // Asset node missing — create it under the parent (function) node,
+      // mirroring setup.mjs ensureNode.
+      const lastSlash = url.lastIndexOf('/');
+      const parentUrl = url.slice(0, lastSlash);
+      const name = nodePath.split('/').pop() || path.basename(filePath);
+      response = await fetch(parentUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          node: {
+            name,
+            node_type: 'raisin:Asset',
+            properties: { title: name, file: '', code },
+          },
+        }),
+      });
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: `${response.status} ${response.statusText}`,
+        details: `PUT ${url}\n${response.status} ${response.statusText}: ${errorText}`,
+        timestamp,
+      };
+    }
+
+    return { success: true, path: filePath, operation: 'push', timestamp };
+  } catch (error) {
+    const { message, details } = formatError(error);
+    return {
+      success: false,
+      path: filePath,
+      operation: 'push',
+      error: message,
+      details: `PUT ${url}\n${details}`,
+      timestamp,
+    };
+  }
+}
+
+/**
+ * Push a binary/asset file to the server via multipart upload.
+ *
+ * Asset files are raisin:Asset nodes that require a `file` property.
  * The server expects a multipart POST with a `file` field — it streams
  * the binary to storage and creates a Resource property with storage_key.
  */
@@ -600,9 +654,26 @@ export async function pushFile(
       };
     }
 
-    // Detect translation files and delegate
+    // Classify the change (pure mapping, see sync/mapping.ts)
     const filename = path.basename(filePath);
-    if (parseTranslationLocale(filename)) {
+    const mapped = mapChangeToNode(filePath);
+
+    if (mapped.kind === 'structural') {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: mapped.reason || 'structural change — run deploy --install',
+        timestamp,
+      };
+    }
+
+    if (mapped.kind === 'skip') {
+      // Nothing to push (hidden/metadata file) — report success, no-op
+      return { success: true, path: filePath, operation: 'push', timestamp };
+    }
+
+    if (mapped.kind === 'translation') {
       return pushTranslationFile(filePath, options);
     }
 
@@ -615,9 +686,13 @@ export async function pushFile(
       };
     }
 
-    // Code files (.js, .py, .star) need multipart upload
-    const ext = path.extname(filePath);
-    if (['.js', '.py', '.star'].includes(ext)) {
+    // Function code files (.js, .py, .star) → inline `code` property
+    if (mapped.kind === 'code') {
+      return pushCodeInline(filePath, options);
+    }
+
+    // Other binary assets → multipart upload
+    if (mapped.kind === 'asset') {
       return pushCodeFile(filePath, options);
     }
 
@@ -636,8 +711,18 @@ export async function pushFile(
       };
     }
 
-    // Build URL and body
-    const { url } = buildServerUrl(config, filePath);
+    // Build URL and body. For named node YAML files an explicit `name`
+    // (or properties.name) overrides the filename-derived node name.
+    let explicitName: string | undefined;
+    if (mapped.kind === 'node-file') {
+      try {
+        const parsed = yaml.parse(content) || {};
+        explicitName = parsed.name || parsed.properties?.name;
+      } catch {
+        // Invalid YAML — fall back to the filename-derived name
+      }
+    }
+    const { url } = buildServerUrl(config, filePath, explicitName);
     const body = buildPushBody(filePath, content);
 
     // Push to server via HTTP API

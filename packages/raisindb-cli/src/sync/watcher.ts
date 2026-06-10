@@ -63,6 +63,13 @@ export interface WatcherOptions {
   watchExtensions?: string[];
   /** Skip server watcher (push-only mode) */
   localOnly?: boolean;
+  /**
+   * Also watch install-time-only files (manifest.yaml, nodetypes/,
+   * workspaces/, mixins/, archetypes/) in the package root and emit
+   * 'structuralChange' events suggesting a re-deploy. Only useful when the
+   * content base differs from the package dir (content/ layout).
+   */
+  watchStructural?: boolean;
 }
 
 /**
@@ -76,6 +83,7 @@ export class SyncWatcher extends EventEmitter {
   private options: Required<WatcherOptions> & { localOnly: boolean };
 
   private localWatcher: FSWatcher | null = null;
+  private structuralWatcher: FSWatcher | null = null;
   private serverClient: RaisinClientType | null = null;
   private serverSubscription: RaisinSubscription | null = null;
 
@@ -116,6 +124,7 @@ export class SyncWatcher extends EventEmitter {
       ],
       watchExtensions: options.watchExtensions ?? ['.yaml', '.yml', '.json', '.md'],
       localOnly: options.localOnly ?? false,
+      watchStructural: options.watchStructural ?? false,
     };
   }
 
@@ -132,6 +141,10 @@ export class SyncWatcher extends EventEmitter {
       ]);
     }
 
+    if (this.options.watchStructural && this.watchBase !== this.packageDir) {
+      this.startStructuralWatcher();
+    }
+
     this.emit('status', this.status);
   }
 
@@ -144,6 +157,12 @@ export class SyncWatcher extends EventEmitter {
       await this.localWatcher.close();
       this.localWatcher = null;
       this.status.localWatching = false;
+    }
+
+    // Stop structural watcher
+    if (this.structuralWatcher) {
+      await this.structuralWatcher.close();
+      this.structuralWatcher = null;
     }
 
     // Unsubscribe from server events
@@ -224,6 +243,49 @@ export class SyncWatcher extends EventEmitter {
         this.emit('status', this.status);
         this.emit('localReady');
       });
+  }
+
+  /**
+   * Watch install-time-only package files (manifest, nodetypes/, workspaces/,
+   * mixins/, archetypes/) and emit 'structuralChange' events. These cannot be
+   * hot-synced — the handler should suggest a re-deploy.
+   */
+  private startStructuralWatcher(): void {
+    const targets = [
+      path.join(this.packageDir, 'manifest.yaml'),
+      path.join(this.packageDir, 'manifest.yml'),
+      path.join(this.packageDir, 'nodetypes'),
+      path.join(this.packageDir, 'workspaces'),
+      path.join(this.packageDir, 'mixins'),
+      path.join(this.packageDir, 'archetypes'),
+    ].filter((p) => fs.existsSync(p));
+
+    if (targets.length === 0) return;
+
+    this.structuralWatcher = watch(targets, {
+      persistent: true,
+      ignoreInitial: true,
+      awaitWriteFinish: {
+        stabilityThreshold: 200,
+        pollInterval: 100,
+      },
+    });
+
+    const handle = (filePath: string) => {
+      const relativePath = path
+        .relative(this.packageDir, filePath)
+        .split(path.sep)
+        .join('/');
+      this.emit('structuralChange', {
+        path: relativePath,
+        timestamp: Date.now(),
+      });
+    };
+
+    this.structuralWatcher
+      .on('add', handle)
+      .on('change', handle)
+      .on('unlink', handle);
   }
 
   /**

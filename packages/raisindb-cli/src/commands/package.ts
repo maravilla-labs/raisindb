@@ -5,12 +5,13 @@ import AdmZip from 'adm-zip';
 import ignore, { Ignore } from 'ignore';
 import React from 'react';
 import { render } from 'ink';
-import { getServer, loadConfig } from '../config.js';
+import { getServer, getDefaultRepo } from '../config.js';
 import { getToken } from '../auth.js';
 import {
   uploadPackage as apiUploadPackage,
   listPackages as apiListPackages,
   installPackage as apiInstallPackage,
+  getJobInfo as apiGetJobInfo,
   subscribeToJobEvents,
   PackageSummary,
   JobEvent,
@@ -90,11 +91,36 @@ interface ValidationState {
 }
 
 /**
- * Run validation with animated progress display
+ * Print validation results as plain lines (non-TTY / CI output).
+ */
+function printPlainValidationReport(results: PackageValidationResults): void {
+  for (const [filePath, result] of Object.entries(results)) {
+    for (const err of result.errors) {
+      console.log(`${filePath}: ERROR [${err.error_code}] ${err.message}`);
+    }
+    for (const warn of result.warnings) {
+      console.log(`${filePath}: WARN  [${warn.error_code}] ${warn.message}`);
+    }
+  }
+  const summary = getValidationSummary(results);
+  console.log(
+    `Validation: ${summary.totalFiles} file(s), ${summary.errorCount} error(s), ${summary.warningCount} warning(s)`
+  );
+}
+
+/**
+ * Run validation with animated progress display (plain lines when stdout
+ * is not a TTY, e.g. CI or piped output).
  */
 async function runValidationWithProgress(
   packageDir: string
 ): Promise<PackageValidationResults> {
+  if (!process.stdout.isTTY) {
+    console.log(`Validating package: ${packageDir}`);
+    const results = await validatePackageDirectory(packageDir);
+    printPlainValidationReport(results);
+    return results;
+  }
   // Initial state
   let state: ValidationState = {
     phase: 'collecting',
@@ -376,12 +402,11 @@ export async function uploadPackage(filePath: string, serverUrl?: string, repo?:
     throw new Error('Not authenticated. Run "raisindb shell" and use /login first.');
   }
 
-  // Get repo from config - require explicit specification if not configured
-  const config = loadConfig();
-  const targetRepo = repo || config.default_repo;
+  // Get repo from env/config - require explicit specification if not configured
+  const targetRepo = repo || getDefaultRepo();
 
   if (!targetRepo) {
-    throw new Error('No repository specified. Use --repo <name> or set a default in "raisindb shell" with "use <database>".');
+    throw new Error('No repository specified. Use --repo <name>, set RAISINDB_REPO, or set a default in "raisindb shell" with "use <database>".');
   }
 
   const fileName = path.basename(resolvedFile);
@@ -549,9 +574,8 @@ export async function listPackages(serverUrl?: string, repo?: string): Promise<v
     throw new Error('Not authenticated. Run /login first.');
   }
 
-  // Get repo from config or use 'default'
-  const config = loadConfig();
-  const targetRepo = repo || config.default_repo || 'default';
+  // Get repo from env/config or use 'default'
+  const targetRepo = repo || getDefaultRepo() || 'default';
 
   try {
     const packages = await apiListPackages(targetRepo);
@@ -562,14 +586,19 @@ export async function listPackages(serverUrl?: string, repo?: string): Promise<v
     }
 
     console.log(`\nPackages in repository '${targetRepo}':\n`);
-    console.log('  Name                          Version     Installed');
-    console.log('  ─────────────────────────────────────────────────────');
+    console.log('  Name                          Version     Installed   Status');
+    console.log('  ──────────────────────────────────────────────────────────────');
 
     for (const pkg of packages) {
       const name = (pkg.name || 'unknown').padEnd(30);
       const version = (pkg.version || '-').padEnd(12);
-      const installed = pkg.installed ? '✓' : '-';
-      console.log(`  ${name}${version}${installed}`);
+      const installed = (pkg.installed ? '✓' : '-').padEnd(12);
+      // Builtin packages installed at repo creation have no status property
+      const status = pkg.status || (pkg.installed ? 'installed' : '-');
+      console.log(`  ${name}${version}${installed}${status}`);
+      if (pkg.status === 'failed' && pkg.error) {
+        console.log(`    error: ${pkg.error}`);
+      }
     }
 
     console.log(`\n  Total: ${packages.length} package(s)`);
@@ -578,8 +607,69 @@ export async function listPackages(serverUrl?: string, repo?: string): Promise<v
   }
 }
 
+/** How long to wait for an install job to reach a terminal state */
+const INSTALL_POLL_TIMEOUT_MS = 180_000;
+const INSTALL_POLL_INTERVAL_MS = 1_000;
+
 /**
- * Installs a package by name (requires server connection)
+ * Poll the package list until the named package reaches a terminal install
+ * state. Success criterion is status === 'installed' (not just job
+ * completion); status === 'failed' throws with the server's error detail.
+ */
+async function waitForInstalled(
+  repo: string,
+  packageName: string,
+  jobId?: string | null,
+  timeoutMs: number = INSTALL_POLL_TIMEOUT_MS
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = '';
+
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, INSTALL_POLL_INTERVAL_MS));
+
+    let pkg;
+    try {
+      const packages = await apiListPackages(repo);
+      pkg = packages.find((p) => p.name === packageName);
+    } catch {
+      continue; // transient network/API error — keep polling
+    }
+    if (!pkg) continue;
+
+    const status = pkg.status || (pkg.installed ? 'installed' : '');
+    if (status && status !== lastStatus) {
+      console.log(`  status: ${status}`);
+      lastStatus = status;
+    }
+
+    if (status === 'installed') {
+      return;
+    }
+    if (status === 'failed') {
+      // Prefer the error on the package node; fall back to the job record
+      // (older repos may have a raisin:Package schema without `error`).
+      let detail = pkg.error;
+      if (!detail && jobId) {
+        const job = await apiGetJobInfo(jobId);
+        detail = job?.error || undefined;
+      }
+      throw new Error(
+        `Package '${packageName}' install failed${detail ? `: ${detail}` : ''}`
+      );
+    }
+  }
+
+  throw new Error(
+    `Timed out waiting for package '${packageName}' to install (last status: ${lastStatus || 'unknown'})`
+  );
+}
+
+/**
+ * Installs a package by name (requires server connection).
+ *
+ * Waits for the background install job and reports the final lifecycle
+ * state ('installed' = success, 'failed' = error with detail).
  */
 export async function installPackage(packageName: string, serverUrl?: string, repo?: string): Promise<void> {
   const server = serverUrl || getServer();
@@ -589,17 +679,24 @@ export async function installPackage(packageName: string, serverUrl?: string, re
 
   const token = getToken();
   if (!token) {
-    throw new Error('Not authenticated. Run /login first.');
+    throw new Error('Not authenticated. Run "raisindb login" first.');
   }
 
-  // Get repo from config or use 'default'
-  const config = loadConfig();
-  const targetRepo = repo || config.default_repo || 'default';
+  // Get repo from env/config or use 'default'
+  const targetRepo = repo || getDefaultRepo() || 'default';
 
   console.log(`Installing package '${packageName}' in repository '${targetRepo}'...`);
 
   try {
-    await apiInstallPackage(targetRepo, packageName);
+    const response = await apiInstallPackage(targetRepo, packageName);
+
+    if (response.installed && !response.job_id) {
+      // Already installed (server-side no-op)
+      console.log(`\nPackage '${packageName}' is already installed.`);
+      return;
+    }
+
+    await waitForInstalled(targetRepo, packageName, response.job_id);
     console.log(`\nPackage '${packageName}' installed successfully!`);
   } catch (error) {
     throw new Error(`Failed to install package: ${error instanceof Error ? error.message : String(error)}`);

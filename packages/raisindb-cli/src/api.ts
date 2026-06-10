@@ -1,5 +1,5 @@
 import { getToken } from './auth.js';
-import { loadConfig } from './config.js';
+import { getServer } from './config.js';
 import { EventSource as EventSourcePolyfill } from 'eventsource';
 import { computeHash, ServerFileInfo } from './sync/compare.js';
 
@@ -29,6 +29,12 @@ export interface PackageSummary {
   version: string;
   title?: string;
   installed: boolean;
+  /** Lifecycle status: processing | uploaded | installing | installed | failed.
+   *  Undefined for builtin packages installed at repo creation. */
+  status?: string;
+  /** Error detail when status === 'failed' */
+  error?: string;
+  installedAt?: string;
 }
 
 export interface NodeInfo {
@@ -73,8 +79,7 @@ export interface JobEvent {
  * Get the base URL for API calls
  */
 export function getBaseUrl(): string {
-  const config = loadConfig();
-  return config.server || 'http://localhost:8081';
+  return getServer() || 'http://localhost:8081';
 }
 
 /**
@@ -174,6 +179,9 @@ export async function listPackages(repo: string): Promise<PackageSummary[]> {
     version: (node.properties?.version as string) || '0.0.0',
     title: node.properties?.title as string | undefined,
     installed: (node.properties?.installed as boolean) ?? false,
+    status: node.properties?.status as string | undefined,
+    error: node.properties?.error as string | undefined,
+    installedAt: node.properties?.installed_at as string | undefined,
   }));
 }
 
@@ -279,10 +287,19 @@ export function subscribeToJobEvents(
   };
 }
 
+export interface InstallResponse {
+  package_name: string;
+  version: string;
+  installed: boolean;
+  installed_at?: string | null;
+  /** Background job id; install completes asynchronously */
+  job_id?: string | null;
+}
+
 /**
- * Install a package
+ * Install a package (starts a background install job)
  */
-export async function installPackage(repo: string, packageName: string): Promise<void> {
+export async function installPackage(repo: string, packageName: string): Promise<InstallResponse> {
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}/api/repos/${repo}/packages/${encodeURIComponent(packageName)}/install`;
 
@@ -294,6 +311,28 @@ export async function installPackage(repo: string, packageName: string): Promise
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({ message: response.statusText })) as { message?: string };
     throw new Error(errorData.message || `Failed to install package: ${response.status}`);
+  }
+
+  return response.json() as Promise<InstallResponse>;
+}
+
+/**
+ * Fetch a background job's info (status, error detail).
+ * Returns null when the job cannot be fetched.
+ */
+export async function getJobInfo(jobId: string): Promise<{ status?: string; error?: string } | null> {
+  const baseUrl = getBaseUrl();
+  const url = `${baseUrl}/management/jobs/${encodeURIComponent(jobId)}/info`;
+
+  try {
+    const response = await fetch(url, { headers: getHeaders() });
+    if (!response.ok) return null;
+    const body = await response.json() as Record<string, unknown>;
+    // Endpoint may wrap the payload in { data: ... }
+    const info = (body.data ?? body) as { status?: string; error?: string };
+    return info;
+  } catch {
+    return null;
   }
 }
 
