@@ -36,12 +36,11 @@ pub async fn ensure_tenant_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let tenant_id = req
-        .headers()
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("default")
-        .to_string();
+    let tenant_id = raisin_context::resolve_tenant_id(
+        req.headers()
+            .get(raisin_context::TENANT_ID_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
 
     let deployment_key = req
         .headers()

@@ -219,7 +219,7 @@ where
     state
         .storage
         .branches()
-        .update_head(tenant_id, repo, &payload.name, revision)
+        .set_head(tenant_id, repo, &payload.name, revision)
         .await?;
 
     Ok(Some(ResponseEnvelope::success(

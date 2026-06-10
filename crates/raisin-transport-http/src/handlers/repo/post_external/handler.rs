@@ -33,6 +33,8 @@ pub(crate) async fn handle_external_upload<S: Storage + TransactionalStorage + '
     override_existing: bool,
     auth_context: Option<AuthContext>,
     tenant_id: &str,
+    repo: &str,
+    branch: &str,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let param_node_type = q
         .node_type
@@ -188,6 +190,8 @@ pub(crate) async fn handle_external_upload<S: Storage + TransactionalStorage + '
         &node_name_override,
         file_name.as_deref(),
         tenant_id,
+        repo,
+        branch,
     )
     .await
 }

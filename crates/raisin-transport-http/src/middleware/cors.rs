@@ -371,59 +371,64 @@ async fn resolve_cors_allowed_origins(
         return cached;
     }
 
-    // 1. Check repo-level (highest priority)
-    if let Some(repo) = repo_id {
-        let repo_origins = get_cors_allowed_origins_for_repo(storage, tenant_id, repo).await;
-        if !repo_origins.is_empty() {
-            tracing::info!(
-                tenant_id = %tenant_id,
-                repo_id = %repo,
-                origins = ?repo_origins,
-                "CORS: Using repo-level config"
-            );
-            cache.put(&cache_key, repo_origins.clone());
-            return repo_origins;
+    // Resolved as the UNION of the applicable levels. Repo/tenant config
+    // extends the operator's global allow-list - it must never shadow it
+    // (adding an origin for one repo used to silently break every other
+    // origin on "no repo in URL" routes via the aggregate branch).
+    let mut origins: Vec<String> = global_origins.to_vec();
+
+    // Repo-level (when the URL names a repo), else aggregate of all repos
+    match repo_id {
+        Some(repo) => {
+            let repo_origins = get_cors_allowed_origins_for_repo(storage, tenant_id, repo).await;
+            if !repo_origins.is_empty() {
+                tracing::debug!(
+                    tenant_id = %tenant_id,
+                    repo_id = %repo,
+                    origins = ?repo_origins,
+                    "CORS: adding repo-level origins"
+                );
+                origins.extend(repo_origins);
+            }
+        }
+        None => {
+            let aggregated = get_all_cors_allowed_origins_for_tenant(storage, tenant_id).await;
+            if !aggregated.is_empty() {
+                tracing::debug!(
+                    tenant_id = %tenant_id,
+                    origins = ?aggregated,
+                    "CORS: adding aggregated repo-level origins (no repo in URL)"
+                );
+                origins.extend(aggregated);
+            }
         }
     }
 
-    // 1b. Aggregate all repos for tenant (no repo in URL)
-    if repo_id.is_none() {
-        let aggregated = get_all_cors_allowed_origins_for_tenant(storage, tenant_id).await;
-        if !aggregated.is_empty() {
-            tracing::info!(
-                tenant_id = %tenant_id,
-                origins = ?aggregated,
-                "CORS: Using aggregated repo-level config (no repo in URL)"
-            );
-            cache.put(&cache_key, aggregated.clone());
-            return aggregated;
-        }
-    }
-
-    // 2. Check tenant-level
+    // Tenant-level
     if let Ok(Some(tenant_config)) = storage
         .tenant_auth_config_repository()
         .get_config(tenant_id)
         .await
     {
         if !tenant_config.cors_allowed_origins.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 tenant_id = %tenant_id,
                 origins = ?tenant_config.cors_allowed_origins,
-                "CORS: Using tenant-level config"
+                "CORS: adding tenant-level origins"
             );
-            cache.put(&cache_key, tenant_config.cors_allowed_origins.clone());
-            return tenant_config.cors_allowed_origins;
+            origins.extend(tenant_config.cors_allowed_origins);
         }
     }
 
-    // 3. Fall back to global config
+    origins.sort();
+    origins.dedup();
+
     tracing::info!(
         tenant_id = %tenant_id,
-        origins = ?global_origins,
-        "CORS: Using global config"
+        repo_id = ?repo_id,
+        origins = ?origins,
+        "CORS: resolved allowed origins (global + repo + tenant union)"
     );
-    let result = global_origins.to_vec();
-    cache.put(&cache_key, result.clone());
-    result
+    cache.put(&cache_key, origins.clone());
+    origins
 }

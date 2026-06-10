@@ -109,13 +109,22 @@ jwt_secret = "test-secret-key-for-integration-tests-only-32chars!"
 
         // Start server process
         let mut cmd = Command::new(&binary_path);
+        // Capture server output for debugging (RAISIN_TEST_SERVER_LOG=path
+        // overrides; default lands in /tmp keyed by port)
+        let log_path = std::env::var("RAISIN_TEST_SERVER_LOG")
+            .unwrap_or_else(|_| format!("/tmp/raisin-test-server-{}.log", config.port));
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|e| format!("Failed to create server log file: {}", e))?;
+        let log_file_err = log_file
+            .try_clone()
+            .map_err(|e| format!("Failed to clone log handle: {}", e))?;
         cmd.current_dir(&workspace_root)
-            .env("RUST_LOG", "warn")
+            .env("RUST_LOG", "info")
             .arg("--config")
             .arg(&config_path)
             .arg("--dev-mode")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_err));
 
         if let Some(ref node_id) = config.cluster_node_id {
             cmd.arg("--cluster-node-id").arg(node_id);
@@ -149,7 +158,7 @@ jwt_secret = "test-secret-key-for-integration-tests-only-32chars!"
     /// Wait for server to be ready (health check)
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), String> {
         let client = Client::new();
-        let health_url = format!("{}/management/health", self.base_url);
+        let health_url = format!("{}/health", self.base_url);
         let start = std::time::Instant::now();
 
         loop {

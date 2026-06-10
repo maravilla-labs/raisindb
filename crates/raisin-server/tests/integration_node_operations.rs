@@ -3803,7 +3803,7 @@ category: testing
 /// This test verifies:
 /// 1. Package upload creates a node with status "processing"
 /// 2. Background job extracts manifest and updates properties
-/// 3. Node status changes to "ready" with manifest data
+/// 3. Node status changes to "uploaded" with manifest data
 async fn test_package_upload_impl() {
     let client = reqwest::Client::new();
     println!("  Test: Package Upload via Unified Endpoint...");
@@ -3891,7 +3891,7 @@ async fn test_package_upload_impl() {
         "Initial status should be 'processing'"
     );
 
-    // Poll for background job completion (status should change to "ready")
+    // Poll for background job completion (status should change to "uploaded")
     println!("    Waiting for background job to complete...");
     let mut final_status = String::new();
     let mut final_node: serde_json::Value = serde_json::Value::Null;
@@ -3908,7 +3908,7 @@ async fn test_package_upload_impl() {
         let poll_node: serde_json::Value = poll_resp.json().await.unwrap_or_default();
         let status = poll_node["properties"]["status"].as_str().unwrap_or("");
 
-        if status == "ready" {
+        if status == "uploaded" {
             println!("    Job completed after {} attempts", attempt);
             final_status = status.to_string();
             final_node = poll_node;
@@ -3921,8 +3921,8 @@ async fn test_package_upload_impl() {
     }
 
     assert_eq!(
-        final_status, "ready",
-        "Status should be 'ready' after job completion"
+        final_status, "uploaded",
+        "Status should be 'uploaded' after job completion"
     );
 
     // Verify manifest properties were extracted

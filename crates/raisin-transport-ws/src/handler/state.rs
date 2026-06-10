@@ -31,6 +31,24 @@ where
     let tenant_id = params.tenant_id.clone();
     let repository = params.repository.clone();
 
+    // Mirror the HTTP scoped-tenant rule: when an x-tenant-id header is
+    // present, it is the authoritative tenant identity - a /sys path tenant
+    // that disagrees with it is rejected with 404 (no info leak), exactly
+    // like the HTTP middleware.
+    if let Some(header_tenant) = headers
+        .get(raisin_context::TENANT_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if header_tenant != tenant_id {
+            tracing::warn!(
+                path_tenant = %tenant_id,
+                header_tenant = %header_tenant,
+                "WebSocket upgrade rejected: /sys path tenant does not match x-tenant-id header"
+            );
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
+    }
+
     tracing::debug!(
         "WebSocket connection request - tenant: {:?}, repository: {:?}",
         tenant_id,
@@ -39,6 +57,48 @@ where
 
     tracing::info!(
         "WebSocket upgrade for tenant: {}, repository: {:?}",
+        tenant_id,
+        repository
+    );
+
+    // Extract authentication token from headers (if present)
+    let token = JwtAuthService::extract_token_from_headers(&headers);
+
+    // Upgrade the connection
+    ws.on_upgrade(move |socket| handle_socket(socket, state, token, tenant_id, repository))
+}
+
+/// Tenant-less WebSocket upgrade handler
+///
+/// Entry point for public clients that don't know (or shouldn't know) a
+/// tenant id. URL format: /ws or /ws/{repository}
+///
+/// Tenant resolution mirrors the HTTP `ensure_tenant_middleware` semantics
+/// via the shared [`raisin_context::resolve_tenant_id`] helper:
+/// an explicit `x-tenant-id` header on the upgrade request wins, otherwise
+/// the connection is scoped to the `default` tenant.
+///
+/// The operator form `/sys/{tenant_id}[/{repository}]` remains fully
+/// supported via [`websocket_handler`].
+pub async fn websocket_handler_tenantless<S, B>(
+    repository: Option<axum::extract::Path<String>>,
+    State(state): State<Arc<WsState<S, B>>>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+) -> impl IntoResponse
+where
+    S: raisin_storage::Storage + raisin_storage::transactional::TransactionalStorage + 'static,
+    B: raisin_binary::BinaryStorage + 'static,
+{
+    let tenant_id = raisin_context::resolve_tenant_id(
+        headers
+            .get(raisin_context::TENANT_ID_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
+    let repository = repository.map(|axum::extract::Path(repo)| repo);
+
+    tracing::info!(
+        "WebSocket upgrade (tenant-less route) - resolved tenant: {}, repository: {:?}",
         tenant_id,
         repository
     );

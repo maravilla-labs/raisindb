@@ -98,6 +98,30 @@ pub(crate) fn function_routes(state: &AppState) -> Router<AppState> {
             ),
         )
         // ----------------------------------------------------------------
+        // Inbox tasks (human-in-the-loop)
+        // ----------------------------------------------------------------
+        // List the caller's inbox tasks
+        .route(
+            "/api/inbox/{repo}",
+            get(crate::handlers::inbox::list_inbox_tasks).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
+        )
+        // Get a single inbox task
+        .route(
+            "/api/inbox/{repo}/tasks/{task_id}",
+            get(crate::handlers::inbox::get_inbox_task).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
+        )
+        // Complete an inbox task (validated; resumes the owning flow)
+        .route(
+            "/api/inbox/{repo}/tasks/{task_id}/complete",
+            post(crate::handlers::inbox::complete_inbox_task).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
+        )
+        // ----------------------------------------------------------------
         // Conversation events SSE (real-time AI conversation streaming)
         // ----------------------------------------------------------------
         .route(

@@ -29,6 +29,8 @@ pub(super) async fn handle_external_upload_direct<S: Storage + TransactionalStor
     node_name_override: &Option<String>,
     file_name: Option<&str>,
     tenant_id: &str,
+    repo: &str,
+    branch: &str,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let asset_name = node_name_override.clone().unwrap_or_else(|| {
         file_name
@@ -134,8 +136,16 @@ pub(super) async fn handle_external_upload_direct<S: Storage + TransactionalStor
     // Enqueue PackageProcess job for raisin:Package uploads
     #[cfg(feature = "storage-rocksdb")]
     if param_node_type == "raisin:Package" {
-        super::jobs::enqueue_package_process_job(state, &created_node_id, stored, ws, tenant_id)
-            .await;
+        super::jobs::enqueue_package_process_job(
+            state,
+            &created_node_id,
+            stored,
+            ws,
+            tenant_id,
+            repo,
+            branch,
+        )
+        .await;
     }
 
     let response = if node_id_override.is_some() {

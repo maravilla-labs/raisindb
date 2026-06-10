@@ -6,12 +6,15 @@ use crate::state::AppState;
 
 /// Enqueue a PackageProcess background job for package uploads.
 #[cfg(feature = "storage-rocksdb")]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn enqueue_package_process_job(
     state: &AppState,
     created_node_id: &str,
     stored: &raisin_binary::StoredObject,
     ws: &str,
     tenant_id: &str,
+    repo: &str,
+    branch: &str,
 ) {
     if let Some(rocksdb) = state.rocksdb_storage.as_ref() {
         let job_registry = rocksdb.job_registry();
@@ -29,8 +32,8 @@ pub(super) async fn enqueue_package_process_job(
 
         let job_context = raisin_storage::jobs::JobContext {
             tenant_id: tenant_id.to_string(),
-            repo_id: "default".to_string(),
-            branch: "main".to_string(),
+            repo_id: repo.to_string(),
+            branch: branch.to_string(),
             workspace_id: ws.to_string(),
             revision: raisin_hlc::HLC::now(),
             metadata,

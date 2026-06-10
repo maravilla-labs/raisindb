@@ -154,6 +154,12 @@ pub async fn uninstall_package(
     node.properties
         .insert("installed".to_string(), PropertyValue::Boolean(false));
     node.properties.remove("installed_at");
+    // Back to "uploaded": the package binary is still present, just not installed.
+    node.properties.insert(
+        "status".to_string(),
+        PropertyValue::String("uploaded".to_string()),
+    );
+    node.properties.remove("error");
 
     node_service
         .upsert(node)

@@ -4,7 +4,7 @@
 //! 1. Upload .rap file via unified endpoint
 //! 2. PackageUploadProcessor sets initial properties (status: "processing")
 //! 3. Background job extracts manifest and updates node
-//! 4. Node status changes to "ready" with manifest data
+//! 4. Node status changes to "uploaded" with manifest data
 
 use reqwest::multipart::{Form, Part};
 use std::io::{Cursor, Write};
@@ -341,7 +341,7 @@ async fn test_package_upload_unified_endpoint() {
         let poll_node: serde_json::Value = poll_resp.json().await.unwrap_or_default();
         let status = poll_node["properties"]["status"].as_str().unwrap_or("");
 
-        if status == "ready" {
+        if status == "uploaded" {
             println!(
                 "    ✓ Job completed after {} attempts ({} ms)",
                 attempt,
@@ -361,8 +361,8 @@ async fn test_package_upload_unified_endpoint() {
     }
 
     assert_eq!(
-        final_status, "ready",
-        "Status should be 'ready' after job completion"
+        final_status, "uploaded",
+        "Status should be 'uploaded' after job completion"
     );
 
     // Verify manifest properties were extracted

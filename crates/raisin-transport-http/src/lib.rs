@@ -41,6 +41,7 @@ mod handlers {
     pub mod identity_auth;
     #[cfg(feature = "storage-rocksdb")]
     pub mod identity_users;
+    pub mod inbox;
     pub mod management;
     pub mod node_types;
     pub mod packages;

@@ -13,6 +13,7 @@ use axum::{
 
 use crate::middleware::TenantInfo;
 use crate::{error::ApiError, state::AppState};
+use raisin_models::auth::AuthContext;
 
 use super::helpers::{
     analyze_triggers, build_function_details, find_function_node, load_function_code,
@@ -35,11 +36,17 @@ pub async fn list_functions(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
+    auth: Option<Extension<AuthContext>>,
     Query(query): Query<ListFunctionsQuery>,
 ) -> Result<Json<Vec<FunctionSummary>>, ApiError> {
     let tenant_id = tenant_info.tenant_id.as_str();
-    let node_svc =
-        state.node_service_for_context(tenant_id, &repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, None);
+    let node_svc = state.node_service_for_context(
+        tenant_id,
+        &repo,
+        DEFAULT_BRANCH,
+        FUNCTIONS_WORKSPACE,
+        auth.map(|Extension(ctx)| ctx),
+    );
 
     let nodes = node_svc
         .list_by_type("raisin:Function")
@@ -106,10 +113,13 @@ pub async fn get_function(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, name)): Path<(String, String)>,
+    auth: Option<Extension<AuthContext>>,
     Query(query): Query<GetFunctionQuery>,
 ) -> Result<Json<FunctionDetails>, ApiError> {
     let tenant_id = tenant_info.tenant_id.as_str();
-    let function_node = find_function_node(&state, tenant_id, &repo, &name).await?;
+    let auth_ctx = auth.map(|Extension(ctx)| ctx);
+    let function_node =
+        find_function_node(&state, tenant_id, &repo, &name, auth_ctx.as_ref()).await?;
 
     let code = if query.include_code {
         Some(load_function_code(&state, tenant_id, &repo, &function_node).await?)
@@ -127,10 +137,13 @@ pub async fn list_executions(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, name)): Path<(String, String)>,
+    auth: Option<Extension<AuthContext>>,
     Query(query): Query<ListExecutionsQuery>,
 ) -> Result<Json<Vec<ExecutionRecord>>, ApiError> {
     let tenant_id = tenant_info.tenant_id.as_str();
-    let function_node = find_function_node(&state, tenant_id, &repo, &name).await?;
+    let auth_ctx = auth.map(|Extension(ctx)| ctx);
+    let function_node =
+        find_function_node(&state, tenant_id, &repo, &name, auth_ctx.as_ref()).await?;
 
     let rocksdb = state
         .rocksdb_storage

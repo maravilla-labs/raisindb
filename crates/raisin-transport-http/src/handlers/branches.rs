@@ -195,7 +195,7 @@ pub async fn update_branch_head(
     state
         .storage()
         .branches()
-        .update_head(&tenant_id, &repo_id, &name, req.revision)
+        .set_head(&tenant_id, &repo_id, &name, req.revision)
         .await?;
 
     Ok(StatusCode::NO_CONTENT)

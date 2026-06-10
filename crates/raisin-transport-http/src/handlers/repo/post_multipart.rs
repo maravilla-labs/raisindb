@@ -86,6 +86,8 @@ pub(super) async fn handle_multipart_upload<S: Storage + TransactionalStorage + 
             override_existing,
             auth_context,
             tenant_id,
+            repo,
+            branch,
         )
         .await;
     }

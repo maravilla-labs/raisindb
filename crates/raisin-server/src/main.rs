@@ -11,6 +11,8 @@ mod admin_user_init_handler;
 mod builtin_package_init_handler;
 mod config;
 mod deps_setup;
+#[cfg(feature = "storage-rocksdb")]
+mod flow_sweeper;
 mod management;
 #[cfg(feature = "storage-rocksdb")]
 mod migrations;
@@ -37,7 +39,7 @@ use raisin_storage::{RegistryRepository, Storage};
 use raisin_storage_memory::InMemoryStorage;
 use raisin_transport_http as http;
 #[cfg(feature = "websocket")]
-use raisin_transport_ws::{websocket_handler, WsConfig, WsState};
+use raisin_transport_ws::{websocket_handler, websocket_handler_tenantless, WsConfig, WsState};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -368,35 +370,48 @@ async fn main() {
                         let storage = storage_for_finder.clone();
                         Box::pin(async move {
                             let mut matches = Vec::new();
-                            let repos = match storage
-                                .repository_management()
-                                .list_repositories()
+                            // Enumerate tenants -> repos via the
+                            // background-job helpers: the tenant-scoped
+                            // repository_management() facade returns NOTHING
+                            // outside a request context (same bug as the
+                            // flow sweeper had).
+                            let tenants = match raisin_rocksdb::management::list_tenants(&storage)
                                 .await
                             {
-                                Ok(r) => r,
+                                Ok(t) => t,
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "Failed to list repositories for scheduled trigger scan");
+                                    tracing::warn!(error = %e, "Failed to list tenants for scheduled trigger scan");
                                     return Ok(matches);
                                 }
                             };
-                            for repo in repos {
+                            let mut repos: Vec<(String, String)> = Vec::new();
+                            for tenant in tenants {
+                                match raisin_rocksdb::management::list_repositories(
+                                    &storage, &tenant,
+                                )
+                                .await
+                                {
+                                    Ok(repo_ids) => repos
+                                        .extend(repo_ids.into_iter().map(|r| (tenant.clone(), r))),
+                                    Err(e) => {
+                                        tracing::warn!(tenant = %tenant, error = %e, "Failed to list repositories for scheduled trigger scan");
+                                    }
+                                }
+                            }
+                            for (tenant_id, repo_id) in repos {
                                 if let Some(ref t) = tenant_filter {
-                                    if &repo.tenant_id != t {
+                                    if &tenant_id != t {
                                         continue;
                                     }
                                 }
                                 if let Some(ref r) = repo_filter {
-                                    if &repo.repo_id != r {
+                                    if &repo_id != r {
                                         continue;
                                     }
                                 }
                                 let branch = "main";
-                                let scope = StorageScope::new(
-                                    &repo.tenant_id,
-                                    &repo.repo_id,
-                                    branch,
-                                    "functions",
-                                );
+                                let scope =
+                                    StorageScope::new(&tenant_id, &repo_id, branch, "functions");
                                 let triggers = match storage
                                     .nodes()
                                     .list_by_type(scope, "raisin:Trigger", ListOptions::default())
@@ -405,8 +420,8 @@ async fn main() {
                                     Ok(t) => t,
                                     Err(e) => {
                                         tracing::debug!(
-                                            tenant = %repo.tenant_id,
-                                            repo = %repo.repo_id,
+                                            tenant = %tenant_id,
+                                            repo = %repo_id,
                                             error = %e,
                                             "Failed to list triggers in repo (skipping)"
                                         );
@@ -451,8 +466,8 @@ async fn main() {
                                     matches.push(raisin_rocksdb::ScheduledTriggerMatch {
                                         function_path,
                                         trigger_name,
-                                        tenant_id: repo.tenant_id.clone(),
-                                        repo_id: repo.repo_id.clone(),
+                                        tenant_id: tenant_id.clone(),
+                                        repo_id: repo_id.clone(),
                                         branch: branch.to_string(),
                                         workspace: "functions".to_string(),
                                     });
@@ -610,6 +625,12 @@ async fn main() {
                 });
                 tracing::info!("Scheduled trigger enqueuer started (60s interval)");
             }
+
+            // Flow wait sweeper: backstop that catches waiting flow
+            // instances whose timeout-check job was lost (queueing failure,
+            // cleanup, clock skew). Idempotent - duplicates are deduped by
+            // the job registry and check_flow_timeout no-ops on undue waits.
+            flow_sweeper::spawn_flow_wait_sweeper(storage.clone(), 120);
 
             tracing::info!(
                 "Total: {} dispatcher workers across {} runtime threads",
@@ -788,8 +809,14 @@ async fn main() {
         ));
 
         let ws_router = Router::new()
+            // Operator / multi-tenant form (explicit tenant in path)
             .route("/sys/{tenant_id}", any(websocket_handler))
             .route("/sys/{tenant_id}/{repository}", any(websocket_handler))
+            // Tenant-less form for public clients; tenant resolved from the
+            // x-tenant-id header on the upgrade request, falling back to
+            // "default" (mirrors HTTP ensure_tenant_middleware semantics)
+            .route("/ws", any(websocket_handler_tenantless))
+            .route("/ws/{repository}", any(websocket_handler_tenantless))
             .with_state(ws_state);
 
         tracing::info!("WebSocket transport initialized");

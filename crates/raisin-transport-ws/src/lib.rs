@@ -53,7 +53,7 @@ pub use auth::{Claims, JwtAuthService, TokenType};
 pub use connection::ConnectionState;
 pub use error::WsError;
 pub use event_handler::WsEventHandler;
-pub use handler::{websocket_handler, WsConfig, WsState};
+pub use handler::{websocket_handler, websocket_handler_tenantless, WsConfig, WsState};
 pub use protocol::{EventMessage, RequestEnvelope, RequestType, ResponseEnvelope, ResponseStatus};
 pub use registry::ConnectionRegistry;
 

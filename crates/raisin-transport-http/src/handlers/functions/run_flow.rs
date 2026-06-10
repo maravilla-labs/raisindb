@@ -145,10 +145,38 @@ pub async fn run_flow_test(
 pub async fn resume_flow(
     State(state): State<AppState>,
     Path((repo, instance_id)): Path<(String, String)>,
-    _auth_context: Option<Extension<AuthContext>>,
+    auth_context: Option<Extension<AuthContext>>,
     Json(req): Json<ResumeFlowRequest>,
 ) -> Result<Json<RunFlowResponse>, ApiError> {
     let scheduler = get_scheduler(&state)?;
+
+    // Human-task waits must be completed through the inbox API
+    // (POST /api/inbox/{repo}/tasks/{task_id}/complete), which validates
+    // the assignee and records who decided. Admins may still force-resume.
+    let wait_type = raisin_flow_runtime::service::get_instance_wait_type(
+        state.storage.as_ref(),
+        &repo,
+        &instance_id,
+    )
+    .await?;
+    if wait_type == Some(raisin_flow_runtime::types::WaitType::HumanTask) {
+        let caller_is_admin = auth_context
+            .as_ref()
+            .map(|ext| {
+                ext.is_system
+                    || ext
+                        .roles
+                        .iter()
+                        .any(|r| r == "system_admin" || r == "admin")
+            })
+            .unwrap_or(false);
+        if !caller_is_admin {
+            return Err(ApiError::validation_failed(
+                "This flow is waiting for a human task. Complete the task via \
+                 POST /api/inbox/{repo}/tasks/{task_id}/complete instead.",
+            ));
+        }
+    }
 
     let result = raisin_flow_runtime::service::resume_flow(
         state.storage.as_ref(),

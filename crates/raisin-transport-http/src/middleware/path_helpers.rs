@@ -64,7 +64,7 @@ pub(super) fn extract_repo_from_any_path(path: &str) -> Option<String> {
         let route_type = segments[1];
         match route_type {
             "repository" | "sql" | "repos" | "functions" | "webhooks" | "triggers" | "search"
-            | "packages" | "flows" | "files" => {
+            | "packages" | "flows" | "files" | "conversations" | "inbox" | "workspaces" => {
                 return Some(segments[2].to_string());
             }
             _ => {}

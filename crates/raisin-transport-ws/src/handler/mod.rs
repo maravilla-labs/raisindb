@@ -13,4 +13,4 @@ mod state;
 
 // Re-export public API
 pub use config::{WsConfig, WsPathParams};
-pub use state::{websocket_handler, WsState};
+pub use state::{websocket_handler, websocket_handler_tenantless, WsState};

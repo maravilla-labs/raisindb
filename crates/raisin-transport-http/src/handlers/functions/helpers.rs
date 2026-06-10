@@ -29,14 +29,24 @@ use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 // ============================================================================
 
 /// Find a function node by name in the functions workspace.
+///
+/// The caller's auth context MUST be forwarded - a `None` context is
+/// subject to RLS as an anonymous principal and sees no nodes at all,
+/// which surfaces as a bogus 404 for every function.
 pub(crate) async fn find_function_node(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
     name: &str,
+    auth_context: Option<&AuthContext>,
 ) -> Result<Node, ApiError> {
-    let node_svc =
-        state.node_service_for_context(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE, None);
+    let node_svc = state.node_service_for_context(
+        tenant_id,
+        repo,
+        DEFAULT_BRANCH,
+        FUNCTIONS_WORKSPACE,
+        auth_context.cloned(),
+    );
     let nodes = node_svc
         .list_by_type("raisin:Function")
         .await

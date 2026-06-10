@@ -57,12 +57,34 @@ pub async fn get_workspace(
     Ok(Json(ws))
 }
 
+/// Require an operator (admin token / system context) for structural
+/// workspace mutations. Workspace definitions control allowed node types and
+/// RLS surface, so identity users and anonymous callers must not touch them.
+fn require_operator(auth: &Option<Extension<models::auth::AuthContext>>) -> Result<(), ApiError> {
+    let is_operator = auth.as_ref().is_some_and(|Extension(ctx)| {
+        ctx.is_system
+            || ctx
+                .permissions()
+                .is_some_and(|p| p.is_system_admin)
+    });
+    if is_operator {
+        Ok(())
+    } else {
+        Err(raisin_error::Error::PermissionDenied(
+            "Workspace management requires operator privileges".to_string(),
+        )
+        .into())
+    }
+}
+
 pub async fn put_workspace(
     State(state): State<AppState>,
     Path((repo, name)): Path<(String, String)>,
     Extension(tenant_info): Extension<TenantInfo>,
+    auth: Option<Extension<models::auth::AuthContext>>,
     Json(mut ws): Json<models::workspace::Workspace>,
 ) -> Result<StatusCode, ApiError> {
+    require_operator(&auth)?;
     let tenant_id = tenant_info.tenant_id.as_str();
     ws.name = name;
     state.ws_svc.put(tenant_id, &repo, ws).await?;
@@ -93,8 +115,10 @@ pub async fn update_workspace_config(
     State(state): State<AppState>,
     Path((repo, name)): Path<(String, String)>,
     Extension(tenant_info): Extension<TenantInfo>,
+    auth: Option<Extension<models::auth::AuthContext>>,
     Json(config): Json<models::workspace::WorkspaceConfig>,
 ) -> Result<StatusCode, ApiError> {
+    require_operator(&auth)?;
     let tenant_id = tenant_info.tenant_id.as_str();
     // Get existing workspace
     let mut ws = state

@@ -51,7 +51,13 @@ pub async fn invoke_function(
         .clone();
 
     let tenant_id = tenant_info.tenant_id.as_str();
-    let function_node = find_function_node(&state, tenant_id, &repo, &name).await?;
+
+    // Extract auth context from request (must also be used for the node
+    // lookup - an anonymous lookup is RLS-filtered to nothing -> 404)
+    let auth_context = auth.map(|Extension(ctx)| ctx);
+
+    let function_node =
+        find_function_node(&state, tenant_id, &repo, &name, auth_context.as_ref()).await?;
 
     let execution_mode = parse_execution_mode(function_node.properties.get("execution_mode"));
     if req.sync && execution_mode == ExecutionMode::Async {
@@ -65,9 +71,6 @@ pub async fn invoke_function(
             "wait_for_completion cannot be used with sync=true",
         ));
     }
-
-    // Extract auth context from request
-    let auth_context = auth.map(|Extension(ctx)| ctx);
 
     // Register job for tracking
     let async_execution_id = nanoid::nanoid!();

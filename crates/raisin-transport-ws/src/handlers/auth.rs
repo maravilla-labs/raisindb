@@ -58,9 +58,13 @@ where
             )?;
 
             // Update connection state with user ID (tenant/repo already set from URL)
+            // Admin sessions operate as system context, mirroring the HTTP
+            // middleware (admin tokens bypass RLS). Without this, RLS
+            // fail-closes and every SQL query returns zero rows for admins.
             {
                 let mut conn = connection_state.write();
                 conn.set_user_id(admin_user.user_id.clone());
+                conn.set_auth_context(raisin_models::auth::AuthContext::system());
             }
 
             info!(
