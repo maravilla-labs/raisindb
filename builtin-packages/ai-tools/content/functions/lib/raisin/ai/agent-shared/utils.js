@@ -65,6 +65,9 @@ ${modeInstructions[mode] || modeInstructions.automatic}
 Guidelines:
 - Work through tasks one at a time
 - Always mark a task as in_progress before starting and completed when done
+- NEVER call update_task more than once for the SAME task in a single response.
+  Tool calls in one response run in parallel: first send update_task(in_progress),
+  do the work, and only in a LATER response send update_task(completed).
 - Use clear, actionable task titles
 - Break complex work into smaller, manageable tasks
 - Update task status in real-time as you work
@@ -192,8 +195,58 @@ async function hasCompletedToolCalls(workspace, assistantPath) {
   }
 }
 
+/**
+ * Persist a raisin:AICostRecord child under `parentPath` for one AI call and
+ * accumulate the call's total tokens onto the conversation node's
+ * `total_tokens_used` property (single-writer read-modify-write).
+ *
+ * Idempotent per parentPath: a second create with the same name is a no-op
+ * and does NOT double-count tokens.
+ */
+async function createCostRecord(workspace, chatPath, parentPath, response, provider, durationMs, name = 'cost-record') {
+  if (!workspace || !parentPath || !response) return;
+  const usage = (response.usage && typeof response.usage === 'object') ? response.usage : {};
+  const inputTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0;
+  const outputTokens = Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0;
+  const totalTokens = Number(usage.total_tokens ?? (inputTokens + outputTokens)) || 0;
+  const costUsd = Number(usage.cost_usd ?? response.cost_usd);
+  const properties = {
+    model: response.model || 'unknown',
+    provider: provider || 'unknown',
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: totalTokens,
+    duration_ms: Number(durationMs || 0),
+    timestamp: new Date().toISOString(),
+    ...(Number.isFinite(costUsd) ? { cost_usd: costUsd } : {}),
+  };
+
+  try {
+    await raisin.nodes.create(workspace, parentPath, {
+      name,
+      node_type: 'raisin:AICostRecord',
+      properties,
+    });
+  } catch (e) {
+    if (!String(e?.message || '').includes('already exists')) throw e;
+    return; // retry of an already-recorded call — don't double-count
+  }
+
+  // Running conversation total (used by the max_conversation_tokens budget)
+  if (chatPath && totalTokens > 0) {
+    try {
+      const chatNode = await raisin.nodes.get(workspace, chatPath);
+      const current = Number(chatNode?.properties?.total_tokens_used) || 0;
+      await raisin.nodes.updateProperty(workspace, chatPath, 'total_tokens_used', current + totalTokens);
+    } catch (e) {
+      log.warn('utils', 'Failed to update total_tokens_used', { chat: chatPath, error: e.message });
+    }
+  }
+}
+
 export {
   TERMINAL_FALLBACK_TEXT,
+  createCostRecord,
   getPlanningSystemPromptAddition,
   safeJson,
   readAssistantContent,

@@ -31,9 +31,16 @@ function stripInternalContext(args) {
  * @param {string} systemPrompt    Optional system prompt (prepended as first entry)
  * @param {string|null} currentAssistantMsgPath  Path to the in-flight assistant message
  * @param {Array|null}  aggregatedToolResults    Pre-aggregated results for the current message
+ * @param {Object} [options]
+ * @param {number} [options.maxHistoryMessages]  Per-agent history window override
+ *                 (agent property max_history_messages); defaults to MAX_HISTORY_MESSAGES.
  * @returns {Array} History entries: { role, content, tool_calls?, tool_call_id?, name? }
  */
-async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAssistantMsgPath = null, aggregatedToolResults = null) {
+async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAssistantMsgPath = null, aggregatedToolResults = null, options = {}) {
+  const maxHistoryMessages = Number(options?.maxHistoryMessages) > 0
+    ? Math.floor(Number(options.maxHistoryMessages))
+    : MAX_HISTORY_MESSAGES;
+
   const history = [];
 
   if (systemPrompt) {
@@ -46,7 +53,7 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
     SELECT path, name, node_type, properties, created_at
     FROM "${workspace}"
     WHERE DESCENDANT_OF($1)
-      AND node_type IN ('raisin:Message', 'raisin:AIToolCall', 'raisin:AIToolResult', 'raisin:AIToolSingleCallResult')
+      AND node_type IN ('raisin:Message', 'raisin:AIToolCall', 'raisin:AIToolResult', 'raisin:AIToolSingleCallResult', 'raisin:AICompaction')
     ORDER BY created_at ASC
   `, [chatPath]);
 
@@ -60,9 +67,43 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
     childrenByParent.get(parentPath).push(node);
   }
 
-  const directMessages = (childrenByParent.get(chatPath) || [])
+  let directMessages = (childrenByParent.get(chatPath) || [])
     .filter(n => n.node_type === 'raisin:Message')
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+  // ── Apply latest compaction (if any): drop summarized messages and
+  //    inject the persisted summary as a synthetic system entry ──
+  const compactions = (childrenByParent.get(chatPath) || [])
+    .filter(n => n.node_type === 'raisin:AICompaction')
+    .sort((a, b) =>
+      new Date(a.properties?.created_at || a.created_at || 0)
+      - new Date(b.properties?.created_at || b.created_at || 0));
+  if (compactions.length > 0) {
+    const cProps = compactions[compactions.length - 1].properties || {};
+    if (cProps.summary && cProps.cutoff_message_path) {
+      const cutoffIdx = directMessages.findIndex(m => m.path === cProps.cutoff_message_path);
+      let applied = false;
+      if (cutoffIdx >= 0) {
+        directMessages = directMessages.slice(cutoffIdx + 1);
+        applied = true;
+      } else if (cProps.cutoff_created_at) {
+        directMessages = directMessages.filter(
+          m => new Date(m.created_at) > new Date(cProps.cutoff_created_at),
+        );
+        applied = true;
+      }
+      if (applied) {
+        history.push({
+          role: 'system',
+          content: `Earlier conversation summary (older messages were compacted):\n${cProps.summary}`,
+        });
+        log.debug('history', 'Applied compaction', {
+          cutoff: cProps.cutoff_message_path,
+          remaining_messages: directMessages.length,
+        });
+      }
+    }
+  }
 
   log.debug('history', 'Queried descendants', {
     total_nodes: allNodes.length,
@@ -171,11 +212,16 @@ async function buildHistoryFromChat(workspace, chatPath, systemPrompt, currentAs
   }
 
   // ── Truncate to keep context window bounded ──
-  if (history.length > MAX_HISTORY_MESSAGES + 1) {
-    const systemMsg = history[0]?.role === 'system' ? history[0] : null;
-    const recent = history.slice(-MAX_HISTORY_MESSAGES);
-    log.debug('history', 'History built', { total_entries: recent.length + (systemMsg ? 1 : 0), truncated: true });
-    return systemMsg ? [systemMsg, ...recent] : recent;
+  // Preserve the leading system entries (system prompt + compaction summary).
+  let leadingSystem = 0;
+  while (leadingSystem < history.length && history[leadingSystem].role === 'system') {
+    leadingSystem++;
+  }
+  if (history.length - leadingSystem > maxHistoryMessages) {
+    const head = history.slice(0, leadingSystem);
+    const recent = history.slice(history.length - maxHistoryMessages);
+    log.debug('history', 'History built', { total_entries: head.length + recent.length, truncated: true });
+    return [...head, ...recent];
   }
 
   log.debug('history', 'History built', { total_entries: history.length, truncated: false });

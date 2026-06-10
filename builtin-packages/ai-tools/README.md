@@ -102,6 +102,47 @@ The package includes serverless functions for AI operations:
 - `on-user-message` - Trigger for new user messages
 - `on-tool-result` - Trigger for tool execution results
 
+## Token safeguards & compaction
+
+All of these agent properties (`raisin:AIAgent`) are optional — when absent,
+behavior is unchanged.
+
+| Property | Type | Default | Effect |
+|----------|------|---------|--------|
+| `max_history_messages` | number | 50 | Per-turn history window sent to the model (system prompt + compaction summary are always kept on top). |
+| `auto_compact` | boolean | `false` | Enable conversation auto-compaction. |
+| `compact_threshold_messages` | number | 30 | Active (non-compacted) message count that triggers compaction at turn start. |
+| `compact_keep_messages` | number | max(2, threshold/3) | Floor of most recent messages kept verbatim when compacting. |
+| `max_conversation_tokens` | number | — | Per-conversation token budget; when reached the agent refuses the turn with `finish_reason: budget_exceeded` and makes no AI call. |
+
+### How compaction works
+
+When `auto_compact` is enabled and the conversation's active message count
+exceeds `compact_threshold_messages` at the start of a turn, the older
+messages (everything except the most recent third, with a
+`compact_keep_messages` floor) are summarized with one extra AI call to the
+agent's own model. The result is persisted as a `raisin:AICompaction` child
+of the agent-side conversation node (`summary`, `summary_preview`,
+`messages_compacted`, `messages_kept`, `cutoff_message_path`), so it is never
+recomputed per turn. History building then sends:
+
+```
+[system prompt, "Earlier conversation summary: …", messages after the cutoff]
+```
+
+Later compactions supersede earlier ones (latest by `created_at` wins) and
+chain the previous summary into the new one. The summarization call's tokens
+are recorded as a `raisin:AICostRecord` under the compaction node.
+
+### Token accounting
+
+Every AI call writes a `raisin:AICostRecord` and increments a running
+`total_tokens_used` property on the agent-side conversation node. The
+`max_conversation_tokens` budget is checked against this total at turn start;
+a budget-exceeded turn creates a normal assistant reply ("This conversation
+has reached its token budget (X used / Y limit)…") and emits the standard
+`done` event so clients terminate cleanly — no provider call is made.
+
 ## Configuration
 
 Configure AI model providers in your RaisinDB settings:

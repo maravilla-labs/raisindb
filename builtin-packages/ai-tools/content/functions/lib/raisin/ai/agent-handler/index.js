@@ -22,6 +22,7 @@
 
 import { log, setContext } from '../agent-shared/logger.js';
 import { buildHistoryFromChat } from '../agent-shared/history.js';
+import { maybeCompactConversation } from '../agent-shared/compaction.js';
 import {
   resolveToolsParallel,
   normalizeToolCalls,
@@ -43,6 +44,7 @@ import {
 import { loadUserMemory, formatMemoryForPrompt } from '../agent-shared/memory.js';
 import {
   safeJson,
+  createCostRecord,
   TERMINAL_FALLBACK_TEXT,
   getPlanningSystemPromptAddition,
   getEffectiveExecutionMode,
@@ -259,6 +261,86 @@ export async function handleUserMessage(context) {
     }
   }
 
+  // ── 4b. Conversation token budget guard ──────────────────────────────────
+  // When max_conversation_tokens is set on the agent and the running total
+  // (total_tokens_used, maintained by createCostRecord) has reached it,
+  // refuse the turn without calling the AI.
+
+  const maxConversationTokens = Number(agentProps.max_conversation_tokens) || 0;
+  if (maxConversationTokens > 0) {
+    const tokensUsed = Number(chat.properties?.total_tokens_used) || 0;
+    if (tokensUsed >= maxConversationTokens) {
+      log.warn('handler', 'Conversation token budget exceeded', {
+        used: tokensUsed,
+        limit: maxConversationTokens,
+      });
+      const content = `This conversation has reached its token budget (${tokensUsed} used / ${maxConversationTokens} limit). Please start a new conversation.`;
+      let budgetMsg;
+      try {
+        budgetMsg = await raisin.nodes.create(workspace, chatPath, {
+          name: replyName,
+          node_type: 'raisin:Message',
+          properties: {
+            role: 'assistant',
+            body: { content, message_text: content },
+            content,
+            sender_id: outboxCtx?.agentUserId ?? 'ai-assistant',
+            sender_display_name: outboxCtx?.agentDisplayName ?? 'AI Assistant',
+            message_type: 'chat',
+            status: 'delivered',
+            created_at: new Date().toISOString(),
+            finish_reason: 'budget_exceeded',
+            parent_message_path: messagePath,
+            dispatch_phase: 'terminal',
+            orchestration_mode: executionMode,
+            orchestration_round: 0,
+            terminal_reason_internal: 'budget_exceeded',
+            turn_terminal_outbox_sent: false,
+            turn_terminal_done_emitted: false,
+            turn_waiting_emitted: false,
+          },
+        });
+      } catch (err) {
+        if (!String(err?.message || '').includes('already exists')) throw err;
+        budgetMsg = await raisin.nodes.get(workspace, `${chatPath}/${replyName}`);
+      }
+      if (!budgetMsg) {
+        log.warn('handler', 'Budget message missing after create race', { replyName });
+        return;
+      }
+
+      await emitConversationEvent('conversation:message_saved', {
+        type: 'message_saved',
+        messagePath: budgetMsg.path,
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+      }, chatPath, streamChannel);
+
+      if (outboxCtx) {
+        await sendAgentOutboxMessage(workspace, outboxCtx, content, 'chat', {
+          finish_reason: 'budget_exceeded',
+        }, {
+          dedupe_key: `chat_terminal:${budgetMsg.path}`,
+        });
+        await setTerminalMarker(workspace, budgetMsg.path, 'turn_terminal_outbox_sent', true);
+      }
+
+      await emitConversationEvent('conversation:done', {
+        type: 'done',
+        content,
+        role: 'assistant',
+        senderDisplayName: outboxCtx?.agentDisplayName ?? 'AI Assistant',
+        finishReason: 'budget_exceeded',
+        dispatchPhase: 'terminal',
+        terminalReasonInternal: 'budget_exceeded',
+        timestamp: new Date().toISOString(),
+      }, chatPath, streamChannel);
+      await setTerminalMarker(workspace, budgetMsg.path, 'turn_terminal_done_emitted', true);
+      terminalEventEmitted = true;
+      return;
+    }
+  }
+
   // ── 5. Resolve tools ─────────────────────────────────────────────────────
 
   let { toolDefinitions, toolNameToRef } = await resolveToolsParallel(agentProps.tools || []);
@@ -300,12 +382,18 @@ export async function handleUserMessage(context) {
 
   // ── 7. Build history and call AI completion ───────────────────────────────
 
-  const history = await buildHistoryFromChat(workspace, chatPath, systemPrompt);
-  log.step('handler', 3, 6, 'Built history', { entries: history.length });
-
   const modelId = agentProps.provider
     ? `${agentProps.provider}:${agentProps.model}`
     : agentProps.model;
+
+  // Auto-compaction: summarize older messages once the threshold is crossed.
+  // The persisted raisin:AICompaction node is picked up by the history builder.
+  await maybeCompactConversation(workspace, chatPath, agentProps, modelId);
+
+  const history = await buildHistoryFromChat(workspace, chatPath, systemPrompt, null, null, {
+    maxHistoryMessages: agentProps.max_history_messages,
+  });
+  log.step('handler', 3, 6, 'Built history', { entries: history.length });
 
   let response;
   const t0AI = log.time();
@@ -569,6 +657,7 @@ export async function handleUserMessage(context) {
 
   await createCostRecord(
     workspace,
+    chatPath,
     assistantMsg.path,
     response,
     agentProps.provider,
@@ -651,7 +740,7 @@ export async function handleUserMessage(context) {
       orchestration_round: 0,
     };
 
-    await raisin.nodes.create(workspace, assistantMsg.path, {
+    const callNode = await raisin.nodes.create(workspace, assistantMsg.path, {
       name: callNodeName,
       node_type: 'raisin:AIToolCall',
       properties: {
@@ -662,6 +751,9 @@ export async function handleUserMessage(context) {
         status: 'pending',
       },
     });
+    if (callNode?.error && !String(callNode.error).includes('already exists')) {
+      throw new Error(`Failed to create tool-call node "${callNodeName}": ${callNode.error}`);
+    }
     pendingToolCount++;
 
     await emitConversationEvent('conversation:tool_call_started', {
@@ -912,35 +1004,6 @@ async function findLatestManualPlanWithPendingTasks(workspace, chatPath) {
   return null;
 }
 
-async function createCostRecord(workspace, parentPath, response, provider, durationMs) {
-  if (!workspace || !parentPath || !response) return;
-  const usage = (response.usage && typeof response.usage === 'object') ? response.usage : {};
-  const inputTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0;
-  const outputTokens = Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0;
-  const totalTokens = Number(usage.total_tokens ?? (inputTokens + outputTokens)) || 0;
-  const costUsd = Number(usage.cost_usd ?? response.cost_usd);
-  const properties = {
-    model: response.model || 'unknown',
-    provider: provider || 'unknown',
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    total_tokens: totalTokens,
-    duration_ms: Number(durationMs || 0),
-    timestamp: new Date().toISOString(),
-    ...(Number.isFinite(costUsd) ? { cost_usd: costUsd } : {}),
-  };
-
-  try {
-    await raisin.nodes.create(workspace, parentPath, {
-      name: 'cost-record',
-      node_type: 'raisin:AICostRecord',
-      properties,
-    });
-  } catch (e) {
-    if (!String(e?.message || '').includes('already exists')) throw e;
-  }
-}
-
 // ─── Inbox Management ───────────────────────────────────────────────────────
 
 async function markAsRead(workspace, chatPath, message) {
@@ -1174,6 +1237,9 @@ async function isRepeatedUnknownTool(workspace, parentMsgPath, knownTools) {
 }
 
 async function createErrorToolResult(workspace, parentPath, callNodeName, callId, toolName, errorResult) {
+  // NOTE: raisin.nodes.create does not throw on backend errors — it returns
+  // an { error } object. Check explicitly, otherwise a failed create cascades
+  // into "converting from js 'undefined' into type 'string'" on .path access.
   const callNode = await raisin.nodes.create(workspace, parentPath, {
     name: callNodeName,
     node_type: 'raisin:AIToolCall',
@@ -1184,7 +1250,11 @@ async function createErrorToolResult(workspace, parentPath, callNodeName, callId
       status: 'completed',
     },
   });
-  await raisin.nodes.create(workspace, callNode.path, {
+  if (callNode?.error) {
+    throw new Error(`Failed to create error tool-call node "${callNodeName}": ${callNode.error}`);
+  }
+  const resultParent = callNode?.path || `${parentPath}/${callNodeName}`;
+  const resultNode = await raisin.nodes.create(workspace, resultParent, {
     name: 'result',
     node_type: 'raisin:AIToolSingleCallResult',
     properties: {
@@ -1194,4 +1264,7 @@ async function createErrorToolResult(workspace, parentPath, callNodeName, callId
       status: 'completed',
     },
   });
+  if (resultNode?.error) {
+    throw new Error(`Failed to create error tool-result node under "${resultParent}": ${resultNode.error}`);
+  }
 }

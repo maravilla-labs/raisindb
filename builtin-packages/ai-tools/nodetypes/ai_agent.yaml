@@ -119,4 +119,62 @@ properties:
       min: 1
       max: 100000
 
+  - name: max_history_messages
+    title: Max History Messages
+    type: Number
+    required: false
+    description: |
+      Maximum number of conversation history entries sent to the model per
+      turn (overrides the built-in default of 50). The system prompt and
+      compaction summary are always kept in addition to this window.
+    validation:
+      min: 1
+      max: 1000
+
+  - name: auto_compact
+    title: Auto-Compact Conversations
+    type: boolean
+    default: false
+    description: |
+      When enabled, once a conversation exceeds compact_threshold_messages,
+      older messages are summarized with one extra AI call and replaced in
+      the model context by a persisted summary (raisin:AICompaction node).
+
+  - name: compact_threshold_messages
+    title: Compaction Threshold (messages)
+    type: Number
+    default: 30
+    description: |
+      Number of active (not yet compacted) conversation messages that
+      triggers auto-compaction at the start of a turn. Only used when
+      auto_compact is true.
+    validation:
+      min: 2
+      max: 1000
+
+  - name: compact_keep_messages
+    title: Messages Kept After Compaction
+    type: Number
+    required: false
+    description: |
+      Minimum number of most recent messages preserved verbatim when
+      compacting. Defaults to max(2, compact_threshold_messages / 3);
+      at least a third of the active messages is always kept.
+    validation:
+      min: 1
+      max: 1000
+
+  - name: max_conversation_tokens
+    title: Max Conversation Tokens
+    type: Number
+    required: false
+    description: |
+      Token budget per conversation. The running total (total_tokens_used on
+      the agent-side conversation node, accumulated from all cost records
+      including compaction calls) is checked at turn start; when reached, the
+      agent replies with a budget-exceeded message (finish_reason
+      budget_exceeded) without calling the AI.
+    validation:
+      min: 1
+
 allowed_children: []

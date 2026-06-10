@@ -19,8 +19,11 @@ properties:
   - name: function_ref
     title: Function Reference
     type: Reference
-    required: true
-    description: Reference to the raisin:Function being called
+    description: |
+      Reference to the raisin:Function being called. Present on executable
+      tool calls; absent on error-placeholder calls (e.g. the model requested
+      an unknown tool and the handler records a completed call with an error
+      result so the conversation loop can continue).
 
   - name: arguments
     title: Arguments

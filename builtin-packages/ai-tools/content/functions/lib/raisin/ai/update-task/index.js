@@ -39,6 +39,30 @@ async function handler(input) {
   const oldProps = taskNode.properties || {};
   const oldStatus = oldProps.status || 'pending';
 
+  // Monotonic status guard: tool calls from one model turn execute in
+  // parallel, so a batched in_progress update can arrive AFTER the completed
+  // update for the same task. Never downgrade a terminal status.
+  const TERMINAL_STATUSES = ['completed', 'cancelled'];
+  if (TERMINAL_STATUSES.includes(oldStatus) && !TERMINAL_STATUSES.includes(status)) {
+    const planPathIgnored = taskNode.path.split('/').slice(0, -1).join('/');
+    const progressIgnored = await updatePlanProgress(workspace, planPathIgnored, chatPath);
+    return {
+      success: true,
+      ignored: true,
+      task_id,
+      title: oldProps.title,
+      old_status: oldStatus,
+      new_status: oldStatus,
+      plan_path: planPathIgnored,
+      plan_id: progressIgnored?.plan_id || null,
+      plan_status: progressIgnored?.status || null,
+      total_tasks: progressIgnored?.total_tasks ?? null,
+      completed_tasks: progressIgnored?.completed_tasks ?? null,
+      pending_tasks: progressIgnored?.pending_tasks ?? null,
+      message: `Task "${oldProps.title}" is already ${oldStatus}; downgrade to ${status} ignored.`,
+    };
+  }
+
   // Build updated properties
   const updatedProps = { ...oldProps, status };
   if (notes) updatedProps.completion_notes = notes;

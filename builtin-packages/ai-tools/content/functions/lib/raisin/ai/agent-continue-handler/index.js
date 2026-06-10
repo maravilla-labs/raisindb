@@ -43,6 +43,7 @@ import {
 import { loadUserMemory, formatMemoryForPrompt } from '../agent-shared/memory.js';
 import {
   safeJson,
+  createCostRecord,
   getPlanningSystemPromptAddition,
   TERMINAL_FALLBACK_TEXT,
   getEffectiveExecutionMode,
@@ -118,45 +119,25 @@ function extractPlanProgressInfo(toolResults) {
     if (!r) continue;
     const normalizedName = (fname || '').replace(/-/g, '_');
     if (normalizedName === 'get_plan_status' || normalizedName === 'update_task') {
+      const total = Number(r.total_tasks || 0);
+      const completed = Number(r.completed_tasks || 0);
+      // "remaining" must count in_progress tasks too: get_plan_status reports
+      // pending_tasks as strictly status='pending', which lets a task stuck
+      // at in_progress look finished and ends the auto loop prematurely.
+      const remaining = total > 0
+        ? Math.max(total - completed, 0)
+        : Number(r.pending_tasks || 0);
       return {
         status: r.status || r.plan_status || null,
-        total_tasks: Number(r.total_tasks || 0),
-        completed_tasks: Number(r.completed_tasks || 0),
-        pending_tasks: Number(r.pending_tasks || 0),
+        total_tasks: total,
+        completed_tasks: completed,
+        pending_tasks: remaining,
         task_status: r.new_status || r.status || null,
         title: r.title || null,
       };
     }
   }
   return null;
-}
-
-async function createCostRecord(workspace, parentPath, response, provider, durationMs) {
-  if (!workspace || !parentPath || !response) return;
-  const usage = (response.usage && typeof response.usage === 'object') ? response.usage : {};
-  const inputTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0;
-  const outputTokens = Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0;
-  const totalTokens = Number(usage.total_tokens ?? (inputTokens + outputTokens)) || 0;
-  const costUsd = Number(usage.cost_usd ?? response.cost_usd);
-  const props = {
-    model: response.model || 'unknown',
-    provider: provider || 'unknown',
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    total_tokens: totalTokens,
-    duration_ms: Number(durationMs || 0),
-    timestamp: new Date().toISOString(),
-    ...(Number.isFinite(costUsd) ? { cost_usd: costUsd } : {}),
-  };
-  try {
-    await raisin.nodes.create(workspace, parentPath, {
-      name: 'cost-record',
-      node_type: 'raisin:AICostRecord',
-      properties: props,
-    });
-  } catch (e) {
-    if (!String(e?.message || '').includes('already exists')) throw e;
-  }
 }
 
 function hashReplaySource(input) {
@@ -356,7 +337,8 @@ function detectToolLoop(history) {
  * Returns true so the caller can track that a continuation is expected.
  */
 async function createErrorToolResult(workspace, parentPath, toolCallName, toolCallId, toolName, errorObj) {
-  await raisin.nodes.create(workspace, parentPath, {
+  // raisin.nodes.create returns { error } instead of throwing — check it.
+  const callNode = await raisin.nodes.create(workspace, parentPath, {
     name: toolCallName,
     node_type: 'raisin:AIToolCall',
     properties: {
@@ -366,7 +348,10 @@ async function createErrorToolResult(workspace, parentPath, toolCallName, toolCa
       status: 'completed',
     },
   });
-  await raisin.nodes.create(workspace, `${parentPath}/${toolCallName}`, {
+  if (callNode?.error) {
+    throw new Error(`Failed to create error tool-call node "${toolCallName}": ${callNode.error}`);
+  }
+  const resultNode = await raisin.nodes.create(workspace, `${parentPath}/${toolCallName}`, {
     name: 'result',
     node_type: 'raisin:AIToolSingleCallResult',
     properties: {
@@ -376,6 +361,9 @@ async function createErrorToolResult(workspace, parentPath, toolCallName, toolCa
       status: 'completed',
     },
   });
+  if (resultNode?.error) {
+    throw new Error(`Failed to create error tool-result node under "${parentPath}/${toolCallName}": ${resultNode.error}`);
+  }
 }
 
 // ─────────────────────────────────────────────────
@@ -612,7 +600,9 @@ async function handleToolResult(ctx) {
   }
 
   const t0Hist = log.time();
-  let history = await buildHistoryFromChat(workspace, chatPath, systemPrompt, assistantMsgPath, aggregatedToolResults);
+  let history = await buildHistoryFromChat(workspace, chatPath, systemPrompt, assistantMsgPath, aggregatedToolResults, {
+    maxHistoryMessages: agent.properties.max_history_messages,
+  });
 
   if (forceFinalText) {
     const hint = completedPlan.message
@@ -886,6 +876,7 @@ async function handleToolResult(ctx) {
 
     await createCostRecord(
       workspace,
+      chatPath,
       nextMsg.path,
       response,
       agent.properties?.provider,
@@ -981,7 +972,7 @@ async function handleToolResult(ctx) {
       };
 
       log.info('continue', 'Creating pending tool call', { name: toolName, path: toolRef['raisin:path'] });
-      await raisin.nodes.create(workspace, nextMsg.path, {
+      const createdCall = await raisin.nodes.create(workspace, nextMsg.path, {
         name: toolCallName,
         node_type: 'raisin:AIToolCall',
         properties: {
@@ -992,6 +983,9 @@ async function handleToolResult(ctx) {
           status: 'pending',
         },
       });
+      if (createdCall?.error && !String(createdCall.error).includes('already exists')) {
+        throw new Error(`Failed to create tool-call node "${toolCallName}": ${createdCall.error}`);
+      }
       pendingToolCount++;
 
       await emitConversationEvent('conversation:tool_call_started', {

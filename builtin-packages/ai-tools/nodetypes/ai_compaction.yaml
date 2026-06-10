@@ -23,6 +23,32 @@ properties:
     required: false
     description: First 200 chars of the generated summary
 
+  - name: summary
+    title: Summary
+    type: String
+    required: false
+    description: |
+      Full generated summary of the compacted messages. Injected into the
+      model context as a synthetic system entry in place of the compacted
+      messages.
+    ui:
+      widget: textarea
+      rows: 8
+
+  - name: cutoff_message_path
+    title: Cutoff Message Path
+    type: String
+    required: false
+    description: |
+      Path of the last (newest) message covered by this compaction. History
+      building includes only messages created after this one.
+
+  - name: cutoff_created_at
+    title: Cutoff Created At
+    type: String
+    required: false
+    description: created_at of the cutoff message (fallback matching)
+
 versionable: false
 publishable: false
 auditable: false
