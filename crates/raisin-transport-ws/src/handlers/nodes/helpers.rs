@@ -36,7 +36,10 @@ pub(crate) fn json_to_property_value(value: &serde_json::Value) -> PropertyValue
                 .map(|(k, v)| (k.clone(), json_to_property_value(v)))
                 .collect(),
         ),
-        serde_json::Value::Null => PropertyValue::String(String::new()),
+        // Preserve explicit nulls. The HTTP path deserializes JSON null to
+        // PropertyValue::Null via serde; coercing to "" here silently
+        // corrupted null-valued properties written over WS.
+        serde_json::Value::Null => PropertyValue::Null,
     }
 }
 
@@ -105,4 +108,50 @@ where
     }
 
     node_service
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_maps_to_property_value_null_not_empty_string() {
+        let value = serde_json::Value::Null;
+        let converted = json_to_property_value(&value);
+        assert!(
+            matches!(converted, PropertyValue::Null),
+            "JSON null must map to PropertyValue::Null, got {:?}",
+            converted
+        );
+    }
+
+    #[test]
+    fn null_round_trips_through_json() {
+        // Null must survive WS write -> PropertyValue -> JSON response.
+        let converted = json_to_property_value(&serde_json::Value::Null);
+        let back = serde_json::to_value(&converted).expect("serialize");
+        assert_eq!(back, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn nested_nulls_are_preserved() {
+        let value = serde_json::json!({
+            "assignee": null,
+            "tags": [null, "a"],
+        });
+        let converted = json_to_property_value(&value);
+        match converted {
+            PropertyValue::Object(obj) => {
+                assert!(matches!(obj.get("assignee"), Some(PropertyValue::Null)));
+                match obj.get("tags") {
+                    Some(PropertyValue::Array(items)) => {
+                        assert!(matches!(items[0], PropertyValue::Null));
+                        assert!(matches!(items[1], PropertyValue::String(ref s) if s == "a"));
+                    }
+                    other => panic!("expected array, got {:?}", other),
+                }
+            }
+            other => panic!("expected object, got {:?}", other),
+        }
+    }
 }

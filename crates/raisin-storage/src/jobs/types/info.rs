@@ -43,6 +43,14 @@ pub struct JobInfo {
     pub timeout_seconds: u64,
     /// When the job should be retried
     pub next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the current execution attempt started (set on claim/Running).
+    ///
+    /// Used by the timeout watchdog to enforce a wall-clock cap on total
+    /// execution time. The worker auto-renews `last_heartbeat` from an
+    /// independent task, so heartbeat staleness alone cannot detect a
+    /// handler that is stuck but whose task is still alive.
+    #[serde(default)]
+    pub executing_since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Handle to background job system

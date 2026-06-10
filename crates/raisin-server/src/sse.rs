@@ -80,6 +80,7 @@ impl JobMonitor for SseJobMonitor {
                 last_heartbeat: None,
                 timeout_seconds: 0,
                 next_retry_at: None,
+                executing_since: None,
             },
             old_status: None,
             new_status: raisin_storage::jobs::JobStatus::Running,

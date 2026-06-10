@@ -56,6 +56,7 @@ impl RocksDBStorage {
                         last_heartbeat: persisted_entry.last_heartbeat,
                         timeout_seconds: persisted_entry.timeout_seconds,
                         next_retry_at: persisted_entry.next_retry_at,
+                        executing_since: persisted_entry.executing_since,
                     };
 
                     // Reset Running/Executing → Scheduled (crashed mid-execution)
@@ -84,6 +85,7 @@ impl RocksDBStorage {
                             last_heartbeat: None,
                             timeout_seconds: persisted_entry.timeout_seconds,
                             next_retry_at: persisted_entry.next_retry_at,
+                            executing_since: persisted_entry.executing_since,
                         };
                         self.job_metadata_store.update(&job_id, &updated_entry)?;
                     }

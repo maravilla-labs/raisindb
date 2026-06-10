@@ -119,6 +119,7 @@ mod tests {
             last_heartbeat: None,
             timeout_seconds: 300,
             next_retry_at: None,
+            executing_since: None,
         };
 
         let context = JobContext {

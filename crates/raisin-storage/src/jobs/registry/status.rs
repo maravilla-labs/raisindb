@@ -51,6 +51,13 @@ impl JobRegistry {
                 if is_terminal {
                     job.completed_at = Some(Utc::now());
                 }
+                // Track when the current execution attempt started so the
+                // watchdog can enforce a wall-clock execution cap.
+                if matches!(status, JobStatus::Running | JobStatus::Executing)
+                    && job.executing_since.is_none()
+                {
+                    job.executing_since = Some(Utc::now());
+                }
                 (Some(old), job.to_job_info())
             } else {
                 return Err(RaisinError::NotFound(format!("Job {:?} not found", job_id)));
@@ -152,6 +159,7 @@ impl JobRegistry {
                 // Atomically set to Running
                 job.status = JobStatus::Running;
                 job.last_heartbeat = Some(chrono::Utc::now());
+                job.executing_since = Some(chrono::Utc::now());
                 (true, job.to_job_info())
             } else {
                 return Err(RaisinError::NotFound(format!("Job {:?} not found", job_id)));
@@ -289,6 +297,14 @@ impl JobRegistry {
                 job.status = JobStatus::Scheduled;
                 job.error = Some(error.clone());
                 job.last_heartbeat = None; // Reset heartbeat for fresh retry
+                job.executing_since = None; // Reset execution-time tracking
+
+                // Issue a fresh cancel token so a retry scheduled by the
+                // watchdog (which cancels the old token to stop the stuck
+                // attempt) is not born cancelled.
+                job.cancel_token = Some(std::sync::Arc::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ));
 
                 // Calculate exponential backoff: 10s, 30s, 60s
                 let delay_seconds = match job.retry_count {

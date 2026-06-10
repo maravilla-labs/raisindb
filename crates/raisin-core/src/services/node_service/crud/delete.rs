@@ -6,8 +6,8 @@ use raisin_error::Result;
 use raisin_models::nodes::audit_log::AuditLogAction;
 use raisin_models::permissions::Operation;
 use raisin_storage::{
-    scope::StorageScope, transactional::TransactionalStorage, NodeRepository, Storage,
-    UpdateNodeOptions,
+    scope::StorageScope, transactional::TransactionalStorage, DeleteNodeOptions, NodeRepository,
+    Storage, UpdateNodeOptions,
 };
 
 use super::super::NodeService;
@@ -111,10 +111,34 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             .unwrap_or(false);
         let _name = before.as_ref().map(|n| n.name.clone());
 
-        // CRITICAL: Create tombstones for all nodes being deleted
-        // This includes the main node and all descendants
-        if let Some(main_node) = &before {
-            // Delete main node (creates tombstone)
+        // Nothing to delete - report false instead of pretending success
+        let Some(main_node) = &before else {
+            return Ok(false);
+        };
+
+        // 1. Clear workspace draft deltas for the node and all descendants.
+        //    This removes any pending "put" drafts (which shadow committed
+        //    storage in get_by_path) and records draft-level delete markers.
+        self.storage
+            .delete_workspace_delta(
+                StorageScope::new(
+                    &self.tenant_id,
+                    &self.repo_id,
+                    &self.branch,
+                    &self.workspace_id,
+                ),
+                &main_node.id,
+                &main_node.path,
+            )
+            .await?;
+
+        let descendants = self
+            .storage
+            .nodes()
+            .deep_children_flat(self.scope(), path, 100, self.revision.as_ref())
+            .await?;
+
+        for desc_node in descendants {
             self.storage
                 .delete_workspace_delta(
                     StorageScope::new(
@@ -123,35 +147,30 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
                         &self.branch,
                         &self.workspace_id,
                     ),
-                    &main_node.id,
-                    &main_node.path,
+                    &desc_node.id,
+                    &desc_node.path,
                 )
                 .await?;
-
-            // Delete all descendant nodes (create tombstones)
-            let descendants = self
-                .storage
-                .nodes()
-                .deep_children_flat(self.scope(), path, 100, self.revision.as_ref())
-                .await?;
-
-            for desc_node in descendants {
-                self.storage
-                    .delete_workspace_delta(
-                        StorageScope::new(
-                            &self.tenant_id,
-                            &self.repo_id,
-                            &self.branch,
-                            &self.workspace_id,
-                        ),
-                        &desc_node.id,
-                        &desc_node.path,
-                    )
-                    .await?;
-            }
         }
 
-        let res = true; // Always succeeds if we got here
+        // 2. Delete from committed storage. This writes tombstones for the
+        //    entire subtree at a freshly allocated revision and atomically
+        //    advances the branch head past it, so reads at head immediately
+        //    see the deletion.
+        //
+        //    NOTE: workspace deltas alone are NOT sufficient here - they are
+        //    drafts that nothing commits in direct mode, and point reads
+        //    (get_by_path) never consult "delete" markers. That made HTTP/WS
+        //    deletes silent no-ops against committed nodes.
+        let res = self
+            .storage
+            .nodes()
+            .delete(
+                self.scope(),
+                &main_node.id,
+                DeleteNodeOptions::default(), // cascade = true
+            )
+            .await?;
 
         if res {
             // Version history is preserved - tombstones mark deletion without removing data

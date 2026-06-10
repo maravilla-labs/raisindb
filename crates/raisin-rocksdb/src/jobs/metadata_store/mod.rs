@@ -40,6 +40,8 @@ pub struct PersistedJobEntry {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub next_retry_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub executing_since: Option<DateTime<Utc>>,
 }
 
 /// RocksDB-backed job metadata store

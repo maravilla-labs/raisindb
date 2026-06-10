@@ -35,10 +35,13 @@ impl JobRegistry {
             }
         }
 
-        // Then abort the handle if available
-        let mut handles = self.handles.write().await;
-        if let Some(handle) = handles.remove(job_id) {
-            handle.abort();
+        // Then abort the handle if available (scoped so the handles lock is
+        // not held across the update_status await below)
+        {
+            let mut handles = self.handles.write().await;
+            if let Some(handle) = handles.remove(job_id) {
+                handle.abort();
+            }
         }
 
         // Update status
@@ -68,14 +71,17 @@ impl JobRegistry {
             _ => {}
         }
 
-        // Remove from both maps
-        let mut jobs = self.jobs.write().await;
-        let mut handles = self.handles.write().await;
+        // Remove from both maps (scoped so no lock is held across the
+        // broadcast await below - see register_job_inner for rationale)
+        {
+            let mut jobs = self.jobs.write().await;
+            let mut handles = self.handles.write().await;
 
-        jobs.remove(job_id);
-        handles.remove(job_id);
+            jobs.remove(job_id);
+            handles.remove(job_id);
+        }
 
-        // Notify monitors that job was removed
+        // Notify monitors that job was removed (no locks held)
         self.monitors.broadcast_removed(job_id).await;
 
         Ok(())
@@ -182,6 +188,7 @@ impl JobRegistry {
             last_heartbeat: job_info.last_heartbeat,
             timeout_seconds: job_info.timeout_seconds,
             next_retry_at: job_info.next_retry_at,
+            executing_since: job_info.executing_since,
         };
 
         let mut jobs = self.jobs.write().await;

@@ -35,6 +35,8 @@ pub(super) struct JobEntry {
     pub last_heartbeat: Option<DateTime<Utc>>,
     pub timeout_seconds: u64,
     pub next_retry_at: Option<DateTime<Utc>>,
+    /// When the current execution attempt started (set on claim/Running).
+    pub executing_since: Option<DateTime<Utc>>,
 }
 
 impl JobEntry {
@@ -54,6 +56,7 @@ impl JobEntry {
             last_heartbeat: self.last_heartbeat,
             timeout_seconds: self.timeout_seconds,
             next_retry_at: self.next_retry_at,
+            executing_since: self.executing_since,
         }
     }
 }

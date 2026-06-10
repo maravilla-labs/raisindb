@@ -190,4 +190,24 @@ impl JobRegistry {
             Err(RaisinError::NotFound(format!("Job {:?} not found", job_id)))
         }
     }
+
+    /// Set execution start to a specific time (for testing timeout scenarios)
+    ///
+    /// # Safety
+    ///
+    /// This method is intended for testing only. It directly manipulates the
+    /// internal job state to simulate a long-running execution attempt.
+    pub async fn set_execution_start_for_test(
+        &self,
+        job_id: &JobId,
+        executing_since: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let mut jobs = self.jobs.write().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            job.executing_since = executing_since;
+            Ok(())
+        } else {
+            Err(RaisinError::NotFound(format!("Job {:?} not found", job_id)))
+        }
+    }
 }

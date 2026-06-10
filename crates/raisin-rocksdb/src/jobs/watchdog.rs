@@ -87,8 +87,17 @@ impl TimeoutWatchdog {
 
     /// Check all running jobs for timeouts
     ///
-    /// For each running job, checks if the heartbeat is too old or missing.
-    /// Timed-out jobs are marked as failed and their cancel tokens are triggered.
+    /// A job is considered timed out when either:
+    /// 1. Its total execution time (since the current attempt was claimed)
+    ///    exceeds `timeout_seconds`. This is the primary check: the worker
+    ///    auto-renews heartbeats from an independent task, so a handler that
+    ///    is stuck (e.g. parked in a blocking call) keeps a fresh heartbeat
+    ///    forever and would never be reaped by heartbeat staleness alone.
+    /// 2. Its heartbeat is older than `timeout_seconds` (heartbeat task died).
+    ///
+    /// Timed-out jobs follow normal retry semantics: they are scheduled for
+    /// retry while attempts remain, and marked failed once retries are
+    /// exhausted. In both cases the stuck attempt is cancelled and aborted.
     async fn check_timeouts(&self) -> Result<()> {
         let jobs = self.job_registry.list_jobs().await;
         let now = Utc::now();
@@ -99,94 +108,100 @@ impl TimeoutWatchdog {
                 continue;
             }
 
-            // Check if job has a heartbeat
-            let timed_out = if let Some(last_heartbeat) = job.last_heartbeat {
-                let elapsed = now.signed_duration_since(last_heartbeat).num_seconds() as u64;
-                if elapsed > job.timeout_seconds {
-                    Some((elapsed, true))
-                } else {
-                    None
-                }
-            } else {
-                // No heartbeat recorded - check how long it's been running
-                let running_time = now.signed_duration_since(job.started_at).num_seconds() as u64;
-                if running_time > job.timeout_seconds {
-                    Some((running_time, false))
-                } else {
-                    None
-                }
-            };
+            // Wall-clock execution time of the current attempt.
+            // Fall back to started_at for jobs claimed before executing_since
+            // existed (restored from older persisted state).
+            let exec_start = job.executing_since.unwrap_or(job.started_at);
+            let running_secs = now.signed_duration_since(exec_start).num_seconds().max(0) as u64;
 
-            if let Some((elapsed, has_heartbeat)) = timed_out {
-                let is_ai_tool_call = matches!(job.job_type, JobType::AIToolCallExecution { .. });
+            // Heartbeat staleness (catches dead heartbeat tasks quickly).
+            let heartbeat_stale_secs = job
+                .last_heartbeat
+                .map(|hb| now.signed_duration_since(hb).num_seconds().max(0) as u64);
 
-                if has_heartbeat {
-                    tracing::warn!(
-                        job_id = %job.id,
-                        job_type = %job.job_type,
-                        elapsed_seconds = elapsed,
-                        timeout_seconds = job.timeout_seconds,
-                        is_ai_tool_call = is_ai_tool_call,
-                        "Job timed out, marking as failed"
-                    );
-                } else {
-                    tracing::warn!(
-                        job_id = %job.id,
-                        job_type = %job.job_type,
-                        running_seconds = elapsed,
-                        timeout_seconds = job.timeout_seconds,
-                        is_ai_tool_call = is_ai_tool_call,
-                        "Job running without heartbeat, marking as failed"
-                    );
-                }
+            let exceeded_runtime = running_secs > job.timeout_seconds;
+            let exceeded_heartbeat = heartbeat_stale_secs
+                .map(|s| s > job.timeout_seconds)
+                .unwrap_or(false);
 
-                let error_msg = if has_heartbeat {
-                    format!(
-                        "[timeout_final] Job timed out after {} seconds (last heartbeat: {}s ago)",
-                        job.timeout_seconds, elapsed
-                    )
-                } else {
-                    format!(
-                        "[timeout_final] Job running for {} seconds without heartbeat (timeout: {}s)",
-                        elapsed, job.timeout_seconds
-                    )
-                };
+            if !exceeded_runtime && !exceeded_heartbeat {
+                continue;
+            }
 
-                if let Err(e) = self
-                    .job_registry
-                    .mark_failed(&job.id, error_msg.clone())
-                    .await
-                {
+            let is_ai_tool_call = matches!(job.job_type, JobType::AIToolCallExecution { .. });
+            let retries_left = job.retry_count < job.max_retries;
+
+            tracing::warn!(
+                job_id = %job.id,
+                job_type = %job.job_type,
+                running_seconds = running_secs,
+                heartbeat_stale_seconds = ?heartbeat_stale_secs,
+                timeout_seconds = job.timeout_seconds,
+                retry_count = job.retry_count,
+                max_retries = job.max_retries,
+                will_retry = retries_left,
+                is_ai_tool_call = is_ai_tool_call,
+                "Job timed out"
+            );
+
+            // Cancel the stuck attempt gracefully first...
+            if let Some(token) = self.job_registry.get_cancel_token(&job.id).await {
+                token.cancel();
+            }
+
+            // ...then abort the handler task so it cannot write a late completion.
+            if self.job_registry.abort_handle(&job.id).await {
+                tracing::debug!(
+                    job_id = %job.id,
+                    "Aborted timed-out job handle"
+                );
+            }
+
+            if retries_left {
+                // Normal retry semantics: re-schedule with backoff. The
+                // registry resets heartbeat/execution tracking and issues a
+                // fresh cancel token for the next attempt.
+                let error_msg = format!(
+                    "[timeout] Job execution exceeded {}s (running for {}s), scheduling retry",
+                    job.timeout_seconds, running_secs
+                );
+                if let Err(e) = self.job_registry.schedule_retry(&job.id, error_msg).await {
                     tracing::warn!(
                         job_id = %job.id,
                         error = %e,
-                        "Failed to mark timed-out job as failed (continuing watchdog scan)"
-                    );
-                    continue;
-                }
-
-                // Try to cancel the job gracefully
-                if let Some(token) = self.job_registry.get_cancel_token(&job.id).await {
-                    token.cancel();
-                }
-
-                // Abort any running handler task so it cannot write a late completion.
-                if self.job_registry.abort_handle(&job.id).await {
-                    tracing::debug!(
-                        job_id = %job.id,
-                        "Aborted timed-out job handle"
+                        "Failed to schedule retry for timed-out job (continuing watchdog scan)"
                     );
                 }
+                continue;
+            }
 
-                // Invoke recovery callback (e.g., create error result nodes for AI tool calls)
-                if let Some(ref cb) = self.on_timeout {
-                    let job_clone = job.clone();
-                    let error_clone = error_msg.clone();
-                    let cb = cb.clone();
-                    tokio::spawn(async move {
-                        cb(job_clone, error_clone).await;
-                    });
-                }
+            let error_msg = format!(
+                "[timeout_final] Job timed out after {}s (running for {}s, retries exhausted)",
+                job.timeout_seconds, running_secs
+            );
+
+            if let Err(e) = self
+                .job_registry
+                .mark_failed(&job.id, error_msg.clone())
+                .await
+            {
+                tracing::warn!(
+                    job_id = %job.id,
+                    error = %e,
+                    "Failed to mark timed-out job as failed (continuing watchdog scan)"
+                );
+                continue;
+            }
+
+            // Invoke recovery callback (e.g., create error result nodes for AI
+            // tool calls) only on final failure.
+            if let Some(ref cb) = self.on_timeout {
+                let job_clone = job.clone();
+                let error_clone = error_msg.clone();
+                let cb = cb.clone();
+                tokio::spawn(async move {
+                    cb(job_clone, error_clone).await;
+                });
             }
         }
 
@@ -199,40 +214,151 @@ mod tests {
     use super::*;
     use raisin_storage::jobs::JobType;
 
-    #[tokio::test]
-    async fn test_watchdog_detects_timeout() {
+    /// Register a job, mark it running, and return (registry, job_id, timeout).
+    async fn running_job(max_retries: u32) -> (Arc<JobRegistry>, raisin_storage::jobs::JobId, i64) {
         let registry = Arc::new(JobRegistry::new());
 
-        // Register a job
         let job_id = registry
             .register_job(
                 JobType::IntegrityScan,
                 "test-tenant".to_string(),
                 None,
                 None,
-                None,
+                Some(max_retries),
             )
             .await
             .unwrap();
 
-        // Mark as running
         registry.mark_running(&job_id).await.unwrap();
 
-        // Set a heartbeat in the past (simulate timeout) - 400 seconds ago with 300s timeout
+        let timeout = registry
+            .get_job_info(&job_id)
+            .await
+            .unwrap()
+            .timeout_seconds as i64;
+
+        (registry, job_id, timeout)
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_detects_timeout() {
+        // max_retries = 0 so the timeout is final (Failed, not retried)
+        let (registry, job_id, timeout) = running_job(0).await;
+
+        // Set a heartbeat older than the job's timeout (simulate dead heartbeat task)
         registry
-            .set_heartbeat_for_test(&job_id, Some(Utc::now() - chrono::Duration::seconds(400)))
+            .set_heartbeat_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 100)),
+            )
+            .await
+            .unwrap();
+        // Match the heartbeat: the execution attempt also started back then
+        registry
+            .set_execution_start_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 100)),
+            )
             .await
             .unwrap();
 
-        // Create watchdog with immediate shutdown
         let shutdown = CancellationToken::new();
         let watchdog = TimeoutWatchdog::new(registry.clone(), shutdown.clone());
 
-        // Run one check
         watchdog.check_timeouts().await.unwrap();
 
         // Job should be marked as failed
         let status = registry.get_status(&job_id).await.unwrap();
         assert!(matches!(status, JobStatus::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_reaps_stuck_job_with_fresh_heartbeat() {
+        // The reap path: a stuck Executing job whose heartbeat task is alive
+        // (heartbeat is fresh) must still be reaped once total execution
+        // time exceeds the timeout.
+        let (registry, job_id, timeout) = running_job(0).await;
+        registry.mark_executing(&job_id).await.unwrap();
+
+        // Heartbeat is fresh (auto-renewed by the worker's heartbeat task)...
+        registry
+            .set_heartbeat_for_test(&job_id, Some(Utc::now()))
+            .await
+            .unwrap();
+        // ...but the attempt has been executing far past its timeout.
+        registry
+            .set_execution_start_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 100)),
+            )
+            .await
+            .unwrap();
+
+        let shutdown = CancellationToken::new();
+        let watchdog = TimeoutWatchdog::new(registry.clone(), shutdown.clone());
+
+        watchdog.check_timeouts().await.unwrap();
+
+        let status = registry.get_status(&job_id).await.unwrap();
+        assert!(
+            matches!(status, JobStatus::Failed(_)),
+            "stuck job with fresh heartbeat must be reaped, got {:?}",
+            status
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_schedules_retry_when_attempts_remain() {
+        // Normal retry semantics: a timed-out job with retries left goes
+        // back to Scheduled (with backoff), not to Failed.
+        let (registry, job_id, timeout) = running_job(3).await;
+
+        registry
+            .set_heartbeat_for_test(&job_id, Some(Utc::now()))
+            .await
+            .unwrap();
+        registry
+            .set_execution_start_for_test(
+                &job_id,
+                Some(Utc::now() - chrono::Duration::seconds(timeout + 100)),
+            )
+            .await
+            .unwrap();
+
+        let shutdown = CancellationToken::new();
+        let watchdog = TimeoutWatchdog::new(registry.clone(), shutdown.clone());
+
+        watchdog.check_timeouts().await.unwrap();
+
+        let info = registry.get_job_info(&job_id).await.unwrap();
+        assert!(
+            matches!(info.status, JobStatus::Scheduled),
+            "timed-out job with retries left must be re-scheduled, got {:?}",
+            info.status
+        );
+        assert_eq!(info.retry_count, 1);
+        assert!(info.next_retry_at.is_some(), "retry backoff must be set");
+        assert!(
+            info.executing_since.is_none(),
+            "execution tracking must reset for the retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_ignores_healthy_job() {
+        let (registry, job_id, _timeout) = running_job(0).await;
+
+        registry
+            .set_heartbeat_for_test(&job_id, Some(Utc::now()))
+            .await
+            .unwrap();
+
+        let shutdown = CancellationToken::new();
+        let watchdog = TimeoutWatchdog::new(registry.clone(), shutdown.clone());
+
+        watchdog.check_timeouts().await.unwrap();
+
+        let status = registry.get_status(&job_id).await.unwrap();
+        assert!(matches!(status, JobStatus::Running));
     }
 }

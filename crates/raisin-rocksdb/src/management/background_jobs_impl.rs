@@ -112,6 +112,7 @@ impl BackgroundJobs for RocksDBStorage {
                 last_heartbeat: entry.last_heartbeat,
                 timeout_seconds: entry.timeout_seconds,
                 next_retry_at: entry.next_retry_at,
+                executing_since: entry.executing_since,
             })
             .collect();
 
@@ -207,6 +208,7 @@ impl BackgroundJobs for RocksDBStorage {
                     last_heartbeat: entry.last_heartbeat,
                     timeout_seconds: entry.timeout_seconds,
                     next_retry_at: entry.next_retry_at,
+                    executing_since: entry.executing_since,
                 }
             }
         };
@@ -380,6 +382,7 @@ impl BackgroundJobsInternal for RocksDBStorage {
                 last_heartbeat: entry.last_heartbeat,
                 timeout_seconds: entry.timeout_seconds,
                 next_retry_at: entry.next_retry_at,
+                executing_since: entry.executing_since,
             })
             .collect())
     }

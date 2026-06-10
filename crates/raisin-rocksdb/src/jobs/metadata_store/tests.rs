@@ -25,6 +25,7 @@ fn create_test_entry(id: &str) -> PersistedJobEntry {
         last_heartbeat: None,
         timeout_seconds: 300,
         next_retry_at: None,
+        executing_since: None,
     }
 }
 

@@ -145,6 +145,7 @@ fn create_job_info(job_type: JobType) -> JobInfo {
         last_heartbeat: None,
         timeout_seconds: 300,
         next_retry_at: None,
+        executing_since: None,
     }
 }
 

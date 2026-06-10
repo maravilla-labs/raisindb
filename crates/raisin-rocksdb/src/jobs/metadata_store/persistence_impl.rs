@@ -28,6 +28,7 @@ impl JobPersistence for JobMetadataStore {
             last_heartbeat: job_info.last_heartbeat,
             timeout_seconds: job_info.timeout_seconds,
             next_retry_at: job_info.next_retry_at,
+            executing_since: job_info.executing_since,
         };
 
         // Persist using synchronous update (JobMetadataStore methods are sync)

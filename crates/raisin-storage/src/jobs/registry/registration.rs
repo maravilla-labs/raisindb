@@ -100,19 +100,26 @@ impl JobRegistry {
             timeout_seconds,
             // None = process immediately; Some(future) = delayed dispatch
             next_retry_at: scheduled_at,
+            executing_since: None,
         };
 
         let job_info = entry.to_job_info();
 
-        let mut jobs = self.jobs.write().await;
-        jobs.insert(job_id.clone(), entry);
+        // CRITICAL: Do not hold any registry lock across an await point.
+        // broadcast_created() is async and can fan out to monitors that call
+        // back into the registry (dispatch, persistence). Holding the jobs
+        // write-lock across that await deadlocked the entire commit path.
+        {
+            let mut jobs = self.jobs.write().await;
+            jobs.insert(job_id.clone(), entry);
+        }
 
         if let Some(h) = handle {
             let mut handles = self.handles.write().await;
             handles.insert(job_id.clone(), h);
         }
 
-        // Notify monitors of new job
+        // Notify monitors of new job (no locks held)
         self.monitors.broadcast_created(&job_info).await;
 
         Ok(job_id)
@@ -184,6 +191,7 @@ impl JobRegistry {
             last_heartbeat: None,
             timeout_seconds,
             next_retry_at: None, // Process immediately
+            executing_since: None,
         };
 
         let job_info = entry.to_job_info();
@@ -291,6 +299,7 @@ impl JobRegistry {
             last_heartbeat: None,
             timeout_seconds,
             next_retry_at: None,
+            executing_since: None,
         };
 
         let job_info = entry.to_job_info();

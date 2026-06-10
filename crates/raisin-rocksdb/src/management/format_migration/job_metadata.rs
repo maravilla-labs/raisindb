@@ -122,6 +122,7 @@ fn migrate_job_metadata_cf(db: &DB) -> Result<()> {
             last_heartbeat: old_entry.last_heartbeat,
             timeout_seconds: old_entry.timeout_seconds,
             next_retry_at: None,
+            executing_since: None,
         };
 
         let new_value = rmp_serde::to_vec(&new_entry)
@@ -196,6 +197,7 @@ fn migrate_job_type_cf(db: &Arc<DB>) -> Result<()> {
             last_heartbeat: old_entry.last_heartbeat,
             timeout_seconds: old_entry.timeout_seconds,
             next_retry_at: old_entry.next_retry_at,
+            executing_since: None,
         };
 
         let new_value = rmp_serde::to_vec(&new_entry)

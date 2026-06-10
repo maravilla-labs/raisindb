@@ -431,7 +431,10 @@ pub(super) async fn check_trigger_filters<S: Storage + 'static>(
                     .cloned()
                     .and_then(|v| {
                         serde_json::from_value::<
-                            std::collections::HashMap<String, raisin_models::nodes::properties::PropertyValue>,
+                            std::collections::HashMap<
+                                String,
+                                raisin_models::nodes::properties::PropertyValue,
+                            >,
                         >(v)
                         .ok()
                     })
