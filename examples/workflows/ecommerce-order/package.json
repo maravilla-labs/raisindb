@@ -1,0 +1,12 @@
+{
+  "name": "raisindb-example-ecommerce-order",
+  "private": true,
+  "type": "module",
+  "description": "Ecommerce order fulfillment: SAGA with two compensations (LIFO), fraud gate with human review, cancel path",
+  "scripts": {
+    "start": "node run.mjs"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../../../packages/raisin-client-js"
+  }
+}

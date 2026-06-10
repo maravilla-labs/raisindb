@@ -16,11 +16,12 @@ import {
 import { browser } from '$app/environment';
 import { localeClause } from '$lib/stores/locale';
 
-// Configuration
-const RAISIN_URL = 'wss://192.168.1.180:8443/sys/default/launchpad-next';
-const TENANT_ID = 'default';
-const REPOSITORY = 'launchpad-next';
-const WORKSPACE_NAME = 'launchpad';
+// Configuration (override via .env / .env.local — see .env.example)
+const RAISIN_URL =
+  import.meta.env.VITE_RAISIN_WS_URL ?? 'ws://localhost:8081/sys/default/launchpad-next';
+const TENANT_ID = import.meta.env.VITE_RAISIN_TENANT ?? 'default';
+const REPOSITORY = import.meta.env.VITE_RAISIN_REPO ?? 'launchpad-next';
+const WORKSPACE_NAME = import.meta.env.VITE_RAISIN_WORKSPACE ?? 'launchpad';
 
 // Singleton client instance
 let clientInstance: RaisinClient | null = null;

@@ -1,0 +1,12 @@
+{
+  "name": "raisindb-example-approval-flow",
+  "private": true,
+  "type": "module",
+  "description": "Human-in-the-loop approval workflow with the RaisinDB SDK",
+  "scripts": {
+    "start": "node run.mjs"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../../../packages/raisin-client-js"
+  }
+}

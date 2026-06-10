@@ -1,0 +1,12 @@
+{
+  "name": "raisindb-example-ai-approval-flow",
+  "private": true,
+  "type": "module",
+  "description": "AI workflow: agent step + agent-as-assignee with human escalation",
+  "scripts": {
+    "start": "node run.mjs"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../../../packages/raisin-client-js"
+  }
+}
