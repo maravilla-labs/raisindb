@@ -1,0 +1,23 @@
+{
+  "name": "vue-board",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Vue 3 demo for the RaisinDB JS SDK Vue composables (createRaisinVue)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../../packages/raisin-client-js",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  }
+}
