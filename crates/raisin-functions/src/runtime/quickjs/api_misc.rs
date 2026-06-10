@@ -312,6 +312,38 @@ pub(super) fn register_tasks_internal<'js>(
     Ok(())
 }
 
+/// Register internal flows API functions.
+pub(super) fn register_flows_internal<'js>(
+    ctx: &Ctx<'js>,
+    internal: &Object<'js>,
+    api: Arc<dyn FunctionApi>,
+) -> std::result::Result<(), rquickjs::Error> {
+    // flows_run - start a raisin:Flow by path (fire-and-forget).
+    // Returns { instance_id, job_id, status: "queued" } as JSON.
+    let api_run = api.clone();
+    let run_fn = Function::new(
+        ctx.clone(),
+        move |flow_path: String, input_json: Option<String>| {
+            let api = api_run.clone();
+            let input: serde_json::Value = input_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::json!({}));
+            let result = run_async_blocking(async move { api.flow_run(&flow_path, input).await });
+            match result {
+                Ok(v) => serde_json::to_string(&v)
+                    .unwrap_or(r#"{"error":"serialization failed"}"#.to_string()),
+                Err(e) => {
+                    tracing::error!(error = %e, "flow_run failed");
+                    json_error(&e)
+                }
+            }
+        },
+    )?;
+    internal.set("flows_run", run_fn)?;
+
+    Ok(())
+}
+
 /// Register internal crypto API functions.
 pub(super) fn register_crypto_internal<'js>(
     ctx: &Ctx<'js>,

@@ -399,7 +399,7 @@ globalThis.raisin = {
             if (typeof __raisin_internal.flows_run !== 'function') {
                 throw new Error('raisin.flows.run() is not available — server binary may need rebuild: cargo build --release --package raisin-server --features "storage-rocksdb,websocket,pgwire"');
             }
-            const result = __raisin_internal.flows_run(flowPath, input || {});
+            const result = __raisin_internal.flows_run(flowPath, JSON.stringify(input || {}));
             const parsed = JSON.parse(result);
             if (parsed && parsed.error) {
                 throw new Error(parsed.message || parsed.error);

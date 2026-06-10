@@ -21,8 +21,8 @@ use super::api_admin::register_admin_internal;
 use super::api_fetch::register_fetch_internal;
 use super::api_misc::{
     register_ai_internal, register_crypto_internal, register_events_internal,
-    register_functions_internal, register_http_internal, register_sql_internal,
-    register_tasks_internal,
+    register_flows_internal, register_functions_internal, register_http_internal,
+    register_sql_internal, register_tasks_internal,
 };
 use super::api_nodes::register_nodes_internal;
 use super::api_resources::register_resources_internal;
@@ -112,6 +112,7 @@ fn setup_raisin_api<'js>(
     register_ai_internal(ctx, &internal, api.clone())?;
     register_resources_internal(ctx, &internal, api.clone())?;
     register_functions_internal(ctx, &internal, api.clone())?;
+    register_flows_internal(ctx, &internal, api.clone())?;
     register_tasks_internal(ctx, &internal, api.clone())?;
     register_transaction_internal(ctx, &internal, api.clone())?;
     register_admin_internal(ctx, &internal, api.clone())?;
