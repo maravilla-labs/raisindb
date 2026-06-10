@@ -1,19 +1,21 @@
 /**
  * Mock Configuration Editor
  *
- * Allows users to configure optional function mocking for test runs.
- * Functions can be set to:
- * - 'real': Execute the actual function
+ * Allows users to configure optional function and AI agent mocking for
+ * test runs. Each can be set to:
+ * - 'real': Execute the actual function/agent
  * - 'passthrough': Return input as output (no execution)
  * - 'mock_output': Return a predefined mock value
  *
- * AI agents always run with real behavior and cannot be mocked.
+ * Functions are keyed by function path (mock_functions); AI steps (agent
+ * steps, AI containers, chat) are keyed by agent path (mock_agents), so
+ * AI flows can be tested without a provider.
  */
 
 import { useCallback } from 'react'
-import { ChevronDown, ChevronRight, Wand2, ArrowRight, Code2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Wand2, ArrowRight, Code2, Bot } from 'lucide-react'
 import { useState } from 'react'
-import type { FlowDefinition, FlowNode } from '@raisindb/flow-designer'
+import type { FlowDefinition, FlowNode, RaisinReference } from '@raisindb/flow-designer'
 import { isFlowStep, isFlowContainer } from '@raisindb/flow-designer'
 
 export type MockBehavior = 'real' | 'passthrough' | 'mock_output'
@@ -25,40 +27,64 @@ export interface FunctionMock {
 }
 
 export interface MockConfig {
-  [functionPath: string]: FunctionMock
+  [path: string]: FunctionMock
 }
 
 export interface MockConfigEditorProps {
-  /** The workflow definition to extract function steps from */
+  /** The workflow definition to extract function/agent steps from */
   workflow: FlowDefinition
-  /** Current mock configuration */
+  /** Current function mock configuration (keyed by function path) */
   mockConfig: MockConfig
-  /** Called when mock configuration changes */
+  /** Called when function mock configuration changes */
   onChange: (config: MockConfig) => void
+  /** Current agent mock configuration (keyed by agent path) */
+  agentMockConfig?: MockConfig
+  /** Called when agent mock configuration changes */
+  onAgentChange?: (config: MockConfig) => void
 }
 
-// Extract all function paths from workflow nodes
-function extractFunctionPaths(nodes: FlowNode[]): Array<{ stepId: string; path: string; name: string }> {
-  const paths: Array<{ stepId: string; path: string; name: string }> = []
+interface MockTarget {
+  stepId: string
+  path: string
+  name: string
+  kind: 'function' | 'agent'
+}
+
+function refToPath(ref: RaisinReference | string | undefined): string {
+  if (!ref) return ''
+  if (typeof ref === 'string') return ref
+  return ref['raisin:path'] || ref['raisin:ref'] || ''
+}
+
+// Extract all mockable function/agent paths from workflow nodes
+function extractMockTargets(nodes: FlowNode[]): MockTarget[] {
+  const targets: MockTarget[] = []
 
   for (const node of nodes) {
-    if (isFlowStep(node) && node.properties.function_ref) {
-      const ref = node.properties.function_ref
-      const path = typeof ref === 'string' ? ref : ref['raisin:path'] || ref['raisin:ref'] || ''
-      if (path) {
-        paths.push({
-          stepId: node.id,
-          path,
-          name: node.properties.action || node.id,
-        })
+    if (isFlowStep(node)) {
+      const name = node.properties.action || node.id
+      const functionPath = refToPath(node.properties.function_ref)
+      if (functionPath) {
+        targets.push({ stepId: node.id, path: functionPath, name, kind: 'function' })
+      }
+      const agentPath =
+        refToPath(node.properties.agent_ref) || refToPath(node.properties.chat_config?.agent_ref)
+      if (agentPath) {
+        targets.push({ stepId: node.id, path: agentPath, name, kind: 'agent' })
       }
     }
-    if (isFlowContainer(node) && node.children) {
-      paths.push(...extractFunctionPaths(node.children))
+    if (isFlowContainer(node)) {
+      const aiAgentPath = refToPath(node.ai_config?.agent_ref)
+      if (aiAgentPath) {
+        targets.push({ stepId: node.id, path: aiAgentPath, name: node.id, kind: 'agent' })
+      }
+      if (node.children) {
+        targets.push(...extractMockTargets(node.children))
+      }
     }
   }
 
-  return paths
+  return targets
 }
 
 const BEHAVIOR_OPTIONS: Array<{ value: MockBehavior; label: string; icon: React.ReactNode; description: string }> = [
@@ -66,7 +92,7 @@ const BEHAVIOR_OPTIONS: Array<{ value: MockBehavior; label: string; icon: React.
     value: 'real',
     label: 'Real',
     icon: <Wand2 className="w-4 h-4" />,
-    description: 'Execute the actual function',
+    description: 'Execute the actual function/agent',
   },
   {
     value: 'passthrough',
@@ -82,39 +108,61 @@ const BEHAVIOR_OPTIONS: Array<{ value: MockBehavior; label: string; icon: React.
   },
 ]
 
-export function MockConfigEditor({ workflow, mockConfig, onChange }: MockConfigEditorProps) {
+export function MockConfigEditor({
+  workflow,
+  mockConfig,
+  onChange,
+  agentMockConfig = {},
+  onAgentChange,
+}: MockConfigEditorProps) {
   const [expanded, setExpanded] = useState(false)
 
-  // Extract function paths from workflow
-  const functionPaths = extractFunctionPaths(workflow.nodes)
+  // Extract function/agent paths from workflow
+  const targets = extractMockTargets(workflow.nodes)
+  const functionTargets = targets.filter((t) => t.kind === 'function')
+  const agentTargets = targets.filter((t) => t.kind === 'agent' && onAgentChange)
 
-  // Count mocked functions
-  const mockCount = Object.values(mockConfig).filter((m) => m.behavior !== 'real').length
+  // Count mocked entries
+  const mockCount =
+    Object.values(mockConfig).filter((m) => m.behavior !== 'real').length +
+    Object.values(agentMockConfig).filter((m) => m.behavior !== 'real').length
+
+  const configFor = useCallback(
+    (kind: MockTarget['kind']) => (kind === 'function' ? mockConfig : agentMockConfig),
+    [mockConfig, agentMockConfig]
+  )
+
+  const emitFor = useCallback(
+    (kind: MockTarget['kind']) => (kind === 'function' ? onChange : onAgentChange!),
+    [onChange, onAgentChange]
+  )
 
   // Update mock behavior
   const updateBehavior = useCallback(
-    (path: string, behavior: MockBehavior) => {
-      onChange({
-        ...mockConfig,
+    (kind: MockTarget['kind'], path: string, behavior: MockBehavior) => {
+      const config = configFor(kind)
+      emitFor(kind)({
+        ...config,
         [path]: {
-          ...mockConfig[path],
+          ...config[path],
           behavior,
-          mock_output: behavior === 'mock_output' ? mockConfig[path]?.mock_output ?? {} : undefined,
+          mock_output: behavior === 'mock_output' ? config[path]?.mock_output ?? {} : undefined,
         },
       })
     },
-    [mockConfig, onChange]
+    [configFor, emitFor]
   )
 
   // Update mock output
   const updateMockOutput = useCallback(
-    (path: string, outputStr: string) => {
+    (kind: MockTarget['kind'], path: string, outputStr: string) => {
       try {
         const output = JSON.parse(outputStr)
-        onChange({
-          ...mockConfig,
+        const config = configFor(kind)
+        emitFor(kind)({
+          ...config,
           [path]: {
-            ...mockConfig[path],
+            ...config[path],
             mock_output: output,
           },
         })
@@ -122,10 +170,11 @@ export function MockConfigEditor({ workflow, mockConfig, onChange }: MockConfigE
         // Invalid JSON, ignore
       }
     },
-    [mockConfig, onChange]
+    [configFor, emitFor]
   )
 
-  if (functionPaths.length === 0) {
+  const allTargets = [...functionTargets, ...agentTargets]
+  if (allTargets.length === 0) {
     return null
   }
 
@@ -142,38 +191,45 @@ export function MockConfigEditor({ workflow, mockConfig, onChange }: MockConfigE
           ) : (
             <ChevronRight className="w-4 h-4 text-gray-400" />
           )}
-          <span className="text-sm font-medium text-white">Function Mocking</span>
+          <span className="text-sm font-medium text-white">Function & AI Mocking</span>
           {mockCount > 0 && (
             <span className="px-2 py-0.5 text-xs bg-amber-500/20 text-amber-400 rounded-full">
               {mockCount} mocked
             </span>
           )}
         </div>
-        <span className="text-xs text-gray-500">{functionPaths.length} functions</span>
+        <span className="text-xs text-gray-500">
+          {functionTargets.length} functions
+          {agentTargets.length > 0 ? `, ${agentTargets.length} agents` : ''}
+        </span>
       </button>
 
       {/* Content */}
       {expanded && (
         <div className="p-4 space-y-3 bg-black/20">
           <p className="text-xs text-gray-500">
-            Configure how functions behave during test runs. AI agents always run with real behavior.
+            Configure how functions and AI agents behave during test runs. Mocked AI steps return
+            their mock value without calling a provider.
           </p>
 
-          {functionPaths.map(({ stepId, path, name }) => {
-            const mock = mockConfig[path]
+          {allTargets.map(({ stepId, path, name, kind }) => {
+            const mock = configFor(kind)[path]
             const isMocked = mock && mock.behavior !== 'real'
 
             return (
               <div
-                key={stepId}
+                key={`${kind}:${stepId}:${path}`}
                 className={`border rounded-lg transition-colors ${
                   isMocked ? 'border-amber-500/30 bg-amber-500/5' : 'border-white/10 bg-white/5'
                 }`}
               >
-                {/* Function header */}
+                {/* Target header */}
                 <div className="flex items-center justify-between px-3 py-2">
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">{name}</p>
+                    <p className="text-sm font-medium text-white truncate flex items-center gap-1.5">
+                      {kind === 'agent' && <Bot className="w-3.5 h-3.5 text-purple-400" />}
+                      {name}
+                    </p>
                     <p className="text-xs text-gray-500 truncate">{path}</p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -183,11 +239,11 @@ export function MockConfigEditor({ workflow, mockConfig, onChange }: MockConfigE
                       onChange={(e) => {
                         const behavior = e.target.value as MockBehavior
                         if (behavior === 'real') {
-                          const newConfig = { ...mockConfig }
+                          const newConfig = { ...configFor(kind) }
                           delete newConfig[path]
-                          onChange(newConfig)
+                          emitFor(kind)(newConfig)
                         } else {
-                          updateBehavior(path, behavior)
+                          updateBehavior(kind, path, behavior)
                         }
                       }}
                       className="px-2 py-1 text-xs bg-black/30 border border-white/10 rounded text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -207,7 +263,7 @@ export function MockConfigEditor({ workflow, mockConfig, onChange }: MockConfigE
                     <label className="block text-xs text-gray-400 mb-1">Mock Output (JSON)</label>
                     <textarea
                       value={JSON.stringify(mock.mock_output ?? {}, null, 2)}
-                      onChange={(e) => updateMockOutput(path, e.target.value)}
+                      onChange={(e) => updateMockOutput(kind, path, e.target.value)}
                       rows={3}
                       className="w-full px-2 py-1.5 text-xs font-mono bg-black/40 border border-white/10 rounded text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
                       placeholder='{"result": "mocked"}'

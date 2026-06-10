@@ -32,6 +32,7 @@ import {
   Terminal,
   Link2,
   Workflow,
+  Inbox,
   Bot
 } from 'lucide-react'
 
@@ -495,6 +496,18 @@ export default function RepositoryLayout() {
             >
               <Workflow className="w-5 h-5 flex-shrink-0" />
               {!sidebarCollapsed && <span>Flow Instances</span>}
+            </Link>
+            <Link
+              to={`/${repo}/inbox`}
+              className={`flex items-center rounded-lg transition-colors ${
+                isActive('/inbox')
+                  ? 'bg-primary-500 text-white font-semibold'
+                  : 'text-white/80 hover:bg-white/5 hover:text-white'
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
+              title={sidebarCollapsed ? 'Inbox' : ''}
+            >
+              <Inbox className="w-5 h-5 flex-shrink-0" />
+              {!sidebarCollapsed && <span>Inbox</span>}
             </Link>
             <Link
               to={`/${repo}/agents`}

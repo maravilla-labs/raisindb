@@ -21,12 +21,21 @@ import {
   Plus,
   Trash2,
   MessageSquare,
+  Filter,
+  Route,
+  Trophy,
+  Repeat,
 } from 'lucide-react'
 import { AgentPicker } from './AgentPicker'
+import { AssigneePicker } from './AssigneePicker'
+import { ConditionBuilder } from './ConditionBuilder'
 import type {
   FlowStep,
   FlowContainer,
   FlowStepProperties,
+  ContainerRouterConfig,
+  ContainerRefereeConfig,
+  LoopConfig,
 } from '@raisindb/flow-designer'
 import { isFlowStep, isFlowContainer } from '@raisindb/flow-designer'
 
@@ -121,9 +130,13 @@ interface StepConfigPanelProps {
   node: FlowStep | FlowContainer
   /** Callback when step properties change */
   onUpdateStep: (updates: Partial<FlowStepProperties>) => void
-  /** Callback when container properties change */
+  /** Callback when container properties change (null removes router/referee/loop/prompt) */
   onUpdateContainer?: (updates: {
     ai_config?: AiContainerConfig
+    router?: ContainerRouterConfig | null
+    referee?: ContainerRefereeConfig | null
+    loop?: LoopConfig | null
+    prompt?: string | null
     timeout_ms?: number
     properties?: Record<string, unknown>
   }) => void
@@ -151,8 +164,12 @@ export function StepConfigPanel({
   const isStep = isFlowStep(node)
   const isContainer = isFlowContainer(node)
   const isAiContainer = isContainer && (node as FlowContainer).container_type === 'ai_sequence'
+  const isOrContainer = isContainer && (node as FlowContainer).container_type === 'or'
+  const isCompetitionContainer = isContainer && (node as FlowContainer).container_type === 'competition'
+  const isLoopContainer = isContainer && (node as FlowContainer).container_type === 'loop'
   const isHumanTask = isStep && (node as FlowStep).properties?.step_type === 'human_task'
   const isChatStep = isStep && (node as FlowStep).properties?.step_type === 'chat'
+  const isAiAgentStep = isStep && (node as FlowStep).properties?.step_type === 'ai_agent'
 
   // Get current values for step
   const stepProps = isStep ? (node as FlowStep).properties : null
@@ -164,9 +181,25 @@ export function StepConfigPanel({
   const containerNode = isContainer ? (node as FlowContainer) : null
   const aiConfig = (containerNode as any)?.ai_config as AiContainerConfig | undefined
 
+  // Router config (OR containers) and referee config (competition containers)
+  const routerConfig = containerNode?.router
+  const refereeConfig = containerNode?.referee
+  const sharedPrompt = containerNode?.prompt
+  // Loop config (loop containers)
+  const loopConfig = containerNode?.loop
+
   // Agent picker state
   const [showAgentPicker, setShowAgentPicker] = useState(false)
   const [showChatAgentPicker, setShowChatAgentPicker] = useState(false)
+  const [showRouterAgentPicker, setShowRouterAgentPicker] = useState(false)
+  const [showRefereeAgentPicker, setShowRefereeAgentPicker] = useState(false)
+
+  // AI Router section collapsed state (OR containers)
+  const [routerExpanded, setRouterExpanded] = useState(true)
+
+  // Assignee picker state (human tasks)
+  const [showAssigneePicker, setShowAssigneePicker] = useState(false)
+  const [showEscalationPicker, setShowEscalationPicker] = useState(false)
 
   // Chat step configuration
   const chatConfig = stepProps?.chat_config as {
@@ -248,6 +281,47 @@ export function StepConfigPanel({
         on_error: aiConfig?.on_error || 'stop',
         ...updates,
       },
+    })
+    onDirty()
+  }
+
+  // Router handlers (OR containers)
+  const handleRouterChange = (updates: Partial<ContainerRouterConfig>) => {
+    if (!onUpdateContainer || !isOrContainer) return
+    onUpdateContainer({
+      router: { ...routerConfig, ...updates } as ContainerRouterConfig,
+    })
+    onDirty()
+  }
+
+  const handleRouterToggle = (enabled: boolean) => {
+    if (!onUpdateContainer || !isOrContainer) return
+    onUpdateContainer({
+      router: enabled ? ({ ...routerConfig } as ContainerRouterConfig) : null,
+    })
+    onDirty()
+  }
+
+  // Referee handlers (competition containers)
+  const handleRefereeChange = (updates: Partial<ContainerRefereeConfig>) => {
+    if (!onUpdateContainer || !isCompetitionContainer) return
+    onUpdateContainer({
+      referee: { ...refereeConfig, ...updates } as ContainerRefereeConfig,
+    })
+    onDirty()
+  }
+
+  const handleSharedPromptChange = (value: string) => {
+    if (!onUpdateContainer || !isCompetitionContainer) return
+    onUpdateContainer({ prompt: value || null })
+    onDirty()
+  }
+
+  // Loop handlers (loop containers)
+  const handleLoopChange = (updates: Partial<LoopConfig>) => {
+    if (!onUpdateContainer || !isLoopContainer) return
+    onUpdateContainer({
+      loop: { over: '', ...loopConfig, ...updates } as LoopConfig,
     })
     onDirty()
   }
@@ -356,14 +430,75 @@ export function StepConfigPanel({
                   onUpdateStep({ assignee: e.target.value })
                   onDirty()
                 }}
-                placeholder="users/manager"
+                placeholder="/users/manager or /agents/support"
                 className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
               />
+              <button
+                onClick={() => setShowAssigneePicker(true)}
+                className="px-3 py-2 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 hover:bg-amber-500/20 transition-colors text-sm flex-shrink-0"
+                title="Browse users and AI agents"
+              >
+                Browse
+              </button>
             </div>
             <p className="text-xs text-gray-500">
-              Path to the user who will receive this task (e.g., users/manager)
+              Path to the user or AI agent who will receive this task (e.g., /users/manager or /agents/support)
             </p>
           </div>
+
+          {/* Escalation Assignee */}
+          <div className="space-y-2">
+            <label className="block text-xs text-gray-400">Escalation assignee</label>
+            <div className="flex items-center gap-2">
+              <User className="w-4 h-4 text-gray-400 flex-shrink-0" />
+              <input
+                type="text"
+                value={stepProps?.escalation_assignee || ''}
+                onChange={(e) => {
+                  onUpdateStep({ escalation_assignee: e.target.value || undefined })
+                  onDirty()
+                }}
+                placeholder="/users/manager"
+                className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+              <button
+                onClick={() => setShowEscalationPicker(true)}
+                className="px-3 py-2 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 hover:bg-amber-500/20 transition-colors text-sm flex-shrink-0"
+                title="Browse users and AI agents"
+              >
+                Browse
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Human to escalate to when an AI agent assignee fails or is not confident
+            </p>
+          </div>
+
+          {/* Min Confidence (only when assignee is an AI agent) */}
+          {stepProps?.assignee?.startsWith('/agents/') && (
+            <div className="space-y-2">
+              <label className="block text-xs text-gray-400">Min confidence</label>
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={stepProps?.min_confidence ?? ''}
+                onChange={(e) => {
+                  const value = e.target.value
+                  onUpdateStep({
+                    min_confidence: value === '' ? undefined : parseFloat(value),
+                  })
+                  onDirty()
+                }}
+                placeholder="0.8"
+                className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+              <p className="text-xs text-gray-500">
+                Minimum confidence (0-1) required from the AI agent before escalating to the escalation assignee
+              </p>
+            </div>
+          )}
 
           {/* Description */}
           <div className="space-y-2">
@@ -633,6 +768,39 @@ export function StepConfigPanel({
       {/* Step Configuration (for non-human-task and non-chat steps only) */}
       {isStep && !isHumanTask && !isChatStep && (
         <>
+          {/* AI Agent Tool Loop (ai_agent steps only) */}
+          {isAiAgentStep && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Bot className="w-4 h-4 text-purple-400" />
+                <h4 className="text-sm font-medium text-white">Agent Tools</h4>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Max tool iterations</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  step={1}
+                  value={stepProps?.max_tool_iterations ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    onUpdateStep({
+                      max_tool_iterations: value === '' ? undefined : parseInt(value),
+                    })
+                    onDirty()
+                  }}
+                  placeholder="5 (default)"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+                <p className="text-xs text-gray-500">
+                  The agent's own tools run in a bounded internal loop (default 5 iterations).
+                  Tool usage is reported in the step output as tools_used and tool_iterations.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Retry Configuration */}
           <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -765,6 +933,24 @@ export function StepConfigPanel({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Step Condition */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Filter className="w-4 h-4 text-green-400" />
+              <h4 className="text-sm font-medium text-white">Condition</h4>
+            </div>
+            <p className="text-xs text-gray-500">
+              Optional expression that must evaluate to true for this step to execute
+            </p>
+            <ConditionBuilder
+              condition={stepProps?.condition || ''}
+              onChange={(newCondition) => {
+                onUpdateStep({ condition: newCondition || undefined })
+                onDirty()
+              }}
+            />
           </div>
 
           {/* Execution Identity (FR-028) */}
@@ -1040,6 +1226,372 @@ export function StepConfigPanel({
             </div>
           )}
 
+          {/* AI Router (OR containers): agent picks the branch when no rule matched */}
+          {isOrContainer && onUpdateContainer && (
+            <div className="space-y-3 pt-3 border-t border-white/10">
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => setRouterExpanded(!routerExpanded)}
+                  className="flex items-center gap-2 text-left"
+                >
+                  <Route className="w-4 h-4 text-orange-400" />
+                  <h4 className="text-sm font-medium text-white">AI Router</h4>
+                  <ChevronDown
+                    className={`w-4 h-4 text-gray-400 transition-transform ${
+                      routerExpanded ? '' : '-rotate-90'
+                    }`}
+                  />
+                </button>
+                <div
+                  className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors ${
+                    routerConfig ? 'bg-orange-500' : 'bg-gray-600'
+                  }`}
+                  onClick={() => handleRouterToggle(!routerConfig)}
+                  title={routerConfig ? 'Disable AI router' : 'Enable AI router'}
+                >
+                  <div
+                    className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
+                      routerConfig ? 'left-5' : 'left-0.5'
+                    }`}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">
+                REL rules always run first - the agent decides the branch only when no rule matched.
+              </p>
+
+              {routerConfig && routerExpanded && (
+                <div className="space-y-4">
+                  {/* Router Agent */}
+                  <div className="space-y-2">
+                    <label className="block text-xs text-gray-400">
+                      Routing Agent <span className="text-red-400">*</span>
+                    </label>
+                    {routerConfig.agent_ref ? (
+                      <div className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-white/10 rounded-lg">
+                        <Bot className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                        <span className="text-sm text-white truncate flex-1">
+                          {routerConfig.agent_ref['raisin:path'] || routerConfig.agent_ref['raisin:ref']}
+                        </span>
+                        <button
+                          onClick={() => setShowRouterAgentPicker(true)}
+                          className="text-gray-400 hover:text-white"
+                          title="Change agent"
+                        >
+                          <Link2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setShowRouterAgentPicker(true)}
+                        className="w-full flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/30 rounded-lg text-orange-400 hover:bg-orange-500/20 transition-colors"
+                      >
+                        <Bot className="w-4 h-4" />
+                        <span className="text-sm">Select Routing Agent</span>
+                      </button>
+                    )}
+                    <p className="text-xs text-gray-500">
+                      The agent that picks the branch. Its answer is schema-constrained to the child ids.
+                    </p>
+                  </div>
+
+                  {/* Routing Prompt */}
+                  <div className="space-y-2">
+                    <label className="block text-xs text-gray-400">Routing Instructions</label>
+                    <textarea
+                      value={routerConfig.prompt || ''}
+                      onChange={(e) => handleRouterChange({ prompt: e.target.value || undefined })}
+                      placeholder="Order from {{ input.customer }} for {{ input.amount }} CHF. Route it."
+                      rows={3}
+                      className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+                    />
+                    <p className="text-xs text-gray-500">
+                      Template expressions supported. The agent also sees each branch's id and title.
+                    </p>
+                  </div>
+
+                  {/* Min Confidence */}
+                  <div className="space-y-2">
+                    <label className="block text-xs text-gray-400">Min confidence</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={routerConfig.min_confidence ?? ''}
+                      onChange={(e) => {
+                        const value = e.target.value
+                        handleRouterChange({
+                          min_confidence: value === '' ? undefined : parseFloat(value),
+                        })
+                      }}
+                      placeholder="0.6"
+                      className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    />
+                    <p className="text-xs text-gray-500">
+                      Below this confidence the default branch runs (or the container is skipped)
+                    </p>
+                  </div>
+
+                  {/* Default Branch */}
+                  <div className="space-y-2">
+                    <label className="block text-xs text-gray-400">Default branch</label>
+                    <div className="relative">
+                      <select
+                        value={routerConfig.default_branch || ''}
+                        onChange={(e) =>
+                          handleRouterChange({ default_branch: e.target.value || undefined })
+                        }
+                        className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      >
+                        <option value="" className="bg-gray-800">
+                          Skip container
+                        </option>
+                        {(containerNode?.children || []).map((child) => (
+                          <option key={child.id} value={child.id} className="bg-gray-800">
+                            {(isFlowStep(child) && child.properties.action) || child.id}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      Fallback when the agent is not confident or picks an invalid branch
+                    </p>
+                  </div>
+
+                  <p className="text-xs text-gray-500">
+                    The decision is recorded as a step output: routed_to, routed_by_agent, reasoning, confidence.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Referee (competition containers) */}
+          {isCompetitionContainer && onUpdateContainer && (
+            <div className="space-y-4 pt-3 border-t border-white/10">
+              <div className="flex items-center gap-2">
+                <Trophy className="w-4 h-4 text-yellow-400" />
+                <h4 className="text-sm font-medium text-white">Referee</h4>
+              </div>
+
+              {/* Referee Agent */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">
+                  Referee Agent <span className="text-red-400">*</span>
+                </label>
+                {refereeConfig?.agent_ref ? (
+                  <div className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-white/10 rounded-lg">
+                    <Bot className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                    <span className="text-sm text-white truncate flex-1">
+                      {refereeConfig.agent_ref['raisin:path'] || refereeConfig.agent_ref['raisin:ref']}
+                    </span>
+                    <button
+                      onClick={() => setShowRefereeAgentPicker(true)}
+                      className="text-gray-400 hover:text-white"
+                      title="Change agent"
+                    >
+                      <Link2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowRefereeAgentPicker(true)}
+                    className="w-full flex items-center gap-2 px-3 py-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 hover:bg-yellow-500/20 transition-colors"
+                  >
+                    <Bot className="w-4 h-4" />
+                    <span className="text-sm">Select Referee Agent</span>
+                  </button>
+                )}
+                <p className="text-xs text-gray-500">
+                  Judges the competitors' answers - accepts a winner or sends feedback for another round
+                </p>
+              </div>
+
+              {/* Shared Task Prompt */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Shared Task</label>
+                <textarea
+                  value={sharedPrompt || ''}
+                  onChange={(e) => handleSharedPromptChange(e.target.value)}
+                  placeholder="Write a tagline for {{ input.product }}."
+                  rows={3}
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-yellow-500 resize-none"
+                />
+                <p className="text-xs text-gray-500">
+                  Every competitor answers this task (template expressions supported). Children may override it with their own prompt.
+                </p>
+              </div>
+
+              {/* Referee Prompt */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Judging Instructions (optional)</label>
+                <textarea
+                  value={refereeConfig?.prompt || ''}
+                  onChange={(e) => handleRefereeChange({ prompt: e.target.value || undefined })}
+                  placeholder="Prefer concise, brand-safe answers..."
+                  rows={3}
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-yellow-500 resize-none"
+                />
+              </div>
+
+              {/* Min Confidence */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Min confidence</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={refereeConfig?.min_confidence ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    handleRefereeChange({
+                      min_confidence: value === '' ? undefined : parseFloat(value),
+                    })
+                  }}
+                  placeholder="0.7 (default)"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                />
+                <p className="text-xs text-gray-500">
+                  Below this the output's confident flag is false (the winner is still produced)
+                </p>
+              </div>
+
+              {/* Max Rounds */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Max refinement rounds</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={refereeConfig?.max_rounds ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    handleRefereeChange({
+                      max_rounds: value === '' ? undefined : parseInt(value),
+                    })
+                  }}
+                  placeholder="1 (default)"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                />
+                <p className="text-xs text-gray-500">
+                  Refinement rounds after the initial one - on the final round the referee must accept
+                </p>
+              </div>
+
+              {/* Hint */}
+              <div className="p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                <p className="text-xs text-yellow-200/80 flex items-start gap-1.5">
+                  <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                  <span>
+                    Children must be AI agent steps - each can use a different LLM. Gate on
+                    steps.&lt;id&gt;.confidence downstream to add human review.
+                  </span>
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Loop (loop containers) */}
+          {isLoopContainer && onUpdateContainer && (
+            <div className="space-y-4 pt-3 border-t border-white/10">
+              <div className="flex items-center gap-2">
+                <Repeat className="w-4 h-4 text-teal-400" />
+                <h4 className="text-sm font-medium text-white">Loop</h4>
+              </div>
+              <p className="text-xs text-gray-500">
+                The children run once per item of the collection. Results are aggregated on the
+                container's step output (results, count).
+              </p>
+
+              {/* Collection expression */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">
+                  Loop over <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={loopConfig?.over || ''}
+                  onChange={(e) => handleLoopChange({ over: e.target.value })}
+                  placeholder="${steps.pick_candidates.candidates}"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
+                />
+                <p className="text-xs text-gray-500">
+                  Template expression resolving to an array (input.*, steps.*, trigger.*)
+                </p>
+              </div>
+
+              {/* Item variable */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Item variable</label>
+                <input
+                  type="text"
+                  value={loopConfig?.item || ''}
+                  onChange={(e) => handleLoopChange({ item: e.target.value || undefined })}
+                  placeholder="item (default)"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
+                />
+                <p className="text-xs text-gray-500">
+                  The current item, referenced in the body as {'${item}'} / {'{{ item }}'} (snake_case)
+                </p>
+              </div>
+
+              {/* Index variable */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Index variable (optional)</label>
+                <input
+                  type="text"
+                  value={loopConfig?.index || ''}
+                  onChange={(e) => handleLoopChange({ index: e.target.value || undefined })}
+                  placeholder="e.g. item_index"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
+                />
+                <p className="text-xs text-gray-500">Exposes the 0-based iteration index</p>
+              </div>
+
+              {/* Max iterations */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Max iterations</label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={loopConfig?.max_iterations ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    handleLoopChange({
+                      max_iterations: value === '' ? undefined : parseInt(value),
+                    })
+                  }}
+                  placeholder="unlimited"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                />
+                <p className="text-xs text-gray-500">
+                  Safety cap - iterate at most this many items of the collection
+                </p>
+              </div>
+
+              {/* Until condition */}
+              <div className="space-y-2">
+                <label className="block text-xs text-gray-400">Until (early exit, optional)</label>
+                <input
+                  type="text"
+                  value={loopConfig?.until || ''}
+                  onChange={(e) => handleLoopChange({ until: e.target.value || undefined })}
+                  placeholder="steps.ask.response == 'accept'"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
+                />
+                <p className="text-xs text-gray-500">
+                  REL condition evaluated after each iteration - when true the loop stops with the
+                  results collected so far
+                </p>
+              </div>
+            </div>
+          )}
+
           <p className="text-xs text-gray-500">
             Select a step inside this container to configure retry and timeout settings.
           </p>
@@ -1067,6 +1619,56 @@ export function StepConfigPanel({
             setShowChatAgentPicker(false)
           }}
           onClose={() => setShowChatAgentPicker(false)}
+        />
+      )}
+
+      {/* Agent Picker Modal (OR Container Router) */}
+      {showRouterAgentPicker && (
+        <AgentPicker
+          currentAgentPath={routerConfig?.agent_ref?.['raisin:path']}
+          onSelect={(ref) => {
+            handleRouterChange({ agent_ref: ref })
+            setShowRouterAgentPicker(false)
+          }}
+          onClose={() => setShowRouterAgentPicker(false)}
+        />
+      )}
+
+      {/* Agent Picker Modal (Competition Referee) */}
+      {showRefereeAgentPicker && (
+        <AgentPicker
+          currentAgentPath={refereeConfig?.agent_ref?.['raisin:path']}
+          onSelect={(ref) => {
+            handleRefereeChange({ agent_ref: ref })
+            setShowRefereeAgentPicker(false)
+          }}
+          onClose={() => setShowRefereeAgentPicker(false)}
+        />
+      )}
+
+      {/* Assignee Picker Modal (Human Task) */}
+      {showAssigneePicker && (
+        <AssigneePicker
+          currentPath={stepProps?.assignee}
+          onSelect={(path) => {
+            onUpdateStep({ assignee: path })
+            onDirty()
+            setShowAssigneePicker(false)
+          }}
+          onClose={() => setShowAssigneePicker(false)}
+        />
+      )}
+
+      {/* Escalation Assignee Picker Modal (Human Task) */}
+      {showEscalationPicker && (
+        <AssigneePicker
+          currentPath={stepProps?.escalation_assignee}
+          onSelect={(path) => {
+            onUpdateStep({ escalation_assignee: path })
+            onDirty()
+            setShowEscalationPicker(false)
+          }}
+          onClose={() => setShowEscalationPicker(false)}
         />
       )}
     </div>

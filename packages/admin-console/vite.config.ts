@@ -16,7 +16,10 @@ export default defineConfig({
   },
   // WASM support
   optimizeDeps: {
-    exclude: ['@raisindb/sql-wasm'],
+    // Linked workspace packages must not be dep-cached: Vite's pre-bundle
+    // otherwise serves stale code after the linked source changes (e.g. new
+    // palette items in the flow designer) until a manual --force restart.
+    exclude: ['@raisindb/sql-wasm', '@raisindb/flow-designer'],
   },
   server: {
     proxy: {
@@ -25,6 +28,11 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/workspaces': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      // Management + SSE event streams (/management/events/jobs, ...)
+      '/management': {
         target: 'http://localhost:8081',
         changeOrigin: true,
       },

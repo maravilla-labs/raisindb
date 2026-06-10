@@ -44,6 +44,7 @@ import ExecutionLogs from './pages/management/ExecutionLogs'
 import FlowExecutionMonitor from './pages/management/FlowExecutionMonitor'
 import RepositoryExecutionLogs from './pages/RepositoryExecutionLogs'
 import RepositoryFlows from './pages/RepositoryFlows'
+import RepositoryInbox from './pages/RepositoryInbox'
 import { SqlQuery } from './pages/SqlQuery'
 import FunctionsIDE from './pages/functions/FunctionsIDE'
 import SystemUpdatesPage from './pages/SystemUpdatesPage'
@@ -171,6 +172,7 @@ function App() {
           <Route path="query" element={<SqlQuery />} />
           <Route path="logs" element={<RepositoryExecutionLogs />} />
           <Route path="flows" element={<RepositoryFlows />} />
+          <Route path="inbox" element={<RepositoryInbox />} />
           <Route path="settings/*" element={<RepositorySettings />} />
           <Route path="system-updates" element={<SystemUpdatesPage />} />
           <Route path="management/*" element={<RepositoryManagement />} />

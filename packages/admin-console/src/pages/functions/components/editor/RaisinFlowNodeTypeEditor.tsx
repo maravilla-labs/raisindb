@@ -5,15 +5,28 @@
  */
 
 import { useEffect, useCallback, useState, useRef, useMemo } from 'react'
-import { Power, PowerOff, Loader2, Link2, Unlink, X } from 'lucide-react'
+import {
+  Power,
+  PowerOff,
+  Loader2,
+  Link2,
+  Unlink,
+  X,
+  FlaskConical,
+  ChevronDown,
+  ChevronRight,
+  UserCheck,
+} from 'lucide-react'
 import { Allotment } from 'allotment'
 import 'allotment/dist/style.css'
-import { useFunctionsContext } from '../../hooks'
+import { useFunctionsContext, useFlowRun } from '../../hooks'
 import { nodesApi } from '../../../../api/nodes'
-import { flowsApi } from '../../../../api/flows'
-import { jobsApi } from '../../../../api/jobs'
 import CommitDialog from '../../../../components/CommitDialog'
+import TaskDetail from '../../../../components/inbox/TaskDetail'
 import { FunctionPicker } from './FunctionPicker'
+import { FunctionIOPanel } from './FunctionIOPanel'
+import { MockConfigEditor, type MockConfig } from './test/MockConfigEditor'
+import { StepOutputInspector, type StepOutput } from './test/StepOutputInspector'
 import {
   FlowDesigner,
   FlowToolbar,
@@ -22,7 +35,6 @@ import {
   isFlowContainer,
   useFlowValidation,
   type FlowDesignerHandle,
-  type ExecutionState,
 } from '@raisindb/flow-designer'
 import type {
   FlowDefinition,
@@ -31,7 +43,6 @@ import type {
   FlowTheme,
   ValidationIssue,
 } from '@raisindb/flow-designer'
-import { subscribeToFlowEvents } from '../../../../api/flows'
 import type {
   EditorTab,
   FlowProperties,
@@ -204,14 +215,22 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
   // Run dialog state
   const [showRunDialog, setShowRunDialog] = useState(false)
   const [runPayload, setRunPayload] = useState('')
-  const [isExecuting, setIsExecuting] = useState(false)
+  const [testMode, setTestMode] = useState(false)
+  const [mockConfig, setMockConfig] = useState<MockConfig>({})
+  const [agentMockConfig, setAgentMockConfig] = useState<MockConfig>({})
+  const [taskBusy, setTaskBusy] = useState(false)
+  const [stepOutputsExpanded, setStepOutputsExpanded] = useState(true)
 
-  // Execution state for canvas highlighting
-  const [executionState, setExecutionState] = useState<ExecutionState>({
-    completedNodeIds: new Set<string>(),
-    failedNodeIds: new Set<string>(),
-    isExecuting: false,
+  // Run + SSE wiring (execution state, events, step outputs, waiting task)
+  const flowRun = useFlowRun({
+    repo,
+    flowPath: tab.path,
+    flowName: properties.name || tab.name,
+    addLog,
+    clearLogs,
   })
+  const { executionState } = flowRun
+  const isExecuting = flowRun.running
 
   // Toolbar state (synced from FlowDesigner)
   const [toolbarState, setToolbarState] = useState({
@@ -328,6 +347,60 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
     }
     return undefined
   }, [targetStepId, workflowData.nodes, findNodeById])
+
+  // Adapt the hook's step outputs to the StepOutputInspector's Map shape
+  const stepOutputsMap = useMemo(() => {
+    const map = new Map<string, StepOutput>()
+    for (const [stepId, record] of Object.entries(flowRun.stepOutputs)) {
+      const node = findNodeById(workflowData.nodes, stepId)
+      const stepName =
+        record.stepName ||
+        (node && isFlowStep(node) ? node.properties.action : undefined) ||
+        stepId
+      map.set(stepId, {
+        stepId,
+        stepName,
+        status: record.status,
+        output: record.output,
+        error: record.error,
+        durationMs: record.durationMs,
+        timestamp: record.timestamp,
+      })
+    }
+    return map
+  }, [flowRun.stepOutputs, workflowData.nodes, findNodeById])
+
+  // Start a run (real or test) from the Run dialog
+  const handleStartRun = useCallback(async () => {
+    let payload: unknown
+    try {
+      payload = runPayload.trim() ? JSON.parse(runPayload) : {}
+    } catch (error) {
+      addLog({ level: 'error', message: `Failed to start flow: ${error}`, timestamp: new Date().toISOString() })
+      return
+    }
+    await flowRun.start({
+      test: testMode,
+      input: payload,
+      mockConfig: testMode ? mockConfig : undefined,
+      agentMockConfig: testMode ? agentMockConfig : undefined,
+    })
+  }, [runPayload, testMode, mockConfig, agentMockConfig, flowRun, addLog])
+
+  // Complete the waiting human task inline
+  const handleCompleteTask = useCallback(
+    async (response: Record<string, unknown>) => {
+      setTaskBusy(true)
+      try {
+        await flowRun.completeWaitingTask(response)
+      } catch (error) {
+        addLog({ level: 'error', message: `Failed to complete task: ${error}`, timestamp: new Date().toISOString() })
+      } finally {
+        setTaskBusy(false)
+      }
+    },
+    [flowRun, addLog]
+  )
 
   // Load flow data
   useEffect(() => {
@@ -600,7 +673,14 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
 
           {/* Center panel: Visual workflow designer */}
           <Allotment.Pane minSize={300}>
-            <div className="h-full">
+            <div className="h-full relative">
+              {/* TEST indicator while a test run is active */}
+              {flowRun.running && flowRun.isTestRun && (
+                <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-semibold tracking-wider pointer-events-none">
+                  <FlaskConical className="w-3.5 h-3.5" />
+                  TEST
+                </div>
+              )}
               <FlowDesigner
                 ref={flowDesignerRef}
                 flow={workflowData}
@@ -680,6 +760,33 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
                         )}
                       </div>
 
+                      {/* Function input/output schemas + arguments editor */}
+                      {selectedNode.properties.function_ref &&
+                        (!selectedNode.properties.step_type ||
+                          selectedNode.properties.step_type === 'default') && (
+                          <div className="pt-4 border-t border-white/10">
+                            <FunctionIOPanel
+                              repo={repo}
+                              functionPath={
+                                selectedNode.properties.function_ref['raisin:path'] ||
+                                selectedNode.properties.function_ref['raisin:ref']
+                              }
+                              stepId={selectedNode.id}
+                              args={
+                                selectedNode.properties.arguments as
+                                  | Record<string, unknown>
+                                  | undefined
+                              }
+                              onChangeArguments={(args) => {
+                                flowDesignerRef.current?.updateStepProperty(selectedNode.id, {
+                                  arguments: args,
+                                })
+                                markTabDirty(tab.id, true)
+                              }}
+                            />
+                          </div>
+                        )}
+
                       {/* Disabled toggle */}
                       <div className="flex items-center justify-between pt-2">
                         <span className="text-xs text-gray-500">Disabled</span>
@@ -750,21 +857,19 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
                         </div>
                       )}
 
-                      {/* AI Container Configuration */}
-                      {selectedNode.container_type === 'ai_sequence' && (
-                        <div className="pt-4 border-t border-white/10">
-                          <StepConfigPanel
-                            node={selectedNode}
-                            onUpdateStep={() => {}}
-                            onUpdateContainer={(updates) => {
-                              // Update container with AI config
-                              flowDesignerRef.current?.updateContainer(selectedNode.id, updates as any)
-                              markTabDirty(tab.id, true)
-                            }}
-                            onDirty={() => markTabDirty(tab.id, true)}
-                          />
-                        </div>
-                      )}
+                      {/* Container Configuration (AI config, router, referee, merge strategy) */}
+                      <div className="pt-4 border-t border-white/10">
+                        <StepConfigPanel
+                          node={selectedNode}
+                          onUpdateStep={() => {}}
+                          onUpdateContainer={(updates) => {
+                            // Update container (ai_config / router / referee / prompt / timeout)
+                            flowDesignerRef.current?.updateContainer(selectedNode.id, updates as any)
+                            markTabDirty(tab.id, true)
+                          }}
+                          onDirty={() => markTabDirty(tab.id, true)}
+                        />
+                      </div>
                     </div>
                   ) : (
                     <p className="text-sm text-gray-500">
@@ -810,10 +915,18 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
           />
 
           {/* Dialog */}
-          <div className="relative bg-gray-900 border border-white/10 rounded-xl shadow-2xl w-full max-w-lg">
+          <div className="relative bg-gray-900 border border-white/10 rounded-xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[85vh]">
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
-              <h2 className="text-lg font-semibold text-white">Run Flow</h2>
+              <div className="flex items-center gap-3">
+                <h2 className="text-lg font-semibold text-white">Run Flow</h2>
+                {flowRun.running && flowRun.isTestRun && (
+                  <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-semibold tracking-wider">
+                    <FlaskConical className="w-3.5 h-3.5" />
+                    TEST
+                  </span>
+                )}
+              </div>
               <button
                 onClick={() => setShowRunDialog(false)}
                 className="p-1 text-gray-400 hover:text-white rounded hover:bg-white/10"
@@ -823,7 +936,7 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
             </div>
 
             {/* Content */}
-            <div className="p-6 space-y-4">
+            <div className="p-6 space-y-4 overflow-y-auto">
               <div className="space-y-2">
                 <label className="block text-sm text-gray-400">Input Payload (JSON)</label>
                 <textarea
@@ -835,6 +948,42 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
                 />
               </div>
 
+              {/* Test run toggle */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <FlaskConical className="w-4 h-4 text-amber-400" />
+                  <div>
+                    <label className="block text-sm text-white">Test run</label>
+                    <p className="text-xs text-gray-500">
+                      Execute via the test endpoint with optional function mocking
+                    </p>
+                  </div>
+                </div>
+                <div
+                  className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors ${
+                    testMode ? 'bg-amber-500' : 'bg-gray-600'
+                  }`}
+                  onClick={() => setTestMode((prev) => !prev)}
+                >
+                  <div
+                    className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
+                      testMode ? 'left-5' : 'left-0.5'
+                    }`}
+                  />
+                </div>
+              </div>
+
+              {/* Mock configuration (test runs only) */}
+              {testMode && (
+                <MockConfigEditor
+                  workflow={workflowData}
+                  mockConfig={mockConfig}
+                  onChange={setMockConfig}
+                  agentMockConfig={agentMockConfig}
+                  onAgentChange={setAgentMockConfig}
+                />
+              )}
+
               <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
                 <p className="text-sm text-blue-400">
                   Flow: <span className="font-medium text-white">{properties.name || tab.name}</span>
@@ -843,6 +992,52 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
                   The flow will be executed with the provided payload.
                 </p>
               </div>
+
+              {/* Waiting human task: complete inline without leaving the editor */}
+              {flowRun.waitingTask && (
+                <div className="border border-amber-500/40 bg-amber-500/5 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center gap-2 text-amber-400">
+                    <UserCheck className="w-4 h-4" />
+                    <span className="text-sm font-medium">Flow is waiting on a human task</span>
+                  </div>
+                  <TaskDetail
+                    task={flowRun.waitingTask}
+                    onComplete={handleCompleteTask}
+                    busy={taskBusy}
+                  />
+                </div>
+              )}
+
+              {/* Step outputs (collapsible) */}
+              {flowRun.instanceId && (
+                <div className="border border-white/10 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setStepOutputsExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between px-4 py-3 bg-white/5 hover:bg-white/10 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      {stepOutputsExpanded ? (
+                        <ChevronDown className="w-4 h-4 text-gray-400" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-400" />
+                      )}
+                      <span className="text-sm font-medium text-white">Step Outputs</span>
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {flowRun.running ? 'Running…' : 'Finished'}
+                    </span>
+                  </button>
+                  {stepOutputsExpanded && (
+                    <div className="p-3 bg-black/20">
+                      <StepOutputInspector
+                        stepOutputs={stepOutputsMap}
+                        selectedStepId={selectedStepId}
+                        onSelectStep={handleSelectNode}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Footer */}
@@ -851,177 +1046,14 @@ export function RaisinFlowNodeTypeEditor({ tab }: RaisinFlowNodeTypeEditorProps)
                 onClick={() => setShowRunDialog(false)}
                 className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-white/10 transition-colors"
               >
-                Cancel
+                Close
               </button>
               <button
-                onClick={async () => {
-                  setIsExecuting(true)
-                  clearLogs()
-                  // Reset execution state
-                  setExecutionState({
-                    completedNodeIds: new Set<string>(),
-                    failedNodeIds: new Set<string>(),
-                    isExecuting: true,
-                  })
-                  addLog({ level: 'info', message: `Starting flow: ${properties.name || tab.name}`, timestamp: new Date().toISOString() })
-
-                  try {
-                    const payload = runPayload.trim() ? JSON.parse(runPayload) : {}
-                    const result = await flowsApi.runFlow(repo, {
-                      flow_path: tab.path,
-                      input: payload,
-                    })
-
-                    addLog({ level: 'info', message: `Flow queued: ${result.instance_id}`, timestamp: new Date().toISOString() })
-
-                    // Subscribe to flow step events for canvas highlighting
-                    const unsubscribeFlow = subscribeToFlowEvents(repo, result.instance_id, {
-                      onStepStarted: (event) => {
-                        addLog({ level: 'debug', message: `Step started: ${event.node_id}`, timestamp: event.timestamp })
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: event.node_id,
-                          waitingNodeId: undefined,
-                        }))
-                      },
-                      onStepCompleted: (event) => {
-                        addLog({ level: 'debug', message: `Step completed: ${event.node_id} (${event.duration_ms}ms)`, timestamp: event.timestamp })
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: undefined,
-                          completedNodeIds: new Set([...prev.completedNodeIds, event.node_id]),
-                        }))
-                      },
-                      onStepFailed: (event) => {
-                        addLog({ level: 'error', message: `Step failed: ${event.node_id} - ${event.error}`, timestamp: event.timestamp })
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: undefined,
-                          failedNodeIds: new Set([...prev.failedNodeIds, event.node_id]),
-                        }))
-                      },
-                      onFlowWaiting: (event) => {
-                        addLog({ level: 'info', message: `Flow waiting: ${event.reason}`, timestamp: event.timestamp })
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: undefined,
-                          waitingNodeId: event.node_id,
-                        }))
-                      },
-                      onFlowResumed: (event) => {
-                        addLog({ level: 'info', message: `Flow resumed from: ${event.node_id}`, timestamp: event.timestamp })
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          waitingNodeId: undefined,
-                        }))
-                      },
-                      onFlowCompleted: (event) => {
-                        addLog({ level: 'info', message: `Flow completed (${event.total_duration_ms}ms)`, timestamp: event.timestamp })
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: undefined,
-                          waitingNodeId: undefined,
-                          isExecuting: false,
-                        }))
-                        setIsExecuting(false)
-                        unsubscribeFlow()
-                      },
-                      onFlowFailed: (event) => {
-                        addLog({ level: 'error', message: `Flow failed: ${event.error}`, timestamp: event.timestamp })
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: undefined,
-                          waitingNodeId: undefined,
-                          isExecuting: false,
-                        }))
-                        setIsExecuting(false)
-                        unsubscribeFlow()
-                      },
-                      onLog: (event) => {
-                        addLog({
-                          level: event.level as 'debug' | 'info' | 'warn' | 'error',
-                          message: event.message,
-                          timestamp: event.timestamp,
-                        })
-                      },
-                    })
-
-                    // Subscribe to job events for this specific job (for overall status)
-                    const unsubscribeJob = jobsApi.subscribeToJobEvents((event) => {
-                      if (event.job_id !== result.job_id) return
-
-                      // Add any logs from the event
-                      if (event.logs) {
-                        for (const log of event.logs) {
-                          addLog({
-                            level: log.level as 'debug' | 'info' | 'warn' | 'error',
-                            message: log.message,
-                            timestamp: log.timestamp,
-                          })
-                        }
-                      }
-
-                      // Check for completion (backup in case flow events don't arrive)
-                      if (event.status === 'Completed') {
-                        if (event.function_result) {
-                          // Check for flow_status and flow_error in the result
-                          const flowResult = event.function_result as { flow_status?: string; flow_error?: string; instance_id?: string; current_node_id?: string }
-                          if (flowResult.flow_status === 'failed' && flowResult.flow_error) {
-                            addLog({ level: 'error', message: `Flow failed: ${flowResult.flow_error}`, timestamp: new Date().toISOString() })
-                            // Highlight the failed step if we know which one
-                            const failedNode = flowResult.current_node_id
-                            setExecutionState((prev) => ({
-                              ...prev,
-                              isExecuting: false,
-                              failedNodeIds: failedNode ? new Set([...prev.failedNodeIds, failedNode]) : prev.failedNodeIds,
-                            }))
-                          } else if (flowResult.flow_status === 'waiting') {
-                            addLog({ level: 'info', message: `Flow waiting (instance: ${flowResult.instance_id})`, timestamp: new Date().toISOString() })
-                          } else if (flowResult.flow_status === 'completed') {
-                            addLog({ level: 'info', message: `Flow completed (instance: ${flowResult.instance_id})`, timestamp: new Date().toISOString() })
-                          } else {
-                            addLog({ level: 'info', message: `Result: ${JSON.stringify(event.function_result)}`, timestamp: new Date().toISOString() })
-                          }
-                        }
-                        // Clean up both subscriptions
-                        setIsExecuting(false)
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: undefined,
-                          waitingNodeId: undefined,
-                          isExecuting: false,
-                        }))
-                        unsubscribeJob()
-                        unsubscribeFlow()
-                      } else if (event.status.startsWith('Failed')) {
-                        addLog({ level: 'error', message: `Job failed: ${event.error || 'Unknown error'}`, timestamp: new Date().toISOString() })
-                        setIsExecuting(false)
-                        setExecutionState((prev) => ({
-                          ...prev,
-                          currentNodeId: undefined,
-                          waitingNodeId: undefined,
-                          isExecuting: false,
-                        }))
-                        unsubscribeJob()
-                        unsubscribeFlow()
-                      }
-                    })
-
-                    setShowRunDialog(false)
-                  } catch (error) {
-                    addLog({ level: 'error', message: `Failed to start flow: ${error}`, timestamp: new Date().toISOString() })
-                    setIsExecuting(false)
-                    setExecutionState({
-                      completedNodeIds: new Set<string>(),
-                      failedNodeIds: new Set<string>(),
-                      isExecuting: false,
-                    })
-                  }
-                }}
+                onClick={() => void handleStartRun()}
                 disabled={isExecuting}
                 className="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isExecuting ? 'Running...' : 'Run Flow'}
+                {isExecuting ? 'Running...' : testMode ? 'Run Test' : 'Run Flow'}
               </button>
             </div>
           </div>

@@ -68,6 +68,8 @@ export interface NodePickerProps {
   config: NodePickerConfig
   onSelect: (node: SelectedNode) => void
   onClose: () => void
+  /** Optional extra content rendered below the header (e.g. tab toggle) */
+  headerExtra?: React.ReactNode
 }
 
 interface TreeNode extends Node {
@@ -84,7 +86,7 @@ interface SearchResult {
   description?: string
 }
 
-export function NodePicker({ config, onSelect, onClose }: NodePickerProps) {
+export function NodePicker({ config, onSelect, onClose, headerExtra }: NodePickerProps) {
   const {
     nodeType,
     title,
@@ -194,7 +196,7 @@ export function NodePicker({ config, onSelect, onClose }: NodePickerProps) {
       try {
         const sql = `
           SELECT id, path, name, properties
-          FROM ${workspace}
+          FROM '${workspace}'
           WHERE node_type = '${nodeType}'
             AND (
               COALESCE(name, '') ILIKE '%' || $1 || '%'
@@ -463,6 +465,11 @@ export function NodePicker({ config, onSelect, onClose }: NodePickerProps) {
           <h3 className="text-lg font-medium text-white">{title}</h3>
           <p className="text-sm text-gray-400">{subtitle}</p>
         </div>
+
+        {/* Optional extra header content (e.g. tab toggle) */}
+        {headerExtra && (
+          <div className="px-4 py-2 border-b border-white/10">{headerExtra}</div>
+        )}
 
         {/* Search Input */}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-white/10">

@@ -292,7 +292,7 @@ export interface FlowWorkflowStep extends FlowWorkflowNodeBase {
 /**
  * Container types for workflow containers
  */
-export type FlowContainerType = 'and' | 'or' | 'parallel' | 'ai_sequence'
+export type FlowContainerType = 'and' | 'or' | 'parallel' | 'ai_sequence' | 'competition' | 'loop'
 
 /**
  * Workflow container node

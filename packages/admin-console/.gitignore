@@ -1,0 +1,4 @@
+
+# API keys / local secrets
+*.env.grok_key
+examples/**/.env.local

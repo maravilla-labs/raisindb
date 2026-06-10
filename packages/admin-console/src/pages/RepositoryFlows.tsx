@@ -9,7 +9,7 @@
  * - Filter by status and search by path
  */
 
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, lazy, Suspense } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Workflow,
@@ -34,6 +34,9 @@ import { sseManager } from '../api/management'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast, ToastContainer } from '../components/Toast'
 
+// Lazily load the diagram view (pulls in @raisindb/flow-designer)
+const FlowInstanceDiagram = lazy(() => import('../components/flows/FlowInstanceDiagram'))
+
 // Flow instance interface matching raisin:FlowInstance node properties
 interface FlowInstance {
   id: string
@@ -54,6 +57,7 @@ interface FlowInstance {
   context?: {
     compensation_stack?: unknown[]
   }
+  flow_definition_snapshot?: unknown
 }
 
 // Status configuration for visual styling
@@ -85,6 +89,7 @@ export default function RepositoryFlows() {
   const [error, setError] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [expandedInstanceId, setExpandedInstanceId] = useState<string | null>(null)
+  const [expandedView, setExpandedView] = useState<'details' | 'diagram'>('details')
   const [, setTick] = useState(0)
   const [clearConfirm, setClearConfirm] = useState<{ title: string; message: string; confirmText: string; onConfirm: () => void } | null>(null)
   const { toasts, error: showError, warning: showWarning, closeToast } = useToast()
@@ -159,6 +164,7 @@ export default function RepositoryFlows() {
       variables: props.variables as Record<string, unknown>,
       wait_info: props.wait_info as FlowInstance['wait_info'],
       context: props.context as FlowInstance['context'],
+      flow_definition_snapshot: props.flow_definition_snapshot,
     }
   }
 
@@ -463,7 +469,10 @@ export default function RepositoryFlows() {
                     className={`grid grid-cols-[auto_1fr_120px_100px_100px_80px] gap-4 px-4 py-3 items-center hover:bg-white/5 cursor-pointer transition-colors ${
                       isFailed ? 'bg-red-500/5' : ''
                     }`}
-                    onClick={() => setExpandedInstanceId(isExpanded ? null : instance.id)}
+                    onClick={() => {
+                      setExpandedInstanceId(isExpanded ? null : instance.id)
+                      if (!isExpanded) setExpandedView('details')
+                    }}
                   >
                     {/* Expand Icon */}
                     <div className="text-zinc-500">
@@ -541,6 +550,38 @@ export default function RepositoryFlows() {
                   {isExpanded && (
                     <div className="px-4 pb-4 bg-black/20 border-t border-white/5">
                       <div className="pt-4 pl-9">
+                        {/* View Toggle: Details / Diagram */}
+                        <div className="mb-4 inline-flex rounded-lg bg-white/5 p-0.5">
+                          {(['details', 'diagram'] as const).map((view) => (
+                            <button
+                              key={view}
+                              onClick={() => setExpandedView(view)}
+                              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors capitalize ${
+                                expandedView === view
+                                  ? 'bg-purple-500 text-white'
+                                  : 'text-zinc-400 hover:text-white'
+                              }`}
+                            >
+                              {view}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Diagram View */}
+                        {expandedView === 'diagram' && repo && (
+                          <Suspense
+                            fallback={
+                              <div className="h-32 flex items-center justify-center text-sm text-zinc-500">
+                                Loading diagram…
+                              </div>
+                            }
+                          >
+                            <FlowInstanceDiagram repo={repo} instance={instance} />
+                          </Suspense>
+                        )}
+
+                        {expandedView === 'details' && (
+                        <>
                         {/* Error Display */}
                         {instance.error && (
                           <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
@@ -597,6 +638,8 @@ export default function RepositoryFlows() {
                               {JSON.stringify(instance.variables, null, 2)}
                             </pre>
                           </div>
+                        )}
+                        </>
                         )}
                       </div>
                     </div>

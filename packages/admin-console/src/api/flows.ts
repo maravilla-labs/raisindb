@@ -115,6 +115,43 @@ export interface RunFlowResponse {
   status: string
 }
 
+/** Mock behavior for a function during a test run */
+export type FlowMockBehavior = 'real' | 'passthrough' | 'mock_output'
+
+/** Mock configuration for a single function (mirrors `FunctionMock` in raisin-flow-runtime) */
+export interface FlowFunctionMock {
+  behavior: FlowMockBehavior
+  /** Mock output value (for `mock_output` behavior) */
+  mock_output?: unknown
+  /** Artificial delay in milliseconds */
+  mock_delay_ms?: number
+}
+
+/** Test run configuration (mirrors `TestRunConfig` in raisin-flow-runtime) */
+export interface FlowTestConfig {
+  /** Whether this is a test run */
+  is_test_run: boolean
+  /** Mock configuration keyed by function path */
+  mock_functions?: Record<string, FlowFunctionMock>
+  /** Mock configuration keyed by agent path (agent steps, AI containers, chat) */
+  mock_agents?: Record<string, FlowFunctionMock>
+  /** Whether to run in an isolated branch */
+  isolated_branch?: boolean
+  /** Name of the isolated branch (if created) */
+  branch_name?: string
+  /** Whether to auto-discard changes on completion */
+  auto_discard?: boolean
+}
+
+export interface TestFlowRequest {
+  /** Path to the raisin:Flow node */
+  flow_path: string
+  /** Input data passed to the flow */
+  input?: unknown
+  /** Test run configuration */
+  test_config?: FlowTestConfig
+}
+
 // API Functions
 
 /**
@@ -128,6 +165,30 @@ export async function runFlow(
   request: RunFlowRequest
 ): Promise<RunFlowResponse> {
   const response = await fetch(`/api/flows/${repo}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify(request),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`HTTP ${response.status}: ${errorText}`)
+  }
+
+  return response.json()
+}
+
+/**
+ * Run a flow in test mode
+ *
+ * Mirrors {@link runFlow} but posts to the `/test` endpoint, allowing function
+ * mocking and isolated-branch execution via `test_config`.
+ */
+export async function testFlow(
+  repo: string,
+  request: TestFlowRequest
+): Promise<RunFlowResponse> {
+  const response = await fetch(`/api/flows/${repo}/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify(request),
@@ -281,6 +342,7 @@ export async function deleteFlowInstance(
 // Convenience exports
 export const flowsApi = {
   runFlow,
+  testFlow,
   subscribeToFlowEvents,
   cancelFlowInstance,
   deleteFlowInstance,
