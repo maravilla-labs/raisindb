@@ -191,6 +191,21 @@ pub trait FunctionApi: Send + Sync {
     /// Call another function directly (function-to-function calls)
     async fn function_call(&self, function_path: &str, arguments: Value) -> Result<Value>;
 
+    // ========== Flow Operations ==========
+
+    /// Start a `raisin:Flow` by path (fire-and-forget).
+    ///
+    /// Returns `{ instance_id, job_id, status: "queued" }` - the flow runs
+    /// asynchronously via the job system; poll the flow instance API to
+    /// observe progress.
+    async fn flow_run(&self, flow_path: &str, input: Value) -> Result<Value> {
+        let _ = input;
+        Err(raisin_error::Error::Validation(format!(
+            "Flow execution is not available in this runtime (flow: {})",
+            flow_path
+        )))
+    }
+
     // ========== Transaction Operations ==========
 
     /// Begin a new transaction, returns transaction ID

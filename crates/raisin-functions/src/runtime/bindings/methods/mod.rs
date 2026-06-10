@@ -14,6 +14,7 @@ pub mod context;
 pub mod crypto;
 pub mod date;
 pub mod events;
+pub mod flows;
 pub mod functions;
 pub mod http;
 pub mod nodes;
@@ -38,6 +39,7 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(events::methods());
     methods.extend(tasks::methods());
     methods.extend(functions::methods());
+    methods.extend(flows::methods());
     methods.extend(notify::methods());
 
     // Resource operations

@@ -274,3 +274,21 @@ pub type FunctionCallCallback = Arc<
         + Send
         + Sync,
 >;
+
+/// Callback for raisin.flows.run(flowPath, input)
+///
+/// Starts a `raisin:Flow` node (functions workspace) by path in the current
+/// repository - fire-and-forget. The flow instance is created and a
+/// `FlowInstanceExecution` job is queued via the same service the HTTP
+/// `POST /api/flows/{repo}/run` handler uses; the callback does NOT wait
+/// for the flow to finish.
+///
+/// Returns `{ "instance_id": "...", "job_id": "...", "status": "queued" }`.
+pub type FlowRunCallback = Arc<
+    dyn Fn(
+            String, // flow_path (e.g., "/flows/fill-shift")
+            Value,  // flow input
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;

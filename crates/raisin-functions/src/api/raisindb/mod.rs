@@ -259,6 +259,12 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_function_call(function_path, arguments).await
     }
 
+    // ========== Flow Operations ==========
+
+    async fn flow_run(&self, flow_path: &str, input: Value) -> Result<Value> {
+        self.impl_flow_run(flow_path, input).await
+    }
+
     // ========== Date/Time Operations ==========
 
     fn date_now(&self) -> String {

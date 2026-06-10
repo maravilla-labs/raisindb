@@ -13,6 +13,80 @@ use raisin_binary::BinaryStorage;
 use raisin_storage::{transactional::TransactionalStorage, Storage, StorageScope};
 use std::sync::Arc;
 
+/// Node types whose `Created` event makes the unified job event handler
+/// enqueue an OOTB execution job (`raisin:AIToolCall` -> tool execution,
+/// `raisin:AIToolSingleCallResult` -> result aggregation). The flow engine
+/// executes its tool calls inline and persists these nodes purely as audit
+/// records, so publishing `Created` events for them would double-execute
+/// the tools. Everything else gets the same events NodeService publishes.
+const SUPPRESSED_CREATED_EVENT_TYPES: &[&str] =
+    &["raisin:AIToolCall", "raisin:AIToolSingleCallResult"];
+
+/// Publish a node event on the storage event bus, mirroring exactly what
+/// `NodeService` publishes after a write (see
+/// raisin-core/src/services/node_service/crud/{create,update}.rs).
+///
+/// The flow engine writes nodes through `storage.nodes()` directly (no
+/// NodeService), so without this the event bus never sees flow-created
+/// nodes: WebSocket subscriptions (e.g. an inbox watching
+/// `{home}/inbox/**` for `node:created`), trigger evaluation, fulltext
+/// indexing and embeddings all miss them.
+///
+/// Trigger evaluation is enqueued ONLY by the unified job event handler in
+/// response to these bus events (see
+/// raisin-rocksdb/src/jobs/event_handler/node_handlers.rs); the flow write
+/// path does not enqueue trigger evaluation separately, so publishing here
+/// fires triggers exactly once - same as the NodeService path.
+async fn publish_node_event<S>(
+    storage: &Arc<S>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node: &raisin_models::nodes::Node,
+    kind: raisin_storage::NodeEventKind,
+) where
+    S: Storage,
+{
+    use raisin_storage::BranchRepository;
+
+    if matches!(kind, raisin_storage::NodeEventKind::Created)
+        && SUPPRESSED_CREATED_EVENT_TYPES.contains(&node.node_type.as_str())
+    {
+        tracing::debug!(
+            node_id = %node.id,
+            node_type = %node.node_type,
+            "Suppressing Created event for flow-recorded tool-call node (flow executes tools inline)"
+        );
+        return;
+    }
+
+    // Same revision lookup NodeService performs after commit
+    let revision = match storage
+        .branches()
+        .get_branch(tenant_id, repo_id, branch)
+        .await
+    {
+        Ok(Some(b)) => b.head,
+        _ => raisin_hlc::HLC::new(0, 0),
+    };
+
+    storage
+        .event_bus()
+        .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
+            tenant_id: tenant_id.to_string(),
+            repository_id: repo_id.to_string(),
+            branch: branch.to_string(),
+            workspace_id: workspace.to_string(),
+            node_id: node.id.clone(),
+            node_type: Some(node.node_type.clone()),
+            revision,
+            kind,
+            path: Some(node.path.clone()),
+            metadata: None,
+        }));
+}
+
 /// Create node loader callback - loads nodes from storage
 pub(super) fn create_node_loader<S, B>(
     deps: &Arc<ExecutionDependencies<S, B>>,
@@ -110,11 +184,24 @@ where
                     .nodes()
                     .update(
                         StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                        existing,
+                        existing.clone(),
                         UpdateNodeOptions::default(),
                     )
                     .await
                     .map_err(|e| format!("Failed to update node: {}", e))?;
+
+                // Emit the same node:updated event NodeService would publish
+                // so WS subscriptions / triggers / indexing see flow writes
+                publish_node_event(
+                    &deps.storage,
+                    &tenant_id,
+                    &repo_id,
+                    &branch,
+                    &workspace,
+                    &existing,
+                    raisin_storage::NodeEventKind::Updated,
+                )
+                .await;
 
                 Ok(())
             })
@@ -203,6 +290,20 @@ where
                     )
                     .await
                     .map_err(|e| format!("Failed to create node: {}", e))?;
+
+                // Emit the same node:created event NodeService would publish
+                // so WS subscriptions (e.g. inbox `{home}/inbox/**`),
+                // triggers and indexing see flow-created nodes
+                publish_node_event(
+                    &deps.storage,
+                    &tenant_id,
+                    &repo_id,
+                    &branch,
+                    &workspace,
+                    &created,
+                    raisin_storage::NodeEventKind::Created,
+                )
+                .await;
 
                 serde_json::to_value(created)
                     .map_err(|e| format!("Failed to serialize created node: {}", e))

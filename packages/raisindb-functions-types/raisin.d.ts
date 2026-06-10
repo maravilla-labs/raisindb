@@ -265,6 +265,10 @@ declare namespace raisin {
     function emit(eventType: string, data: any): Promise<void>;
   }
 
+  namespace flows {
+    function run(flowPath: string, input: any): Promise<any>;
+  }
+
   namespace functions {
     function execute(functionPath: string, arguments: any, context: any): Promise<any>;
     function call(functionPath: string, arguments: any): Promise<any>;

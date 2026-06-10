@@ -32,6 +32,7 @@ pub use callbacks::{
     AIGetDefaultModelCallback,
     AIListModelsCallback,
     EmitEventCallback,
+    FlowRunCallback,
     FunctionCallCallback,
     FunctionExecuteCallback,
     FunctionExecuteContext,

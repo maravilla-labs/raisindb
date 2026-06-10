@@ -18,6 +18,7 @@
 
 pub mod ai;
 pub mod events;
+pub mod flows;
 pub mod functions;
 pub mod http;
 pub mod nodes;
@@ -159,6 +160,18 @@ where
                 tenant_id.clone(),
                 repo_id.clone(),
                 branch.clone(),
+            )),
+            _ => None,
+        },
+
+        // Flow run (raisin.flows.run) - only available if job system dependencies are provided
+        flow_run: match (&deps.job_registry, &deps.job_data_store) {
+            (Some(registry), Some(data_store)) => Some(flows::create_flow_run(
+                deps.clone(),
+                registry.clone(),
+                data_store.clone(),
+                repo_id.clone(),
+                auth_context.clone(),
             )),
             _ => None,
         },

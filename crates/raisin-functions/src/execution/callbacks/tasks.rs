@@ -166,9 +166,16 @@ where
                     .insert("due_at".to_string(), PropertyValue::Date(due_at.into()));
             }
 
-            // Create NodeService for the users workspace
-            let svc =
-                NodeService::new_with_context(storage, tenant, repo, branch, "users".to_string());
+            // Create NodeService for the inbox workspace. User homes (and
+            // their inbox children) live in raisin:access_control - the same
+            // workspace task_update/complete/query use.
+            let svc = NodeService::new_with_context(
+                storage,
+                tenant,
+                repo,
+                branch,
+                "raisin:access_control".to_string(),
+            );
 
             // Create the task node
             svc.create(node.clone()).await?;

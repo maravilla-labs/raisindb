@@ -36,4 +36,12 @@ impl RaisinFunctionApi {
 
         callback(function_path.to_string(), arguments).await
     }
+
+    pub(crate) async fn impl_flow_run(&self, flow_path: &str, input: Value) -> Result<Value> {
+        let callback = self.callbacks.flow_run.as_ref().ok_or_else(|| {
+            raisin_error::Error::Validation("Flow run callback not configured".to_string())
+        })?;
+
+        callback(flow_path.to_string(), input).await
+    }
 }
