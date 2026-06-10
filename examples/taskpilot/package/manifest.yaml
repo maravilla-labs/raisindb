@@ -1,0 +1,46 @@
+name: taskpilot
+version: 0.1.0
+title: TaskPilot
+description: >
+  Focused demo for the RaisinDB plan/task system. Provides the `projects`
+  workspace with a small launch checklist (raisin:Node items), three tool
+  functions (list-items, update-item, radio-check), and the Groq-backed
+  `pilot` planning agent (task_creation_enabled, approve_then_auto by
+  default) with its home folder in the `ai` workspace. The agent proposes a
+  plan, the UI approves or rejects it, and the tasks execute against the
+  checklist.
+author: SOLUTAS GmbH
+license: BSL-1.1
+icon: clipboard-check
+color: "#2563eb"
+keywords:
+  - plans
+  - tasks
+  - ai-agent
+  - demo
+category: examples
+
+# Depends on the builtin ai-tools package (raisin:AIAgent node type, `ai`
+# workspace, agent-handler + the planning tools create-plan/add-task/
+# update-task/get-plan-status) which is auto-installed on repository
+# creation.
+
+provides:
+  workspaces:
+    - projects
+  functions:
+    - /lib/taskpilot/list-items
+    - /lib/taskpilot/update-item
+    - /lib/taskpilot/radio-check
+
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:AIAgent
+  ai:
+    default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:Folder

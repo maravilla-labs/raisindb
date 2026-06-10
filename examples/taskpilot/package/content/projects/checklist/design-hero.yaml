@@ -1,0 +1,7 @@
+node_type: raisin:Node
+properties:
+  title: Design hero section
+  status: todo
+  owner: Iker
+  order: 2
+  notes: ""

@@ -1,0 +1,7 @@
+node_type: raisin:Node
+properties:
+  title: Draft landing copy
+  status: todo
+  owner: Mara
+  order: 1
+  notes: ""

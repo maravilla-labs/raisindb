@@ -1,0 +1,30 @@
+node_type: raisin:Function
+properties:
+  name: radio-check
+  title: Radio Check
+  description: >
+    Read-only morale check for the crew: reports checklist completion as a
+    flight-progress percentage plus a short aviation-style status call.
+    Takes no input and never changes anything.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties: {}
+  output_schema:
+    type: object
+    properties:
+      callsign:
+        type: string
+      completion_percent:
+        type: number
+      done:
+        type: integer
+      total:
+        type: integer
+      message:
+        type: string

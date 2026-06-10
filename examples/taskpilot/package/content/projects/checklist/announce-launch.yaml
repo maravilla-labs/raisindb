@@ -1,0 +1,7 @@
+node_type: raisin:Node
+properties:
+  title: Announce launch
+  status: todo
+  owner: Noa
+  order: 5
+  notes: ""

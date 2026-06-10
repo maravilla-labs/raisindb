@@ -1,0 +1,7 @@
+node_type: raisin:Node
+properties:
+  title: Set up analytics
+  status: todo
+  owner: Noa
+  order: 3
+  notes: ""

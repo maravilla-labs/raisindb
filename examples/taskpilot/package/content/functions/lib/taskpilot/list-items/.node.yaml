@@ -1,0 +1,27 @@
+node_type: raisin:Function
+properties:
+  name: list-items
+  title: List Checklist Items
+  description: >
+    List the items on the launch checklist with path, title, status
+    (todo/done), owner, order and notes. Optionally filter by status.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      status:
+        type: string
+        enum: [todo, done]
+        description: Only items with this status
+  output_schema:
+    type: object
+    properties:
+      items:
+        type: array
+        description: >
+          Matching items with path, title, status, owner, order, notes

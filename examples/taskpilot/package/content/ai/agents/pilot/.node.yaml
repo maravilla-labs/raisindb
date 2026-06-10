@@ -1,0 +1,10 @@
+node_type: raisin:Folder
+properties:
+  title: Pilot
+  agent_ref:
+    raisin:ref: ""
+    raisin:workspace: "functions"
+    raisin:path: "/agents/pilot"
+  user_id: "agent:pilot"
+  display_name: "Pilot"
+  max_turns: 10

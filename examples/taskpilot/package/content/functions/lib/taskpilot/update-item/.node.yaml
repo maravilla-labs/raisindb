@@ -1,0 +1,40 @@
+node_type: raisin:Function
+properties:
+  name: update-item
+  title: Update Checklist Item
+  description: >
+    Update a checklist item: set its status (todo/done) and/or replace its
+    notes. Pass the item node path (e.g. /checklist/design-hero) plus the
+    fields to change.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required:
+      - item_path
+    properties:
+      item_path:
+        type: string
+        description: Item node path, e.g. /checklist/design-hero
+      status:
+        type: string
+        enum: [todo, done]
+        description: New status for the item
+      notes:
+        type: string
+        description: Replacement notes text for the item
+  output_schema:
+    type: object
+    properties:
+      item_path:
+        type: string
+      title:
+        type: string
+      status:
+        type: string
+      notes:
+        type: string

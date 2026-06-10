@@ -1,0 +1,30 @@
+{
+  "name": "taskpilot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "React Router 7 demo for the RaisinDB plan/task system and the SDK React integration (createRaisinReact)",
+  "scripts": {
+    "setup": "node setup.mjs",
+    "dev": "react-router dev",
+    "build": "react-router build",
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../../packages/raisin-client-js",
+    "@react-router/node": "^7.17.0",
+    "isbot": "^5",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router": "^7.1.5"
+  },
+  "devDependencies": {
+    "@react-router/dev": "^7.1.5",
+    "@types/node": "^25.9.2",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}
