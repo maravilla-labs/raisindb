@@ -107,13 +107,20 @@ impl NodeRepositoryImpl {
         // 4. Add property indexes (delegates to indexing module)
         self.add_property_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
-        // 5. Add reference indexes (delegates to indexing module)
+        // 5. Add system property indexes (__name, __node_type, ...) - without
+        // these, nodes created through this batch path (e.g. deep create)
+        // are invisible to list_by_type
+        self.add_system_property_indexes(
+            batch, node, tenant_id, repo_id, branch, workspace, revision,
+        )?;
+
+        // 6. Add reference indexes (delegates to indexing module)
         self.add_reference_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
-        // 6. Add relation indexes (delegates to indexing module)
+        // 7. Add relation indexes (delegates to indexing module)
         self.add_relation_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
-        // 7. Add ORDERED_CHILDREN index entry (if order_label provided)
+        // 8. Add ORDERED_CHILDREN index entry (if order_label provided)
         if let Some(label) = order_label {
             // Use parent_id_override if provided (for copy operations where node.parent is a NAME not ID)
             // Otherwise use node.parent (which should be an ID for regular operations)

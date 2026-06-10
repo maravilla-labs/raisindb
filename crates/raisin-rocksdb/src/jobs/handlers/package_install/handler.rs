@@ -81,9 +81,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 package_version,
                 package_node_id,
             } => (
-                package_name.as_str(),
-                package_version.as_str(),
-                package_node_id.as_str(),
+                package_name.clone(),
+                package_version.clone(),
+                package_node_id.clone(),
             ),
             _ => {
                 return Err(Error::Validation(
@@ -92,6 +92,96 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             }
         };
 
+        // Status lifecycle: uploaded -> installing -> installed | failed
+        self.set_package_status(context, &package_node_id, "installing", None)
+            .await;
+
+        let result = self
+            .run_install(
+                job,
+                context,
+                &package_name,
+                &package_version,
+                &package_node_id,
+            )
+            .await;
+
+        if let Err(ref e) = result {
+            self.set_package_status(context, &package_node_id, "failed", Some(&e.to_string()))
+                .await;
+        }
+
+        result
+    }
+
+    /// Best-effort update of the package node's status (and error detail).
+    ///
+    /// Failures here are logged but never fail the install job itself. If the
+    /// repository's raisin:Package NodeType predates the `error` property
+    /// (strict mode rejects unknown properties), the write is retried without
+    /// the error detail so the status itself always lands.
+    pub(super) async fn set_package_status(
+        &self,
+        context: &JobContext,
+        package_node_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) {
+        let attempt = |include_error: bool| async move {
+            let tx = self.storage.begin_context().await?;
+            tx.set_tenant_repo(&context.tenant_id, &context.repo_id)?;
+            tx.set_branch(&context.branch)?;
+            tx.set_actor("package-installer")?;
+            tx.set_auth_context(AuthContext::system())?;
+            tx.set_message(&format!("Set package status to {}", status))?;
+
+            if let Some(mut node) = tx.get_node("packages", package_node_id).await? {
+                node.properties.insert(
+                    "status".to_string(),
+                    PropertyValue::String(status.to_string()),
+                );
+                match error {
+                    Some(detail) if include_error => {
+                        node.properties.insert(
+                            "error".to_string(),
+                            PropertyValue::String(detail.to_string()),
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        node.properties.remove("error");
+                    }
+                }
+                tx.upsert_node("packages", &node).await?;
+                tx.commit().await?;
+            }
+            Ok::<(), Error>(())
+        };
+
+        let result = match attempt(true).await {
+            Err(Error::Validation(_)) if error.is_some() => attempt(false).await,
+            other => other,
+        };
+
+        if let Err(e) = result {
+            tracing::warn!(
+                package_node_id = %package_node_id,
+                status = %status,
+                error = %e,
+                "Failed to update package status"
+            );
+        }
+    }
+
+    /// Run the actual installation phases.
+    async fn run_install(
+        &self,
+        job: &JobInfo,
+        context: &JobContext,
+        package_name: &str,
+        package_version: &str,
+        package_node_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
         // Get install mode from context metadata (defaults to Keep)
         let install_mode: InstallMode = context
             .metadata
@@ -367,13 +457,18 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         let node = tx.get_node(workspace, package_node_id).await?;
 
         if let Some(mut node) = node {
-            // Update installed status
+            // Update installed status (lifecycle: ... -> installing -> installed)
             node.properties
                 .insert("installed".to_string(), PropertyValue::Boolean(true));
             node.properties.insert(
                 "installed_at".to_string(),
                 PropertyValue::String(chrono::Utc::now().to_rfc3339()),
             );
+            node.properties.insert(
+                "status".to_string(),
+                PropertyValue::String("installed".to_string()),
+            );
+            node.properties.remove("error");
 
             tx.upsert_node(workspace, &node).await?;
             tx.commit().await?;

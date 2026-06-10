@@ -292,19 +292,15 @@ impl FlowInstanceExecutionHandler {
                     .await
             }
             "timeout_check" => {
-                // Timeout check: verify if a waiting flow has timed out
-                // Resume with empty data - resume_flow will check timeout_at and fail if expired
+                // Timeout check / scheduled wake-up: no-op if the wait is not
+                // yet due; resumes Scheduled/Retry waits whose time arrived;
+                // enforces the timeout (timeout_edge or fail) for other waits.
                 tracing::debug!(
                     instance_id = %instance_id,
                     "Checking flow timeout"
                 );
 
-                raisin_flow_runtime::runtime::resume_flow(
-                    &instance_id,
-                    serde_json::Value::Null,
-                    &callbacks,
-                )
-                .await
+                raisin_flow_runtime::runtime::check_flow_timeout(&instance_id, &callbacks).await
             }
             _ => {
                 return Err(Error::Validation(format!(
@@ -350,6 +346,23 @@ impl FlowInstanceExecutionHandler {
                 })))
             }
             Err(e) => {
+                // Version conflicts mean another process is touching the
+                // instance right now (e.g. sibling parallel branches
+                // resuming the same parent). Fail the JOB so the job
+                // system's retry/backoff redelivers it.
+                if matches!(e, raisin_flow_runtime::types::FlowError::VersionConflict) {
+                    tracing::warn!(
+                        job_id = %job.id,
+                        instance_id = %instance_id,
+                        execution_type = %execution_type,
+                        "Flow instance busy (version conflict) - job will be retried"
+                    );
+                    return Err(Error::Backend(format!(
+                        "Flow instance {} busy, retry delivery: {}",
+                        instance_id, e
+                    )));
+                }
+
                 tracing::error!(
                     job_id = %job.id,
                     instance_id = %instance_id,

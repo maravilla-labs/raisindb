@@ -42,6 +42,17 @@ impl BranchRepositoryImpl {
             branch.head,
             new_head
         );
+        // Monotonic advance (see update_head): a racing earlier commit must
+        // never move the head back below an already-visible later revision.
+        if new_head <= branch.head {
+            tracing::debug!(
+                "update_head_to_batch: skipping non-advancing head update branch={} current={:?} candidate={:?}",
+                branch_name,
+                branch.head,
+                new_head
+            );
+            return Ok(branch);
+        }
         branch.head = new_head;
 
         let key = keys::branch_key(tenant_id, repo_id, branch_name);

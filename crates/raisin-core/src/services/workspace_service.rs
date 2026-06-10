@@ -121,14 +121,17 @@ impl<S: Storage> WorkspaceService<S> {
                 };
 
                 // Create ROOT node in a transaction to establish rev0
-                // This ensures the root node is part of the revision history
+                // This ensures the root node is part of the revision history.
+                // System auth context: RLS rejects transactions without one,
+                // and the route layer already enforced operator access.
                 let mut tx = Transaction::new(
                     self.storage.clone(),
                     tenant_id.to_string(),
                     repo_id.to_string(),
                     branch,
                     ws.name.clone(),
-                );
+                )
+                .with_auth_context(raisin_models::auth::AuthContext::system());
 
                 tx.create(root_node);
 

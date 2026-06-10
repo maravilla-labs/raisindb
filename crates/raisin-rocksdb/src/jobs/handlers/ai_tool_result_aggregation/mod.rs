@@ -139,70 +139,60 @@ impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
             )
             .await?;
 
-        // Handle single tool case (no aggregator)
-        if aggregator_opt.is_none() {
-            tracing::info!(
-                aggregator_path = %aggregator_path,
-                assistant_msg_path = %assistant_msg_path,
-                "No aggregator found - single tool case, creating AIToolResult directly"
-            );
-
-            let (tool_results, skip_continuation) = self
-                .collect_all_results(
-                    &context.tenant_id,
-                    &context.repo_id,
-                    &context.branch,
-                    &workspace,
-                    &assistant_msg_path,
-                )
-                .await?;
-
-            self.create_aggregated_result(
+        // Completion is decided by RECOUNTING persisted nodes, not by a
+        // stored counter: property updates are last-writer-wins, so a
+        // read-modify-write counter loses updates when two results complete
+        // concurrently (both read N, both write N+1, the turn stalls forever).
+        //
+        // Recounting is race-free here because every result node is committed
+        // BEFORE its aggregation job is enqueued — the job for the last
+        // result therefore always observes the full set.
+        let (tool_results, skip_continuation, tool_call_count) = self
+            .collect_all_results(
                 &context.tenant_id,
                 &context.repo_id,
                 &context.branch,
                 &workspace,
                 &assistant_msg_path,
-                tool_results,
-                skip_continuation,
             )
             .await?;
 
-            return Ok(Some(serde_json::json!({
-                "status": "complete",
-                "result_count": 1,
-                "single_tool": true
-            })));
-        }
+        // expected_count was computed when the aggregator was created and may
+        // undercount if tool-call nodes were still being created; take the
+        // max with the live tool-call count.
+        let expected_count = match &aggregator_opt {
+            Some(aggregator) => {
+                get_int_property(aggregator, "expected_count")?.max(tool_call_count as i64)
+            }
+            None => tool_call_count as i64,
+        };
+        let completed_count = tool_results.len() as i64;
 
-        let aggregator = aggregator_opt.unwrap();
-
-        // Get expected and current counts
-        let expected_count = get_int_property(&aggregator, "expected_count")?;
-
-        // Atomic increment via compare-and-swap
-        let new_count = self
-            .atomic_increment_completed_count(
+        if aggregator_opt.is_some() {
+            self.store_completed_count(
                 &context.tenant_id,
                 &context.repo_id,
                 &context.branch,
                 &workspace,
                 &aggregator_path,
+                completed_count,
             )
-            .await?;
+            .await;
+        }
 
         tracing::info!(
             aggregator_path = %aggregator_path,
-            new_count = new_count,
+            completed = completed_count,
             expected = expected_count,
-            "Incremented aggregator count"
+            has_aggregator = aggregator_opt.is_some(),
+            "Recounted aggregator state"
         );
 
         // Not all complete yet - exit early
-        if new_count < expected_count {
+        if completed_count < expected_count {
             return Ok(Some(serde_json::json!({
                 "status": "waiting",
-                "completed": new_count,
+                "completed": completed_count,
                 "expected": expected_count
             })));
         }
@@ -213,16 +203,6 @@ impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
             "All {} tools complete, creating aggregated result",
             expected_count
         );
-
-        let (tool_results, skip_continuation) = self
-            .collect_all_results(
-                &context.tenant_id,
-                &context.repo_id,
-                &context.branch,
-                &workspace,
-                &assistant_msg_path,
-            )
-            .await?;
 
         self.create_aggregated_result(
             &context.tenant_id,

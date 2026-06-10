@@ -45,7 +45,7 @@ pub fn create_trigger_matcher<S: Storage + 'static>(storage: Arc<S>) -> TriggerM
               repo_id: String,
               branch: String,
               workspace: String,
-              _node_properties: Option<serde_json::Value>| {
+              node_properties: Option<serde_json::Value>| {
             let storage = storage.clone();
 
             Box::pin(async move {
@@ -78,6 +78,7 @@ pub fn create_trigger_matcher<S: Storage + 'static>(storage: Arc<S>) -> TriggerM
                     repo_id: &repo_id,
                     branch: &branch,
                     workspace: &workspace,
+                    node_properties: node_properties.as_ref(),
                 };
 
                 // Query all raisin:Function nodes in the functions workspace

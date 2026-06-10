@@ -125,6 +125,25 @@ pub trait BranchRepository: Send + Sync {
         new_head: HLC,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
+    /// Set HEAD pointer for a branch unconditionally (rollback/reset).
+    ///
+    /// Unlike `update_head` (fast-forward only, safe for concurrent commits),
+    /// this moves the head to ANY revision, including backwards. Use only for
+    /// deliberate operator actions (branch reset to an earlier revision).
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier
+    /// * `repo_id` - Repository identifier
+    /// * `branch_name` - Branch name
+    /// * `new_head` - New HEAD revision (HLC timestamp)
+    fn set_head(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        new_head: HLC,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+
     /// Set upstream branch for divergence tracking
     ///
     /// # Arguments

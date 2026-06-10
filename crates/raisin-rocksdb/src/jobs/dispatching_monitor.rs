@@ -38,6 +38,35 @@ impl JobMonitor for DispatchingMonitor {
     async fn on_job_created(&self, job: &JobInfo) {
         let priority = job.job_type.default_priority();
         let category = job.job_type.category();
+
+        // Jobs registered with a future schedule (register_job_at) are
+        // dispatched only once their time arrives. next_retry_at doubles
+        // as the scheduled-dispatch time for new jobs.
+        if let Some(scheduled_at) = job.next_retry_at {
+            let now = chrono::Utc::now();
+            if scheduled_at > now {
+                let dispatcher = self.dispatcher.clone();
+                let job_id = job.id.clone();
+                let delay = (scheduled_at - now).to_std().unwrap_or_default();
+
+                tracing::debug!(
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    delay_seconds = delay.as_secs(),
+                    category = %category,
+                    "Scheduled delayed dispatch for new job"
+                );
+
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    dispatcher
+                        .dispatch_categorized(job_id, priority, category)
+                        .await;
+                });
+                return;
+            }
+        }
+
         self.dispatcher
             .dispatch_categorized(job.id.clone(), priority, category)
             .await;

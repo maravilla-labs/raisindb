@@ -217,15 +217,37 @@ impl RocksDBWorker {
                             "Claimed job, loading context"
                         );
 
-                        // Load job context before spawning
-                        let context = match self.job_data_store.get(&job.tenant, &job.id)? {
+                        // Load job context before spawning. Callers follow the
+                        // register_job() -> JobDataStore.put() convention, so a
+                        // fast claim can race the context write - retry briefly
+                        // before declaring the job dead.
+                        let mut context_opt = self.job_data_store.get(&job.tenant, &job.id)?;
+                        if context_opt.is_none() {
+                            for attempt in 1..=10u32 {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    50 * attempt as u64,
+                                ))
+                                .await;
+                                context_opt = self.job_data_store.get(&job.tenant, &job.id)?;
+                                if context_opt.is_some() {
+                                    tracing::debug!(
+                                        worker_id = self.id,
+                                        job_id = %job.id,
+                                        attempt,
+                                        "Job context arrived after retry"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        let context = match context_opt {
                             Some(ctx) => ctx,
                             None => {
                                 let error_msg = format!("Job context not found for job {}", job.id);
                                 tracing::error!(
                                     worker_id = self.id,
                                     job_id = %job.id,
-                                    "Missing job context"
+                                    "Missing job context (after grace retries)"
                                 );
                                 self.job_registry.mark_failed(&job.id, error_msg).await?;
                                 return Ok(true); // Claimed but failed

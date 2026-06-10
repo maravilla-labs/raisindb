@@ -108,7 +108,7 @@ impl<S: Storage + TransactionalStorage> PackageProcessHandler<S> {
         context: &JobContext,
     ) -> Result<Option<serde_json::Value>> {
         let package_node_id = match &job.job_type {
-            JobType::PackageProcess { package_node_id } => package_node_id.as_str(),
+            JobType::PackageProcess { package_node_id } => package_node_id.clone(),
             _ => {
                 return Err(Error::Validation(
                     "Expected PackageProcess job type".to_string(),
@@ -116,6 +116,70 @@ impl<S: Storage + TransactionalStorage> PackageProcessHandler<S> {
             }
         };
 
+        let result = self.run(job, context, &package_node_id).await;
+
+        if let Err(ref e) = result {
+            // Make the failure visible on the package node instead of leaving
+            // it stuck in "processing" forever.
+            self.mark_package_failed(context, &package_node_id, &e.to_string())
+                .await;
+        }
+
+        result
+    }
+
+    /// Best-effort: set status="failed" + error detail on the package node.
+    ///
+    /// If the repository's raisin:Package NodeType predates the `error`
+    /// property (strict mode), retry without the error detail so the failed
+    /// status itself always lands.
+    async fn mark_package_failed(&self, context: &JobContext, package_node_id: &str, error: &str) {
+        let attempt = |include_error: bool| async move {
+            let tx = self.storage.begin_context().await?;
+            tx.set_tenant_repo(&context.tenant_id, &context.repo_id)?;
+            tx.set_branch(&context.branch)?;
+            tx.set_actor("package-processor")?;
+            tx.set_auth_context(AuthContext::system())?;
+            tx.set_message("Mark package processing as failed")?;
+
+            if let Some(mut node) = tx.get_node("packages", package_node_id).await? {
+                node.properties.insert(
+                    "status".to_string(),
+                    PropertyValue::String("failed".to_string()),
+                );
+                if include_error {
+                    node.properties.insert(
+                        "error".to_string(),
+                        PropertyValue::String(error.to_string()),
+                    );
+                }
+                tx.upsert_node("packages", &node).await?;
+                tx.commit().await?;
+            }
+            Ok::<(), Error>(())
+        };
+
+        let result = match attempt(true).await {
+            Err(Error::Validation(_)) => attempt(false).await,
+            other => other,
+        };
+
+        if let Err(e) = result {
+            tracing::warn!(
+                package_node_id = %package_node_id,
+                error = %e,
+                "Failed to mark package node as failed"
+            );
+        }
+    }
+
+    /// Run package processing (manifest extraction + node finalization).
+    async fn run(
+        &self,
+        job: &JobInfo,
+        context: &JobContext,
+        package_node_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
         tracing::info!(
             job_id = %job.id,
             package_node_id = %package_node_id,
@@ -333,10 +397,7 @@ impl<S: Storage + TransactionalStorage> PackageProcessHandler<S> {
             existing.properties.insert(key, value);
         }
 
-        existing.properties.insert(
-            "status".to_string(),
-            PropertyValue::String("ready".to_string()),
-        );
+        Self::set_uploaded_status(&mut existing.properties);
         existing.properties.insert(
             "upload_state".to_string(),
             PropertyValue::String("updated".to_string()),
@@ -393,10 +454,7 @@ impl<S: Storage + TransactionalStorage> PackageProcessHandler<S> {
             node.properties.insert(key, value);
         }
 
-        node.properties.insert(
-            "status".to_string(),
-            PropertyValue::String("ready".to_string()),
-        );
+        Self::set_uploaded_status(&mut node.properties);
         node.properties
             .insert("progress".to_string(), PropertyValue::Float(1.0));
         node.properties.remove("large_upload");
@@ -425,10 +483,7 @@ impl<S: Storage + TransactionalStorage> PackageProcessHandler<S> {
             node.properties.insert(key, value);
         }
 
-        node.properties.insert(
-            "status".to_string(),
-            PropertyValue::String("ready".to_string()),
-        );
+        Self::set_uploaded_status(&mut node.properties);
         node.properties
             .insert("progress".to_string(), PropertyValue::Float(1.0));
 
@@ -448,6 +503,25 @@ impl<S: Storage + TransactionalStorage> PackageProcessHandler<S> {
         tracing::debug!(job_id = %job_id, progress = %progress, message = %message, "Package process progress");
         if let Err(e) = self.job_registry.update_progress(job_id, progress).await {
             tracing::warn!(job_id = %job_id, error = %e, "Failed to update job progress");
+        }
+    }
+
+    /// Set status="uploaded" unless an install is already in flight.
+    ///
+    /// `deploy --install` enqueues the install job right after upload, so the
+    /// PackageProcess job can finish after the install started — never
+    /// downgrade "installing"/"installed" back to "uploaded".
+    fn set_uploaded_status(properties: &mut std::collections::HashMap<String, PropertyValue>) {
+        let install_in_flight = matches!(
+            properties.get("status"),
+            Some(PropertyValue::String(s)) if s == "installing" || s == "installed"
+        );
+        if !install_in_flight {
+            properties.insert(
+                "status".to_string(),
+                PropertyValue::String("uploaded".to_string()),
+            );
+            properties.remove("error");
         }
     }
 

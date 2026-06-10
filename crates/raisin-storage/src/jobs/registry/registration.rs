@@ -42,6 +42,45 @@ impl JobRegistry {
         cancel_token: Option<Arc<tokio_util::sync::CancellationToken>>,
         max_retries: Option<u32>,
     ) -> Result<JobId> {
+        self.register_job_inner(job_type, tenant, handle, cancel_token, max_retries, None)
+            .await
+    }
+
+    /// Register a new job to be dispatched at a future time
+    ///
+    /// The job is persisted immediately but only dispatched to workers once
+    /// `scheduled_at` is reached (via the dispatching monitor's delayed
+    /// dispatch; restart-safe because `next_retry_at` is persisted and
+    /// honored when restored jobs are re-dispatched).
+    ///
+    /// Used for flow wait timeouts, retry backoffs, and scheduled delays.
+    pub async fn register_job_at(
+        &self,
+        job_type: JobType,
+        tenant: String,
+        scheduled_at: chrono::DateTime<Utc>,
+        max_retries: Option<u32>,
+    ) -> Result<JobId> {
+        self.register_job_inner(
+            job_type,
+            tenant,
+            None,
+            None,
+            max_retries,
+            Some(scheduled_at),
+        )
+        .await
+    }
+
+    async fn register_job_inner(
+        &self,
+        job_type: JobType,
+        tenant: String,
+        handle: Option<JoinHandle<()>>,
+        cancel_token: Option<Arc<tokio_util::sync::CancellationToken>>,
+        max_retries: Option<u32>,
+        scheduled_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<JobId> {
         let job_id = JobId::new();
         let timeout_seconds = job_type.default_timeout_seconds();
         let entry = JobEntry {
@@ -59,7 +98,8 @@ impl JobRegistry {
             max_retries: max_retries.unwrap_or(3),
             last_heartbeat: None,
             timeout_seconds,
-            next_retry_at: None, // Process immediately
+            // None = process immediately; Some(future) = delayed dispatch
+            next_retry_at: scheduled_at,
         };
 
         let job_info = entry.to_job_info();

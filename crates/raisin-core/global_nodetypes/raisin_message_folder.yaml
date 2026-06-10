@@ -10,6 +10,9 @@ properties:
 allowed_children:
   - raisin:Message
   - raisin:Conversation
+  # Workflow human tasks are created at {assignee}/inbox/task-* - a user's
+  # inbox folder holds chat artifacts AND inbox tasks.
+  - raisin:InboxTask
 versionable: false
 publishable: false
 auditable: false

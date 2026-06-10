@@ -192,6 +192,59 @@ impl BranchRepository for InMemoryBranchRepo {
                 )));
             }
 
+            // Monotonic advance - commits never move the head backwards
+            // (mirrors the RocksDB impl; deliberate resets use set_head).
+            if new_head <= branch.head {
+                return Ok(());
+            }
+            branch.head = new_head;
+            drop(branches);
+
+            // Emit BranchUpdated event
+            self.event_bus.publish(raisin_storage::Event::Repository(
+                raisin_storage::RepositoryEvent {
+                    tenant_id: tenant_id.to_string(),
+                    repository_id: repo_id.to_string(),
+                    kind: raisin_storage::RepositoryEventKind::BranchUpdated,
+                    workspace: None,
+                    revision_id: Some(new_head.to_string()),
+                    branch_name: Some(branch_name.to_string()),
+                    tag_name: None,
+                    message: None,
+                    actor: None,
+                    metadata: None,
+                },
+            ));
+
+            Ok(())
+        } else {
+            Err(raisin_error::Error::NotFound(format!(
+                "Branch {}",
+                branch_name
+            )))
+        }
+    }
+
+    async fn set_head(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        new_head: HLC,
+    ) -> Result<()> {
+        let key = Self::make_key(tenant_id, repo_id, branch_name);
+        let mut branches = self.branches.write().await;
+
+        if let Some(branch) = branches.get_mut(&key) {
+            // Check if branch is protected
+            if branch.protected {
+                return Err(raisin_error::Error::Forbidden(format!(
+                    "Cannot modify protected branch '{}': branch is protected from commits",
+                    branch_name
+                )));
+            }
+
+            // Unconditional (deliberate rollback/reset).
             branch.head = new_head;
             drop(branches);
 
@@ -354,5 +407,42 @@ impl BranchRepository for InMemoryBranchRepo {
         Err(Error::Validation(
             "Merge with conflict resolution is not supported in in-memory storage".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raisin_hlc::HLC;
+
+    fn repo() -> InMemoryBranchRepo {
+        let bus = std::sync::Arc::new(raisin_storage::InMemoryEventBus::new())
+            as std::sync::Arc<dyn raisin_storage::EventBus>;
+        InMemoryBranchRepo::new(bus)
+    }
+
+    /// Commits never move the head backwards: a racing earlier-revision
+    /// commit must not overwrite a later head (branch-head visibility race -
+    /// nodes committed above the head become invisible to reads/triggers).
+    #[tokio::test]
+    async fn update_head_is_monotonic_but_set_head_can_roll_back() {
+        let r = repo();
+        r.create_branch("t", "repo", "main", "test", None, None, false, false)
+            .await
+            .unwrap();
+
+        let early = HLC { timestamp_ms: 100, counter: 0 };
+        let late = HLC { timestamp_ms: 200, counter: 0 };
+
+        r.update_head("t", "repo", "main", late).await.unwrap();
+        assert_eq!(r.get_head("t", "repo", "main").await.unwrap(), late);
+
+        // Racing earlier commit: silently skipped, head stays at `late`
+        r.update_head("t", "repo", "main", early).await.unwrap();
+        assert_eq!(r.get_head("t", "repo", "main").await.unwrap(), late);
+
+        // Deliberate operator reset: allowed to move backwards
+        r.set_head("t", "repo", "main", early).await.unwrap();
+        assert_eq!(r.get_head("t", "repo", "main").await.unwrap(), early);
     }
 }

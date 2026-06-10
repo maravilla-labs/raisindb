@@ -291,10 +291,20 @@ impl BranchRepository for BranchRepositoryImpl {
             )));
         }
 
-        eprintln!(
-            "update_head: branch={}, old_head={:?}, new_head={:?}",
-            branch_name, branch.head, new_head
-        );
+        // Monotonic advance: concurrent commits read-modify-write this record,
+        // and an unconditional assignment lets an earlier revision overwrite a
+        // later one (lost update) - committed nodes then sit ABOVE the head and
+        // are invisible to reads/trigger matching until the next write. Commits
+        // may only move the head forward; deliberate rollbacks use set_head().
+        if new_head <= branch.head {
+            tracing::debug!(
+                "update_head: skipping non-advancing head update branch={} current={:?} candidate={:?}",
+                branch_name,
+                branch.head,
+                new_head
+            );
+            return Ok(());
+        }
         branch.head = new_head;
 
         let key = keys::branch_key(tenant_id, repo_id, branch_name);
@@ -318,6 +328,61 @@ impl BranchRepository for BranchRepositoryImpl {
                         },
                         "system".to_string(),
                         Some(format!("Branch '{}' head updated", branch_name)),
+                        true,
+                        Some(new_head),
+                    )
+                    .await;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn set_head(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch_name: &str,
+        new_head: HLC,
+    ) -> Result<()> {
+        let mut branch = self
+            .get_branch(tenant_id, repo_id, branch_name)
+            .await?
+            .ok_or_else(|| {
+                raisin_error::Error::NotFound(format!("Branch '{}' not found", branch_name))
+            })?;
+
+        if branch.protected {
+            return Err(raisin_error::Error::Forbidden(format!(
+                "Cannot modify protected branch '{}': branch is protected from commits",
+                branch_name
+            )));
+        }
+
+        // Unconditional (deliberate rollback/reset) - commits use update_head.
+        branch.head = new_head;
+
+        let key = keys::branch_key(tenant_id, repo_id, branch_name);
+        let value = rmp_serde::to_vec(&branch)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+
+        let cf = cf_handle(&self.db, cf::BRANCHES)?;
+        self.db
+            .put_cf(cf, key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        if let Some(ref capture) = self.operation_capture {
+            if capture.is_enabled() {
+                let _op = capture
+                    .capture_operation_with_revision(
+                        tenant_id.to_string(),
+                        repo_id.to_string(),
+                        branch_name.to_string(),
+                        raisin_replication::OpType::UpdateBranch {
+                            branch: branch.clone(),
+                        },
+                        "system".to_string(),
+                        Some(format!("Branch '{}' head set (reset)", branch_name)),
                         true,
                         Some(new_head),
                     )

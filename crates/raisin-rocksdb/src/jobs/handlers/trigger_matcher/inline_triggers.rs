@@ -33,6 +33,11 @@ pub(super) struct InlineTriggerContext<'a> {
     pub repo_id: &'a str,
     pub branch: &'a str,
     pub workspace: &'a str,
+    /// Node properties from the event payload. Fallback for property-filter
+    /// evaluation when the node is not yet visible at the read snapshot
+    /// (branch-head visibility race) - without it, a stale read silently
+    /// drops the trigger (no retry on no-match).
+    pub node_properties: Option<&'a serde_json::Value>,
 }
 
 /// Process inline triggers on raisin:Function nodes
@@ -417,13 +422,29 @@ pub(super) async fn check_trigger_filters<S: Storage + 'static>(
                 )
                 .await?;
 
-            match node_opt {
-                Some(node) => {
+            // Fall back to the event payload's properties when the node
+            // read misses (commit not yet visible at this read snapshot).
+            let properties = match node_opt {
+                Some(node) => Some((node.properties, "node")),
+                None => ctx
+                    .node_properties
+                    .cloned()
+                    .and_then(|v| {
+                        serde_json::from_value::<
+                            std::collections::HashMap<String, raisin_models::nodes::properties::PropertyValue>,
+                        >(v)
+                        .ok()
+                    })
+                    .map(|p| (p, "event payload (node not yet visible)")),
+            };
+
+            match properties {
+                Some((properties, source)) => {
                     for (key, expected_value) in prop_filters {
                         let prop_matches =
-                            property_filter_matches(&node.properties, key, expected_value);
+                            property_filter_matches(&properties, key, expected_value);
 
-                        let actual_value = get_nested_property(&node.properties, key)
+                        let actual_value = get_nested_property(&properties, key)
                             .and_then(|v| serde_json::to_value(v).ok());
 
                         filter_checks.push(FilterCheckResult {
@@ -432,11 +453,11 @@ pub(super) async fn check_trigger_filters<S: Storage + 'static>(
                             expected: Some(expected_value.clone()),
                             actual: actual_value.clone(),
                             reason: if prop_matches {
-                                format!("Property {} matches filter", key)
+                                format!("Property {} matches filter (source: {})", key, source)
                             } else {
                                 format!(
-                                    "Property {} does not match: expected {:?}, got {:?}",
-                                    key, expected_value, actual_value
+                                    "Property {} does not match: expected {:?}, got {:?} (source: {})",
+                                    key, expected_value, actual_value, source
                                 )
                             },
                         });
@@ -452,7 +473,7 @@ pub(super) async fn check_trigger_filters<S: Storage + 'static>(
                         passed: false,
                         expected: Some(serde_json::json!(prop_filters)),
                         actual: None,
-                        reason: "Node not found for property filter check".to_string(),
+                        reason: "Node not found and no event-payload properties available for property filter check".to_string(),
                     });
                     all_filters_pass = false;
                 }

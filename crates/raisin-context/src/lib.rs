@@ -50,5 +50,5 @@ pub use repository::{
     MergeStrategy, RepositoryConfig, RepositoryContext, RepositoryInfo, ResolutionType, Tag,
     WorkspaceConfig, WorkspaceScope,
 };
-pub use resolver::TenantResolver;
+pub use resolver::{resolve_tenant_id, TenantResolver, DEFAULT_TENANT_ID, TENANT_ID_HEADER};
 pub use tier::{Operation, ServiceTier, TierProvider};

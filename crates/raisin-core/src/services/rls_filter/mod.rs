@@ -132,6 +132,11 @@ pub fn can_perform(
 }
 
 /// Check if user can create a node at a path with a given type.
+///
+/// Permission `condition`s are evaluated against a candidate node built from
+/// `path`/`node_type` (no properties). Conditions that only reference
+/// `node.path` / `node.node_type` (e.g. `node.path.startsWith(auth.home)`)
+/// work for creates; conditions on fields that don't exist yet fail closed.
 pub fn can_create_at_path(
     path: &str,
     node_type: &str,
@@ -165,6 +170,9 @@ pub fn can_create_at_path(
         return true;
     }
 
+    // Candidate node for condition evaluation (lazily built once needed).
+    let mut candidate: Option<Node> = None;
+
     for permission in &permissions.permissions {
         if !permission.applies_to_scope(scope) {
             continue;
@@ -184,10 +192,52 @@ pub fn can_create_at_path(
             }
         }
 
+        if let Some(condition) = &permission.condition {
+            let node = candidate.get_or_insert_with(|| candidate_node(path, node_type));
+            if !evaluate_rel_condition(condition, node, auth) {
+                tracing::debug!(
+                    path = path,
+                    condition = %condition,
+                    "RLS: create condition not satisfied - trying next permission"
+                );
+                continue;
+            }
+        }
+
         return true;
     }
 
     false
+}
+
+/// Build a minimal candidate node so REL conditions can be evaluated for
+/// creates. Only `path`, `name` and `node_type` are meaningful; conditions on
+/// fields that don't exist yet (owner, created_by, properties) fail closed.
+fn candidate_node(path: &str, node_type: &str) -> Node {
+    Node {
+        id: String::new(),
+        name: path.rsplit('/').next().unwrap_or_default().to_string(),
+        path: path.to_string(),
+        parent: None,
+        node_type: node_type.to_string(),
+        children: Vec::new(),
+        order_key: String::new(),
+        has_children: None,
+        properties: Default::default(),
+        archetype: None,
+        created_at: None,
+        updated_at: None,
+        created_by: None,
+        updated_by: None,
+        published_at: None,
+        published_by: None,
+        version: 0,
+        translations: None,
+        tenant_id: None,
+        workspace: None,
+        owner_id: None,
+        relations: Vec::new(),
+    }
 }
 
 #[cfg(test)]

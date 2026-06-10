@@ -10,88 +10,47 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
-    /// Atomically increment the completed_count on the aggregator node
+    /// Persist the observed completed_count on the aggregator node.
     ///
-    /// Uses compare-and-swap to ensure exactly one handler wins when multiple
-    /// results complete simultaneously.
-    pub(super) async fn atomic_increment_completed_count(
+    /// Purely informational: completion is decided by recounting persisted
+    /// result nodes (see `handle`), because property updates are
+    /// last-writer-wins and a read-modify-write counter loses updates when
+    /// two results complete concurrently.
+    pub(super) async fn store_completed_count(
         &self,
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
         workspace: &str,
         aggregator_path: &str,
-    ) -> Result<i64> {
-        let max_retries = 10;
-        for attempt in 0..max_retries {
-            let node = self
-                .storage
-                .nodes()
-                .get_by_path(
-                    StorageScope::new(tenant_id, repo_id, branch, workspace),
-                    aggregator_path,
-                    None,
-                )
-                .await?
-                .ok_or_else(|| {
-                    Error::NotFound(format!("Aggregator not found: {}", aggregator_path))
-                })?;
-
-            let current = super::helpers::get_int_property(&node, "completed_count").unwrap_or(0);
-            let new_value = current + 1;
-
-            let result = self
-                .storage
-                .nodes()
-                .update_property_by_path(
-                    StorageScope::new(tenant_id, repo_id, branch, workspace),
-                    aggregator_path,
-                    "completed_count",
-                    PropertyValue::Integer(new_value),
-                )
-                .await;
-
-            match result {
-                Ok(_) => {
-                    tracing::debug!(
-                        aggregator_path = %aggregator_path,
-                        previous = current,
-                        new = new_value,
-                        attempt = attempt,
-                        "Successfully incremented completed_count"
-                    );
-                    return Ok(new_value);
-                }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("version") || err_str.contains("conflict") {
-                        tracing::debug!(
-                            aggregator_path = %aggregator_path,
-                            attempt = attempt,
-                            "CAS conflict, retrying"
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_millis(
-                            10 * (attempt as u64 + 1),
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
+        completed: i64,
+    ) {
+        if let Err(e) = self
+            .storage
+            .nodes()
+            .update_property_by_path(
+                StorageScope::new(tenant_id, repo_id, branch, workspace),
+                aggregator_path,
+                "completed_count",
+                PropertyValue::Integer(completed),
+            )
+            .await
+        {
+            tracing::warn!(
+                aggregator_path = %aggregator_path,
+                error = %e,
+                "Failed to store completed_count (informational only)"
+            );
         }
-
-        Err(Error::Validation(format!(
-            "Failed to increment completed_count after {} retries",
-            max_retries
-        )))
     }
 
     /// Collect all AIToolSingleCallResult nodes under the assistant message
     ///
-    /// Returns `(results, skip_continuation)`. If any single result has
-    /// `skip_continuation: true`, the flag is propagated so the aggregated
-    /// AIToolResult can suppress the continuation trigger.
+    /// Returns `(results, skip_continuation, tool_call_count)`. If any single
+    /// result has `skip_continuation: true`, the flag is propagated so the
+    /// aggregated AIToolResult can suppress the continuation trigger.
+    /// `tool_call_count` is the number of AIToolCall children observed NOW —
+    /// the authoritative "expected" value for completion detection.
     pub(super) async fn collect_all_results(
         &self,
         tenant_id: &str,
@@ -99,7 +58,7 @@ impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
         branch: &str,
         workspace: &str,
         assistant_msg_path: &str,
-    ) -> Result<(Vec<serde_json::Value>, bool)> {
+    ) -> Result<(Vec<serde_json::Value>, bool, usize)> {
         let children = self
             .storage
             .nodes()
@@ -114,6 +73,7 @@ impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
             .into_iter()
             .filter(|n| n.node_type == "raisin:AIToolCall")
             .collect();
+        let tool_call_count = tool_calls.len();
 
         let mut results = Vec::new();
         let mut skip_continuation = false;
@@ -166,11 +126,12 @@ impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
         tracing::debug!(
             assistant_msg_path = %assistant_msg_path,
             result_count = results.len(),
+            tool_call_count = tool_call_count,
             skip_continuation = skip_continuation,
             "Collected tool results"
         );
 
-        Ok((results, skip_continuation))
+        Ok((results, skip_continuation, tool_call_count))
     }
 
     /// Create an aggregated AIToolResult node
@@ -242,14 +203,27 @@ impl<S: Storage + 'static> AIToolResultAggregationHandler<S> {
             ..Default::default()
         };
 
-        node_creator(
+        if let Err(e) = node_creator(
             result_node,
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
             workspace.to_string(),
         )
-        .await?;
+        .await
+        {
+            // Two aggregation jobs can both pass the existence check and race
+            // the create; the loser must treat "already exists" as success.
+            let err_str = e.to_string();
+            if err_str.contains("already exists") || err_str.contains("duplicate") {
+                tracing::debug!(
+                    result_path = %result_path,
+                    "Aggregated result created concurrently by another job"
+                );
+                return Ok(());
+            }
+            return Err(e);
+        }
 
         tracing::info!(
             result_path = %result_path,

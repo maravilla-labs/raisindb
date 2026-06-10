@@ -2,6 +2,22 @@
 
 use crate::TenantContext;
 
+/// Name of the HTTP header carrying an explicit tenant id.
+pub const TENANT_ID_HEADER: &str = "x-tenant-id";
+
+/// Tenant id used when no explicit tenant is provided.
+pub const DEFAULT_TENANT_ID: &str = "default";
+
+/// Resolve a tenant id from an optional `x-tenant-id` header value.
+///
+/// This is the single source of truth for header-based tenant resolution,
+/// shared by the HTTP `ensure_tenant_middleware` and the tenant-less
+/// WebSocket routes (`/ws`, `/ws/{repository}`): an explicit `x-tenant-id`
+/// header wins, otherwise the request falls back to the `default` tenant.
+pub fn resolve_tenant_id(header_value: Option<&str>) -> String {
+    header_value.unwrap_or(DEFAULT_TENANT_ID).to_string()
+}
+
 /// Trait for resolving tenant context from request information.
 ///
 /// Implement this trait to define how your application extracts
@@ -97,6 +113,12 @@ impl TenantResolver for SubdomainResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_tenant_id() {
+        assert_eq!(resolve_tenant_id(Some("acme")), "acme");
+        assert_eq!(resolve_tenant_id(None), "default");
+    }
 
     #[test]
     fn test_fixed_resolver() {

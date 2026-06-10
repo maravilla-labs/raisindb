@@ -17,6 +17,9 @@ allowed_node_types:
   - raisin:EntityCircle
   - raisin:StewardshipOverride
   - raisin:GraphAlgorithmConfig
+  # Human-in-the-loop inbox primitives (tasks live under users/**/inbox)
+  - raisin:InboxTask
+  - raisin:Notification
 allowed_root_node_types:
   - raisin:User
   - raisin:Role
@@ -136,6 +139,15 @@ initial_structure:
               # Own inbox - read, update, delete
               - path: "users/**/inbox/**"
                 operations: ["read", "update", "delete"]
+                workspace: "raisin:access_control"
+                condition: "node.path.startsWith(auth.home)"
+
+              # Own inbox - create conversation containers (chat clients
+              # create the raisin:Conversation node + chats folder in the
+              # user's own inbox; message delivery stays system-side)
+              - path: "users/**/inbox/**"
+                operations: ["create"]
+                node_types: ["raisin:Folder", "raisin:Conversation"]
                 workspace: "raisin:access_control"
                 condition: "node.path.startsWith(auth.home)"
 
