@@ -232,14 +232,16 @@ async fn test_resume_with_human_response() {
 }
 
 #[tokio::test]
-async fn test_resume_retry_resets_count() {
+async fn test_resume_retry_preserves_count() {
+    // retry_count must survive the retry resume so max_retries is actually
+    // enforced on the next failure (it is reset when the step succeeds).
     let mut inst = waiting_instance("retry-step", simple_wait(WaitType::Retry));
     inst.retry_count = 3;
     let cb = MockCallbacks::new(inst);
     let _ = resume_flow("test-instance", json!({}), &cb).await;
 
     let updated = cb.instance.lock().unwrap();
-    assert_eq!(updated.retry_count, 0);
+    assert_eq!(updated.retry_count, 3);
 }
 
 #[tokio::test]
@@ -320,21 +322,84 @@ async fn test_resume_waiting_without_wait_info() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_resume_function_call_failure_transitions_to_failed() {
-    let inst = waiting_instance("function-step", simple_wait(WaitType::FunctionCall));
+async fn test_resume_function_call_failure_routes_through_error_handling() {
+    // A failed function result must NOT short-circuit the flow to Failed -
+    // it re-executes the step so the failure flows through the full error
+    // machinery (retry / error_edge / continue_on_fail / rollback).
+    let flow_def = json!({
+        "name": "fn-fail-flow",
+        "version": 1,
+        "nodes": [
+            { "id": "start", "step_type": "start", "properties": {}, "next_node": "fn-step" },
+            {
+                "id": "fn-step",
+                "step_type": "function_step",
+                "properties": { "function_ref": "/lib/fails", "max_retries": 0 },
+                "next_node": "end"
+            },
+            { "id": "end", "step_type": "end", "properties": {} }
+        ]
+    });
+
+    let mut inst = waiting_instance("fn-step", simple_wait(WaitType::FunctionCall));
+    inst.flow_definition_snapshot = flow_def;
     let data = json!({"success": false, "error": "Function execution timeout"});
     let cb = MockCallbacks::new(inst);
     let result = resume_flow("test-instance", data, &cb).await;
 
-    assert!(result.is_ok());
+    // With max_retries=0, no error_edge, and nothing to compensate, the
+    // flow ends up Failed and the error is reported.
+    assert!(result.is_err());
     assert!(cb.was_save_called());
     let updated = cb.instance.lock().unwrap();
     assert_eq!(updated.status, FlowStatus::Failed);
-    assert_eq!(
-        updated.error,
-        Some("Function execution timeout".to_string())
+    assert!(updated
+        .error
+        .as_deref()
+        .unwrap_or("")
+        .contains("Function execution timeout"));
+}
+
+#[tokio::test]
+async fn test_resume_function_call_failure_takes_error_edge() {
+    // With an error_edge configured, a failed function routes to the
+    // handler step instead of failing the flow.
+    let flow_def = json!({
+        "name": "fn-fail-edge-flow",
+        "version": 1,
+        "nodes": [
+            { "id": "start", "step_type": "start", "properties": {}, "next_node": "fn-step" },
+            {
+                "id": "fn-step",
+                "step_type": "function_step",
+                "properties": {
+                    "function_ref": "/lib/fails",
+                    "max_retries": 0,
+                    "error_edge": "error-handler"
+                },
+                "next_node": "end"
+            },
+            { "id": "error-handler", "step_type": "start", "properties": {}, "next_node": "end" },
+            { "id": "end", "step_type": "end", "properties": {} }
+        ]
+    });
+
+    let mut inst = waiting_instance("fn-step", simple_wait(WaitType::FunctionCall));
+    inst.flow_definition_snapshot = flow_def;
+    let data = json!({"success": false, "error": "boom"});
+    let cb = MockCallbacks::new(inst);
+    let result = resume_flow("test-instance", data, &cb).await;
+
+    assert!(
+        result.is_ok(),
+        "error edge path should succeed, got {:?}",
+        result
     );
-    assert!(updated.wait_info.is_none());
+    let updated = cb.instance.lock().unwrap();
+    // Routed through error-handler -> end
+    assert_eq!(updated.status, FlowStatus::Completed);
+    let error_var = updated.variables.as_object().unwrap().get("error");
+    assert!(error_var.is_some(), "$.error context must be populated");
 }
 
 // ---------------------------------------------------------------------------
@@ -417,4 +482,195 @@ async fn test_resume_no_timeout_proceeds_normally() {
             .get("__human_response"),
         Some(&response)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests: check_flow_timeout (timeout_check jobs / scheduled wake-ups)
+// ---------------------------------------------------------------------------
+
+fn wait_with_timeout(wait_type: WaitType, timeout_at: chrono::DateTime<Utc>) -> Option<WaitInfo> {
+    Some(WaitInfo {
+        subscription_id: "sub-test".to_string(),
+        wait_type,
+        target_path: None,
+        expected_event: None,
+        timeout_at: Some(timeout_at),
+    })
+}
+
+/// Regression test for the original bug: a timeout check firing while the
+/// wait is NOT yet due must not resume the flow (it used to resume it
+/// immediately with null data).
+#[tokio::test]
+async fn test_timeout_check_not_due_is_noop() {
+    let future = Utc::now() + chrono::Duration::hours(1);
+    let inst = waiting_instance("human-task", wait_with_timeout(WaitType::HumanTask, future));
+    let cb = MockCallbacks::new(inst);
+
+    let result = check_flow_timeout("test-instance", &cb).await;
+    assert!(result.is_ok());
+
+    let updated = cb.instance.lock().unwrap();
+    assert_eq!(
+        updated.status,
+        FlowStatus::Waiting,
+        "flow must stay waiting"
+    );
+    assert!(updated.wait_info.is_some(), "wait_info must be preserved");
+    assert!(!cb.was_save_called(), "no state change should be persisted");
+}
+
+/// A scheduled (delay) wait whose wake-up time has NOT arrived is left alone.
+#[tokio::test]
+async fn test_timeout_check_scheduled_not_due_is_noop() {
+    let future = Utc::now() + chrono::Duration::minutes(30);
+    let inst = waiting_instance("start", wait_with_timeout(WaitType::Scheduled, future));
+    let cb = MockCallbacks::new(inst);
+
+    assert!(check_flow_timeout("test-instance", &cb).await.is_ok());
+
+    let updated = cb.instance.lock().unwrap();
+    assert_eq!(updated.status, FlowStatus::Waiting);
+    assert!(!cb.was_save_called());
+}
+
+/// A scheduled wait whose wake-up time arrived resumes normally (and must
+/// NOT be treated as a timeout failure).
+#[tokio::test]
+async fn test_timeout_check_scheduled_due_resumes() {
+    let past = Utc::now() - chrono::Duration::seconds(5);
+    let inst = waiting_instance("start", wait_with_timeout(WaitType::Scheduled, past));
+    let cb = MockCallbacks::new(inst);
+
+    let result = check_flow_timeout("test-instance", &cb).await;
+    assert!(
+        result.is_ok(),
+        "due scheduled wait must resume, got {:?}",
+        result
+    );
+
+    let updated = cb.instance.lock().unwrap();
+    // Test flow def is start -> end, so the resumed flow runs to completion
+    assert_eq!(updated.status, FlowStatus::Completed);
+}
+
+/// A retry wait whose backoff elapsed resumes and keeps its retry budget.
+#[tokio::test]
+async fn test_timeout_check_retry_due_resumes() {
+    let past = Utc::now() - chrono::Duration::seconds(5);
+    let mut inst = waiting_instance("start", wait_with_timeout(WaitType::Retry, past));
+    inst.retry_count = 2;
+    let cb = MockCallbacks::new(inst);
+
+    assert!(check_flow_timeout("test-instance", &cb).await.is_ok());
+
+    let updated = cb.instance.lock().unwrap();
+    assert_ne!(updated.status, FlowStatus::Waiting);
+}
+
+/// An expired human-task wait with no timeout_edge fails the flow.
+#[tokio::test]
+async fn test_timeout_check_expired_human_task_fails() {
+    let past = Utc::now() - chrono::Duration::minutes(5);
+    let inst = waiting_instance("human-task", wait_with_timeout(WaitType::HumanTask, past));
+    let cb = MockCallbacks::new(inst);
+
+    let result = check_flow_timeout("test-instance", &cb).await;
+    assert!(result.is_err(), "expired wait should report timeout");
+
+    let updated = cb.instance.lock().unwrap();
+    assert_eq!(updated.status, FlowStatus::Failed);
+    assert!(updated.error.as_deref().unwrap_or("").contains("timed out"));
+}
+
+/// An expired wait on a step with a timeout_edge routes to the handler node
+/// instead of failing the flow.
+#[tokio::test]
+async fn test_timeout_check_expired_follows_timeout_edge() {
+    let flow_def = json!({
+        "name": "timeout-edge-flow",
+        "version": 1,
+        "nodes": [
+            {
+                "id": "wait-step",
+                "step_type": "human_task",
+                "properties": { "timeout_edge": "timeout-handler" },
+                "next_node": "end"
+            },
+            { "id": "timeout-handler", "step_type": "start", "properties": {}, "next_node": "end" },
+            { "id": "end", "step_type": "end", "properties": {} }
+        ]
+    });
+
+    let past = Utc::now() - chrono::Duration::minutes(5);
+    let mut inst = waiting_instance("wait-step", wait_with_timeout(WaitType::HumanTask, past));
+    inst.flow_definition_snapshot = flow_def;
+    let cb = MockCallbacks::new(inst);
+
+    let result = check_flow_timeout("test-instance", &cb).await;
+    assert!(
+        result.is_ok(),
+        "timeout_edge path should succeed, got {:?}",
+        result
+    );
+
+    let updated = cb.instance.lock().unwrap();
+    // Routed through timeout-handler -> end
+    assert_eq!(updated.status, FlowStatus::Completed);
+    let error_var = updated.variables.as_object().unwrap().get("error");
+    assert!(
+        error_var.is_some(),
+        "error context must be set for the handler"
+    );
+    assert_eq!(
+        error_var.unwrap().get("error_type"),
+        Some(&json!("timeout"))
+    );
+}
+
+/// A non-waiting flow is never touched by a timeout check.
+#[tokio::test]
+async fn test_timeout_check_non_waiting_is_noop() {
+    let mut inst = waiting_instance("end", None);
+    inst.status = FlowStatus::Completed;
+    let cb = MockCallbacks::new(inst);
+
+    assert!(check_flow_timeout("test-instance", &cb).await.is_ok());
+    assert!(!cb.was_save_called());
+}
+
+/// A real resume arriving for a Scheduled wait past its wake-up time must
+/// resume normally, not fail as "timed out" (Scheduled timeout_at is a
+/// wake-up time, not a deadline).
+#[tokio::test]
+async fn test_resume_scheduled_past_due_does_not_fail() {
+    let past = Utc::now() - chrono::Duration::minutes(5);
+    let inst = waiting_instance("start", wait_with_timeout(WaitType::Scheduled, past));
+    let cb = MockCallbacks::new(inst);
+
+    let result = resume_flow("test-instance", json!(null), &cb).await;
+    assert!(result.is_ok());
+
+    let updated = cb.instance.lock().unwrap();
+    assert_eq!(updated.status, FlowStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_resume_running_with_data_requests_redelivery() {
+    // A fast function can finish before the flow persists Waiting; its
+    // result delivery must be retried, not swallowed as "already running".
+    let mut inst = waiting_instance("step-1", None);
+    inst.status = FlowStatus::Running;
+    let cb = MockCallbacks::new(inst);
+    let result = resume_flow("test-instance", json!({"success": true, "result": 42}), &cb).await;
+    assert!(matches!(result.unwrap_err(), FlowError::VersionConflict));
+}
+
+#[tokio::test]
+async fn test_resume_pending_with_data_requests_redelivery() {
+    let mut inst = waiting_instance("step-1", None);
+    inst.status = FlowStatus::Pending;
+    let cb = MockCallbacks::new(inst);
+    let result = resume_flow("test-instance", json!({"success": true}), &cb).await;
+    assert!(matches!(result.unwrap_err(), FlowError::VersionConflict));
 }

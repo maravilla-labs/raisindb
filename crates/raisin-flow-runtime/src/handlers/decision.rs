@@ -34,24 +34,17 @@ impl DecisionHandler {
     }
 
     /// Evaluate a condition expression
+    ///
+    /// The evaluation context is built by [`FlowContext::to_json`], so
+    /// conditions can reference `input.*`, `steps.<step_id>.*`, `trigger.*`,
+    /// flow variables, and `error.*` - the same namespaces available to
+    /// template expressions resolved by `DataMapper`.
     #[instrument(skip(context))]
     fn evaluate_condition(&self, condition: &str, context: &FlowContext) -> FlowResult<bool> {
         debug!("Evaluating condition: {}", condition);
 
-        // Build evaluation context from flow context
-        // Convert variables to JSON for raisin-rel
-        let mut eval_map = serde_json::Map::new();
-        eval_map.insert("input".to_string(), context.input.clone());
-
-        // Add all variables
-        for (key, value) in &context.variables {
-            eval_map.insert(key.clone(), value.clone());
-        }
-
-        let json_value = Value::Object(eval_map);
-
-        // Convert to raisin-rel EvalContext
-        let eval_ctx = raisin_rel::EvalContext::from_json(json_value).map_err(|e| {
+        // Convert to raisin-rel EvalContext (shared with DataMapper)
+        let eval_ctx = raisin_rel::EvalContext::from_json(context.to_json()).map_err(|e| {
             FlowError::ConditionEvaluation(format!("Invalid evaluation context: {}", e))
         })?;
 

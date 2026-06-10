@@ -26,7 +26,7 @@ pub mod timeout;
 pub use compensation::{push_compensation, rollback_flow};
 pub use data_mapper::DataMapper;
 pub use executor::execute_flow;
-pub use resume::resume_flow;
+pub use resume::{check_flow_timeout, resume_flow};
 pub use retry::{strategies, RetryConfig};
 pub use state_manager::{
     create_flow_instance, load_instance, save_instance, save_instance_with_version,

@@ -22,6 +22,6 @@ pub use config_types::{
 };
 pub use types::{
     DesignerContainerRule, DesignerContainerType, DesignerErrorStrategy, DesignerFlowDefinition,
-    DesignerNode, DesignerStepProperties, DesignerStepType, ExecutionIdentityMode, RaisinReference,
-    RetryConfig, StepErrorBehavior,
+    DesignerLoopConfig, DesignerNode, DesignerStepProperties, DesignerStepType,
+    ExecutionIdentityMode, RaisinReference, RetryConfig, StepErrorBehavior,
 };

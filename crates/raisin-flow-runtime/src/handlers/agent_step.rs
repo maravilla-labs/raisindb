@@ -5,14 +5,17 @@
 
 //! Lightweight single-shot AI agent step handler.
 //!
-//! Calls an agent once with the flow context as input. No tool loop,
-//! no conversation persistence, no mode overrides. Uses the agent's
-//! configuration as-is.
+//! Calls an agent with the flow context as input. The agent's OWN tools
+//! (configured on the agent node) are executed in a bounded internal
+//! loop — synchronously, with no conversation persistence and no child
+//! steps. For workflow-level tools, orchestration, or explicit tool
+//! visibility, use an `ai_sequence` container instead.
 //!
 //! Use cases: classify email, extract entities, sentiment analysis,
-//! generate summary.
+//! generate summary — including agents that need a lookup tool to do so.
 
 use super::{StepHandler, StepResult};
+use crate::runtime::DataMapper;
 use crate::types::{
     FlowCallbacks, FlowContext, FlowError, FlowExecutionEvent, FlowNode, FlowResult,
 };
@@ -20,6 +23,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Instant;
 use tracing::{debug, error, instrument, warn};
+
+/// Default cap for the internal tool loop of an agent step
+const MAX_TOOL_ITERATIONS_DEFAULT: u32 = 5;
 
 /// Handler for single-shot AI agent steps.
 #[derive(Debug)]
@@ -81,19 +87,41 @@ impl StepHandler for AgentStepHandler {
             .get_string_property("agent_workspace")
             .unwrap_or_else(|| "functions".to_string());
 
-        // Build user message from flow context input
-        let user_content = context
-            .input
-            .get("event")
-            .and_then(|e| e.get("node_data"))
-            .and_then(|n| n.get("properties"))
-            .and_then(|p| p.get("content"))
-            .and_then(|c| c.as_str())
-            .or_else(|| context.input.get("message").and_then(|v| v.as_str()))
-            .or_else(|| context.input.get("input").and_then(|v| v.as_str()))
-            .unwrap_or("");
+        // Build user message: an explicit `prompt` (or `message`) property is
+        // template-resolved against the flow context (e.g.
+        // "Summarize: {{ steps.fetch.body }}"); otherwise fall back to
+        // digging the triggering content out of the flow input.
+        let user_content: String = match step
+            .get_property("prompt")
+            .or_else(|| step.get_property("message"))
+        {
+            Some(prompt_value) => match DataMapper::map(prompt_value, context)? {
+                Value::String(s) => s,
+                Value::Null => String::new(),
+                other => other.to_string(),
+            },
+            None => context
+                .input
+                .get("event")
+                .and_then(|e| e.get("node_data"))
+                .and_then(|n| n.get("properties"))
+                .and_then(|p| p.get("content"))
+                .and_then(|c| c.as_str())
+                .or_else(|| context.input.get("message").and_then(|v| v.as_str()))
+                .or_else(|| context.input.get("input").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string(),
+        };
 
-        let messages = vec![serde_json::json!({
+        // Optional workflow-context injection (include_context property:
+        // "input" | "full" | true) - templates stay the precise mechanism
+        let user_content = super::context_injection::with_context_block(
+            user_content,
+            context,
+            super::context_injection::ContextInjection::from_step(step),
+        );
+
+        let mut messages = vec![serde_json::json!({
             "role": "user",
             "content": user_content,
         })];
@@ -112,18 +140,133 @@ impl StepHandler for AgentStepHandler {
             debug!("Agent step '{}' has response_format configured", step.id);
         }
 
-        let ai_response = callbacks
-            .call_ai(
-                &agent_workspace,
-                &agent_ref,
-                messages,
-                response_format.clone(),
-            )
-            .await
-            .map_err(|e| {
-                error!("Agent step AI call failed: {}", e);
-                FlowError::AIProvider(format!("Agent step AI call failed: {}", e))
-            })?;
+        // Bounded internal tool loop: the agent's own tools (advertised by
+        // call_ai from the agent node config) are executed here so a
+        // tool-equipped agent works in a single-shot step. Workflow-level
+        // tools / explicit tool steps remain ai_sequence territory.
+        let max_tool_iterations = step
+            .get_u32_property("max_tool_iterations")
+            .unwrap_or(MAX_TOOL_ITERATIONS_DEFAULT);
+        let mut tool_iterations: u32 = 0;
+        let mut tools_used: Vec<Value> = Vec::new();
+
+        let ai_response = loop {
+            let response = callbacks
+                .call_ai(
+                    &agent_workspace,
+                    &agent_ref,
+                    messages.clone(),
+                    response_format.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    error!("Agent step AI call failed: {}", e);
+                    FlowError::AIProvider(format!("Agent step AI call failed: {}", e))
+                })?;
+
+            let tool_calls: Vec<Value> = response
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if tool_calls.is_empty() {
+                break response;
+            }
+            if tool_iterations >= max_tool_iterations {
+                warn!(
+                    "Agent step '{}' hit max_tool_iterations ({}) with tool calls still pending - using last response",
+                    step.id, max_tool_iterations
+                );
+                break response;
+            }
+            tool_iterations += 1;
+
+            // tool name -> function path mapping provided by call_ai
+            let tool_map = response.get("_tool_map").cloned().unwrap_or(Value::Null);
+
+            // Echo the assistant turn (with its tool calls) into the transcript
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": response.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                "tool_calls": tool_calls,
+            }));
+
+            for call in &tool_calls {
+                let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments: Value = call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .map(|a| {
+                        if let Some(s) = a.as_str() {
+                            serde_json::from_str(s).unwrap_or(Value::Null)
+                        } else {
+                            a.clone()
+                        }
+                    })
+                    .unwrap_or(Value::Null);
+                let function_ref = tool_map
+                    .get(name)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(name)
+                    .to_string();
+
+                let _ = callbacks
+                    .emit_event(
+                        &context.instance_id,
+                        FlowExecutionEvent::tool_call_started(call_id, name, arguments.clone()),
+                    )
+                    .await;
+
+                let (result, tool_error) = match callbacks
+                    .execute_function(&function_ref, arguments.clone())
+                    .await
+                {
+                    Ok(result) => (result, None),
+                    Err(e) => {
+                        warn!(
+                            "Agent step '{}' tool '{}' failed: {} - feeding error back to agent",
+                            step.id, name, e
+                        );
+                        (Value::Null, Some(e.to_string()))
+                    }
+                };
+
+                let _ = callbacks
+                    .emit_event(
+                        &context.instance_id,
+                        FlowExecutionEvent::tool_call_completed(
+                            call_id,
+                            result.clone(),
+                            tool_error.clone(),
+                            None,
+                        ),
+                    )
+                    .await;
+
+                let tool_content = match &tool_error {
+                    Some(err) => format!("Error: {}", err),
+                    None => match &result {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                };
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": tool_content,
+                }));
+                tools_used.push(serde_json::json!({
+                    "name": name,
+                    "function_ref": function_ref,
+                    "error": tool_error,
+                }));
+            }
+        };
 
         let content = ai_response
             .get("content")
@@ -170,6 +313,10 @@ impl StepHandler for AgentStepHandler {
         if let Some(data) = structured_output {
             output["structured_output"] = data;
         }
+        if !tools_used.is_empty() {
+            output["tools_used"] = Value::Array(tools_used);
+            output["tool_iterations"] = serde_json::json!(tool_iterations);
+        }
 
         // Emit step completed
         let _ = callbacks
@@ -184,7 +331,9 @@ impl StepHandler for AgentStepHandler {
             .await;
 
         let next_node_id = step
-            .get_string_property("next_node")
+            .next_node
+            .clone()
+            .or_else(|| step.get_string_property("next_node"))
             .unwrap_or_else(|| "end".to_string());
 
         Ok(StepResult::Continue {

@@ -12,10 +12,13 @@
 use crate::types::{FlowCallbacks, FlowContext, FlowNode, FlowResult, StepResult};
 use async_trait::async_trait;
 
+pub mod agent_competition;
+pub mod agent_decision;
 pub mod agent_step;
 pub mod ai_container;
 pub mod ai_tool_loop;
 pub mod chat_step;
+pub mod context_injection;
 pub mod conversation_persistence;
 pub mod decision;
 pub mod error;
@@ -27,6 +30,8 @@ pub mod sub_flow;
 pub mod wait;
 
 // Re-exports
+pub use agent_competition::AgentCompetitionHandler;
+pub use agent_decision::AgentDecisionHandler;
 pub use agent_step::AgentStepHandler;
 pub use ai_container::AiContainerHandler;
 pub use chat_step::ChatStepHandler;

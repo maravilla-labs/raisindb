@@ -71,6 +71,27 @@ pub trait FlowCallbacks: Send + Sync {
     /// Queue a job for asynchronous execution
     async fn queue_job(&self, job_type: &str, payload: Value) -> FlowResult<String>;
 
+    /// Queue a job to be executed at (not before) a future time.
+    ///
+    /// Used for wait timeouts, retry backoffs, and scheduled delays. The
+    /// default implementation embeds the schedule in the payload as
+    /// `__scheduled_at` (RFC 3339) and delegates to `queue_job`; the job
+    /// queuer implementation is responsible for honoring it.
+    async fn queue_job_at(
+        &self,
+        job_type: &str,
+        mut payload: Value,
+        scheduled_at: chrono::DateTime<chrono::Utc>,
+    ) -> FlowResult<String> {
+        if let Value::Object(ref mut map) = payload {
+            map.insert(
+                "__scheduled_at".to_string(),
+                Value::String(scheduled_at.to_rfc3339()),
+            );
+        }
+        self.queue_job(job_type, payload).await
+    }
+
     /// Call an AI provider
     ///
     /// # Arguments

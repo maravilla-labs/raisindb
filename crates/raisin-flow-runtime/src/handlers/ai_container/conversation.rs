@@ -242,25 +242,66 @@ impl AiContainerHandler {
         Ok(conversation_path)
     }
 
-    /// Append the triggering user message to a messages list.
+    /// Append the initial user message to a messages list.
+    ///
+    /// Preference order: an explicit, template-resolved `prompt` property
+    /// on the container; then the triggering node's content; then the
+    /// flow input as JSON (so a manual run never starts task-less). The
+    /// `include_context` property optionally appends the workflow context
+    /// as a JSON block (see `context_injection`).
     pub(super) fn init_user_message_to(
         &self,
+        step: &crate::types::FlowNode,
         context: &FlowContext,
         messages: &mut Vec<AiMessage>,
     ) {
-        // Get user message content from flow input
-        if let Some(content) = context
-            .input
-            .get("event")
-            .and_then(|e| e.get("node_data"))
-            .and_then(|n| n.get("properties"))
-            .and_then(|p| p.get("content"))
-            .and_then(|c| c.as_str())
-        {
-            debug!("Adding user message: {}", content);
+        let prompt: Option<String> = step.get_property("prompt").and_then(|prompt_value| {
+            match crate::runtime::DataMapper::map(prompt_value, context) {
+                Ok(serde_json::Value::String(s)) if !s.is_empty() => Some(s),
+                Ok(serde_json::Value::Null) => None,
+                Ok(other) => Some(other.to_string()),
+                Err(e) => {
+                    debug!("Failed to resolve container prompt template: {}", e);
+                    None
+                }
+            }
+        });
+
+        let content = prompt
+            .or_else(|| {
+                // Triggering node content (node-event triggered flows)
+                context
+                    .input
+                    .get("event")
+                    .and_then(|e| e.get("node_data"))
+                    .and_then(|n| n.get("properties"))
+                    .and_then(|p| p.get("content"))
+                    .and_then(|c| c.as_str())
+                    .map(String::from)
+            })
+            .or_else(|| {
+                // Manual / API runs: fall back to the flow input so the
+                // agent always receives a task
+                if context.input.is_null() {
+                    None
+                } else {
+                    Some(format!(
+                        "Process this workflow input:\n```json\n{}\n```",
+                        serde_json::to_string_pretty(&context.input).unwrap_or_default()
+                    ))
+                }
+            });
+
+        if let Some(content) = content {
+            let content = crate::handlers::context_injection::with_context_block(
+                content,
+                context,
+                crate::handlers::context_injection::ContextInjection::from_step(step),
+            );
+            debug!("Adding user message ({} chars)", content.len());
             messages.push(AiMessage {
                 role: MessageRole::User,
-                content: content.to_string(),
+                content,
                 tool_calls: None,
                 tool_call_id: None,
             });

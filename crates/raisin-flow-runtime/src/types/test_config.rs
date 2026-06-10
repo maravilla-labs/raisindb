@@ -5,12 +5,14 @@
 
 //! Test run configuration for workflow execution.
 //!
-//! Allows configuring how functions behave during test runs:
-//! - `real`: Execute the actual function
+//! Allows configuring how functions and AI agents behave during test runs:
+//! - `real`: Execute the actual function/agent
 //! - `passthrough`: Return input as output (no execution)
 //! - `mock_output`: Return a predefined mock value
 //!
-//! AI agents always run with real behavior and cannot be mocked.
+//! Functions are mocked by function path (`mock_functions`); AI steps
+//! (agent steps, AI containers, chat) are mocked by agent path
+//! (`mock_agents`), so AI flows can be tested without a provider.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,9 +25,14 @@ pub struct TestRunConfig {
     #[serde(default)]
     pub is_test_run: bool,
 
-    /// Mock configuration for functions
+    /// Mock configuration for functions (keyed by function path)
     #[serde(default)]
     pub mock_functions: HashMap<String, FunctionMock>,
+
+    /// Mock configuration for AI agents (keyed by agent path) - applies
+    /// to agent steps, AI containers, and chat steps
+    #[serde(default)]
+    pub mock_agents: HashMap<String, FunctionMock>,
 
     /// Whether to run in an isolated branch
     #[serde(default)]
@@ -49,6 +56,7 @@ impl Default for TestRunConfig {
         Self {
             is_test_run: false,
             mock_functions: HashMap::new(),
+            mock_agents: HashMap::new(),
             isolated_branch: false,
             branch_name: None,
             auto_discard: true,
@@ -131,6 +139,17 @@ impl TestRunConfig {
             .get(function_path)
             .map(|m| m.behavior != MockBehavior::Real)
             .unwrap_or(false)
+    }
+
+    /// Add an agent mock
+    pub fn with_agent_mock(mut self, agent_path: String, mock: FunctionMock) -> Self {
+        self.mock_agents.insert(agent_path, mock);
+        self
+    }
+
+    /// Get mock configuration for an AI agent
+    pub fn get_agent_mock(&self, agent_path: &str) -> Option<&FunctionMock> {
+        self.mock_agents.get(agent_path)
     }
 }
 

@@ -82,10 +82,11 @@ impl ParallelHandler {
                 })?
                 .clone();
 
-            // Build input for child flow
+            // Build input for child flow: resolve the mapping's template
+            // expressions against the parent context (e.g.
+            // { "item": "${input.orders[0]}", "run": "${steps.prep.run_id}" })
             let child_input = if let Some(input_mapping) = branch_obj.get("input_mapping") {
-                // TODO: Map parent context to child input based on mapping
-                input_mapping.clone()
+                crate::runtime::DataMapper::map(input_mapping, context)?
             } else {
                 // Default: pass entire parent input
                 context.input.clone()

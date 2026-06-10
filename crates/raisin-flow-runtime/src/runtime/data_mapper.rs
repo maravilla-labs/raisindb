@@ -9,30 +9,41 @@
 //! resolving variable references and evaluating expressions within flow steps.
 //! It supports:
 //! - Recursive resolution in JSON Objects and Arrays
-//! - Variable substitution (e.g., "${input.user.name}")
+//! - Whole-string expressions that keep their native JSON type
+//!   (e.g. `"${input.count}"` resolves to a number)
+//! - Inline interpolation inside larger strings
+//!   (e.g. `"Hello {{ input.user.name }}!"`)
 //! - Expression evaluation using `raisin-rel`
+//!
+//! Both `${expr}` and `{{ expr }}` markers are supported. The evaluation
+//! context is built by [`FlowContext::to_json`] and exposes:
+//! - `input.*` - the flow input / triggering node data
+//! - `steps.<step_id>.*` - outputs of previously completed steps
+//! - `trigger.*` - trigger info (event type, node path, ...)
+//! - root-level flow variables
+//! - `error.*` - error info when following an error edge
 
 use crate::types::{FlowContext, FlowError, FlowResult};
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Utility for mapping data and evaluating expressions
 pub struct DataMapper;
+
+/// A segment of a template string: either literal text or an expression.
+enum Segment<'a> {
+    Literal(&'a str),
+    Expr(&'a str),
+}
 
 impl DataMapper {
     /// Map a value by resolving any expressions or variables within it.
     ///
     /// This method recursively processes the input value:
-    /// - Strings matching "${...}" are evaluated as expressions
+    /// - Strings containing `${...}` or `{{...}}` are resolved (whole-string
+    ///   expressions keep their native type, mixed strings are interpolated)
     /// - Objects and Arrays are processed recursively
     /// - Other values are returned as-is
-    ///
-    /// # Arguments
-    /// * `value` - The value to map
-    /// * `context` - The flow execution context
-    ///
-    /// # Returns
-    /// The resolved value
     pub fn map(value: &Value, context: &FlowContext) -> FlowResult<Value> {
         match value {
             Value::String(s) => Self::resolve_string(s, context),
@@ -55,109 +66,147 @@ impl DataMapper {
         }
     }
 
-    /// Resolve a string value, checking for expression markers.
+    /// Resolve a string value, evaluating any embedded expressions.
     ///
-    /// Supported formats:
-    /// - "${expression}" - Evaluates the expression using raisin-rel
-    /// - "{{variable}}" - Simple variable substitution (legacy support)
+    /// - A string that is (modulo surrounding whitespace) a single
+    ///   `${expr}` / `{{ expr }}` resolves to the expression's native value.
+    /// - A string mixing literal text and expressions resolves to a string
+    ///   with each expression interpolated.
+    /// - A string without expression markers is returned unchanged.
     fn resolve_string(s: &str, context: &FlowContext) -> FlowResult<Value> {
-        let trimmed = s.trim();
+        if !s.contains("${") && !s.contains("{{") {
+            return Ok(Value::String(s.to_string()));
+        }
 
-        // Check for expression syntax: ${...}
-        if trimmed.starts_with("${") && trimmed.ends_with('}') {
-            let expr = &trimmed[2..trimmed.len() - 1];
+        let segments = Self::tokenize(s);
+
+        // Whole-string expression: exactly one expression and only
+        // whitespace literals around it -> keep native type.
+        let expr_count = segments
+            .iter()
+            .filter(|seg| matches!(seg, Segment::Expr(_)))
+            .count();
+        if expr_count == 1
+            && segments.iter().all(|seg| match seg {
+                Segment::Expr(_) => true,
+                Segment::Literal(lit) => lit.trim().is_empty(),
+            })
+        {
+            let expr = segments
+                .iter()
+                .find_map(|seg| match seg {
+                    Segment::Expr(e) => Some(*e),
+                    Segment::Literal(_) => None,
+                })
+                .expect("expr_count == 1");
             return Self::evaluate_expression(expr, context);
         }
 
-        // Check for template syntax: {{...}}
-        if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
-            let expr = &trimmed[2..trimmed.len() - 2];
-            return Self::evaluate_expression(expr, context);
+        if expr_count == 0 {
+            // Contains "${" or "{{" but no complete expression - literal.
+            return Ok(Value::String(s.to_string()));
         }
 
-        // Return literal string
-        Ok(Value::String(s.to_string()))
+        // Inline interpolation: concatenate literals and stringified results.
+        let mut out = String::with_capacity(s.len());
+        for seg in segments {
+            match seg {
+                Segment::Literal(lit) => out.push_str(lit),
+                Segment::Expr(expr) => {
+                    let resolved = Self::evaluate_expression(expr, context)?;
+                    out.push_str(&Self::stringify(&resolved));
+                }
+            }
+        }
+        Ok(Value::String(out))
+    }
+
+    /// Split a template string into literal and expression segments.
+    ///
+    /// `${...}` is matched with brace-depth counting (so nested braces in
+    /// the expression are allowed). `{{ ... }}` is matched up to the next
+    /// `}}`. Unterminated markers are treated as literal text.
+    fn tokenize(s: &str) -> Vec<Segment<'_>> {
+        let bytes = s.as_bytes();
+        let mut segments = Vec::new();
+        let mut lit_start = 0;
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                // ${...} with depth counting
+                let expr_start = i + 2;
+                let mut depth = 1usize;
+                let mut j = expr_start;
+                while j < bytes.len() && depth > 0 {
+                    match bytes[j] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if depth == 0 {
+                    if lit_start < i {
+                        segments.push(Segment::Literal(&s[lit_start..i]));
+                    }
+                    segments.push(Segment::Expr(s[expr_start..j - 1].trim()));
+                    i = j;
+                    lit_start = i;
+                    continue;
+                }
+                // Unterminated - fall through as literal
+            } else if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                // {{...}} up to the next }}
+                let expr_start = i + 2;
+                if let Some(rel_end) = s[expr_start..].find("}}") {
+                    let expr_end = expr_start + rel_end;
+                    if lit_start < i {
+                        segments.push(Segment::Literal(&s[lit_start..i]));
+                    }
+                    segments.push(Segment::Expr(s[expr_start..expr_end].trim()));
+                    i = expr_end + 2;
+                    lit_start = i;
+                    continue;
+                }
+                // Unterminated - fall through as literal
+            }
+            i += 1;
+        }
+
+        if lit_start < s.len() {
+            segments.push(Segment::Literal(&s[lit_start..]));
+        }
+        segments
+    }
+
+    /// Convert a resolved value to its string form for interpolation.
+    ///
+    /// Strings are inserted raw (no quotes), null becomes the empty string,
+    /// and other values use their compact JSON representation.
+    fn stringify(value: &Value) -> String {
+        match value {
+            Value::Null => String::new(),
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
     }
 
     /// Evaluate a raisin-rel expression against the flow context.
     fn evaluate_expression(expr: &str, context: &FlowContext) -> FlowResult<Value> {
         debug!("Evaluating expression: {}", expr);
 
-        // Build evaluation context from flow context
-        let mut eval_map = serde_json::Map::new();
-
-        // 1. Add "input" (the triggering node data)
-        eval_map.insert("input".to_string(), context.input.clone());
-
-        // 2. Add "steps" (outputs from previous steps)
-        // This matches the proposed `${steps.step_id.output}` syntax
-        if !context.step_outputs.is_empty() {
-            let steps_val = serde_json::to_value(&context.step_outputs).unwrap_or(Value::Null);
-            eval_map.insert("steps".to_string(), steps_val);
-        }
-
-        // 3. Add variables directly at root
-        for (key, value) in &context.variables {
-            eval_map.insert(key.clone(), value.clone());
-        }
-
-        // 4. Add trigger info
-        if let Some(trigger) = &context.trigger_info {
-            if let Ok(val) = serde_json::to_value(trigger) {
-                eval_map.insert("trigger".to_string(), val);
-            }
-        }
-
-        let json_context = Value::Object(eval_map);
-
-        // Convert to raisin-rel EvalContext
-        let eval_ctx = raisin_rel::EvalContext::from_json(json_context).map_err(|e| {
+        // Build the evaluation context from the flow context (single source
+        // of truth shared with condition evaluation).
+        let eval_ctx = raisin_rel::EvalContext::from_json(context.to_json()).map_err(|e| {
             FlowError::ConditionEvaluation(format!("Invalid evaluation context: {}", e))
         })?;
 
-        // Evaluate
         let result = raisin_rel::eval(expr, &eval_ctx).map_err(|e| {
             FlowError::ConditionEvaluation(format!("Evaluation failed for '{}': {}", expr, e))
         })?;
 
-        // Convert raisin-rel Value back to serde_json::Value
-        Ok(match result {
-            raisin_rel::Value::Null => Value::Null,
-            raisin_rel::Value::Boolean(b) => Value::Bool(b),
-            raisin_rel::Value::Integer(i) => Value::Number(i.into()),
-            raisin_rel::Value::Float(f) => {
-                if let Some(n) = serde_json::Number::from_f64(f) {
-                    Value::Number(n)
-                } else {
-                    warn!("Expression resulted in non-finite float: {}", f);
-                    Value::Null
-                }
-            }
-            raisin_rel::Value::String(s) => Value::String(s),
-            raisin_rel::Value::Array(arr) => {
-                // Convert array items recursively (simplified)
-                Value::Array(
-                    arr.into_iter()
-                        .map(|v| {
-                            match v {
-                                raisin_rel::Value::String(s) => Value::String(s),
-                                raisin_rel::Value::Integer(i) => Value::Number(i.into()),
-                                raisin_rel::Value::Boolean(b) => Value::Bool(b),
-                                raisin_rel::Value::Null => Value::Null,
-                                _ => Value::String(format!("{:?}", v)), // Fallback for complex types
-                            }
-                        })
-                        .collect(),
-                )
-            }
-            raisin_rel::Value::Object(obj) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in obj {
-                    map.insert(k, Value::String(format!("{:?}", v))); // Simplified
-                }
-                Value::Object(map)
-            }
-        })
+        Ok(result.to_json())
     }
 }
 
@@ -206,11 +255,69 @@ mod tests {
     }
 
     #[test]
+    fn test_map_template_syntax() {
+        let context = create_test_context();
+        let val = json!("{{ input.user.name }}");
+        let result = DataMapper::map(&val, &context).unwrap();
+        assert_eq!(result, json!("Alice"));
+    }
+
+    #[test]
     fn test_map_math_expression() {
         let context = create_test_context();
         let val = json!("${input.user.age + 5}");
         let result = DataMapper::map(&val, &context).unwrap();
         assert_eq!(result, json!(35));
+    }
+
+    #[test]
+    fn test_whole_string_keeps_native_type() {
+        let context = create_test_context();
+        // Number stays a number, object stays an object
+        assert_eq!(
+            DataMapper::map(&json!("${input.user.age}"), &context).unwrap(),
+            json!(30)
+        );
+        assert_eq!(
+            DataMapper::map(&json!("${input.user}"), &context).unwrap(),
+            json!({"name": "Alice", "age": 30})
+        );
+        // Surrounding whitespace still counts as whole-string
+        assert_eq!(
+            DataMapper::map(&json!("  ${input.user.age}  "), &context).unwrap(),
+            json!(30)
+        );
+    }
+
+    #[test]
+    fn test_inline_interpolation() {
+        let context = create_test_context();
+        let val = json!("Hello {{ input.user.name }}, you are ${input.user.age} years old");
+        let result = DataMapper::map(&val, &context).unwrap();
+        assert_eq!(result, json!("Hello Alice, you are 30 years old"));
+    }
+
+    #[test]
+    fn test_inline_interpolation_non_string_values() {
+        let context = create_test_context();
+        let val = json!("user=${input.user} result=${steps.step_1.result}");
+        let result = DataMapper::map(&val, &context).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(s.contains("\"name\":\"Alice\""), "got: {}", s);
+        assert!(s.ends_with("result=100"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_unterminated_marker_is_literal() {
+        let context = create_test_context();
+        assert_eq!(
+            DataMapper::map(&json!("price is ${100"), &context).unwrap(),
+            json!("price is ${100")
+        );
+        assert_eq!(
+            DataMapper::map(&json!("brace {{ only"), &context).unwrap(),
+            json!("brace {{ only")
+        );
     }
 
     #[test]
@@ -229,5 +336,13 @@ mod tests {
         assert_eq!(result["info"]["age_next_year"], json!(31));
         assert_eq!(result["list"][0], json!("active"));
         assert_eq!(result["list"][1], json!("literal"));
+    }
+
+    #[test]
+    fn test_object_result_roundtrip() {
+        // Regression: objects/arrays used to be lossily debug-formatted
+        let context = create_test_context();
+        let result = DataMapper::map(&json!("${steps.step_1}"), &context).unwrap();
+        assert_eq!(result, json!({"result": 100}));
     }
 }

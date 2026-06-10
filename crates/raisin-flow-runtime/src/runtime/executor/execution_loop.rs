@@ -171,16 +171,33 @@ pub(super) async fn execute_flow_with_retry(
                     )
                     .await;
 
-                // Merge output into variables
-                if let Value::Object(map) = output {
-                    if let Value::Object(ref mut vars) = instance.variables {
+                // Record the raw output under step_outputs so later steps can
+                // reference it via `steps.<step_id>.*` expressions, then merge
+                // object outputs into the flat variables (legacy behavior).
+                // __last_output feeds context.current_output on the next step
+                // (used by loops to collect per-iteration results).
+                if let Value::Object(ref mut vars) = instance.variables {
+                    if !output.is_null() {
+                        vars.entry("step_outputs".to_string())
+                            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+                            .as_object_mut()
+                            .map(|outputs| outputs.insert(current_step.id.clone(), output.clone()));
+                    }
+                    vars.insert("__last_output".to_string(), output.clone());
+                    if let Value::Object(map) = output {
                         for (key, value) in map {
+                            // Never let a step output clobber internal
+                            // bookkeeping (step_outputs, __* keys)
+                            if key.starts_with("__") || key == "step_outputs" {
+                                continue;
+                            }
                             vars.insert(key, value);
                         }
                     }
                 }
 
                 instance.current_node_id = next_node_id;
+                instance.retry_count = 0; // Step succeeded - reset retry budget
                 same_step_count = 0; // Reset SameStep guard on step transition
                                      // OPTIMIZATION: Don't persist to DB yet if next step is also sync
                                      // Only persist at async boundaries

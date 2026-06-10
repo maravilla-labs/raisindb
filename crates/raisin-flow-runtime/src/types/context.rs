@@ -239,10 +239,22 @@ impl FlowContext {
     /// This creates a flat structure where step outputs can be accessed:
     /// - `input` - the triggering node data
     /// - `steps.{step_id}` - output from a specific step
+    /// - `trigger` - info about what triggered the flow
     /// - `{variable_name}` - flow variables
+    ///
+    /// This is the single source of truth for the expression evaluation
+    /// context: both condition evaluation (decision steps) and template
+    /// substitution (`DataMapper`) build their raisin-rel context from it.
     pub fn to_json(&self) -> Value {
         let mut obj = serde_json::Map::new();
         obj.insert("input".to_string(), self.input.clone());
+
+        // Add trigger info (available as `trigger.*` in expressions)
+        if let Some(trigger) = &self.trigger_info {
+            if let Ok(val) = serde_json::to_value(trigger) {
+                obj.insert("trigger".to_string(), val);
+            }
+        }
 
         // Add step outputs under "steps" namespace
         if !self.step_outputs.is_empty() {

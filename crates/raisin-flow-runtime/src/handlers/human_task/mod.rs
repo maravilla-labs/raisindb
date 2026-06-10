@@ -30,6 +30,7 @@
 //!       priority: 4
 //! ```
 
+pub mod agent_assignee;
 pub mod handler;
 mod step_handler_impl;
 
@@ -37,3 +38,14 @@ mod step_handler_impl;
 mod tests;
 
 pub use handler::HumanTaskHandler;
+
+/// Workspace where inbox task nodes live. User homes (`raisin:User` nodes
+/// with their `inbox` children) are created in `raisin:access_control`, so
+/// tasks must be created there too for `{home}/inbox` listings to find them.
+pub const INBOX_WORKSPACE: &str = "raisin:access_control";
+
+/// Canonical node type for inbox tasks (shared with `raisin.tasks.*`).
+pub const INBOX_TASK_NODE_TYPE: &str = "raisin:InboxTask";
+
+/// Workspace where AI agent nodes live.
+pub const AGENT_WORKSPACE: &str = "functions";

@@ -94,10 +94,7 @@ pub(super) fn take_user_message(context: &mut FlowContext) -> Option<String> {
 /// Build a `StepResult::Continue` with session summary output.
 pub(super) fn make_continue(step: &FlowNode, session: &ChatSessionState) -> StepResult {
     StepResult::Continue {
-        next_node_id: step
-            .next_node
-            .clone()
-            .unwrap_or_else(|| "__implicit_end__".to_string()),
+        next_node_id: step.next_node.clone().unwrap_or_else(|| "end".to_string()),
         output: serde_json::json!({
             "session_id": session.session_id,
             "turn_count": session.turn_count,

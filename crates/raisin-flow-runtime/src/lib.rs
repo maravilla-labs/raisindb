@@ -67,7 +67,7 @@ pub use handlers::{
     FunctionStepHandler, HumanTaskHandler, OnErrorBehavior, ParallelHandler, StepError,
     StepHandler,
 };
-pub use integration::{FlowExecutionHandler, FlowResumeReason, FlowTriggerEvent};
+pub use integration::{FlowResumeReason, FlowTriggerEvent};
 pub use runtime::*;
 pub use types::*;
 

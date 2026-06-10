@@ -45,16 +45,33 @@ impl StepHandler for WaitHandler {
     async fn execute(
         &self,
         step: &FlowNode,
-        _context: &mut FlowContext,
+        context: &mut FlowContext,
         _callbacks: &dyn FlowCallbacks,
     ) -> FlowResult<StepResult> {
+        // Resuming after the wait elapsed (scheduled wake-up) or the
+        // awaited event arrived? Continue instead of waiting again.
+        if context.variables.remove("__wait_elapsed_pending").is_some() {
+            let next_node = step.next_node.clone().unwrap_or_else(|| "end".to_string());
+            return Ok(StepResult::Continue {
+                next_node_id: next_node,
+                output: json!({"waited": true}),
+            });
+        }
+        if let Some(event_data) = context.variables.remove("__resume_data") {
+            let next_node = step.next_node.clone().unwrap_or_else(|| "end".to_string());
+            return Ok(StepResult::Continue {
+                next_node_id: next_node,
+                output: json!({"waited": true, "event": event_data}),
+            });
+        }
+
         let wait_type = step
             .get_string_property("wait_type")
             .unwrap_or_else(|| "delay".to_string());
 
         match wait_type.as_str() {
-            "delay" => execute_delay_wait(step),
-            "until" => execute_until_wait(step),
+            "delay" => execute_delay_wait(step, context),
+            "until" => execute_until_wait(step, context),
             "event" => execute_event_wait(step),
             "cron" => execute_cron_wait(step),
             _ => Err(FlowError::InvalidNodeConfiguration(format!(
@@ -65,15 +82,23 @@ impl StepHandler for WaitHandler {
     }
 }
 
+/// Resolve template expressions in a string property value
+fn resolve_template(s: &str, context: &FlowContext) -> FlowResult<String> {
+    match crate::runtime::DataMapper::map(&serde_json::Value::String(s.to_string()), context)? {
+        serde_json::Value::String(out) => Ok(out),
+        other => Ok(other.to_string()),
+    }
+}
+
 /// Execute a delay-based wait
-fn execute_delay_wait(step: &FlowNode) -> FlowResult<StepResult> {
-    // Get duration string (e.g., "5s", "30m", "1h", "1d")
+fn execute_delay_wait(step: &FlowNode, context: &FlowContext) -> FlowResult<StepResult> {
+    // Get duration string (e.g., "5s", "30m", "1h", "1d"); template
+    // expressions like "${input.delay}" are resolved first
     let duration_str = step
         .get_string_property("duration")
         .or_else(|| step.get_string_property("delay"))
-        .ok_or_else(|| {
-            FlowError::MissingProperty("duration required for delay wait".to_string())
-        })?;
+        .ok_or_else(|| FlowError::MissingProperty("duration required for delay wait".to_string()))
+        .and_then(|s| resolve_template(&s, context))?;
 
     let duration_ms = parse_duration(&duration_str)?;
     let resume_at = Utc::now() + Duration::milliseconds(duration_ms as i64);
@@ -97,12 +122,13 @@ fn execute_delay_wait(step: &FlowNode) -> FlowResult<StepResult> {
 }
 
 /// Execute an until-timestamp wait
-fn execute_until_wait(step: &FlowNode) -> FlowResult<StepResult> {
-    // Get target timestamp
+fn execute_until_wait(step: &FlowNode, context: &FlowContext) -> FlowResult<StepResult> {
+    // Get target timestamp (template expressions resolved first)
     let until_str = step
         .get_string_property("until")
         .or_else(|| step.get_string_property("timestamp"))
-        .ok_or_else(|| FlowError::MissingProperty("until timestamp required".to_string()))?;
+        .ok_or_else(|| FlowError::MissingProperty("until timestamp required".to_string()))
+        .and_then(|s| resolve_template(&s, context))?;
 
     // Parse timestamp
     let resume_at: DateTime<Utc> = until_str
@@ -287,32 +313,34 @@ fn parse_duration(s: &str) -> FlowResult<u64> {
 
 /// Calculate the next occurrence for a cron expression
 ///
-/// This is a simplified implementation - full version would use a cron parser library
+/// Supports standard 5-field cron expressions ("0 9 * * 1-5"), 6/7-field
+/// expressions with seconds, and nicknames ("@hourly", "@daily", ...).
 fn calculate_next_cron_occurrence(cron_expr: &str) -> FlowResult<DateTime<Utc>> {
-    // For now, just add a fixed interval based on common patterns
-    // Full implementation would parse cron and calculate actual next occurrence
+    use std::str::FromStr;
 
-    let now = Utc::now();
+    let expr = cron_expr.trim();
 
-    // Simple pattern matching for common cron expressions
-    let next = if cron_expr.contains("@hourly") || cron_expr.starts_with("0 * * * *") {
-        // Next hour
-        now + Duration::hours(1)
-    } else if cron_expr.contains("@daily") || cron_expr.starts_with("0 0 * * *") {
-        // Next day at midnight
-        now + Duration::days(1)
-    } else if cron_expr.contains("@weekly") || cron_expr.starts_with("0 0 * * 0") {
-        // Next week
-        now + Duration::weeks(1)
-    } else if cron_expr.contains("@monthly") {
-        // Next month (approximation)
-        now + Duration::days(30)
+    // The cron crate expects a seconds field first; prepend "0" to
+    // standard 5-field expressions. Nicknames pass through unchanged.
+    let normalized = if expr.starts_with('@') || expr.split_whitespace().count() != 5 {
+        expr.to_string()
     } else {
-        // Default: next minute
-        now + Duration::minutes(1)
+        format!("0 {}", expr)
     };
 
-    Ok(next)
+    let schedule = cron::Schedule::from_str(&normalized).map_err(|e| {
+        FlowError::InvalidNodeConfiguration(format!(
+            "Invalid cron expression '{}': {}",
+            cron_expr, e
+        ))
+    })?;
+
+    schedule.upcoming(Utc).next().ok_or_else(|| {
+        FlowError::InvalidNodeConfiguration(format!(
+            "Cron expression '{}' has no upcoming occurrence",
+            cron_expr
+        ))
+    })
 }
 
 #[cfg(test)]

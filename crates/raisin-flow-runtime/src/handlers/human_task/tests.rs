@@ -184,7 +184,7 @@ async fn test_human_task_creates_inbox_task() {
     let nodes = created_nodes.lock().await;
     assert_eq!(nodes.len(), 1);
     let (node_type, path, properties) = &nodes[0];
-    assert_eq!(node_type, "inbox_task");
+    assert_eq!(node_type, "raisin:InboxTask");
     assert!(path.starts_with("/users/manager/inbox/task-approval-1-"));
     assert_eq!(properties["task_type"], "approval");
     assert_eq!(properties["title"], "Approve Budget Request");

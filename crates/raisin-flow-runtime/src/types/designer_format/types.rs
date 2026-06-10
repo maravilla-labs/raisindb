@@ -87,6 +87,23 @@ pub enum DesignerNode {
         /// Container rules for conditional routing
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         rules: Vec<DesignerContainerRule>,
+        /// AI router: an agent that decides which child runs when no REL
+        /// rule matched (or as the only routing mechanism). OR containers
+        /// only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        router: Option<DesignerRouterConfig>,
+        /// Referee for competition containers: judges the competitors'
+        /// answers, may request refinement rounds, declares confidence
+        #[serde(skip_serializing_if = "Option::is_none")]
+        referee: Option<DesignerRefereeConfig>,
+        /// Loop configuration (only for loop containers)
+        #[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
+        loop_config: Option<DesignerLoopConfig>,
+        /// Shared task prompt for competition containers (template
+        /// expressions supported); children may override with their own
+        /// `prompt`
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
         /// Container timeout in milliseconds
         #[serde(skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
@@ -158,6 +175,11 @@ pub struct DesignerStepProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compensation_ref: Option<RaisinReference>,
 
+    /// Mapping for the compensation input (template expressions; the
+    /// forward step's output is available as output.*)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compensation_input_mapping: Option<serde_json::Value>,
+
     /// Continue workflow on step failure
     #[serde(default)]
     pub continue_on_fail: bool,
@@ -176,6 +198,68 @@ pub struct DesignerStepProperties {
     /// Chat step configuration (for chat step type)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_config: Option<super::config_types::ChatStepConfig>,
+
+    /// Function arguments - values support template expressions like
+    /// "{{ input.value }}" or "${steps.prev.field}"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+
+    /// Prompt for ai_agent steps (template expressions supported)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+
+    /// Response format for ai_agent steps: "text", "json_object", or
+    /// "json_schema" (structured output lands in structured_output)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
+
+    /// Workflow-context injection for ai_agent steps: "input" | "full" |
+    /// true (= full). Appends the workflow context as a JSON block to
+    /// the prompt - templates remain the precise mechanism.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_context: Option<serde_json::Value>,
+
+    // === Human task properties (step_type = human_task) ===
+    /// Type of human task: approval | input | review | action
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_type: Option<String>,
+
+    /// Assignee path - a user ("/users/alice") or an AI agent
+    /// ("/agents/support"); agents decide tasks automatically
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+
+    /// Task description shown to the assignee
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_description: Option<String>,
+
+    /// Options for approval tasks
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<serde_json::Value>,
+
+    /// JSON schema for input tasks
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+
+    /// Task due time in seconds from creation (wait deadline)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_in_seconds: Option<i64>,
+
+    /// Task priority (1-5, where 5 is highest)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
+
+    /// Minimum confidence for an agent assignee's decision (0-1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
+
+    /// Human assignee to escalate to when an agent assignee fails
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalation_assignee: Option<String>,
+
+    /// Target node ID when the wait deadline expires
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_edge: Option<String>,
 }
 
 /// Execution identity mode for step execution (FR-028)
@@ -201,6 +285,8 @@ pub enum DesignerStepType {
     AiAgent,
     /// Interactive chat session step
     Chat,
+    /// Human task step (approval / input / review / action)
+    HumanTask,
 }
 
 /// Retry configuration
@@ -215,7 +301,12 @@ pub struct RetryConfig {
 }
 
 /// RaisinDB reference type for cross-node references
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Deserializes from either the full reference object
+/// (`{"raisin:ref": "...", "raisin:workspace": "..."}`) or a plain path
+/// string (hand-authored YAML convenience; workspace defaults to
+/// "functions").
+#[derive(Debug, Clone, Serialize)]
 pub struct RaisinReference {
     /// Node ID or path
     #[serde(rename = "raisin:ref")]
@@ -230,6 +321,47 @@ pub struct RaisinReference {
     pub raisin_path: Option<String>,
 }
 
+impl<'de> serde::Deserialize<'de> for RaisinReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct FullRef {
+            #[serde(rename = "raisin:ref")]
+            raisin_ref: String,
+            #[serde(rename = "raisin:workspace", default = "default_ref_workspace")]
+            raisin_workspace: String,
+            #[serde(rename = "raisin:path", default)]
+            raisin_path: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RefRepr {
+            Path(String),
+            Full(FullRef),
+        }
+
+        match RefRepr::deserialize(deserializer)? {
+            RefRepr::Path(path) => Ok(RaisinReference {
+                raisin_ref: path,
+                raisin_workspace: default_ref_workspace(),
+                raisin_path: None,
+            }),
+            RefRepr::Full(full) => Ok(RaisinReference {
+                raisin_ref: full.raisin_ref,
+                raisin_workspace: full.raisin_workspace,
+                raisin_path: full.raisin_path,
+            }),
+        }
+    }
+}
+
+fn default_ref_workspace() -> String {
+    "functions".to_string()
+}
+
 /// Container types matching the designer UI
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,6 +374,49 @@ pub enum DesignerContainerType {
     Parallel,
     /// AI-orchestrated execution with tool calls
     AiSequence,
+    /// Competing agents: every child agent answers the same task, a
+    /// referee picks the winner (with optional refinement rounds)
+    Competition,
+    /// Iterate the children once per item of a collection
+    Loop,
+}
+
+/// Loop configuration for loop containers.
+///
+/// The container's children form the loop body and execute once per item
+/// of the resolved collection. The current item is exposed as a flow
+/// variable (default `item`), referenced in templates as `{{ item }}` /
+/// `${item}` and in REL conditions as a bare identifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignerLoopConfig {
+    /// Collection expression to iterate, e.g.
+    /// `${steps.pick_candidates.candidates}` or `{{ input.items }}`.
+    /// Must resolve to an array (objects iterate as
+    /// `{key, value}` pairs).
+    pub over: String,
+
+    /// Variable name for the current item (default: `item`). Must be a
+    /// REL identifier (`[A-Za-z0-9_]`, snake_case).
+    #[serde(default = "default_loop_item")]
+    pub item: String,
+
+    /// Optional variable name for the current 0-based index
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+
+    /// Safety cap: iterate at most this many items
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+
+    /// Early-exit REL condition, evaluated after each completed
+    /// iteration; when true the loop finishes with the results collected
+    /// so far (e.g. `steps.ask.response == "accept"`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+fn default_loop_item() -> String {
+    "item".to_string()
 }
 
 /// Step error behavior
@@ -263,4 +438,64 @@ pub struct DesignerContainerRule {
     pub condition: String,
     /// ID of next step if condition matches
     pub next_step: String,
+}
+
+/// Referee configuration for competition containers.
+///
+/// Every child agent answers the same task (possibly with different
+/// LLMs); the referee judges the answers and either accepts a winner or
+/// sends feedback for another round. The declared confidence travels in
+/// the step output so downstream rules can gate on it (e.g. route
+/// low-confidence results to a human task).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignerRefereeConfig {
+    /// The referee agent
+    pub agent_ref: RaisinReference,
+
+    /// Judging instructions (template expressions supported); defaults to
+    /// a generic "pick the best answer" prompt
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+
+    /// Confidence the referee must declare to accept without further
+    /// rounds (0-1, default 0.7)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
+
+    /// Maximum refinement rounds after the initial one (default 1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+
+    /// Workflow-context injection for the shared task: "input" | "full" |
+    /// true (= full)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_context: Option<serde_json::Value>,
+}
+
+/// AI router configuration for OR containers: the referenced agent picks
+/// the child to run. Deterministic REL rules always run first; the agent
+/// decides only when none matched (or when there are no rules at all).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignerRouterConfig {
+    /// The routing agent
+    pub agent_ref: RaisinReference,
+
+    /// Routing instructions shown to the agent (template expressions
+    /// supported); defaults to a prompt built from the flow input
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+
+    /// Minimum confidence (0-1) required to follow the agent's choice;
+    /// below it the router falls back to `default_branch` / skip
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
+
+    /// Child id to run when the agent is not confident or returns an
+    /// invalid branch; unset = skip the container
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+
+    /// Workflow-context injection: "input" | "full" | true (= full)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_context: Option<serde_json::Value>,
 }

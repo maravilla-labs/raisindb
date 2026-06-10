@@ -57,17 +57,18 @@ pub(super) async fn handle_wait_result(
         timeout_at: calculate_timeout(metadata),
     });
 
-    // Schedule a timeout check job if a timeout is configured
+    // Schedule a timeout-check wake-up job at the deadline if one is
+    // configured. For Scheduled waits this is the wake-up that resumes the
+    // flow; for other waits it enforces the timeout (timeout_edge or fail).
     if let Some(timeout_at) = instance.wait_info.as_ref().and_then(|w| w.timeout_at) {
         let timeout_payload = serde_json::json!({
-            "type": "FlowInstanceExecution",
             "instance_id": instance_id,
             "execution_type": "timeout_check",
             "timeout_at": timeout_at.to_rfc3339(),
         });
 
         match callbacks
-            .queue_job("FlowInstanceExecution", timeout_payload)
+            .queue_job_at("FlowInstanceExecution", timeout_payload, timeout_at)
             .await
         {
             Ok(job_id) => {
@@ -162,14 +163,134 @@ pub(super) async fn handle_complete_result(
     let _ = callbacks
         .emit_event(
             instance_id,
-            FlowExecutionEvent::flow_completed(output, total_duration_ms),
+            FlowExecutionEvent::flow_completed(output.clone(), total_duration_ms),
         )
         .await;
 
     callbacks
         .save_instance_with_version(instance, expected_version)
         .await?;
+
+    // Notify the parent flow (sub-flow / parallel branch) of completion
+    notify_parent_flow(instance, "completed", Some(output), None, callbacks).await;
+
     Ok(())
+}
+
+/// Queue a resume job for the parent flow when a child flow (sub-flow or
+/// parallel branch) reaches a terminal state.
+///
+/// Best-effort: failures are logged, the wait sweeper / timeout machinery
+/// acts as the backstop for a lost notification.
+pub(super) async fn notify_parent_flow(
+    instance: &crate::types::FlowInstance,
+    status: &str,
+    output: Option<Value>,
+    error: Option<String>,
+    callbacks: &dyn FlowCallbacks,
+) {
+    let Some(parent_instance_id) = instance.parent_instance_ref.clone() else {
+        return;
+    };
+
+    let get_var = |key: &str| {
+        instance
+            .variables
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+
+    let resume_payload = serde_json::json!({
+        "instance_id": parent_instance_id,
+        "execution_type": "resume",
+        "resume_reason": "child_flow_terminal",
+        "resume_data": {
+            "child_completed": true,
+            "child_instance_id": instance.id,
+            "parent_step_id": get_var("__parent_step_id"),
+            "branch_id": get_var("__branch_id"),
+            "status": status,
+            "output": output,
+            "error": error,
+        },
+    });
+
+    match callbacks
+        .queue_job("FlowInstanceExecution", resume_payload)
+        .await
+    {
+        Ok(job_id) => {
+            info!(
+                "Child flow {} {} - queued parent {} resume job {}",
+                instance.id, status, parent_instance_id, job_id
+            );
+        }
+        Err(e) => {
+            error!(
+                "Child flow {} {} but failed to queue parent {} resume: {}",
+                instance.id, status, parent_instance_id, e
+            );
+        }
+    }
+}
+
+/// Transition the flow into a Retry wait and schedule the wake-up job.
+async fn schedule_retry(
+    instance_id: &str,
+    instance: &mut crate::types::FlowInstance,
+    step: &crate::types::FlowNode,
+    expected_version: i32,
+    callbacks: &dyn FlowCallbacks,
+) -> FlowResult<bool> {
+    instance.retry_count += 1;
+    instance.metrics.retry_count += 1;
+    let backoff = calculate_backoff(instance.retry_count, Some(step));
+
+    warn!(
+        "Retrying flow {} (attempt {}) after {:?}",
+        instance_id, instance.retry_count, backoff
+    );
+
+    let retry_at = Utc::now() + backoff;
+    instance.status = FlowStatus::Waiting;
+    instance.wait_info = Some(WaitInfo {
+        subscription_id: generate_subscription_id(),
+        wait_type: WaitType::Retry,
+        target_path: None,
+        expected_event: None,
+        timeout_at: Some(retry_at),
+    });
+
+    callbacks
+        .save_instance_with_version(instance, expected_version)
+        .await?;
+
+    // Schedule the retry wake-up: check_flow_timeout routes Retry waits
+    // to a normal resume once the backoff has elapsed.
+    let retry_payload = serde_json::json!({
+        "instance_id": instance_id,
+        "execution_type": "timeout_check",
+        "timeout_at": retry_at.to_rfc3339(),
+    });
+    match callbacks
+        .queue_job_at("FlowInstanceExecution", retry_payload, retry_at)
+        .await
+    {
+        Ok(job_id) => {
+            info!(
+                "Scheduled retry wake-up job {} for flow {} at {}",
+                job_id, instance_id, retry_at
+            );
+        }
+        Err(e) => {
+            warn!(
+                "Failed to schedule retry wake-up job for flow {}: {}",
+                instance_id, e
+            );
+        }
+    }
+    Ok(true) // Return from loop
 }
 
 /// Handle an Error step result: retry, error edges, continue-on-fail, or fail
@@ -197,7 +318,21 @@ pub(super) async fn handle_error_result(
         )
         .await;
 
-    // Check for error_edge - if set, follow it instead of normal error handling
+    // Retry first: the error edge / continue-on-fail / rollback are
+    // last-resort paths once the retry budget is exhausted.
+    let max_retries = get_max_retries(current_step);
+    if instance.retry_count < max_retries {
+        return schedule_retry(
+            instance_id,
+            instance,
+            current_step,
+            expected_version,
+            callbacks,
+        )
+        .await;
+    }
+
+    // Check for error_edge - if set, follow it instead of failing
     let error_edge = current_step
         .properties
         .get("error_edge")
@@ -264,36 +399,8 @@ pub(super) async fn handle_error_result(
         return Ok(false); // Continue loop
     }
 
-    // Standard retry logic
-    let max_retries = get_max_retries(current_step);
-
-    if instance.retry_count < max_retries {
-        instance.retry_count += 1;
-        instance.metrics.retry_count += 1;
-        let backoff = calculate_backoff(instance.retry_count);
-
-        warn!(
-            "Retrying flow {} (attempt {}/{}) after {:?}",
-            instance_id, instance.retry_count, max_retries, backoff
-        );
-
-        instance.status = FlowStatus::Waiting;
-        instance.wait_info = Some(WaitInfo {
-            subscription_id: generate_subscription_id(),
-            wait_type: WaitType::Retry,
-            target_path: None,
-            expected_event: None,
-            timeout_at: Some(Utc::now() + backoff),
-        });
-
-        callbacks
-            .save_instance_with_version(instance, expected_version)
-            .await?;
-        // TODO: Schedule retry job
-        return Ok(true); // Return from loop
-    }
-
-    // Max retries exceeded - initiate rollback
+    // Retries exhausted, no error edge, no continue-on-fail: fail the flow
+    // and run saga compensation
     error!(
         "Flow {} failed after {} retries, initiating rollback",
         instance_id, instance.retry_count
@@ -303,7 +410,8 @@ pub(super) async fn handle_error_result(
     instance.error = Some(error.to_string());
     instance.completed_at = Some(Utc::now());
 
-    // Execute saga compensation
+    // Execute saga compensation (saves progress per compensation and sets
+    // the final RolledBack status when compensations ran)
     rollback_flow(instance, callbacks).await?;
 
     // Calculate total duration and emit FlowFailed event
@@ -319,8 +427,13 @@ pub(super) async fn handle_error_result(
         )
         .await;
 
-    callbacks
-        .save_instance_with_version(instance, expected_version)
-        .await?;
+    // Plain save: rollback_flow already persisted mid-rollback progress
+    // (bumping the version past expected_version), and this failure path
+    // has a single writer.
+    callbacks.save_instance(instance).await?;
+
+    // Notify the parent flow (sub-flow / parallel branch) of the failure
+    notify_parent_flow(instance, "failed", None, Some(error.to_string()), callbacks).await;
+
     Err(error)
 }

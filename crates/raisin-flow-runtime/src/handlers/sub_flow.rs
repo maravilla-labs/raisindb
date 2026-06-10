@@ -45,6 +45,51 @@ impl StepHandler for SubFlowHandler {
         context: &mut FlowContext,
         callbacks: &dyn FlowCallbacks,
     ) -> FlowResult<StepResult> {
+        // Resuming after the child flow reached a terminal state?
+        // (The child's completion queues a parent resume carrying
+        // `child_completed` - see notify_parent_flow.)
+        if let Some(result) = context.variables.remove("__resume_data") {
+            if result
+                .get("child_completed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let child_id = result
+                    .get("child_instance_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if status == "completed" {
+                    let output = result.get("output").cloned().unwrap_or(Value::Null);
+                    tracing::info!(
+                        step_id = %step.id,
+                        child_instance_id = %child_id,
+                        "Sub-flow completed, continuing"
+                    );
+                    return Ok(StepResult::Continue {
+                        next_node_id: step.next_node.clone().unwrap_or_else(|| "end".to_string()),
+                        output,
+                    });
+                }
+
+                let error = result
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("sub-flow failed");
+                return Ok(StepResult::Error {
+                    error: FlowError::ChildFlowError(format!(
+                        "Sub-flow '{}' failed: {}",
+                        child_id, error
+                    )),
+                });
+            }
+            // Not a child-flow completion - restore for other consumers
+            context
+                .variables
+                .insert("__resume_data".to_string(), result);
+        }
+
         // Get sub-flow reference from properties
         let flow_ref = step
             .get_string_property("flow_ref")
@@ -134,31 +179,34 @@ fn build_child_input(step: &FlowNode, context: &FlowContext) -> FlowResult<Value
             let mut child_input = serde_json::Map::new();
 
             for (target_key, source_expr) in mapping_obj {
-                // Simple variable reference (e.g., "$variable_name" or "$.path.to.value")
+                // Legacy variable reference (e.g. "$variable_name" or
+                // "$.path.to.value") - kept for backward compatibility
                 if let Some(expr_str) = source_expr.as_str() {
-                    if expr_str.starts_with("$.") || expr_str.starts_with("$") {
-                        // Variable reference - extract from context
+                    if (expr_str.starts_with("$.") || expr_str.starts_with('$'))
+                        && !expr_str.starts_with("${")
+                    {
                         let var_name = expr_str.trim_start_matches("$.").trim_start_matches('$');
                         if let Some(value) = context.variables.get(var_name) {
                             child_input.insert(target_key.clone(), value.clone());
                         }
-                    } else {
-                        // Literal string value
-                        child_input.insert(target_key.clone(), source_expr.clone());
+                        continue;
                     }
-                } else {
-                    // Direct value
-                    child_input.insert(target_key.clone(), source_expr.clone());
                 }
+
+                // Template expressions (${...} / {{...}}) and literals
+                child_input.insert(
+                    target_key.clone(),
+                    crate::runtime::DataMapper::map(source_expr, context)?,
+                );
             }
 
             return Ok(Value::Object(child_input));
         }
     }
 
-    // Check for direct input property
+    // Check for direct input property (template-resolved)
     if let Some(input) = step.properties.get("input") {
-        return Ok(input.clone());
+        return crate::runtime::DataMapper::map(input, context);
     }
 
     // Default: pass parent's input and variables

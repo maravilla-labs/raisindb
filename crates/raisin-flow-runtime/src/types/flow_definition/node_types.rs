@@ -161,6 +161,17 @@ pub enum StepType {
     #[serde(alias = "chat_step", alias = "chat_session")]
     Chat,
 
+    /// AI-routed decision: an agent picks the next step from a set of
+    /// declared branches (lowered from an OR container with a `router`,
+    /// or authored directly in runtime format)
+    #[serde(alias = "ai_decision", alias = "agent_router")]
+    AgentDecision,
+
+    /// Competing agents judged by a referee (lowered from a competition
+    /// container)
+    #[serde(alias = "ai_competition")]
+    Competition,
+
     /// Generic container
     Container,
 
@@ -182,6 +193,9 @@ impl StepType {
 
     /// Check if this is a branching type
     pub fn is_branching(&self) -> bool {
-        matches!(self, StepType::Decision | StepType::Parallel)
+        matches!(
+            self,
+            StepType::Decision | StepType::Parallel | StepType::AgentDecision
+        )
     }
 }

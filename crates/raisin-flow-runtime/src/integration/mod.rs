@@ -12,27 +12,14 @@
 
 //! Integration layer for RaisinDB flow runtime
 //!
-//! This module provides the bridge between the flow runtime and RaisinDB's
-//! job system. It includes:
+//! This module provides trigger type definitions for flow lifecycle events.
 //!
-//! - Job handler for executing flow instances via the unified job queue
-//! - Trigger type definitions for flow lifecycle events
-//!
-//! # Architecture
-//!
-//! The flow runtime integrates with RaisinDB through the unified job system:
-//!
-//! 1. **Flow Execution**: Jobs are registered with `JobRegistry.register_job()`
-//!    and data is stored with `JobDataStore.put()`
-//! 2. **State Persistence**: Flow state is persisted at async boundaries using
-//!    the `FlowCallbacks` trait
-//! 3. **Event-Driven Resumption**: Flows pause at async boundaries and resume
-//!    when events arrive (tool results, human input, etc.)
+//! Flow instance execution itself is handled by the production job handler
+//! in raisin-rocksdb (`FlowInstanceExecutionHandler`), which drives
+//! `runtime::execute_flow` / `resume_flow` / `check_flow_timeout`.
 
-pub mod job_handler;
 pub mod triggers;
 
-pub use job_handler::FlowExecutionHandler;
 pub use triggers::{
     build_trigger_info_from_event, create_flow_instance_from_trigger, FlowInstanceBuilder,
     FlowResumeReason, FlowTriggerEvent,

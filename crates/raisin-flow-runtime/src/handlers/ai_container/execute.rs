@@ -102,7 +102,7 @@ impl StepHandler for AiContainerHandler {
 
         // On first iteration, append the triggering user message if not already in history
         if state.iteration == 0 && messages.is_empty() {
-            self.init_user_message_to(context, &mut messages);
+            self.init_user_message_to(step, context, &mut messages);
             debug!("Initialized conversation with {} messages", messages.len());
         }
 
@@ -219,7 +219,9 @@ impl StepHandler for AiContainerHandler {
 
             // Get next node from flow
             let next_node_id = step
-                .get_string_property("next_node")
+                .next_node
+                .clone()
+                .or_else(|| step.get_string_property("next_node"))
                 .unwrap_or_else(|| "end".to_string());
 
             return Ok(StepResult::Continue {
@@ -365,7 +367,9 @@ impl StepHandler for AiContainerHandler {
                     .await;
 
                 let next_node_id = step
-                    .get_string_property("next_node")
+                    .next_node
+                    .clone()
+                    .or_else(|| step.get_string_property("next_node"))
                     .unwrap_or_else(|| "end".to_string());
 
                 Ok(StepResult::Continue {

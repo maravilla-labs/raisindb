@@ -103,7 +103,12 @@ fn start_for_each_loop(
     })?;
 
     // Resolve collection from context
-    let items = resolve_collection(&collection_expr, context)?;
+    let mut items = resolve_collection(&collection_expr, context)?;
+
+    // Optional safety cap on the number of iterations
+    if let Some(max) = step.get_u32_property("max_iterations") {
+        items.truncate(max as usize);
+    }
 
     if items.is_empty() {
         // Empty collection - skip to next step
@@ -302,11 +307,20 @@ fn continue_loop(
         state.results.push(output.clone());
     }
 
+    // Early-exit: the optional 'until' REL condition is evaluated after
+    // each completed iteration, with the just-finished iteration's loop
+    // variables and step outputs visible. When true the loop finishes
+    // with the results collected so far.
+    let until_satisfied = match step.get_string_property("until") {
+        Some(condition) => evaluate_rel_condition(&condition, context)?,
+        None => false,
+    };
+
     // Move to next iteration
     state.index += 1;
 
     // Check if loop is complete
-    if state.index >= state.total {
+    if until_satisfied || state.index >= state.total {
         // Loop complete - clean up and continue
         context.variables.remove(loop_state_key);
         context.variables.remove(&state.item_var);
@@ -382,6 +396,22 @@ fn continue_loop(
 
 /// Resolve a collection expression to a Vec<Value>
 fn resolve_collection(expr: &str, context: &FlowContext) -> FlowResult<Vec<Value>> {
+    // Template expressions: "${input.items}", "{{ steps.fetch.rows }}", ...
+    if expr.contains("${") || expr.contains("{{") {
+        let resolved = crate::runtime::DataMapper::map(&Value::String(expr.to_string()), context)?;
+        return match resolved {
+            Value::Array(arr) => Ok(arr),
+            Value::Object(obj) => Ok(obj
+                .iter()
+                .map(|(k, v)| json!({"key": k, "value": v}))
+                .collect()),
+            other => Err(FlowError::InvalidNodeConfiguration(format!(
+                "Collection '{}' resolved to a non-iterable value: {}",
+                expr, other
+            ))),
+        };
+    }
+
     // Handle variable reference
     let var_name = expr.trim_start_matches("$.").trim_start_matches('$');
 
@@ -414,6 +444,30 @@ fn resolve_collection(expr: &str, context: &FlowContext) -> FlowResult<Vec<Value
             FlowError::InvalidNodeConfiguration(format!("Could not resolve collection: {}", expr))
         })
     }
+}
+
+/// Evaluate a raisin-rel condition against the flow context (same
+/// namespaces as decision steps: input.*, steps.*, trigger.*, variables)
+fn evaluate_rel_condition(condition: &str, context: &FlowContext) -> FlowResult<bool> {
+    let eval_ctx = raisin_rel::EvalContext::from_json(context.to_json()).map_err(|e| {
+        FlowError::ConditionEvaluation(format!("Invalid evaluation context: {}", e))
+    })?;
+
+    // Safety: raisin_rel::eval is a sandboxed expression evaluator (no
+    // side effects, no host access) - the same engine decision steps use.
+    let result = raisin_rel::eval(condition, &eval_ctx).map_err(|e| {
+        FlowError::ConditionEvaluation(format!("Loop 'until' evaluation failed: {}", e))
+    })?;
+
+    Ok(match result {
+        raisin_rel::Value::Boolean(b) => b,
+        raisin_rel::Value::Null => false,
+        raisin_rel::Value::Integer(n) => n != 0,
+        raisin_rel::Value::Float(f) => f != 0.0,
+        raisin_rel::Value::String(s) => !s.is_empty(),
+        raisin_rel::Value::Array(arr) => !arr.is_empty(),
+        raisin_rel::Value::Object(obj) => !obj.is_empty(),
+    })
 }
 
 /// Simple condition evaluator (placeholder for REL integration)

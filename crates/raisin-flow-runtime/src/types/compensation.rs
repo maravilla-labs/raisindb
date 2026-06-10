@@ -25,6 +25,11 @@ pub struct CompensationEntry {
 
     /// Status of the compensation execution
     pub compensation_status: CompensationStatus,
+
+    /// When the compensation itself ran (executed or failed) - proves the
+    /// LIFO execution order from the final persisted stack
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_at: Option<DateTime<Utc>>,
 }
 
 impl CompensationEntry {
@@ -36,17 +41,20 @@ impl CompensationEntry {
             compensation_fn,
             compensation_input,
             compensation_status: CompensationStatus::Pending,
+            executed_at: None,
         }
     }
 
     /// Mark compensation as executed successfully
     pub fn mark_executed(&mut self) {
         self.compensation_status = CompensationStatus::Executed;
+        self.executed_at = Some(Utc::now());
     }
 
     /// Mark compensation as failed
     pub fn mark_failed(&mut self, error: String) {
         self.compensation_status = CompensationStatus::Failed(error);
+        self.executed_at = Some(Utc::now());
     }
 
     /// Check if compensation is pending

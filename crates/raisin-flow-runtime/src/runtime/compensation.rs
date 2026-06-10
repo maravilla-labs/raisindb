@@ -14,7 +14,6 @@
 //! - Progress is saved after each compensation
 //! - The flow is marked as RolledBack when complete
 
-use crate::runtime::save_instance_with_version;
 use crate::types::{CompensationEntry, FlowCallbacks, FlowInstance, FlowResult, FlowStatus};
 use serde_json::Value;
 use tracing::{error, info, warn};
@@ -50,17 +49,43 @@ pub async fn rollback_flow(
     let compensation_count = instance.compensation_stack.len();
 
     if compensation_count == 0 {
+        // Nothing to roll back - keep the current (Failed) status rather
+        // than claiming a rollback happened.
         info!("No compensations to execute for flow {}", instance.id);
-        instance.status = FlowStatus::RolledBack;
         return Ok(());
     }
 
-    // Execute compensations in reverse order (LIFO)
-    while let Some(mut entry) = instance.compensation_stack.pop() {
+    // Execute compensations in reverse order (LIFO). Entries are updated
+    // in place (with their CompensationStatus) and retained for audit;
+    // non-Pending entries are skipped, which makes a re-entered rollback
+    // (e.g. after a crash mid-rollback) safe.
+    for idx in (0..instance.compensation_stack.len()).rev() {
+        if !matches!(
+            instance.compensation_stack[idx].compensation_status,
+            crate::types::CompensationStatus::Pending
+        ) {
+            continue;
+        }
+        let mut entry = instance.compensation_stack[idx].clone();
+
         info!(
             "Executing compensation for step {} (function: {})",
             entry.step_id, entry.compensation_fn
         );
+
+        let _ = callbacks
+            .emit_event(
+                &instance.id,
+                crate::types::FlowExecutionEvent::log(
+                    "info",
+                    format!(
+                        "Executing compensation '{}' for step '{}'",
+                        entry.compensation_fn, entry.step_id
+                    ),
+                    Some(entry.step_id.clone()),
+                ),
+            )
+            .await;
 
         match execute_compensation(&entry, callbacks).await {
             Ok(_) => {
@@ -78,17 +103,29 @@ pub async fn rollback_flow(
                     "Compensation for step {} failed: {}. Continuing with remaining compensations.",
                     entry.step_id, error_msg
                 );
+                let _ = callbacks
+                    .emit_event(
+                        &instance.id,
+                        crate::types::FlowExecutionEvent::log(
+                            "error",
+                            format!(
+                                "Compensation '{}' for step '{}' failed: {}",
+                                entry.compensation_fn, entry.step_id, error_msg
+                            ),
+                            Some(entry.step_id.clone()),
+                        ),
+                    )
+                    .await;
             }
         }
 
-        // Push the updated entry back (with execution status)
-        // Note: We're building a new list of executed compensations
-        // This could be stored in a separate field if needed
+        instance.compensation_stack[idx] = entry;
 
-        // Save progress after each compensation
-        // Use the current version since we're already in a failure state
-        let current_version = instance.flow_version;
-        if let Err(e) = save_instance_with_version(instance, current_version, callbacks).await {
+        // Save progress after each compensation. The rollback owner is the
+        // only writer at this point (the flow is in a failure path), so a
+        // plain save is used - per-step OCC would conflict with itself
+        // because the in-memory version is not bumped by saves.
+        if let Err(e) = callbacks.save_instance(instance).await {
             warn!(
                 "Failed to save progress during rollback for flow {}: {}. Continuing...",
                 instance.id, e
@@ -374,12 +411,14 @@ mod tests {
         );
 
         // No compensations added
+        instance.status = FlowStatus::Failed;
 
         // Execute rollback
         rollback_flow(&mut instance, &callbacks).await.unwrap();
 
-        // Should be marked as RolledBack even with no compensations
-        assert_eq!(instance.status, FlowStatus::RolledBack);
+        // With nothing to roll back, the status is left untouched (Failed)
+        // instead of claiming a rollback happened
+        assert_eq!(instance.status, FlowStatus::Failed);
 
         // No functions should have been executed
         let executed = callbacks.get_executed();

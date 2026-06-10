@@ -179,14 +179,55 @@ impl HumanTaskHandler {
             task_props["due_in_seconds"] = Value::Number(due_seconds.into());
         }
 
-        Ok(task_props)
+        // Resolve template expressions (e.g. "Approve order {{ input.order_id }}")
+        // in title, description, assignee, option labels, etc.
+        crate::runtime::DataMapper::map(&task_props, context)
     }
 
-    /// Generate inbox task path based on assignee
-    pub(super) fn generate_task_path(&self, assignee: &str, step_id: &str) -> String {
-        // Generate a path like: /users/manager/inbox/task-{step_id}-{timestamp}
-        let timestamp = chrono::Utc::now().timestamp_millis();
-        format!("{}/inbox/task-{}-{}", assignee, step_id, timestamp)
+    /// Generate the inbox task path for a human task wait.
+    ///
+    /// The path is scoped to the flow INSTANCE and the loop ITERATION, not
+    /// just the step:
+    ///
+    ///   `{assignee}/inbox/task-{step_id}-{instance_slug}-it{iteration}`
+    ///
+    /// - `instance_slug` makes the path unique per flow run, so a new run
+    ///   can never alias (and be satisfied by) an earlier run's task node.
+    /// - `it{iteration}` (`__loop_index`, 0 outside loops) makes each loop
+    ///   iteration of the same step id its own task.
+    /// - The path is deterministic per (instance, step, iteration), so a
+    ///   re-delivered execution of the same wait is idempotent; the create
+    ///   path in `step_handler_impl` verifies any existing node at this
+    ///   path actually belongs to this instance/step and is still pending
+    ///   before reusing it.
+    pub(super) fn generate_task_path(
+        &self,
+        assignee: &str,
+        step_id: &str,
+        context: &FlowContext,
+    ) -> String {
+        // Short path-safe slug of the instance id (UUIDs: first 8 hex chars)
+        let mut instance_slug: String = context
+            .instance_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(8)
+            .collect();
+        if instance_slug.is_empty() {
+            instance_slug = chrono::Utc::now().timestamp_millis().to_string();
+        }
+
+        // Loop iteration (set by the loop handler); 0 outside loops
+        let iteration = context
+            .variables
+            .get("__loop_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        format!(
+            "{}/inbox/task-{}-{}-it{}",
+            assignee, step_id, instance_slug, iteration
+        )
     }
 }
 

@@ -18,6 +18,7 @@
 //! ```
 
 use super::StepHandler;
+use crate::runtime::DataMapper;
 use crate::types::{
     CompensationEntry, FlowCallbacks, FlowContext, FlowError, FlowNode, FlowResult, StepResult,
 };
@@ -50,54 +51,64 @@ impl FunctionStepHandler {
     }
 
     /// Build function arguments from step properties and context
-    fn build_arguments(&self, step: &FlowNode, _context: &FlowContext) -> Result<Value, FlowError> {
-        // Get arguments from step properties
+    ///
+    /// Template expressions like `{{ input.value }}` or `${steps.prev.id}`
+    /// are resolved against the flow context.
+    fn build_arguments(&self, step: &FlowNode, context: &FlowContext) -> Result<Value, FlowError> {
         if let Some(args) = step.get_object("arguments") {
-            // TODO: Implement template variable substitution ({{ input.value }})
-            // For now, return as-is
-            Ok(Value::Object(args.clone()))
+            DataMapper::map(&Value::Object(args.clone()), context)
         } else {
             // No arguments specified, use empty object
             Ok(Value::Object(serde_json::Map::new()))
         }
     }
 
-    /// Add compensation to stack if specified
-    fn handle_compensation(
+    /// Add compensation to the stack after the function completed.
+    ///
+    /// Compensation is registered only once the forward operation actually
+    /// succeeded - a function that never ran must not be compensated. The
+    /// step's output is exposed as `output.*` to the
+    /// `compensation_input_mapping` expressions (e.g.
+    /// `{ "charge_id": "${output.charge_id}" }`).
+    fn push_compensation_after_success(
         &self,
         step: &FlowNode,
         context: &mut FlowContext,
-        _function_ref: &str,
-        arguments: &Value,
+        output: &Value,
     ) -> Result<(), FlowError> {
-        // Check if compensation is specified
-        if let Some(compensation_fn) = step.get_string("compensation_ref") {
-            debug!(
-                "Adding compensation for step '{}': {}",
-                step.id, compensation_fn
-            );
+        let Some(compensation_fn) = step.get_string("compensation_ref") else {
+            return Ok(());
+        };
 
-            // Build compensation input (can be mapped from step output)
-            let compensation_input = if step.get_object("compensation_input_mapping").is_some() {
-                // TODO: Map output to compensation input based on mapping
-                // For now, use the same arguments
-                arguments.clone()
+        debug!(
+            "Adding compensation for step '{}': {}",
+            step.id, compensation_fn
+        );
+
+        // Build compensation input: resolve the mapping against the flow
+        // context (with the fresh output available), otherwise reuse the
+        // forward arguments.
+        let compensation_input =
+            if let Some(mapping) = step.get_object("compensation_input_mapping") {
+                let previous_output = context.current_output.take();
+                context.current_output = Some(output.clone());
+                let resolved = DataMapper::map(&Value::Object(mapping.clone()), context);
+                context.current_output = previous_output;
+                resolved?
             } else {
-                // Default: use same arguments as forward operation
-                arguments.clone()
+                self.build_arguments(step, context)?
             };
 
-            let entry = CompensationEntry {
-                step_id: step.id.clone(),
-                completed_at: Utc::now(),
-                compensation_fn,
-                compensation_input,
-                compensation_status: crate::types::CompensationStatus::Pending,
-            };
+        let entry = CompensationEntry {
+            step_id: step.id.clone(),
+            completed_at: Utc::now(),
+            compensation_fn,
+            compensation_input,
+            compensation_status: crate::types::CompensationStatus::Pending,
+            executed_at: None,
+        };
 
-            context.push_compensation(entry);
-        }
-
+        context.push_compensation(entry);
         Ok(())
     }
 }
@@ -141,6 +152,10 @@ impl StepHandler for FunctionStepHandler {
                     step_id = %step.id,
                     "Function succeeded, continuing to next step"
                 );
+
+                // The forward operation completed - register its
+                // compensation for saga rollback (if configured).
+                self.push_compensation_after_success(step, context, &output)?;
 
                 // Get next node
                 let next_node_id = step.next_node.clone().unwrap_or_else(|| "end".to_string());
@@ -242,9 +257,6 @@ impl StepHandler for FunctionStepHandler {
         let arguments = self.build_arguments(step, context)?;
         debug!("Function arguments: {}", arguments);
 
-        // Add compensation to stack if specified
-        self.handle_compensation(step, context, &function_ref, &arguments)?;
-
         // Create job payload
         // Note: Use "function_path" to match flow_callbacks_factory.rs expectation
         // Include instance_id for flow resumption after function completes
@@ -270,14 +282,24 @@ impl StepHandler for FunctionStepHandler {
             }
         };
 
-        // Return Wait result
+        // Return Wait result. An optional step timeout (timeout_ms) becomes
+        // the wait deadline so stuck function executions don't hang the flow.
+        let mut metadata = serde_json::json!({
+            "job_id": job_id,
+            "function_ref": function_ref,
+            "step_id": step.id,
+        });
+        if let Some(timeout_ms) = step
+            .get_property("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .filter(|ms| *ms > 0)
+        {
+            metadata["timeout_ms"] = serde_json::json!(timeout_ms);
+        }
+
         Ok(StepResult::Wait {
             reason: "function_call".to_string(),
-            metadata: serde_json::json!({
-                "job_id": job_id,
-                "function_ref": function_ref,
-                "step_id": step.id,
-            }),
+            metadata,
         })
     }
 }
@@ -443,11 +465,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), FlowError::MissingProperty(_)));
     }
 
-    #[tokio::test]
-    async fn test_function_step_with_compensation() {
-        let handler = FunctionStepHandler::new();
-        let mut context = create_test_context();
-
+    fn compensation_step_node() -> FlowNode {
         let mut properties = HashMap::new();
         properties.insert(
             "function_ref".to_string(),
@@ -462,20 +480,56 @@ mod tests {
         args.insert("amount".to_string(), Value::Number(100.into()));
         properties.insert("arguments".to_string(), Value::Object(args));
 
-        let node = FlowNode {
+        FlowNode {
             id: "charge-step".to_string(),
             step_type: StepType::FunctionStep,
             properties,
             children: vec![],
             next_node: Some("next-step".to_string()),
-        };
+        }
+    }
 
+    /// Compensation must NOT be registered at queue time - a function that
+    /// never ran must not be compensated.
+    #[tokio::test]
+    async fn test_function_step_no_compensation_at_queue_time() {
+        let handler = FunctionStepHandler::new();
+        let mut context = create_test_context();
+        let node = compensation_step_node();
         let callbacks = MockCallbacks::new();
 
         let result = handler.execute(&node, &mut context, &callbacks).await;
         assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), StepResult::Wait { .. }));
 
-        // Check compensation stack
+        assert_eq!(
+            context.compensation_stack.len(),
+            0,
+            "compensation must only be pushed after the function succeeds"
+        );
+    }
+
+    /// Compensation is registered once the function result arrives with
+    /// success=true.
+    #[tokio::test]
+    async fn test_function_step_compensation_on_success() {
+        let handler = FunctionStepHandler::new();
+        let mut context = create_test_context();
+        context.variables.insert(
+            "__function_result".to_string(),
+            serde_json::json!({
+                "success": true,
+                "result": { "charge_id": "ch_123" }
+            }),
+        );
+
+        let node = compensation_step_node();
+        let callbacks = MockCallbacks::new();
+
+        let result = handler.execute(&node, &mut context, &callbacks).await;
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), StepResult::Continue { .. }));
+
         assert_eq!(context.compensation_stack.len(), 1);
         let compensation = &context.compensation_stack[0];
         assert_eq!(compensation.step_id, "charge-step");
@@ -484,6 +538,64 @@ mod tests {
             compensation.compensation_status,
             CompensationStatus::Pending
         ));
+    }
+
+    /// compensation_input_mapping can reference the step output via
+    /// `output.*` expressions.
+    #[tokio::test]
+    async fn test_function_step_compensation_input_mapping_uses_output() {
+        let handler = FunctionStepHandler::new();
+        let mut context = create_test_context();
+        context.variables.insert(
+            "__function_result".to_string(),
+            serde_json::json!({
+                "success": true,
+                "result": { "charge_id": "ch_123" }
+            }),
+        );
+
+        let mut node = compensation_step_node();
+        let mut mapping = serde_json::Map::new();
+        mapping.insert(
+            "charge_id".to_string(),
+            Value::String("${output.charge_id}".to_string()),
+        );
+        node.properties.insert(
+            "compensation_input_mapping".to_string(),
+            Value::Object(mapping),
+        );
+
+        let callbacks = MockCallbacks::new();
+        let result = handler.execute(&node, &mut context, &callbacks).await;
+        assert!(result.is_ok());
+
+        let compensation = &context.compensation_stack[0];
+        assert_eq!(
+            compensation.compensation_input,
+            serde_json::json!({"charge_id": "ch_123"})
+        );
+    }
+
+    /// A failed function result must not register compensation.
+    #[tokio::test]
+    async fn test_function_step_no_compensation_on_failure() {
+        let handler = FunctionStepHandler::new();
+        let mut context = create_test_context();
+        context.variables.insert(
+            "__function_result".to_string(),
+            serde_json::json!({
+                "success": false,
+                "error": "card declined"
+            }),
+        );
+
+        let node = compensation_step_node();
+        let callbacks = MockCallbacks::new();
+
+        let result = handler.execute(&node, &mut context, &callbacks).await;
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), StepResult::Error { .. }));
+        assert_eq!(context.compensation_stack.len(), 0);
     }
 
     #[tokio::test]

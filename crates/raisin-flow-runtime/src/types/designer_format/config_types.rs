@@ -50,6 +50,27 @@ pub struct DesignerAiConfig {
     /// Total timeout across all iterations in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_timeout_ms: Option<u64>,
+
+    /// Maximum retries on transient AI failures
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+
+    /// Base delay between retries in milliseconds (exponential backoff)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_delay_ms: Option<u64>,
+
+    /// Workflow-context injection: "input" | "full" | true (= full).
+    /// Appends the workflow context as a JSON block to the agent's task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_context: Option<serde_json::Value>,
+
+    /// Response format: "text", "json_object", or "json_schema"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<String>,
+
+    /// JSON schema for structured output (when response_format = "json_schema")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 fn default_tool_mode() -> DesignerToolMode {
@@ -130,27 +151,88 @@ pub struct HandoffTarget {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// Conditions under which handoff should occur (raisin-rel expression)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Conditions under which handoff should occur (raisin-rel expression).
+    /// The designer UI saves this as `trigger_condition`.
+    #[serde(alias = "trigger_condition", skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+
+    /// Phrases that trigger handoff to this agent (designer UI field)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_phrases: Vec<String>,
 }
 
-/// Chat session termination configuration
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Chat session termination configuration.
+///
+/// Deserializes from either the runtime shape
+/// (`{allow_user_end, allow_ai_end, end_keywords}`) or the designer UI
+/// shape (`{modes: ["user_request","ai_decision",...], termination_phrases,
+/// inactivity_timeout_ms}`).
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatTerminationConfig {
     /// User can explicitly end the session
-    #[serde(default = "default_true")]
     pub allow_user_end: bool,
 
     /// AI can determine when session is complete
-    #[serde(default = "default_true")]
     pub allow_ai_end: bool,
 
     /// Keywords that trigger session end (e.g., "goodbye", "exit")
-    #[serde(default)]
     pub end_keywords: Vec<String>,
+
+    /// End the session after this much user inactivity (designer UI field)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inactivity_timeout_ms: Option<u64>,
 }
 
-fn default_true() -> bool {
-    true
+impl Default for ChatTerminationConfig {
+    fn default() -> Self {
+        Self {
+            allow_user_end: true,
+            allow_ai_end: true,
+            end_keywords: Vec::new(),
+            inactivity_timeout_ms: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatTerminationConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            // Runtime shape
+            allow_user_end: Option<bool>,
+            allow_ai_end: Option<bool>,
+            #[serde(default)]
+            end_keywords: Vec<String>,
+            // Designer UI shape
+            #[serde(default)]
+            modes: Vec<String>,
+            #[serde(default)]
+            termination_phrases: Vec<String>,
+            inactivity_timeout_ms: Option<u64>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let from_modes = !raw.modes.is_empty();
+        Ok(ChatTerminationConfig {
+            allow_user_end: raw.allow_user_end.unwrap_or(if from_modes {
+                raw.modes.iter().any(|m| m == "user_request")
+            } else {
+                true
+            }),
+            allow_ai_end: raw.allow_ai_end.unwrap_or(if from_modes {
+                raw.modes.iter().any(|m| m == "ai_decision")
+            } else {
+                true
+            }),
+            end_keywords: if raw.end_keywords.is_empty() {
+                raw.termination_phrases
+            } else {
+                raw.end_keywords
+            },
+            inactivity_timeout_ms: raw.inactivity_timeout_ms,
+        })
+    }
 }

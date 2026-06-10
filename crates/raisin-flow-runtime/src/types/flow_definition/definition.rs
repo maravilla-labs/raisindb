@@ -122,13 +122,17 @@ impl FlowDefinition {
             }
         }
 
-        // Try to detect format by checking first node's structure
+        // Try to detect format by checking the first node's structure.
+        // An EMPTY nodes array is treated as designer format too: the
+        // designer saves empty flows without start/end nodes, while an
+        // empty runtime-format flow would be invalid anyway (no start).
         let is_designer_format = value
             .get("nodes")
             .and_then(|nodes| nodes.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|node| node.get("node_type"))
-            .is_some();
+            .map(|arr| {
+                arr.is_empty() || arr.first().and_then(|node| node.get("node_type")).is_some()
+            })
+            .unwrap_or(false);
 
         if is_designer_format {
             // Designer format - parse and convert
