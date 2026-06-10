@@ -443,9 +443,13 @@ function buildAgentMetadata(sender, recipient) {
     humanSenderPath = sender.path;
   }
 
-  if (!agentName) return {};
+  // conversation_type lets clients filter (the SDK lists with
+  // conversation_type = 'ai_chat'); without it, agent-initiated
+  // conversations are invisible to typed list queries.
+  if (!agentName) return { conversation_type: 'direct_message' };
 
   const meta = {
+    conversation_type: 'ai_chat',
     agent_ref: { 'raisin:ref': '', 'raisin:workspace': 'functions', 'raisin:path': `/agents/${agentName}` },
   };
   if (humanSenderId) meta.human_sender_id = humanSenderId;

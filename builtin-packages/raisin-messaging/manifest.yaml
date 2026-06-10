@@ -1,5 +1,5 @@
 name: raisin-messaging
-version: 1.0.2
+version: 1.0.3
 title: RaisinDB Messaging Package
 description: >
   Provides the core inbox/outbox messaging pipeline, chat delivery,
