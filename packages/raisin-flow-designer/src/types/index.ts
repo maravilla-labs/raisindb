@@ -22,6 +22,9 @@ export type {
   AiToolMode,
   AiErrorBehavior,
   AiContainerConfig,
+  ContainerRouterConfig,
+  ContainerRefereeConfig,
+  LoopConfig,
   HandoffTarget,
   ChatTerminationMode,
   ChatTerminationConfig,
@@ -40,6 +43,7 @@ export {
   DEFAULT_AI_CONTAINER_CONFIG,
   AI_TOOL_MODE_DESCRIPTIONS,
   DEFAULT_CHAT_STEP_CONFIG,
+  DEFAULT_LOOP_CONFIG,
   INITIAL_EXECUTION_STATE,
 } from './flow';
 

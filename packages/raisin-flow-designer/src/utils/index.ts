@@ -15,6 +15,8 @@ export {
   cloneNode,
   countNodes,
   getAllNodeIds,
+  getErrorEdge,
+  formatDuration,
   createEmptyFlow,
   type FindNodeResult,
 } from './flowHelpers';

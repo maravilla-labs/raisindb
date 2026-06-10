@@ -8,7 +8,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { FlowDefinition, FlowNode, FlowStep, FlowContainer } from '../types';
 import type { ValidationResult, ValidationIssue } from '../context/FlowDesignerContext';
-import { isFlowStep, isFlowContainer } from '../utils';
+import { isFlowStep, isFlowContainer, getErrorEdge } from '../utils';
 
 export interface UseFlowValidationOptions {
   /** Debounce delay in milliseconds (default: 300ms) */
@@ -101,6 +101,44 @@ function validateStepProperties(nodes: FlowNode[], _parentId?: string): Validati
         });
       }
 
+      if (step.properties.step_type === 'human_task') {
+        // Human task must have an assignee
+        if (!step.properties.assignee || step.properties.assignee.trim() === '') {
+          issues.push({
+            nodeId: step.id,
+            field: 'assignee',
+            code: 'MISSING_ASSIGNEE',
+            message: 'Human Task step requires an assignee.',
+            severity: 'error',
+          });
+        }
+
+        // Approval tasks should define options
+        if (
+          step.properties.task_type === 'approval' &&
+          (!step.properties.options || step.properties.options.length === 0)
+        ) {
+          issues.push({
+            nodeId: step.id,
+            field: 'options',
+            code: 'MISSING_TASK_OPTIONS',
+            message: 'Approval task has no options defined. Default approve/reject options will be used.',
+            severity: 'warning',
+          });
+        }
+
+        // Input tasks should define an input schema
+        if (step.properties.task_type === 'input' && !step.properties.input_schema) {
+          issues.push({
+            nodeId: step.id,
+            field: 'input_schema',
+            code: 'MISSING_INPUT_SCHEMA',
+            message: 'Input task has no input schema. The collected data will be unstructured.',
+            severity: 'warning',
+          });
+        }
+      }
+
       // Check for chat step without agent reference
       if (step.properties.step_type === 'chat' && !step.properties.chat_config?.agent_ref) {
         issues.push({
@@ -112,10 +150,8 @@ function validateStepProperties(nodes: FlowNode[], _parentId?: string): Validati
         });
       }
 
-      // Check for error edge pointing to non-existent node
-      if (step.error_edge) {
-        // Note: We'd need to validate this against all nodes, done in validateErrorEdges
-      }
+      // Note: error edges pointing to non-existent nodes are validated
+      // against the full flow in validateErrorEdges
     }
 
     if (isFlowContainer(node)) {
@@ -138,6 +174,177 @@ function validateStepProperties(nodes: FlowNode[], _parentId?: string): Validati
           field: 'ai_config',
           code: 'MISSING_AI_CONFIG',
           message: 'AI Sequence container requires agent configuration.',
+          severity: 'error',
+        });
+      }
+
+      // Check for AI sequence config without agent reference
+      if (
+        container.container_type === 'ai_sequence' &&
+        container.ai_config &&
+        !container.ai_config.agent_ref
+      ) {
+        issues.push({
+          nodeId: container.id,
+          field: 'ai_config.agent_ref',
+          code: 'MISSING_AI_AGENT_REF',
+          message: 'AI Sequence container requires an agent reference (ai_config.agent_ref).',
+          severity: 'error',
+        });
+      }
+
+      // AI router is only supported on OR containers
+      if (container.router && container.container_type !== 'or') {
+        issues.push({
+          nodeId: container.id,
+          field: 'router',
+          code: 'ROUTER_ON_NON_OR',
+          message: `AI router is only supported on OR containers (this is "${container.container_type}").`,
+          severity: 'error',
+        });
+      }
+
+      // Router configuration checks (the agent decides when no REL rule matched)
+      if (container.router) {
+        const router = container.router;
+        const childIds = new Set(container.children.map((child) => child.id));
+
+        if (!router.agent_ref) {
+          issues.push({
+            nodeId: container.id,
+            field: 'router.agent_ref',
+            code: 'MISSING_ROUTER_AGENT',
+            message: 'AI router requires an agent_ref (the agent that decides the branch).',
+            severity: 'error',
+          });
+        }
+        if (router.default_branch != null && !childIds.has(router.default_branch)) {
+          issues.push({
+            nodeId: container.id,
+            field: 'router.default_branch',
+            code: 'INVALID_DEFAULT_BRANCH',
+            message: `router.default_branch "${router.default_branch}" is not a child of this container.`,
+            severity: 'error',
+          });
+        }
+        if (
+          router.min_confidence != null &&
+          (router.min_confidence < 0 || router.min_confidence > 1)
+        ) {
+          issues.push({
+            nodeId: container.id,
+            field: 'router.min_confidence',
+            code: 'INVALID_MIN_CONFIDENCE',
+            message: `router.min_confidence must be between 0 and 1 (got ${router.min_confidence}).`,
+            severity: 'error',
+          });
+        }
+      }
+
+      // Check OR container children are reachable via a rule or condition.
+      // With an AI router every child is reachable (the agent can pick any).
+      if (container.container_type === 'or' && container.children.length > 0 && !container.router) {
+        const routedIds = new Set(
+          (container.rules ?? []).map((rule) => rule.next_step)
+        );
+        for (const child of container.children) {
+          const hasOwnCondition =
+            isFlowStep(child) && !!child.properties.condition?.trim();
+          if (!routedIds.has(child.id) && !hasOwnCondition) {
+            issues.push({
+              nodeId: child.id,
+              code: 'UNROUTED_OR_CHILD',
+              message: 'Step is inside an OR container but no rule or condition routes to it.',
+              severity: 'warning',
+            });
+          }
+        }
+      }
+
+      // Competition container checks (mirrors the CLI doctor)
+      if (container.container_type === 'competition') {
+        if (!container.referee || !container.referee.agent_ref) {
+          issues.push({
+            nodeId: container.id,
+            field: 'referee',
+            code: 'COMPETITION_NEEDS_REFEREE',
+            message: 'Competition container requires a referee with an agent_ref to judge the answers.',
+            severity: 'error',
+          });
+        }
+
+        const agentChildren = container.children.filter(
+          (child) => isFlowStep(child) && child.properties.agent_ref != null
+        );
+        if (agentChildren.length < 2) {
+          issues.push({
+            nodeId: container.id,
+            code: 'COMPETITION_TOO_FEW_AGENTS',
+            message: `Competition container needs at least 2 children with agent_ref (found ${agentChildren.length}) — competitors are agents, each may use a different LLM.`,
+            severity: 'error',
+          });
+        }
+        for (const child of container.children) {
+          if (isFlowStep(child) && child.properties.agent_ref == null) {
+            issues.push({
+              nodeId: child.id,
+              code: 'COMPETITION_NON_AGENT_CHILD',
+              message: 'Competition children must be agent steps (agent_ref) — this child is ignored by the competition.',
+              severity: 'warning',
+            });
+          }
+        }
+
+        const refMinConfidence = container.referee?.min_confidence;
+        if (refMinConfidence != null && (refMinConfidence < 0 || refMinConfidence > 1)) {
+          issues.push({
+            nodeId: container.id,
+            field: 'referee.min_confidence',
+            code: 'INVALID_MIN_CONFIDENCE',
+            message: `referee.min_confidence must be between 0 and 1 (got ${refMinConfidence}).`,
+            severity: 'error',
+          });
+        }
+      }
+
+      // Loop container checks (mirrors the CLI doctor)
+      if (container.container_type === 'loop') {
+        if (!container.loop || !container.loop.over?.trim()) {
+          issues.push({
+            nodeId: container.id,
+            field: 'loop.over',
+            code: 'LOOP_MISSING_OVER',
+            message: "Loop container requires loop.over - the collection expression to iterate (e.g. ${steps.pick.items}).",
+            severity: 'error',
+          });
+        }
+        if (container.loop?.item != null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(container.loop.item)) {
+          issues.push({
+            nodeId: container.id,
+            field: 'loop.item',
+            code: 'LOOP_INVALID_ITEM',
+            message: `loop.item "${container.loop.item}" must be a snake_case identifier ([A-Za-z0-9_]) so it can be referenced in templates and REL conditions.`,
+            severity: 'error',
+          });
+        }
+        if (container.loop?.max_iterations != null && container.loop.max_iterations < 1) {
+          issues.push({
+            nodeId: container.id,
+            field: 'loop.max_iterations',
+            code: 'LOOP_INVALID_MAX_ITERATIONS',
+            message: `loop.max_iterations must be at least 1 (got ${container.loop.max_iterations}).`,
+            severity: 'error',
+          });
+        }
+      }
+
+      // Loop config is only supported on loop containers
+      if (container.loop && container.container_type !== 'loop') {
+        issues.push({
+          nodeId: container.id,
+          field: 'loop',
+          code: 'LOOP_ON_NON_LOOP',
+          message: `Loop config is only supported on loop containers (this is "${container.container_type}").`,
           severity: 'error',
         });
       }
@@ -166,16 +373,18 @@ function validateErrorEdges(flow: FlowDefinition): ValidationIssue[] {
   collectIds(flow.nodes);
 
   // Check error edges point to valid nodes
+  // (error edges may live at step level or in step.properties)
   function checkErrorEdges(nodes: FlowNode[]) {
     for (const node of nodes) {
       if (isFlowStep(node)) {
         const step = node as FlowStep;
-        if (step.error_edge && !allNodeIds.has(step.error_edge)) {
+        const errorEdge = getErrorEdge(step);
+        if (errorEdge && !allNodeIds.has(errorEdge)) {
           issues.push({
             nodeId: step.id,
             field: 'error_edge',
             code: 'INVALID_ERROR_EDGE',
-            message: `Error edge points to non-existent node: ${step.error_edge}`,
+            message: `Error edge points to non-existent node: ${errorEdge}`,
             severity: 'error',
           });
         }

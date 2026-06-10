@@ -89,6 +89,8 @@ export function useFlowDesigner(): UseFlowDesignerReturn {
       // Map container type to StepType
       const stepType: StepType = options.container_type === 'parallel' ? 'parallel' :
                                   options.container_type === 'ai_sequence' ? 'ai_sequence' :
+                                  options.container_type === 'competition' ? 'competition' :
+                                  options.container_type === 'loop' ? 'loop' :
                                   options.container_type === 'and' ? 'and' :
                                   options.container_type === 'or' ? 'or' : 'parallel';
 

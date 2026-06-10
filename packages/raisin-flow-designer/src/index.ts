@@ -90,6 +90,10 @@ export type {
   AiToolMode,
   AiErrorBehavior,
   AiContainerConfig,
+  // Router / referee / loop container types
+  ContainerRouterConfig,
+  ContainerRefereeConfig,
+  LoopConfig,
   // Execution state types
   StepExecutionState,
   StepExecutionInfo,
@@ -129,6 +133,7 @@ export {
   RETRY_STRATEGY_DESCRIPTIONS,
   DEFAULT_AI_CONTAINER_CONFIG,
   AI_TOOL_MODE_DESCRIPTIONS,
+  DEFAULT_LOOP_CONFIG,
   INITIAL_EXECUTION_STATE,
 } from './types';
 

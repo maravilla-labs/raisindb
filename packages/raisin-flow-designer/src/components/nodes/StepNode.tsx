@@ -23,9 +23,14 @@ import {
   Check,
   X,
   Clock,
+  RotateCw,
+  Undo2,
+  ShieldAlert,
+  Zap,
 } from 'lucide-react';
 import type { FlowStep, InsertPosition } from '../../types';
-import { getRefDisplayName, getRefPath } from '../../types';
+import { getRefDisplayName, getRefPath, RETRY_STRATEGIES } from '../../types';
+import { getErrorEdge, formatDuration } from '../../utils';
 import { useThemeClasses } from '../../context';
 
 /** Execution status for visualization */
@@ -109,6 +114,31 @@ export function StepNode({
   const hasFunction = !!functionRef;
   const hasAgent = !!agentRef;
   const hasChatAgent = !!(chatConfig?.agent_ref);
+
+  // Configuration badges (bottom row)
+  const retryConfig = node.properties?.retry;
+  const retryStrategy = node.properties?.retry_strategy;
+  const hasRetry =
+    (!!retryConfig && retryConfig.max_retries > 0) ||
+    (!!retryStrategy && retryStrategy !== 'none');
+  const retryCount =
+    retryConfig?.max_retries ??
+    (retryStrategy && retryStrategy !== 'none'
+      ? RETRY_STRATEGIES[retryStrategy].max_retries
+      : 0);
+  const timeoutMs = node.properties?.timeout_ms;
+  const compensationRef = node.properties?.compensation_ref;
+  const continueOnFail = !!node.properties?.continue_on_fail;
+  const errorEdgeTarget = getErrorEdge(node);
+  const isAgentAssignee =
+    isHumanTask && !!node.properties?.assignee?.startsWith('/agents/');
+  const hasBadges =
+    hasRetry ||
+    timeoutMs != null ||
+    !!compensationRef ||
+    continueOnFail ||
+    !!errorEdgeTarget ||
+    isAgentAssignee;
 
   // Inline editing state
   const [isEditing, setIsEditing] = useState(false);
@@ -576,6 +606,84 @@ export function StepNode({
           </div>
         )
       )}
+
+      {/* Configuration badges */}
+      {hasBadges && (
+        <div className="flex items-center justify-center gap-1.5 flex-wrap mt-3 w-full">
+          {hasRetry && (
+            <ConfigBadge title={`Retries up to ${retryCount} time${retryCount === 1 ? '' : 's'}${retryStrategy && retryStrategy !== 'none' ? ` (${retryStrategy} strategy)` : ''}`}>
+              <RotateCw className="w-3 h-3" />
+              <span>{retryCount}×</span>
+            </ConfigBadge>
+          )}
+          {timeoutMs != null && (
+            <ConfigBadge title={`Timeout: ${formatDuration(timeoutMs)}`}>
+              <Clock className="w-3 h-3" />
+              <span>{formatDuration(timeoutMs)}</span>
+            </ConfigBadge>
+          )}
+          {compensationRef && (
+            <ConfigBadge title={`Compensation function: ${getRefPath(compensationRef)}`}>
+              <Undo2 className="w-3 h-3" />
+            </ConfigBadge>
+          )}
+          {continueOnFail && (
+            <ConfigBadge title="Continues workflow on failure" variant="warning">
+              <ShieldAlert className="w-3 h-3" />
+            </ConfigBadge>
+          )}
+          {errorEdgeTarget && (
+            <ConfigBadge title={`On error → ${errorEdgeTarget}`} variant="error">
+              <Zap className="w-3 h-3" />
+              <span className="max-w-[100px] truncate">{errorEdgeTarget}</span>
+            </ConfigBadge>
+          )}
+          {isAgentAssignee && (
+            <ConfigBadge title="Decided by AI agent" variant="agent">
+              <Bot className="w-3 h-3" />
+            </ConfigBadge>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+/** Small icon badge for step configuration indicators */
+function ConfigBadge({
+  title,
+  variant = 'default',
+  children,
+}: {
+  title: string;
+  variant?: 'default' | 'error' | 'warning' | 'agent';
+  children: React.ReactNode;
+}) {
+  const themeClasses = useThemeClasses();
+  const variantClasses = {
+    default: themeClasses.isDark
+      ? 'bg-gray-700/60 text-gray-300'
+      : 'bg-gray-100 text-gray-600',
+    error: themeClasses.isDark
+      ? 'bg-red-900/30 text-red-400'
+      : 'bg-red-100 text-red-700',
+    warning: themeClasses.isDark
+      ? 'bg-amber-900/30 text-amber-400'
+      : 'bg-amber-100 text-amber-700',
+    agent: themeClasses.isDark
+      ? 'bg-purple-900/30 text-purple-400'
+      : 'bg-purple-100 text-purple-700',
+  };
+
+  return (
+    <span
+      title={title}
+      className={clsx(
+        'flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium',
+        variantClasses[variant]
+      )}
+    >
+      {children}
+    </span>
   );
 }

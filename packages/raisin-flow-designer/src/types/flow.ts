@@ -5,7 +5,7 @@
  */
 
 /** Container types matching Svelte implementation */
-export type ContainerType = 'and' | 'or' | 'parallel' | 'ai_sequence';
+export type ContainerType = 'and' | 'or' | 'parallel' | 'ai_sequence' | 'competition' | 'loop';
 
 /** Step error behavior */
 export type StepErrorBehavior = 'stop' | 'skip' | 'continue';
@@ -116,6 +116,21 @@ export interface FlowStepProperties {
   disabled?: boolean;
   /** Step type - distinguishes AI agent, chat, and human task steps from regular steps */
   step_type?: 'default' | 'ai_agent' | 'human_task' | 'chat';
+  /** Function arguments - values support template expressions like "{{ input.x }}" or "${steps.prev.field}" */
+  arguments?: Record<string, unknown>;
+  /** Prompt for ai_agent steps (template expressions supported) */
+  prompt?: string;
+  /** Response format for ai_agent steps: "text", "json_object", or "json_schema" */
+  response_format?: unknown;
+  /** Max internal tool-loop iterations for ai_agent steps (default 5) */
+  max_tool_iterations?: number;
+  /** Workflow-context injection: 'input' | 'full' | true (= full) */
+  include_context?: 'input' | 'full' | 'none' | boolean;
+
+  /** Mapping for compensation input (template expressions; forward step output available as output.*) */
+  compensation_input_mapping?: Record<string, unknown>;
+  /** Target node ID when a human task's wait deadline expires */
+  timeout_edge?: string;
   /** Retry configuration for this step */
   retry?: RetryConfig;
   /** Retry strategy preset (alternative to custom retry config) */
@@ -140,8 +155,12 @@ export interface FlowStepProperties {
 
   /** Type of human task */
   task_type?: 'approval' | 'input' | 'review' | 'action';
-  /** User path to assign the task to */
+  /** User or AI agent path to assign the task to */
   assignee?: string;
+  /** Human user path to escalate to when an AI agent assignee fails or is not confident */
+  escalation_assignee?: string;
+  /** Minimum confidence (0-1) required from an AI agent assignee before escalation */
+  min_confidence?: number;
   /** Task description */
   task_description?: string;
   /** Options for approval tasks */
@@ -239,6 +258,9 @@ export interface AiContainerConfig {
   response_format?: string;
   /** JSON schema for structured output (when response_format = "json_schema") */
   output_schema?: unknown;
+  /** Workflow-context injection: 'input' | 'full' | true (= full) */
+  include_context?: 'input' | 'full' | 'none' | boolean;
+
 }
 
 /** Default AI container configuration */
@@ -257,7 +279,61 @@ export const AI_TOOL_MODE_DESCRIPTIONS: Record<AiToolMode, string> = {
   hybrid: 'Some tools internal, others explicit',
 };
 
-/** Container node with children (AND/OR/Parallel/AI) */
+/** AI router for OR containers: an agent picks the child to run when no REL rule matched */
+export interface ContainerRouterConfig {
+  /** The routing agent */
+  agent_ref: RaisinReference;
+  /** Routing instructions (template expressions supported) */
+  prompt?: string;
+  /** Minimum confidence (0-1) to follow the agent's choice */
+  min_confidence?: number;
+  /** Child id to run on low confidence / invalid branch; unset = skip container */
+  default_branch?: string;
+  /** Workflow-context injection: 'input' | 'full' | true (= full) */
+  include_context?: 'input' | 'full' | 'none' | boolean;
+}
+
+/** Referee for competition containers: judges competitor answers, may request refinement */
+export interface ContainerRefereeConfig {
+  /** The referee agent */
+  agent_ref: RaisinReference;
+  /** Judging instructions (template expressions supported) */
+  prompt?: string;
+  /** Confidence required to accept without further rounds (default 0.7) */
+  min_confidence?: number;
+  /** Maximum refinement rounds after the initial one (default 1) */
+  max_rounds?: number;
+  /** Workflow-context injection: 'input' | 'full' | true (= full) */
+  include_context?: 'input' | 'full' | 'none' | boolean;
+}
+
+/**
+ * Loop configuration for loop containers.
+ *
+ * The container's children form the loop body and execute once per item of
+ * the resolved collection. The current item is exposed as a flow variable
+ * (default `item`), referenced in templates as `{{ item }}` / `${item}`.
+ */
+export interface LoopConfig {
+  /** Collection expression to iterate, e.g. "${steps.pick.candidates}" (must resolve to an array) */
+  over: string;
+  /** Variable name for the current item (default "item"; snake_case REL identifier) */
+  item?: string;
+  /** Optional variable name for the current 0-based index */
+  index?: string;
+  /** Safety cap: iterate at most this many items */
+  max_iterations?: number;
+  /** Early-exit REL condition evaluated after each completed iteration, e.g. "steps.ask.response == 'accept'" */
+  until?: string;
+}
+
+/** Default loop configuration */
+export const DEFAULT_LOOP_CONFIG: LoopConfig = {
+  over: '',
+  item: 'item',
+};
+
+/** Container node with children (AND/OR/Parallel/AI/Competition/Loop) */
 export interface FlowContainer extends FlowNodeBase {
   node_type: 'raisin:FlowContainer';
   container_type: ContainerType;
@@ -265,6 +341,14 @@ export interface FlowContainer extends FlowNodeBase {
   children: FlowNode[];
   /** AI container configuration (only for ai_sequence type) */
   ai_config?: AiContainerConfig;
+  /** AI router (only for or type): agent decides the branch when no rule matched */
+  router?: ContainerRouterConfig;
+  /** Referee (only for competition type) */
+  referee?: ContainerRefereeConfig;
+  /** Loop configuration (only for loop type) */
+  loop?: LoopConfig;
+  /** Shared task prompt (only for competition type; children may override) */
+  prompt?: string;
   /** Container timeout in milliseconds */
   timeout_ms?: number;
 }
@@ -308,6 +392,8 @@ export const CONTAINER_TYPE_LABELS: Record<ContainerType, string> = {
   or: 'OR',
   parallel: 'Parallel',
   ai_sequence: 'AI Sequence',
+  competition: 'Competition',
+  loop: 'Loop',
 };
 
 /** Container type descriptions */
@@ -316,6 +402,8 @@ export const CONTAINER_TYPE_DESCRIPTIONS: Record<ContainerType, string> = {
   or: 'Any child can pass',
   parallel: 'Execute children concurrently',
   ai_sequence: 'AI-orchestrated execution',
+  competition: 'Competing agents judged by a referee',
+  loop: 'Run children once per item of a collection',
 };
 
 // ============================================================================

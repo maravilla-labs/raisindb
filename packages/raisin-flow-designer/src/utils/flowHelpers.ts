@@ -6,6 +6,7 @@
 
 import type {
   FlowNode,
+  FlowStep,
   FlowContainer,
   FlowDefinition,
   InsertPosition,
@@ -186,6 +187,31 @@ export function getAllNodeIds(nodes: FlowNode[]): string[] {
     }
   }
   return ids;
+}
+
+/**
+ * Get the error edge target node ID for a step.
+ *
+ * Error edges exist in the wild both at step level (`step.error_edge`)
+ * and inside properties (`step.properties.error_edge`); the step-level
+ * value takes precedence (matching ErrorHandlingEditor).
+ */
+export function getErrorEdge(step: FlowStep): string | undefined {
+  return step.error_edge || step.properties?.error_edge || undefined;
+}
+
+/**
+ * Humanize a millisecond duration (e.g. 500 -> "500ms", 30000 -> "30s",
+ * 300000 -> "5m", 5400000 -> "1.5h")
+ */
+export function formatDuration(ms: number): string {
+  const fmt = (value: number) => String(Math.round(value * 10) / 10);
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${fmt(seconds)}s`;
+  const minutes = seconds / 60;
+  if (minutes < 60) return `${fmt(minutes)}m`;
+  return `${fmt(minutes / 60)}h`;
 }
 
 /**

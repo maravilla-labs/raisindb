@@ -7,7 +7,7 @@
 
 import { Fragment, useState, useCallback, useEffect, useMemo, useImperativeHandle, forwardRef } from 'react';
 import { clsx } from 'clsx';
-import type { FlowDefinition, FlowNode, StepType, InsertPosition, RaisinReference, CommandContext, ContainerType, ContainerRule, FlowStepProperties, AiContainerConfig } from '../types';
+import type { FlowDefinition, FlowNode, StepType, InsertPosition, RaisinReference, CommandContext, ContainerType, ContainerRule, FlowStepProperties, AiContainerConfig, ContainerRouterConfig, ContainerRefereeConfig, LoopConfig } from '../types';
 import { isFlowStep, isFlowContainer } from '../types';
 import { useFlowState, useDragAndDrop, useCommandHistory, useSelection } from '../hooks';
 import {
@@ -22,7 +22,7 @@ import { ThemeProvider, useThemeClasses, type FlowTheme } from '../context';
 import { FlowToolbar } from './FlowToolbar';
 import { FlowCanvas } from './FlowCanvas';
 import { StartNode, EndNode, StepNode, ContainerNode, TriggerNode, AddTriggerButton, type TriggerInfo } from './nodes';
-import { VerticalConnector, ConnectorWithButton } from './connections';
+import { VerticalConnector, ConnectorWithButton, ErrorEdgeOverlay } from './connections';
 import { DropIndicator, GhostNode } from './dnd';
 import { NodePalette } from './NodePalette';
 import { findDropTargetFromPoint, calculateInsertPosition, calculateDropIndicator } from '../utils';
@@ -101,8 +101,8 @@ export interface FlowDesignerHandle {
   setStepAgent: (stepId: string, agentRef: RaisinReference) => void;
   /** Update step properties (title, disabled, etc.) */
   updateStepProperty: (nodeId: string, updates: Partial<FlowStepProperties>) => void;
-  /** Update container properties (type, rules, ai_config, timeout) */
-  updateContainer: (containerId: string, updates: { container_type?: ContainerType; rules?: ContainerRule[]; ai_config?: AiContainerConfig; timeout_ms?: number }) => void;
+  /** Update container properties (type, rules, ai_config, router, referee, loop, prompt, timeout). Pass null for router/referee/loop/prompt to remove them. */
+  updateContainer: (containerId: string, updates: { container_type?: ContainerType; rules?: ContainerRule[]; ai_config?: AiContainerConfig; router?: ContainerRouterConfig | null; referee?: ContainerRefereeConfig | null; loop?: LoopConfig | null; prompt?: string | null; timeout_ms?: number }) => void;
   /** Get the current flow state */
   getFlow: () => FlowDefinition;
   /** Undo last action */
@@ -363,7 +363,7 @@ export const FlowDesigner = forwardRef<FlowDesignerHandle, FlowDesignerProps>(
 
   // Update container properties
   const updateContainer = useCallback(
-    (containerId: string, updates: { container_type?: ContainerType; rules?: ContainerRule[]; ai_config?: AiContainerConfig; timeout_ms?: number }) => {
+    (containerId: string, updates: { container_type?: ContainerType; rules?: ContainerRule[]; ai_config?: AiContainerConfig; router?: ContainerRouterConfig | null; referee?: ContainerRefereeConfig | null; loop?: LoopConfig | null; prompt?: string | null; timeout_ms?: number }) => {
       const command = new UpdateRulesCommand(commandContext, {
         containerId,
         ...updates,
@@ -639,6 +639,7 @@ export const FlowDesigner = forwardRef<FlowDesignerHandle, FlowDesignerProps>(
         selectedTriggerId={selectedTriggerId}
         onTriggerSelect={onTriggerSelect}
         onAddTrigger={onAddTrigger}
+        executionState={executionState}
       />
     </ThemeProvider>
   );
@@ -684,6 +685,7 @@ interface FlowDesignerContentProps {
   selectedTriggerId?: string | null;
   onTriggerSelect?: (triggerId: string | null) => void;
   onAddTrigger?: () => void;
+  executionState?: ExecutionState;
 }
 
 function FlowDesignerContent({
@@ -725,6 +727,7 @@ function FlowDesignerContent({
   selectedTriggerId,
   onTriggerSelect,
   onAddTrigger,
+  executionState,
 }: FlowDesignerContentProps) {
   const themeClasses = useThemeClasses();
 
@@ -875,6 +878,12 @@ function FlowDesignerContent({
           {/* End node */}
           <EndNode />
         </div>
+
+        {/* Error edge connectors (red dashed rails on the right side) */}
+        <ErrorEdgeOverlay
+          flow={flow}
+          failedNodeIds={executionState?.failedNodeIds}
+        />
       </FlowCanvas>
 
       {/* Drop indicator overlay (internal drag) */}

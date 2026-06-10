@@ -7,7 +7,7 @@
 
 import { useState } from 'react';
 import { clsx } from 'clsx';
-import { Sparkles, GitBranch, Layers, ChevronUp, ChevronDown } from 'lucide-react';
+import { Sparkles, GitBranch, Layers, Trophy, Repeat, ChevronUp, ChevronDown } from 'lucide-react';
 import type { FlowContainer, FlowNode, ContainerType } from '../../types';
 import { ContainerTypeIcon } from '../connections/ContainerTypeIcon';
 import { useThemeClasses } from '../../context';
@@ -48,6 +48,8 @@ const CONTAINER_ICONS: Record<ContainerType, typeof Sparkles> = {
   and: GitBranch,
   or: GitBranch,
   parallel: Layers,
+  competition: Trophy,
+  loop: Repeat,
 };
 
 export function ContainerNode({

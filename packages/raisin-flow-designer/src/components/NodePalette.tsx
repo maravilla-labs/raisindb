@@ -8,7 +8,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { clsx } from 'clsx';
-import { Box, Bot, GitBranch, Layers, Sparkles, GripHorizontal, UserCheck, MessageSquare } from 'lucide-react';
+import { Box, Bot, GitBranch, Layers, Sparkles, GripHorizontal, UserCheck, MessageSquare, Trophy, Repeat } from 'lucide-react';
 import type { StepType } from '../types';
 import { useThemeClasses } from '../context';
 
@@ -99,6 +99,22 @@ const PALETTE_ITEMS: PaletteItemConfig[] = [
     description: 'AI-orchestrated execution',
     lightColor: 'bg-purple-50 hover:bg-purple-100 text-purple-700 border-purple-200',
     darkColor: 'bg-purple-900/50 hover:bg-purple-800/50 text-purple-300 border-purple-700/50',
+  },
+  {
+    type: 'competition',
+    icon: Trophy,
+    label: 'Compete',
+    description: 'Competing agents judged by a referee',
+    lightColor: 'bg-yellow-50 hover:bg-yellow-100 text-yellow-700 border-yellow-200',
+    darkColor: 'bg-yellow-900/50 hover:bg-yellow-800/50 text-yellow-300 border-yellow-700/50',
+  },
+  {
+    type: 'loop',
+    icon: Repeat,
+    label: 'Loop',
+    description: 'Run children once per item of a collection',
+    lightColor: 'bg-teal-50 hover:bg-teal-100 text-teal-700 border-teal-200',
+    darkColor: 'bg-teal-900/50 hover:bg-teal-800/50 text-teal-300 border-teal-700/50',
   },
 ];
 

@@ -12,6 +12,9 @@ import type {
   StepErrorBehavior,
   RaisinReference,
   AiContainerConfig,
+  ContainerRouterConfig,
+  ContainerRefereeConfig,
+  LoopConfig,
   TaskOption,
   RetryConfig,
   RetryStrategy,
@@ -28,7 +31,7 @@ export interface CommandContext {
 }
 
 /** Step types that can be added */
-export type StepType = 'step' | 'ai_agent' | 'human_task' | 'chat' | 'and' | 'or' | 'parallel' | 'ai_sequence';
+export type StepType = 'step' | 'ai_agent' | 'human_task' | 'chat' | 'and' | 'or' | 'parallel' | 'ai_sequence' | 'competition' | 'loop';
 
 /** Parameters for AddStepCommand */
 export interface AddStepParams {
@@ -106,6 +109,14 @@ export interface UpdateContainerParams {
   rules?: ContainerRule[];
   /** AI container configuration (for ai_sequence containers) */
   ai_config?: AiContainerConfig;
+  /** AI router for OR containers (null removes the router) */
+  router?: ContainerRouterConfig | null;
+  /** Referee for competition containers (null removes the referee) */
+  referee?: ContainerRefereeConfig | null;
+  /** Loop configuration for loop containers (null removes the config) */
+  loop?: LoopConfig | null;
+  /** Shared task prompt for competition containers (null removes the prompt) */
+  prompt?: string | null;
   /** Container timeout in milliseconds */
   timeout_ms?: number;
 }
@@ -196,6 +207,16 @@ export const STEP_TEMPLATES: Record<StepType, StepTemplate> = {
   ai_sequence: {
     node_type: 'raisin:FlowContainer',
     container_type: 'ai_sequence',
+    children: [],
+  },
+  competition: {
+    node_type: 'raisin:FlowContainer',
+    container_type: 'competition',
+    children: [],
+  },
+  loop: {
+    node_type: 'raisin:FlowContainer',
+    container_type: 'loop',
     children: [],
   },
 };

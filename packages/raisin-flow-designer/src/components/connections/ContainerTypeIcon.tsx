@@ -99,6 +99,34 @@ export function ContainerTypeIcon({
           fill="yellow"
         />
       )}
+      {containerType === 'competition' && (
+        /* Competition (Diamond + Gold fill) */
+        <polygon
+          points="12,3 21,12 12,21 3,12"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="gold"
+        />
+      )}
+      {containerType === 'loop' && (
+        /* Loop (Circular arrow) */
+        <>
+          <path
+            d="M19 12 A7 7 0 1 1 12 5"
+            strokeWidth="2"
+            strokeLinecap="round"
+            fill="none"
+          />
+          <polyline
+            points="9,1.5 12,5 8.5,8"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="none"
+          />
+        </>
+      )}
     </svg>
   );
 }

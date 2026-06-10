@@ -21,7 +21,7 @@ export class UpdateRulesCommand extends AbstractCommand {
 
     this.context.setState((currentState) => {
       const newState = cloneFlow(currentState);
-      const { containerId, container_type, rules, ai_config, timeout_ms } = this.params;
+      const { containerId, container_type, rules, ai_config, router, referee, loop, prompt, timeout_ms } = this.params;
 
       const result = findNodeAndParent(newState, containerId);
       if (!result || !isFlowContainer(result.node)) {
@@ -39,6 +39,34 @@ export class UpdateRulesCommand extends AbstractCommand {
       }
       if (ai_config !== undefined) {
         container.ai_config = ai_config;
+      }
+      if (router !== undefined) {
+        if (router === null) {
+          delete container.router;
+        } else {
+          container.router = router;
+        }
+      }
+      if (referee !== undefined) {
+        if (referee === null) {
+          delete container.referee;
+        } else {
+          container.referee = referee;
+        }
+      }
+      if (loop !== undefined) {
+        if (loop === null) {
+          delete container.loop;
+        } else {
+          container.loop = loop;
+        }
+      }
+      if (prompt !== undefined) {
+        if (prompt === null) {
+          delete container.prompt;
+        } else {
+          container.prompt = prompt;
+        }
       }
       if (timeout_ms !== undefined) {
         container.timeout_ms = timeout_ms;

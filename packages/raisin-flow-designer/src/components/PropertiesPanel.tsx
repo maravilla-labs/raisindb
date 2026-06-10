@@ -174,6 +174,7 @@ function ContainerPropertiesContent({ container }: { container: FlowContainer })
            container.container_type === 'ai_sequence' ? 'AI Sequence' :
            container.container_type === 'and' ? 'AND' :
            container.container_type === 'or' ? 'OR' :
+           container.container_type === 'loop' ? 'Loop' :
            container.container_type}
         </span>
       </div>
@@ -201,6 +202,21 @@ function ContainerPropertiesContent({ container }: { container: FlowContainer })
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* Loop Config */}
+      {container.container_type === 'loop' && container.loop && (
+        <div>
+          <label className={clsx('block text-xs font-medium mb-1', themeClasses.stepTextMuted)}>
+            Loop Configuration
+          </label>
+          <pre className={clsx(
+            'text-xs p-2 rounded bg-gray-100 dark:bg-gray-800 overflow-x-auto',
+            themeClasses.stepText
+          )}>
+            {JSON.stringify(container.loop, null, 2)}
+          </pre>
         </div>
       )}
 
