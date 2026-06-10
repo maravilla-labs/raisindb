@@ -165,3 +165,23 @@ export type {
   UseSqlReturn,
   UseSubscriptionOptions,
 } from './types';
+
+// Hook return/option types (parity with the @raisindb/client/vue subpath):
+// apps need these to type props that carry a hook's return value around.
+export type {
+  ReactLike,
+  UseConversationReturn,
+  UseConversationListReturn,
+} from '../react-conversation';
+export type { UseFlowOptions, UseFlowReturn, FlowStatus } from '../react-flow';
+export type {
+  ConversationStoreOptions,
+  ConversationStoreSnapshot,
+  ToolCallInfo,
+} from '../../stores/conversation-store';
+export type {
+  ConversationListStoreOptions,
+  ConversationListSnapshot,
+} from '../../stores/conversation-list-store';
+export type { PlanProjection, PlanProjectionTask } from '../../utils/plan-projection';
+export type { ChatMessage, ConversationListItem } from '../../types/chat';

@@ -124,10 +124,14 @@ export function useConversation(
 // useConversationList
 // ---------------------------------------------------------------------------
 
+// isLoading starts TRUE: the hook always calls store.load() in its mount
+// effect, but the first render happens before that effect runs — reporting
+// "not loading" there makes consumers mis-resolve an empty list as "loaded,
+// no conversations" (e.g. failing to resume the latest conversation).
 const INITIAL_LIST_SNAPSHOT: ConversationListSnapshot = {
   conversations: [],
   totalUnreadCount: 0,
-  isLoading: false,
+  isLoading: true,
   error: null,
 };
 

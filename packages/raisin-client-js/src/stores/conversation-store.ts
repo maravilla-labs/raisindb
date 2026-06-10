@@ -348,11 +348,13 @@ export class ConversationStore {
     }
     switch (event.type) {
       case 'text_chunk':
+        this.markStreamingActivity();
         this._streamingText += event.text;
         this.notify();
         break;
 
       case 'thought_chunk':
+        this.markStreamingActivity();
         this.notify();
         break;
 
@@ -363,6 +365,7 @@ export class ConversationStore {
         break;
 
       case 'tool_call_started': {
+        this.markStreamingActivity();
         logger.debug('[ConversationStore] Tool started:', event.functionName);
         const info: ToolCallInfo = {
           id: event.toolCallId,
@@ -376,6 +379,7 @@ export class ConversationStore {
       }
 
       case 'tool_call_completed': {
+        this.markStreamingActivity();
         logger.debug('[ConversationStore] Tool completed:', event.toolCallId);
         const idx = this._activeToolCalls.findIndex(tc => tc.id === event.toolCallId);
         if (idx >= 0) {
@@ -502,6 +506,27 @@ export class ConversationStore {
         break;
       }
     }
+  }
+
+  /**
+   * Agent activity observed while the store thought the turn was over.
+   *
+   * This happens when execution continues WITHOUT a user message — plan
+   * approval in approve_then_auto / step_by_step (approvePlan() returns an
+   * enqueue receipt and the agent starts executing), or agent-initiated
+   * follow-ups. The events arrive over the persistent live subscription
+   * (no history replay), so activity is always "now": re-enter streaming
+   * state so UIs show progress and the end-of-turn handling (done/waiting
+   * → deferred reload) runs again for this continuation.
+   */
+  private markStreamingActivity(): void {
+    if (this._isStreaming) return;
+    logger.debug('[ConversationStore] Agent activity while idle — re-entering streaming state');
+    this._isStreaming = true;
+    this._isWaiting = false;
+    this._streamingText = '';
+    this.resetStreamingTimer();
+    this.startWatchdog();
   }
 
   /**
