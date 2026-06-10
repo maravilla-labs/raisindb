@@ -387,7 +387,7 @@ impl AIProviderTrait for OllamaProvider {
 }
 
 /// Parse NDJSON lines from Ollama's streaming response into `StreamChunk`s.
-fn parse_ollama_ndjson(text: &str) -> Vec<Result<StreamChunk>> {
+pub(super) fn parse_ollama_ndjson(text: &str) -> Vec<Result<StreamChunk>> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {

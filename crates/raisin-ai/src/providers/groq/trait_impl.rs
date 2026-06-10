@@ -223,6 +223,17 @@ fn parse_groq_chunk(data: &str) -> Vec<Result<StreamChunk>> {
         Err(_) => return chunks,
     };
 
+    // Groq sends usage nested in `x_groq.usage` on the final streaming chunk;
+    // a top-level `usage` (OpenAI stream_options style) is also accepted.
+    let chunk_usage = chunk
+        .usage
+        .as_ref()
+        .or_else(|| chunk.x_groq.as_ref().and_then(|x| x.usage.as_ref()));
+
+    // Track whether usage was attached to a finish chunk so the usage-only
+    // handling below doesn't double-report it.
+    let mut usage_taken = false;
+
     for choice in &chunk.choices {
         if let Some(content) = &choice.delta.content {
             if !content.is_empty() {
@@ -263,15 +274,36 @@ fn parse_groq_chunk(data: &str) -> Vec<Result<StreamChunk>> {
         }
 
         if let Some(reason) = &choice.finish_reason {
+            usage_taken = usage_taken || chunk_usage.is_some();
             chunks.push(Ok(StreamChunk {
                 delta: String::new(),
                 tool_calls: None,
-                usage: chunk.usage.as_ref().map(|u| Usage {
+                usage: chunk_usage.map(|u| Usage {
                     prompt_tokens: u.prompt_tokens,
                     completion_tokens: u.completion_tokens,
                     total_tokens: u.total_tokens,
                 }),
                 stop_reason: Some(reason.clone()),
+                model: chunk.model.clone(),
+            }));
+        }
+    }
+
+    // Usage may also arrive on a trailing chunk with an empty `choices` array
+    // (OpenAI `stream_options.include_usage` style) or on a chunk whose
+    // choices carry no finish_reason. Emit a usage-only chunk so stream
+    // accumulation still captures token counts.
+    if !usage_taken {
+        if let Some(u) = chunk_usage {
+            chunks.push(Ok(StreamChunk {
+                delta: String::new(),
+                tool_calls: None,
+                usage: Some(Usage {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    total_tokens: u.total_tokens,
+                }),
+                stop_reason: None,
                 model: chunk.model.clone(),
             }));
         }

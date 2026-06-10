@@ -111,9 +111,16 @@ pub(super) enum AnthropicResponseContent {
 }
 
 /// Usage statistics from Anthropic.
+///
+/// Both fields default to 0: the streaming `message_delta` event reports
+/// only `output_tokens` (no `input_tokens` key), so requiring both would
+/// make the whole event fail to deserialize and silently drop the final
+/// stop_reason + output usage.
 #[derive(Debug, Deserialize)]
 pub(super) struct AnthropicUsage {
+    #[serde(default)]
     pub input_tokens: u32,
+    #[serde(default)]
     pub output_tokens: u32,
 }
 

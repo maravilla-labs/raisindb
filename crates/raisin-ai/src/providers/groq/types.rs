@@ -160,6 +160,17 @@ pub(super) struct GroqStreamChunk {
     pub usage: Option<GroqUsage>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Groq-specific metadata. In streaming mode Groq does NOT put `usage` at
+    /// the top level — it arrives nested in `x_groq.usage` on the final chunk.
+    #[serde(default)]
+    pub x_groq: Option<GroqXGroq>,
+}
+
+/// The `x_groq` payload attached to the final streaming chunk.
+#[derive(Debug, Deserialize)]
+pub(super) struct GroqXGroq {
+    #[serde(default)]
+    pub usage: Option<GroqUsage>,
 }
 
 /// A choice inside a streaming chunk.

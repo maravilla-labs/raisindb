@@ -285,7 +285,7 @@ impl AIProviderTrait for GeminiProvider {
 ///
 /// Gemini with `alt=sse` returns standard SSE `data:` lines containing
 /// JSON objects matching the `GeminiGenerateResponse` schema.
-fn parse_gemini_sse_events(text: &str, model: &str) -> Vec<Result<StreamChunk>> {
+pub(super) fn parse_gemini_sse_events(text: &str, model: &str) -> Vec<Result<StreamChunk>> {
     use crate::providers::sse::parse_sse_data_lines;
 
     parse_sse_data_lines(text)
@@ -298,7 +298,29 @@ fn parse_gemini_sse_events(text: &str, model: &str) -> Vec<Result<StreamChunk>> 
 fn parse_gemini_chunk(data: &str, model: &str) -> Option<Result<StreamChunk>> {
     let response: GeminiGenerateResponse = serde_json::from_str(data).ok()?;
 
-    let candidate = response.candidates.into_iter().next()?;
+    let usage = response.usage_metadata.map(|u| Usage {
+        prompt_tokens: u.prompt_token_count,
+        completion_tokens: u.candidates_token_count,
+        total_tokens: u.total_token_count,
+    });
+
+    let candidate = match response.candidates.into_iter().next() {
+        Some(c) => c,
+        None => {
+            // A chunk without candidates can still carry usageMetadata
+            // (e.g. a trailing accounting chunk). Emit a usage-only chunk
+            // so stream accumulation still captures token counts.
+            return usage.map(|u| {
+                Ok(StreamChunk {
+                    delta: String::new(),
+                    tool_calls: None,
+                    usage: Some(u),
+                    stop_reason: None,
+                    model: Some(model.to_string()),
+                })
+            });
+        }
+    };
 
     let mut text_delta = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -328,12 +350,6 @@ fn parse_gemini_chunk(data: &str, model: &str) -> Option<Result<StreamChunk>> {
         "MAX_TOKENS" => "length".to_string(),
         "SAFETY" | "RECITATION" => "content_filter".to_string(),
         other => other.to_lowercase(),
-    });
-
-    let usage = response.usage_metadata.map(|u| Usage {
-        prompt_tokens: u.prompt_token_count,
-        completion_tokens: u.candidates_token_count,
-        total_tokens: u.total_token_count,
     });
 
     let is_final = usage.is_some() || stop_reason.is_some();

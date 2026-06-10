@@ -268,13 +268,15 @@ fn parse_anthropic_chunk(event_type: &str, data: &str) -> Option<Result<StreamCh
 
             let event: MessageDeltaEvent = serde_json::from_str(data).ok()?;
 
+            // Output-only (partial) usage: the shared stream accumulator
+            // merges this with the input usage from `message_start`.
             Some(Ok(StreamChunk {
                 delta: String::new(),
                 tool_calls: None,
                 usage: event.usage.map(|u| Usage {
-                    prompt_tokens: 0,
+                    prompt_tokens: u.input_tokens,
                     completion_tokens: u.output_tokens,
-                    total_tokens: u.output_tokens,
+                    total_tokens: u.input_tokens + u.output_tokens,
                 }),
                 stop_reason: event.delta.stop_reason,
                 model: None,

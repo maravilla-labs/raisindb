@@ -552,7 +552,11 @@ impl AIProviderTrait for BedrockProvider {
     }
 
     fn supports_streaming(&self) -> bool {
-        true
+        // ConverseStream is not implemented; `stream_complete` falls back to
+        // the trait default which returns UnsupportedOperation. Reporting
+        // `false` routes callers to the non-streaming `complete()` path,
+        // which works and captures token usage from the Converse response.
+        false
     }
 
     fn supports_tools(&self) -> bool {
@@ -704,7 +708,9 @@ impl AIProviderTrait for BedrockProvider {
     }
 
     fn supports_streaming(&self) -> bool {
-        true
+        // See the feature-enabled impl: streaming is not implemented, so
+        // report `false` to route callers to the non-streaming path.
+        false
     }
 
     fn supports_tools(&self) -> bool {
@@ -786,7 +792,9 @@ mod tests {
     fn test_provider_capabilities() {
         let provider = BedrockProvider::new("us-east-1", "test-key", "test-secret");
         assert_eq!(provider.provider_name(), "bedrock");
-        assert!(provider.supports_streaming());
+        // Streaming (ConverseStream) is not implemented — reporting false
+        // routes callers to the non-streaming path which captures usage.
+        assert!(!provider.supports_streaming());
         assert!(provider.supports_tools());
         assert!(!provider.available_models().is_empty());
     }

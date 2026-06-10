@@ -51,11 +51,21 @@ where
     let mut model = String::new();
     let mut stop_reason: Option<String> = None;
     let mut usage: Option<Value> = None;
+    let mut end_session = false;
+    let mut handoff_to: Option<String> = None;
     let mut detector = tool_call_extraction::StreamingToolCallDetector::new();
 
     while let Some(chunk) = rx.recv().await {
-        // Extract text delta
-        if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+        // Extract text: streaming chunks carry `delta`; complete
+        // (non-streaming) responses forwarded as a single chunk - the
+        // fallback path when no streaming provider is configured - carry
+        // the full text in `content`.
+        let text_delta = chunk
+            .get("delta")
+            .and_then(|d| d.as_str())
+            .or_else(|| chunk.get("content").and_then(|c| c.as_str()));
+
+        if let Some(delta) = text_delta {
             if !delta.is_empty() {
                 // Determine if this is thinking content
                 let is_thinking = chunk
@@ -104,15 +114,36 @@ where
             }
         }
 
-        // Capture stop reason
-        if let Some(sr) = chunk.get("stop_reason").and_then(|v| v.as_str()) {
+        // Capture stop reason (complete responses use "finish_reason")
+        if let Some(sr) = chunk
+            .get("stop_reason")
+            .or_else(|| chunk.get("finish_reason"))
+            .and_then(|v| v.as_str())
+        {
             stop_reason = Some(sr.to_string());
         }
 
-        // Capture usage
+        // Capture usage. Providers may report usage incrementally across
+        // chunks (e.g. Anthropic sends input tokens on `message_start` and
+        // output tokens on `message_delta`), so merge rather than replace.
         if let Some(u) = chunk.get("usage") {
             if !u.is_null() {
-                usage = Some(u.clone());
+                usage = Some(match usage.take() {
+                    None => u.clone(),
+                    Some(prev) => merge_usage_values(&prev, u),
+                });
+            }
+        }
+
+        // Capture session-control signals (chat steps)
+        if let Some(es) = chunk.get("end_session").and_then(|v| v.as_bool()) {
+            if es {
+                end_session = true;
+            }
+        }
+        if let Some(h) = chunk.get("handoff_to").and_then(|v| v.as_str()) {
+            if !h.is_empty() {
+                handoff_to = Some(h.to_string());
             }
         }
     }
@@ -171,14 +202,55 @@ where
     }
 
     if let Some(sr) = stop_reason {
-        result["stop_reason"] = Value::String(sr);
+        // Emit under both keys: providers/consumers are split between the
+        // OpenAI-style "finish_reason" and the Anthropic-style "stop_reason".
+        result["stop_reason"] = Value::String(sr.clone());
+        result["finish_reason"] = Value::String(sr);
     }
 
     if let Some(u) = usage {
         result["usage"] = u;
     }
 
+    if end_session {
+        result["end_session"] = Value::Bool(true);
+    }
+
+    if let Some(h) = handoff_to {
+        result["handoff_to"] = Value::String(h);
+    }
+
     result
+}
+
+/// Merge two usage objects reported on different stream chunks.
+///
+/// Token counts reported during streaming are cumulative, so taking the
+/// per-field maximum is correct both for providers that re-send the full
+/// usage on the final chunk and for providers that split usage across
+/// chunks (e.g. Anthropic: input tokens on `message_start`, output tokens
+/// on `message_delta`). `total_tokens` is recomputed when the reported
+/// totals don't cover the merged prompt + completion counts.
+pub fn merge_usage_values(prev: &Value, next: &Value) -> Value {
+    let field = |v: &Value, key: &str| v.get(key).and_then(|x| x.as_u64()).unwrap_or(0);
+
+    let prompt = field(prev, "prompt_tokens").max(field(next, "prompt_tokens"));
+    let completion = field(prev, "completion_tokens").max(field(next, "completion_tokens"));
+    let total = field(prev, "total_tokens")
+        .max(field(next, "total_tokens"))
+        .max(prompt + completion);
+
+    // Preserve any provider-specific extra fields (later chunks win).
+    let mut merged = prev.clone();
+    if let (Some(m), Some(n)) = (merged.as_object_mut(), next.as_object()) {
+        for (k, v) in n {
+            m.insert(k.clone(), v.clone());
+        }
+    }
+    merged["prompt_tokens"] = prompt.into();
+    merged["completion_tokens"] = completion.into();
+    merged["total_tokens"] = total.into();
+    merged
 }
 
 /// Merge a streaming tool call delta into the accumulated tool_calls array.
@@ -346,6 +418,93 @@ mod tests {
         assert_eq!(result["content"], "Hello world");
         assert_eq!(result["stop_reason"], "stop");
         assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_accumulate_stream_merges_split_usage() {
+        // Anthropic style: input usage on message_start, output usage on
+        // message_delta. The accumulator must merge, not take the last.
+        let (tx, mut rx) = mpsc::channel(10);
+
+        tx.send(serde_json::json!({
+            "delta": "",
+            "model": "claude-sonnet-4-5",
+            "usage": { "prompt_tokens": 42, "completion_tokens": 1, "total_tokens": 43 }
+        }))
+        .await
+        .unwrap();
+        tx.send(serde_json::json!({ "delta": "Hello" }))
+            .await
+            .unwrap();
+        tx.send(serde_json::json!({
+            "delta": "",
+            "stop_reason": "end_turn",
+            "usage": { "prompt_tokens": 0, "completion_tokens": 17, "total_tokens": 17 }
+        }))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let mut tool_map = HashMap::new();
+        let result = accumulate_stream(&mut rx, |_| async {}, &mut tool_map).await;
+
+        assert_eq!(result["usage"]["prompt_tokens"], 42);
+        assert_eq!(result["usage"]["completion_tokens"], 17);
+        assert_eq!(result["usage"]["total_tokens"], 59);
+    }
+
+    #[tokio::test]
+    async fn test_accumulate_stream_usage_on_trailing_chunk() {
+        // OpenAI stream_options.include_usage style: usage arrives on a
+        // trailing usage-only chunk after the finish chunk.
+        let (tx, mut rx) = mpsc::channel(10);
+
+        tx.send(serde_json::json!({ "delta": "Hi", "model": "gpt-4o" }))
+            .await
+            .unwrap();
+        tx.send(serde_json::json!({ "delta": "", "stop_reason": "stop" }))
+            .await
+            .unwrap();
+        tx.send(serde_json::json!({
+            "delta": "",
+            "usage": { "prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14 }
+        }))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let mut tool_map = HashMap::new();
+        let result = accumulate_stream(&mut rx, |_| async {}, &mut tool_map).await;
+
+        assert_eq!(result["usage"]["prompt_tokens"], 11);
+        assert_eq!(result["usage"]["completion_tokens"], 3);
+        assert_eq!(result["usage"]["total_tokens"], 14);
+        assert_eq!(result["stop_reason"], "stop");
+    }
+
+    #[test]
+    fn test_merge_usage_values_cumulative_updates() {
+        // Gemini style: cumulative usageMetadata on several chunks.
+        let a =
+            serde_json::json!({ "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12 });
+        let b =
+            serde_json::json!({ "prompt_tokens": 10, "completion_tokens": 9, "total_tokens": 19 });
+        let merged = merge_usage_values(&a, &b);
+        assert_eq!(merged["prompt_tokens"], 10);
+        assert_eq!(merged["completion_tokens"], 9);
+        assert_eq!(merged["total_tokens"], 19);
+    }
+
+    #[test]
+    fn test_merge_usage_values_preserves_extra_fields() {
+        let a =
+            serde_json::json!({ "prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5 });
+        let b = serde_json::json!({ "prompt_tokens": 0, "completion_tokens": 7, "total_tokens": 7, "cost": 0.001 });
+        let merged = merge_usage_values(&a, &b);
+        assert_eq!(merged["prompt_tokens"], 5);
+        assert_eq!(merged["completion_tokens"], 7);
+        assert_eq!(merged["total_tokens"], 12);
+        assert_eq!(merged["cost"], 0.001);
     }
 
     #[tokio::test]

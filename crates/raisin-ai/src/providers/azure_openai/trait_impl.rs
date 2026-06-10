@@ -325,7 +325,7 @@ impl AIProviderTrait for AzureOpenAIProvider {
 }
 
 /// Parse SSE events from Azure OpenAI's streaming response.
-fn parse_azure_sse_events(text: &str) -> Vec<Result<StreamChunk>> {
+pub(super) fn parse_azure_sse_events(text: &str) -> Vec<Result<StreamChunk>> {
     use crate::providers::sse::parse_sse_data_lines;
 
     parse_sse_data_lines(text)
@@ -342,6 +342,10 @@ fn parse_azure_chunk(data: &str) -> Vec<Result<StreamChunk>> {
         Ok(c) => c,
         Err(_) => return chunks,
     };
+
+    // Track whether usage was attached to a finish chunk so the trailing
+    // usage-only chunk handling below doesn't double-report it.
+    let mut usage_taken = false;
 
     for choice in &chunk.choices {
         if let Some(content) = &choice.delta.content {
@@ -382,6 +386,7 @@ fn parse_azure_chunk(data: &str) -> Vec<Result<StreamChunk>> {
         }
 
         if let Some(reason) = &choice.finish_reason {
+            usage_taken = usage_taken || chunk.usage.is_some();
             chunks.push(Ok(StreamChunk {
                 delta: String::new(),
                 tool_calls: None,
@@ -391,6 +396,26 @@ fn parse_azure_chunk(data: &str) -> Vec<Result<StreamChunk>> {
                     total_tokens: u.total_tokens,
                 }),
                 stop_reason: Some(reason.clone()),
+                model: chunk.model.clone(),
+            }));
+        }
+    }
+
+    // With `stream_options: {"include_usage": true}` Azure sends usage on a
+    // TRAILING chunk with an empty `choices` array (the finish chunk itself
+    // carries `usage: null`). Emit a usage-only chunk so stream accumulation
+    // still captures token counts.
+    if !usage_taken {
+        if let Some(u) = &chunk.usage {
+            chunks.push(Ok(StreamChunk {
+                delta: String::new(),
+                tool_calls: None,
+                usage: Some(Usage {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    total_tokens: u.total_tokens,
+                }),
+                stop_reason: None,
                 model: chunk.model.clone(),
             }));
         }

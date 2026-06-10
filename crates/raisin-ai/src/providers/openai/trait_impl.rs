@@ -192,7 +192,7 @@ fn parse_responses_response(
 }
 
 /// Parse SSE events from a text buffer into StreamChunks.
-fn parse_sse_events(text: &str) -> Vec<Result<StreamChunk>> {
+pub(super) fn parse_sse_events(text: &str) -> Vec<Result<StreamChunk>> {
     use crate::providers::sse::parse_sse_data_lines;
 
     parse_sse_data_lines(text)
@@ -248,11 +248,14 @@ fn parse_openai_chunk(data: &str) -> Option<Result<StreamChunk>> {
                 model: None,
             }))
         }
-        "response.completed" => {
+        // `response.incomplete` is the terminal event when generation stops
+        // early (e.g. max_output_tokens); it carries the same response object
+        // with final usage, which must not be dropped.
+        "response.completed" | "response.incomplete" => {
             let resp = event.response?;
             let stop_reason = match resp.status.as_str() {
                 "completed" | "stopped" => Some("stop".to_string()),
-                "length_exceeded" => Some("length".to_string()),
+                "length_exceeded" | "incomplete" => Some("length".to_string()),
                 other => Some(other.to_string()),
             };
             Some(Ok(StreamChunk {

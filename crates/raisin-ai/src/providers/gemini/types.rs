@@ -41,9 +41,11 @@ pub(super) struct GeminiGenerateRequest {
 }
 
 /// Gemini content (message)
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(super) struct GeminiContent {
+    #[serde(default)]
     pub role: String,
+    #[serde(default)]
     pub parts: Vec<GeminiPart>,
 }
 
@@ -111,6 +113,9 @@ pub(super) struct GeminiFunctionDeclaration {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GeminiGenerateResponse {
+    /// Defaults to empty: a streaming chunk may carry only `usageMetadata`
+    /// without candidates and must still deserialize.
+    #[serde(default)]
     pub candidates: Vec<GeminiCandidate>,
     #[serde(default)]
     pub usage_metadata: Option<GeminiUsageMetadata>,
@@ -122,6 +127,9 @@ pub(super) struct GeminiGenerateResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GeminiCandidate {
+    /// Defaults to an empty content block: the final streaming chunk can
+    /// carry only `finishReason` (+ top-level usage) without content.
+    #[serde(default)]
     pub content: GeminiContent,
     #[serde(default)]
     pub finish_reason: Option<String>,
@@ -130,11 +138,19 @@ pub(super) struct GeminiCandidate {
 }
 
 /// Gemini usage metadata
+///
+/// All counts default to 0: intermediate streaming chunks can report
+/// `usageMetadata` with only a subset of the fields (e.g. no
+/// `candidatesTokenCount` yet). Requiring them would fail deserialization
+/// of the whole chunk and silently drop its text content.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GeminiUsageMetadata {
+    #[serde(default)]
     pub prompt_token_count: u32,
+    #[serde(default)]
     pub candidates_token_count: u32,
+    #[serde(default)]
     pub total_token_count: u32,
 }
 

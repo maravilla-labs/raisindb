@@ -31,10 +31,16 @@ fn test_groq_model_supports_tools() {
     // STT / TTS / moderation models do not.
     assert!(!super::groq_model_supports_tools("whisper-large-v3"));
     assert!(!super::groq_model_supports_tools("whisper-large-v3-turbo"));
-    assert!(!super::groq_model_supports_tools("canopylabs/orpheus-arabic-saudi"));
+    assert!(!super::groq_model_supports_tools(
+        "canopylabs/orpheus-arabic-saudi"
+    ));
     assert!(!super::groq_model_supports_tools("playai-tts"));
-    assert!(!super::groq_model_supports_tools("meta-llama/llama-prompt-guard-2-22m"));
-    assert!(!super::groq_model_supports_tools("openai/gpt-oss-safeguard-20b"));
+    assert!(!super::groq_model_supports_tools(
+        "meta-llama/llama-prompt-guard-2-22m"
+    ));
+    assert!(!super::groq_model_supports_tools(
+        "openai/gpt-oss-safeguard-20b"
+    ));
 }
 
 #[test]
@@ -196,6 +202,71 @@ data: [DONE]
     assert_eq!(usage.prompt_tokens, 10);
     assert_eq!(usage.completion_tokens, 5);
     assert_eq!(usage.total_tokens, 15);
+}
+
+#[test]
+fn test_parse_sse_finish_with_x_groq_usage() {
+    // Real Groq streaming shape: usage is nested under x_groq on the final chunk
+    let sse = r#"data: {"id":"chatcmpl-abc","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"llama-3.1-8b-instant","x_groq":{"id":"req_123","usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_groq_sse_events(sse);
+    assert_eq!(chunks.len(), 1);
+    let c = chunks[0].as_ref().unwrap();
+    assert_eq!(c.stop_reason.as_deref(), Some("stop"));
+    let usage = c.usage.as_ref().unwrap();
+    assert_eq!(usage.prompt_tokens, 42);
+    assert_eq!(usage.completion_tokens, 7);
+    assert_eq!(usage.total_tokens, 49);
+}
+
+#[test]
+fn test_parse_sse_usage_only_trailing_chunk() {
+    // OpenAI stream_options.include_usage style: trailing chunk with empty choices
+    let sse = r#"data: {"id":"chatcmpl-abc","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14},"model":"llama-3.1-8b-instant"}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_groq_sse_events(sse);
+    assert_eq!(chunks.len(), 1);
+    let c = chunks[0].as_ref().unwrap();
+    assert!(c.stop_reason.is_none());
+    let usage = c.usage.as_ref().unwrap();
+    assert_eq!(usage.total_tokens, 14);
+}
+
+#[test]
+fn test_parse_sse_usage_on_content_chunk_without_finish() {
+    // Usage attached to a chunk whose choice has content but no finish_reason:
+    // both the text delta and a usage-only chunk must be emitted.
+    let sse = r#"data: {"id":"chatcmpl-abc","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7},"model":"llama-3.1-8b-instant"}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_groq_sse_events(sse);
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0].as_ref().unwrap().delta, "done");
+    let usage = chunks[1].as_ref().unwrap().usage.as_ref().unwrap();
+    assert_eq!(usage.total_tokens, 7);
+}
+
+#[test]
+fn test_parse_sse_usage_on_finish_chunk_not_duplicated() {
+    // Usage on the finish chunk itself must be captured exactly once.
+    let sse = r#"data: {"id":"chatcmpl-abc","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},"model":"llama-3.1-8b-instant"}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_groq_sse_events(sse);
+    assert_eq!(chunks.len(), 1);
+    let c = chunks[0].as_ref().unwrap();
+    assert_eq!(c.stop_reason.as_deref(), Some("stop"));
+    assert_eq!(c.usage.as_ref().unwrap().total_tokens, 15);
 }
 
 #[test]

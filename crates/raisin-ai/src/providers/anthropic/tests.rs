@@ -454,6 +454,55 @@ data: {\"type\":\"message_stop\"}\n";
 }
 
 #[test]
+fn test_parse_sse_message_delta_real_wire_format() {
+    // Real Anthropic wire format: message_delta usage has ONLY output_tokens
+    // (no input_tokens key). This must still parse — historically it failed
+    // deserialization and dropped both the stop_reason and the output usage.
+    let sse = "\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":23}}\n";
+
+    let chunks = parse_anthropic_sse_events(sse);
+    assert_eq!(chunks.len(), 1);
+
+    let c = chunks[0].as_ref().unwrap();
+    assert_eq!(c.stop_reason.as_deref(), Some("end_turn"));
+    let usage = c.usage.as_ref().unwrap();
+    assert_eq!(usage.prompt_tokens, 0);
+    assert_eq!(usage.completion_tokens, 23);
+    assert_eq!(usage.total_tokens, 23);
+}
+
+#[test]
+fn test_parse_sse_split_usage_across_events() {
+    // Input usage arrives on message_start, output usage on message_delta.
+    // Each event must emit its partial usage; the shared accumulator merges.
+    let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_abc\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":100,\"output_tokens\":2}}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\
+\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":40}}\n";
+
+    let chunks = parse_anthropic_sse_events(sse);
+
+    let start_usage = chunks[0].as_ref().unwrap().usage.as_ref().unwrap();
+    assert_eq!(start_usage.prompt_tokens, 100);
+
+    let final_chunk = chunks
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .find(|c| c.stop_reason.is_some())
+        .expect("final chunk with stop_reason");
+    let final_usage = final_chunk.usage.as_ref().unwrap();
+    assert_eq!(final_usage.prompt_tokens, 0);
+    assert_eq!(final_usage.completion_tokens, 40);
+}
+
+#[test]
 fn test_parse_sse_empty_input() {
     let chunks = parse_anthropic_sse_events("");
     assert!(chunks.is_empty());

@@ -91,3 +91,75 @@ fn test_convert_openrouter_model() {
     assert!(info.capabilities.streaming);
     assert!(!info.capabilities.embeddings);
 }
+
+// ── Streaming SSE parsing ─────────────────────────────────────────
+
+use super::trait_impl::parse_openrouter_sse_events;
+
+#[test]
+fn test_parse_sse_text_delta() {
+    let sse = r#"data: {"id":"gen-1","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}],"model":"openai/gpt-4o"}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_openrouter_sse_events(sse);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].as_ref().unwrap().delta, "Hello");
+}
+
+#[test]
+fn test_parse_sse_usage_on_final_chunk_with_null_finish() {
+    // OpenRouter usage accounting: the final SSE chunk carries usage but may
+    // have finish_reason null and an empty content delta.
+    let sse = r#"data: {"id":"gen-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"model":"openai/gpt-4o"}
+
+data: {"id":"gen-1","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}],"usage":{"prompt_tokens":30,"completion_tokens":12,"total_tokens":42},"model":"openai/gpt-4o"}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_openrouter_sse_events(sse);
+    assert_eq!(chunks.len(), 2);
+
+    assert_eq!(
+        chunks[0].as_ref().unwrap().stop_reason.as_deref(),
+        Some("stop")
+    );
+
+    let usage_chunk = chunks[1].as_ref().unwrap();
+    assert!(usage_chunk.stop_reason.is_none());
+    let usage = usage_chunk.usage.as_ref().unwrap();
+    assert_eq!(usage.prompt_tokens, 30);
+    assert_eq!(usage.completion_tokens, 12);
+    assert_eq!(usage.total_tokens, 42);
+}
+
+#[test]
+fn test_parse_sse_usage_on_trailing_empty_choices_chunk() {
+    // OpenAI stream_options style: trailing chunk with empty choices.
+    let sse = r#"data: {"id":"gen-1","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14},"model":"openai/gpt-4o"}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_openrouter_sse_events(sse);
+    assert_eq!(chunks.len(), 1);
+    let c = chunks[0].as_ref().unwrap();
+    assert!(c.stop_reason.is_none());
+    assert_eq!(c.usage.as_ref().unwrap().total_tokens, 14);
+}
+
+#[test]
+fn test_parse_sse_usage_on_finish_chunk_not_duplicated() {
+    let sse = r#"data: {"id":"gen-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},"model":"openai/gpt-4o"}
+
+data: [DONE]
+"#;
+
+    let chunks = parse_openrouter_sse_events(sse);
+    assert_eq!(chunks.len(), 1);
+    let c = chunks[0].as_ref().unwrap();
+    assert_eq!(c.stop_reason.as_deref(), Some("stop"));
+    assert_eq!(c.usage.as_ref().unwrap().total_tokens, 15);
+}

@@ -18,6 +18,16 @@ pub(super) struct OpenAIChatRequest {
     /// Response format for structured output (json_object mode)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<OpenRouterResponseFormat>,
+    /// OpenRouter usage accounting (`{"include": true}`). Required for
+    /// streaming responses to include token usage on the final SSE chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<OpenRouterUsageConfig>,
+}
+
+/// OpenRouter usage accounting opt-in.
+#[derive(Debug, Serialize)]
+pub(super) struct OpenRouterUsageConfig {
+    pub include: bool,
 }
 
 /// Response format for OpenRouter (OpenAI-compatible json_object and json_schema modes)

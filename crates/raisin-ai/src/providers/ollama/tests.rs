@@ -212,3 +212,42 @@ fn test_embedding_model_detection() {
     };
     assert!(!OllamaProvider::is_embedding_model(&empty_show));
 }
+
+// ── Streaming NDJSON parsing ──────────────────────────────────────
+
+use super::provider_impl::parse_ollama_ndjson;
+
+#[test]
+fn test_parse_ndjson_final_object_carries_usage() {
+    // Ollama reports prompt_eval_count / eval_count on the final done object.
+    let ndjson = r#"{"model":"llama3.2","created_at":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":"Hello"},"done":false}
+{"model":"llama3.2","created_at":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":""},"done":true,"total_duration":123,"prompt_eval_count":26,"eval_count":9}
+"#;
+
+    let chunks = parse_ollama_ndjson(ndjson);
+    assert_eq!(chunks.len(), 2);
+
+    assert_eq!(chunks[0].as_ref().unwrap().delta, "Hello");
+    assert!(chunks[0].as_ref().unwrap().usage.is_none());
+
+    let final_chunk = chunks[1].as_ref().unwrap();
+    assert_eq!(final_chunk.stop_reason.as_deref(), Some("stop"));
+    let usage = final_chunk.usage.as_ref().unwrap();
+    assert_eq!(usage.prompt_tokens, 26);
+    assert_eq!(usage.completion_tokens, 9);
+    assert_eq!(usage.total_tokens, 35);
+}
+
+#[test]
+fn test_parse_ndjson_final_object_without_counts() {
+    // Counts can be missing (e.g. on error paths) — must not panic and
+    // must still emit the stop chunk.
+    let ndjson = r#"{"model":"llama3.2","created_at":"t","message":{"role":"assistant","content":""},"done":true}
+"#;
+
+    let chunks = parse_ollama_ndjson(ndjson);
+    assert_eq!(chunks.len(), 1);
+    let c = chunks[0].as_ref().unwrap();
+    assert_eq!(c.stop_reason.as_deref(), Some("stop"));
+    assert_eq!(c.usage.as_ref().unwrap().total_tokens, 0);
+}
