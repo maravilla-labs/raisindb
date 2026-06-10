@@ -616,6 +616,108 @@ async function deployAgent() {
 }
 
 /**
+ * The PLAN-enabled coordinator agent (the "Planner" tab in the frontend).
+ *
+ * Composition demo: task_creation_enabled + execution_mode approve_then_auto
+ * means the agent proposes a raisin:AIPlan (one task per open shift) that the
+ * manager must APPROVE; each approved task then runs start-shift-fill, i.e.
+ * starts the durable /flows/fill-shift workflow for that shift. A "completed"
+ * plan task means the workflow was STARTED - the board fills as staff accept
+ * their inbox tasks.
+ */
+async function deployCoordinatorAgent() {
+  await ensureNode('functions', '/', 'agents', 'raisin:Folder', {});
+  await ensureNode('functions', '/agents', 'shift-coordinator', 'raisin:AIAgent', {
+    title: 'Shift Coordinator',
+    // Keep in sync with package/content/functions/agents/shift-coordinator/.node.yaml
+    system_prompt: [
+      'You are the shift coordinator for a small cafe. You help the manager',
+      'fill the weekend shift board by starting the durable fill-shift',
+      'workflow - you never chat with staff yourself and you never assign',
+      'anyone directly.',
+      '',
+      'You have tools to list shifts, list staff, start the fill-shift',
+      'workflow for one shift (start-shift-fill), and the planning tools',
+      '(create-plan, add-task, update-task, get-plan-status).',
+      '',
+      'When the manager asks to fill MULTIPLE shifts (e.g. "fill all open',
+      'shifts", "fill the weekend", "fill Saturday"):',
+      '1. Call list-shifts with status "open" to get the open shifts.',
+      '2. Call create-plan with ONE task per open shift. Each task title',
+      '   MUST be the shift title followed by its path, e.g.',
+      '   "Fill Saturday Morning (/shifts/sat-morning)". Order the tasks',
+      '   Friday -> Saturday -> Sunday.',
+      '3. When executing a task: mark it in_progress with update-task,',
+      "   call start-shift-fill with that task's shift path, then mark the",
+      '   task completed with update-task (use the task_id values returned',
+      '   by create-plan). One start-shift-fill call per task - never skip',
+      '   a task and never call start-shift-fill twice for the same shift.',
+      '4. After the last task, summarize: which shifts got a workflow',
+      '   started, with their instance ids.',
+      '',
+      'Be honest about what "completed" means: completing a task means the',
+      'fill-shift WORKFLOW WAS STARTED for that shift - staff still have to',
+      'accept their inbox tasks before the shift is actually filled. Say so',
+      'in your summary; never claim a shift is filled unless list-shifts',
+      'shows status "filled".',
+      '',
+      'When the manager names a SINGLE specific shift ("fill the Sunday',
+      'evening shift"), do NOT create a plan - just call start-shift-fill',
+      'for that shift directly and report the instance id.',
+      '',
+      'Rules:',
+      '- Always check the live board with list-shifts before planning -',
+      '  never guess which shifts are open.',
+      '- Only plan tasks for shifts whose status is "open"; leave filled',
+      '  shifts alone.',
+      '- Keep answers short and factual.',
+    ].join('\n'),
+    provider: 'groq',
+    model: AGENT_MODEL,
+    temperature: 0.2,
+    max_tokens: 1024,
+    task_creation_enabled: true,
+    thinking_enabled: false,
+    execution_mode: 'approve_then_auto',
+    execution_context: 'system',
+    tools: [
+      '/lib/shiftboard/list-shifts',
+      '/lib/shiftboard/list-staff',
+      '/lib/shiftboard/start-shift-fill',
+      '/lib/raisin/ai/create-plan',
+      '/lib/raisin/ai/add-task',
+      '/lib/raisin/ai/update-task',
+      '/lib/raisin/ai/get-plan-status',
+    ],
+    rules: ['Only start fill-shift workflows for shifts that are currently open.'],
+  });
+  console.log(`✅ Agent /agents/shift-coordinator deployed (groq ${AGENT_MODEL}, approve_then_auto)`);
+
+  await ensureNode('ai', '/agents', 'shift-coordinator', 'raisin:Folder', {
+    title: 'Shift Coordinator',
+    agent_ref: {
+      'raisin:ref': '',
+      'raisin:workspace': 'functions',
+      'raisin:path': '/agents/shift-coordinator',
+    },
+    user_id: 'agent:shift-coordinator',
+    display_name: 'Shift Coordinator',
+    max_turns: 10,
+  });
+  for (const [parent, name, title] of [
+    ['/agents/shift-coordinator', 'inbox', 'Inbox'],
+    ['/agents/shift-coordinator', 'outbox', 'Outbox'],
+    ['/agents/shift-coordinator', 'memory', 'User Memory'],
+    ['/agents/shift-coordinator', 'sent', 'Sent'],
+    ['/agents/shift-coordinator/inbox', 'chats', 'Chats'],
+    ['/agents/shift-coordinator/inbox', 'notifications', 'Notifications'],
+  ]) {
+    await ensureNode('ai', parent, name, 'raisin:Folder', { title });
+  }
+  console.log('✅ Coordinator agent home created in ai workspace (inbox/outbox/...)');
+}
+
+/**
  * Allow raisin:InboxTask children under raisin:MessageFolder.
  *
  * The workflow engine creates human tasks at {assignee}/inbox/task-* and a
@@ -686,10 +788,11 @@ async function main() {
   await deployFlow();
   await ensureInboxTasksAllowed();
   await deployAgent();
+  await deployCoordinatorAgent();
   await ensurePlannerUser();
   await ensureStaffUsers();
   console.log('\n🎉 Setup complete.');
-  console.log(`   Agent: /agents/shift-planner (${AGENT_MODEL} via Groq)`);
+  console.log(`   Agents: /agents/shift-planner + /agents/shift-coordinator (${AGENT_MODEL} via Groq)`);
   console.log(`   Login: ${PLANNER_EMAIL} / ${PLANNER_PASSWORD}`);
   console.log(`   Staff: ${STAFF_USERS.map((s) => s.email).join(', ')} / ${STAFF_PASSWORD}`);
   console.log('   Next: npm run smoke              (backend chat smoke test)');

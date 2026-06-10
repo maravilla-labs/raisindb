@@ -4,6 +4,8 @@
   import { board } from '$lib/stores/board.svelte';
   import { notifications } from '$lib/stores/notifications.svelte';
   import { chat } from '$lib/stores/chat.svelte';
+  import { planner } from '$lib/stores/planner.svelte';
+  import { view } from '$lib/stores/view.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
   import { connection } from '$lib/stores/connection.svelte';
   import { initClient } from '$lib/raisin';
@@ -11,6 +13,7 @@
   import Header from '$lib/components/Header.svelte';
   import ShiftBoard from '$lib/components/ShiftBoard.svelte';
   import ChatPanel from '$lib/components/ChatPanel.svelte';
+  import PlanPanel from '$lib/components/PlanPanel.svelte';
   import TaskPanel from '$lib/components/TaskPanel.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
 
@@ -27,6 +30,9 @@
     if (data.session && data.chat) {
       chat.seed(data.chat);
     }
+    if (data.session && data.planner) {
+      planner.seed(data.planner);
+    }
     if (data.session && data.tasks) {
       tasks.seed(data.tasks);
     }
@@ -42,18 +48,21 @@
   });
 
   // After hydration: bring up the live layer — WS client (JWT from the
-  // cookie session), board subscription, inbox bell, streaming chat.
-  // ($effect never runs during SSR.)
+  // cookie session), board subscription, inbox bell, streaming chats (one
+  // ConversationStore per agent: Board ↔ shift-planner, Planner tab ↔
+  // shift-coordinator). ($effect never runs during SSR.)
   $effect(() => {
     if (!data.session) return;
     const { token, user } = data.session;
     const chatData = data.chat ?? { conversationPath: null, messages: [] };
+    const plannerData = data.planner ?? { conversationPath: null, messages: [] };
 
     (async () => {
       try {
         await initClient(token);
         connection.init();
         chat.connect(chatData);
+        planner.connect(plannerData);
         tasks.connect();
         await Promise.all([board.connect(), notifications.init(user)]);
       } catch (err) {
@@ -91,11 +100,32 @@
   <div class="app">
     <Header />
     <main class="layout">
+      <!-- The board is always visible: when the Planner tab's plan executes,
+           the shifts filling live on the left IS the payoff. -->
       <ShiftBoard />
-      <div class="side">
-        <TaskPanel />
-        <ChatPanel />
-      </div>
+      {#if view.tab === 'planner'}
+        <div class="side" data-testid="side-planner">
+          <PlanPanel chat={planner} />
+          <ChatPanel
+            chat={planner}
+            title="Shift coordinator"
+            placeholder="Message the coordinator…"
+            emptyHint="Ask for a plan — e.g. “Fill all open weekend shifts.” The coordinator proposes one task per open shift; approving the plan starts a durable fill-shift workflow for each."
+            testid="planner-chat"
+          />
+        </div>
+      {:else}
+        <div class="side" data-testid="side-board">
+          <TaskPanel />
+          <ChatPanel
+            {chat}
+            title="Planning chat"
+            placeholder="Message the shift planner…"
+            emptyHint="Ask the shift planner anything — e.g. “Which shifts are still open?” or “Fill the weekend board, check the weather for outdoor shifts.”"
+            testid="chat"
+          />
+        </div>
+      {/if}
     </main>
   </div>
   <Toasts />

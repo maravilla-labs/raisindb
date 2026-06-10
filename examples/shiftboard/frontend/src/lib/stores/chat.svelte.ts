@@ -1,5 +1,10 @@
 /**
- * Planning chat state (Svelte 5 runes) — wraps the SDK's ConversationStore.
+ * Agent chat state (Svelte 5 runes) — wraps the SDK's ConversationStore.
+ *
+ * The app runs TWO independent instances of this class: `chat` (the Board
+ * tab's shift-planner conversation) and the Planner tab's coordinator chat
+ * (see planner.svelte.ts) — each with its own ConversationStore and its own
+ * conversation with its own agent.
  *
  * SSR handoff: +page.server.ts resolves the latest agent conversation and its
  * message history; the page seeds this store before first render so the chat
@@ -12,9 +17,12 @@
  *
  * SDK APIs used:
  *   new ConversationStore({ database, conversationPath?, createOptions })
- *     .subscribe(cb)        - state snapshots (messages, streamingText, tool calls)
+ *     .subscribe(cb)        - state snapshots (messages, streamingText,
+ *                             tool calls, plans projection)
  *     .sendMessage(text)    - send + stream the agent's reply (conversation is
  *                             created lazily on first send via createOptions)
+ *     .approvePlan(path) / .rejectPlan(path, feedback)
+ *     .loadMessages()       - canonical history reload (plan grace reloads)
  */
 import {
   ConversationStore,
@@ -53,13 +61,23 @@ function seededSnapshot(ssr: ChatSSRData): ConversationStoreSnapshot {
   };
 }
 
-class ChatState {
+export class AgentChatState {
   snapshot = $state<ConversationStoreSnapshot>(EMPTY_SNAPSHOT);
   /** True once the live store is wired up (input enabled). */
   ready = $state(false);
 
   #store: ConversationStore | null = null;
   #connected = false;
+  #agentPath: string;
+  #onSnapshot?: (snapshot: ConversationStoreSnapshot) => void;
+
+  constructor(
+    agentPath: string,
+    onSnapshot?: (snapshot: ConversationStoreSnapshot) => void,
+  ) {
+    this.#agentPath = agentPath;
+    this.#onSnapshot = onSnapshot;
+  }
 
   /** Seed from SSR data. Runs during server render and again on hydration. */
   seed(ssr: ChatSSRData): void {
@@ -78,7 +96,7 @@ class ChatState {
     this.#store = new ConversationStore({
       database: getDb(),
       conversationPath: ssr.conversationPath ?? undefined,
-      createOptions: { participant: AGENT_PATH },
+      createOptions: { participant: this.#agentPath },
     });
 
     // Seed the store with the SSR-loaded history instead of calling
@@ -91,6 +109,7 @@ class ChatState {
 
     this.#store.subscribe((s) => {
       this.snapshot = s;
+      this.#onSnapshot?.(s);
     });
     this.ready = true;
   }
@@ -98,6 +117,21 @@ class ChatState {
   async send(text: string): Promise<void> {
     await this.#store?.sendMessage(text);
   }
+
+  async approvePlan(planPath: string): Promise<void> {
+    if (!this.#store) throw new Error('chat not connected');
+    await this.#store.approvePlan(planPath);
+  }
+
+  async rejectPlan(planPath: string, feedback?: string): Promise<void> {
+    if (!this.#store) throw new Error('chat not connected');
+    await this.#store.rejectPlan(planPath, feedback);
+  }
+
+  /** Canonical history reload (used by the plan-card grace reloads). */
+  async reload(): Promise<void> {
+    await this.#store?.loadMessages();
+  }
 }
 
-export const chat = new ChatState();
+export const chat = new AgentChatState(AGENT_PATH);

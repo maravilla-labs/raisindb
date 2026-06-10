@@ -22,6 +22,12 @@ What it demonstrates:
   manager. The agent starts it conversationally with its `start-shift-fill`
   tool when the manager asks for a tracked process. See the workflow
   scenario below.
+- **Planner view: plans + workflows composed** — a second, plan-enabled
+  agent (`/agents/shift-coordinator`, `task_creation_enabled` +
+  `execution_mode: approve_then_auto`) fills the whole weekend board: it
+  proposes a **plan** with one task per open shift that the manager must
+  **approve**; each approved task then calls `start-shift-fill`, i.e.
+  starts one durable fill-shift workflow. See the Planner section below.
 - **Live node subscriptions** — when the agent assigns a shift, the shift node
   in workspace `staffing` is updated server-side and the matching board card
   updates in place (with a highlight flash) via a WebSocket node subscription.
@@ -232,6 +238,72 @@ RAISIN_REPO=shiftboard2 npm run workflow-test
 The same scenario also runs as engine-level CI against the *shipped* YAML:
 `cargo test -p raisin-flow-runtime --test e2e_flows shiftboard`.
 
+## Planner: plans + workflows composed
+
+The **Planner** tab (header toggle `Board | Planner`) is the composition
+demo: the AI **plan/task system** on top of the **durable workflow** above.
+A second agent, `/agents/shift-coordinator`
+(`package/content/functions/agents/shift-coordinator/.node.yaml`), is
+configured with `task_creation_enabled: true` and
+`execution_mode: approve_then_auto`, and gets the builtin planning tools
+(`/lib/raisin/ai/create-plan`, `add-task`, `update-task`,
+`get-plan-status`) next to `list-shifts`, `list-staff` and
+`start-shift-fill`. It never messages staff and never assigns anyone — it
+only plans and starts workflows.
+
+1. The manager (Planner tab, a **separate conversation** from the Board
+   chat) writes: *"Fill all open weekend shifts."*
+2. The coordinator checks the board (`list-shifts status=open`) and calls
+   `create-plan` with **one task per open shift** (task title = shift title
+   + path, e.g. `Fill Saturday Morning (/shifts/sat-morning)`). Because the
+   agent runs in `approve_then_auto`, the plan lands as a `raisin:AIPlan`
+   node in `pending_approval` — nothing executes yet.
+3. The proposal renders as a card in the **plan panel** (`PlanPanel.svelte`,
+   driven by the SDK's deterministic `plans` projection on
+   `ConversationStore`) with the ordered tasks and **Approve / Reject**
+   buttons (`store.approvePlan` / `store.rejectPlan`, reject takes optional
+   feedback).
+4. On approve, the agent executes the tasks: for each one it calls
+   `start-shift-fill`, which starts a fill-shift workflow instance and
+   **returns immediately**. The task is then marked completed.
+5. The board (always visible, left) fills **live** as staff accept the
+   inbox approval tasks the workflows created — card by card.
+
+**The seam, stated honestly:** `start-shift-fill` is fire-and-forget, so a
+plan task flipping to *completed* means *"the workflow for this shift was
+STARTED"* — not *"the shift is filled"*. The plan completes when all
+workflows are running; whether and when each shift actually fills is up to
+the staff answering their inbox tasks (the agent's system prompt makes it
+report exactly that). For this demo that seam is a feature: you can watch
+the plan complete in seconds and then see the board fill asynchronously.
+A tighter coupling (task completes only when the flow completes) would
+need the agent to wait on flow instances — a different, blocking design.
+
+Two client-side event-ordering quirks are handled in
+`frontend/src/lib/stores/planner.svelte.ts` with reload polling (the same
+approach as the admin console's Test Chat): the safety-net `done` event
+(finish reason `awaiting_plan_approval`) can arrive **before** the
+async-delivered `ai_plan` card, and after approval the lifecycle messages
+(`ai_plan` / `ai_task_update`) arrive without reliable live events on the
+user's subscription. Those lifecycle messages are also **filtered out of
+the chat transcript** (their content is just the task title) — they belong
+to the plan panel.
+
+`planner-tab-check.mjs` proves the whole composition headlessly
+(Playwright + inbox API; ONE Groq run, budget-asserted):
+
+```bash
+RAISIN_REPO=shiftboard2 npm run planner-tab-check
+```
+
+reset all shifts open → login → Planner tab → "Fill all open weekend
+shifts" → plan card `pending_approval` with one task per open shift →
+Approve → all tasks complete (= 5 workflows started, board still honest:
+nothing filled yet) → anna/cara really have pending inbox tasks (API) →
+ONE task accepted via the API → that shift flips to `filled` on the open
+page **live** → demo state restored (remaining flow instances cancelled,
+board re-seeded).
+
 Configuration (frontend): `VITE_RAISIN_WS_URL` (default
 `ws://localhost:8081/ws/shiftboard`; multi-tenant operators can use
 `ws://host/sys/{tenant}/{repo}`) and `VITE_RAISIN_REPO`
@@ -365,6 +437,8 @@ through the same subscription API any other writer would trigger.
 | Create chat lazily | `new ConversationStore({ database, createOptions: { participant: '/agents/shift-planner' } })` |
 | Chat state (messages, streaming text, tool calls, errors) | `ConversationStore.subscribe(snapshot => …)` |
 | Send a message | `ConversationStore.sendMessage(text)` |
+| Plan proposal/progress cards | `snapshot.plans` (deterministic projection from `ai_plan` / `ai_task_update` messages) |
+| Approve / reject a plan | `ConversationStore.approvePlan(planPath)` / `.rejectPlan(planPath, feedback)` |
 
 ## Frontend code layout
 
@@ -386,9 +460,14 @@ frontend/src/
                                      the task store
   lib/stores/tasks.svelte.ts         human task panel state: SSR seed, live
                                      upsert/remove, optimistic complete
-  lib/stores/chat.svelte.ts          ConversationStore → $state snapshot
+  lib/stores/chat.svelte.ts          AgentChatState: ConversationStore →
+                                     $state snapshot (one instance per agent)
+  lib/stores/planner.svelte.ts       Planner tab: coordinator chat instance +
+                                     plan-card grace / execution-watch reloads
+  lib/stores/view.svelte.ts          Board | Planner tab state
   lib/components/                    LoginScreen, Header, ShiftBoard,
-                                     ShiftCard, TaskPanel, ChatPanel, Toasts
+                                     ShiftCard, TaskPanel, ChatPanel,
+                                     PlanPanel, Toasts
   ssr-check.sh (frontend/)           curl-only proof of real SSR
   inbox-task-check.sh (frontend/)    curl-only proof of the human-task loop
 ```

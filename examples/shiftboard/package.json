@@ -10,7 +10,8 @@
     "negotiation-test": "node negotiation-test.mjs",
     "workflow-test": "node workflow-test.mjs",
     "compaction-test": "node compaction-test.mjs",
-    "plan-modes-test": "node plan-modes-test.mjs"
+    "plan-modes-test": "node plan-modes-test.mjs",
+    "planner-tab-check": "node planner-tab-check.mjs"
   },
   "dependencies": {
     "@raisindb/client": "file:../../packages/raisin-client-js"

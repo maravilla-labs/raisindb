@@ -5,7 +5,13 @@
 </script>
 
 <!-- flashSeq > 0 means this card was just updated by a live event. -->
-<article class="shift-card" class:flash={shift.flashSeq > 0}>
+<article
+  class="shift-card"
+  class:flash={shift.flashSeq > 0}
+  data-testid="shift-card"
+  data-path={shift.path}
+  data-status={shift.status}
+>
   <div class="shift-head">
     <span class="shift-title">
       {shift.title}

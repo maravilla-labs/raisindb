@@ -77,6 +77,10 @@ class NotificationState {
     // too (role: 'user') — don't notify about things the user just did.
     if (props.role === 'user') return;
 
+    // Plan/task lifecycle messages (ai_plan / ai_task_update) render in the
+    // plan panel — a plan with N tasks would otherwise fire 2N+1 toasts.
+    if (props.message_type === 'ai_plan' || props.message_type === 'ai_task_update') return;
+
     this.unread += 1;
     this.#showToast(
       (props.title as string) ??

@@ -1,0 +1,10 @@
+node_type: raisin:Folder
+properties:
+  title: Shift Coordinator
+  agent_ref:
+    raisin:ref: ""
+    raisin:workspace: "functions"
+    raisin:path: "/agents/shift-coordinator"
+  user_id: "agent:shift-coordinator"
+  display_name: "Shift Coordinator"
+  max_turns: 10

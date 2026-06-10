@@ -24,7 +24,7 @@ import {
   loginWithEmail,
   setAuthCookies,
 } from '$lib/server/raisin';
-import { AGENT_PATH } from '$lib/agent';
+import { AGENT_PATH, COORDINATOR_PATH } from '$lib/agent';
 import { SHIFTS_SQL, STAFF_SQL, rowsToShifts, rowsToStaff, type SqlNodeRow } from '$lib/board-data';
 
 /** agent_ref is a raisin reference object over HTTP; tolerate both shapes. */
@@ -37,7 +37,7 @@ function agentRefPath(item: ConversationListItem): string | undefined {
 
 export const load: PageServerLoad = async ({ parent }) => {
   const { session } = await parent();
-  if (!session) return { board: null, chat: null, tasks: null };
+  if (!session) return { board: null, chat: null, planner: null, tasks: null };
 
   const client = createHttpClient(session.token);
   const db = client.database(REPOSITORY);
@@ -50,22 +50,28 @@ export const load: PageServerLoad = async ({ parent }) => {
     listPendingTasks(client),
   ]);
 
-  // Latest ai_chat conversation with our agent (same selection as the old SPA).
-  let conversationPath: string | null = null;
-  let messages: ChatMessage[] = [];
+  // Latest ai_chat conversation per agent: the Board chat (shift-planner)
+  // and the Planner tab chat (shift-coordinator) are separate conversations.
+  const empty = { conversationPath: null as string | null, messages: [] as ChatMessage[] };
+  let chat = { ...empty };
+  let planner = { ...empty };
   try {
     const manager = createConversationManager(client);
     const conversations = await manager.list({ type: 'ai_chat' });
-    conversationPath =
+    const latestFor = (agentPath: string) =>
       conversations
-        .filter((c) => agentRefPath(c) === AGENT_PATH)
+        .filter((c) => agentRefPath(c) === agentPath)
         .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0]
         ?.conversationPath ?? null;
-    if (conversationPath) {
-      messages = await manager.getMessages(conversationPath);
-    }
+
+    chat.conversationPath = latestFor(AGENT_PATH);
+    planner.conversationPath = latestFor(COORDINATOR_PATH);
+    [chat.messages, planner.messages] = await Promise.all([
+      chat.conversationPath ? manager.getMessages(chat.conversationPath) : [],
+      planner.conversationPath ? manager.getMessages(planner.conversationPath) : [],
+    ]);
   } catch (err) {
-    console.warn('[ssr] loading conversation failed, chat starts fresh:', err);
+    console.warn('[ssr] loading conversations failed, chats start fresh:', err);
   }
 
   return {
@@ -73,7 +79,8 @@ export const load: PageServerLoad = async ({ parent }) => {
       shifts: rowsToShifts((shiftsRes.rows ?? []) as unknown as SqlNodeRow[]),
       staff: rowsToStaff((staffRes.rows ?? []) as unknown as SqlNodeRow[]),
     },
-    chat: { conversationPath, messages },
+    chat,
+    planner,
     tasks: pendingTasks,
   };
 };

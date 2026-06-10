@@ -1,5 +1,5 @@
 name: shiftboard
-version: 1.2.0
+version: 1.3.0
 title: Shiftboard
 description: >
   AI-assisted weekend shift planning demo. Provides the `staffing` workspace
@@ -7,10 +7,13 @@ description: >
   assign-shift, message-staff, pick-candidates, resolve-accepter,
   start-shift-fill), the durable /flows/fill-shift workflow (asks staff via
   inbox accept/decline tasks, assigns the first accepter, notifies the
-  manager), and the Groq-backed shift-planner AI agent with its home folder
-  in the `ai` workspace. The agent coordinates with staff over chat (asks
+  manager), and two Groq-backed AI agents with home folders in the `ai`
+  workspace: shift-planner coordinates with staff over chat (asks
   candidates, handles declines, assigns only after a confirmation) or - on
-  request - starts the tracked workflow variant via start-shift-fill.
+  request - starts the tracked workflow variant via start-shift-fill;
+  shift-coordinator is the plan-enabled composition demo (approve_then_auto)
+  that proposes an approvable plan with one task per open shift, each task
+  starting the fill-shift workflow.
 author: SOLUTAS GmbH
 license: BSL-1.1
 icon: calendar-clock

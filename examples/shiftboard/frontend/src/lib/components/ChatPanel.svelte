@@ -1,14 +1,35 @@
 <script lang="ts">
-  import { chat } from '../stores/chat.svelte';
+  import type { AgentChatState } from '../stores/chat.svelte';
+
+  let {
+    chat,
+    title = 'Planning chat',
+    placeholder = 'Message the agent…',
+    emptyHint = 'Ask the agent anything.',
+    testid = 'chat',
+  }: {
+    chat: AgentChatState;
+    title?: string;
+    placeholder?: string;
+    emptyHint?: string;
+    testid?: string;
+  } = $props();
 
   let input = $state('');
   let scroller = $state<HTMLElement>();
 
   // Only user/assistant messages with text are rendered as bubbles;
   // tool/system messages are surfaced via the tool-call badges instead.
+  // Plan/task lifecycle messages (messageType ai_plan / ai_task_update —
+  // their content is just the plan/task title) belong to the plan panel,
+  // not the transcript.
   const visibleMessages = $derived(
     chat.snapshot.messages.filter(
-      (m) => (m.role === 'user' || m.role === 'assistant') && m.content,
+      (m) =>
+        (m.role === 'user' || m.role === 'assistant') &&
+        m.content &&
+        m.messageType !== 'ai_plan' &&
+        m.messageType !== 'ai_task_update',
     ),
   );
 
@@ -41,8 +62,8 @@
   }
 </script>
 
-<section class="panel chat-panel">
-  <h2 class="panel-title">Planning chat</h2>
+<section class="panel chat-panel" data-testid={testid}>
+  <h2 class="panel-title">{title}</h2>
 
   <div class="chat-messages" bind:this={scroller}>
     <!-- SSR already renders the history below; only show the placeholder
@@ -50,14 +71,11 @@
     {#if !chat.ready && visibleMessages.length === 0}
       <p class="muted">Opening conversation…</p>
     {:else if chat.ready && visibleMessages.length === 0 && !chat.snapshot.isStreaming}
-      <p class="muted chat-empty">
-        Ask the shift planner anything — e.g. “Which shifts are still open?”
-        or “Fill the weekend board, check the weather for outdoor shifts.”
-      </p>
+      <p class="muted chat-empty">{emptyHint}</p>
     {/if}
 
     {#each visibleMessages as message, i (message.id ?? i)}
-      <div class="bubble {message.role}">
+      <div class="bubble {message.role}" data-testid="{testid}-bubble-{message.role}">
         {message.content}
       </div>
     {/each}
@@ -99,12 +117,14 @@
   <div class="chat-input">
     <input
       type="text"
-      placeholder="Message the shift planner…"
+      {placeholder}
+      data-testid="{testid}-input"
       bind:value={input}
       onkeydown={onKeydown}
       disabled={!chat.ready || chat.snapshot.isStreaming}
     />
     <button
+      data-testid="{testid}-send"
       onclick={send}
       disabled={!chat.ready || chat.snapshot.isStreaming || !input.trim()}
     >

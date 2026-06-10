@@ -253,6 +253,31 @@ input {
   color: var(--text-muted);
 }
 
+/* Board | Planner toggle (swaps the right column only). */
+.tabs {
+  display: inline-flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+}
+
+.tab {
+  border: none;
+  background: none;
+  border-radius: 999px;
+  padding: 0.25rem 0.85rem;
+  font-size: 0.825rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.tab.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
 .signout {
   background: none;
   border: 1px solid var(--border);
@@ -545,6 +570,196 @@ input {
 
 .task-btn:hover {
   filter: brightness(0.97);
+}
+
+/* ----------------------------------------------------------------- plans */
+
+/* Planner tab: plan proposal/progress cards above the coordinator chat. */
+.plan-panel {
+  flex: none;
+  max-height: 55%;
+}
+
+.plan-scroll {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding-right: 0.25rem;
+}
+
+.plan-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.65rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.plan-card.pending_approval {
+  border-color: var(--accent);
+}
+
+.plan-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.plan-title {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.plan-status {
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.plan-status.completed {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.plan-status.failed,
+.plan-status.cancelled {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.plan-status.executing,
+.plan-status.in_progress,
+.plan-status.approved {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.plan-task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.task-row.completed .task-row-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.task-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  display: grid;
+  place-items: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.task-icon.in_progress {
+  border-color: var(--amber);
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
+.task-icon.completed {
+  border-color: var(--green);
+  background: var(--green);
+  color: #fff;
+}
+
+.task-icon.failed {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.task-icon.cancelled {
+  color: var(--text-muted);
+}
+
+.plan-feedback {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.825rem;
+}
+
+.plan-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.plan-actions button {
+  border-radius: 8px;
+  padding: 0.35rem 0.95rem;
+  font-size: 0.825rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+}
+
+.plan-actions .approve {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+
+.plan-actions .reject {
+  background: var(--surface);
+  border-color: #fecaca;
+  color: var(--red);
+}
+
+.plan-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.continue-bar {
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.continue-bar p {
+  margin: 0;
+  font-size: 0.825rem;
+  color: var(--text-muted);
+}
+
+.continue-bar button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.35rem 0.85rem;
+  font-weight: 600;
+  font-size: 0.825rem;
 }
 
 /* ------------------------------------------------------------------ chat */

@@ -3,11 +3,31 @@
   import { notifications } from '../stores/notifications.svelte';
   import { session } from '../stores/session.svelte';
   import { tasks } from '../stores/tasks.svelte';
+  import { view } from '../stores/view.svelte';
 </script>
 
 <header class="header">
   <div class="header-left">
     <h1 class="app-title">Shiftboard</h1>
+    <!-- The tabs swap only the right column; the board stays visible. -->
+    <nav class="tabs" aria-label="View">
+      <button
+        class="tab"
+        class:active={view.tab === 'board'}
+        data-testid="tab-board"
+        onclick={() => (view.tab = 'board')}
+      >
+        Board
+      </button>
+      <button
+        class="tab"
+        class:active={view.tab === 'planner'}
+        data-testid="tab-planner"
+        onclick={() => (view.tab = 'planner')}
+      >
+        Planner
+      </button>
+    </nav>
     <span class="conn" title="WebSocket connection state">
       <span class="conn-dot {connection.status}"></span>
       {connection.status}
