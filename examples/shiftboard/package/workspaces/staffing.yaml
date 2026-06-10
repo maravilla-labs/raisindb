@@ -1,0 +1,22 @@
+name: staffing
+title: Staffing
+description: Shift planning board
+icon: calendar-clock
+color: "#f59e0b"
+
+allowed_node_types:
+  - raisin:Folder
+  - raisin:Node
+
+allowed_root_node_types:
+  - raisin:Folder
+
+root_structure:
+  - name: shifts
+    node_type: raisin:Folder
+    title: Shifts
+    description: Weekend shifts to fill
+  - name: staff
+    node_type: raisin:Folder
+    title: Staff
+    description: Staff members and their availability

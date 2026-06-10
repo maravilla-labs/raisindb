@@ -1,0 +1,10 @@
+node_type: raisin:Folder
+properties:
+  title: Shift Planner
+  agent_ref:
+    raisin:ref: ""
+    raisin:workspace: "functions"
+    raisin:path: "/agents/shift-planner"
+  user_id: "agent:shift-planner"
+  display_name: "Shift Planner"
+  max_turns: 10

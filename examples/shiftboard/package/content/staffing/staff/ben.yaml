@@ -1,0 +1,8 @@
+node_type: raisin:Node
+properties:
+  title: Ben
+  role: waiter
+  email: ben@example.com
+  available_days:
+    - saturday
+    - sunday

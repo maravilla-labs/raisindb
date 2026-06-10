@@ -1,0 +1,23 @@
+node_type: raisin:Function
+properties:
+  name: list-staff
+  title: List Staff
+  description: >
+    List all staff members with their role, their email address, whether
+    they are reachable by chat (reachable=true means message-staff works
+    for that email) and which days they are available to work.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties: {}
+  output_schema:
+    type: object
+    properties:
+      staff:
+        type: array
+        description: Staff members with name, role, email, reachable, available_days

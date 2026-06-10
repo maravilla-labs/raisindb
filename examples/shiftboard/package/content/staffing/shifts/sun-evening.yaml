@@ -1,0 +1,10 @@
+node_type: raisin:Node
+properties:
+  title: Sunday Evening
+  day: sunday
+  start: "15:00"
+  end: "21:00"
+  location: Restaurant
+  outdoor: false
+  status: open
+  assignee: null

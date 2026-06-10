@@ -1,0 +1,34 @@
+node_type: raisin:Function
+properties:
+  name: start-shift-fill
+  title: Start Shift Fill Workflow
+  description: >
+    Start the durable fill-shift workflow for an open shift. The workflow
+    engine asks each available and reachable staff member via an inbox
+    approval task (accept/decline buttons with a deadline), assigns the
+    first accepter to the shift, and messages the manager with the outcome.
+    Use this instead of chatting with staff yourself when the manager wants
+    a tracked, auditable process ("via tasks", "with a workflow"). Pass the
+    shift node path (e.g. /shifts/sun-evening). Returns the workflow
+    instance id immediately - the coordination continues in the background.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required: [shift_path]
+    properties:
+      shift_path:
+        type: string
+        description: Shift node path, e.g. /shifts/sun-evening
+  output_schema:
+    type: object
+    properties:
+      instance_id:
+        type: string
+        description: Flow instance id of the started workflow
+      status: { type: string }
+      message: { type: string }

@@ -1,0 +1,35 @@
+node_type: raisin:Function
+properties:
+  name: pick-candidates
+  title: Pick Candidates
+  description: >
+    Find the candidates for filling a shift: staff members who are available
+    on the shift's day AND reachable (their email belongs to a registered
+    identity user). Returns the shift details plus the ordered candidate
+    list with each candidate's identity-user home path (used as the inbox
+    task assignee by the fill-shift workflow).
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required: [shift_path]
+    properties:
+      shift_path:
+        type: string
+        description: Shift node path, e.g. /shifts/sun-evening
+  output_schema:
+    type: object
+    properties:
+      shift_path: { type: string }
+      shift_title: { type: string }
+      day: { type: string }
+      start: { type: string }
+      end: { type: string }
+      location: { type: string }
+      candidates:
+        type: array
+        description: Ordered candidates with name, email, user_path

@@ -1,0 +1,35 @@
+node_type: raisin:Function
+properties:
+  name: assign-shift
+  title: Assign Shift
+  description: >
+    Assign a staff member to a shift by setting the assignee. Pass the shift
+    node path (e.g. /shifts/sat-morning) and the staff member name. Pass
+    staff_name null to clear an assignment and re-open the shift.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required:
+      - shift_path
+    properties:
+      shift_path:
+        type: string
+        description: Shift node path, e.g. /shifts/sat-morning
+      staff_name:
+        type: string
+        description: Staff member name to assign, or null to clear
+  output_schema:
+    type: object
+    properties:
+      shift_path:
+        type: string
+      assignee:
+        type: string
+      status:
+        type: string
+        description: open or filled after the change

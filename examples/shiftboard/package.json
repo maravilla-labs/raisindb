@@ -1,0 +1,18 @@
+{
+  "name": "shiftboard-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shift-planning demo: AI agent chat with tools that read/update shift nodes, live node subscriptions, inbox notifications.",
+  "scripts": {
+    "setup": "node setup.mjs",
+    "smoke": "node smoke.mjs",
+    "negotiation-test": "node negotiation-test.mjs",
+    "workflow-test": "node workflow-test.mjs",
+    "compaction-test": "node compaction-test.mjs",
+    "plan-modes-test": "node plan-modes-test.mjs"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../../packages/raisin-client-js"
+  }
+}

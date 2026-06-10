@@ -1,0 +1,33 @@
+node_type: raisin:Function
+properties:
+  name: list-shifts
+  title: List Shifts
+  description: >
+    List the shifts on the staffing board with day, time, location, whether
+    the spot is outdoor, status (open/filled) and current assignee.
+    Optionally filter by day or status.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    properties:
+      day:
+        type: string
+        enum: [friday, saturday, sunday]
+        description: Only shifts on this day
+      status:
+        type: string
+        enum: [open, filled]
+        description: Only shifts with this status
+  output_schema:
+    type: object
+    properties:
+      shifts:
+        type: array
+        description: >
+          Matching shifts with path, title, day, start, end, location,
+          outdoor, status, assignee

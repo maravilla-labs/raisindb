@@ -1,0 +1,9 @@
+node_type: raisin:Node
+properties:
+  title: Cara
+  role: all-round
+  email: cara@example.com
+  available_days:
+    - friday
+    - saturday
+    - sunday

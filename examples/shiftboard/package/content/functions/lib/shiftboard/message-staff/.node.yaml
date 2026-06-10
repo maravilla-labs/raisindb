@@ -1,0 +1,37 @@
+node_type: raisin:Function
+properties:
+  name: message-staff
+  title: Message Staff
+  description: >
+    Send a short chat message to a person by email address - a staff member
+    (to ask if they can take a shift) or the manager (to report an outcome).
+    The message is delivered into their inbox; when they reply, you receive
+    the reply as a new chat message in that same conversation. Always
+    restate which shift the message is about.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: false
+    required:
+      - staff_email
+      - message
+    properties:
+      staff_email:
+        type: string
+        description: Email address of the recipient, e.g. anna@example.com
+      message:
+        type: string
+        description: The chat message text to send. Mention the shift (name, day, time, location) so the thread keeps context.
+  output_schema:
+    type: object
+    properties:
+      delivered_to:
+        type: string
+        description: Email the message was sent to
+      conversation_id:
+        type: string
+        description: Conversation thread the message was placed in

@@ -1,0 +1,53 @@
+name: shiftboard
+version: 1.2.0
+title: Shiftboard
+description: >
+  AI-assisted weekend shift planning demo. Provides the `staffing` workspace
+  with seed shift/staff nodes, tool functions (list-shifts, list-staff,
+  assign-shift, message-staff, pick-candidates, resolve-accepter,
+  start-shift-fill), the durable /flows/fill-shift workflow (asks staff via
+  inbox accept/decline tasks, assigns the first accepter, notifies the
+  manager), and the Groq-backed shift-planner AI agent with its home folder
+  in the `ai` workspace. The agent coordinates with staff over chat (asks
+  candidates, handles declines, assigns only after a confirmation) or - on
+  request - starts the tracked workflow variant via start-shift-fill.
+author: SOLUTAS GmbH
+license: BSL-1.1
+icon: calendar-clock
+color: "#f59e0b"
+keywords:
+  - shifts
+  - staffing
+  - ai-agent
+  - demo
+category: examples
+
+# Depends on the builtin ai-tools package (raisin:AIAgent node type, `ai`
+# workspace, agent-handler + weather tool) which is auto-installed on
+# repository creation.
+
+provides:
+  workspaces:
+    - staffing
+  functions:
+    - /lib/shiftboard/list-shifts
+    - /lib/shiftboard/list-staff
+    - /lib/shiftboard/assign-shift
+    - /lib/shiftboard/message-staff
+    - /lib/shiftboard/pick-candidates
+    - /lib/shiftboard/resolve-accepter
+    - /lib/shiftboard/start-shift-fill
+  flows:
+    - /flows/fill-shift
+
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:AIAgent
+  ai:
+    default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:Folder

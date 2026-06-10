@@ -1,0 +1,25 @@
+{
+  "name": "shiftboard-frontend",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Shiftboard demo (SvelteKit SSR): AI agent chat with tool calls, live node subscriptions, inbox notifications. Server-rendered board + chat history, hydrated into a live WebSocket client.",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview --port 5175",
+    "start": "ORIGIN=http://localhost:5175 PORT=5175 node build",
+    "prepare": "svelte-kit sync || echo ''"
+  },
+  "dependencies": {
+    "@raisindb/client": "file:../../../packages/raisin-client-js"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-node": "^5.3.3",
+    "@sveltejs/kit": "^2.48.5",
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "svelte": "^5.43.8",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2"
+  }
+}

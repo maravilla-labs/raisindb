@@ -1,0 +1,39 @@
+node_type: raisin:Function
+properties:
+  name: resolve-accepter
+  title: Resolve Accepter
+  description: >
+    Workflow helper for /flows/fill-shift: pairs the ask-each loop results
+    (one human-task response per asked candidate, in order) back with the
+    candidate list to determine who accepted, who declined, and the outcome
+    summary sent to the manager.
+  enabled: true
+  language: javascript
+  execution_mode: async
+  entry_file: index.js:handler
+  version: 1
+  input_schema:
+    type: object
+    additionalProperties: true
+    properties:
+      candidates:
+        type: array
+        description: Ordered candidates from pick-candidates
+      results:
+        type: array
+        description: Loop results - one human response per asked candidate
+      shift_title: { type: string }
+      day: { type: string }
+      start: { type: string }
+      end: { type: string }
+      location: { type: string }
+      shift_path: { type: string }
+  output_schema:
+    type: object
+    properties:
+      accepted: { type: boolean }
+      accepter_name: { type: string }
+      accepter_email: { type: string }
+      asked: { type: integer }
+      declined_names: { type: array }
+      summary: { type: string }

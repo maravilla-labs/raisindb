@@ -1,0 +1,114 @@
+node_type: raisin:Flow
+properties:
+  name: fill-shift
+  title: Fill Shift
+  description: >
+    Durable shift-filling workflow: pick the available AND reachable
+    candidates for a shift, ask them one by one via inbox approval tasks
+    (accept/decline, 5 minute deadline each), stop at the first accept,
+    assign the accepter to the shift, and message the manager with the
+    outcome. Started by the shift-planner agent's start-shift-fill tool or
+    directly via POST /api/flows/{repo}/run.
+  enabled: true
+  workflow_data:
+    version: 1
+    error_strategy: fail_fast
+    nodes:
+      # 1. Who could take this shift? Available on the day + registered
+      #    identity user (their home path becomes the task assignee).
+      - id: pick_candidates
+        node_type: raisin:FlowStep
+        properties:
+          action: "Pick candidates for {{ input.shift_path }}"
+          function_ref: /lib/shiftboard/pick-candidates
+          arguments:
+            shift_path: "${input.shift_path}"
+          # Function JOB retries run ~40s on a fixed backoff - the step's
+          # wait deadline must outlive them (see docs/workflows.md).
+          timeout_ms: 120000
+
+      # 2. Ask each candidate in order. The human task pauses the flow until
+      #    the candidate hits Accept/Decline in their inbox (or the deadline
+      #    expires). `until` stops the loop after the first accept.
+      - id: ask_each
+        node_type: raisin:FlowContainer
+        container_type: loop
+        loop:
+          over: "${steps.pick_candidates.candidates}"
+          item: candidate
+          index: candidate_index
+          max_iterations: 10
+          until: 'steps.ask_candidate.action == "accept"'
+        children:
+          - id: ask_candidate
+            node_type: raisin:FlowStep
+            properties:
+              action: "Can you take {{ steps.pick_candidates.shift_title }} ({{ steps.pick_candidates.day }} {{ steps.pick_candidates.start }}-{{ steps.pick_candidates.end }})?"
+              step_type: human_task
+              task_type: approval
+              assignee: "${candidate.user_path}"
+              task_description: >-
+                Hi {{ candidate.name }} - the {{ steps.pick_candidates.shift_title }}
+                shift ({{ steps.pick_candidates.day }}
+                {{ steps.pick_candidates.start }}-{{ steps.pick_candidates.end }},
+                {{ steps.pick_candidates.location }},
+                {{ input.shift_path }}) is open. Can you take it?
+              priority: 4
+              # Deadline doubles as the wait timeout; on expiry the task is
+              # marked expired and the flow jumps to resolve_accepter, which
+              # then reports "not everyone responded".
+              due_in_seconds: 300
+              timeout_edge: resolve_accepter
+              options:
+                - { value: accept, label: Accept, style: success }
+                - { value: decline, label: Decline, style: danger }
+
+      # 3. Pair the loop results with the candidate list: who accepted,
+      #    who declined, and the outcome summary for the manager.
+      - id: resolve_accepter
+        node_type: raisin:FlowStep
+        properties:
+          action: Determine who accepted
+          function_ref: /lib/shiftboard/resolve-accepter
+          arguments:
+            candidates: "${steps.pick_candidates.candidates}"
+            results: "${steps.ask_each.results}"
+            shift_path: "${input.shift_path}"
+            shift_title: "${steps.pick_candidates.shift_title}"
+            day: "${steps.pick_candidates.day}"
+            start: "${steps.pick_candidates.start}"
+            end: "${steps.pick_candidates.end}"
+            location: "${steps.pick_candidates.location}"
+          timeout_ms: 120000
+
+      # 4. Somebody accepted -> assign them. No rule match (nobody accepted)
+      #    skips the container entirely and falls through to the report.
+      - id: assign_or_report
+        node_type: raisin:FlowContainer
+        container_type: or
+        rules:
+          - condition: "steps.resolve_accepter.accepted == true"
+            next_step: assign_shift
+        children:
+          - id: assign_shift
+            node_type: raisin:FlowStep
+            properties:
+              action: "Assign {{ steps.resolve_accepter.accepter_name }} to {{ input.shift_path }}"
+              function_ref: /lib/shiftboard/assign-shift
+              arguments:
+                shift_path: "${input.shift_path}"
+                staff_name: "${steps.resolve_accepter.accepter_name}"
+              timeout_ms: 120000
+
+      # 5. Always report the outcome to the manager (accepted + assigned,
+      #    or nobody available) - best effort, never fails the flow.
+      - id: notify_manager
+        node_type: raisin:FlowStep
+        properties:
+          action: Report the outcome to the manager
+          function_ref: /lib/shiftboard/message-staff
+          arguments:
+            staff_email: planner@example.com
+            message: "${steps.resolve_accepter.summary}"
+          timeout_ms: 120000
+          continue_on_fail: true
