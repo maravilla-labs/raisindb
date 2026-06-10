@@ -197,18 +197,26 @@ export class RaisinHttpClient extends EventEmitter {
       // Admin authentication with username/password
       const payload: AuthenticatePayload = AuthManager.createAuthPayload(credentials as AdminCredentials);
 
-      const response = await this.request<AuthenticateResponse>({
+      // The admin auth endpoint returns { token, user_id, username, ... }
+      // (NOT the WebSocket protocol's { access_token, refresh_token }).
+      const response = await this.request<
+        AuthenticateResponse & { token?: string; user_id?: string; username?: string }
+      >({
         method: 'POST',
         path: `/api/raisindb/sys/${this._context.tenant_id}/auth`,
         body: payload,
         skipAuth: true,
       });
 
-      this.authManager.setTokens(response.data);
+      if (response.data.token) {
+        this.authManager.storage.setAccessToken(response.data.token);
+      } else {
+        this.authManager.setTokens(response.data);
+      }
 
       // Set admin user info
       this._currentUser = {
-        userId: 'admin',
+        userId: response.data.user_id ?? 'admin',
         anonymous: false,
       };
 

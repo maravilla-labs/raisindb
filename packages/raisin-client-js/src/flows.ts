@@ -98,7 +98,7 @@ export class FlowsApi {
 
     // 3. Register callback for EventMessages with this subscription_id
     const callback = (event: EventMessage) => {
-      const payload = event.payload as FlowExecutionEvent;
+      const payload = event.payload as unknown as FlowExecutionEvent;
       queue.push(payload);
       if (
         payload.type === 'flow_completed' ||

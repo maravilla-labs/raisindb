@@ -42,9 +42,61 @@ export interface ResponseEnvelope {
 }
 
 /**
- * Event message for server-initiated events (subscriptions)
+ * Payload of node events (`node:created`, `node:updated`, `node:deleted`, ...)
+ * as emitted by the server's WebSocket event forwarder.
+ *
+ * All fields except `kind` are optional because the exact shape depends on
+ * the event kind and subscription options (e.g. `node` is only present when
+ * the subscription was created with `include_node: true`). Unknown extra
+ * fields are accessible via the index signature.
  */
-export interface EventMessage {
+export interface NodeEventPayload {
+  /** Event kind (e.g. "Created", "Updated", "Deleted", "PropertyChanged { .. }") */
+  kind: string;
+  /** Tenant the event originated from */
+  tenant_id?: string;
+  /** Repository the event originated from */
+  repository_id?: string;
+  /** Branch the event originated from */
+  branch?: string;
+  /** Workspace containing the node */
+  workspace_id?: string;
+  /** ID of the affected node */
+  node_id?: string;
+  /** Node type of the affected node */
+  node_type?: string | null;
+  /** Revision (HLC timestamp) of the change */
+  revision?: string;
+  /** Path of the affected node */
+  path?: string | null;
+  /** Full node data (only when subscribed with `include_node: true`) */
+  node?: Node;
+  /** Event metadata (source, related nodes, ...) */
+  metadata?: Record<string, unknown> | null;
+  /** Relation type (for `node:relation_added` / `node:relation_removed`) */
+  relation_type?: string;
+  /** Target node ID (for relation events) */
+  target_node_id?: string;
+  /** Changed property name (for `node:property_changed`) */
+  property?: string;
+  /** Related node ID, if provided in event metadata */
+  related_node_id?: string;
+  /** Related workspace, if provided in event metadata */
+  related_workspace?: string;
+  /** Relation direction, if provided in event metadata */
+  relation_direction?: string;
+  /** Additional event-specific fields */
+  [key: string]: unknown;
+}
+
+/**
+ * Event message for server-initiated events (subscriptions)
+ *
+ * Defaults the payload type to {@link NodeEventPayload} (the most common
+ * case). Pass a type parameter for other event families
+ * (e.g. `EventMessage<MyRepositoryEventPayload>`).
+ */
+export interface EventMessage<TPayload = NodeEventPayload> {
   /** Unique event ID */
   event_id: string;
   /** Subscription ID this event belongs to */
@@ -52,7 +104,7 @@ export interface EventMessage {
   /** Event type */
   event_type: string;
   /** Event payload */
-  payload: unknown;
+  payload: TPayload;
   /** Timestamp of the event (ISO 8601 string) */
   timestamp: string;
 }
@@ -589,7 +641,13 @@ export interface SubscribePayload {
 export interface SubscriptionFilters {
   /** Filter by workspace */
   workspace?: string;
-  /** Filter by path pattern (supports wildcards like "/folder/*") */
+  /**
+   * Filter by path pattern.
+   *
+   * Semantics: a plain path matches only that exact node (no implicit
+   * prefix matching), `*` matches exactly one path segment, `**` matches
+   * recursively (e.g. "/folder/**" for all descendants of "/folder").
+   */
   path?: string;
   /** Filter by event types */
   event_types?: string[];

@@ -14,7 +14,6 @@ import {
   LocalStorageTokenStorage,
   IdentityUser,
   IdentityAuthResponse,
-  IdentityAuthError,
 } from './auth';
 import { EventHandler } from './events';
 import { Database } from './database';
@@ -36,7 +35,9 @@ import {
   isConnectedMessage,
 } from './protocol';
 import { RaisinHttpClient, HttpClientOptions, SignAssetOptions, SignedAssetUrl } from './http-client';
+import { RaisinAuthError, RaisinTimeoutError } from './errors';
 import { logger, LogLevel, setLogLevel } from './logger';
+import { normalizeHomePath } from './utils/home-path';
 import type { Upload, UploadOptions, BatchUpload, BatchUploadOptions } from './upload/types';
 import { createFileSource } from './upload/file-source';
 import { UploadManager } from './upload/uploader';
@@ -105,8 +106,15 @@ export interface ClientOptions {
   tokenStorage?: TokenStorage;
   /** Request timeout in milliseconds (default: 30000) */
   requestTimeout?: number;
-  /** Tenant ID (extracted from URL if not provided) */
+  /** Tenant ID (extracted from URL if not provided; default: "default") */
   tenantId?: string;
+  /**
+   * Repository name. When the URL has no path (e.g. `ws://host:8081`),
+   * the client connects to the tenant-less `/ws/{repository}` route.
+   * When the URL already carries a path, this overrides the repository
+   * extracted from the URL (used for repo-scoped auth endpoints).
+   */
+  repository?: string;
   /** Default branch (default: "main") */
   defaultBranch?: string;
   /** Client mode (default: "websocket") */
@@ -156,7 +164,7 @@ export class RaisinClient extends EventEmitter {
   private authManager: AuthManager;
   private eventHandler: EventHandler;
   private _context: RequestContext;
-  private options: Required<Omit<ClientOptions, 'connection' | 'tokenStorage' | 'mode' | 'logLevel' | 'httpBaseUrl'>>;
+  private options: Required<Omit<ClientOptions, 'connection' | 'tokenStorage' | 'mode' | 'logLevel' | 'httpBaseUrl' | 'repository'>>;
   private _currentUser: CurrentUser | null = null;
   private _httpBaseUrl: string;
   private _repository: string;
@@ -173,6 +181,19 @@ export class RaisinClient extends EventEmitter {
   // Reconnection tracking
   private _previousConnectionState: ConnectionState = ConnectionState.Disconnected;
   private _reconnectedListeners: Set<() => void> = new Set();
+  private _everConnected = false;
+
+  // Requests queued while the connection is re-establishing.
+  // Flushed after reconnect + re-auth; bounded by MAX_QUEUED_REQUESTS.
+  private _queuedRequests: Array<{ requestId: string; encoded: Uint8Array }> = [];
+  /** Hard cap on requests held while reconnecting; overflow rejects immediately. */
+  private static readonly MAX_QUEUED_REQUESTS = 100;
+
+  /**
+   * Backoff delays (ms) between subscription-restore retries after reconnect.
+   * @internal - overridable in tests
+   */
+  private _restoreRetryDelaysMs: number[] = [1000, 3000, 9000];
 
   // Upload manager (uses HTTP under the hood)
   private _uploadManager: UploadManager | null = null;
@@ -185,17 +206,21 @@ export class RaisinClient extends EventEmitter {
       setLogLevel(options.logLevel);
     }
 
+    // When a repository option is given and the URL has no path, build the
+    // tenant-less /ws/{repository} URL internally.
+    const connectionUrl = this.buildConnectionUrl(url, options.repository);
+
     this.options = {
       requestTimeout: options.requestTimeout ?? 30000,
-      tenantId: options.tenantId ?? this.extractTenantFromUrl(url),
+      tenantId: options.tenantId ?? this.extractTenantFromUrl(connectionUrl),
       defaultBranch: options.defaultBranch ?? 'main',
     };
 
     // Derive HTTP base URL from WebSocket URL if not provided
-    this._httpBaseUrl = options.httpBaseUrl ?? this.deriveHttpUrl(url);
+    this._httpBaseUrl = options.httpBaseUrl ?? this.deriveHttpUrl(connectionUrl);
 
     // Extract repository from URL for repo-scoped auth endpoints
-    this._repository = this.extractRepositoryFromUrl(url);
+    this._repository = options.repository ?? this.extractRepositoryFromUrl(connectionUrl);
 
     // Initialize context
     this._context = {
@@ -203,8 +228,25 @@ export class RaisinClient extends EventEmitter {
       branch: this.options.defaultBranch,
     };
 
+    // Send the tenant on the WebSocket upgrade request so tenant-less /ws
+    // URLs resolve to the right tenant - but ONLY when the caller explicitly
+    // provided one (or the URL carries one). Header ABSENCE is the protocol's
+    // "use your default resolution" signal; always asserting 'default' would
+    // fight proxies that inject the real tenant header. Only effective where
+    // the WebSocket implementation supports custom headers (Node.js `ws`);
+    // browsers ignore it and rely on the server-side resolution.
+    const explicitTenant =
+      options.tenantId ?? (this.extractTenantFromUrl(url) !== 'default' ? this.options.tenantId : undefined);
+    const connectionOptions: ConnectionOptions = {
+      ...options.connection,
+      headers: {
+        ...(explicitTenant ? { 'x-tenant-id': explicitTenant } : {}),
+        ...options.connection?.headers,
+      },
+    };
+
     // Initialize components
-    this.connection = new Connection(url, options.connection);
+    this.connection = this.createConnection(connectionUrl, connectionOptions);
     this.requestTracker = new RequestTracker({
       defaultTimeout: this.options.requestTimeout,
     });
@@ -215,6 +257,15 @@ export class RaisinClient extends EventEmitter {
 
     // Set up event handlers
     this.setupConnectionHandlers();
+  }
+
+  /**
+   * Create the underlying WebSocket connection.
+   * Seam for tests to inject a fake connection.
+   * @internal
+   */
+  protected createConnection(url: string, options?: ConnectionOptions): Connection {
+    return new Connection(url, options);
   }
 
   /**
@@ -236,14 +287,48 @@ export class RaisinClient extends EventEmitter {
   }
 
   /**
+   * Build the WebSocket connection URL.
+   *
+   * When a repository option is provided and the URL carries no path
+   * (e.g. `ws://host:8081`), build the tenant-less `/ws/{repository}`
+   * route internally. URLs that already carry a path are used as-is.
+   */
+  private buildConnectionUrl(url: string, repository?: string): string {
+    if (!repository) {
+      return url;
+    }
+    try {
+      const wsUrl = url.replace(/^raisin:\/\//, 'ws://').replace(/^raisins:\/\//, 'wss://');
+      const parsed = new URL(wsUrl);
+      const hasPath = parsed.pathname.split('/').some((p) => p.length > 0);
+      if (hasPath) {
+        return url;
+      }
+      return `${url.replace(/\/+$/, '')}/ws/${repository}`;
+    } catch {
+      return url;
+    }
+  }
+
+  /**
    * Extract repository from URL
-   * URL format: raisin://host:port/tenant/repository or ws://host:port/tenant/repository
+   * URL forms: /ws/{repo} (tenant-less, preferred), /sys/{tenant}/{repo}
+   * (operator/multi-tenant), /{tenant}/{repo} (legacy).
    */
   private extractRepositoryFromUrl(url: string): string {
     try {
       const wsUrl = url.replace(/^raisin:\/\//, 'ws://').replace(/^raisins:\/\//, 'wss://');
       const parsed = new URL(wsUrl);
       const parts = parsed.pathname.split('/').filter((p) => p.length > 0);
+      if (parts[0] === 'ws') {
+        // /ws/{repo}
+        return parts.length > 1 ? parts[1] : '';
+      }
+      if (parts[0] === 'sys') {
+        // /sys/{tenant}/{repo}
+        return parts.length > 2 ? parts[2] : '';
+      }
+      // Legacy /{tenant}/{repo}
       return parts.length > 1 ? parts[1] : '';
     } catch {
       return '';
@@ -252,7 +337,11 @@ export class RaisinClient extends EventEmitter {
 
   /**
    * Extract tenant ID from URL
-   * URL format: raisin://host:port/tenant/repository or ws://host:port/tenant/repository
+   * URL forms: /ws/{repo} (tenant-less — no tenant in URL),
+   * /sys/{tenant}/{repo} (canonical), /{tenant}/{repo} (legacy).
+   * When the URL doesn't carry a tenant, fall back to 'default' — the
+   * server's tenant middleware resolves it anyway (production derives the
+   * tenant from the request itself), so an explicit tenantId is optional.
    */
   private extractTenantFromUrl(url: string): string {
     try {
@@ -260,7 +349,15 @@ export class RaisinClient extends EventEmitter {
       const wsUrl = url.replace(/^raisin:\/\//, 'ws://').replace(/^raisins:\/\//, 'wss://');
       const parsed = new URL(wsUrl);
       const parts = parsed.pathname.split('/').filter((p) => p.length > 0);
-      return parts.length > 0 ? parts[0] : 'default';
+      if (parts[0] === 'ws') {
+        // Tenant-less route: the server resolves the tenant from the
+        // upgrade request (x-tenant-id header, falling back to 'default').
+        return 'default';
+      }
+      if (parts[0] === 'sys') {
+        return parts.length > 1 ? parts[1] : 'default';
+      }
+      return parts.length >= 2 ? parts[0] : 'default';
     } catch (error) {
       return 'default';
     }
@@ -279,8 +376,15 @@ export class RaisinClient extends EventEmitter {
         this._previousConnectionState === ConnectionState.Disconnected ||
         this._previousConnectionState === ConnectionState.Reconnecting;
 
+      if (state === ConnectionState.Connected) {
+        this._everConnected = true;
+      }
+
       if (state === ConnectionState.Disconnected || state === ConnectionState.Closed) {
-        // Cancel all pending requests
+        // The connection is down for good (manual close, max reconnect
+        // attempts reached, ...): cancel all pending requests, including
+        // any held in the reconnect queue.
+        this._queuedRequests = [];
         this.requestTracker.cancelAll();
       }
 
@@ -368,6 +472,7 @@ export class RaisinClient extends EventEmitter {
         logger.debug(`Anonymous user info stored: ${message.user_id}`);
         // Anonymous user is ready immediately
         this._updateReadyState();
+        this._flushQueuedRequests();
 
         // Restore subscriptions for anonymous users on reconnect
         if (hasActiveSubscriptions) {
@@ -377,16 +482,34 @@ export class RaisinClient extends EventEmitter {
         // Auto-authenticate with stored token on reconnect
         logger.info(`[handleConnectedMessage] Stored token found, auto-authenticating...`);
         this.autoReauthenticate()
-          .then(async () => {
-            // After successful re-auth, restore subscriptions
+          .then(async (authenticated) => {
+            if (authenticated) {
+              // After successful re-auth, deliver requests queued while down
+              this._flushQueuedRequests();
+            } else {
+              this._rejectQueuedRequests(
+                new RaisinAuthError(
+                  'Re-authentication failed after reconnect',
+                  'AUTH_TOKEN_EXPIRED',
+                  401
+                )
+              );
+            }
+            // Restore subscriptions regardless (they may be readable anonymously)
             if (hasActiveSubscriptions) {
               await this._restoreSubscriptionsAndNotify();
             }
           })
           .catch((err) => {
             logger.error(`[handleConnectedMessage] Auto-authenticate failed:`, err);
+            this._rejectQueuedRequests(
+              err instanceof Error ? err : new Error('Re-authentication failed after reconnect')
+            );
           });
       }
+    } else {
+      // Non-anonymous connection message: nothing to re-authenticate here
+      this._flushQueuedRequests();
     }
 
     // Emit connected event
@@ -398,20 +521,45 @@ export class RaisinClient extends EventEmitter {
   }
 
   /**
-   * Restore subscriptions after reconnection and notify listeners
+   * Restore subscriptions after reconnection and notify listeners.
+   *
+   * Retries with backoff (see `_restoreRetryDelaysMs`); on final failure a
+   * `subscription_restore_failed` event is emitted so applications can
+   * resync their state (e.g. reload lists and re-subscribe manually).
    * @internal
    */
   private async _restoreSubscriptionsAndNotify(): Promise<void> {
-    try {
-      logger.info('[_restoreSubscriptionsAndNotify] Restoring subscriptions...');
-      await this.eventHandler.restoreSubscriptions();
-      logger.info('[_restoreSubscriptionsAndNotify] Subscriptions restored successfully');
+    const delays = this._restoreRetryDelaysMs;
+    let lastError: unknown;
 
-      // Notify reconnected listeners
-      this._emitReconnected();
-    } catch (error) {
-      logger.error('[_restoreSubscriptionsAndNotify] Failed to restore subscriptions:', error);
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      try {
+        logger.info(
+          `[_restoreSubscriptionsAndNotify] Restoring subscriptions (attempt ${attempt + 1}/${delays.length + 1})...`
+        );
+        await this.eventHandler.restoreSubscriptions({ retry: attempt > 0 });
+        logger.info('[_restoreSubscriptionsAndNotify] Subscriptions restored successfully');
+
+        // Notify reconnected listeners
+        this._emitReconnected();
+        return;
+      } catch (error) {
+        lastError = error;
+        logger.error(
+          `[_restoreSubscriptionsAndNotify] Restore attempt ${attempt + 1} failed:`,
+          error
+        );
+        if (attempt < delays.length) {
+          await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+        }
+      }
     }
+
+    logger.error('[_restoreSubscriptionsAndNotify] Giving up after retries; events may be stale');
+    this.emit(
+      'subscription_restore_failed',
+      lastError instanceof Error ? lastError : new Error(String(lastError))
+    );
   }
 
   /**
@@ -432,13 +580,15 @@ export class RaisinClient extends EventEmitter {
 
   /**
    * Auto-reauthenticate with stored JWT on reconnection
+   *
+   * @returns true if the session was re-authenticated, false otherwise
    * @internal
    */
-  private async autoReauthenticate(): Promise<void> {
+  private async autoReauthenticate(): Promise<boolean> {
     const token = this.authManager.storage.getAccessToken();
     if (!token) {
       logger.warn('[autoReauthenticate] No stored token');
-      return;
+      return false;
     }
 
     // Check if token is expired
@@ -452,14 +602,15 @@ export class RaisinClient extends EventEmitter {
           this.authManager.clear();
           this._currentUser = null;
           this._emitAuthEvent('SESSION_EXPIRED');
-          return;
+          return false;
         }
         // Use the new token
         const newToken = this.authManager.storage.getAccessToken();
         if (newToken) {
           await this.authenticate({ type: 'jwt', token: newToken });
+          return true;
         }
-        return;
+        return false;
       }
     }
 
@@ -467,6 +618,7 @@ export class RaisinClient extends EventEmitter {
     try {
       await this.authenticate({ type: 'jwt', token });
       logger.info('[autoReauthenticate] Successfully re-authenticated');
+      return true;
     } catch (err) {
       logger.error('[autoReauthenticate] Failed to authenticate:', err);
       // Try to refresh token
@@ -475,11 +627,14 @@ export class RaisinClient extends EventEmitter {
         const newToken = this.authManager.storage.getAccessToken();
         if (newToken) {
           await this.authenticate({ type: 'jwt', token: newToken });
+          return true;
         }
+        return false;
       } else {
         this.authManager.clear();
         this._currentUser = null;
         this._emitAuthEvent('SESSION_EXPIRED');
+        return false;
       }
     }
   }
@@ -627,7 +782,7 @@ export class RaisinClient extends EventEmitter {
     const url = `${this._httpBaseUrl}/auth/${repository}/login`;
     logger.debug('[loginWithEmail] POST', url);
 
-    const response = await fetch(url, {
+    const response = await this._fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -635,11 +790,13 @@ export class RaisinClient extends EventEmitter {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: response.statusText }));
-      const authError: IdentityAuthError = {
-        code: error.code || 'LOGIN_FAILED',
-        message: error.message || 'Login failed',
-      };
-      throw authError;
+      // Real Error instance; keeps `{ code, message }` fields for
+      // backwards-compatible destructuring (IdentityAuthError shape).
+      throw new RaisinAuthError(
+        error.message || 'Login failed',
+        error.code || 'LOGIN_FAILED',
+        response.status
+      );
     }
 
     const tokens: IdentityAuthResponse = await response.json();
@@ -689,7 +846,7 @@ export class RaisinClient extends EventEmitter {
     };
 
     // 9. Schedule auto-refresh (expires_at minus 5 minutes)
-    const expiresInMs = (tokens.expires_at * 1000) - Date.now() - (5 * 60 * 1000);
+    const expiresInMs = RaisinClient.expiresAtToMs(tokens.expires_at) - Date.now() - (5 * 60 * 1000);
     if (expiresInMs > 0) {
       this.scheduleAutoRefresh(expiresInMs);
     }
@@ -725,7 +882,7 @@ export class RaisinClient extends EventEmitter {
 
     // 1. Call HTTP register endpoint
     const url = `${this._httpBaseUrl}/auth/${repository}/register`;
-    const response = await fetch(url, {
+    const response = await this._fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password, display_name: displayName }),
@@ -733,11 +890,13 @@ export class RaisinClient extends EventEmitter {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: response.statusText }));
-      const authError: IdentityAuthError = {
-        code: error.code || 'REGISTRATION_FAILED',
-        message: error.message || 'Registration failed',
-      };
-      throw authError;
+      // Real Error instance; keeps `{ code, message }` fields for
+      // backwards-compatible destructuring (IdentityAuthError shape).
+      throw new RaisinAuthError(
+        error.message || 'Registration failed',
+        error.code || 'REGISTRATION_FAILED',
+        response.status
+      );
     }
 
     const tokens: IdentityAuthResponse = await response.json();
@@ -786,7 +945,7 @@ export class RaisinClient extends EventEmitter {
     };
 
     // 9. Schedule auto-refresh (expires_at minus 5 minutes)
-    const expiresInMs = (tokens.expires_at * 1000) - Date.now() - (5 * 60 * 1000);
+    const expiresInMs = RaisinClient.expiresAtToMs(tokens.expires_at) - Date.now() - (5 * 60 * 1000);
     if (expiresInMs > 0) {
       this.scheduleAutoRefresh(expiresInMs);
     }
@@ -914,7 +1073,7 @@ export class RaisinClient extends EventEmitter {
             const url = this._repository
               ? `${this._httpBaseUrl}/auth/${this._repository}/refresh`
               : `${this._httpBaseUrl}/auth/refresh`;
-            const response = await fetch(url, {
+            const response = await this._fetchWithTimeout(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ refresh_token: refreshToken }),
@@ -926,7 +1085,7 @@ export class RaisinClient extends EventEmitter {
               this.authManager.storage.setRefreshToken(tokens.refresh_token);
 
               // Schedule next auto-refresh (expires_at minus 5 minutes)
-              const expiresInMs = (tokens.expires_at * 1000) - Date.now() - (5 * 60 * 1000);
+              const expiresInMs = RaisinClient.expiresAtToMs(tokens.expires_at) - Date.now() - (5 * 60 * 1000);
               if (expiresInMs > 0) {
                 this.scheduleAutoRefresh(expiresInMs);
               }
@@ -1071,7 +1230,7 @@ export class RaisinClient extends EventEmitter {
       const url = this._repository
         ? `${this._httpBaseUrl}/auth/${this._repository}/refresh`
         : `${this._httpBaseUrl}/auth/refresh`;
-      const response = await fetch(url, {
+      const response = await this._fetchWithTimeout(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refresh_token: refreshToken }),
@@ -1111,7 +1270,7 @@ export class RaisinClient extends EventEmitter {
       }
 
       // Schedule next refresh (token expires_at minus 5 minutes)
-      const expiresInMs = (tokens.expires_at * 1000) - Date.now() - (5 * 60 * 1000);
+      const expiresInMs = RaisinClient.expiresAtToMs(tokens.expires_at) - Date.now() - (5 * 60 * 1000);
       if (expiresInMs > 0) {
         this.scheduleAutoRefresh(expiresInMs);
       }
@@ -1127,6 +1286,61 @@ export class RaisinClient extends EventEmitter {
   }
 
   /**
+   * Fetch with a timeout derived from `requestTimeout`.
+   *
+   * Aborts the request after `requestTimeout` ms and rejects with a
+   * `RaisinTimeoutError`. If the caller provides its own AbortSignal in
+   * `init.signal`, it is respected: an external abort rejects with the
+   * original AbortError instead of a timeout error.
+   * @internal
+   */
+  private async _fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+    const timeoutMs = this.options.requestTimeout;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    const externalSignal = init.signal ?? undefined;
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+      }
+    }
+
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.name === 'AbortError' &&
+        !externalSignal?.aborted
+      ) {
+        throw new RaisinTimeoutError(
+          `Request to ${url} timed out after ${timeoutMs}ms`,
+          'REQUEST_TIMEOUT',
+          timeoutMs
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Normalize a token `expires_at` value to epoch milliseconds.
+   *
+   * Server endpoints are inconsistent: some return seconds, others
+   * milliseconds. Anything above 1e11 can't be a seconds-epoch (year 5138),
+   * so treat it as milliseconds.
+   * @internal
+   */
+  private static expiresAtToMs(expiresAt: number): number {
+    return expiresAt > 100_000_000_000 ? expiresAt : expiresAt * 1000;
+  }
+
+  /**
    * Schedule automatic token refresh
    * @internal
    */
@@ -1136,12 +1350,17 @@ export class RaisinClient extends EventEmitter {
       clearTimeout(this._refreshTimer);
     }
 
-    logger.debug(`[scheduleAutoRefresh] Scheduling refresh in ${Math.round(delayMs / 1000 / 60)} minutes`);
+    // Clamp to a sane window: at least 30s out (avoid refresh storms on
+    // skewed clocks), at most ~24 days (setTimeout 32-bit overflow fires
+    // immediately otherwise).
+    const clamped = Math.min(Math.max(delayMs, 30_000), 0x7fffffff);
+
+    logger.debug(`[scheduleAutoRefresh] Scheduling refresh in ${Math.round(clamped / 1000 / 60)} minutes`);
 
     this._refreshTimer = setTimeout(async () => {
       logger.info('[autoRefresh] Auto-refreshing token...');
       await this.refreshToken();
-    }, delayMs);
+    }, clamped);
   }
 
   /** Timer for automatic token refresh */
@@ -1172,6 +1391,12 @@ export class RaisinClient extends EventEmitter {
 
   /**
    * Send a request to the server
+   *
+   * If the connection is temporarily down (connecting/reconnecting, or
+   * disconnected with auto-reconnect enabled), the request is queued and
+   * flushed once the connection is re-established and re-authenticated.
+   * Queued requests are still subject to their own request timeout, and the
+   * queue is bounded (overflow rejects immediately).
    */
   private async sendRequestInternal(
     payload: unknown,
@@ -1179,8 +1404,25 @@ export class RaisinClient extends EventEmitter {
     contextOverride?: RequestContext,
     requestOptions?: { timeoutMs?: number }
   ): Promise<unknown> {
-    if (!this.connection.isConnected()) {
-      throw new Error('Not connected to server');
+    const connected = this.connection.isConnected();
+    if (!connected) {
+      const state = this.connection.getState();
+      const willReconnect =
+        state === ConnectionState.Connecting ||
+        state === ConnectionState.Reconnecting ||
+        (state === ConnectionState.Disconnected &&
+          this._everConnected &&
+          this.connection.isAutoReconnectEnabled());
+
+      if (!willReconnect) {
+        throw new Error('Not connected to server');
+      }
+
+      if (this._queuedRequests.length >= RaisinClient.MAX_QUEUED_REQUESTS) {
+        throw new Error(
+          `Request queue is full (${RaisinClient.MAX_QUEUED_REQUESTS} requests pending while reconnecting)`
+        );
+      }
     }
 
     const requestId = this.requestTracker.generateRequestId();
@@ -1205,12 +1447,19 @@ export class RaisinClient extends EventEmitter {
       requestOptions?.timeoutMs,
     );
 
-    // Send request
+    // Send request (or queue it while the connection is re-establishing)
     try {
       const encoded = encodeMessage(request);
       logger.debug(`Encoded request - ID: ${requestId}, type: ${requestType}, size: ${encoded.length} bytes`);
-      this.connection.send(encoded);
-      logger.debug(`Request sent - ID: ${requestId}`);
+      if (connected) {
+        this.connection.send(encoded);
+        logger.debug(`Request sent - ID: ${requestId}`);
+      } else {
+        this._queuedRequests.push({ requestId, encoded });
+        logger.debug(
+          `Request queued while reconnecting - ID: ${requestId}, queue size: ${this._queuedRequests.length}`
+        );
+      }
     } catch (error) {
       logger.error(`Failed to send request - ID: ${requestId}:`, error);
       this.requestTracker.rejectRequest(
@@ -1221,6 +1470,49 @@ export class RaisinClient extends EventEmitter {
     }
 
     return responsePromise;
+  }
+
+  /**
+   * Flush requests queued while the connection was re-establishing.
+   * Called after the connection is connected and (re-)authenticated.
+   * @internal
+   */
+  private _flushQueuedRequests(): void {
+    if (this._queuedRequests.length === 0) return;
+
+    const queued = this._queuedRequests;
+    this._queuedRequests = [];
+    logger.info(`[_flushQueuedRequests] Flushing ${queued.length} queued request(s)`);
+
+    for (const { requestId, encoded } of queued) {
+      // Skip requests that already timed out while queued
+      if (!this.requestTracker.hasPendingRequest(requestId)) continue;
+      try {
+        this.connection.send(encoded);
+      } catch (error) {
+        this.requestTracker.rejectRequest(
+          requestId,
+          error instanceof Error ? error : new Error('Failed to send queued request')
+        );
+      }
+    }
+  }
+
+  /**
+   * Reject all requests queued while the connection was re-establishing
+   * (e.g. re-authentication failed after reconnect).
+   * @internal
+   */
+  private _rejectQueuedRequests(error: Error): void {
+    if (this._queuedRequests.length === 0) return;
+
+    const queued = this._queuedRequests;
+    this._queuedRequests = [];
+    logger.warn(`[_rejectQueuedRequests] Rejecting ${queued.length} queued request(s): ${error.message}`);
+
+    for (const { requestId } of queued) {
+      this.requestTracker.rejectRequest(requestId, error);
+    }
   }
 
   /**
@@ -1580,6 +1872,9 @@ export class RaisinClient extends EventEmitter {
     // Unsubscribe from previous subscription if any
     await this._unsubscribeFromUserHome();
 
+    // Strip a possible workspace prefix (e.g. "/raisin:access_control/users/...")
+    userHome = normalizeHomePath(userHome) ?? userHome;
+
     try {
       const db = this.database(repository);
       // Extract workspace from path (e.g., "/users/internal/john" -> "users")
@@ -1600,7 +1895,7 @@ export class RaisinClient extends EventEmitter {
         for (const callback of this._userChangeListeners) {
           try {
             callback({
-              node: event.payload as UserNode,
+              node: event.payload as unknown as UserNode,
               changeType: event.event_type,
             });
           } catch (err) {
@@ -1919,7 +2214,7 @@ export class RaisinClient extends EventEmitter {
       : options.path;
     const endpoint = `/api/repository/${options.repository}/${branch}/head/${options.workspace}${pathWithProperty}/raisin:sign`;
 
-    const response = await fetch(`${this._httpBaseUrl}${endpoint}`, {
+    const response = await this._fetchWithTimeout(`${this._httpBaseUrl}${endpoint}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

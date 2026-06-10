@@ -101,6 +101,7 @@ export type {
   RequestEnvelope,
   ResponseEnvelope,
   EventMessage,
+  NodeEventPayload,
   RequestContext,
   ErrorInfo,
   ResponseMetadata,
@@ -152,6 +153,7 @@ export { RequestTracker } from './utils/request-tracker';
 export type { RequestTrackerOptions } from './utils/request-tracker';
 export { ReconnectManager } from './utils/reconnect';
 export type { ReconnectOptions } from './utils/reconnect';
+export { normalizeHomePath } from './utils/home-path';
 
 // Logger
 export { LogLevel, logger, configureLogger, setLogLevel, getLogLevel, getLoggerConfig } from './logger';
@@ -279,6 +281,50 @@ export type {
 } from './types/flow';
 export { isTerminalEvent } from './types/flow';
 
+// Workflow definition types (canonical, shared with the flow designer)
+export type {
+  RaisinReference,
+  ContainerType,
+  StepErrorBehavior,
+  FlowErrorStrategy,
+  RetryConfig,
+  RetryStrategy,
+  HumanTaskType,
+  TaskOption,
+  HandoffTarget,
+  ChatTerminationMode,
+  ChatTerminationConfig,
+  ChatStepConfig,
+  AiToolMode,
+  AiErrorBehavior,
+  AiContainerConfig,
+  FlowDefinitionNodeBase,
+  FlowStepProperties,
+  FlowDefinitionStep,
+  ContainerRule,
+  FlowDefinitionContainer,
+  FlowDefinitionNode,
+  FlowDefinition,
+  InboxTask,
+  InboxTaskStatus,
+  TaskCompletionResult,
+} from './types/flow-definition';
+export {
+  RETRY_STRATEGIES,
+  getRefDisplayName,
+  getRefPath,
+  isFlowDefinitionStep,
+  isFlowDefinitionContainer,
+} from './types/flow-definition';
+
+// Inbox tasks (human-in-the-loop)
+export { InboxApi } from './inbox';
+export type {
+  InboxApiOptions,
+  ListTasksOptions,
+  ListTasksResponse,
+} from './inbox';
+
 // Chat types
 export type {
   ChatMessage,
@@ -307,7 +353,7 @@ export type {
 } from './types/chat';
 
 // Conversation management (unified API)
-export { ConversationManager } from './conversations';
+export { ConversationManager, DEFAULT_SEND_MESSAGE_INACTIVITY_TIMEOUT_MS } from './conversations';
 export type {
   ListConversationsOptions,
   CreateConversationOptions as CreateConvoOptions,
@@ -392,6 +438,15 @@ export type {
   UseSqlReturn,
   UseSubscriptionOptions,
 } from './integrations/react';
+
+// Vue 3 integration (composables factory — also available as @raisindb/client/vue)
+export { createRaisinVue } from './integrations/vue';
+export type {
+  RaisinVue,
+  VueLike,
+  VueRef,
+  VueComputedRef,
+} from './integrations/vue';
 
 // Streaming (SSE)
 export { SSEClient } from './streaming/sse-client';

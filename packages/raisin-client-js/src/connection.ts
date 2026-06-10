@@ -34,6 +34,15 @@ export interface ConnectionOptions {
   heartbeatTimeout?: number;
   /** WebSocket protocols */
   protocols?: string | string[];
+  /**
+   * Extra headers to send on the WebSocket upgrade request
+   * (e.g. `x-tenant-id` for tenant-less `/ws` URLs).
+   *
+   * Only honored by WebSocket implementations that support custom headers
+   * (Node.js `ws` package). Browser WebSockets silently ignore them — the
+   * server then resolves the tenant from the request (default: "default").
+   */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -82,8 +91,9 @@ export class Connection extends EventEmitter {
   private reconnectManager: ReconnectManager;
   private heartbeatTimer?: NodeJS.Timeout;
   private heartbeatTimeoutTimer?: NodeJS.Timeout;
-  private options: Required<Omit<ConnectionOptions, 'reconnectOptions' | 'protocols'>> & {
+  private options: Required<Omit<ConnectionOptions, 'reconnectOptions' | 'protocols' | 'headers'>> & {
     protocols?: string | string[];
+    headers?: Record<string, string>;
   };
   private WebSocketImpl: WebSocketImpl;
   private manualClose = false;
@@ -99,6 +109,7 @@ export class Connection extends EventEmitter {
       heartbeatInterval: options.heartbeatInterval ?? 30000,
       heartbeatTimeout: options.heartbeatTimeout ?? 5000,
       protocols: options.protocols,
+      headers: options.headers,
     };
     this.reconnectManager = new ReconnectManager(options.reconnectOptions);
     this.WebSocketImpl = getWebSocketImpl();
@@ -117,10 +128,20 @@ export class Connection extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       try {
-        // Create WebSocket instance
-        this.ws = new (this.WebSocketImpl as any)(
-          this.url,
-          this.options.protocols
+        // Create WebSocket instance.
+        // The third argument (upgrade headers) is only understood by the
+        // Node.js `ws` package. Browsers do NOT simply ignore it - Chromium
+        // fails the handshake when a third argument is passed - so only pass
+        // it to non-browser implementations. Browser connections rely on the
+        // server-side tenant resolution instead of upgrade headers.
+        const isBrowserWebSocket =
+          typeof WebSocket !== 'undefined' && this.WebSocketImpl === WebSocket;
+        this.ws = (
+          isBrowserWebSocket || !this.options.headers
+            ? new (this.WebSocketImpl as any)(this.url, this.options.protocols)
+            : new (this.WebSocketImpl as any)(this.url, this.options.protocols, {
+                headers: this.options.headers,
+              })
         ) as WebSocket;
 
         // Set binary type for MessagePack
@@ -231,6 +252,17 @@ export class Connection extends EventEmitter {
    */
   isConnected(): boolean {
     return this.state === ConnectionState.Connected;
+  }
+
+  /**
+   * Whether auto-reconnect is enabled for this connection.
+   *
+   * Used by the client to decide whether requests issued while the
+   * connection is down can be queued (the connection will come back) or
+   * should fail immediately.
+   */
+  isAutoReconnectEnabled(): boolean {
+    return this.options.autoReconnect;
   }
 
   /**

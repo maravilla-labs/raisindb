@@ -41,6 +41,7 @@ import { SSEClient } from './streaming/sse-client';
 import { RaisinAbortError, RaisinTimeoutError, classifyHttpError } from './errors';
 import type { SqlResult } from './protocol';
 import { isRecoveredDoneEvent } from './utils/chat-events';
+import { normalizeHomePath } from './utils/home-path';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -73,12 +74,22 @@ export interface CreateConversationOptions {
   signal?: AbortSignal;
 }
 
+/** Default inactivity timeout for sendMessage SSE streams (2 minutes) */
+export const DEFAULT_SEND_MESSAGE_INACTIVITY_TIMEOUT_MS = 120_000;
+
 /** Options for sending a message */
 export interface SendMessageOptions {
   /** Whether to stream events via SSE (default: true) */
   stream?: boolean;
   /** Abort signal */
   signal?: AbortSignal;
+  /**
+   * Inactivity timeout for the per-turn SSE stream in milliseconds
+   * (default: 120000). If the stream produces no bytes for this long,
+   * the turn ends with a synthetic `waiting` event instead of hanging
+   * forever. Set to 0 to disable.
+   */
+  inactivityTimeoutMs?: number;
 }
 
 /** Handle for a persistent conversation SSE subscription */
@@ -178,10 +189,11 @@ export class ConversationManager {
     );
     if (!result?.rows?.[0]) throw new Error('User not authenticated');
     const row = result.rows[0] as Record<string, unknown>;
-    this.cachedUserHome = row.home as string;
-    this.cachedUserId = (row.user_id as string) || this.cachedUserHome;
-    if (!this.cachedUserHome) throw new Error('User home path not found');
-    return { userId: this.cachedUserId, userHome: this.cachedUserHome };
+    const userHome = normalizeHomePath(row.home as string);
+    if (!userHome) throw new Error('User home path not found');
+    this.cachedUserHome = userHome;
+    this.cachedUserId = (row.user_id as string) || userHome;
+    return { userId: this.cachedUserId, userHome };
   }
 
   // ==========================================================================
@@ -416,6 +428,8 @@ export class ConversationManager {
       signal: options?.signal,
       method: 'POST',
       body: { channel: streamTarget.channel, path: streamTarget.path },
+      inactivityTimeoutMs:
+        options?.inactivityTimeoutMs ?? DEFAULT_SEND_MESSAGE_INACTIVITY_TIMEOUT_MS,
     });
 
     const iterator = sse[Symbol.asyncIterator]();
@@ -424,6 +438,8 @@ export class ConversationManager {
     try {
       await sse.waitUntilConnected();
     } catch {
+      // Avoid an unhandled rejection if the iterator errors after we bail
+      pendingFirst?.catch(() => undefined);
       pendingFirst = null;
       sse.close();
       logger.debug('SSE connection failed, falling back to create-only');
@@ -467,6 +483,18 @@ export class ConversationManager {
             return;
           }
         }
+      } catch (error) {
+        if (error instanceof RaisinTimeoutError && error.code === 'SSE_INACTIVITY_TIMEOUT') {
+          // The SSE stream went silent mid-turn. End the turn gracefully so
+          // chat UIs don't hang; the persistent subscription / message reload
+          // will pick up any late events.
+          logger.warn(
+            `[ConversationManager] SSE stream inactive for ${error.timeoutMs}ms, ending turn with synthetic waiting event`,
+          );
+          yield { type: 'waiting', timestamp: new Date().toISOString() };
+          return;
+        }
+        throw error;
       } finally {
         sse.close();
       }

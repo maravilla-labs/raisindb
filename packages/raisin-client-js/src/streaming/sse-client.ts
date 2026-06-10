@@ -7,7 +7,7 @@
 
 import { logger } from '../logger';
 import { ReconnectManager, type ReconnectOptions } from '../utils/reconnect';
-import { RaisinConnectionError, RaisinAuthError, RaisinAbortError } from '../errors';
+import { RaisinConnectionError, RaisinAuthError, RaisinAbortError, RaisinTimeoutError } from '../errors';
 
 /**
  * Parsed SSE event from the wire format
@@ -56,6 +56,17 @@ export interface SSEClientOptions {
   method?: 'GET' | 'POST';
   /** Request body for POST requests (JSON-serialized automatically) */
   body?: unknown;
+  /**
+   * Inactivity timeout in milliseconds (default: disabled).
+   *
+   * The timer is reset whenever any bytes arrive on the stream (events,
+   * comments/keep-alives, partial frames). If the stream produces nothing
+   * for this long — including a fetch that never responds — the connection
+   * is torn down. With reconnection enabled the client reconnects; with
+   * reconnection disabled the stream ends with a `RaisinTimeoutError`
+   * (code `SSE_INACTIVITY_TIMEOUT`).
+   */
+  inactivityTimeoutMs?: number;
 }
 
 /**
@@ -127,6 +138,7 @@ export class SSEClient<T = unknown> implements AsyncIterable<SSEEvent<T>> {
   private eventTypeSet: Set<string> | null;
   private autoReconnect: boolean;
   private externalSignal?: AbortSignal;
+  private inactivityTimeoutMs?: number;
 
   constructor(url: string, options: SSEClientOptions = {}) {
     this.url = url;
@@ -135,6 +147,7 @@ export class SSEClient<T = unknown> implements AsyncIterable<SSEEvent<T>> {
     this._lastEventId = options.lastEventId;
     this.autoReconnect = options.reconnect?.enabled ?? true;
     this.externalSignal = options.signal;
+    this.inactivityTimeoutMs = options.inactivityTimeoutMs;
     this.eventTypeSet = options.eventTypes?.length
       ? new Set(options.eventTypes)
       : null;
@@ -316,6 +329,26 @@ export class SSEClient<T = unknown> implements AsyncIterable<SSEEvent<T>> {
           return;
         }
 
+        // Inactivity timeout: reconnect silently if enabled, otherwise end
+        // the stream with the typed timeout error.
+        if (err instanceof RaisinTimeoutError && err.code === 'SSE_INACTIVITY_TIMEOUT') {
+          logger.warn('SSE inactivity timeout:', err.message);
+          if (!this.autoReconnect) {
+            this.setState('disconnected');
+            onError?.(err);
+            throw err;
+          }
+          this.setState('reconnecting');
+          const scheduled = await this.waitForReconnect();
+          if (!scheduled) {
+            logger.warn('SSE max reconnection attempts reached');
+            this.setState('disconnected');
+            onError?.(err);
+            throw err;
+          }
+          continue;
+        }
+
         logger.error('SSE connection error:', err.message);
         onError?.(err);
 
@@ -375,7 +408,9 @@ export class SSEClient<T = unknown> implements AsyncIterable<SSEEvent<T>> {
       fetchOptions.body = JSON.stringify(this.options.body);
     }
 
-    const response = await this.fetchImpl(this.url, fetchOptions);
+    const response = await this.withInactivityTimeout(
+      this.fetchImpl(this.url, fetchOptions),
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -403,7 +438,7 @@ export class SSEClient<T = unknown> implements AsyncIterable<SSEEvent<T>> {
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await this.withInactivityTimeout(reader.read());
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -448,8 +483,53 @@ export class SSEClient<T = unknown> implements AsyncIterable<SSEEvent<T>> {
         }
       }
     } finally {
-      reader.releaseLock();
+      try {
+        reader.releaseLock();
+      } catch {
+        // Releasing while a read is pending can throw in some implementations
+      }
     }
+  }
+
+  /**
+   * Race a stream operation against the inactivity timeout.
+   *
+   * If no bytes (or response) arrive within `inactivityTimeoutMs`, the
+   * internal connection is aborted and the operation rejects with a
+   * `RaisinTimeoutError` (code `SSE_INACTIVITY_TIMEOUT`). The timer is
+   * effectively reset on every chunk because each `reader.read()` is
+   * wrapped individually.
+   */
+  private withInactivityTimeout<T>(promise: Promise<T>): Promise<T> {
+    const timeoutMs = this.inactivityTimeoutMs;
+    if (!timeoutMs || timeoutMs <= 0) return promise;
+
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        // Swallow the eventual rejection of the underlying promise
+        // (e.g. AbortError after we abort) to avoid unhandled rejections.
+        promise.catch(() => undefined);
+        this.abortController?.abort();
+        reject(
+          new RaisinTimeoutError(
+            `SSE stream inactive for ${timeoutMs}ms`,
+            'SSE_INACTIVITY_TIMEOUT',
+            timeoutMs,
+          ),
+        );
+      }, timeoutMs);
+
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   /**

@@ -39,6 +39,8 @@ interface FilterSubscriptionEntry {
   filters: SubscriptionFilters;
   /** All callbacks registered for this filter combination */
   callbacks: Set<EventCallback>;
+  /** Set while the entry still needs to be re-subscribed after a reconnect */
+  restorePending?: boolean;
 }
 
 /** Default deduplication window in milliseconds (5 seconds) */
@@ -163,6 +165,14 @@ export class EventHandler {
    *
    * If a subscription with identical filters already exists, the callback
    * is added to the existing subscription instead of creating a new one.
+   *
+   * Path filter semantics (matched server-side):
+   * - A plain path matches **only that exact node** — there is no implicit
+   *   prefix matching.
+   * - `*` matches exactly one path segment (e.g. `/inbox/*` matches
+   *   `/inbox/a` but not `/inbox/a/b`).
+   * - `**` matches recursively (e.g. `/inbox/**` matches all descendants
+   *   of `/inbox`, but not `/inbox` itself).
    *
    * @param filters - Event filters
    * @param callback - Callback function for events
@@ -402,20 +412,37 @@ export class EventHandler {
    * Restore subscriptions after reconnect
    *
    * Re-subscribes to the server with the original filters for all active
-   * subscription entries.
+   * subscription entries. Failed entries are kept (with their callbacks)
+   * and marked pending so a retry call can re-attempt them without
+   * duplicating already-restored subscriptions.
+   *
+   * @param options.retry - When true, only re-attempts entries that failed
+   *   in a previous call (instead of re-subscribing everything)
+   * @throws Error if any subscription could not be restored
    */
-  async restoreSubscriptions(): Promise<void> {
+  async restoreSubscriptions(options?: { retry?: boolean }): Promise<void> {
+    if (!options?.retry) {
+      // Fresh restore session: every entry needs a new server-side
+      // subscription; drop stale routing IDs from the old connection.
+      for (const entry of this.filterSubscriptions.values()) {
+        this.subscriptions.delete(entry.serverId);
+        entry.restorePending = true;
+      }
+    }
+
     // Collect entries to restore (can't modify map while iterating)
-    const entriesToRestore = Array.from(this.filterSubscriptions.entries());
+    const entriesToRestore = Array.from(this.filterSubscriptions.entries())
+      .filter(([, entry]) => entry.restorePending);
 
-    // Clear current state
-    this.subscriptions.clear();
-    this.filterSubscriptions.clear();
-    // Keep callbackToHash intact for callback lookups
+    let failureCount = 0;
+    let lastError: unknown;
 
-    // Re-subscribe each entry
+    // Re-subscribe each pending entry
     for (const [hash, entry] of entriesToRestore) {
-      if (entry.callbacks.size === 0) continue;
+      if (entry.callbacks.size === 0) {
+        entry.restorePending = false;
+        continue;
+      }
 
       try {
         const payload: SubscribePayload = { filters: entry.filters };
@@ -427,11 +454,8 @@ export class EventHandler {
         const newServerId = response.subscription_id;
 
         // Update mappings with new server ID
-        this.filterSubscriptions.set(hash, {
-          serverId: newServerId,
-          filters: entry.filters,
-          callbacks: entry.callbacks,
-        });
+        entry.serverId = newServerId;
+        entry.restorePending = false;
         this.subscriptions.set(newServerId, hash);
 
         // Update callbackToHash (hash stays the same, just verify it's set)
@@ -440,11 +464,17 @@ export class EventHandler {
         }
       } catch (error) {
         logger.error('Failed to restore subscription:', error);
-        // Remove callbacks that couldn't be restored
-        for (const callback of entry.callbacks) {
-          this.callbackToHash.delete(callback);
-        }
+        failureCount++;
+        lastError = error;
+        // Keep the entry pending so a retry can re-attempt it
       }
+    }
+
+    if (failureCount > 0) {
+      const message = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new Error(
+        `Failed to restore ${failureCount} subscription(s) after reconnect: ${message}`
+      );
     }
   }
 }
@@ -495,7 +525,15 @@ export class EventSubscriptions {
   /**
    * Subscribe to events for a specific path
    *
-   * @param path - Path pattern (supports wildcards like "/folder/*")
+   * Path pattern semantics (matched server-side):
+   * - A plain path matches **only that exact node** — there is no implicit
+   *   prefix matching, so `/folder` does NOT match `/folder/child`.
+   * - `*` matches exactly one path segment: `/folder/*` matches
+   *   `/folder/child` but not `/folder/child/grandchild`.
+   * - `**` matches recursively: `/folder/**` matches every descendant of
+   *   `/folder` (but not `/folder` itself).
+   *
+   * @param path - Path pattern (e.g. "/folder", "/folder/*", "/folder/**")
    * @param callback - Callback function for events
    * @param options - Optional subscription options
    * @param options.includeNode - Include full node data in event payload (default: false)

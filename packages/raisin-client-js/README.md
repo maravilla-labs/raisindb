@@ -317,6 +317,99 @@ const subscription4 = await events.subscribeToNodeType('Page', (event) => {
 await subscription1.unsubscribe();
 ```
 
+### Build a chatbox
+
+Everything chat lives behind `db.conversations` (low-level) and
+`ConversationStore` (framework-agnostic state container). The store creates
+the conversation lazily on the first message, streams the agent's reply over
+SSE, tracks in-flight tool calls, and projects plans for approval UIs.
+
+```typescript
+import { ConversationStore } from '@raisindb/client';
+
+const db = client.database('myrepo');
+
+const store = new ConversationStore({
+  database: db,
+  // Conversation is created on the first sendMessage(). The participant is
+  // an agent path, so this becomes an `ai_chat` conversation.
+  createOptions: { participant: '/agents/support' },
+});
+
+store.subscribe((s) => {
+  renderMessages(s.messages);                      // ChatMessage[]
+  if (s.isStreaming) renderPartial(s.streamingText); // live tokens
+
+  // Tool-call badges: "running" entries are in-flight
+  for (const tc of s.activeToolCalls) {
+    renderToolBadge(tc.functionName, tc.status);   // running | completed | failed
+  }
+
+  // Plans awaiting approval
+  for (const plan of s.plans) {
+    if (plan.status === 'pending_approval') {
+      renderPlanCard(plan, {
+        approve: () => store.approvePlan(plan.planPath),
+        reject: (why) => store.rejectPlan(plan.planPath, why),
+      });
+    }
+  }
+
+  if (s.error) showError(s.error);
+});
+
+await store.sendMessage('Plan next week\'s shifts');
+// ...
+store.stop();    // abort the current turn in the UI
+store.destroy(); // on teardown
+```
+
+To resume an existing conversation, pass `conversationPath` instead of (or in
+addition to) `createOptions` and call `store.loadMessages()` for history. To
+build an inbox-style list of conversations, use `ConversationListStore`
+(`load()`, `createConversation()`, `markAsRead()`, `realtime: true`).
+
+### Listen to the inbox (notifications without an extra API)
+
+Server-side messaging delivers items into the logged-in user's home inbox in
+the `raisin:access_control` workspace. A plain node subscription on
+`${home}/inbox/**` is all an inbox bell needs — no polling, no extra API.
+
+```typescript
+import { normalizeHomePath } from '@raisindb/client';
+
+const user = await client.initSession('myrepo');
+
+// user.home may be workspace-prefixed (/raisin:access_control/users/...).
+// Subscription paths must be workspace-relative — always normalize.
+const home = normalizeHomePath(user!.home)!;
+
+await db.workspace('raisin:access_control').events().subscribe(
+  {
+    path: `${home}/inbox/**`,
+    event_types: ['node:created'],
+    include_node: true, // deliver the full node so we can render a title
+  },
+  (event) => {
+    const props = event.payload.node?.properties ?? {};
+    if (props.role === 'user') return; // skip the user's own chat messages
+    bumpBadge();
+    showToast((props.title as string) ?? (props.subject as string) ?? 'New inbox item');
+  },
+);
+```
+
+**Path filter semantics** (important — there is no implicit prefix matching):
+
+| Pattern | Matches |
+|---------|---------|
+| `/users/u1/inbox` | exactly that node, nothing below it |
+| `/users/u1/inbox/*` | direct children only (`*` = one path segment) |
+| `/users/u1/inbox/**` | the whole subtree, any depth (`**` = recursive) |
+
+Inbox items nest (e.g. `inbox/chats/<conversation>/<message>`), so you almost
+always want `/**`.
+
 ### Workspace Management
 
 ```typescript
@@ -446,104 +539,117 @@ const client = new RaisinClient('raisin://localhost:8080/sys/default', {
 
 ## Framework Integration
 
+The SDK ships dedicated subpath exports — `@raisindb/client/react`,
+`@raisindb/client/svelte`, and `@raisindb/client/vue`. None of them make the
+framework a dependency: React and Vue use a "bring your own framework"
+factory (you pass the module in once), Svelte gets framework-free adapters
+that bind naturally to runes.
+
 ### React
 
 ```tsx
-import { useEffect, useState } from 'react';
-import { RaisinClient, LocalStorageTokenStorage, IdentityUser } from '@raisindb/client';
-
-const client = new RaisinClient('ws://localhost:8081/sys/default/myrepo', {
-  tokenStorage: new LocalStorageTokenStorage('myapp'),
-});
-
-function App() {
-  const [user, setUser] = useState<IdentityUser | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    // Initialize session on mount
-    client.initSession('myrepo').then(setUser).finally(() => setLoading(false));
-
-    // Listen to auth state changes
-    const unsubscribe = client.onAuthStateChange(({ event, session }) => {
-      setUser(session.user);
-    });
-
-    return unsubscribe;
-  }, []);
-
-  if (loading) return <div>Loading...</div>;
-  if (!user) return <LoginPage />;
-  return <Dashboard user={user} />;
-}
-```
-
-### SvelteKit
-
-```typescript
-// lib/raisin.ts
+// lib/raisin-react.ts
+import React from 'react';
 import { RaisinClient, LocalStorageTokenStorage } from '@raisindb/client';
-import { writable } from 'svelte/store';
+import { createRaisinReact } from '@raisindb/client/react';
 
 export const client = new RaisinClient('ws://localhost:8081/sys/default/myrepo', {
   tokenStorage: new LocalStorageTokenStorage('myapp'),
 });
 
-export const user = writable<IdentityUser | null>(null);
+export const {
+  RaisinProvider, useAuth, useConnection, useSql, useSubscription,
+  useConversation, useConversationList,
+} = createRaisinReact(React);
 
-// Subscribe to auth changes
-client.onAuthStateChange(({ session }) => {
-  user.set(session.user);
+// App.tsx
+function Chat() {
+  const chat = useConversation({
+    database: client.database('myrepo'),
+    createOptions: { participant: '/agents/support' },
+  });
+
+  return (
+    <div>
+      {chat.messages.map((m, i) => <p key={i}>{m.content}</p>)}
+      {chat.isStreaming && <p className="streaming">{chat.streamingText}</p>}
+      <button onClick={() => chat.sendMessage('Hello!')}>Send</button>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <RaisinProvider client={client} repository="myrepo">
+      <Chat />
+    </RaisinProvider>
+  );
+}
+```
+
+### Svelte 5
+
+```typescript
+// lib/chat.svelte.ts
+import { ConversationStore, type ConversationStoreSnapshot } from '@raisindb/client';
+import { createConversationAdapter } from '@raisindb/client/svelte';
+import { db } from '$lib/raisin';
+
+const adapter = createConversationAdapter({
+  database: db,
+  createOptions: { participant: '/agents/support' },
 });
 
-// lib/stores/auth.ts
-export async function initSession() {
-  return client.initSession('myrepo');
-}
+let snapshot = $state<ConversationStoreSnapshot>(adapter.getSnapshot());
+adapter.subscribe((s) => { snapshot = s; });
 
-export async function login(email: string, password: string) {
-  return client.loginWithEmail(email, password, 'myrepo');
-}
-
-export async function logout() {
-  return client.logout();
-}
+export const chat = {
+  get messages() { return snapshot.messages; },
+  get isStreaming() { return snapshot.isStreaming; },
+  get streamingText() { return snapshot.streamingText; },
+  get plans() { return snapshot.plans; },
+  send: adapter.sendMessage,
+  approvePlan: adapter.approvePlan,
+  destroy: adapter.destroy,
+};
 ```
 
 ### Vue 3
 
 ```typescript
-// composables/useAuth.ts
-import { ref, onMounted, onUnmounted } from 'vue';
-import { RaisinClient, LocalStorageTokenStorage, IdentityUser } from '@raisindb/client';
+// lib/raisin-vue.ts
+import * as vue from 'vue';
+import { RaisinClient, LocalStorageTokenStorage } from '@raisindb/client';
+import { createRaisinVue } from '@raisindb/client/vue';
 
-const client = new RaisinClient('ws://localhost:8081/sys/default/myrepo', {
+export const client = new RaisinClient('ws://localhost:8081/sys/default/myrepo', {
   tokenStorage: new LocalStorageTokenStorage('myapp'),
 });
+export const db = client.database('myrepo');
 
-export function useAuth() {
-  const user = ref<IdentityUser | null>(null);
-  const loading = ref(true);
-  let unsubscribe: (() => void) | null = null;
+export const {
+  useAuth, useConnection, useSql, useSubscription,
+  useConversation, useConversationList,
+} = createRaisinVue(vue);
+```
 
-  onMounted(async () => {
-    user.value = await client.initSession('myrepo');
-    loading.value = false;
+```vue
+<!-- Chat.vue -->
+<script setup lang="ts">
+import { db, useConversation } from '@/lib/raisin-vue';
 
-    unsubscribe = client.onAuthStateChange(({ session }) => {
-      user.value = session.user;
-    });
-  });
+const chat = useConversation({
+  database: db,
+  createOptions: { participant: '/agents/support' },
+});
+// Cleanup is automatic: the composable destroys its store onUnmounted.
+</script>
 
-  onUnmounted(() => unsubscribe?.());
-
-  return {
-    user,
-    loading,
-    login: (email: string, password: string) => client.loginWithEmail(email, password, 'myrepo'),
-    logout: () => client.logout(),
-  };
-}
+<template>
+  <p v-for="(m, i) in chat.messages.value" :key="i">{{ m.content }}</p>
+  <p v-if="chat.isStreaming.value" class="streaming">{{ chat.streamingText.value }}</p>
+  <button @click="chat.sendMessage('Hello!')">Send</button>
+</template>
 ```
 
 ### Server-Side Rendering (SSR)
@@ -721,6 +827,111 @@ npm run dev
 
 # Type check
 npm run typecheck
+```
+
+## Stability options
+
+Options and behaviors that keep chat, inbox, and workflow UIs responsive when
+the network or server misbehaves.
+
+### `requestTimeout` (RaisinClient / RaisinHttpClient option)
+
+Default: `30000` ms. Applies to:
+
+- Every WebSocket request (resolved/rejected via the internal request tracker).
+- All HTTP auth calls (`loginWithEmail`, `registerWithEmail`, `refreshToken`,
+  `initSession` token refresh) and `signAssetUrl` — these abort the underlying
+  `fetch` after `requestTimeout` and reject with a `RaisinTimeoutError`
+  (`code: 'REQUEST_TIMEOUT'`) instead of hanging forever.
+
+Auth failures from the identity endpoints are thrown as `RaisinAuthError`
+instances (real `Error` subclasses) that still carry the `{ code, message }`
+fields, so existing destructuring keeps working:
+
+```typescript
+try {
+  await client.loginWithEmail(email, password, 'my-repo');
+} catch (err) {
+  if (err instanceof RaisinAuthError) {
+    console.log(err.code, err.message, err.status);
+  }
+}
+```
+
+### `sendMessage` inactivity timeout (per-turn SSE)
+
+`db.conversations.sendMessage(path, text, options)` streams the assistant turn
+over a single-shot SSE connection. If that stream dies mid-turn (proxy reset,
+server restart, dead TCP), the turn now ends with a synthetic `waiting` event
+after `inactivityTimeoutMs` of silence (default: `120000` ms, reset on every
+byte received) instead of stalling the chat UI forever:
+
+```typescript
+for await (const event of db.conversations.sendMessage(path, 'Hi', {
+  inactivityTimeoutMs: 60_000, // override; 0 disables
+})) {
+  // ... a final { type: 'waiting' } event is guaranteed even if the stream dies
+}
+```
+
+The same option exists on the lower-level `SSEClient` (`inactivityTimeoutMs`).
+With reconnection enabled the SSE client silently reconnects on inactivity;
+with reconnection disabled the stream ends with a `RaisinTimeoutError`
+(`code: 'SSE_INACTIVITY_TIMEOUT'`).
+
+### `streamingTimeoutMs` + `watchdogIntervalMs` (ConversationStore)
+
+`ConversationStore` adds two recovery layers on top of the SSE stream:
+
+- `streamingTimeoutMs` (default: `120000`) — if no SSE event arrives for this
+  long while a turn is streaming, the store auto-recovers (reloads messages
+  and clears the streaming state).
+- `watchdogIntervalMs` (default: `30000`) — while streaming, the store
+  periodically asks the backend whether the turn is actually still active
+  (`checkTurnHealth`) and recovers if the backend says it finished.
+
+```typescript
+const store = new ConversationStore({
+  database: db,
+  conversationPath,
+  streamingTimeoutMs: 90_000,
+  watchdogIntervalMs: 15_000,
+});
+```
+
+### Request queueing during reconnects
+
+Requests issued while the WebSocket is temporarily down are no longer thrown
+away. If the connection state is `Connecting`/`Reconnecting` (or
+`Disconnected` with auto-reconnect enabled after a previous successful
+connection), `RaisinClient` holds the request and flushes it once the
+connection is re-established **and** re-authenticated:
+
+- Each queued request still honors its own `requestTimeout` — it rejects if
+  the connection doesn't come back in time.
+- The queue is bounded (100 requests); overflowing requests reject
+  immediately with a "Request queue is full" error.
+- If re-authentication fails after reconnect, queued requests reject with a
+  `RaisinAuthError`.
+- A permanent disconnect (manual `disconnect()`, max reconnect attempts
+  reached) cancels everything in the queue.
+
+### `subscription_restore_failed` event
+
+After a reconnect, the client restores event subscriptions automatically and
+retries on failure (3 retries with 1s/3s/9s backoff, without duplicating the
+subscriptions that already succeeded). If restoration still fails, the client
+emits `subscription_restore_failed` so the app can resync its state:
+
+```typescript
+client.on('subscription_restore_failed', (error) => {
+  // Realtime events may be stale: reload lists and/or re-subscribe manually
+  console.warn('Subscriptions not restored after reconnect:', error);
+});
+
+client.onReconnected(() => {
+  // Fired only after connection + auth + successful subscription restore
+});
 ```
 
 ## License

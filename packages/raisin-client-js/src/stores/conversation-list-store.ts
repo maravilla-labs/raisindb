@@ -20,6 +20,32 @@ import type { Database } from '../database';
 import type { ConversationType, ConversationListItem } from '../types/chat';
 import { ConversationStore, type ConversationStoreOptions } from './conversation-store';
 import { logger } from '../logger';
+import { normalizeHomePath } from '../utils/home-path';
+
+/**
+ * Build the realtime subscription filters for a user's chats folder.
+ *
+ * The server matches subscription paths literally with glob semantics:
+ * `*` matches exactly one path segment, `**` matches recursively, and there
+ * is NO implicit prefix matching — a plain path only matches that exact
+ * node. To observe conversations created/updated under the chats folder we
+ * therefore need the recursive `/**` suffix.
+ *
+ * Exported for testing.
+ * @internal
+ */
+export function buildChatsSubscriptionFilters(userHome: string): {
+  workspace: string;
+  path: string;
+  event_types: string[];
+} {
+  const home = normalizeHomePath(userHome) ?? userHome;
+  return {
+    workspace: 'raisin:access_control',
+    path: `${home}/inbox/chats/**`,
+    event_types: ['node:created', 'node:updated'],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -228,14 +254,8 @@ export class ConversationListStore {
       const userHome = rows?.[0]?.home as string;
       if (!userHome) return;
 
-      const chatsPath = `${userHome}/inbox/chats`;
-
       this._realtimeSubscription = await events.subscribe(
-        {
-          workspace: 'raisin:access_control',
-          path: chatsPath,
-          event_types: ['node:created', 'node:updated'],
-        },
+        buildChatsSubscriptionFilters(userHome),
         async (event) => {
           const eventData = event as any;
           const nodeId = eventData.payload?.node_id;

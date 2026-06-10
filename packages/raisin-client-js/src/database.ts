@@ -15,6 +15,7 @@ import { FlowsApi } from './flows';
 import { FunctionsApi } from './functions-api';
 import { ConversationManager } from './conversations';
 import { FlowClient } from './flow-client';
+import { InboxApi } from './inbox';
 import type { AuthManager } from './auth';
 import type { UploadManager } from './upload/uploader';
 import type { SignAssetOptions, SignedAssetUrl } from './http-client';
@@ -55,6 +56,7 @@ export class Database {
   private _functionsApi?: FunctionsApi;
   private _conversationManager?: ConversationManager;
   private _flowClient?: FlowClient;
+  private _inboxApi?: InboxApi;
 
   constructor(
     repository: string,
@@ -372,7 +374,44 @@ export class Database {
   }
 
   /**
+   * Get a pre-configured InboxApi for human-in-the-loop tasks.
+   *
+   * Requires the Database to have been created via `RaisinClient.database()`
+   * (which automatically provides HTTP context).
+   *
+   * @example
+   * ```typescript
+   * const db = client.database('my-repo');
+   * const { tasks } = await db.inbox.listTasks({ status: 'pending' });
+   * await db.inbox.completeTask(tasks[0].id, { action: 'approve' });
+   * ```
+   */
+  get inbox(): InboxApi {
+    if (!this._inboxApi) {
+      if (!this.httpOptions?.httpBaseUrl || !this.httpOptions?.authManager) {
+        throw new Error(
+          'db.inbox requires HTTP context. Use client.database() to get a Database with inbox support.',
+        );
+      }
+      this._inboxApi = new InboxApi(
+        this.httpOptions.httpBaseUrl,
+        this.repository,
+        this.httpOptions.authManager,
+      );
+    }
+    return this._inboxApi;
+  }
+
+  /**
    * Get EventHandler for subscribing to real-time events
+   *
+   * Path filter semantics for subscriptions (matched server-side):
+   * - A plain path matches **only that exact node** — there is no implicit
+   *   prefix matching.
+   * - `*` matches exactly one path segment (`/inbox/*` matches `/inbox/a`,
+   *   not `/inbox/a/b`).
+   * - `**` matches recursively (`/inbox/**` matches all descendants of
+   *   `/inbox`, but not `/inbox` itself).
    */
   events(): EventHandler {
     return this.eventHandler;

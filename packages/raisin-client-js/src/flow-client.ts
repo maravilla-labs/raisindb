@@ -429,36 +429,34 @@ export class FlowClient {
    * Respond to a human task within a flow.
    *
    * When a flow is waiting on a human_task step (approval, input, review),
-   * use this method to submit the response and resume the flow.
+   * use this method to submit the response. Completion is validated
+   * (caller must be the task's assignee or an admin) and resumes the flow.
    *
-   * @param instanceId - Flow instance ID
-   * @param taskId - The human task node ID
-   * @param response - The human's response data
+   * Note: prefer `InboxApi` for full inbox functionality (listing tasks,
+   * task details); this is a convenience passthrough to the same endpoint.
+   *
+   * @param instanceId - Flow instance ID (unused; kept for API stability)
+   * @param taskId - The inbox task node ID (or path)
+   * @param response - The response data
    *
    * @example
    * ```typescript
    * // Approve a task
-   * await flows.respondToHumanTask('instance-123', 'step-5', {
+   * await flows.respondToHumanTask('instance-123', 'task-abc', {
    *   action: 'approve',
    *   comment: 'Looks good!',
-   * });
-   *
-   * // Provide input for an input task
-   * await flows.respondToHumanTask('instance-123', 'step-3', {
-   *   name: 'John Doe',
-   *   email: 'john@example.com',
    * });
    * ```
    */
   async respondToHumanTask(
-    instanceId: string,
+    _instanceId: string,
     taskId: string,
     response: unknown,
     options?: { signal?: AbortSignal },
   ): Promise<void> {
     await this.request<void>({
       method: 'POST',
-      path: `/api/flows/${this.repository}/instances/${instanceId}/tasks/${taskId}/respond`,
+      path: `/api/inbox/${this.repository}/tasks/${encodeURIComponent(taskId)}/complete`,
       body: { response },
       signal: options?.signal,
     });

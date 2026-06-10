@@ -122,8 +122,18 @@ export class NodeFileSource implements FileSource {
 
     // Dynamically import fs/promises if not provided
     if (!this._fsPromises) {
-      // Use dynamic import for Node.js fs module
-      this._fsPromises = await import('fs/promises');
+      if (!isNodeEnvironment()) {
+        throw new Error(
+          'NodeFileSource requires Node.js (fs/promises is not available in browsers). ' +
+          'In the browser, use a File or Blob object instead.'
+        );
+      }
+      // Dynamic import with a computed specifier so bundlers (Vite, etc.)
+      // don't try to resolve "fs/promises" into browser bundles.
+      const specifier = 'fs/promises';
+      this._fsPromises = (await import(
+        /* @vite-ignore */ /* webpackIgnore: true */ specifier
+      )) as typeof import('fs/promises');
     }
 
     // Get file stats to determine size

@@ -29,11 +29,20 @@ export type ConnectionErrorCode =
   | 'CONNECTION_LOST'
   | 'SSE_STREAM_ERROR';
 
-/** Error codes for authentication errors */
+/**
+ * Error codes for authentication errors.
+ *
+ * Includes the well-known codes plus any server-provided code string
+ * (e.g. identity endpoints return codes like `LOGIN_FAILED`).
+ */
 export type AuthErrorCode =
   | 'AUTH_UNAUTHORIZED'
   | 'AUTH_FORBIDDEN'
-  | 'AUTH_TOKEN_EXPIRED';
+  | 'AUTH_TOKEN_EXPIRED'
+  | 'LOGIN_FAILED'
+  | 'REGISTRATION_FAILED'
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  | (string & {});
 
 /** Error codes for flow execution errors */
 export type FlowErrorCode =
@@ -46,7 +55,8 @@ export type FlowErrorCode =
 export type TimeoutErrorCode =
   | 'REQUEST_TIMEOUT'
   | 'CONNECTION_TIMEOUT'
-  | 'POLL_TIMEOUT';
+  | 'POLL_TIMEOUT'
+  | 'SSE_INACTIVITY_TIMEOUT';
 
 /** Error codes for abort/cancellation errors */
 export type AbortErrorCode = 'ABORTED';

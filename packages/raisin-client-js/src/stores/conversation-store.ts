@@ -456,6 +456,9 @@ export class ConversationStore {
         logger.error('[ConversationStore] Turn failed', event.error);
         this._error = event.error;
         this._isStreaming = false;
+        // A failed turn ends any waiting state too - otherwise UIs keyed on
+        // isWaiting show a thinking indicator forever after a failure.
+        this._isWaiting = false;
         this._streamingText = '';
         this._activeToolCalls = [];
         this.clearStreamingTimer();
