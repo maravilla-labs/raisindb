@@ -81,6 +81,27 @@ Function-runtime traps (NOT the client SDK):
 - Return **graceful errors as data** (`{error: "...pick another candidate"}`)
   instead of throwing — the model self-corrects in the same turn.
 
+## Plans & approval-gated execution
+
+Set `task_creation_enabled: true` and add the builtin planning tools
+(`/lib/raisin/ai/create-plan|add-task|update-task|get-plan-status`) and the
+agent decomposes work into a persisted `raisin:AIPlan` + `raisin:AITask`
+tree. `execution_mode` controls the gate: `automatic` (run immediately),
+`approve_then_auto` (one approval, then run all), `step_by_step` (one task
+per continue signal), `manual` (approval + explicit instructions). With
+`task_creation_enabled: false`, planning tools are filtered from the model —
+no plan nodes ever.
+
+Client side it's all in the SDK: `ConversationStore.plans` projects plan/task
+state from the `ai_plan` / `ai_task_update` message cards;
+`approvePlan(planPath)` / `rejectPlan(planPath, feedback?)` resolve the gate;
+a `waiting` event (`reason: awaiting_plan_approval`) parks the turn, and
+`step_by_step` pauses with `finish_reason: awaiting_step_continue` — any
+plain user message ("continue") resumes. Full contract + UI recipe:
+`docs/guides/ai/agent-plans-and-tools.md` on the website; reference client:
+the admin console's agent Test Chat; scripted proof:
+`examples/shiftboard/plan-modes-test.mjs`.
+
 ## Proactive messaging (agent → user)
 
 To message a user from a tool, mirror the agent-handler's own outbox shape

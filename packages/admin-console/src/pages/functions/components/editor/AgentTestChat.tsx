@@ -22,8 +22,12 @@ import {
   AlertCircle,
   Trash2,
   RotateCcw,
+  Play,
+  PauseCircle,
 } from 'lucide-react'
 import { agentChatApi, type ChatEvent, type TestConversation } from '../../../../api/agent-chat'
+import { agentChatPlansApi, type PlanProjection } from '../../../../api/agent-chat-plans'
+import { AgentTestChatPlanCard } from './AgentTestChatPlanCard'
 import MarkdownRenderer from '../../../../components/MarkdownRenderer'
 
 interface AgentTestChatProps {
@@ -66,12 +70,22 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false)
+  // Plan/task projection for this conversation (mirrors ConversationStore.plans
+  // in the JS SDK). Refreshed on SSE events and polled while a plan is active.
+  const [plans, setPlans] = useState<PlanProjection[]>([])
+  // Why the agent is paused: 'awaiting_plan_approval' (waiting for an
+  // approve/reject) or 'step_by_step' (waiting for a continue signal).
+  const [waitingReason, setWaitingReason] = useState<string | null>(null)
+  const [planActionBusy, setPlanActionBusy] = useState<string | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const streamAbortRef = useRef<AbortController | null>(null)
   const assistantMessageIdRef = useRef<string | null>(null)
   const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const conversationRef = useRef<TestConversation | null>(null)
+  const plansRefreshInFlightRef = useRef(false)
+  conversationRef.current = conversation
 
   const clearInactivityTimer = useCallback(() => {
     if (inactivityTimerRef.current) {
@@ -95,9 +109,35 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
     }, INACTIVITY_TIMEOUT_MS)
   }, [clearInactivityTimer])
 
+  // Re-project plan/task state from the persisted ai_plan / ai_task_update
+  // message cards (same contract the SDK's ConversationStore.plans exposes).
+  const refreshPlans = useCallback(async () => {
+    const conv = conversationRef.current
+    if (!conv || plansRefreshInFlightRef.current) return
+    plansRefreshInFlightRef.current = true
+    try {
+      const next = await agentChatPlansApi.loadPlans(repo, conv.conversationPath)
+      setPlans(next)
+    } catch (err) {
+      console.error('Failed to load plans:', err)
+    } finally {
+      plansRefreshInFlightRef.current = false
+    }
+  }, [repo])
+
+  // Plan/task cards are delivered to the user conversation asynchronously
+  // (outbox -> process-chat), often landing AFTER the SSE waiting/done event
+  // of the turn that produced them. Schedule a few delayed refreshes so the
+  // projection catches late deliveries even when polling has stopped.
+  const schedulePlanRefreshes = useCallback(() => {
+    for (const delay of [1_500, 4_000, 8_000]) {
+      setTimeout(() => void refreshPlans(), delay)
+    }
+  }, [refreshPlans])
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, plans, waitingReason])
 
   // Clear any pending inactivity timer when the component unmounts.
   useEffect(() => () => clearInactivityTimer(), [clearInactivityTimer])
@@ -114,6 +154,8 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       })
       setConversation(conv)
       setMessages([])
+      setPlans([])
+      setWaitingReason(null)
     } catch (err) {
       console.error('Failed to create conversation:', err)
       setError(
@@ -221,8 +263,10 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       case 'message_saved':
         // A new assistant message landed in storage. If it's an assistant
         // turn and we don't have a bubble yet, open one for subsequent
-        // chunks to attach to.
+        // chunks to attach to. Plan/task cards land as messages too, so
+        // refresh the plan projection.
         if (event.role === 'assistant') ensureAssistantBubble()
+        void refreshPlans()
         break
       case 'done':
         applyToAssistant(m => ({
@@ -232,19 +276,37 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
         }))
         assistantMessageIdRef.current = null
         setIsWaitingForResponse(false)
+        // Pause-style terminal events: awaiting_step_continue (step_by_step
+        // pause) and awaiting_plan_approval (safety-net done after the
+        // waiting event) keep their waiting affordances visible.
+        setWaitingReason(
+          event.finishReason === 'awaiting_step_continue'
+            ? 'step_by_step'
+            : event.finishReason === 'awaiting_plan_approval'
+              ? 'awaiting_plan_approval'
+              : null,
+        )
         clearInactivityTimer()
+        void refreshPlans()
+        schedulePlanRefreshes()
         break
       case 'waiting':
-        // Turn paused (e.g. plan approval). Keep the spinner up but stop the
-        // stall timer — the agent is intentionally waiting on the user.
+        // Turn paused on purpose: 'awaiting_plan_approval' (render the plan
+        // card with Approve/Reject) or 'step_by_step' (render Continue).
+        // Stop the spinner and the stall timer — the agent is waiting on us.
+        assistantMessageIdRef.current = null
+        setIsWaitingForResponse(false)
+        setWaitingReason(event.reason ?? 'awaiting_plan_approval')
         clearInactivityTimer()
+        void refreshPlans()
+        schedulePlanRefreshes()
         break
       case 'log':
         // Surface backend logs to the dev console; don't render in the chat.
         console.debug(`[agent-handler ${event.level}]`, event.message, event.module ?? '')
         break
     }
-  }, [applyToAssistant, ensureAssistantBubble, armInactivityTimer, clearInactivityTimer])
+  }, [applyToAssistant, ensureAssistantBubble, armInactivityTimer, clearInactivityTimer, refreshPlans, schedulePlanRefreshes])
 
   const consumeStream = useCallback(async (streamChannel: string) => {
     streamAbortRef.current?.abort()
@@ -267,13 +329,28 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
     }
   }, [repo, handleEvent, clearInactivityTimer])
 
-  const handleSend = async () => {
-    if (!inputText.trim() || !conversation || isSending) return
+  // Poll the plan projection while something is in flight: a paused turn, a
+  // running turn, or a plan that is still pending/in progress. Task status
+  // updates are persisted as messages without dedicated SSE events, so this
+  // is what makes the task list progress live during execution.
+  const hasActivePlan = plans.some(
+    p => p.status === 'pending_approval' || p.status === 'in_progress',
+  )
+  useEffect(() => {
+    if (!conversation) return
+    if (!waitingReason && !isWaitingForResponse && !hasActivePlan) return
+    const timer = setInterval(() => {
+      void refreshPlans()
+    }, 3_000)
+    return () => clearInterval(timer)
+  }, [conversation, waitingReason, isWaitingForResponse, hasActivePlan, refreshPlans])
 
-    const messageContent = inputText.trim()
-    setInputText('')
+  const sendMessage = async (messageContent: string) => {
+    if (!messageContent || !conversation || isSending) return
+
     setIsSending(true)
     setError(null)
+    setWaitingReason(null)
 
     try {
       // Open the SSE stream BEFORE writing the user message so we don't miss
@@ -308,6 +385,51 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       streamAbortRef.current?.abort()
     } finally {
       setIsSending(false)
+    }
+  }
+
+  const handleSend = () => {
+    const messageContent = inputText.trim()
+    if (!messageContent) return
+    setInputText('')
+    void sendMessage(messageContent)
+  }
+
+  // Resume a step_by_step turn: a plain user message is the continue signal.
+  const handleContinue = () => {
+    void sendMessage('continue')
+  }
+
+  // Approve/reject mirror the SDK's ConversationStore.approvePlan/rejectPlan:
+  // SQL INVOKE of /lib/raisin/ai/plan-approval-handler. Approval may start a
+  // continuation turn (approve_then_auto / step_by_step), so keep the SSE
+  // stream open to capture it; the plan poller shows task progress.
+  const handlePlanAction = async (
+    action: 'approve' | 'reject',
+    planPath: string,
+    feedback?: string,
+  ) => {
+    if (!conversation || planActionBusy) return
+    setPlanActionBusy(planPath)
+    setError(null)
+    try {
+      if (action === 'approve') {
+        await agentChatPlansApi.approvePlan(repo, planPath)
+      } else {
+        await agentChatPlansApi.rejectPlan(repo, planPath, feedback)
+      }
+      setWaitingReason(null)
+      assistantMessageIdRef.current = null
+      // (Re)open the stream so the continuation turn's events render. In
+      // manual mode no continuation follows an approval — that's fine, the
+      // stream just stays idle and the plan card reflects the new status.
+      void consumeStream(conversation.streamChannel)
+      await refreshPlans()
+    } catch (err) {
+      console.error(`Failed to ${action} plan:`, err)
+      setError(err instanceof Error ? `Failed to ${action} plan: ${err.message}` : `Failed to ${action} plan`)
+    } finally {
+      setPlanActionBusy(null)
     }
   }
 
@@ -491,6 +613,52 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
               </div>
             </div>
           ))
+        )}
+
+        {/* Plan proposal / progress cards (projected from ai_plan +
+            ai_task_update message cards, like ConversationStore.plans) */}
+        {plans.length > 0 && (
+          <div className="space-y-2 ml-10">
+            {plans.map((plan) => (
+              <AgentTestChatPlanCard
+                key={plan.key}
+                plan={plan}
+                busy={planActionBusy === plan.planPath}
+                onApprove={(planPath) => void handlePlanAction('approve', planPath)}
+                onReject={(planPath, feedback) => void handlePlanAction('reject', planPath, feedback)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Paused awaiting approval but the plan card hasn't been delivered
+            yet (outbox delivery is async) — show a hint while polling. */}
+        {waitingReason === 'awaiting_plan_approval' &&
+          !plans.some(p => p.status === 'pending_approval') && (
+          <div className="flex items-center gap-2 ml-10 text-yellow-300/80 text-xs">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <span>Agent proposed a plan — loading it…</span>
+          </div>
+        )}
+
+        {/* step_by_step pause: agent completed one task and waits for the
+            continue signal (a plain user message). */}
+        {waitingReason === 'step_by_step' && !isWaitingForResponse && (
+          <div className="flex items-center gap-3 ml-10" data-testid="step-continue">
+            <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
+              <PauseCircle className="w-3.5 h-3.5 text-blue-400" />
+              <span>Paused after this step</span>
+            </div>
+            <button
+              onClick={handleContinue}
+              disabled={isSending}
+              className="px-2.5 py-1 bg-blue-500/20 text-blue-300 rounded text-xs hover:bg-blue-500/30 disabled:opacity-50 flex items-center gap-1.5"
+              data-testid="step-continue-button"
+            >
+              <Play className="w-3 h-3" />
+              Continue next step
+            </button>
+          </div>
         )}
 
         {isWaitingForResponse && !assistantMessageIdRef.current && (
