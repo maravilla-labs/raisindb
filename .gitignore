@@ -57,3 +57,8 @@ docs/internal/
 # Environment files (use .env.example instead)
 .env
 **/.env
+
+# AI provider test keys (never commit)
+*.env.grok_key
+**/*.env.grok_key
+examples/**/.env.local
