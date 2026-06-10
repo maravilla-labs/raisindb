@@ -232,36 +232,14 @@ where
         parent_path: &str,
         child_def: &models::nodes::types::initial_structure::InitialChild,
     ) -> Result<models::nodes::Node> {
-        // Convert properties from serde_json::Value to PropertyValue
+        // Convert properties from serde_json::Value to PropertyValue.
+        // Uses the shared serde-based conversion (same semantics as the HTTP
+        // path and workspace_structure_init): null stays Null, arrays/objects
+        // stay structured - never coerced to strings.
         let properties = if let Some(props) = &child_def.properties {
             props
                 .iter()
-                .map(|(k, v)| {
-                    // Convert serde_json::Value to PropertyValue
-                    let property_value = match v {
-                        serde_json::Value::String(s) => PropertyValue::String(s.clone()),
-                        serde_json::Value::Number(n) => {
-                            if let Some(i) = n.as_i64() {
-                                PropertyValue::Integer(i)
-                            } else if let Some(f) = n.as_f64() {
-                                PropertyValue::Float(f)
-                            } else {
-                                PropertyValue::String(n.to_string())
-                            }
-                        }
-                        serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
-                        serde_json::Value::Array(_arr) => {
-                            // For now, just convert to string representation
-                            PropertyValue::String(serde_json::to_string(v).unwrap_or_default())
-                        }
-                        serde_json::Value::Object(_) => {
-                            // For now, just convert to string representation
-                            PropertyValue::String(serde_json::to_string(v).unwrap_or_default())
-                        }
-                        serde_json::Value::Null => PropertyValue::String(String::new()),
-                    };
-                    (k.clone(), property_value)
-                })
+                .map(|(k, v)| (k.clone(), crate::json_value_to_property_value(v)))
                 .collect()
         } else {
             HashMap::new()

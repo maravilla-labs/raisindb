@@ -2,7 +2,6 @@
 
 use raisin_error::Result;
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::{
     scope::BranchScope, transactional::TransactionalStorage, BranchRepository, NodeTypeRepository,
@@ -53,32 +52,13 @@ impl<S: TransactionalStorage> Transaction<S> {
         actor: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Node>> + Send + 'a>> {
         Box::pin(async move {
+            // Shared serde-based conversion (same semantics as the HTTP path
+            // and workspace_structure_init): null stays Null, arrays/objects
+            // stay structured - never coerced to strings.
             let properties = if let Some(props) = &child_def.properties {
                 props
                     .iter()
-                    .map(|(k, v)| {
-                        let property_value = match v {
-                            serde_json::Value::String(s) => PropertyValue::String(s.clone()),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    PropertyValue::Integer(i)
-                                } else if let Some(f) = n.as_f64() {
-                                    PropertyValue::Float(f)
-                                } else {
-                                    PropertyValue::String(n.to_string())
-                                }
-                            }
-                            serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
-                            serde_json::Value::Array(_) => {
-                                PropertyValue::String(serde_json::to_string(v).unwrap_or_default())
-                            }
-                            serde_json::Value::Object(_) => {
-                                PropertyValue::String(serde_json::to_string(v).unwrap_or_default())
-                            }
-                            serde_json::Value::Null => PropertyValue::String(String::new()),
-                        };
-                        (k.clone(), property_value)
-                    })
+                    .map(|(k, v)| (k.clone(), crate::json_value_to_property_value(v)))
                     .collect()
             } else {
                 HashMap::new()
@@ -87,25 +67,7 @@ impl<S: TransactionalStorage> Transaction<S> {
             let translations = child_def.translations.as_ref().map(|trans| {
                 trans
                     .iter()
-                    .map(|(lang, val)| {
-                        let property_value = match val {
-                            serde_json::Value::String(s) => PropertyValue::String(s.clone()),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    PropertyValue::Integer(i)
-                                } else if let Some(f) = n.as_f64() {
-                                    PropertyValue::Float(f)
-                                } else {
-                                    PropertyValue::String(n.to_string())
-                                }
-                            }
-                            serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
-                            _ => PropertyValue::String(
-                                serde_json::to_string(val).unwrap_or_default(),
-                            ),
-                        };
-                        (lang.clone(), property_value)
-                    })
+                    .map(|(lang, val)| (lang.clone(), crate::json_value_to_property_value(val)))
                     .collect()
             });
 

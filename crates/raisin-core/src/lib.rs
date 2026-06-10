@@ -37,7 +37,9 @@
 //! ```
 
 pub mod utils;
-pub use utils::{sanitize_name, sign_asset_url, verify_asset_signature};
+pub use utils::{
+    json_value_to_property_value, sanitize_name, sign_asset_url, verify_asset_signature,
+};
 pub mod connection;
 pub mod replication;
 pub mod traits;

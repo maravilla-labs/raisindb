@@ -67,6 +67,27 @@ pub fn sanitize_name(input: &str) -> Result<String> {
     Ok(slug)
 }
 
+/// Convert a `serde_json::Value` to a `PropertyValue` with full fidelity.
+///
+/// Uses serde untagged deserialization, the same mechanism as the HTTP
+/// transport and `workspace_structure_init::convert_properties`, so:
+/// - `null` maps to `PropertyValue::Null` (never coerced to `""`)
+/// - arrays/objects map to `PropertyValue::Array`/`Object` (never stringified)
+/// - special object shapes (resources, references, geometry, ...) map to
+///   their dedicated variants
+///
+/// Falls back to a JSON-string representation only if deserialization fails
+/// (which untagged `PropertyValue` essentially never does for valid JSON).
+pub fn json_value_to_property_value(
+    value: &serde_json::Value,
+) -> raisin_models::nodes::properties::PropertyValue {
+    serde_json::from_value(value.clone()).unwrap_or_else(|_| {
+        raisin_models::nodes::properties::PropertyValue::String(
+            serde_json::to_string(value).unwrap_or_default(),
+        )
+    })
+}
+
 // ============================================================================
 // HMAC Signed URL Utilities
 // ============================================================================
@@ -177,9 +198,56 @@ pub fn verify_asset_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raisin_models::nodes::properties::PropertyValue;
 
     const TENANT: &str = "default";
     const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!!";
+
+    #[test]
+    fn json_null_maps_to_property_value_null() {
+        // null must never be coerced to "" (matches HTTP / WS semantics)
+        let pv = json_value_to_property_value(&serde_json::Value::Null);
+        assert!(matches!(pv, PropertyValue::Null), "got {:?}", pv);
+    }
+
+    #[test]
+    fn json_structures_stay_structured() {
+        let v = serde_json::json!({"assignee": null, "tags": ["a", 1, true]});
+        match json_value_to_property_value(&v) {
+            PropertyValue::Object(obj) => {
+                assert!(matches!(obj.get("assignee"), Some(PropertyValue::Null)));
+                match obj.get("tags") {
+                    Some(PropertyValue::Array(items)) => {
+                        assert!(matches!(items[0], PropertyValue::String(ref s) if s == "a"));
+                        assert!(matches!(items[1], PropertyValue::Integer(1)));
+                        assert!(matches!(items[2], PropertyValue::Boolean(true)));
+                    }
+                    other => panic!("expected array, got {:?}", other),
+                }
+            }
+            other => panic!("expected object, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn json_scalars_convert() {
+        assert!(matches!(
+            json_value_to_property_value(&serde_json::json!("x")),
+            PropertyValue::String(ref s) if s == "x"
+        ));
+        assert!(matches!(
+            json_value_to_property_value(&serde_json::json!(7)),
+            PropertyValue::Integer(7)
+        ));
+        assert!(matches!(
+            json_value_to_property_value(&serde_json::json!(1.5)),
+            PropertyValue::Float(f) if (f - 1.5).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            json_value_to_property_value(&serde_json::json!(false)),
+            PropertyValue::Boolean(false)
+        ));
+    }
     const PATH: &str = "repo/main/head/ws/file.jpg";
 
     #[test]

@@ -322,6 +322,36 @@ impl RocksDBWorker {
     }
 }
 
+/// RAII cleanup for handler tasks.
+///
+/// Runs on every exit path of `execute_handler_task` - including when the
+/// task is **aborted** by the timeout watchdog (abort drops the future, which
+/// drops this guard). Without it, an aborted handler leaked its heartbeat
+/// sub-task forever and never decremented the in-flight counter.
+struct HandlerCleanupGuard {
+    job_id: JobId,
+    job_registry: Arc<JobRegistry>,
+    heartbeat_token: CancellationToken,
+    in_flight: InFlightTracker,
+}
+
+impl Drop for HandlerCleanupGuard {
+    fn drop(&mut self) {
+        self.heartbeat_token.cancel();
+        self.in_flight.decrement();
+
+        // clear_handle is async; spawn it if a runtime is still available.
+        // (After watchdog abort_handle this is a harmless no-op.)
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let registry = self.job_registry.clone();
+            let job_id = self.job_id.clone();
+            rt.spawn(async move {
+                registry.clear_handle(&job_id).await;
+            });
+        }
+    }
+}
+
 /// Independent handler task that runs to completion
 ///
 /// This function runs as a spawned async task, completely independent of the
@@ -355,6 +385,17 @@ async fn execute_handler_task(
                 tokio::select! {
                     _ = token.cancelled() => break,
                     _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                        // Self-terminate when the job is no longer active
+                        // (terminal, or re-scheduled by the watchdog). This is
+                        // the backstop for handler tasks that were aborted
+                        // without unwinding (e.g. stuck in a blocking call).
+                        if !job_registry_job_is_active(&registry, &job_id).await {
+                            tracing::debug!(
+                                job_id = %job_id,
+                                "Heartbeat task exiting - job no longer active"
+                            );
+                            break;
+                        }
                         if let Err(e) = registry.update_heartbeat(&job_id).await {
                             tracing::error!(
                                 job_id = %job_id,
@@ -366,6 +407,15 @@ async fn execute_handler_task(
                 }
             }
         })
+    };
+
+    // All exit paths (including watchdog abort) cancel the heartbeat task,
+    // decrement in-flight, and clear the stored handle via this guard.
+    let _cleanup = HandlerCleanupGuard {
+        job_id: job.id.clone(),
+        job_registry: job_registry.clone(),
+        heartbeat_token: heartbeat_token.clone(),
+        in_flight: in_flight.clone(),
     };
 
     // Update initial heartbeat before waiting on semaphore.
@@ -392,11 +442,7 @@ async fn execute_handler_task(
                     "Handler semaphore closed during shutdown".to_string(),
                 )
                 .await;
-            heartbeat_token.cancel();
-            heartbeat_task.await.ok();
-            job_registry.clear_handle(&job.id).await;
-            in_flight.decrement();
-            return;
+            return; // guard performs cleanup
         }
     };
 
@@ -414,17 +460,14 @@ async fn execute_handler_task(
             error = %e,
             "Failed to mark job as executing after permit acquisition"
         );
-        heartbeat_token.cancel();
-        heartbeat_task.await.ok();
-        job_registry.clear_handle(&job.id).await;
-        in_flight.decrement();
-        return;
+        return; // guard performs cleanup
     }
 
     // Dispatch to handler
     let dispatch_result = handlers.dispatch(&job, &context).await;
 
-    // Stop heartbeat before handling result
+    // Stop heartbeat before handling result so no late heartbeat is written
+    // after the terminal status. (The guard would also cancel it on drop.)
     heartbeat_token.cancel();
     heartbeat_task.await.ok();
 
@@ -493,6 +536,65 @@ async fn execute_handler_task(
         }
     }
 
-    job_registry.clear_handle(&job.id).await;
-    in_flight.decrement();
+    // Handle/heartbeat/in-flight cleanup happens in HandlerCleanupGuard::drop.
+}
+
+/// Whether a job is still actively executing (used by the heartbeat backstop).
+async fn job_registry_job_is_active(registry: &JobRegistry, job_id: &JobId) -> bool {
+    matches!(
+        registry.get_status(job_id).await,
+        Ok(JobStatus::Running | JobStatus::Executing)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Aborting a handler task must still cancel its heartbeat token and
+    /// decrement the in-flight counter (via HandlerCleanupGuard::drop).
+    /// Regression test for the watchdog-abort leak.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abort_runs_handler_cleanup_guard() {
+        let registry = Arc::new(JobRegistry::new());
+        let job_id = registry
+            .register_job(
+                raisin_storage::jobs::JobType::IntegrityScan,
+                "test-tenant".to_string(),
+                None,
+                None,
+                Some(0),
+            )
+            .await
+            .unwrap();
+
+        let in_flight = InFlightTracker::new();
+        let heartbeat_token = CancellationToken::new();
+
+        in_flight.increment();
+        let guard = HandlerCleanupGuard {
+            job_id: job_id.clone(),
+            job_registry: registry.clone(),
+            heartbeat_token: heartbeat_token.clone(),
+            in_flight: in_flight.clone(),
+        };
+
+        // Simulate a handler that hangs forever at an await point.
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+
+        // Give the task a chance to start, then abort it (watchdog path).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(in_flight.get(), 1);
+        task.abort();
+        let _ = task.await;
+
+        assert_eq!(in_flight.get(), 0, "abort must decrement in-flight count");
+        assert!(
+            heartbeat_token.is_cancelled(),
+            "abort must cancel the heartbeat token"
+        );
+    }
 }

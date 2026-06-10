@@ -213,6 +213,7 @@ impl Default for DeleteNodeOptions {
 /// # Examples
 ///
 /// ```
+/// use raisin_hlc::HLC;
 /// use raisin_storage::ListOptions;
 ///
 /// // API responses (users need expand arrows)
@@ -317,7 +318,7 @@ impl ListOptions {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use raisin_storage::NodeWithPopulatedChildren;
 ///
 /// let parent = storage.nodes()
