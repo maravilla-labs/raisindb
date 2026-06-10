@@ -62,10 +62,7 @@ pub async fn get_workspace(
 /// RLS surface, so identity users and anonymous callers must not touch them.
 fn require_operator(auth: &Option<Extension<models::auth::AuthContext>>) -> Result<(), ApiError> {
     let is_operator = auth.as_ref().is_some_and(|Extension(ctx)| {
-        ctx.is_system
-            || ctx
-                .permissions()
-                .is_some_and(|p| p.is_system_admin)
+        ctx.is_system || ctx.permissions().is_some_and(|p| p.is_system_admin)
     });
     if is_operator {
         Ok(())

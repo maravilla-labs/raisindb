@@ -431,8 +431,14 @@ mod tests {
             .await
             .unwrap();
 
-        let early = HLC { timestamp_ms: 100, counter: 0 };
-        let late = HLC { timestamp_ms: 200, counter: 0 };
+        let early = HLC {
+            timestamp_ms: 100,
+            counter: 0,
+        };
+        let late = HLC {
+            timestamp_ms: 200,
+            counter: 0,
+        };
 
         r.update_head("t", "repo", "main", late).await.unwrap();
         assert_eq!(r.get_head("t", "repo", "main").await.unwrap(), late);
