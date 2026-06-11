@@ -14,6 +14,7 @@ import { loadConfig } from '../config.js';
 import {
   createPackageFromSelection,
   subscribeToJobEvents,
+  getJobInfo,
   getBaseUrl,
   getHeaders,
   type SelectedPath,
@@ -161,6 +162,28 @@ function CreateFromServerFlow({ repo, onComplete, onError }: CreateFromServerFlo
         }
       };
 
+      // Poll the job info endpoint until the job reaches a terminal state.
+      // Used as a fallback when the SSE stream is unavailable (e.g. proxies
+      // that buffer event streams) — the job keeps running server-side
+      // either way, so a broken stream must not fail the command.
+      let pollTimer: ReturnType<typeof setTimeout> | null = null;
+      const pollJobStatus = () => {
+        pollTimer = setTimeout(async () => {
+          const info = await getJobInfo(response.job_id!);
+          const status = info?.status?.toLowerCase() ?? '';
+          if (status.startsWith('completed')) {
+            downloadPackageFile();
+            return;
+          }
+          if (status.startsWith('failed')) {
+            setPhase('error');
+            setError(info?.error || 'Package creation failed');
+            return;
+          }
+          pollJobStatus();
+        }, 2000);
+      };
+
       // Subscribe to job events
       const cleanup = subscribeToJobEvents(
         (event: JobEvent) => {
@@ -180,9 +203,10 @@ function CreateFromServerFlow({ repo, onComplete, onError }: CreateFromServerFlo
             cleanup();
           }
         },
-        (err) => {
-          setPhase('error');
-          setError(err.message);
+        () => {
+          // SSE unavailable — switch to polling instead of failing.
+          cleanup();
+          if (!pollTimer) pollJobStatus();
         }
       );
 
@@ -190,6 +214,7 @@ function CreateFromServerFlow({ repo, onComplete, onError }: CreateFromServerFlo
       setTimeout(() => {
         if (phase === 'creating') {
           cleanup();
+          if (pollTimer) clearTimeout(pollTimer);
           setPhase('error');
           setError('Package creation timed out');
         }

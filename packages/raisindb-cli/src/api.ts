@@ -261,8 +261,20 @@ export function subscribeToJobEvents(
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}/management/events/jobs`;
 
-  // Using eventsource polyfill for Node.js (EventSource is browser-only)
-  const eventSource = new EventSourcePolyfill(url);
+  // Using eventsource polyfill for Node.js (EventSource is browser-only).
+  // The management SSE endpoints require authentication; the EventSource
+  // spec has no headers option, so inject the Authorization header through
+  // the polyfill's custom fetch hook.
+  const token = getToken();
+  const eventSource = new EventSourcePolyfill(url, {
+    fetch: (input, init) => {
+      const headers = new Headers(init?.headers);
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+      return fetch(input, { ...init, headers });
+    },
+  });
 
   // Add event listener with proper typing
   const handler = (event: Event) => {
