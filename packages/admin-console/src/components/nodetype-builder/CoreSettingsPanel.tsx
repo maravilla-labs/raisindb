@@ -2,13 +2,17 @@ import { useState, useEffect, useMemo } from 'react'
 import { useParams } from 'react-router-dom'
 import { Settings2, Plus, Trash2, GripVertical, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'
 import NodeTypePicker from '../shared/NodeTypePicker'
-import { nodeTypesApi, type NodeType } from '../../api/nodetypes'
+import { type NodeType } from '../../api/nodetypes'
+import { mixinsApi } from '../../api/mixins'
 import type { NodeTypeDefinition, IndexType, CompoundIndexDefinition, CompoundIndexColumn } from './types'
 
 interface CoreSettingsPanelProps {
   nodeType: NodeTypeDefinition
   onChange: (nodeType: NodeTypeDefinition) => void
   validationErrors: Record<string, string>
+  /** When true, hide inheritance fields (extends / mixins / allowed children).
+   *  Used when editing a mixin, which has none of these. */
+  hideInheritance?: boolean
 }
 
 // Resolved property from a mixin, with source attribution
@@ -23,6 +27,7 @@ export default function CoreSettingsPanel({
   nodeType,
   onChange,
   validationErrors,
+  hideInheritance = false,
 }: CoreSettingsPanelProps) {
   const { repo, branch: branchParam } = useParams<{ repo: string; branch?: string }>()
   const activeBranch = branchParam || 'main'
@@ -49,7 +54,7 @@ export default function CoreSettingsPanel({
       await Promise.all(
         mixins.map(async (name) => {
           try {
-            const def = await nodeTypesApi.get(repo!, activeBranch, name)
+            const def = await mixinsApi.get(repo!, activeBranch, name)
             if (!cancelled) {
               newDefs.set(name, def)
             }
@@ -186,7 +191,9 @@ export default function CoreSettingsPanel({
       <div className="px-3 py-2 border-b border-white/10">
         <div className="flex items-center gap-2">
           <Settings2 className="w-4 h-4 text-primary-400" />
-          <h3 className="text-sm font-semibold text-white">Node Type Settings</h3>
+          <h3 className="text-sm font-semibold text-white">
+            {hideInheritance ? 'Mixin Settings' : 'Node Type Settings'}
+          </h3>
         </div>
       </div>
 
@@ -220,6 +227,7 @@ export default function CoreSettingsPanel({
         </div>
 
         {/* Extends */}
+        {!hideInheritance && (
         <div>
           <label className="block text-xs font-medium text-zinc-300 mb-1">
             Extends (Parent Type)
@@ -236,14 +244,17 @@ export default function CoreSettingsPanel({
             <p className="text-xs text-red-400 mt-1">{validationErrors.extends}</p>
           )}
         </div>
+        )}
 
         {/* Mixins */}
+        {!hideInheritance && (
         <div>
           <label className="block text-xs font-medium text-zinc-300 mb-1">
             Mixins
           </label>
           <NodeTypePicker
             mode="multi"
+            source="mixins"
             value={nodeType.mixins || []}
             onChange={(value) => updateNodeType({ mixins: (value as string[]).length > 0 ? (value as string[]) : undefined })}
             excludeNames={nodeType.name ? [nodeType.name] : []}
@@ -298,6 +309,7 @@ export default function CoreSettingsPanel({
             </div>
           )}
         </div>
+        )}
 
         {/* Icon & Version */}
         <div className="grid grid-cols-2 gap-4">
@@ -591,6 +603,7 @@ export default function CoreSettingsPanel({
         </div>
 
         {/* Allowed Children */}
+        {!hideInheritance && (
         <div>
           <label className="block text-xs font-medium text-zinc-300 mb-1">
             Allowed Children
@@ -606,6 +619,7 @@ export default function CoreSettingsPanel({
             Select types that can be children of this node type. Use "Allow All" for any type.
           </p>
         </div>
+        )}
       </div>
     </div>
   )

@@ -43,6 +43,7 @@ mod handlers {
     pub mod identity_users;
     pub mod inbox;
     pub mod management;
+    pub mod mixins;
     pub mod node_types;
     pub mod packages;
     #[cfg(feature = "storage-rocksdb")]

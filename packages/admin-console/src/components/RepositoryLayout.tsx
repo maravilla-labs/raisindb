@@ -21,6 +21,7 @@ import {
   Settings,
   Wrench,
   Layers,
+  Boxes,
   Puzzle,
   Shapes,
   Shield,
@@ -102,7 +103,7 @@ export default function RepositoryLayout() {
     }
 
     // Routes with potential branch segment: /repo/branch/type/* or /repo/type/*
-    const routeTypes = ['nodetypes', 'archetypes', 'elementtypes', 'users', 'roles', 'groups', 'circles', 'relation-types', 'agents', 'packages', 'models', 'access-control']
+    const routeTypes = ['nodetypes', 'mixins', 'archetypes', 'elementtypes', 'users', 'roles', 'groups', 'circles', 'relation-types', 'agents', 'packages', 'models', 'access-control']
 
     for (const type of routeTypes) {
       // Pattern with branch: /repo/branch/type/*
@@ -128,7 +129,7 @@ export default function RepositoryLayout() {
 
   const isActive = (path: string) => location.pathname.startsWith(`/${repo}${path}`)
   const modelsActive =
-    isActive('/models') || isActive('/nodetypes') || isActive('/archetypes') || isActive('/elementtypes')
+    isActive('/models') || isActive('/nodetypes') || isActive('/mixins') || isActive('/archetypes') || isActive('/elementtypes')
   const accessControlActive =
     isActive('/users') || isActive('/roles') || isActive('/groups') || isActive('/relation-types') || isActive('/access-control') || isActive('/circles')
 
@@ -271,6 +272,7 @@ export default function RepositoryLayout() {
                 label="Models"
                 items={[
                   { to: `/${repo}/nodetypes`, icon: Tag, label: 'Node Types', active: isActive('/nodetypes') },
+                  { to: `/${repo}/mixins`, icon: Boxes, label: 'Mixins', active: isActive('/mixins') },
                   { to: `/${repo}/archetypes`, icon: Puzzle, label: 'Archetypes', active: isActive('/archetypes') },
                   { to: `/${repo}/elementtypes`, icon: Shapes, label: 'Elements', active: isActive('/elementtypes') },
                 ]}
@@ -317,6 +319,18 @@ export default function RepositoryLayout() {
                   >
                     <Tag className="w-4 h-4 flex-shrink-0" />
                     {!sidebarCollapsed && <span>Node Types</span>}
+                  </Link>
+                  <Link
+                    to={`/${repo}/mixins`}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                      isActive('/mixins')
+                        ? 'bg-primary-400/40 text-white'
+                        : 'text-white/70 hover:bg-white/5 hover:text-white'
+                    } ${sidebarCollapsed ? 'justify-center w-12 h-12' : ''}`}
+                    title={sidebarCollapsed ? 'Mixins' : ''}
+                  >
+                    <Boxes className="w-4 h-4 flex-shrink-0" />
+                    {!sidebarCollapsed && <span>Mixins</span>}
                   </Link>
                   <Link
                     to={`/${repo}/archetypes`}

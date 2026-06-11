@@ -35,12 +35,34 @@ pub struct ResolvedNodeType {
     pub resolved_properties: Vec<PropertyValueSchema>,
     /// All allowed children including inherited ones
     pub resolved_allowed_children: Vec<String>,
+    /// Effective mixin names applied to this NodeType, including those inherited
+    /// from `extends` and transitively from other mixins (deduped, order preserved)
+    pub resolved_mixins: Vec<String>,
     /// Whether this node type is indexable (merged from inheritance)
     pub resolved_indexable: bool,
     /// Which index types are enabled (merged from inheritance)
     pub resolved_index_types: Vec<IndexType>,
     /// Inheritance chain (for debugging)
     pub inheritance_chain: Vec<String>,
+}
+
+impl ResolvedNodeType {
+    /// The full "is-a" membership set for this NodeType: the type itself, its
+    /// `extends` ancestors (from `inheritance_chain`), and every effective mixin
+    /// (deduped, order preserved). Used to materialize `$supertypes` on nodes.
+    pub fn effective_supertypes(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for name in self
+            .inheritance_chain
+            .iter()
+            .chain(self.resolved_mixins.iter())
+        {
+            if !out.iter().any(|x| x == name) {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
 }
 
 /// Maximum depth of inheritance chain to prevent stack overflow

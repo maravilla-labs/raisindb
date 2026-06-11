@@ -71,7 +71,15 @@ impl<S: Storage> NodeTypeResolver<S> {
                 })?;
 
             let mut resolved_allowed_children = Vec::new();
+            let mut resolved_mixins: Vec<String> = Vec::new();
             let mut property_map: HashMap<String, PropertyValueSchema> = HashMap::new();
+
+            // Helper to append a mixin name without duplicates, preserving order
+            fn push_mixin(list: &mut Vec<String>, name: &str) {
+                if !list.iter().any(|m| m == name) {
+                    list.push(name.to_string());
+                }
+            }
 
             let mut resolved_indexable = true;
             let mut resolved_index_types: Vec<IndexType> =
@@ -89,6 +97,9 @@ impl<S: Storage> NodeTypeResolver<S> {
                     }
                 }
                 resolved_allowed_children.extend(parent_resolved.resolved_allowed_children);
+                for mixin in parent_resolved.resolved_mixins {
+                    push_mixin(&mut resolved_mixins, &mixin);
+                }
                 resolved_indexable = parent_resolved.resolved_indexable;
                 resolved_index_types = parent_resolved.resolved_index_types;
             }
@@ -118,6 +129,12 @@ impl<S: Storage> NodeTypeResolver<S> {
                         if !resolved_allowed_children.contains(&child) {
                             resolved_allowed_children.push(child);
                         }
+                    }
+
+                    // Record the mixin itself plus any mixins it transitively applies
+                    push_mixin(&mut resolved_mixins, mixin_name);
+                    for inner in mixin_resolved.resolved_mixins {
+                        push_mixin(&mut resolved_mixins, &inner);
                     }
 
                     if !mixin_resolved.resolved_indexable {
@@ -171,6 +188,7 @@ impl<S: Storage> NodeTypeResolver<S> {
                 node_type,
                 resolved_properties,
                 resolved_allowed_children,
+                resolved_mixins,
                 resolved_indexable,
                 resolved_index_types,
                 inheritance_chain: chain.clone(),

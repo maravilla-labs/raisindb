@@ -15,6 +15,7 @@ impl Default for FunctionRegistry {
         super::builtins_search::register(&mut registry);
         super::builtins_scalar::register(&mut registry);
         super::builtins_system::register(&mut registry);
+        super::builtins_type_check::register(&mut registry);
 
         registry
     }

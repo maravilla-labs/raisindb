@@ -158,6 +158,20 @@ interface RaisinNode {
    * @param data - Resource (from resize()), or { base64, mimeType, name }
    */
   addResource(propertyPath: string, data: Resource | ResourceUploadData | string): Promise<any>;
+
+  /**
+   * True if this node carries the given mixin (type-declared, transitively).
+   * Backed by the server-materialized effective-mixin set.
+   * @param mixinName - e.g., "studio:SEO"
+   */
+  hasMixin(mixinName: string): boolean;
+
+  /**
+   * True if this node "is a" given type — its node_type, any `extends` ancestor,
+   * or any effective mixin.
+   * @param typeName - e.g., "studio:Folder"
+   */
+  isNodeType(typeName: string): boolean;
 }
 
 interface ResourceUploadData {

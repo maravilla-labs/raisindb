@@ -49,8 +49,12 @@ impl<S: Storage> NodeValidator<S> {
             .filter_map(|schema| schema.name.as_deref().map(|n| (n, ())))
             .collect();
 
-        // Check each node property is defined in schema
+        // Check each node property is defined in schema. Reserved ($-prefixed)
+        // keys are server-computed metadata (e.g. $mixins) and are exempt.
         for key in node.properties.keys() {
+            if raisin_models::nodes::is_reserved_property_key(key) {
+                continue;
+            }
             if !allowed_properties.contains_key(key.as_str()) {
                 return Err(Error::Validation(format!(
                     "Undefined property '{}' in strict mode for NodeType '{}'",

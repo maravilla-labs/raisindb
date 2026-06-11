@@ -171,4 +171,47 @@ mod tests {
             "relations should be empty Vec from default"
         );
     }
+
+    #[test]
+    fn test_effective_types_stamp_and_query() {
+        let mut node = Node {
+            node_type: "studio:Article".to_string(),
+            ..Default::default()
+        };
+
+        // A spoofed client value must be wiped before stamping.
+        node.properties.insert(
+            "$mixins".to_string(),
+            PropertyValue::Array(vec![PropertyValue::String("evil:Admin".to_string())]),
+        );
+        node.strip_reserved_properties();
+        assert!(node.effective_mixins().is_empty());
+
+        node.set_effective_types(
+            vec!["studio:SEO".to_string(), "studio:Timestamps".to_string()],
+            vec![
+                "studio:Article".to_string(),
+                "studio:Content".to_string(),
+                "studio:SEO".to_string(),
+                "studio:Timestamps".to_string(),
+            ],
+        );
+
+        // has_mixin reads $mixins
+        assert!(node.has_mixin("studio:SEO"));
+        assert!(node.has_mixin("studio:Timestamps"));
+        assert!(!node.has_mixin("evil:Admin"));
+        assert!(!node.has_mixin("studio:Article")); // node_type is not a mixin
+
+        // is_a reads node_type + $supertypes
+        assert!(node.is_a("studio:Article")); // own node_type
+        assert!(node.is_a("studio:Content")); // extends ancestor
+        assert!(node.is_a("studio:SEO")); // via mixin
+        assert!(!node.is_a("studio:Unrelated"));
+
+        assert_eq!(
+            node.effective_mixins(),
+            vec!["studio:SEO".to_string(), "studio:Timestamps".to_string()]
+        );
+    }
 }

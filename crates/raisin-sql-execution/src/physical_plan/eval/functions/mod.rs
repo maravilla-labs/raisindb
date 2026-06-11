@@ -28,6 +28,7 @@ mod string;
 mod system;
 mod temporal;
 mod traits;
+mod type_check;
 
 // Re-export public API
 pub use registry::FunctionRegistry;
@@ -103,6 +104,7 @@ static FUNCTIONS: LazyLock<FunctionRegistry> = LazyLock::new(|| {
     temporal::register_functions(&mut registry);
     system::register_functions(&mut registry);
     geospatial::register_functions(&mut registry);
+    type_check::register_functions(&mut registry);
 
     tracing::info!(
         "Initialized SQL function registry with {} functions",

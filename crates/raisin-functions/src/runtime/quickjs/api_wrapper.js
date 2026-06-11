@@ -184,6 +184,22 @@ function wrapNode(nodeData, workspace) {
     return {
         ...nodeData,
 
+        // True if this node carries the given mixin (type-declared, transitively).
+        // Reads the server-materialized `$mixins` set.
+        hasMixin(mixinName) {
+            const mixins = this.properties?.['$mixins'];
+            return Array.isArray(mixins) && mixins.includes(mixinName);
+        },
+
+        // True if this node "is a" given type — its node_type, any `extends`
+        // ancestor, or any effective mixin.
+        // Reads the server-materialized `$supertypes` set.
+        isNodeType(typeName) {
+            if (this.node_type === typeName) return true;
+            const supertypes = this.properties?.['$supertypes'];
+            return Array.isArray(supertypes) && supertypes.includes(typeName);
+        },
+
         // Get a Resource object from a property path (e.g., "./file" or "file")
         getResource(propertyPath) {
             const path = propertyPath.startsWith('./') ? propertyPath.slice(2) : propertyPath;

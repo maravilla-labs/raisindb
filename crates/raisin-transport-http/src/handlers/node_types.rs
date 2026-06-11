@@ -49,7 +49,10 @@ pub struct NodeTypeWriteRequest {
     pub commit: Option<NodeTypeCommitPayload>,
 }
 
-fn resolve_commit(payload: Option<NodeTypeCommitPayload>, fallback: String) -> CommitMetadata {
+pub(crate) fn resolve_commit(
+    payload: Option<NodeTypeCommitPayload>,
+    fallback: String,
+) -> CommitMetadata {
     match payload {
         Some(p) => CommitMetadata {
             message: p.message,
@@ -163,7 +166,10 @@ pub async fn list_node_types(
 
     let scope = BranchScope::new(tenant_id, repo_id, branch_name);
 
-    let node_types = state.storage().node_types().list(scope, None).await?;
+    let mut node_types = state.storage().node_types().list(scope, None).await?;
+    // Mixins are NodeTypes with is_mixin=true; they are managed via /mixins, so
+    // exclude them from the plain NodeType listing to avoid double-listing.
+    node_types.retain(|nt| nt.is_mixin != Some(true));
 
     tracing::debug!(
         target: "raisin_http::node_types",
@@ -198,11 +204,13 @@ pub async fn list_published_node_types(
 
     let scope = BranchScope::new(tenant_id, repo_id, branch_name);
 
-    let node_types = state
+    let mut node_types = state
         .storage()
         .node_types()
         .list_published(scope, None)
         .await?;
+    // Exclude mixins (is_mixin=true) — they are managed via /mixins.
+    node_types.retain(|nt| nt.is_mixin != Some(true));
 
     tracing::debug!(
         target: "raisin_http::node_types",
@@ -296,6 +304,7 @@ pub async fn get_resolved_node_type(
         "node_type": resolved.node_type,
         "resolved_properties": resolved.resolved_properties,
         "resolved_allowed_children": resolved.resolved_allowed_children,
+        "resolved_mixins": resolved.resolved_mixins,
         "inheritance_chain": resolved.inheritance_chain,
     });
 

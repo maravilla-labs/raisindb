@@ -46,6 +46,8 @@ pub struct PackageProvides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nodetypes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mixins: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspaces: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<Vec<String>>,
@@ -145,6 +147,17 @@ pub(crate) fn build_package_properties(
                     nodetypes
                         .iter()
                         .map(|nt| PropertyValue::String(nt.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(mixins) = &provides.mixins {
+            provides_obj.insert(
+                "mixins".to_string(),
+                PropertyValue::Array(
+                    mixins
+                        .iter()
+                        .map(|m| PropertyValue::String(m.clone()))
                         .collect(),
                 ),
             );

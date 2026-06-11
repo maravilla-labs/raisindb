@@ -8,6 +8,7 @@ mod builtins_json;
 mod builtins_scalar;
 mod builtins_search;
 mod builtins_system;
+mod builtins_type_check;
 mod registry;
 mod types;
 

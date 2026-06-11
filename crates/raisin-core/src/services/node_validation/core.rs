@@ -95,6 +95,18 @@ impl<S: Storage> NodeValidator<S> {
 
     /// Validate a node against its NodeType schema
     pub async fn validate_node(&self, workspace: &str, node: &Node) -> Result<()> {
+        self.validate_node_resolved(workspace, node).await.map(|_| ())
+    }
+
+    /// Validate a node against its NodeType schema and return the resolved NodeType.
+    ///
+    /// Callers on the write path use the returned [`ResolvedNodeType`] to materialize
+    /// the node's effective mixin / supertype sets without resolving a second time.
+    pub async fn validate_node_resolved(
+        &self,
+        workspace: &str,
+        node: &Node,
+    ) -> Result<ResolvedNodeType> {
         // Resolve the NodeType with full inheritance (now repository-level)
         let resolved = self
             .resolver
@@ -120,7 +132,7 @@ impl<S: Storage> NodeValidator<S> {
         self.validate_element_types(node, &mut element_type_cache)
             .await?;
 
-        Ok(())
+        Ok(resolved)
     }
 
     /// Validate that the NodeType exists (without checking if published)

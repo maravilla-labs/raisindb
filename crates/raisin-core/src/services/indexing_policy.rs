@@ -111,6 +111,7 @@ mod tests {
             node_type: minimal_node_type("test:Type"),
             resolved_properties: properties,
             resolved_allowed_children: vec![],
+            resolved_mixins: vec![],
             resolved_indexable: indexable,
             resolved_index_types: index_types,
             inheritance_chain: vec!["test:Type".to_string()],

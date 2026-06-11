@@ -47,6 +47,31 @@ pub(crate) fn management_routes(_state: &AppState) -> Router<AppState> {
             post(crate::handlers::node_types::unpublish_node_type),
         )
         // ----------------------------------------------------------------
+        // Mixin management (NodeTypes with is_mixin=true)
+        // ----------------------------------------------------------------
+        .route(
+            "/api/management/{repo}/{branch}/mixins",
+            post(crate::handlers::mixins::create_mixin).get(crate::handlers::mixins::list_mixins),
+        )
+        .route(
+            "/api/management/{repo}/{branch}/mixins/published",
+            get(crate::handlers::mixins::list_published_mixins),
+        )
+        .route(
+            "/api/management/{repo}/{branch}/mixins/{name}",
+            get(crate::handlers::mixins::get_mixin)
+                .put(crate::handlers::mixins::update_mixin)
+                .delete(crate::handlers::mixins::delete_mixin),
+        )
+        .route(
+            "/api/management/{repo}/{branch}/mixins/{name}/publish",
+            post(crate::handlers::mixins::publish_mixin),
+        )
+        .route(
+            "/api/management/{repo}/{branch}/mixins/{name}/unpublish",
+            post(crate::handlers::mixins::unpublish_mixin),
+        )
+        // ----------------------------------------------------------------
         // Archetype management
         // ----------------------------------------------------------------
         .route(

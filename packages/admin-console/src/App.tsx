@@ -17,6 +17,8 @@ import WorkspaceSelector from './pages/WorkspaceSelector'
 import BranchManagement from './pages/BranchManagement'
 import NodeTypes from './pages/NodeTypes'
 import NodeTypeEditor from './pages/NodeTypeEditor'
+import Mixins from './pages/Mixins'
+import MixinEditor from './pages/MixinEditor'
 import Archetypes from './pages/Archetypes'
 import ArchetypeEditor from './pages/ArchetypeEditor'
 import ElementTypes from './pages/ElementTypes'
@@ -103,6 +105,14 @@ function App() {
           <Route path=":branch/nodetypes/new" element={<NodeTypeEditor />} />
           <Route path="nodetypes/:name" element={<NodeTypeEditor />} />
           <Route path=":branch/nodetypes/:name" element={<NodeTypeEditor />} />
+
+          {/* Mixin routes (NodeTypes with is_mixin=true) */}
+          <Route path="mixins" element={<Mixins />} />
+          <Route path=":branch/mixins" element={<Mixins />} />
+          <Route path="mixins/new" element={<MixinEditor />} />
+          <Route path=":branch/mixins/new" element={<MixinEditor />} />
+          <Route path="mixins/:name" element={<MixinEditor />} />
+          <Route path=":branch/mixins/:name" element={<MixinEditor />} />
           {/* Archetype routes */}
           <Route path="archetypes" element={<Archetypes />} />
           <Route path=":branch/archetypes" element={<Archetypes />} />

@@ -230,15 +230,11 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         parent_path: &str,
         mut node: models::nodes::Node,
     ) -> Result<models::nodes::Node> {
-        // Validate NodeType exists and validate node against schema
+        // Validate NodeType exists, validate node against schema, and stamp the
+        // materialized effective-mixin / supertype membership sets.
         // NOTE: RocksDB transaction layer also validates, but InMemoryStorage doesn't,
         // so we validate here as well for consistent behavior across backends.
-        self.validator
-            .validate_node_type_exists(&node.node_type)
-            .await?;
-        self.validator
-            .validate_node(&self.workspace_id, &node)
-            .await?;
+        self.validate_and_stamp(&mut node).await?;
 
         // Sanitize the node name
         let clean_name = sanitize_name(&node.name)?;

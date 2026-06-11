@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
 use raisin_storage::{transactional::TransactionalStorage, Storage};
@@ -159,5 +160,34 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
     /// direct storage access is needed.
     pub fn storage(&self) -> &Arc<S> {
         &self.storage
+    }
+
+    /// Validate a node against its NodeType and stamp the materialized
+    /// effective-mixin / supertype membership sets used by `has_mixin()` /
+    /// `is_a()`.
+    ///
+    /// This is the single write-path choke point: it checks the NodeType exists,
+    /// runs full schema validation, and — reusing the same resolution — writes the
+    /// reserved `$mixins` / `$supertypes` properties onto the node. Any
+    /// client-supplied reserved properties are stripped first so they can't be
+    /// spoofed.
+    pub(crate) async fn validate_and_stamp(
+        &self,
+        node: &mut raisin_models::nodes::Node,
+    ) -> Result<()> {
+        // Never trust client-supplied membership sets.
+        node.strip_reserved_properties();
+
+        self.validator
+            .validate_node_type_exists(&node.node_type)
+            .await?;
+        let resolved = self
+            .validator
+            .validate_node_resolved(&self.workspace_id, node)
+            .await?;
+
+        let supertypes = resolved.effective_supertypes();
+        node.set_effective_types(resolved.resolved_mixins.clone(), supertypes);
+        Ok(())
     }
 }

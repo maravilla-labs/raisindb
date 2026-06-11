@@ -241,6 +241,12 @@ async fn test_mixin_composition() {
     let resolved = resolver.resolve("test:Article").await.unwrap();
 
     assert_eq!(resolved.resolved_properties.len(), 4);
+
+    // Effective mixins are recorded in declaration order
+    assert_eq!(
+        resolved.resolved_mixins,
+        vec!["test:Timestamped".to_string(), "test:Taggable".to_string()]
+    );
 }
 
 #[tokio::test]

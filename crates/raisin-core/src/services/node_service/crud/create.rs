@@ -71,15 +71,11 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             }
         }
 
-        // Validate NodeType exists and validate node against schema
+        // Validate NodeType exists, validate node against schema, and stamp the
+        // materialized effective-mixin / supertype membership sets.
         // NOTE: RocksDB transaction layer also validates, but InMemoryStorage doesn't,
         // so we validate here as well for consistent behavior across backends.
-        self.validator
-            .validate_node_type_exists(&node.node_type)
-            .await?;
-        self.validator
-            .validate_node(&self.workspace_id, &node)
-            .await?;
+        self.validate_and_stamp(&mut node).await?;
 
         // Validate and sanitize path
         if node.path.is_empty() {
@@ -266,15 +262,11 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             )));
         }
 
-        // Validate NodeType exists and validate node against schema
+        // Validate NodeType exists, validate node against schema, and stamp the
+        // materialized effective-mixin / supertype membership sets.
         // NOTE: RocksDB transaction layer also validates, but InMemoryStorage doesn't,
         // so we validate here as well for consistent behavior across backends.
-        self.validator
-            .validate_node_type_exists(&node.node_type)
-            .await?;
-        self.validator
-            .validate_node(&self.workspace_id, &node)
-            .await?;
+        self.validate_and_stamp(&mut node).await?;
 
         // Validate and sanitize path
         if node.path.is_empty() {

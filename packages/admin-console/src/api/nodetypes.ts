@@ -6,6 +6,7 @@ export interface NodeType {
   version?: number
   extends?: string
   mixins?: string[]
+  is_mixin?: boolean
   strict?: boolean
   overrides?: any
   description?: string

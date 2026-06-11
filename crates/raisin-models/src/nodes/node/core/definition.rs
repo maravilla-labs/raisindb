@@ -26,6 +26,34 @@ fn default_version() -> i32 {
 /// This ID is automatically created when a workspace is initialized.
 pub const ROOT_NODE_ID: &str = "M2016N2019L2022T";
 
+/// Reserved property key holding the node's effective mixin names, materialized on
+/// write from the resolved NodeType. Backs `has_mixin()` / `node.hasMixin()`.
+pub const RESERVED_MIXINS_KEY: &str = "$mixins";
+
+/// Reserved property key holding the node's full "is-a" membership set: its
+/// node_type, all `extends` ancestors, and every effective mixin. Backs `is_a()`
+/// / `node.isNodeType()`.
+pub const RESERVED_SUPERTYPES_KEY: &str = "$supertypes";
+
+/// Reserved property keys are server-computed metadata and must never be trusted
+/// from client input. The convention is a leading `$`.
+pub fn is_reserved_property_key(key: &str) -> bool {
+    key.starts_with('$')
+}
+
+fn read_string_array(properties: &HashMap<String, PropertyValue>, key: &str) -> Vec<String> {
+    match properties.get(key) {
+        Some(PropertyValue::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                PropertyValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// A content node in RaisinDB's hierarchical structure
 ///
 /// Nodes are the primary content entities, organized in a tree structure within workspaces.
@@ -342,5 +370,43 @@ impl Node {
 
     pub fn get_properties(&self) -> Properties<'_> {
         Properties::new(&self.properties)
+    }
+
+    /// Stamp the materialized effective-mixin and supertype membership sets onto
+    /// this node. Server-computed only; call after schema validation.
+    pub fn set_effective_types(&mut self, mixins: Vec<String>, supertypes: Vec<String>) {
+        self.properties.insert(
+            RESERVED_MIXINS_KEY.to_string(),
+            PropertyValue::Array(mixins.into_iter().map(PropertyValue::String).collect()),
+        );
+        self.properties.insert(
+            RESERVED_SUPERTYPES_KEY.to_string(),
+            PropertyValue::Array(supertypes.into_iter().map(PropertyValue::String).collect()),
+        );
+    }
+
+    /// Remove all reserved (`$`-prefixed) properties. Used to strip
+    /// client-supplied values before re-stamping on write.
+    pub fn strip_reserved_properties(&mut self) {
+        self.properties.retain(|k, _| !is_reserved_property_key(k));
+    }
+
+    /// The node's effective mixin names (materialized).
+    pub fn effective_mixins(&self) -> Vec<String> {
+        read_string_array(&self.properties, RESERVED_MIXINS_KEY)
+    }
+
+    /// True if this node carries the given mixin (by exact name).
+    pub fn has_mixin(&self, mixin_name: &str) -> bool {
+        self.effective_mixins().iter().any(|m| m == mixin_name)
+    }
+
+    /// True if this node is of the given type — its node_type, any `extends`
+    /// ancestor, or any effective mixin.
+    pub fn is_a(&self, type_name: &str) -> bool {
+        self.node_type == type_name
+            || read_string_array(&self.properties, RESERVED_SUPERTYPES_KEY)
+                .iter()
+                .any(|t| t == type_name)
     }
 }

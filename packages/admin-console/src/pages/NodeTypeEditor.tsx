@@ -45,6 +45,44 @@ import {
   type ResolvedNodeType,
   type NodeTypeCommitPayload,
 } from '../api/nodetypes'
+import { mixinsApi } from '../api/mixins'
+
+// The same editor drives both NodeTypes and Mixins (NodeTypes with is_mixin=true).
+// `kind` selects the API, route base, labels, and which panels are shown.
+export type EditorKind = 'nodetype' | 'mixin'
+
+interface EditorKindConfig {
+  api: {
+    get: (repo: string, branch: string, name: string) => Promise<NodeType>
+    create: (repo: string, branch: string, nt: NodeType, commit?: NodeTypeCommitPayload) => Promise<NodeType>
+    update: (repo: string, branch: string, name: string, nt: NodeType, commit?: NodeTypeCommitPayload) => Promise<NodeType>
+  }
+  basePath: string
+  typeLabel: string
+  listLabel: string
+  // Mixins have no inheritance, so they hide the extends/mixins/allowed-children
+  // settings and the "Resolved" view.
+  supportsInheritance: boolean
+}
+
+function editorConfig(kind: EditorKind): EditorKindConfig {
+  if (kind === 'mixin') {
+    return {
+      api: mixinsApi,
+      basePath: 'mixins',
+      typeLabel: 'Mixin',
+      listLabel: 'Mixins',
+      supportsInheritance: false,
+    }
+  }
+  return {
+    api: nodeTypesApi,
+    basePath: 'nodetypes',
+    typeLabel: 'Node Type',
+    listLabel: 'Node Types',
+    supportsInheritance: true,
+  }
+}
 
 // Helper functions for path manipulation
 interface PathSegment {
@@ -349,7 +387,8 @@ const DEFAULT_NODE_TYPE: NodeTypeDefinition = {
 }
 
 // Inner component that uses context
-function NodeTypeEditorContent() {
+function NodeTypeEditorContent({ kind = 'nodetype' }: { kind?: EditorKind }) {
+  const cfg = editorConfig(kind)
   const { repo, branch, name } = useParams<{ repo: string; branch?: string; name: string }>()
   const activeBranch = branch || 'main'
   const navigate = useNavigate()
@@ -596,18 +635,18 @@ function NodeTypeEditorContent() {
       let saved: NodeType
 
       if (pendingCommit.action === 'create') {
-        saved = await nodeTypesApi.create(repo, activeBranch, pendingCommit.nodeType, commit)
-        showSuccess('Created', 'Node type created successfully!')
-        navigate(`/${repo}/nodetypes/${saved.name}`)
+        saved = await cfg.api.create(repo, activeBranch, pendingCommit.nodeType, commit)
+        showSuccess('Created', `${cfg.typeLabel} created successfully!`)
+        navigate(`/${repo}/${cfg.basePath}/${saved.name}`)
       } else {
-        saved = await nodeTypesApi.update(
+        saved = await cfg.api.update(
           repo,
           activeBranch,
           pendingCommit.targetName,
           pendingCommit.nodeType,
           commit
         )
-        showSuccess('Updated', 'Node type updated successfully!')
+        showSuccess('Updated', `${cfg.typeLabel} updated successfully!`)
         setCurrentNodeType(saved)
       }
 
@@ -624,7 +663,7 @@ function NodeTypeEditorContent() {
   const loadResolved = async () => {
     if (!name || !repo) return
     try {
-      const data = await nodeTypesApi.getResolved(repo, activeBranch, name)
+      const data = await nodeTypesApi.getResolved(repo, activeBranch, name!)
       setResolved(data)
       setShowResolved(true)
     } catch (error) {
@@ -642,9 +681,9 @@ function NodeTypeEditorContent() {
       <div className="h-full flex flex-col">
         {/* Toolbar */}
         <BuilderToolbar
-          title={isNew ? 'New Node Type' : currentNodeType?.name ?? name ?? 'Node Type'}
+          title={isNew ? `New ${cfg.typeLabel}` : currentNodeType?.name ?? name ?? cfg.typeLabel}
           icon={<FileType className="w-5 h-5 text-primary-300" />}
-          backLink={{ to: `/${repo}/nodetypes`, label: 'Node Types' }}
+          backLink={{ to: `/${repo}/${cfg.basePath}`, label: cfg.listLabel }}
           status={
             <>
               {currentNodeType?.version && (
@@ -666,7 +705,7 @@ function NodeTypeEditorContent() {
           onUndo={undo}
           onRedo={redo}
           extraActions={
-            !isNew && (
+            !isNew && cfg.supportsInheritance && (
               <button
                 onClick={loadResolved}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded bg-secondary-500/20 text-secondary-300 hover:bg-secondary-500/30 transition-colors"
@@ -739,6 +778,7 @@ function NodeTypeEditorContent() {
                         nodeType={nodeType}
                         onChange={(updated) => setNodeType(updated, 'Update settings')}
                         validationErrors={validationErrors}
+                        hideInheritance={!cfg.supportsInheritance}
                       />
                     )}
                   </div>
@@ -780,11 +820,11 @@ function NodeTypeEditorContent() {
 
       {pendingCommit && (
         <CommitDialog
-          title={isNew ? 'Create Node Type' : 'Update Node Type'}
+          title={isNew ? `Create ${cfg.typeLabel}` : `Update ${cfg.typeLabel}`}
           action={
             pendingCommit.action === 'create'
-              ? `Creating new node type "${pendingCommit.nodeType.name}"`
-              : `Updating node type "${pendingCommit.targetName}"`
+              ? `Creating new ${cfg.typeLabel.toLowerCase()} "${pendingCommit.nodeType.name}"`
+              : `Updating ${cfg.typeLabel.toLowerCase()} "${pendingCommit.targetName}"`
           }
           onCommit={executeCommit}
           onClose={() => setPendingCommit(null)}
@@ -859,7 +899,8 @@ function NodeTypeEditorContent() {
 }
 
 // Wrapper that loads nodeType and provides context
-export default function NodeTypeEditor() {
+export default function NodeTypeEditor({ kind = 'nodetype' }: { kind?: EditorKind }) {
+  const cfg = editorConfig(kind)
   const { repo, branch, name } = useParams<{ repo: string; branch?: string; name: string }>()
   const activeBranch = branch || 'main'
   const navigate = useNavigate()
@@ -883,12 +924,12 @@ export default function NodeTypeEditor() {
       setError(null)
 
       try {
-        const data = await nodeTypesApi.get(repo!, activeBranch, name!)
+        const data = await cfg.api.get(repo!, activeBranch, name!)
         const definition = parseYamlToNodeType(yaml.dump(data, { indent: 2 }))
         setInitialNodeType(definition)
       } catch (err) {
-        console.error('Failed to load node type:', err)
-        setError('Failed to load node type')
+        console.error(`Failed to load ${cfg.typeLabel.toLowerCase()}:`, err)
+        setError(`Failed to load ${cfg.typeLabel.toLowerCase()}`)
       } finally {
         setLoading(false)
       }
@@ -898,7 +939,7 @@ export default function NodeTypeEditor() {
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-zinc-400">Loading node type...</div>
+        <div className="text-zinc-400">Loading {cfg.typeLabel.toLowerCase()}...</div>
       </div>
     )
   }
@@ -909,10 +950,10 @@ export default function NodeTypeEditor() {
         <div className="text-center">
           <div className="text-red-400 mb-4">{error}</div>
           <button
-            onClick={() => navigate(`/${repo}/nodetypes`)}
+            onClick={() => navigate(`/${repo}/${cfg.basePath}`)}
             className="px-4 py-2 bg-primary-500 text-white rounded hover:bg-primary-600"
           >
-            Back to Node Types
+            Back to {cfg.listLabel}
           </button>
         </div>
       </div>
@@ -926,7 +967,7 @@ export default function NodeTypeEditor() {
         // State is managed internally by context
       }}
     >
-      <NodeTypeEditorContent />
+      <NodeTypeEditorContent kind={kind} />
     </NodeTypeBuilderProvider>
   )
 }

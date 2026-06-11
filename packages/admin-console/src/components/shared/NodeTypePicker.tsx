@@ -10,6 +10,7 @@ import { useParams } from 'react-router-dom'
 import { FileType } from 'lucide-react'
 import { TypePicker, type SelectionMode, type PickableType } from './type-picker'
 import { nodeTypesApi, type NodeType } from '../../api/nodetypes'
+import { mixinsApi } from '../../api/mixins'
 
 interface NodeTypePickerProps {
   mode: SelectionMode
@@ -26,6 +27,8 @@ interface NodeTypePickerProps {
   excludeNames?: string[]
   /** If true, only show published node types. Default: false (show all) */
   publishedOnly?: boolean
+  /** Which catalog to list from. Default: 'nodetypes'. Use 'mixins' to pick mixins. */
+  source?: 'nodetypes' | 'mixins'
 }
 
 /**
@@ -52,6 +55,7 @@ export default function NodeTypePicker({
   error,
   excludeNames = [],
   publishedOnly = false,
+  source = 'nodetypes',
 }: NodeTypePickerProps) {
   const { repo, branch } = useParams<{ repo: string; branch?: string }>()
   const activeBranch = branch || 'main'
@@ -70,13 +74,14 @@ export default function NodeTypePicker({
       try {
         setLoading(true)
         setLoadError(null)
+        const catalog = source === 'mixins' ? mixinsApi : nodeTypesApi
         // Use list (all) or listPublished based on publishedOnly prop
         const data = publishedOnly
-          ? await nodeTypesApi.listPublished(repo, activeBranch)
-          : await nodeTypesApi.list(repo, activeBranch)
+          ? await catalog.listPublished(repo, activeBranch)
+          : await catalog.list(repo, activeBranch)
         setNodeTypes(data)
       } catch (err) {
-        console.error('Failed to load node types:', err)
+        console.error('Failed to load types:', err)
         setLoadError('Failed to load types')
       } finally {
         setLoading(false)
@@ -84,7 +89,7 @@ export default function NodeTypePicker({
     }
 
     loadNodeTypes()
-  }, [repo, activeBranch, publishedOnly])
+  }, [repo, activeBranch, publishedOnly, source])
 
   // Filter out excluded names and convert to pickable items
   const items: PickableType[] = nodeTypes
