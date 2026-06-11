@@ -1197,6 +1197,72 @@ const IN_FLIGHT_DISPATCH_PHASES = new Set([
   'ready_for_model',
 ]);
 
+// Stale-turn recovery thresholds.
+//
+// A turn whose continuation event is lost (e.g. the aggregated_result trigger
+// never reached agent-continue-handler because of a restart or a dropped
+// trigger-evaluation job) stays non-terminal FOREVER, and the in-flight guard
+// then queues every subsequent user message — the chat is dead until manual
+// intervention. (Production incident chat-5494d4d7: weather tool completed in
+// 44ms, aggregated_result persisted, but no continue-3 turn was ever created;
+// continue-2 stayed at dispatch_phase=awaiting_results and all later user
+// messages were stuck in orchestration_queue_state=queued.)
+//
+// Tier 1: aggregation already finished (aggregated_result exists) but the
+//         continuation never started. The only remaining step is a model call
+//         that normally takes seconds — if nothing has progressed within the
+//         grace window, the continuation event is gone.
+const STALE_TURN_AGGREGATED_GRACE_MS = 2 * 60 * 1000;
+// Tier 2: hard ceiling for any in-flight turn. Past the job watchdog's
+//         full retry budget nothing legitimate is still running.
+const STALE_TURN_MAX_AGE_MS = 30 * 60 * 1000;
+
+function parseNodeTimestamp(node) {
+  const raw = node?.properties?.created_at || node?.created_at || '';
+  const ts = Date.parse(typeof raw === 'string' ? raw : String(raw));
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+/**
+ * Detect and recover an abandoned in-flight turn. Returns true when the turn
+ * was marked terminal (the caller may then proceed with the new user message
+ * instead of queueing it forever).
+ */
+async function recoverStaleInFlightTurn(workspace, latest) {
+  const createdAtMs = parseNodeTimestamp(latest);
+  const ageMs = createdAtMs > 0 ? Date.now() - createdAtMs : 0;
+
+  let staleReason = null;
+  if (createdAtMs > 0 && ageMs > STALE_TURN_MAX_AGE_MS) {
+    staleReason = 'stale_turn_max_age';
+  } else {
+    // Lost-continuation signature: aggregation done, no progress since.
+    try {
+      const agg = await raisin.nodes.get(workspace, `${latest.path}/aggregated_result`);
+      if (agg && !agg.error) {
+        const aggAtMs = parseNodeTimestamp(agg) || createdAtMs;
+        if (aggAtMs > 0 && Date.now() - aggAtMs > STALE_TURN_AGGREGATED_GRACE_MS) {
+          staleReason = 'stale_turn_lost_continuation';
+        }
+      }
+    } catch (_) { /* no aggregated_result — not the lost-continuation case */ }
+  }
+
+  if (!staleReason) return false;
+
+  log.warn('handler', 'Recovering abandoned in-flight turn', {
+    turn_path: latest.path,
+    dispatch_phase: latest?.properties?.dispatch_phase,
+    age_ms: ageMs,
+    reason: staleReason,
+  });
+  await updateOrchestrationState(workspace, latest.path, {
+    dispatch_phase: 'terminal',
+    terminal_reason_internal: staleReason,
+  });
+  return true;
+}
+
 export async function findInFlightAssistantTurn(workspace, chatPath) {
   // A turn is only "in flight" if the LATEST assistant message is still
   // non-terminal. Earlier messages in a finished tool/continuation chain are
@@ -1217,7 +1283,21 @@ export async function findInFlightAssistantTurn(workspace, chatPath) {
 
   const latest = await raisin.nodes.get(workspace, rows[0].path);
   const phase = latest?.properties?.dispatch_phase;
-  return IN_FLIGHT_DISPATCH_PHASES.has(phase) ? rows[0] : null;
+  if (!IN_FLIGHT_DISPATCH_PHASES.has(phase)) return null;
+
+  // Self-heal: a turn abandoned by a lost continuation event must not block
+  // the chat forever. If it is recovered (marked terminal), report no
+  // in-flight turn so the new user message proceeds normally.
+  try {
+    if (await recoverStaleInFlightTurn(workspace, latest)) return null;
+  } catch (err) {
+    log.warn('handler', 'Stale-turn recovery failed; keeping turn in flight', {
+      turn_path: latest?.path,
+      error: err?.message || String(err),
+    });
+  }
+
+  return rows[0];
 }
 
 // ─── Tool Call Helpers ──────────────────────────────────────────────────────

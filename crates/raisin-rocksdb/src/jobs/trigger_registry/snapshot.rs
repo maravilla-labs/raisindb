@@ -29,6 +29,17 @@ pub(crate) struct TriggerRegistrySnapshot {
     indexed_workspaces: HashSet<String>,
     indexed_node_types: HashSet<String>,
 
+    /// The (tenant, repo, branch) scope this snapshot was loaded for.
+    ///
+    /// The registry holds ONE global snapshot, but `load_snapshot` only loads
+    /// triggers from a single scope. The quick-reject is therefore only valid
+    /// for events from that same scope — events from any other scope must
+    /// fail open. (Production incident: an invalidation from another repo
+    /// swapped in that repo's snapshot, and an `aggregated_result` event from
+    /// the chat's repo was silently quick-rejected — the agent continuation
+    /// was never triggered and the conversation hung forever.)
+    pub(super) scope: Option<(String, String, String)>,
+
     /// Metadata
     pub(super) loaded_at: Instant,
     pub(super) version: u64,
@@ -46,6 +57,7 @@ impl TriggerRegistrySnapshot {
             wildcard_node_type: HashSet::new(),
             indexed_workspaces: HashSet::new(),
             indexed_node_types: HashSet::new(),
+            scope: None,
             loaded_at: Instant::now(),
             version: 0,
         }
@@ -62,6 +74,7 @@ impl TriggerRegistrySnapshot {
             wildcard_node_type: HashSet::new(),
             indexed_workspaces: HashSet::new(),
             indexed_node_types: HashSet::new(),
+            scope: None,
             loaded_at: Instant::now(),
             version,
         };
@@ -117,6 +130,27 @@ impl TriggerRegistrySnapshot {
         }
 
         snapshot
+    }
+
+    /// Scope-aware quick check (see `TriggerRegistry::could_have_matches_for_scope`).
+    ///
+    /// The quick-reject is only authoritative for the scope this snapshot was
+    /// loaded from. Events from any other (tenant, repo, branch) fail OPEN so
+    /// the trigger matcher performs the real check against storage.
+    pub(super) fn could_have_matches_scoped(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_type: &str,
+    ) -> bool {
+        match &self.scope {
+            Some((t, r, b)) if t == tenant_id && r == repo_id && b == branch => {
+                self.could_have_matches(workspace, node_type)
+            }
+            _ => true,
+        }
     }
 
     /// Check if there could be any matches for this workspace and node_type

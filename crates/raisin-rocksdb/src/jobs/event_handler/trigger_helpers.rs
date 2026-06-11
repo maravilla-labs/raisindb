@@ -36,9 +36,20 @@ impl UnifiedJobEventHandler {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Quick-reject check using cached registry
+        // Quick-reject check using cached registry.
+        //
+        // MUST be scope-aware: the cached snapshot is loaded from a single
+        // (tenant, repo, branch). Checking an event from another scope against
+        // it silently drops valid trigger events (e.g. the agent-continuation
+        // aggregated_result event), permanently hanging the conversation.
         if let Some(registry) = &self.trigger_registry {
-            if !registry.could_have_matches(&node_event.workspace_id, &node_type) {
+            if !registry.could_have_matches_for_scope(
+                &node_event.tenant_id,
+                &node_event.repository_id,
+                &node_event.branch,
+                &node_event.workspace_id,
+                &node_type,
+            ) {
                 tracing::trace!(
                     workspace = %node_event.workspace_id,
                     node_type = %node_type,

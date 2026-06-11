@@ -24,11 +24,15 @@ async function getCoordinates(city) {
   // Use 'count=1' to get the single most relevant result
   const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`;
   const response = await fetch(url);
+  if (!response.ok) throw new Error(`Geocoding request failed with status ${response.status}`);
 
   const data = await response.json();
+  // Check if any location was found BEFORE indexing into the array —
+  // indexing first turned "no results" into an opaque TypeError.
+  if (!Array.isArray(data.results) || data.results.length === 0) {
+    throw new Error("Location not found");
+  }
   const result = data.results[0];
-  // Check if any location was found
-  if (!data.results) throw new Error("Location not found");
 
   return {
     latitude: result.latitude,

@@ -39,6 +39,7 @@ use async_trait::async_trait;
 use raisin_error::{Error, Result};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Function, Module, Promise, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::debug;
@@ -120,6 +121,37 @@ impl FunctionRuntime for QuickJsRuntime {
             metadata.resource_limits.max_stack_bytes as usize,
         )
         .await;
+
+        // Wall-clock interrupt backstop inside the interpreter.
+        //
+        // The tokio-level timeout below cannot preempt JavaScript that never
+        // yields to the event loop (e.g. `while(true){}`, pathological
+        // regexes): `tokio::time::timeout` only fires between polls, and a
+        // busy loop never returns from its poll. Without this handler such
+        // code pins a tokio worker thread forever — the job watchdog can
+        // abort the task, but the abort also only lands at an await point,
+        // so every retry leaks another worker thread until the function
+        // execution semaphore is exhausted and ALL JS execution stalls.
+        //
+        // QuickJS calls the interrupt handler periodically while executing
+        // bytecode; returning `true` raises an uncatchable exception that
+        // surfaces as a normal execution error (graceful error-as-data).
+        let interrupt_deadline =
+            Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1));
+        let interrupted = Arc::new(AtomicBool::new(false));
+        {
+            let interrupted = interrupted.clone();
+            self.runtime
+                .set_interrupt_handler(Some(Box::new(move || {
+                    if Instant::now() >= interrupt_deadline {
+                        interrupted.store(true, Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
+                })))
+                .await;
+        }
 
         // Check if code uses ES6 modules
         let uses_modules = has_es6_modules(code);
@@ -371,6 +403,10 @@ impl FunctionRuntime for QuickJsRuntime {
         )
         .await;
 
+        // Remove the per-execution interrupt handler so a stale deadline
+        // cannot interrupt a later execution on a shared runtime instance.
+        self.runtime.set_interrupt_handler(None).await;
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // Collect logs
@@ -404,6 +440,23 @@ impl FunctionRuntime for QuickJsRuntime {
                 Ok(ExecutionResult::success(execution_id, output, stats).with_logs(captured_logs))
             }
             Ok(Err(e)) => {
+                // If the engine-level interrupt fired, the underlying error is
+                // an opaque "interrupted" exception — report it as the timeout
+                // it actually is.
+                if interrupted.load(Ordering::Relaxed) {
+                    tracing::debug!(
+                        execution_id = %execution_id,
+                        timeout_ms = timeout_ms,
+                        duration_ms = duration_ms,
+                        "QuickJS execution interrupted by wall-clock deadline"
+                    );
+                    return Ok(ExecutionResult::failure(
+                        execution_id,
+                        ExecutionError::timeout(timeout_ms),
+                        stats,
+                    )
+                    .with_logs(captured_logs));
+                }
                 tracing::debug!(
                     execution_id = %execution_id,
                     error = %e,

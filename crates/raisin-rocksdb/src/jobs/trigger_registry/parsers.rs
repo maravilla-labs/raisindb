@@ -80,7 +80,13 @@ impl<S: Storage> TriggerRegistry<S> {
         }
 
         let version = self.current.load().version + 1;
-        Ok(TriggerRegistrySnapshot::build_indexes(triggers, version))
+        let mut snapshot = TriggerRegistrySnapshot::build_indexes(triggers, version);
+        snapshot.scope = Some((
+            tenant_id.to_string(),
+            repo_id.to_string(),
+            branch.to_string(),
+        ));
+        Ok(snapshot)
     }
 
     /// Parse an inline trigger from a raisin:Function node

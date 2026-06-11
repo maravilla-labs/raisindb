@@ -66,6 +66,84 @@ fn test_snapshot_wildcards() {
 }
 
 #[test]
+fn test_scoped_quick_reject_fails_open_for_other_scopes() {
+    // Regression for the lost-continuation hang (production chat-5494d4d7):
+    // the global snapshot is loaded from ONE (tenant, repo, branch). After an
+    // invalidation from repo B, events from repo A were quick-rejected against
+    // B's trigger shapes and silently dropped — the agent-continue trigger
+    // never fired and the conversation hung forever. Events from a scope other
+    // than the snapshot's must fail OPEN.
+    let triggers = vec![CachedTrigger {
+        id: "trigger1".to_string(),
+        function_path: Some("/functions/test".to_string()),
+        trigger_name: "test-trigger".to_string(),
+        trigger_path: None,
+        priority: 0,
+        enabled: true,
+        event_kinds: vec!["Created".to_string()],
+        filters: TriggerFilters {
+            workspaces: Some(vec!["workspace1".to_string()]),
+            node_types: Some(vec!["test:Node".to_string()]),
+            paths: None,
+            property_filters: None,
+        },
+        max_retries: None,
+        workflow_data: None,
+    }];
+
+    let mut snapshot = TriggerRegistrySnapshot::build_indexes(triggers, 1);
+    snapshot.scope = Some((
+        "tenant-b".to_string(),
+        "repo-b".to_string(),
+        "main".to_string(),
+    ));
+
+    // Same scope: quick-reject is authoritative.
+    assert!(snapshot.could_have_matches_scoped(
+        "tenant-b",
+        "repo-b",
+        "main",
+        "workspace1",
+        "test:Node"
+    ));
+    assert!(!snapshot.could_have_matches_scoped(
+        "tenant-b",
+        "repo-b",
+        "main",
+        "ai",
+        "raisin:AIToolResult"
+    ));
+
+    // Different repo: MUST fail open even though the shape is not indexed.
+    assert!(snapshot.could_have_matches_scoped(
+        "tenant-b",
+        "repo-a",
+        "main",
+        "ai",
+        "raisin:AIToolResult"
+    ));
+    // Different tenant and branch likewise.
+    assert!(snapshot.could_have_matches_scoped(
+        "tenant-a",
+        "repo-b",
+        "main",
+        "ai",
+        "raisin:AIToolResult"
+    ));
+    assert!(snapshot.could_have_matches_scoped(
+        "tenant-b",
+        "repo-b",
+        "dev",
+        "ai",
+        "raisin:AIToolResult"
+    ));
+
+    // Unscoped snapshot (never loaded): fail open for everything.
+    let empty = TriggerRegistrySnapshot::empty();
+    assert!(empty.could_have_matches_scoped("t", "r", "b", "ai", "raisin:AIToolResult"));
+}
+
+#[test]
 fn test_get_candidates_filtering() {
     let mut triggers = vec![];
 

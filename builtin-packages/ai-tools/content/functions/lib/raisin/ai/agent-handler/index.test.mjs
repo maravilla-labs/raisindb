@@ -226,3 +226,106 @@ test('findInFlightAssistantTurn: no assistant messages is NOT in-flight', async 
   const result = await findInFlightAssistantTurn('ai', '/c');
   assert.equal(result, null);
 });
+
+test('findInFlightAssistantTurn: lost-continuation turn is recovered (aggregated_result done, no progress)', async () => {
+  // Regression for production incident chat-5494d4d7: the weather tool call
+  // completed and aggregated_result was persisted, but the continuation
+  // trigger never invoked agent-continue-handler. The turn sat at
+  // dispatch_phase=awaiting_results forever and the in-flight guard queued
+  // every subsequent user message. The guard must detect the signature
+  // (aggregated_result exists + stale) and mark the turn terminal.
+  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const updates = [];
+  globalThis.raisin = {
+    sql: { async query() { return [{ path: '/c/continue-2-reply-1' }]; } },
+    nodes: {
+      async get(_workspace, path) {
+        if (path === '/c/continue-2-reply-1') {
+          return {
+            path,
+            node_type: 'raisin:Message',
+            properties: { role: 'assistant', dispatch_phase: 'awaiting_results', created_at: tenMinAgo },
+          };
+        }
+        if (path === '/c/continue-2-reply-1/aggregated_result') {
+          return {
+            path,
+            node_type: 'raisin:AIToolResult',
+            properties: { aggregated: true, created_at: tenMinAgo },
+          };
+        }
+        return null;
+      },
+      async update(_workspace, path, body) {
+        updates.push({ path, properties: body?.properties || {} });
+      },
+    },
+  };
+  const result = await findInFlightAssistantTurn('ai', '/c');
+  assert.equal(result, null, 'recovered turn must not block the next user message');
+  const terminal = updates.find(
+    (u) => u.path === '/c/continue-2-reply-1' && u.properties.dispatch_phase === 'terminal',
+  );
+  assert.ok(terminal, 'stale turn must be marked terminal');
+  assert.equal(terminal.properties.terminal_reason_internal, 'stale_turn_lost_continuation');
+});
+
+test('findInFlightAssistantTurn: fresh awaiting_results turn with aggregated_result is still in-flight', async () => {
+  // The normal window between aggregated_result creation and the continue
+  // handler starting is milliseconds-to-seconds — a fresh turn must NOT be
+  // recovered.
+  const justNow = new Date().toISOString();
+  globalThis.raisin = {
+    sql: { async query() { return [{ path: '/c/continue-2-reply-1' }]; } },
+    nodes: {
+      async get(_workspace, path) {
+        if (path === '/c/continue-2-reply-1') {
+          return {
+            path,
+            node_type: 'raisin:Message',
+            properties: { role: 'assistant', dispatch_phase: 'awaiting_results', created_at: justNow },
+          };
+        }
+        if (path === '/c/continue-2-reply-1/aggregated_result') {
+          return { path, node_type: 'raisin:AIToolResult', properties: { aggregated: true, created_at: justNow } };
+        }
+        return null;
+      },
+      async update() {
+        throw new Error('fresh turn must not be touched');
+      },
+    },
+  };
+  const result = await findInFlightAssistantTurn('ai', '/c');
+  assert.deepEqual(result, { path: '/c/continue-2-reply-1' });
+});
+
+test('findInFlightAssistantTurn: ancient turn without aggregated_result is recovered via max-age tier', async () => {
+  const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const updates = [];
+  globalThis.raisin = {
+    sql: { async query() { return [{ path: '/c/reply-1' }]; } },
+    nodes: {
+      async get(_workspace, path) {
+        if (path === '/c/reply-1') {
+          return {
+            path,
+            node_type: 'raisin:Message',
+            properties: { role: 'assistant', dispatch_phase: 'awaiting_results', created_at: hourAgo },
+          };
+        }
+        return null; // no aggregated_result — tool never finished and the job is gone
+      },
+      async update(_workspace, path, body) {
+        updates.push({ path, properties: body?.properties || {} });
+      },
+    },
+  };
+  const result = await findInFlightAssistantTurn('ai', '/c');
+  assert.equal(result, null);
+  const terminal = updates.find(
+    (u) => u.path === '/c/reply-1' && u.properties.dispatch_phase === 'terminal',
+  );
+  assert.ok(terminal, 'ancient turn must be marked terminal');
+  assert.equal(terminal.properties.terminal_reason_internal, 'stale_turn_max_age');
+});

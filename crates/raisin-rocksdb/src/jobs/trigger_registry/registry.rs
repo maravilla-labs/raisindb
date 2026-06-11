@@ -55,6 +55,27 @@ impl<S: Storage> TriggerRegistry<S> {
         snapshot.could_have_matches(workspace, node_type)
     }
 
+    /// Scope-aware quick check for events.
+    ///
+    /// The registry holds a single global snapshot, but each snapshot is
+    /// loaded from ONE (tenant, repo, branch) scope. Quick-rejecting an event
+    /// from a *different* scope against this snapshot silently drops valid
+    /// trigger events (an invalidation from repo B swaps in B's triggers and
+    /// events from repo A stop matching). For events outside the snapshot's
+    /// scope this fails OPEN — the trigger matcher performs the authoritative
+    /// check against storage.
+    pub fn could_have_matches_for_scope(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node_type: &str,
+    ) -> bool {
+        let snapshot = self.current.load();
+        snapshot.could_have_matches_scoped(tenant_id, repo_id, branch, workspace, node_type)
+    }
+
     /// Get candidate triggers for an event
     ///
     /// Returns triggers that might match based on workspace, node_type, and event_kind.

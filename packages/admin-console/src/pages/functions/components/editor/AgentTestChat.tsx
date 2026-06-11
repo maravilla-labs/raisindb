@@ -105,6 +105,22 @@ export function AgentTestChat({ repo, branch: _branch, agentPath, agentName, age
       streamAbortRef.current = null
       assistantMessageIdRef.current = null
       setIsWaitingForResponse(false)
+      // Don't leave tool calls visually spinning forever: their
+      // tool_call_completed events will never arrive on this stream.
+      setMessages(prev =>
+        prev.map(m =>
+          m.children?.some(c => c.type === 'tool_call' && c.status === 'running')
+            ? {
+                ...m,
+                children: m.children.map(c =>
+                  c.type === 'tool_call' && c.status === 'running'
+                    ? { ...c, status: 'stalled', content: 'Status: stalled (no response from agent)' }
+                    : c,
+                ),
+              }
+            : m,
+        ),
+      )
       setError('The agent did not respond in time. Send your message again to retry.')
     }, INACTIVITY_TIMEOUT_MS)
   }, [clearInactivityTimer])

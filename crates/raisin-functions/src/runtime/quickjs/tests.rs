@@ -725,6 +725,98 @@ async fn test_raisin_nodes_transaction_rollback() {
     assert_eq!(output["rolledBack"], true);
 }
 
+// ============= Timeout / interrupt backstop =============
+
+/// A busy loop never yields to the event loop, so `tokio::time::timeout`
+/// alone can never preempt it — without the engine-level interrupt handler
+/// this test would spin a worker thread forever (the production symptom was
+/// an AI tool call stuck at status "running" while a worker thread burned
+/// 100% CPU until process restart). The interrupt handler must convert it
+/// into a graceful timeout failure within the configured budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_busy_loop_is_interrupted_at_deadline() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            let x = 0;
+            while (true) { x = (x + 1) % 1000000; }
+            return { x };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+
+    let metadata = FunctionMetadata::javascript("busy_loop_test")
+        .with_resource_limits(crate::types::ResourceLimits::default().with_timeout_ms(500));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let started = Instant::now();
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(!result.success, "busy loop must not succeed");
+    let err = result.error.expect("busy loop must produce an error");
+    assert!(
+        err.message.to_lowercase().contains("timed out")
+            || err.message.to_lowercase().contains("timeout"),
+        "error must be reported as a timeout, got: {}",
+        err.message
+    );
+    // Generous bound: deadline is 500ms; the interrupt handler fires within
+    // the interpreter's polling cadence. Anything below 10s proves the loop
+    // was preempted rather than running unbounded.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "busy loop must be interrupted near the deadline, took {:?}",
+        elapsed
+    );
+}
+
+/// A later execution on the same runtime must not be killed by the previous
+/// execution's (already expired) interrupt deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_interrupt_deadline_does_not_leak_to_next_execution() {
+    let runtime = QuickJsRuntime::new();
+
+    let spin = r#"
+        function handler(input) { while (true) {} }
+    "#;
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("spin")
+        .with_resource_limits(crate::types::ResourceLimits::default().with_timeout_ms(300));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let result = runtime
+        .execute(spin, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+    assert!(!result.success);
+
+    // Second execution with a normal budget must succeed.
+    let ok_code = r#"
+        function handler(input) { return { ok: true }; }
+    "#;
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("ok_fn");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let result = runtime
+        .execute(ok_code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+    assert!(
+        result.success,
+        "execution after an interrupted one must succeed: {:?}",
+        result.error
+    );
+    assert_eq!(result.output.unwrap()["ok"], true);
+}
+
 // ============= W3C Fetch API Tests =============
 
 #[tokio::test]
