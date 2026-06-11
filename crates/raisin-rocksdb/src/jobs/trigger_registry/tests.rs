@@ -201,3 +201,98 @@ fn test_get_candidates_filtering() {
     let candidates = snapshot.get_candidates("workspace1", "test:Node", "Deleted");
     assert_eq!(candidates.len(), 0);
 }
+
+// ───────────────────────── Per-scope snapshot cache ─────────────────────────
+
+mod snapshot_cache {
+    use super::super::registry::{ScopeKey, SnapshotCache};
+    use super::super::snapshot::TriggerRegistrySnapshot;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn key(t: &str, r: &str, b: &str) -> ScopeKey {
+        (t.to_string(), r.to_string(), b.to_string())
+    }
+
+    fn snapshot(version: u64) -> Arc<TriggerRegistrySnapshot> {
+        Arc::new(TriggerRegistrySnapshot::build_indexes(vec![], version))
+    }
+
+    #[test]
+    fn fresh_snapshot_is_served_per_scope() {
+        let cache = SnapshotCache::new(Duration::from_secs(300), 16);
+        cache.insert(key("t1", "repo-a", "main"), snapshot(1));
+        cache.insert(key("t1", "repo-b", "main"), snapshot(7));
+
+        // Each scope sees only its own snapshot.
+        assert_eq!(
+            cache
+                .get_fresh(&key("t1", "repo-a", "main"))
+                .unwrap()
+                .version,
+            1
+        );
+        assert_eq!(
+            cache
+                .get_fresh(&key("t1", "repo-b", "main"))
+                .unwrap()
+                .version,
+            7
+        );
+        // Inserting repo-b must NOT evict or replace repo-a (the old global
+        // single-snapshot design did exactly that).
+        assert!(cache.get_fresh(&key("t1", "repo-a", "main")).is_some());
+
+        // Unknown scope: no snapshot -> caller fails open.
+        assert!(cache.get_fresh(&key("t2", "repo-a", "main")).is_none());
+    }
+
+    #[test]
+    fn stale_snapshot_is_not_served() {
+        // TTL of zero: everything is immediately stale.
+        let cache = SnapshotCache::new(Duration::from_millis(0), 16);
+        cache.insert(key("t1", "repo-a", "main"), snapshot(1));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            cache.get_fresh(&key("t1", "repo-a", "main")).is_none(),
+            "stale snapshot must not be served (caller fails open)"
+        );
+        // version_for still sees the stored entry so reloads stay monotonic.
+        assert_eq!(cache.version_for(&key("t1", "repo-a", "main")), 1);
+    }
+
+    #[test]
+    fn version_is_monotonic_per_scope() {
+        let cache = SnapshotCache::new(Duration::from_secs(300), 16);
+        assert_eq!(cache.version_for(&key("t1", "r", "main")), 0);
+        cache.insert(key("t1", "r", "main"), snapshot(1));
+        assert_eq!(cache.version_for(&key("t1", "r", "main")), 1);
+        cache.insert(key("t1", "r", "main"), snapshot(2));
+        assert_eq!(cache.version_for(&key("t1", "r", "main")), 2);
+        // Other scopes keep independent version counters.
+        assert_eq!(cache.version_for(&key("t2", "r", "main")), 0);
+    }
+
+    #[test]
+    fn eviction_respects_bound_and_keeps_newest() {
+        let cache = SnapshotCache::new(Duration::from_secs(300), 3);
+        cache.insert(key("t", "r1", "main"), snapshot(1));
+        std::thread::sleep(Duration::from_millis(2));
+        cache.insert(key("t", "r2", "main"), snapshot(1));
+        std::thread::sleep(Duration::from_millis(2));
+        cache.insert(key("t", "r3", "main"), snapshot(1));
+        std::thread::sleep(Duration::from_millis(2));
+
+        // Fourth scope: bound is 3, the oldest (r1) must be evicted.
+        cache.insert(key("t", "r4", "main"), snapshot(1));
+        assert_eq!(cache.len(), 3);
+        assert!(!cache.contains(&key("t", "r1", "main")), "oldest evicted");
+        assert!(cache.contains(&key("t", "r4", "main")), "newest kept");
+
+        // Replacing an existing scope never evicts others.
+        cache.insert(key("t", "r4", "main"), snapshot(2));
+        assert_eq!(cache.len(), 3);
+        assert!(cache.contains(&key("t", "r2", "main")));
+        assert!(cache.contains(&key("t", "r3", "main")));
+    }
+}

@@ -79,13 +79,15 @@ impl<S: Storage> TriggerRegistry<S> {
             }
         }
 
-        let version = self.current.load().version + 1;
-        let mut snapshot = TriggerRegistrySnapshot::build_indexes(triggers, version);
-        snapshot.scope = Some((
+        let scope_key = (
             tenant_id.to_string(),
             repo_id.to_string(),
             branch.to_string(),
-        ));
+        );
+        // Per-scope version: monotonic within each (tenant, repo, branch)
+        let version = self.cache.version_for(&scope_key) + 1;
+        let mut snapshot = TriggerRegistrySnapshot::build_indexes(triggers, version);
+        snapshot.scope = Some(scope_key);
         Ok(snapshot)
     }
 
