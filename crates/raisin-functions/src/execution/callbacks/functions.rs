@@ -344,9 +344,15 @@ async fn execute_function_job(
         metadata,
     };
 
-    // Register FunctionExecution job
-    let job_id = job_registry
-        .register_job(
+    // Store job context BEFORE registering so dispatch can never observe
+    // the job without its context.
+    let job_id = raisin_storage::jobs::JobId::new();
+    job_data_store.put(&job_id, &context)?;
+
+    // Register FunctionExecution job under the pre-generated ID
+    job_registry
+        .register_job_with_id(
+            job_id.clone(),
             JobType::FunctionExecution {
                 function_path: function_path.to_string(),
                 trigger_name: None, // Not triggered by an event
@@ -358,9 +364,6 @@ async fn execute_function_job(
             Some(0), // max_retries=0: caller is blocked, don't retry with backoff
         )
         .await?;
-
-    // Store job context
-    job_data_store.put(&job_id, &context)?;
 
     tracing::info!(
         job_id = %job_id,

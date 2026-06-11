@@ -81,12 +81,6 @@ pub async fn complete_upload(
             commit_actor: req.commit_actor.clone(),
         };
 
-        // Register job
-        let job_id = job_registry
-            .register_job(job_type, session.tenant_id.clone(), None, None, None)
-            .await
-            .map_err(|e| ApiError::internal(format!("Failed to register completion job: {}", e)))?;
-
         // Create job context
         let job_context = JobContext {
             tenant_id: session.tenant_id.clone(),
@@ -123,15 +117,28 @@ pub async fn complete_upload(
             },
         };
 
-        // Store job context
-        if let Err(e) = job_data_store.put(&job_id, &job_context) {
-            tracing::warn!(
-                job_id = %job_id,
-                upload_id = %upload_id,
-                error = %e,
-                "Failed to store job context for upload completion"
-            );
-        }
+        // Store job context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        job_data_store.put(&job_id, &job_context).map_err(|e| {
+            ApiError::internal(format!(
+                "Failed to store job context for upload completion: {}",
+                e
+            ))
+        })?;
+
+        // Register job under the pre-generated ID
+        job_registry
+            .register_job_with_id(
+                job_id.clone(),
+                job_type,
+                session.tenant_id.clone(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to register completion job: {}", e)))?;
 
         tracing::info!(
             upload_id = %upload_id,

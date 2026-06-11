@@ -368,17 +368,26 @@ async fn register_trigger_job(
         metadata,
     };
 
-    // Register with JobRegistry
-    let job_id = rocksdb
-        .job_registry()
-        .register_job(job_type, tenant_id.to_string(), None, None, None)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    // Store context in JobDataStore
+    // Store context in JobDataStore BEFORE registering so dispatch can
+    // never observe the job without its context.
+    let job_id = raisin_storage::jobs::JobId::new();
     rocksdb
         .job_data_store()
         .put(&job_id, &context)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // Register with JobRegistry under the pre-generated ID
+    rocksdb
+        .job_registry()
+        .register_job_with_id(
+            job_id.clone(),
+            job_type,
+            tenant_id.to_string(),
+            None,
+            None,
+            None,
+        )
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(job_id)

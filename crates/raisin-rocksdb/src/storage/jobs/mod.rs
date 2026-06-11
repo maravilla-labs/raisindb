@@ -51,10 +51,15 @@ impl RocksDBStorage {
             metadata: HashMap::new(),
         };
 
-        // Register job
-        let job_id = self
-            .job_registry
-            .register_job(
+        // Store job context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        self.job_data_store.put(&job_id, &context)?;
+
+        // Register job under the pre-generated ID
+        self.job_registry
+            .register_job_with_id(
+                job_id.clone(),
                 JobType::PropertyIndexBuild {
                     tenant_id: tenant_id.to_string(),
                     repo_id: repo_id.to_string(),
@@ -67,9 +72,6 @@ impl RocksDBStorage {
                 None,
             )
             .await?;
-
-        // Store job context
-        self.job_data_store.put(&job_id, &context)?;
 
         tracing::info!(
             job_id = %job_id,

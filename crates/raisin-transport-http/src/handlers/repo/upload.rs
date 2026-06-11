@@ -249,33 +249,44 @@ async fn handle_large_package_upload<S: Storage + TransactionalStorage + 'static
                 metadata,
             };
 
-            match job_registry
-                .register_job(job_type, tenant_id.to_string(), None, None, None)
-                .await
-            {
-                Ok(job_id) => {
-                    if let Err(e) = job_data_store.put(&job_id, &job_context) {
-                        tracing::warn!(
-                            job_id = %job_id,
-                            error = %e,
-                            "Failed to store job context for large package processing"
-                        );
-                    } else {
+            // Store job context BEFORE registering so dispatch can never
+            // observe the job without its context.
+            let job_id = raisin_storage::jobs::JobId::new();
+            if let Err(e) = job_data_store.put(&job_id, &job_context) {
+                tracing::warn!(
+                    job_id = %job_id,
+                    error = %e,
+                    "Failed to store job context for large package processing"
+                );
+                None
+            } else {
+                match job_registry
+                    .register_job_with_id(
+                        job_id.clone(),
+                        job_type,
+                        tenant_id.to_string(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
                         tracing::info!(
                             job_id = %job_id,
                             package_node_id = %node_id,
                             "Enqueued PackageProcess job for large upload"
                         );
+                        Some(job_id)
                     }
-                    Some(job_id)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        package_node_id = %node_id,
-                        error = %e,
-                        "Failed to register PackageProcess job for large upload"
-                    );
-                    None
+                    Err(e) => {
+                        tracing::warn!(
+                            package_node_id = %node_id,
+                            error = %e,
+                            "Failed to register PackageProcess job for large upload"
+                        );
+                        None
+                    }
                 }
             }
         } else {

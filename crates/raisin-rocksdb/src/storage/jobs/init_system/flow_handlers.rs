@@ -41,21 +41,11 @@ pub fn create_flow_resume_callback(
                     resume_reason: Some("function_result".to_string()),
                 };
 
-                let job_id = job_registry
-                    .register_job(job, tenant_id.clone(), None, None, None)
-                    .await
-                    .map_err(|e| {
-                        raisin_error::Error::Backend(format!(
-                            "Failed to register flow resume job: {}",
-                            e
-                        ))
-                    })?;
-
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("function_result".to_string(), result);
 
                 let context = JobContext {
-                    tenant_id,
+                    tenant_id: tenant_id.clone(),
                     repo_id,
                     branch,
                     workspace_id: "raisin:system".to_string(),
@@ -63,12 +53,25 @@ pub fn create_flow_resume_callback(
                     metadata,
                 };
 
+                // Store job context BEFORE registering so dispatch can never
+                // observe the job without its context.
+                let job_id = raisin_storage::jobs::JobId::new();
                 job_data_store.put(&job_id, &context).map_err(|e| {
                     raisin_error::Error::Backend(format!(
                         "Failed to store flow resume job context: {}",
                         e
                     ))
                 })?;
+
+                job_registry
+                    .register_job_with_id(job_id.clone(), job, tenant_id, None, None, None)
+                    .await
+                    .map_err(|e| {
+                        raisin_error::Error::Backend(format!(
+                            "Failed to register flow resume job: {}",
+                            e
+                        ))
+                    })?;
 
                 tracing::info!(
                     job_id = %job_id,

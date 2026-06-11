@@ -111,18 +111,28 @@ impl BranchRepository for BranchRepositoryImpl {
                         metadata: HashMap::new(),
                     };
 
-                    match job_registry
-                        .register_job(job_type.clone(), tenant_id.to_string(), None, None, None)
-                        .await
-                    {
-                        Ok(job_id) => {
-                            if let Err(e) = job_data_store.put(&job_id, &context) {
-                                tracing::error!(
-                                    job_id = %job_id,
-                                    error = %e,
-                                    "Failed to store job context for revision history copy"
-                                );
-                            } else {
+                    // Store job context BEFORE registering so dispatch can
+                    // never observe the job without its context.
+                    let job_id = raisin_storage::jobs::JobId::new();
+                    if let Err(e) = job_data_store.put(&job_id, &context) {
+                        tracing::error!(
+                            job_id = %job_id,
+                            error = %e,
+                            "Failed to store job context for revision history copy"
+                        );
+                    } else {
+                        match job_registry
+                            .register_job_with_id(
+                                job_id.clone(),
+                                job_type.clone(),
+                                tenant_id.to_string(),
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
                                 tracing::info!(
                                     job_id = %job_id,
                                     source_branch = %source_branch_for_indexes,
@@ -131,14 +141,14 @@ impl BranchRepository for BranchRepositoryImpl {
                                     "Enqueued revision history copy job"
                                 );
                             }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                source_branch = %source_branch_for_indexes,
-                                target_branch = %branch_name,
-                                "Failed to enqueue revision history copy job"
-                            );
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    source_branch = %source_branch_for_indexes,
+                                    target_branch = %branch_name,
+                                    "Failed to enqueue revision history copy job"
+                                );
+                            }
                         }
                     }
                 } else {

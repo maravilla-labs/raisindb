@@ -200,11 +200,17 @@ impl ScheduledTriggerHandler {
                 metadata,
             };
 
+            // Store the context BEFORE registering so dispatch can never
+            // observe the job without its context.
+            let function_job_id = raisin_storage::jobs::JobId::new();
+            self.job_data_store
+                .put(&function_job_id, &function_context)?;
+
             // Enqueue the function execution job
             // TODO: Extract max_retries from scheduled trigger properties when needed
-            let function_job_id = self
-                .job_registry
-                .register_job(
+            self.job_registry
+                .register_job_with_id(
+                    function_job_id.clone(),
                     function_job_type.clone(),
                     trigger_match.tenant_id.clone(),
                     None,
@@ -212,9 +218,6 @@ impl ScheduledTriggerHandler {
                     None, // Use default max_retries for scheduled triggers
                 )
                 .await?;
-
-            self.job_data_store
-                .put(&function_job_id, &function_context)?;
 
             // Dispatch to priority queue
             let priority = function_job_type.default_priority();

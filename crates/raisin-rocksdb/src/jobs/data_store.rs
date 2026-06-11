@@ -216,6 +216,93 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// Regression test for the register-before-put race:
+    ///
+    /// `JobRegistry::register_job_with_id` lets callers store the JobContext
+    /// BEFORE the job becomes visible to dispatch. This test pins that
+    /// invariant by registering a monitor that reads the JobDataStore the
+    /// moment `on_job_created` fires (which is exactly when the dispatching
+    /// monitor would hand the job to a worker) and asserting the context is
+    /// already present.
+    #[tokio::test]
+    async fn test_context_visible_at_job_created_with_pregenerated_id() {
+        use raisin_storage::jobs::{JobInfo, JobMonitor, JobRegistry, JobType};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct ContextProbe {
+            store: JobDataStore,
+            context_present_at_creation: Arc<AtomicBool>,
+            fired: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl JobMonitor for ContextProbe {
+            async fn on_job_update(&self, _event: raisin_storage::jobs::JobEvent) {}
+
+            async fn on_job_created(&self, job: &JobInfo) {
+                let present = self
+                    .store
+                    .get(&job.tenant, &job.id)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                self.context_present_at_creation
+                    .store(present, Ordering::SeqCst);
+                self.fired.store(true, Ordering::SeqCst);
+            }
+
+            async fn on_job_removed(&self, _job_id: &JobId) {}
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::open_db(temp_dir.path()).unwrap());
+        let store = JobDataStore::new(Arc::clone(&db));
+
+        let registry = JobRegistry::new();
+        let context_present = Arc::new(AtomicBool::new(false));
+        let fired = Arc::new(AtomicBool::new(false));
+        registry
+            .monitors()
+            .add_monitor(Arc::new(ContextProbe {
+                store: store.clone(),
+                context_present_at_creation: context_present.clone(),
+                fired: fired.clone(),
+            }))
+            .await;
+
+        // Data-before-visible pattern: pre-generate ID, put context, register.
+        let job_id = JobId::new();
+        let context = create_test_context();
+        store.put(&job_id, &context).unwrap();
+
+        registry
+            .register_job_with_id(
+                job_id.clone(),
+                JobType::IntegrityScan,
+                context.tenant_id.clone(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // broadcast_created notifies monitors on spawned tasks; wait for it.
+        for _ in 0..200 {
+            if fired.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(fired.load(Ordering::SeqCst), "monitor must have fired");
+        assert!(
+            context_present.load(Ordering::SeqCst),
+            "JobContext must already be stored when the job becomes visible \
+             to dispatch (on_job_created)"
+        );
+    }
+
     #[test]
     fn test_delete_nonexistent() {
         let temp_dir = tempfile::tempdir().unwrap();

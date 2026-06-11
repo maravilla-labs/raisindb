@@ -65,14 +65,23 @@ impl FlowJobScheduler for JobQueueFlowScheduler {
             metadata,
         };
 
-        let job_id = self
-            .job_registry
-            .register_job(job_type, TENANT_ID.to_string(), None, None, None)
-            .await
-            .map_err(|e| FlowError::Other(e.to_string()))?;
-
+        // Store job context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
         self.job_data_store
             .put(&job_id, &context)
+            .map_err(|e| FlowError::Other(e.to_string()))?;
+
+        self.job_registry
+            .register_job_with_id(
+                job_id.clone(),
+                job_type,
+                TENANT_ID.to_string(),
+                None,
+                None,
+                None,
+            )
+            .await
             .map_err(|e| FlowError::Other(e.to_string()))?;
 
         Ok(job_id.to_string())

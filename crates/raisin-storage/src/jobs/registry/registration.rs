@@ -42,8 +42,48 @@ impl JobRegistry {
         cancel_token: Option<Arc<tokio_util::sync::CancellationToken>>,
         max_retries: Option<u32>,
     ) -> Result<JobId> {
-        self.register_job_inner(job_type, tenant, handle, cancel_token, max_retries, None)
-            .await
+        self.register_job_inner(
+            JobId::new(),
+            job_type,
+            tenant,
+            handle,
+            cancel_token,
+            max_retries,
+            None,
+        )
+        .await
+    }
+
+    /// Register a new job under a caller-generated job ID.
+    ///
+    /// This is the race-free variant of [`register_job`](Self::register_job):
+    /// generate a `JobId` with `JobId::new()`, persist the job's `JobContext`
+    /// (e.g. via `JobDataStore::put`) FIRST, and only then call this method.
+    ///
+    /// `register_job` generates the ID internally, which forces callers to
+    /// write the job context AFTER registration. Registration immediately
+    /// broadcasts the job to dispatch monitors, so a worker can claim the job
+    /// before the context write lands and fail with "Missing job context".
+    /// Storing the context before calling this method closes that window.
+    pub async fn register_job_with_id(
+        &self,
+        job_id: JobId,
+        job_type: JobType,
+        tenant: String,
+        handle: Option<JoinHandle<()>>,
+        cancel_token: Option<Arc<tokio_util::sync::CancellationToken>>,
+        max_retries: Option<u32>,
+    ) -> Result<JobId> {
+        self.register_job_inner(
+            job_id,
+            job_type,
+            tenant,
+            handle,
+            cancel_token,
+            max_retries,
+            None,
+        )
+        .await
     }
 
     /// Register a new job to be dispatched at a future time
@@ -62,6 +102,7 @@ impl JobRegistry {
         max_retries: Option<u32>,
     ) -> Result<JobId> {
         self.register_job_inner(
+            JobId::new(),
             job_type,
             tenant,
             None,
@@ -72,8 +113,35 @@ impl JobRegistry {
         .await
     }
 
+    /// Register a delayed job under a caller-generated job ID.
+    ///
+    /// Like [`register_job_at`](Self::register_job_at), but lets the caller
+    /// store the `JobContext` BEFORE the job becomes visible to dispatch.
+    /// See [`register_job_with_id`](Self::register_job_with_id) for why.
+    pub async fn register_job_at_with_id(
+        &self,
+        job_id: JobId,
+        job_type: JobType,
+        tenant: String,
+        scheduled_at: chrono::DateTime<Utc>,
+        max_retries: Option<u32>,
+    ) -> Result<JobId> {
+        self.register_job_inner(
+            job_id,
+            job_type,
+            tenant,
+            None,
+            None,
+            max_retries,
+            Some(scheduled_at),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn register_job_inner(
         &self,
+        job_id: JobId,
         job_type: JobType,
         tenant: String,
         handle: Option<JoinHandle<()>>,
@@ -81,7 +149,6 @@ impl JobRegistry {
         max_retries: Option<u32>,
         scheduled_at: Option<chrono::DateTime<Utc>>,
     ) -> Result<JobId> {
-        let job_id = JobId::new();
         let timeout_seconds = job_type.default_timeout_seconds();
         let entry = JobEntry {
             id: job_id.clone(),

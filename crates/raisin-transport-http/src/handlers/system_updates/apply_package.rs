@@ -342,14 +342,24 @@ async fn queue_install_job(
     let job_registry = rocksdb.job_registry();
     let job_data_store = rocksdb.job_data_store();
 
-    let job_id = job_registry
-        .register_job(job_type, tenant_id.to_string(), None, None, None)
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to register job: {}", e)))?;
-
+    // Store job context BEFORE registering so dispatch can never observe
+    // the job without its context.
+    let job_id = raisin_storage::jobs::JobId::new();
     job_data_store
         .put(&job_id, &job_context)
         .map_err(|e| ApiError::internal(format!("Failed to store job context: {}", e)))?;
+
+    job_registry
+        .register_job_with_id(
+            job_id.clone(),
+            job_type,
+            tenant_id.to_string(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to register job: {}", e)))?;
 
     Ok(job_id.to_string())
 }

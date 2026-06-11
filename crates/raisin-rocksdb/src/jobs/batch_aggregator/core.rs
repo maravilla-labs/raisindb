@@ -298,9 +298,14 @@ impl BatchIndexAggregator {
             operation_count: batch_size,
         };
 
-        let job_id = self
-            .job_registry
-            .register_job(
+        // Store the context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        self.job_data_store.put(&job_id, &context)?;
+
+        self.job_registry
+            .register_job_with_id(
+                job_id.clone(),
                 job_type.clone(),
                 context.tenant_id.clone(),
                 None,
@@ -308,8 +313,6 @@ impl BatchIndexAggregator {
                 None,
             )
             .await?;
-
-        self.job_data_store.put(&job_id, &context)?;
 
         // At this point the job is durable: JobRegistry has the
         // metadata (Scheduled) and JobDataStore has the context with

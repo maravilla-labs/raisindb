@@ -99,18 +99,20 @@ pub(super) fn create_job_registrar(
                 metadata,
             };
 
-            // Register job
-            let job_id = job_registry
-                .register_job(job_type, tenant_id, None, None, None)
+            // Store context BEFORE registering so dispatch can never
+            // observe the job without its context.
+            let job_id = raisin_storage::jobs::JobId::new();
+            job_data_store.put(&job_id, &job_context).map_err(|e| {
+                raisin_error::Error::Backend(format!("Failed to store job context: {}", e))
+            })?;
+
+            // Register job under the pre-generated ID
+            job_registry
+                .register_job_with_id(job_id.clone(), job_type, tenant_id, None, None, None)
                 .await
                 .map_err(|e| {
                     raisin_error::Error::Backend(format!("Failed to register job: {}", e))
                 })?;
-
-            // Store context
-            job_data_store.put(&job_id, &job_context).map_err(|e| {
-                raisin_error::Error::Backend(format!("Failed to store job context: {}", e))
-            })?;
 
             Ok(job_id.to_string())
         })
@@ -169,9 +171,19 @@ pub(super) fn create_restore_tree_registrar(
                     metadata,
                 };
 
-                // Register job
-                let job_id = job_registry
-                    .register_job(job_type, tenant_id, None, None, None)
+                // Store context BEFORE registering so dispatch can never
+                // observe the job without its context.
+                let job_id = raisin_storage::jobs::JobId::new();
+                job_data_store.put(&job_id, &job_context).map_err(|e| {
+                    raisin_error::Error::Backend(format!(
+                        "Failed to store RestoreTree job context: {}",
+                        e
+                    ))
+                })?;
+
+                // Register job under the pre-generated ID
+                job_registry
+                    .register_job_with_id(job_id.clone(), job_type, tenant_id, None, None, None)
                     .await
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!(
@@ -179,14 +191,6 @@ pub(super) fn create_restore_tree_registrar(
                             e
                         ))
                     })?;
-
-                // Store context
-                job_data_store.put(&job_id, &job_context).map_err(|e| {
-                    raisin_error::Error::Backend(format!(
-                        "Failed to store RestoreTree job context: {}",
-                        e
-                    ))
-                })?;
 
                 Ok(job_id.to_string())
             })
@@ -286,19 +290,29 @@ pub(super) fn create_function_invoke_callback(
                     metadata,
                 };
 
-                let job_id = rocksdb
-                    .job_registry()
-                    .register_job(job_type, tenant_id.clone(), None, None, None)
-                    .await
-                    .map_err(|e| {
-                        raisin_error::Error::Backend(format!("Failed to register job: {}", e))
-                    })?;
-
+                // Store context BEFORE registering so dispatch can never
+                // observe the job without its context.
+                let job_id = raisin_storage::jobs::JobId::new();
                 rocksdb
                     .job_data_store()
                     .put(&job_id, &context)
                     .map_err(|e| {
                         raisin_error::Error::Backend(format!("Failed to store job context: {}", e))
+                    })?;
+
+                rocksdb
+                    .job_registry()
+                    .register_job_with_id(
+                        job_id.clone(),
+                        job_type,
+                        tenant_id.clone(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| {
+                        raisin_error::Error::Backend(format!("Failed to register job: {}", e))
                     })?;
 
                 Ok((execution_id, job_id.to_string()))

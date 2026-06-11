@@ -53,8 +53,33 @@ pub async fn verify_relation_integrity(
         branch
     );
 
-    let job_id = job_registry
-        .register_job(
+    // Store job context BEFORE registering so dispatch can never observe
+    // the job without its context.
+    use raisin_storage::jobs::JobContext;
+    use std::collections::HashMap;
+
+    let context = JobContext {
+        tenant_id: tenant.clone(),
+        repo_id: repo.clone(),
+        branch: branch.clone(),
+        workspace_id: "".to_string(), // Not workspace-specific
+        revision: raisin_hlc::HLC::new(0, 0),
+        metadata: HashMap::new(),
+    };
+
+    let job_id = raisin_storage::jobs::JobId::new();
+    job_data_store.put(&job_id, &context).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to store job context: {}", e),
+            }),
+        )
+    })?;
+
+    job_registry
+        .register_job_with_id(
+            job_id.clone(),
             JobType::RelationConsistencyCheck { repair: false },
             tenant.clone(),
             None,
@@ -70,28 +95,6 @@ pub async fn verify_relation_integrity(
                 }),
             )
         })?;
-
-    // Store job context
-    use raisin_storage::jobs::JobContext;
-    use std::collections::HashMap;
-
-    let context = JobContext {
-        tenant_id: tenant.clone(),
-        repo_id: repo.clone(),
-        branch: branch.clone(),
-        workspace_id: "".to_string(), // Not workspace-specific
-        revision: raisin_hlc::HLC::new(0, 0),
-        metadata: HashMap::new(),
-    };
-
-    job_data_store.put(&job_id, &context).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to store job context: {}", e),
-            }),
-        )
-    })?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,
@@ -157,8 +160,33 @@ pub async fn repair_relation_integrity(
             ),
         })?;
 
-    let job_id = job_registry
-        .register_job(
+    // Store job context (with revision for tombstone writes) BEFORE
+    // registering so dispatch can never observe the job without its context.
+    use raisin_storage::jobs::JobContext;
+    use std::collections::HashMap;
+
+    let context = JobContext {
+        tenant_id: tenant.clone(),
+        repo_id: repo.clone(),
+        branch: branch.clone(),
+        workspace_id: "".to_string(), // Not workspace-specific
+        revision,
+        metadata: HashMap::new(),
+    };
+
+    let job_id = raisin_storage::jobs::JobId::new();
+    job_data_store.put(&job_id, &context).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to store job context: {}", e),
+            }),
+        )
+    })?;
+
+    job_registry
+        .register_job_with_id(
+            job_id.clone(),
             JobType::RelationConsistencyCheck { repair: true },
             tenant.clone(),
             None,
@@ -174,28 +202,6 @@ pub async fn repair_relation_integrity(
                 }),
             )
         })?;
-
-    // Store job context with revision for tombstone writes
-    use raisin_storage::jobs::JobContext;
-    use std::collections::HashMap;
-
-    let context = JobContext {
-        tenant_id: tenant.clone(),
-        repo_id: repo.clone(),
-        branch: branch.clone(),
-        workspace_id: "".to_string(), // Not workspace-specific
-        revision,
-        metadata: HashMap::new(),
-    };
-
-    job_data_store.put(&job_id, &context).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to store job context: {}", e),
-            }),
-        )
-    })?;
 
     Ok(Json(JobResponse {
         job_id: job_id.0,

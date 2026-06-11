@@ -39,24 +39,35 @@ pub(super) async fn enqueue_package_process_job(
             metadata,
         };
 
+        // Store job context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        if let Err(e) = job_data_store.put(&job_id, &job_context) {
+            tracing::warn!(
+                job_id = %job_id,
+                error = %e,
+                "Failed to store job context for package processing"
+            );
+            return;
+        }
+
         match job_registry
-            .register_job(job_type, tenant_id.to_string(), None, None, None)
+            .register_job_with_id(
+                job_id.clone(),
+                job_type,
+                tenant_id.to_string(),
+                None,
+                None,
+                None,
+            )
             .await
         {
-            Ok(job_id) => {
-                if let Err(e) = job_data_store.put(&job_id, &job_context) {
-                    tracing::warn!(
-                        job_id = %job_id,
-                        error = %e,
-                        "Failed to store job context for package processing"
-                    );
-                } else {
-                    tracing::info!(
-                        job_id = %job_id,
-                        package_node_id = %created_node_id,
-                        "Enqueued PackageProcess job"
-                    );
-                }
+            Ok(_) => {
+                tracing::info!(
+                    job_id = %job_id,
+                    package_node_id = %created_node_id,
+                    "Enqueued PackageProcess job"
+                );
             }
             Err(e) => {
                 tracing::warn!(

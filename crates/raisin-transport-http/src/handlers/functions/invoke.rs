@@ -232,9 +232,18 @@ async fn register_function_job(
         metadata,
     };
 
-    let job_id = rocksdb
+    // Store job context BEFORE registering so dispatch can never observe
+    // the job without its context.
+    let job_id = raisin_storage::jobs::JobId::new();
+    rocksdb
+        .job_data_store()
+        .put(&job_id, &context)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    rocksdb
         .job_registry()
-        .register_job(
+        .register_job_with_id(
+            job_id.clone(),
             JobType::FunctionExecution {
                 function_path: function_path.to_string(),
                 trigger_name: Some("http".into()),
@@ -247,11 +256,6 @@ async fn register_function_job(
         )
         .await
         .map_err(map_storage_error)?;
-
-    rocksdb
-        .job_data_store()
-        .put(&job_id, &context)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(job_id)
 }

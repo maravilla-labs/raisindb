@@ -117,10 +117,28 @@ pub async fn download_huggingface_model(
         model_id: model_id.clone(),
     };
 
+    // Workers refuse to dispatch jobs without a stored context, so store a
+    // minimal one BEFORE registering (the handler itself only needs the
+    // model_id from the job type).
+    let job_id = raisin_storage::jobs::JobId::new();
+    let job_context = raisin_storage::jobs::JobContext {
+        tenant_id: tenant.clone(),
+        repo_id: String::new(),
+        branch: String::new(),
+        workspace_id: String::new(),
+        revision: raisin_hlc::HLC::now(),
+        metadata: std::collections::HashMap::new(),
+    };
+    storage
+        .job_data_store()
+        .put(&job_id, &job_context)
+        .map_err(|e| ApiError::internal(format!("Failed to store download job context: {}", e)))?;
+
     // Use unified job queue
-    let job_id = storage
+    storage
         .job_registry()
-        .register_job(
+        .register_job_with_id(
+            job_id.clone(),
             job_type,
             tenant.clone(),
             None, // no handle

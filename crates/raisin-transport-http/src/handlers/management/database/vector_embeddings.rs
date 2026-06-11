@@ -264,36 +264,40 @@ async fn run_embedding_regeneration(
                         );
                     }
 
-                    match job_registry
-                        .register_job(
-                            JobType::EmbeddingGenerate {
-                                node_id: node_id.clone(),
-                            },
-                            tenant.clone(),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await
-                    {
-                        Ok(embedding_job_id) => {
-                            let context = JobContext {
-                                tenant_id: tenant.clone(),
-                                repo_id: repo.clone(),
-                                branch: branch.clone(),
-                                workspace_id: "staff".to_string(),
-                                revision: *revision,
-                                metadata: HashMap::new(),
-                            };
+                    // Store the context BEFORE registering so dispatch can
+                    // never observe the job without its context.
+                    let context = JobContext {
+                        tenant_id: tenant.clone(),
+                        repo_id: repo.clone(),
+                        branch: branch.clone(),
+                        workspace_id: "staff".to_string(),
+                        revision: *revision,
+                        metadata: HashMap::new(),
+                    };
 
-                            if let Err(e) = job_data_store.put(&embedding_job_id, &context) {
-                                tracing::error!(
-                                    "Failed to store context for job {}: {}",
-                                    embedding_job_id,
-                                    e
-                                );
-                                errors += 1;
-                            } else {
+                    let embedding_job_id = raisin_storage::JobId::new();
+                    if let Err(e) = job_data_store.put(&embedding_job_id, &context) {
+                        tracing::error!(
+                            "Failed to store context for job {}: {}",
+                            embedding_job_id,
+                            e
+                        );
+                        errors += 1;
+                    } else {
+                        match job_registry
+                            .register_job_with_id(
+                                embedding_job_id.clone(),
+                                JobType::EmbeddingGenerate {
+                                    node_id: node_id.clone(),
+                                },
+                                tenant.clone(),
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
                                 tracing::debug!(
                                     "Queued embedding job {} for node {} (revision {})",
                                     embedding_job_id,
@@ -302,10 +306,10 @@ async fn run_embedding_regeneration(
                                 );
                                 queued += 1;
                             }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to register job for {}: {}", node_id, e);
-                            errors += 1;
+                            Err(e) => {
+                                tracing::error!("Failed to register job for {}: {}", node_id, e);
+                                errors += 1;
+                            }
                         }
                     }
                 } else {

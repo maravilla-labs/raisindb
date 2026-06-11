@@ -208,16 +208,26 @@ pub async fn create_package_from_selection(
             metadata,
         };
 
-        let job_id = job_registry
-            .register_job(job_type, tenant_id.to_string(), None, None, None)
+        // Store job context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        job_data_store
+            .put(&job_id, &job_context)
+            .map_err(|e| ApiError::storage_error(format!("Failed to store job context: {}", e)))?;
+
+        job_registry
+            .register_job_with_id(
+                job_id.clone(),
+                job_type,
+                tenant_id.to_string(),
+                None,
+                None,
+                None,
+            )
             .await
             .map_err(|e| {
                 ApiError::storage_error(format!("Failed to register create job: {}", e))
             })?;
-
-        job_data_store
-            .put(&job_id, &job_context)
-            .map_err(|e| ApiError::storage_error(format!("Failed to store job context: {}", e)))?;
 
         tracing::info!(
             job_id = %job_id,

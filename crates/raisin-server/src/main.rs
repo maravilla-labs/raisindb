@@ -604,6 +604,7 @@ async fn main() {
             // a single raisindb node in production.
             {
                 let registry_for_loop = storage.job_registry().clone();
+                let job_data_store_for_loop = storage.job_data_store().clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -615,8 +616,33 @@ async fn main() {
                             tenant_id: None,
                             repo_id: None,
                         };
+                        // The handler ignores the context, but workers refuse
+                        // to dispatch jobs without one — store it BEFORE the
+                        // job becomes visible to dispatch. (Registering with
+                        // no context made every tick die with "Missing job
+                        // context (after grace retries)".)
+                        let job_id = raisin_storage::jobs::JobId::new();
+                        let context = raisin_storage::jobs::JobContext {
+                            tenant_id: "_system".to_string(),
+                            repo_id: String::new(),
+                            branch: String::new(),
+                            workspace_id: String::new(),
+                            revision: raisin_hlc::HLC::now(),
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) = job_data_store_for_loop.put(&job_id, &context) {
+                            tracing::warn!(error = %e, "Failed to store ScheduledTriggerCheck job context");
+                            continue;
+                        }
                         if let Err(e) = registry_for_loop
-                            .register_job(job_type, "_system".to_string(), None, None, None)
+                            .register_job_with_id(
+                                job_id,
+                                job_type,
+                                "_system".to_string(),
+                                None,
+                                None,
+                                None,
+                            )
                             .await
                         {
                             tracing::warn!(error = %e, "Failed to register ScheduledTriggerCheck job");

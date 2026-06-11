@@ -30,7 +30,7 @@ use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_packages::Manifest;
 use raisin_rocksdb::{JobDataStore, SystemUpdateRepositoryImpl};
-use raisin_storage::jobs::{JobContext, JobRegistry, JobType};
+use raisin_storage::jobs::{JobContext, JobId, JobRegistry, JobType};
 use raisin_storage::system_updates::{AppliedDefinition, ResourceType, SystemUpdateRepository};
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{RepositoryManagementRepository, Storage};
@@ -475,14 +475,23 @@ where
             metadata,
         };
 
-        // Register the job
-        let job_id = self
-            .job_registry
-            .register_job(job_type, tenant_id.to_string(), None, None, None)
-            .await?;
-
-        // Store job context
+        // Store job context BEFORE registering: registration makes the job
+        // visible to dispatch immediately, and a worker that claims it
+        // without a stored context fails the job ("Missing job context").
+        let job_id = JobId::new();
         self.job_data_store.put(&job_id, &job_context)?;
+
+        // Register the job under the pre-generated ID
+        self.job_registry
+            .register_job_with_id(
+                job_id.clone(),
+                job_type,
+                tenant_id.to_string(),
+                None,
+                None,
+                None,
+            )
+            .await?;
 
         info!(
             package_name = %manifest.name,
@@ -524,5 +533,333 @@ where
 
     fn name(&self) -> &str {
         "BuiltinPackageInitHandler"
+    }
+}
+
+#[cfg(all(test, feature = "storage-rocksdb"))]
+mod tests {
+    use super::*;
+    use raisin_binary::FilesystemBinaryStorage;
+    use raisin_rocksdb::{PackageInstallHandler, RocksDBStorage};
+    use raisin_storage::jobs::JobInfo;
+
+    const TENANT: &str = "default";
+    const REPO: &str = "test-repo";
+    const AI_TOOLS_INDEX_PATH: &str = "/lib/raisin/ai/agent-handler/index.js";
+
+    struct TestEnv {
+        _db_dir: tempfile::TempDir,
+        _bin_dir: tempfile::TempDir,
+        storage: Arc<RocksDBStorage>,
+        bin: Arc<FilesystemBinaryStorage>,
+        handler: BuiltinPackageInitHandler<RocksDBStorage, FilesystemBinaryStorage>,
+        system_update_repo: SystemUpdateRepositoryImpl,
+    }
+
+    async fn setup() -> TestEnv {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("info")
+            .with_test_writer()
+            .try_init();
+        let db_dir = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+
+        let storage = Arc::new(RocksDBStorage::new(db_dir.path()).unwrap());
+        let bin = Arc::new(FilesystemBinaryStorage::new(bin_dir.path(), None));
+        let system_update_repo = SystemUpdateRepositoryImpl::new(storage.db().clone());
+
+        let handler = BuiltinPackageInitHandler::new(
+            storage.clone(),
+            bin.clone(),
+            storage.job_registry().clone(),
+            storage.job_data_store().clone(),
+            system_update_repo.clone(),
+        );
+
+        storage
+            .repository_management()
+            .create_repository(TENANT, REPO, raisin_context::RepositoryConfig::default())
+            .await
+            .unwrap();
+
+        // Storage-level create_repository does not create the default
+        // branch or workspaces (the core service does that in production).
+        use raisin_storage::BranchRepository;
+        storage
+            .branches()
+            .create_branch(TENANT, REPO, "main", "test", None, None, false, false)
+            .await
+            .unwrap();
+
+        // Register the built-in system NodeTypes (raisin:Package etc.),
+        // normally done by NodeTypeInitHandler on RepositoryCreated.
+        raisin_core::nodetype_init::init_repository_nodetypes(
+            storage.clone(),
+            TENANT,
+            REPO,
+            "main",
+        )
+        .await
+        .unwrap();
+
+        // Register the global system workspaces (packages, functions, ...),
+        // normally done during repository initialization.
+        use raisin_storage::{RepoScope, WorkspaceRepository};
+        for ws in raisin_core::workspace_init::load_global_workspaces() {
+            storage
+                .workspaces()
+                .put(RepoScope::new(TENANT, REPO), ws)
+                .await
+                .unwrap();
+        }
+
+        TestEnv {
+            _db_dir: db_dir,
+            _bin_dir: bin_dir,
+            storage,
+            bin,
+            handler,
+            system_update_repo,
+        }
+    }
+
+    /// Find Scheduled PackageInstall jobs for the given package name.
+    async fn find_install_jobs(env: &TestEnv, package: &str) -> Vec<JobInfo> {
+        env.storage
+            .job_registry()
+            .list_jobs()
+            .await
+            .into_iter()
+            .filter(|j| {
+                matches!(
+                    &j.job_type,
+                    JobType::PackageInstall { package_name, .. } if package_name == package
+                ) && matches!(j.status, raisin_storage::jobs::JobStatus::Scheduled)
+            })
+            .collect()
+    }
+
+    /// Execute a PackageInstall job the same way a worker would: load the
+    /// context from the JobDataStore (asserting it is already present, which
+    /// is the register-before-put regression) and run the install handler.
+    async fn run_install_job(env: &TestEnv, job: &JobInfo) -> JobContext {
+        let context = env
+            .storage
+            .job_data_store()
+            .get(TENANT, &job.id)
+            .unwrap()
+            .expect(
+                "JobContext must be stored before the job is visible to dispatch \
+                 (register-before-put regression)",
+            );
+
+        let bin_for_get = env.bin.clone();
+        let retrieval: raisin_rocksdb::BinaryRetrievalCallback = Arc::new(move |key: String| {
+            let bin = bin_for_get.clone();
+            Box::pin(async move {
+                bin.get(&key)
+                    .await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| raisin_error::Error::storage(e.to_string()))
+            })
+        });
+        let store_cb = crate::startup::jobs::create_binary_storage_callback(env.bin.clone());
+
+        let install_handler =
+            PackageInstallHandler::new(env.storage.clone(), env.storage.job_registry().clone())
+                .with_binary_callback(retrieval)
+                .with_binary_store_callback(store_cb);
+
+        install_handler
+            .handle(job, &context)
+            .await
+            .expect("package install job must succeed");
+
+        // Mirror the worker lifecycle so the job leaves the Scheduled state.
+        env.storage
+            .job_registry()
+            .mark_running(&job.id)
+            .await
+            .unwrap();
+        env.storage
+            .job_registry()
+            .mark_completed(&job.id)
+            .await
+            .unwrap();
+
+        context
+    }
+
+    fn install_mode_of(context: &JobContext) -> String {
+        context
+            .metadata
+            .get("install_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Size of the embedded (current) agent-handler/index.js.
+    fn embedded_index_js_len() -> i64 {
+        let dir = raisin_core::package_init::get_builtin_package_dir("ai-tools")
+            .expect("ai-tools builtin package must be embedded");
+        let mut stack: Vec<&Dir<'static>> = vec![dir];
+        while let Some(d) = stack.pop() {
+            for f in d.files() {
+                if f.path().ends_with("agent-handler/index.js") {
+                    return f.contents().len() as i64;
+                }
+            }
+            stack.extend(d.dirs());
+        }
+        panic!("embedded ai-tools must contain agent-handler/index.js");
+    }
+
+    async fn get_index_js_node(env: &TestEnv) -> Option<Node> {
+        let tx = env.storage.begin_context().await.unwrap();
+        tx.set_tenant_repo(TENANT, REPO).unwrap();
+        tx.set_branch("main").unwrap();
+        tx.set_auth_context(AuthContext::system()).unwrap();
+        tx.get_node_by_path("functions", AI_TOOLS_INDEX_PATH)
+            .await
+            .unwrap()
+    }
+
+    /// End-to-end regression test for the builtin-package auto-update:
+    ///
+    /// 1. Fresh repo: install_builtin_packages registers an install job whose
+    ///    context is readable at dispatch time; running it installs content.
+    /// 2. Simulate a binary upgrade that ships changed package content by
+    ///    rewriting the recorded content hash to a stale value and tampering
+    ///    the installed node. Re-running install_builtin_packages must detect
+    ///    the change, enqueue a "sync" install job (again with context
+    ///    available), and running that job must bring the content node back
+    ///    to the embedded version.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_builtin_package_update_applied_to_existing_repo() {
+        let env = setup().await;
+
+        // ---- 1. Initial install into the (existing) repo ----
+        env.handler
+            .install_builtin_packages(TENANT, REPO)
+            .await
+            .unwrap();
+
+        let jobs = find_install_jobs(&env, "ai-tools").await;
+        assert_eq!(jobs.len(), 1, "fresh install must enqueue one ai-tools job");
+        let context = run_install_job(&env, &jobs[0]).await;
+        assert_eq!(
+            install_mode_of(&context),
+            "skip",
+            "fresh install uses skip mode"
+        );
+
+        let node = get_index_js_node(&env)
+            .await
+            .expect("agent-handler/index.js must be installed");
+        let expected_len = embedded_index_js_len();
+        assert_eq!(
+            node.properties.get("file_size"),
+            Some(&PropertyValue::Integer(expected_len)),
+            "installed index.js must match the embedded size"
+        );
+
+        // The package node must be marked installed for the hash-compare
+        // branch to run on the next scan. The real PackageInstall job sets
+        // this on completion; do it explicitly here since we invoke the
+        // handler directly.
+        {
+            let tx = env.storage.begin_context().await.unwrap();
+            tx.set_tenant_repo(TENANT, REPO).unwrap();
+            tx.set_branch("main").unwrap();
+            tx.set_actor("test").unwrap();
+            tx.set_auth_context(AuthContext::system()).unwrap();
+            tx.set_message("mark installed").unwrap();
+            let mut pkg = tx
+                .get_node("packages", "package-ai-tools")
+                .await
+                .unwrap()
+                .expect("package node must exist");
+            pkg.properties
+                .insert("installed".to_string(), PropertyValue::Boolean(true));
+            tx.upsert_node("packages", &pkg).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+
+        // ---- 2. Simulate a content change shipped in a new binary ----
+        // The recorded hash no longer matches the embedded package hash.
+        env.system_update_repo
+            .set_applied(
+                TENANT,
+                REPO,
+                ResourceType::Package,
+                "ai-tools",
+                AppliedDefinition {
+                    content_hash: "stale-hash-from-old-binary".to_string(),
+                    applied_version: None,
+                    applied_at: Utc::now(),
+                    applied_by: "test".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Tamper the installed content node so we can observe the sync
+        // rewriting it back to the embedded content.
+        {
+            let tx = env.storage.begin_context().await.unwrap();
+            tx.set_tenant_repo(TENANT, REPO).unwrap();
+            tx.set_branch("main").unwrap();
+            tx.set_actor("test").unwrap();
+            tx.set_auth_context(AuthContext::system()).unwrap();
+            tx.set_message("tamper index.js").unwrap();
+            let mut node = tx
+                .get_node_by_path("functions", AI_TOOLS_INDEX_PATH)
+                .await
+                .unwrap()
+                .unwrap();
+            node.properties
+                .insert("file_size".to_string(), PropertyValue::Integer(1));
+            node.properties.insert(
+                "content_hash".to_string(),
+                PropertyValue::String("stale".to_string()),
+            );
+            tx.upsert_node("functions", &node).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+
+        // ---- 3. Startup scan must detect the update and reinstall ----
+        env.handler
+            .install_builtin_packages(TENANT, REPO)
+            .await
+            .unwrap();
+
+        let jobs = find_install_jobs(&env, "ai-tools").await;
+        assert_eq!(
+            jobs.len(),
+            1,
+            "content change must enqueue exactly one new ai-tools install job"
+        );
+        let context = run_install_job(&env, &jobs[0]).await;
+        assert_eq!(
+            install_mode_of(&context),
+            "sync",
+            "update of an existing repo must use sync mode"
+        );
+
+        let node = get_index_js_node(&env)
+            .await
+            .expect("agent-handler/index.js must still exist after update");
+        assert_eq!(
+            node.properties.get("file_size"),
+            Some(&PropertyValue::Integer(expected_len)),
+            "sync install must restore index.js to the embedded version"
+        );
+        match node.properties.get("content_hash") {
+            Some(PropertyValue::String(h)) => {
+                assert_ne!(h, "stale", "content hash must be rewritten by the sync")
+            }
+            other => panic!("content_hash property missing or wrong type: {:?}", other),
+        }
     }
 }

@@ -111,16 +111,26 @@ mod inner {
             metadata,
         };
 
-        let job_id = rocksdb
-            .job_registry()
-            .register_job(job_type, TENANT_ID.to_string(), None, None, None)
-            .await
-            .map_err(|e| WsError::StorageError(e.to_string()))?;
-
+        // Store job context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
         rocksdb
             .job_data_store()
             .put(&job_id, &context)
             .map_err(|e| WsError::InternalError(e.to_string()))?;
+
+        rocksdb
+            .job_registry()
+            .register_job_with_id(
+                job_id.clone(),
+                job_type,
+                TENANT_ID.to_string(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| WsError::StorageError(e.to_string()))?;
 
         tracing::info!(
             job_id = %job_id,

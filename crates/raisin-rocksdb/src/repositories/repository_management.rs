@@ -116,20 +116,26 @@ impl RepositoryManagementRepository for RepositoryManagementRepositoryImpl {
     }
 
     async fn list_repositories(&self) -> Result<Vec<RepositoryInfo>> {
-        let prefix = keys::KeyBuilder::new().push("repos").build_prefix();
-
+        // Repository keys are laid out as `{tenant}\0repos\0{repo}` (see
+        // `keys::repository_key`), i.e. tenant-FIRST. There is no global
+        // `repos\0...` prefix to scan, so a prefix iterator over "repos"
+        // matches nothing and silently returned an empty list (which broke
+        // e.g. the startup builtin-package scan over all tenants). Instead,
+        // scan the whole REGISTRY column family and filter by key shape.
         let cf = cf_handle(&self.db, cf::REGISTRY)?;
-        let prefix_clone = prefix.clone();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
 
         let mut repos = Vec::new();
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
-            // Verify key actually starts with our prefix
-            if !key.starts_with(&prefix_clone) {
-                break;
+            // Only keys of the exact shape `{tenant}\0repos\0{repo}` are
+            // repository entries; the REGISTRY CF also holds other records
+            // (e.g. `tenants\0{tenant_id}`).
+            let parts: Vec<&[u8]> = key.split(|b| *b == 0).collect();
+            if parts.len() != 3 || parts[1] != b"repos" {
+                continue;
             }
 
             let info: RepositoryInfo = rmp_serde::from_slice(&value).map_err(|e| {
@@ -228,5 +234,67 @@ impl RepositoryManagementRepository for RepositoryManagementRepositoryImpl {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_repo() -> RepositoryManagementRepositoryImpl {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::open_db(temp_dir.path()).unwrap());
+        // Keep tempdir alive for the test duration by leaking it (test-only).
+        std::mem::forget(temp_dir);
+        let event_bus = Arc::new(raisin_events::InMemoryEventBus::new());
+        RepositoryManagementRepositoryImpl::new(db, event_bus)
+    }
+
+    /// Regression test: the global `list_repositories()` used to scan the
+    /// prefix `repos\0`, but repository keys are `{tenant}\0repos\0{repo}`
+    /// (tenant-first), so it always returned an empty list. That silently
+    /// broke every all-tenant scan, most visibly the startup builtin-package
+    /// auto-update which saw "0 repositories" and never reinstalled updated
+    /// packages into existing repos.
+    #[tokio::test]
+    async fn test_list_repositories_returns_repos_across_tenants() {
+        let repo_mgmt = make_repo();
+
+        repo_mgmt
+            .create_repository("tenant-a", "repo-1", RepositoryConfig::default())
+            .await
+            .unwrap();
+        repo_mgmt
+            .create_repository("tenant-a", "repo-2", RepositoryConfig::default())
+            .await
+            .unwrap();
+        repo_mgmt
+            .create_repository("tenant-b", "repo-3", RepositoryConfig::default())
+            .await
+            .unwrap();
+
+        let all = repo_mgmt.list_repositories().await.unwrap();
+        let mut pairs: Vec<(String, String)> = all
+            .iter()
+            .map(|r| (r.tenant_id.clone(), r.repo_id.clone()))
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("tenant-a".to_string(), "repo-1".to_string()),
+                ("tenant-a".to_string(), "repo-2".to_string()),
+                ("tenant-b".to_string(), "repo-3".to_string()),
+            ],
+            "global list_repositories must return every tenant's repositories"
+        );
+
+        // Per-tenant listing still scopes correctly.
+        let tenant_a = repo_mgmt
+            .list_repositories_for_tenant("tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(tenant_a.len(), 2);
+        assert!(tenant_a.iter().all(|r| r.tenant_id == "tenant-a"));
     }
 }

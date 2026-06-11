@@ -69,10 +69,15 @@ impl RocksDBTransaction {
             metadata,
         };
 
-        // Register job in job registry
-        let job_id = self
-            .job_registry
-            .register_job(
+        // Store job context BEFORE registering so a fast worker claim can
+        // never observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        self.job_data_store.put(&job_id, &job_context)?;
+
+        // Register job in job registry under the pre-generated ID
+        self.job_registry
+            .register_job_with_id(
+                job_id.clone(),
                 raisin_storage::jobs::JobType::TreeSnapshot {
                     revision: *new_revision,
                 },
@@ -82,9 +87,6 @@ impl RocksDBTransaction {
                 None,
             )
             .await?;
-
-        // Store job context for worker processing
-        self.job_data_store.put(&job_id, &job_context)?;
 
         tracing::debug!(
             job_id = %job_id,

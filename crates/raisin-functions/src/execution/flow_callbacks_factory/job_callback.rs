@@ -221,17 +221,10 @@ where
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&chrono::Utc));
 
-                // Register the job
-                let job_id = match scheduled_at {
-                    Some(at) if at > chrono::Utc::now() => job_registry
-                        .register_job_at(job, tenant_id.clone(), at, None)
-                        .await
-                        .map_err(|e| format!("Failed to register scheduled job: {}", e))?,
-                    _ => job_registry
-                        .register_job(job, tenant_id.clone(), None, None, None)
-                        .await
-                        .map_err(|e| format!("Failed to register job: {}", e))?,
-                };
+                // Pre-generate the job ID so the context can be stored
+                // BEFORE the job becomes visible to dispatch (a worker that
+                // claims a job without a stored context fails it).
+                let job_id = raisin_storage::jobs::JobId::new();
 
                 // Store job context if we have a data store
                 if let Some(data_store) = deps.job_data_store.as_ref() {
@@ -281,6 +274,25 @@ where
                         .put(&job_id, &context)
                         .map_err(|e| format!("Failed to store job context: {}", e))?;
                 }
+
+                // Register the job under the pre-generated ID
+                match scheduled_at {
+                    Some(at) if at > chrono::Utc::now() => job_registry
+                        .register_job_at_with_id(job_id.clone(), job, tenant_id.clone(), at, None)
+                        .await
+                        .map_err(|e| format!("Failed to register scheduled job: {}", e))?,
+                    _ => job_registry
+                        .register_job_with_id(
+                            job_id.clone(),
+                            job,
+                            tenant_id.clone(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to register job: {}", e))?,
+                };
 
                 Ok(job_id.to_string())
             })
@@ -413,10 +425,9 @@ where
         resume_reason: Some("child_flow".to_string()),
     };
 
-    let job_id = job_registry
-        .register_job(job, tenant_id.to_string(), None, None, None)
-        .await
-        .map_err(|e| format!("Failed to register child flow job: {}", e))?;
+    // Pre-generate the job ID so the context can be stored BEFORE the job
+    // becomes visible to dispatch.
+    let job_id = raisin_storage::jobs::JobId::new();
 
     if let Some(data_store) = deps.job_data_store.as_ref() {
         let mut metadata = std::collections::HashMap::new();
@@ -439,6 +450,11 @@ where
             .put(&job_id, &context)
             .map_err(|e| format!("Failed to store child flow job context: {}", e))?;
     }
+
+    job_registry
+        .register_job_with_id(job_id.clone(), job, tenant_id.to_string(), None, None, None)
+        .await
+        .map_err(|e| format!("Failed to register child flow job: {}", e))?;
 
     tracing::info!(
         child_instance_id = %instance_id,

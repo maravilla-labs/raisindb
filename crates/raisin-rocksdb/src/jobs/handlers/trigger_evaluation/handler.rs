@@ -420,9 +420,14 @@ impl TriggerEvaluationHandler {
             metadata: instance_metadata,
         };
 
-        let job_id = self
-            .job_registry
-            .register_job(
+        // Store the context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        self.job_data_store.put(&job_id, &instance_context)?;
+
+        self.job_registry
+            .register_job_with_id(
+                job_id.clone(),
                 flow_instance_job.clone(),
                 context.tenant_id.clone(),
                 None,
@@ -430,8 +435,6 @@ impl TriggerEvaluationHandler {
                 trigger_match.max_retries,
             )
             .await?;
-
-        self.job_data_store.put(&job_id, &instance_context)?;
 
         // Dispatch to priority queue (non-blocking to prevent upload stalls)
         let priority = flow_instance_job.default_priority();
@@ -470,9 +473,14 @@ impl TriggerEvaluationHandler {
             execution_id: execution_id.to_string(),
         };
 
-        let job_id = self
-            .job_registry
-            .register_job(
+        // Store the context BEFORE registering so dispatch can never
+        // observe the job without its context.
+        let job_id = raisin_storage::jobs::JobId::new();
+        self.job_data_store.put(&job_id, job_context)?;
+
+        self.job_registry
+            .register_job_with_id(
+                job_id.clone(),
                 function_job_type.clone(),
                 context.tenant_id.clone(),
                 None,
@@ -480,8 +488,6 @@ impl TriggerEvaluationHandler {
                 trigger_match.max_retries,
             )
             .await?;
-
-        self.job_data_store.put(&job_id, job_context)?;
 
         // Dispatch to priority queue (non-blocking to prevent upload stalls)
         let priority = function_job_type.default_priority();
