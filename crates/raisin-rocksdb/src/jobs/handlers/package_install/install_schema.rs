@@ -438,31 +438,68 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             let existing = workspace_repo
                 .get(RepoScope::new(tenant_id, repo_id), &ws_name)
                 .await?;
+            let was_existing = existing.is_some();
 
-            if existing.is_some() && install_mode == InstallMode::Skip {
-                // Skip mode: skip existing
-                tracing::debug!(
-                    job_id = %job_id,
-                    workspace = %ws_name,
-                    "Workspace already exists, skipping (skip mode)"
-                );
-                stats.workspaces_skipped += 1;
-            } else {
-                // Create or overwrite workspace
-                workspace_repo
-                    .put(RepoScope::new(tenant_id, repo_id), workspace)
-                    .await?;
+            // Keep (skip) mode: never overwrite an existing workspace, but additively
+            // merge its `allowed_node_types` from the package (add-only, never remove)
+            // so NodeTypes the package newly provides become usable without requiring
+            // an explicit `workspace_patches` entry. The merge is skipped when the
+            // existing workspace already allows everything (empty list or "*"), so we
+            // never silently narrow an unrestricted workspace.
+            if install_mode == InstallMode::Skip {
+                if let Some(mut existing_ws) = existing {
+                    let allows_all = existing_ws.allowed_node_types.is_empty()
+                        || existing_ws.allowed_node_types.iter().any(|t| t == "*");
 
-                tracing::debug!(
-                    job_id = %job_id,
-                    workspace = %ws_name,
-                    mode = ?install_mode,
-                    overwrite = existing.is_some(),
-                    "Installed workspace"
-                );
+                    let mut modified = false;
+                    if !allows_all {
+                        for type_name in &workspace.allowed_node_types {
+                            if type_name != "*"
+                                && !existing_ws.allowed_node_types.contains(type_name)
+                            {
+                                existing_ws.allowed_node_types.push(type_name.clone());
+                                modified = true;
+                            }
+                        }
+                    }
 
-                stats.workspaces_installed += 1;
+                    if modified {
+                        workspace_repo
+                            .put(RepoScope::new(tenant_id, repo_id), existing_ws)
+                            .await?;
+                        tracing::debug!(
+                            job_id = %job_id,
+                            workspace = %ws_name,
+                            "Merged allowed_node_types into existing workspace (keep mode)"
+                        );
+                        stats.patches_applied += 1;
+                    } else {
+                        tracing::debug!(
+                            job_id = %job_id,
+                            workspace = %ws_name,
+                            "Workspace already exists, nothing to merge (keep mode)"
+                        );
+                        stats.workspaces_skipped += 1;
+                    }
+                    continue;
+                }
+                // No existing workspace — fall through and create it.
             }
+
+            // Create (new workspace) or overwrite (force mode).
+            workspace_repo
+                .put(RepoScope::new(tenant_id, repo_id), workspace)
+                .await?;
+
+            tracing::debug!(
+                job_id = %job_id,
+                workspace = %ws_name,
+                mode = ?install_mode,
+                overwrite = was_existing,
+                "Installed workspace"
+            );
+
+            stats.workspaces_installed += 1;
         }
 
         Ok(())

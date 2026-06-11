@@ -600,6 +600,14 @@ Supported `provides` keys: `nodetypes`, `archetypes`, `elementtypes`, `mixins`, 
 
 Use `workspace_patches` to add allowed node types to existing workspaces without overwriting their definition. Always include `raisin:Asset` if the workspace needs file uploads — without it, uploads will fail silently.
 
+### Reinstall & existing workspaces
+
+On **reinstall**, an existing workspace is never overwritten (your live customizations are preserved). To make the workspace pick up NodeTypes your package newly provides, the installer **additively merges** the `allowed_node_types` from your package's `workspaces/<name>.yaml` into the existing workspace — add-only, it never removes a type. So just listing the type in your workspace YAML's `allowed_node_types` is enough; you do not have to duplicate it under `workspace_patches`.
+
+The merge is **skipped when the existing workspace already allows everything** (an empty `allowed_node_types` list, or one containing `"*"`) — that workspace already permits the new type, and merging would silently narrow it. A literal `"*"` entry is never merged in either.
+
+`workspace_patches` is still the right tool when you need to extend a workspace you don't define in your own package (e.g. another package's workspace), or to add types targeted at a specific workspace by name.
+
 ---
 
 ## 7. Content YAML
