@@ -95,7 +95,9 @@ impl<S: Storage> NodeValidator<S> {
 
     /// Validate a node against its NodeType schema
     pub async fn validate_node(&self, workspace: &str, node: &Node) -> Result<()> {
-        self.validate_node_resolved(workspace, node).await.map(|_| ())
+        self.validate_node_resolved(workspace, node)
+            .await
+            .map(|_| ())
     }
 
     /// Validate a node against its NodeType schema and return the resolved NodeType.

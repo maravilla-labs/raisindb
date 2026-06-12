@@ -19,9 +19,7 @@ use raisin_sql::analyzer::{Literal, TypedExpr};
 /// True if `obj[key]` is a JSON string array containing `needle`.
 fn json_string_array_contains(obj: &serde_json::Value, key: &str, needle: &str) -> bool {
     match obj.get(key) {
-        Some(serde_json::Value::Array(items)) => {
-            items.iter().any(|v| v.as_str() == Some(needle))
-        }
+        Some(serde_json::Value::Array(items)) => items.iter().any(|v| v.as_str() == Some(needle)),
         _ => false,
     }
 }
