@@ -30,6 +30,8 @@ export interface FieldTypeSchema {
   multiple?: boolean
   design_value?: boolean
   translatable?: boolean
+  /** Free-form metadata; round-tripped as-is by the backend. */
+  meta?: Record<string, any>
 }
 
 // Internal ID for React keys (not serialized to API)

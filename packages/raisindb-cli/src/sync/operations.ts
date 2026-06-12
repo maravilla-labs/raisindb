@@ -8,7 +8,7 @@ import yaml from 'yaml';
 import { SyncConfig } from './config.js';
 import { getToken } from '../auth.js';
 import { ChangeEvent } from './watcher.js';
-import { mapChangeToNode, parseTranslationLocale } from './mapping.js';
+import { mapChangeToNode, parseTranslationLocale, type SchemaKind } from './mapping.js';
 
 export { parseTranslationLocale } from './mapping.js';
 
@@ -294,6 +294,102 @@ function buildServerUrl(
   const httpServer = toHttpUrl(config.server);
   const url = `${httpServer}/api/repository/${config.repository}/${config.branch}/head/${workspace}/${nodePath}`;
   return { url, workspace, nodePath };
+}
+
+/** Management endpoint (plural) + request-body field for each schema kind. */
+const SCHEMA_ENDPOINTS: Record<SchemaKind, { plural: string; field: string }> = {
+  nodetype: { plural: 'nodetypes', field: 'node_type' },
+  archetype: { plural: 'archetypes', field: 'archetype' },
+  elementtype: { plural: 'elementtypes', field: 'element_type' },
+  mixin: { plural: 'mixins', field: 'node_type' },
+};
+
+/**
+ * Push a schema definition (node type / archetype / element type / mixin) to
+ * the management API.
+ *
+ * POST to the create endpoint upserts (create-or-update) server-side, so this
+ * applies changed definitions live — no re-deploy needed. The node name comes
+ * from the YAML's `name` field, so the server addresses the right type.
+ */
+async function pushSchemaFile(
+  filePath: string,
+  options: SyncOperationOptions,
+  schemaKind: SchemaKind
+): Promise<SyncResult> {
+  const { packageDir, config, dryRun } = options;
+  // Schema directories live at the package root (a sibling of content/), so
+  // resolve against packageDir, not the content base.
+  const fullPath = path.join(packageDir, filePath);
+  const timestamp = Date.now();
+  const { plural, field } = SCHEMA_ENDPOINTS[schemaKind];
+  const httpServer = toHttpUrl(config.server);
+  const url = `${httpServer}/api/management/${config.repository}/${config.branch}/${plural}`;
+
+  try {
+    if (dryRun) {
+      return { success: true, path: filePath, operation: 'push', timestamp };
+    }
+
+    const token = getToken();
+    if (!token) {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: 'Not authenticated',
+        timestamp,
+      };
+    }
+
+    const content = fs.readFileSync(fullPath, 'utf-8');
+    const definition = yaml.parse(content);
+    if (!definition || typeof definition !== 'object') {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: 'Invalid schema YAML (expected an object)',
+        timestamp,
+      };
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        [field]: definition,
+        commit: { message: 'Package sync', actor: 'cli' },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: `${response.status} ${response.statusText}`,
+        details: `POST ${url}\n${response.status} ${response.statusText}: ${errorText}`,
+        timestamp,
+      };
+    }
+
+    return { success: true, path: filePath, operation: 'push', timestamp };
+  } catch (error) {
+    const { message, details } = formatError(error);
+    return {
+      success: false,
+      path: filePath,
+      operation: 'push',
+      error: message,
+      details: `POST ${url}\n${details}`,
+      timestamp,
+    };
+  }
 }
 
 /**
@@ -639,24 +735,26 @@ export async function pushFile(
   options: SyncOperationOptions
 ): Promise<SyncResult> {
   const { contentBase, config, dryRun } = options;
-  const fullPath = path.join(contentBase, filePath);
   const timestamp = Date.now();
 
   try {
-    // Check if file exists
-    if (!fs.existsSync(fullPath)) {
-      return {
-        success: false,
-        path: filePath,
-        operation: 'push',
-        error: 'File not found',
-        timestamp,
-      };
-    }
-
-    // Classify the change (pure mapping, see sync/mapping.ts)
+    // Classify the change (pure mapping, see sync/mapping.ts). Schema/skip/
+    // structural kinds are resolved before the content-base existence check
+    // because they don't live under contentBase (schema dirs sit at the
+    // package root; skip/structural don't read a content file at all).
     const filename = path.basename(filePath);
     const mapped = mapChangeToNode(filePath);
+
+    if (mapped.kind === 'skip') {
+      // Nothing to push (hidden/metadata file) — report success, no-op
+      return { success: true, path: filePath, operation: 'push', timestamp };
+    }
+
+    // Schema definitions (node types / archetypes / element types / mixins)
+    // resolve against packageDir and are pushed to the management API (upsert).
+    if (mapped.kind === 'schema' && mapped.schemaKind) {
+      return pushSchemaFile(filePath, options, mapped.schemaKind);
+    }
 
     if (mapped.kind === 'structural') {
       return {
@@ -668,9 +766,16 @@ export async function pushFile(
       };
     }
 
-    if (mapped.kind === 'skip') {
-      // Nothing to push (hidden/metadata file) — report success, no-op
-      return { success: true, path: filePath, operation: 'push', timestamp };
+    // Remaining kinds are content under the content base — it must exist.
+    const fullPath = path.join(contentBase, filePath);
+    if (!fs.existsSync(fullPath)) {
+      return {
+        success: false,
+        path: filePath,
+        operation: 'push',
+        error: 'File not found',
+        timestamp,
+      };
     }
 
     if (mapped.kind === 'translation') {

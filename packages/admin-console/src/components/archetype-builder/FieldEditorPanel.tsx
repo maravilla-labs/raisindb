@@ -18,10 +18,12 @@ import {
   Check,
   ChevronDown,
   Loader2,
+  Braces,
 } from 'lucide-react'
 import { FIELD_TYPE_ICONS, FIELD_TYPE_COLORS } from './constants'
 import { cleanObject } from './utils'
 import { elementTypesApi, type ElementType as ApiElementType } from '../../api/elementtypes'
+import KeyValueEditor from '../shared/KeyValueEditor'
 import type { FieldSchema } from './types'
 
 // Simplified element type info for dropdown selection
@@ -42,7 +44,7 @@ interface FieldEditorPanelProps {
   currentElementTypeName?: string
 }
 
-type TabId = 'basic' | 'display' | 'validation' | 'config'
+type TabId = 'basic' | 'display' | 'validation' | 'config' | 'meta'
 
 interface TabConfig {
   id: TabId
@@ -55,6 +57,7 @@ const TABS: TabConfig[] = [
   { id: 'display', icon: Eye, tooltip: 'Labels & presentation' },
   { id: 'validation', icon: Shield, tooltip: 'Constraints & rules' },
   { id: 'config', icon: Sliders, tooltip: 'Type-specific options' },
+  { id: 'meta', icon: Braces, tooltip: 'Custom metadata' },
 ]
 
 export default function FieldEditorPanel({
@@ -179,6 +182,10 @@ export default function FieldEditorPanel({
             loadingElementTypes={loadingElementTypes}
           />
         )}
+
+        {activeTab === 'meta' && (
+          <MetaTab field={field} updateField={updateField} />
+        )}
       </div>
     </div>
   )
@@ -189,6 +196,25 @@ export default function FieldEditorPanel({
 interface TabProps {
   field: FieldSchema
   updateField: (updates: Partial<FieldSchema>) => void
+}
+
+function MetaTab({ field, updateField }: TabProps) {
+  return (
+    <div>
+      <label className="block text-xs text-zinc-400 mb-1">Custom Metadata</label>
+      <p className="text-[10px] text-zinc-500 mb-2">
+        Arbitrary key/value data stored on this field's <code>meta</code>. Not
+        interpreted by the database — round-tripped as-is for editors and
+        integrations. Values are parsed as JSON when possible (numbers,
+        booleans, arrays), otherwise kept as text.
+      </p>
+      <KeyValueEditor
+        value={(field as any).meta}
+        instanceKey={field.id}
+        onChange={(meta) => updateField({ meta } as any)}
+      />
+    </div>
+  )
 }
 
 function BasicTab({ field, updateField }: TabProps) {

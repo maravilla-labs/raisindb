@@ -3,6 +3,7 @@
 //! Archetype management operation handlers
 
 use parking_lot::RwLock;
+use raisin_core::ArchetypeResolver;
 use raisin_models::nodes::types::Archetype;
 use raisin_storage::scope::BranchScope;
 use raisin_storage::transactional::TransactionalStorage;
@@ -14,9 +15,9 @@ use crate::{
     error::WsError,
     handler::WsState,
     protocol::{
-        ArchetypeCreatePayload, ArchetypeDeletePayload, ArchetypeGetPayload, ArchetypeListPayload,
-        ArchetypePublishPayload, ArchetypeUnpublishPayload, ArchetypeUpdatePayload,
-        RequestEnvelope, ResponseEnvelope,
+        ArchetypeCreatePayload, ArchetypeDeletePayload, ArchetypeGetPayload,
+        ArchetypeGetResolvedPayload, ArchetypeListPayload, ArchetypePublishPayload,
+        ArchetypeUnpublishPayload, ArchetypeUpdatePayload, RequestEnvelope, ResponseEnvelope,
     },
 };
 
@@ -362,5 +363,48 @@ where
     Ok(Some(ResponseEnvelope::success(
         request.request_id,
         serde_json::json!({"success": true}),
+    )))
+}
+
+/// Handle getting a resolved archetype with full inheritance applied
+pub async fn handle_archetype_get_resolved<S, B>(
+    state: &Arc<WsState<S, B>>,
+    _connection_state: &Arc<RwLock<ConnectionState>>,
+    request: RequestEnvelope,
+) -> Result<Option<ResponseEnvelope>, WsError>
+where
+    S: Storage,
+    B: raisin_binary::BinaryStorage,
+{
+    let payload: ArchetypeGetResolvedPayload = serde_json::from_value(request.payload.clone())?;
+
+    let tenant_id = &request.context.tenant_id;
+    let repo = request
+        .context
+        .repository
+        .as_ref()
+        .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))?;
+    let branch = request.context.branch.as_deref().unwrap_or("main");
+
+    let resolver = ArchetypeResolver::new(
+        state.storage.clone(),
+        tenant_id.to_string(),
+        repo.to_string(),
+        branch.to_string(),
+    );
+
+    let resolved = resolver.resolve(&payload.name).await?;
+
+    let response = serde_json::json!({
+        "archetype": resolved.archetype,
+        "resolved_fields": resolved.resolved_fields,
+        "resolved_layout": resolved.resolved_layout,
+        "inheritance_chain": resolved.inheritance_chain,
+        "resolved_strict": resolved.resolved_strict,
+    });
+
+    Ok(Some(ResponseEnvelope::success(
+        request.request_id,
+        response,
     )))
 }

@@ -454,6 +454,31 @@ async function runWatchMode(
     }
   });
 
+  // Schema definitions (nodetypes/archetypes/elementtypes/mixins) live at the
+  // package root, outside the content base. The structural watcher surfaces
+  // them as 'schemaChange'; push each one live to the management API (upsert) —
+  // no re-deploy needed.
+  watcher.on('schemaChange', async (event: { path: string }) => {
+    watcher.markInFlight(event.path);
+    const result = await pushFile(event.path, syncOptions);
+    watcher.emit('syncResult', result);
+    watcher.clearInFlight(event.path);
+  });
+
+  // Initial one-time sync: bring the server up to date with local state once,
+  // then only changed files are pushed while watching.
+  if (!options.dryRun) {
+    const localFiles = getLocalFiles(packageDir, config);
+    let ok = 0;
+    let fail = 0;
+    for (const [filePath] of localFiles) {
+      const result = await pushFile(filePath, syncOptions);
+      if (result.success) ok++;
+      else fail++;
+    }
+    console.log(`Initial sync: ${ok} pushed, ${fail} failed — now watching for changes.`);
+  }
+
   // Non-TTY (CI, logs, piped output): plain line output instead of the Ink UI.
   // Attaches its own listeners before start so no event (esp. 'error') is lost.
   if (!process.stdout.isTTY) {

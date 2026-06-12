@@ -71,6 +71,10 @@ export { ElementTypes } from './element-types';
 export { Branches } from './branches';
 export { Tags } from './tags';
 
+// HTTP (SSR) schema management
+export { HttpNodeTypes, HttpArchetypes, HttpElementTypes } from './http-schema';
+export type { SchemaCommit } from './http-schema';
+
 // SQL queries
 export { SqlQuery, createSqlHandler } from './sql';
 

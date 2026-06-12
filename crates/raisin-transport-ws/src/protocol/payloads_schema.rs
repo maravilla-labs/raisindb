@@ -101,6 +101,11 @@ pub struct ArchetypeUnpublishPayload {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchetypeGetResolvedPayload {
+    pub name: String,
+}
+
 // ---------------------------------------------------------------------------
 // ElementType operation payloads
 // ---------------------------------------------------------------------------
@@ -140,5 +145,10 @@ pub struct ElementTypePublishPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementTypeUnpublishPayload {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElementTypeGetResolvedPayload {
     pub name: String,
 }

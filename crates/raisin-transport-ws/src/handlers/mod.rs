@@ -222,6 +222,9 @@ where
         RequestType::ArchetypeUnpublish => {
             handle_archetype_unpublish(state, connection_state, request).await
         }
+        RequestType::ArchetypeGetResolved => {
+            handle_archetype_get_resolved(state, connection_state, request).await
+        }
 
         // ElementType operations
         RequestType::ElementTypeCreate => {
@@ -244,6 +247,9 @@ where
         }
         RequestType::ElementTypeUnpublish => {
             handle_element_type_unpublish(state, connection_state, request).await
+        }
+        RequestType::ElementTypeGetResolved => {
+            handle_element_type_get_resolved(state, connection_state, request).await
         }
 
         // Branch operations

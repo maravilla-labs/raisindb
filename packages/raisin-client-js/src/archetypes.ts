@@ -100,4 +100,16 @@ export class Archetypes {
       RequestType.ArchetypeUnpublish
     );
   }
+
+  /**
+   * Get resolved Archetype with full inheritance applied
+   */
+  async getResolved(name: string): Promise<unknown> {
+    return this.sendRequest(
+      {
+        name
+      },
+      RequestType.ArchetypeGetResolved
+    );
+  }
 }

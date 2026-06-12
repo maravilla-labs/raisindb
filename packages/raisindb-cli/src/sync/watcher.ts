@@ -255,9 +255,10 @@ export class SyncWatcher extends EventEmitter {
       path.join(this.packageDir, 'manifest.yaml'),
       path.join(this.packageDir, 'manifest.yml'),
       path.join(this.packageDir, 'nodetypes'),
-      path.join(this.packageDir, 'workspaces'),
-      path.join(this.packageDir, 'mixins'),
       path.join(this.packageDir, 'archetypes'),
+      path.join(this.packageDir, 'elementtypes'),
+      path.join(this.packageDir, 'mixins'),
+      path.join(this.packageDir, 'workspaces'),
     ].filter((p) => fs.existsSync(p));
 
     if (targets.length === 0) return;
@@ -271,12 +272,19 @@ export class SyncWatcher extends EventEmitter {
       },
     });
 
+    // Schema definitions can be hot-synced to the management API; only manifest
+    // and workspaces still require a re-deploy.
+    const SCHEMA_DIRS = ['nodetypes', 'archetypes', 'elementtypes', 'mixins'];
     const handle = (filePath: string) => {
       const relativePath = path
         .relative(this.packageDir, filePath)
         .split(path.sep)
         .join('/');
-      this.emit('structuralChange', {
+      const top = relativePath.split('/')[0];
+      const isSchema =
+        SCHEMA_DIRS.includes(top) &&
+        (relativePath.endsWith('.yaml') || relativePath.endsWith('.yml'));
+      this.emit(isSchema ? 'schemaChange' : 'structuralChange', {
         path: relativePath,
         timestamp: Date.now(),
       });

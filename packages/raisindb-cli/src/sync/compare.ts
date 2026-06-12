@@ -116,6 +116,21 @@ export function getLocalFiles(
     }
   }
 
+  // Schema directories (node types / archetypes / element types / mixins) live
+  // at the package root. When a content/ layout is used the scan above only
+  // covered content/, so include the schema dirs explicitly so they are synced.
+  if (basePath === '' && scanDir !== directory) {
+    for (const schemaDir of ['nodetypes', 'archetypes', 'elementtypes', 'mixins']) {
+      const dirPath = path.join(directory, schemaDir);
+      if (fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory()) {
+        const subFiles = getLocalFilesRecursive(dirPath, config, schemaDir);
+        for (const [subPath, info] of subFiles) {
+          files.set(subPath, info);
+        }
+      }
+    }
+  }
+
   return files;
 }
 

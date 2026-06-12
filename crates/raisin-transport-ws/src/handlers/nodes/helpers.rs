@@ -7,6 +7,7 @@
 
 use parking_lot::RwLock;
 use raisin_core::NodeService;
+use raisin_models::nodes::properties::value::Element;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::transactional::TransactionalStorage;
 use std::sync::Arc;
@@ -31,11 +32,33 @@ pub(crate) fn json_to_property_value(value: &serde_json::Value) -> PropertyValue
         serde_json::Value::Array(arr) => {
             PropertyValue::Array(arr.iter().map(json_to_property_value).collect())
         }
-        serde_json::Value::Object(obj) => PropertyValue::Object(
-            obj.iter()
-                .map(|(k, v)| (k.clone(), json_to_property_value(v)))
-                .collect(),
-        ),
+        serde_json::Value::Object(obj) => {
+            // Flat maps carrying element_type are Elements — mirrors the
+            // canonical serde deserializer so SectionField content written
+            // over WS survives archetype validation.
+            if let Some(serde_json::Value::String(element_type)) = obj.get("element_type") {
+                let uuid = obj
+                    .get("uuid")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = obj
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "element_type" && k.as_str() != "uuid")
+                    .map(|(k, v)| (k.clone(), json_to_property_value(v)))
+                    .collect();
+                return PropertyValue::Element(Element {
+                    uuid,
+                    element_type: element_type.clone(),
+                    content,
+                });
+            }
+            PropertyValue::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), json_to_property_value(v)))
+                    .collect(),
+            )
+        }
         // Preserve explicit nulls. The HTTP path deserializes JSON null to
         // PropertyValue::Null via serde; coercing to "" here silently
         // corrupted null-valued properties written over WS.

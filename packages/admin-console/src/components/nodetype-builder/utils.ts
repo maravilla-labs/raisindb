@@ -39,7 +39,7 @@ export function parseYamlToNodeType(yamlContent: string): NodeTypeDefinition {
 /**
  * Add internal IDs to properties for React keys and drag-drop
  */
-function addPropertyIds(property: any): PropertyValueSchema {
+export function addPropertyIds(property: any): PropertyValueSchema {
   const prop: PropertyValueSchema = {
     ...property,
     id: property.id || nanoid(),

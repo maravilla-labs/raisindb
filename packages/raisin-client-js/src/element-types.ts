@@ -100,4 +100,16 @@ export class ElementTypes {
       RequestType.ElementTypeUnpublish
     );
   }
+
+  /**
+   * Get resolved ElementType with full inheritance applied
+   */
+  async getResolved(name: string): Promise<unknown> {
+    return this.sendRequest(
+      {
+        name
+      },
+      RequestType.ElementTypeGetResolved
+    );
+  }
 }

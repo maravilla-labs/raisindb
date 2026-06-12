@@ -683,3 +683,89 @@ Do NOT proceed until all errors are resolved.
 | `COMPOSITE_DUPLICATE_UUID` | Two items in the same composite array share the same `uuid` |
 
 Every type in `provides` must have a corresponding YAML file in the matching directory (`nodetypes/`, `archetypes/`, `elementtypes/`, `mixins/`, `workspaces/`). File names use kebab-case (e.g., `landing-page.yaml` for `launchpad:LandingPage`).
+
+---
+
+## 9. Accessing schemas at runtime (SDK & REST)
+
+The YAML above is how you **author** schemas in a package. To **read or manage** them programmatically (tools, scripts, SSR, admin UIs), use the client SDK or the management REST API.
+
+Schema types are **per-branch** — a NodeType/Archetype/ElementType on `main` and on `staging` are independent records. Operations default to the database's branch (`main`); use `onBranch()` to target another.
+
+Both the WebSocket client (`RaisinClient`) and the HTTP/SSR client (`RaisinHttpClient`) expose the same accessors with the same method names:
+
+```ts
+const db = client.database('my_repo');
+
+db.nodeTypes();     // get / list / getResolved / create / update / delete / publish / unpublish
+db.archetypes();    // same surface
+db.elementTypes();  // same surface
+```
+
+### Resolving inheritance — `getResolved()`
+
+To get a type with its `extends` chain merged (base first, child overrides by name, cycle-detected — for NodeTypes also `mixins`), call `getResolved(name)` instead of merging chains yourself. Available for **all three** kinds on **both** clients.
+
+**It returns an envelope, not a single merged object.** The **original** (unmerged) definition stays under `node_type` / `archetype` / `element_type`; the **merged** data is in the `resolved_*` keys. Read effective fields/properties from `resolved_fields` / `resolved_properties` — NOT from `element_type.fields` / `node_type.properties` (those are only the leaf type's own, unmerged entries).
+
+```ts
+await db.elementTypes().getResolved('launchpad:Hero');
+// {
+//   element_type,        // original definition (unmerged)
+//   resolved_fields,     // FieldSchema[] — all fields incl. inherited; child overrides by name
+//   resolved_layout,     // LayoutNode[] | null
+//   inheritance_chain,   // string[] leaf → root
+//   resolved_strict      // boolean
+// }
+
+await db.archetypes().getResolved('launchpad:LandingPage');
+// same shape as elementTypes, but the original is under `archetype`
+
+await db.nodeTypes().getResolved('launchpad:Page');
+// {
+//   node_type,                  // original definition (unmerged)
+//   resolved_properties,        // PropertyValueSchema[] — extends ancestors + mixins + own (own wins)
+//   resolved_allowed_children,  // string[]
+//   resolved_mixins,            // string[] effective mixin names (inherited + transitive)
+//   inheritance_chain           // string[] leaf → root of the extends chain
+// }
+```
+
+Mixin **properties** are merged into `resolved_properties`; the mixin **names** are listed in `resolved_mixins`. The WebSocket and HTTP responses use the same shapes.
+
+### Branches
+
+```ts
+await db.elementTypes().getResolved('launchpad:Hero');                      // main (default)
+await db.onBranch('staging').elementTypes().getResolved('launchpad:Hero');  // staging branch
+await db.onBranch('staging').archetypes().list();
+```
+
+For the HTTP client the branch is part of the REST path (`/api/management/{repo}/{branch}/...`); for the WebSocket client it travels in the request context. `onBranch('x')` works on both.
+
+Writes (`create` / `update` / `delete` / `publish` / `unpublish`) take an optional `commit` `{ message, actor? }` — honored by the HTTP client (the REST API records a commit); the WebSocket client auto-commits as the system actor.
+
+---
+
+## 10. Local development loop
+
+During development, **don't** rebuild and reinstall the package for every edit — sync changes live to a running server.
+
+```bash
+# 1. Start a local server in your project folder (data in ./.data)
+raisindb server start
+
+# 2. First install (creates schema + seed content)
+raisindb deploy ./package --repo myapp --install
+
+# 3. Watch + push every change live as you edit
+raisindb sync ./package --repo myapp --watch --push
+```
+
+`sync --watch` does a **one-time full sync** at start, then pushes **only changed files**. What it covers:
+
+- **Schema (the main thing you edit)** — `nodetypes/`, `archetypes/`, `elementtypes/`, `mixins/` (`*.yaml`) are upserted to the management API live. Editing a node type / archetype / element type / mixin applies immediately — **no re-deploy** — and `getResolved` reflects it right away.
+- **Content** — `content/**/.node.yaml`, named-node YAML, function code (`.js`/`.py`/`.star`), and translations push live to the workspace.
+- **Needs re-deploy** — only `manifest.yaml` and `workspaces/` (applied at install time). The watcher prints a hint.
+
+Re-running `raisindb deploy ./package --repo myapp --install` also updates existing schema (a reinstall upserts node types / archetypes / element types / mixins); **content nodes are left untouched**, so runtime edits aren't clobbered. Use `--watch` for the fast loop and `deploy --install` after manifest/workspace changes (or to ship a versioned `.rap`).

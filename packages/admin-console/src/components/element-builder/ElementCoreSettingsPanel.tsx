@@ -8,6 +8,7 @@ import { Settings } from 'lucide-react'
 import { cleanObject } from './utils'
 import type { ElementTypeDefinition } from './types'
 import ElementTypePicker from '../shared/ElementTypePicker'
+import KeyValueEditor from '../shared/KeyValueEditor'
 
 interface ElementCoreSettingsPanelProps {
   elementType: ElementTypeDefinition
@@ -120,6 +121,21 @@ export default function ElementCoreSettingsPanel({
             onChange={(e) => updateElementType({ description: e.target.value || undefined })}
             className="w-full px-3 py-2 bg-black/30 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-400 min-h-[80px]"
             placeholder="Describe this element type's purpose and usage"
+          />
+        </div>
+
+        {/* Metadata */}
+        <div className="pt-4 border-t border-white/10">
+          <label className="block text-xs text-zinc-400 mb-1">Metadata</label>
+          <p className="text-[10px] text-zinc-500 mb-2">
+            Arbitrary key/value data stored on the element type's <code>meta</code>.
+            Round-tripped as-is for editors and integrations. Values are parsed as
+            JSON when possible, otherwise kept as text.
+          </p>
+          <KeyValueEditor
+            value={elementType.meta as Record<string, any> | undefined}
+            instanceKey={elementType.id ?? elementType.name}
+            onChange={(meta) => updateElementType({ meta })}
           />
         </div>
 

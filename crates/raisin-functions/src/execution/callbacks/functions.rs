@@ -454,6 +454,31 @@ fn json_to_property_value(value: Value) -> Result<PropertyValue> {
             Ok(PropertyValue::Array(items?))
         }
         Value::Object(obj) => {
+            // Flat maps carrying element_type are Elements — mirrors the
+            // canonical serde deserializer so SectionField content written
+            // from functions survives archetype validation.
+            if let Some(Value::String(element_type)) = obj.get("element_type") {
+                let element_type = element_type.clone();
+                let uuid = obj
+                    .get("uuid")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mut content = HashMap::new();
+                for (k, v) in obj {
+                    if k == "element_type" || k == "uuid" {
+                        continue;
+                    }
+                    content.insert(k, json_to_property_value(v)?);
+                }
+                return Ok(PropertyValue::Element(
+                    raisin_models::nodes::properties::value::Element {
+                        uuid,
+                        element_type,
+                        content,
+                    },
+                ));
+            }
             let mut map = HashMap::new();
             for (k, v) in obj {
                 map.insert(k, json_to_property_value(v)?);

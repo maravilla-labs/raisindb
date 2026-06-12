@@ -16,11 +16,14 @@ import {
   Shield,
   Search as SearchIcon,
   Sliders,
+  Braces,
   X,
 } from 'lucide-react'
 import { PROPERTY_TYPE_ICONS, PROPERTY_TYPE_LABELS } from './constants'
 import type { PropertyValueSchema, PropertyType, IndexType } from './types'
 import { pathSegments } from './types'
+import { addPropertyIds } from './utils'
+import KeyValueEditor from '../shared/KeyValueEditor'
 
 interface PropertyEditorPanelProps {
   property: PropertyValueSchema
@@ -29,7 +32,7 @@ interface PropertyEditorPanelProps {
   path?: string
 }
 
-type TabId = 'basic' | 'display' | 'validation' | 'indexing' | 'advanced'
+type TabId = 'basic' | 'display' | 'validation' | 'indexing' | 'advanced' | 'metadata'
 
 interface TabConfig {
   id: TabId
@@ -44,6 +47,7 @@ const TABS: TabConfig[] = [
   { id: 'validation', icon: Shield, label: 'Validation', tooltip: 'Constraints & rules' },
   { id: 'indexing', icon: SearchIcon, label: 'Indexing', tooltip: 'Search indexes' },
   { id: 'advanced', icon: Sliders, label: 'Advanced', tooltip: 'Type-specific options' },
+  { id: 'metadata', icon: Braces, label: 'Metadata', tooltip: 'Constraints, structure & metadata' },
 ]
 
 export default function PropertyEditorPanel({
@@ -88,6 +92,14 @@ export default function PropertyEditorPanel({
           delete (next as any).constraints
         }
       }
+    }
+
+    if ('meta' in updates && !next.meta) {
+      delete (next as any).meta
+    }
+
+    if ('structure' in updates && !next.structure) {
+      delete (next as any).structure
     }
 
     onChange(next)
@@ -233,6 +245,15 @@ export default function PropertyEditorPanel({
           <AdvancedTab
             property={property}
             updateProperty={updateProperty}
+          />
+        )}
+
+        {activeTab === 'metadata' && (
+          <MetadataTab
+            key={property.id ?? path}
+            property={property}
+            updateProperty={updateProperty}
+            instanceKey={property.id ?? path ?? property.name ?? ''}
           />
         )}
       </div>
@@ -802,6 +823,145 @@ function AdvancedTab({ property, updateProperty }: TabProps) {
         </p>
       )}
     </>
+  )
+}
+
+interface MetadataTabProps extends TabProps {
+  instanceKey: string
+}
+
+function MetadataTab({ property, updateProperty, instanceKey }: MetadataTabProps) {
+  return (
+    <div className="space-y-4">
+      {/* Constraints (raw) */}
+      <div>
+        <label className="block text-xs font-medium text-zinc-300 mb-1">
+          Constraints
+        </label>
+        <p className="text-xs text-zinc-500 mb-2">
+          Full key/value view of this property's <code>constraints</code> map.
+          Keys edited in the Validation/Advanced tabs (e.g. <code>minLength</code>,
+          <code> pattern</code>) appear here too. Values are parsed as JSON when
+          possible.
+        </p>
+        <KeyValueEditor
+          value={property.constraints}
+          instanceKey={`${instanceKey}:constraints`}
+          onChange={(constraints) => updateProperty({ constraints })}
+          keyPlaceholder="constraint"
+          addLabel="Add constraint"
+        />
+      </div>
+
+      {/* Structure (Object only) */}
+      {property.type === 'Object' && (
+        <div className="pt-3 border-t border-white/10">
+          <label className="block text-xs font-medium text-zinc-300 mb-1">
+            Structure
+          </label>
+          <p className="text-xs text-zinc-500 mb-2">
+            Nested property schemas keyed by name, defining the shape of this
+            object. You can also add nested properties visually by dropping them
+            onto this object in the canvas. Edit as JSON below for bulk authoring
+            — values are property schemas (e.g.{' '}
+            <code>{'{ "city": { "type": "String" } }'}</code>).
+          </p>
+          <StructureEditor
+            value={property.structure}
+            onChange={(structure) => updateProperty({ structure })}
+          />
+        </div>
+      )}
+
+      {/* Meta */}
+      <div className="pt-3 border-t border-white/10">
+        <label className="block text-xs font-medium text-zinc-300 mb-1">
+          Metadata
+        </label>
+        <p className="text-xs text-zinc-500 mb-2">
+          Arbitrary key/value data stored on this property's <code>meta</code>.
+          Not interpreted by the database — round-tripped as-is for editors and
+          integrations.
+        </p>
+        <KeyValueEditor
+          value={property.meta}
+          instanceKey={`${instanceKey}:meta`}
+          onChange={(meta) => updateProperty({ meta })}
+        />
+      </div>
+    </div>
+  )
+}
+
+interface StructureEditorProps {
+  value?: Record<string, PropertyValueSchema>
+  onChange: (value: Record<string, PropertyValueSchema> | undefined) => void
+}
+
+/** Recursively drop internal `id` keys so the JSON view stays clean. */
+function stripInternalIds(value: any): any {
+  if (Array.isArray(value)) return value.map(stripInternalIds)
+  if (value && typeof value === 'object') {
+    const { id, ...rest } = value as Record<string, any>
+    const out: Record<string, any> = {}
+    Object.entries(rest).forEach(([k, v]) => {
+      out[k] = stripInternalIds(v)
+    })
+    return out
+  }
+  return value
+}
+
+function StructureEditor({ value, onChange }: StructureEditorProps) {
+  const [text, setText] = useState(() =>
+    value && Object.keys(value).length > 0
+      ? JSON.stringify(stripInternalIds(value), null, 2)
+      : ''
+  )
+  const [error, setError] = useState<string | null>(null)
+
+  const handleChange = (raw: string) => {
+    setText(raw)
+    const trimmed = raw.trim()
+    if (trimmed === '') {
+      setError(null)
+      onChange(undefined)
+      return
+    }
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        setError('Structure must be a JSON object keyed by property name.')
+        return
+      }
+      // Normalize each nested schema the same way loaded structures are, so
+      // canvas rendering and drag-drop have the internal ids they expect.
+      const normalized = Object.fromEntries(
+        Object.entries(parsed).map(([key, schema]) => [key, addPropertyIds(schema)])
+      ) as Record<string, PropertyValueSchema>
+      setError(null)
+      onChange(normalized)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Invalid JSON')
+    }
+  }
+
+  return (
+    <div>
+      <textarea
+        value={text}
+        onChange={(e) => handleChange(e.target.value)}
+        rows={6}
+        spellCheck={false}
+        className={`w-full px-3 py-2 bg-white/5 border rounded-lg text-sm text-white font-mono focus:outline-none focus:ring-2 ${
+          error
+            ? 'border-red-500 focus:ring-red-400'
+            : 'border-white/20 focus:ring-primary-500/50'
+        }`}
+        placeholder={'{\n  "city": { "type": "String" },\n  "zip": { "type": "String" }\n}'}
+      />
+      {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+    </div>
   )
 }
 

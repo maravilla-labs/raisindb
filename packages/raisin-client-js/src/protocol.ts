@@ -234,6 +234,7 @@ export enum RequestType {
   ArchetypeDelete = 'archetype_delete',
   ArchetypePublish = 'archetype_publish',
   ArchetypeUnpublish = 'archetype_unpublish',
+  ArchetypeGetResolved = 'archetype_get_resolved',
 
   // ElementType operations
   ElementTypeCreate = 'element_type_create',
@@ -243,6 +244,7 @@ export enum RequestType {
   ElementTypeDelete = 'element_type_delete',
   ElementTypePublish = 'element_type_publish',
   ElementTypeUnpublish = 'element_type_unpublish',
+  ElementTypeGetResolved = 'element_type_get_resolved',
 
   // Search operations
   FullTextSearch = 'full_text_search',

@@ -18,6 +18,9 @@
 
 import { decodeNamespace } from '../namespace-encoding.js';
 
+/** Which schema kind a file under a schema directory defines */
+export type SchemaKind = 'nodetype' | 'archetype' | 'elementtype' | 'mixin';
+
 /** What kind of change a file represents */
 export type ChangeKind =
   | 'node-yaml' // .node.yaml describing its containing directory node
@@ -25,7 +28,8 @@ export type ChangeKind =
   | 'code' // .js / .py / .star function code (pushed as inline `code` property)
   | 'asset' // other binary/asset file (pushed via multipart upload)
   | 'translation' // {base}.{locale}.yaml translation overlay
-  | 'structural' // manifest / nodetypes / workspaces — needs re-deploy
+  | 'schema' // nodetype/archetype/elementtype/mixin → management API (upsert)
+  | 'structural' // manifest / workspaces — needs re-deploy
   | 'skip'; // not a syncable content file
 
 export interface MappedChange {
@@ -36,6 +40,8 @@ export interface MappedChange {
   nodePath?: string;
   /** Locale for translation files */
   locale?: string;
+  /** Schema kind, set when kind === 'schema' */
+  schemaKind?: SchemaKind;
   /** Human-readable hint for structural/skip changes */
   reason?: string;
 }
@@ -43,15 +49,20 @@ export interface MappedChange {
 /** Code file extensions pushed as inline `code` property on asset nodes */
 export const CODE_EXTENSIONS = ['.js', '.py', '.star'];
 
+/**
+ * Top-level package directories holding schema definitions. These are synced
+ * live to the management API (upsert), unlike content nodes which go to the
+ * repository workspace.
+ */
+const SCHEMA_DIRS: Record<string, SchemaKind> = {
+  nodetypes: 'nodetype',
+  archetypes: 'archetype',
+  elementtypes: 'elementtype',
+  mixins: 'mixin',
+};
+
 /** Top-level package directories that are install-time-only (structural) */
-const STRUCTURAL_DIRS = new Set([
-  'nodetypes',
-  'workspaces',
-  'mixins',
-  'archetypes',
-  'elementtypes',
-  'static',
-]);
+const STRUCTURAL_DIRS = new Set(['workspaces', 'static']);
 
 const LOCALE_RE = /^[a-zA-Z]{2,3}(-[a-zA-Z]{2,4}|\d{3})?$/;
 
@@ -111,6 +122,16 @@ export function mapChangeToNode(
       };
     }
     return { kind: 'skip', reason: 'not inside a workspace directory' };
+  }
+
+  // Schema directories (nodetypes/archetypes/elementtypes/mixins) → synced
+  // live to the management API. Only .yaml/.yml definition files apply.
+  const schemaKind = SCHEMA_DIRS[parts[0]];
+  if (schemaKind) {
+    if (filename.endsWith('.yaml') || filename.endsWith('.yml')) {
+      return { kind: 'schema', schemaKind };
+    }
+    return { kind: 'skip', reason: 'non-YAML file in a schema directory' };
   }
 
   // Structural directories (only meaningful when content base == package dir)

@@ -11,6 +11,7 @@
 use crate::physical_plan::executor::Row;
 use indexmap::IndexMap;
 use raisin_error::Error;
+use raisin_models::nodes::properties::value::Element;
 use raisin_models::nodes::properties::{PropertyValue, RaisinReference};
 use raisin_sql::analyzer::{DataType, Expr, Literal, TypedExpr};
 
@@ -214,6 +215,29 @@ pub(super) fn json_value_to_property_value(v: &serde_json::Value) -> Result<Prop
                         path: path_str,
                     }));
                 }
+            }
+
+            // Check if this is an Element (flat map carrying element_type) —
+            // mirrors the canonical serde deserializer so SectionField content
+            // written via SQL survives archetype validation.
+            if let Some(serde_json::Value::String(element_type)) = map.get("element_type") {
+                let uuid = map
+                    .get("uuid")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mut content = std::collections::HashMap::new();
+                for (k, v) in map {
+                    if k == "element_type" || k == "uuid" {
+                        continue;
+                    }
+                    content.insert(k.clone(), json_value_to_property_value(v)?);
+                }
+                return Ok(PropertyValue::Element(Element {
+                    uuid,
+                    element_type: element_type.clone(),
+                    content,
+                }));
             }
 
             // Fallback: regular object

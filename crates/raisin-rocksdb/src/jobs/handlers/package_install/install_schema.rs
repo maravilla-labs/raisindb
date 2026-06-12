@@ -78,25 +78,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         for (name, node_type) in mixins_to_install {
             let type_name = node_type.name.clone();
 
-            // In skip mode, check if mixin exists first
-            if install_mode == InstallMode::Skip {
-                let existing = node_type_repo
-                    .get(
-                        BranchScope::new(tenant_id, repo_id, "main"),
-                        &type_name,
-                        None,
-                    )
-                    .await?;
-                if existing.is_some() {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        mixin = %type_name,
-                        "Mixin already exists, skipping (skip mode)"
-                    );
-                    stats.mixins_skipped += 1;
-                    continue;
-                }
-            }
+            // Schema is package-authoritative: always upsert (create or update)
+            // so re-installing a package applies changed definitions, even in
+            // Skip mode (Skip only protects existing *content* nodes from being
+            // overwritten — schema must track the package).
 
             // Register mixin as a node type (upsert handles both create and update)
             let commit = CommitMetadata::system(format!("Package install mixin: {}", name));
@@ -167,25 +152,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         for (name, node_type) in node_types_to_install {
             let type_name = node_type.name.clone();
 
-            // In skip mode, check if node type exists first
-            if install_mode == InstallMode::Skip {
-                let existing = node_type_repo
-                    .get(
-                        BranchScope::new(tenant_id, repo_id, "main"),
-                        &type_name,
-                        None,
-                    )
-                    .await?;
-                if existing.is_some() {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        node_type = %type_name,
-                        "Node type already exists, skipping (skip mode)"
-                    );
-                    stats.node_types_skipped += 1;
-                    continue;
-                }
-            }
+            // Schema is package-authoritative: always upsert (create or update)
+            // so re-installing a package applies changed definitions, even in
+            // Skip mode (Skip only protects existing *content* nodes).
 
             // Register node type (upsert handles both create and update)
             let commit = CommitMetadata::system(format!("Package install: {}", name));
@@ -256,25 +225,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         for (name, archetype) in archetypes_to_install {
             let archetype_name = archetype.name.clone();
 
-            // In skip mode, check if archetype exists first
-            if install_mode == InstallMode::Skip {
-                let existing = archetype_repo
-                    .get(
-                        BranchScope::new(tenant_id, repo_id, "main"),
-                        &archetype_name,
-                        None,
-                    )
-                    .await?;
-                if existing.is_some() {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        archetype = %archetype_name,
-                        "Archetype already exists, skipping (skip mode)"
-                    );
-                    stats.archetypes_skipped += 1;
-                    continue;
-                }
-            }
+            // Schema is package-authoritative: always upsert (create or update)
+            // so re-installing a package applies changed definitions, even in
+            // Skip mode (Skip only protects existing *content* nodes).
 
             // Register archetype (upsert handles both create and update)
             let commit = CommitMetadata::system(format!("Package install: {}", name));
@@ -345,25 +298,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         for (name, element_type) in element_types_to_install {
             let type_name = element_type.name.clone();
 
-            // In skip mode, check if element type exists first
-            if install_mode == InstallMode::Skip {
-                let existing = element_type_repo
-                    .get(
-                        BranchScope::new(tenant_id, repo_id, "main"),
-                        &type_name,
-                        None,
-                    )
-                    .await?;
-                if existing.is_some() {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        element_type = %type_name,
-                        "Element type already exists, skipping (skip mode)"
-                    );
-                    stats.element_types_skipped += 1;
-                    continue;
-                }
-            }
+            // Schema is package-authoritative: always upsert (create or update)
+            // so re-installing a package applies changed definitions, even in
+            // Skip mode (Skip only protects existing *content* nodes).
 
             // Register element type (upsert handles both create and update)
             let commit = CommitMetadata::system(format!("Package install: {}", name));

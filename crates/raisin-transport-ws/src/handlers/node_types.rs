@@ -515,11 +515,13 @@ where
         resolver.resolve(&payload.name).await?
     };
 
-    // Return as JSON with extra metadata
+    // Return as JSON with extra metadata (shape matches the HTTP management
+    // endpoint, including the effective `resolved_mixins` name list).
     let response = serde_json::json!({
         "node_type": resolved.node_type,
         "resolved_properties": resolved.resolved_properties,
         "resolved_allowed_children": resolved.resolved_allowed_children,
+        "resolved_mixins": resolved.resolved_mixins,
         "inheritance_chain": resolved.inheritance_chain,
     });
 

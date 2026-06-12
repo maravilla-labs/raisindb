@@ -28,6 +28,7 @@ import {
 import type { Upload, UploadOptions, BatchUpload, BatchUploadOptions } from './upload/types';
 import { createFileSource } from './upload/file-source';
 import { UploadManager } from './upload/uploader';
+import { HttpNodeTypes, HttpArchetypes, HttpElementTypes } from './http-schema';
 
 /**
  * Current user info
@@ -1018,6 +1019,22 @@ export class RaisinHttpClient extends EventEmitter {
   }
 
   /**
+   * Make a management REST request and return the parsed body.
+   *
+   * @internal Used by the HTTP schema-management helpers
+   * ({@link HttpNodeTypes}/{@link HttpArchetypes}/{@link HttpElementTypes}) to
+   * reuse the client's centralized auth, timeout, and base-URL handling.
+   */
+  async managementRequest<T = unknown>(
+    method: string,
+    path: string,
+    body?: unknown
+  ): Promise<T> {
+    const response = await this.request<T>({ method, path, body });
+    return response.data;
+  }
+
+  /**
    * Get a simplified database interface for SSR
    * This returns an HTTP-based database client
    */
@@ -1120,6 +1137,26 @@ export class HttpDatabase {
       (repo, name, input, options) => this.client.invokeFunction(repo, name, input, options),
       (repo, name, input) => this.client.invokeFunctionSync(repo, name, input),
     );
+  }
+
+  /** Effective branch for management calls. */
+  private schemaBranch(): string {
+    return this.branch ?? this.client.getBranch();
+  }
+
+  /** NodeType management (get/list/getResolved/create/update/delete/publish/unpublish). */
+  nodeTypes(): HttpNodeTypes {
+    return new HttpNodeTypes(this.repository, this.schemaBranch(), this.client);
+  }
+
+  /** Archetype management (get/list/getResolved/create/update/delete/publish/unpublish). */
+  archetypes(): HttpArchetypes {
+    return new HttpArchetypes(this.repository, this.schemaBranch(), this.client);
+  }
+
+  /** ElementType management (get/list/getResolved/create/update/delete/publish/unpublish). */
+  elementTypes(): HttpElementTypes {
+    return new HttpElementTypes(this.repository, this.schemaBranch(), this.client);
   }
 }
 

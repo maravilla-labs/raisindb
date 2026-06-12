@@ -353,6 +353,7 @@ pub enum RequestType {
     ArchetypeDelete,
     ArchetypePublish,
     ArchetypeUnpublish,
+    ArchetypeGetResolved,
 
     // ElementType operations
     ElementTypeCreate,
@@ -362,6 +363,7 @@ pub enum RequestType {
     ElementTypeDelete,
     ElementTypePublish,
     ElementTypeUnpublish,
+    ElementTypeGetResolved,
 
     // Search operations
     FullTextSearch,

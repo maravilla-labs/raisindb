@@ -17,6 +17,7 @@
 use crate::nodes::properties::PropertyValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// The base schema for a field in a block type.
 ///
@@ -59,4 +60,10 @@ pub struct FieldTypeSchema {
     /// Whether the field is translatable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translatable: Option<bool>,
+    /// Arbitrary, free-form metadata attached to the field.
+    ///
+    /// Not interpreted by the database; round-tripped as-is so editors and
+    /// integrations can attach their own configuration to a field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<HashMap<String, PropertyValue>>,
 }
