@@ -80,7 +80,8 @@ pub use relate_parser::{is_relate_statement, is_unrelate_statement, parse_relate
 pub use transaction::TransactionStatement;
 pub use transaction_parser::{is_transaction_statement, parse_transaction};
 pub use translate::{
-    TranslateFilter, TranslateStatement, TranslationAssignment, TranslationPath, TranslationValue,
+    PathSegment, TranslateFilter, TranslateStatement, TranslationAssignment, TranslationPath,
+    TranslationValue,
 };
 pub use translate_parser::{is_translate_statement, parse_translate};
 

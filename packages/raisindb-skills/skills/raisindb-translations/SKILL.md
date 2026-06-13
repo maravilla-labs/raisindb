@@ -178,6 +178,81 @@ The `icon` field is NOT in the translation because it is not translatable. The s
 
 **Rule**: If a repeatable CompositeField has ANY sub-field with `translatable: true`, every item must have a unique `uuid`.
 
+## Nested CompositeField Translations
+
+The uuid rule applies at **every** repeatable level — including a composite
+nested inside another composite, or a composite inside a multivalue Element
+field. Translations are addressed by a flat JSON pointer that alternates
+*field → uuid* at each array level:
+
+```
+/sections/<section-uuid>/features/<feature-uuid>/title
+```
+
+The server's translation resolver walks this pointer to any depth, matching each
+uuid segment against the `uuid` of the array item. **Every** array item along
+the path therefore needs a `uuid` — if an intermediate item has no `uuid`, the
+nested translation cannot be anchored and the field is effectively locked.
+
+This means the requirement is recursive but still *conditional*: a repeatable
+composite needs item uuids when it has a translatable field anywhere in its
+sub-tree — directly **or** inside a nested composite. Composites you never
+translate stay uuid-free.
+
+**Element type** — a multivalue Element field whose element contains a
+repeatable composite:
+
+```yaml
+# elementtypes/feature-section.yaml
+fields:
+  - $type: TextField
+    name: heading
+    translatable: true
+  - $type: CompositeField
+    name: features        # repeatable composite, nested one level deeper
+    multiple: true
+    fields:
+      - { $type: TextField, name: title, translatable: true }
+      - { $type: TextField, name: icon }   # NOT translatable
+```
+
+**Base content** (`.node.yaml`) — uuids at **each** level:
+
+```yaml
+content:
+  - uuid: sec-1            # outer element/section item
+    element_type: launchpad:FeatureSection
+    heading: Features
+    features:
+      - uuid: feat-fast    # inner composite item
+        icon: zap
+        title: Fast Development
+      - uuid: feat-scale
+        icon: trending-up
+        title: Scalable
+```
+
+**Translation overlay** (`.node.fr.yaml`) — mirror the uuids, translate leaves:
+
+```yaml
+content:
+  - uuid: sec-1
+    heading: Fonctionnalites
+    features:
+      - uuid: feat-fast
+        title: Developpement rapide
+      - uuid: feat-scale
+        title: Evolutif
+```
+
+The validator emits `COMPOSITE_MISSING_UUID` at the offending level if a nested
+composite item lacks a `uuid` — even when only the inner composite is
+translatable and the outer one has no directly-translatable field of its own.
+
+The same flat pointers are what the REST `raisin:cmd/translate` command and the
+SQL `UPDATE … FOR LOCALE` statement write — see the SQL reference's TRANSLATE
+section for the SQL form.
+
 ## Frontend Locale Store
 
 Track the active language and generate SQL clauses. The key function is `localeClause()`:

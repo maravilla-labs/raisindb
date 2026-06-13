@@ -15,7 +15,7 @@ pub use parsers::{is_translate_statement, parse_translate, TranslateParseError};
 mod tests {
     use super::*;
     use crate::ast::translate::{
-        TranslateFilter, TranslateStatement, TranslationAssignment, TranslationPath,
+        PathSegment, TranslateFilter, TranslateStatement, TranslationAssignment, TranslationPath,
         TranslationValue,
     };
 
@@ -85,11 +85,18 @@ mod tests {
 
         assert_eq!(
             result.assignments[0].path,
-            TranslationPath::BlockProperty {
-                array_field: "blocks".to_string(),
-                block_uuid: "550e8400".to_string(),
-                property_path: vec!["content".to_string(), "text".to_string()],
-            }
+            TranslationPath::indexed(vec![
+                PathSegment::Indexed {
+                    field: "blocks".to_string(),
+                    uuid: "550e8400".to_string(),
+                },
+                PathSegment::Field("content".to_string()),
+                PathSegment::Field("text".to_string()),
+            ])
+        );
+        assert_eq!(
+            result.assignments[0].path.to_json_pointer(),
+            "/blocks/550e8400/content/text"
         );
     }
 
@@ -226,7 +233,7 @@ mod tests {
         );
         assert_eq!(
             result.assignments[0].path.to_json_pointer(),
-            Some("/seo/meta/description".to_string())
+            "/seo/meta/description"
         );
     }
 
@@ -236,20 +243,51 @@ mod tests {
         let result = parse_translate(sql).unwrap().unwrap();
 
         match &result.assignments[0].path {
-            TranslationPath::BlockProperty {
-                array_field,
-                block_uuid,
-                property_path,
-            } => {
-                assert_eq!(array_field, "sections");
-                assert_eq!(block_uuid, "abc123");
+            TranslationPath::Indexed(segments) => {
                 assert_eq!(
-                    property_path,
-                    &vec!["header".to_string(), "title".to_string()]
+                    segments,
+                    &vec![
+                        PathSegment::Indexed {
+                            field: "sections".to_string(),
+                            uuid: "abc123".to_string(),
+                        },
+                        PathSegment::Field("header".to_string()),
+                        PathSegment::Field("title".to_string()),
+                    ]
                 );
             }
-            _ => panic!("Expected BlockProperty"),
+            _ => panic!("Expected Indexed path"),
         }
+        assert_eq!(
+            result.assignments[0].path.to_json_pointer(),
+            "/sections/abc123/header/title"
+        );
+    }
+
+    #[test]
+    fn test_parse_deeply_nested_indexed_path() {
+        // composite inside a multivalue element field: two uuid levels deep
+        let sql = "UPDATE Page FOR LOCALE 'de' SET sections[uuid='s1'].features[uuid='f1'].title = 'Titel' WHERE path = '/home'";
+        let result = parse_translate(sql).unwrap().unwrap();
+
+        assert_eq!(
+            result.assignments[0].path,
+            TranslationPath::indexed(vec![
+                PathSegment::Indexed {
+                    field: "sections".to_string(),
+                    uuid: "s1".to_string(),
+                },
+                PathSegment::Indexed {
+                    field: "features".to_string(),
+                    uuid: "f1".to_string(),
+                },
+                PathSegment::Field("title".to_string()),
+            ])
+        );
+        assert_eq!(
+            result.assignments[0].path.to_json_pointer(),
+            "/sections/s1/features/f1/title"
+        );
     }
 
     #[test]
@@ -259,7 +297,7 @@ mod tests {
 
         assert_eq!(result.assignments.len(), 2);
         assert!(result.assignments[0].path.is_property());
-        assert!(result.assignments[1].path.is_block_property());
+        assert!(result.assignments[1].path.is_indexed());
     }
 
     #[test]

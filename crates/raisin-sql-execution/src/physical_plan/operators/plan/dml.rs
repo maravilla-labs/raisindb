@@ -82,14 +82,14 @@
 //!
 //! ## PhysicalTranslate
 //!
-//! Updates translations for nodes in a specific locale. Node-level translations
-//! use JSON Pointer paths (e.g., "/title", "/metadata/author"). Block-level
-//! translations are stored separately keyed by block UUID.
+//! Updates translations for nodes in a specific locale. All translations use
+//! flat JSON Pointer paths (e.g., "/title", "/metadata/author"), including
+//! uuid-indexed paths for nested array items
+//! (e.g., "/sections/s1/features/f1/title"), resolved to any depth.
 //!
 //! ### Fields
 //! - `locale` - Target locale code (e.g., "de", "fr", "en-US")
-//! - `node_translations` - Node-level translations: JSON Pointer -> value
-//! - `block_translations` - Block-level translations: block_uuid -> (JSON Pointer -> value)
+//! - `node_translations` - Translations as flat JSON Pointer -> value
 //! - `filter` - Filter to select nodes to translate
 //! - `workspace` - Workspace containing the nodes
 //! - `branch_override` - Optional branch override

@@ -380,10 +380,9 @@ impl QueryPlan {
             }
             AnalyzedStatement::Translate(translate) => {
                 output.push_str(&format!(
-                    "TRANSLATE FOR LOCALE '{}' ({} node props, {} blocks)\n",
+                    "TRANSLATE FOR LOCALE '{}' ({} translations)\n",
                     translate.locale,
                     translate.node_translations.len(),
-                    translate.block_translations.len()
                 ));
                 if translate.filter.is_some() {
                     output.push_str("  WHERE: present\n");

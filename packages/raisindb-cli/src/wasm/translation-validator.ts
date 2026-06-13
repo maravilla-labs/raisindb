@@ -118,8 +118,11 @@ export function buildSchemaContext(allFiles: Record<string, string>): SchemaCont
 }
 
 /**
- * Collect the set of translatable field names from a list of FieldDefs.
- * Recurses into CompositeField sub-fields.
+ * Collect the set of directly-translatable field names from a list of FieldDefs.
+ *
+ * Nested CompositeField sub-fields are NOT included here — their translatable
+ * descendants are validated by recursing into the nested array (see
+ * `checkCompositeItems`).
  */
 function collectTranslatableFields(fields: FieldDef[]): Set<string> {
   const result = new Set<string>();
@@ -127,10 +130,23 @@ function collectTranslatableFields(fields: FieldDef[]): Set<string> {
     if (f.translatable === true) {
       result.add(f.name);
     }
-    // CompositeField sub-fields: their translatable children apply to items
-    // within the composite array (handled separately during validation).
   }
   return result;
+}
+
+/**
+ * Whether a field — or any nested CompositeField descendant — is translatable.
+ * A repeatable composite needs item UUIDs whenever this is true for any of its
+ * sub-fields, because the translation pointer (`/field/<uuid>/…`) must be
+ * anchorable through this level even when only a nested composite is
+ * translatable.
+ */
+function fieldHasTranslatableDescendant(f: FieldDef): boolean {
+  if (f.translatable === true) return true;
+  if (f.$type === 'CompositeField' && Array.isArray(f.fields)) {
+    return f.fields.some(fieldHasTranslatableDescendant);
+  }
+  return false;
 }
 
 /**
@@ -442,10 +458,14 @@ function checkCompositeItems(
   errors: ValidationError[],
 ): void {
   if (!compositeDef.fields) return;
-  const subTranslatable = collectTranslatableFields(compositeDef.fields);
+  const subFields = compositeDef.fields;
+  const subTranslatable = collectTranslatableFields(subFields);
+  // Items need UUIDs if this composite has translatable content anywhere in its
+  // sub-tree — directly OR inside a nested composite — so the deep pointer can
+  // be anchored through this level.
+  const requiresUuid = subFields.some(fieldHasTranslatableDescendant);
 
-  // If composite has translatable sub-fields, items need unique UUIDs
-  if (subTranslatable.size > 0) {
+  if (requiresUuid) {
     const seenUuids = new Set<string>();
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -484,6 +504,24 @@ function checkCompositeItems(
     for (const key of Object.keys(rec)) {
       if (NON_TRANSLATABLE_KEYS.has(key)) continue;
       if (SECTION_IDENTIFIER_KEYS.has(key)) continue;
+
+      // Nested CompositeField: recurse into its items rather than flagging the
+      // field itself as non-translatable.
+      const subDef = subFields.find(f => f.name === key);
+      if (subDef && subDef.$type === 'CompositeField') {
+        const subArr = rec[key];
+        if (Array.isArray(subArr)) {
+          checkCompositeItems(
+            subArr,
+            `${parentPath}[${i}].${key}`,
+            filePath,
+            subDef,
+            errors,
+          );
+        }
+        continue;
+      }
+
       if (!subTranslatable.has(key)) {
         errors.push({
           file_path: filePath,

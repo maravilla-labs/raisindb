@@ -17,7 +17,7 @@ use crate::ast::order::{NodeReference, OrderStatement};
 use crate::ast::relate::{RelateNodeReference, RelateStatement, UnrelateStatement};
 use crate::ast::restore::RestoreStatement;
 use crate::ast::translate::{
-    TranslateFilter, TranslateStatement, TranslationPath, TranslationValue,
+    PathSegment, TranslateFilter, TranslateStatement, TranslationPath, TranslationValue,
 };
 
 use super::catalog::Catalog;
@@ -249,10 +249,13 @@ pub(super) fn analyze_translate(
         return Err(AnalysisError::TranslateInvalidLocale(stmt.locale.clone()));
     }
 
-    // Convert assignments to analyzed format
+    // Convert assignments to analyzed format.
+    //
+    // Both plain property paths and uuid-indexed paths flatten to a single flat
+    // node-overlay JSON pointer (`/field/uuid/field/uuid/leaf`). The resolver
+    // (`merge_into_map`) navigates arrays by matching uuid segments against item
+    // `uuid`s, so a single map handles arbitrary nesting depth.
     let mut node_translations: HashMap<String, AnalyzedTranslationValue> = HashMap::new();
-    let mut block_translations: HashMap<String, HashMap<String, AnalyzedTranslationValue>> =
-        HashMap::new();
 
     for assignment in &stmt.assignments {
         let value = match &assignment.value {
@@ -263,32 +266,19 @@ pub(super) fn analyze_translate(
             TranslationValue::Null => AnalyzedTranslationValue::Null,
         };
 
-        match &assignment.path {
-            TranslationPath::Property(segments) => {
-                // Convert dot-notation to JsonPointer
-                let json_pointer = format!("/{}", segments.join("/"));
-                node_translations.insert(json_pointer, value);
-            }
-            TranslationPath::BlockProperty {
-                block_uuid,
-                property_path,
-                ..
-            } => {
-                // Validate block UUID format
-                if block_uuid.is_empty() {
-                    return Err(AnalysisError::TranslateEmptyBlockUuid);
-                }
-
-                // Convert property path to JsonPointer
-                let json_pointer = format!("/{}", property_path.join("/"));
-
-                // Add to block translations map
-                block_translations
-                    .entry(block_uuid.clone())
-                    .or_default()
-                    .insert(json_pointer, value);
+        // Reject empty uuids in indexed paths (e.g. `features[uuid='']`),
+        // which could never resolve against a real item.
+        if let TranslationPath::Indexed(segments) = &assignment.path {
+            if segments
+                .iter()
+                .any(|s| matches!(s, PathSegment::Indexed { uuid, .. } if uuid.is_empty()))
+            {
+                return Err(AnalysisError::TranslateEmptyBlockUuid);
             }
         }
+
+        let json_pointer = assignment.path.to_json_pointer();
+        node_translations.insert(json_pointer, value);
     }
 
     // Convert filter
@@ -311,7 +301,6 @@ pub(super) fn analyze_translate(
         workspace,
         locale: stmt.locale.clone(),
         node_translations,
-        block_translations,
         filter,
         branch_override: stmt.branch.clone(),
     })

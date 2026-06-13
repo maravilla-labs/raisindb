@@ -121,7 +121,6 @@ pub(super) fn explain_dml_op(plan: &LogicalPlan, prefix: &str) -> String {
         LogicalPlan::Translate {
             locale,
             node_translations,
-            block_translations,
             filter,
             workspace,
             branch_override,
@@ -136,11 +135,10 @@ pub(super) fn explain_dml_op(plan: &LogicalPlan, prefix: &str) -> String {
                 .unwrap_or_default();
             let filter_str = if filter.is_some() { " (filtered)" } else { "" };
             format!(
-                "{}Translate: locale='{}' ({} node props, {} blocks){}{}{}",
+                "{}Translate: locale='{}' ({} translations){}{}{}",
                 prefix,
                 locale,
                 node_translations.len(),
-                block_translations.len(),
                 filter_str,
                 ws_str,
                 branch_str

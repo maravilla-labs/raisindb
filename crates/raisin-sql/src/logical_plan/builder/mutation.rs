@@ -89,7 +89,6 @@ impl<'a> PlanBuilder<'a> {
         Ok(LogicalPlan::Translate {
             locale: translate.locale.clone(),
             node_translations: translate.node_translations.clone(),
-            block_translations: translate.block_translations.clone(),
             filter: translate.filter.clone(),
             workspace: Some(translate.workspace.clone()),
             branch_override: translate.branch_override.clone(),

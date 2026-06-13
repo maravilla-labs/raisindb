@@ -243,14 +243,9 @@ pub enum LogicalPlan {
     Translate {
         /// Target locale code (e.g., "de", "fr", "en-US")
         locale: String,
-        /// Node-level translations: JsonPointer -> value
+        /// Translations as flat JsonPointer -> value (incl. uuid-indexed paths)
         node_translations:
             std::collections::HashMap<String, crate::analyzer::AnalyzedTranslationValue>,
-        /// Block-level translations: block_uuid -> (JsonPointer -> value)
-        block_translations: std::collections::HashMap<
-            String,
-            std::collections::HashMap<String, crate::analyzer::AnalyzedTranslationValue>,
-        >,
         /// Filter to select nodes to translate
         filter: Option<crate::analyzer::AnalyzedTranslateFilter>,
         /// Workspace containing the nodes

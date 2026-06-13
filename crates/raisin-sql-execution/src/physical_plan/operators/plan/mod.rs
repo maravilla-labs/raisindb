@@ -418,10 +418,6 @@ define_physical_plan! {
             locale: String,
             node_translations:
                 std::collections::HashMap<String, raisin_sql::analyzer::AnalyzedTranslationValue>,
-            block_translations: std::collections::HashMap<
-                String,
-                std::collections::HashMap<String, raisin_sql::analyzer::AnalyzedTranslationValue>,
-            >,
             filter: Option<raisin_sql::analyzer::AnalyzedTranslateFilter>,
             workspace: Option<String>,
             branch_override: Option<String>,

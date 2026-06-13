@@ -100,14 +100,12 @@ impl PhysicalPlanner {
             LogicalPlan::Translate {
                 locale,
                 node_translations,
-                block_translations,
                 filter,
                 workspace,
                 branch_override,
             } => Some(Ok(PhysicalPlan::PhysicalTranslate {
                 locale: locale.clone(),
                 node_translations: node_translations.clone(),
-                block_translations: block_translations.clone(),
                 filter: filter.clone(),
                 workspace: workspace.clone(),
                 branch_override: branch_override.clone(),

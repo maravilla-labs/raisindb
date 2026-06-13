@@ -30,10 +30,6 @@ pub async fn execute_translate<
 >(
     locale: &'a str,
     node_translations: &'a std::collections::HashMap<String, AnalyzedTranslationValue>,
-    block_translations: &'a std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, AnalyzedTranslationValue>,
-    >,
     filter: &'a Option<AnalyzedTranslateFilter>,
     workspace: &'a Option<String>,
     branch_override: &'a Option<String>,
@@ -52,11 +48,10 @@ pub async fn execute_translate<
         .unwrap_or(&ctx.branch);
 
     tracing::debug!(
-        "TRANSLATE: locale='{}', workspace='{}', {} node props, {} blocks",
+        "TRANSLATE: locale='{}', workspace='{}', {} translations",
         locale,
         workspace_id,
-        node_translations.len(),
-        block_translations.len()
+        node_translations.len()
     );
 
     // Step 1: Find target node(s) based on filter
@@ -69,20 +64,17 @@ pub async fn execute_translate<
         return Ok(Box::pin(stream::once(async move { Ok(result_row) })));
     }
 
-    // Step 2: Build LocaleOverlay from translations
+    // Step 2: Build LocaleOverlay from translations.
+    //
+    // All translations are flat JsonPointers — plain (`/title`) or uuid-indexed
+    // (`/sections/s1/features/f1/title`). The resolver navigates arrays by
+    // matching uuid segments against item `uuid`s, so deep nesting works without
+    // any special-casing here.
     let mut overlay_data = std::collections::HashMap::new();
 
     for (json_pointer, value) in node_translations {
         let prop_value = translation_value_to_property_value(value);
         overlay_data.insert(JsonPointer::new(json_pointer), prop_value);
-    }
-
-    for (block_uuid, block_props) in block_translations {
-        for (json_pointer, value) in block_props {
-            let prop_value = translation_value_to_property_value(value);
-            let full_path = format!("/blocks/{}{}", block_uuid, json_pointer);
-            overlay_data.insert(JsonPointer::new(&full_path), prop_value);
-        }
     }
 
     let overlay = LocaleOverlay::properties(overlay_data);
@@ -126,11 +118,7 @@ pub async fn execute_translate<
         txn_ctx.set_tenant_repo(&ctx.tenant_id, &ctx.repo_id)?;
         txn_ctx.set_branch(branch)?;
 
-        let props: Vec<&str> = node_translations
-            .keys()
-            .chain(block_translations.keys())
-            .map(|s| s.as_str())
-            .collect();
+        let props: Vec<&str> = node_translations.keys().map(|s| s.as_str()).collect();
         let props_str = props.join(",");
         let target = match filter {
             Some(AnalyzedTranslateFilter::Path(p)) => p.as_str(),

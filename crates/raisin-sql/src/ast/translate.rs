@@ -7,23 +7,37 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A translation path targeting either a node property or a block property
+/// A single segment of a translation path.
+///
+/// Paths flatten to JSON pointers where a uuid-indexed segment contributes
+/// *two* pointer segments — the array field name and the item uuid — because
+/// the resolver (`merge_into_map`) navigates arrays by matching the next
+/// pointer segment against each item's `uuid`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathSegment {
+    /// Plain object field: `title`, or `.content` after a uuid index
+    Field(String),
+    /// Array field indexed by item uuid: `features[uuid='…']`
+    Indexed {
+        /// Array field name (e.g. "features", "sections", "blocks")
+        field: String,
+        /// UUID of the targeted item
+        uuid: String,
+    },
+}
+
+/// A translation path targeting either a plain node property or a property
+/// nested inside one or more uuid-indexed array levels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranslationPath {
     /// Simple property path: `title` or `metadata.author`
     /// Converts to JsonPointer: `/title` or `/metadata/author`
     Property(Vec<String>),
 
-    /// Block property path: `blocks[uuid='...'].content.text`
-    /// Targets a specific block by UUID, then a property within that block
-    BlockProperty {
-        /// Array field name (e.g., "blocks", "content")
-        array_field: String,
-        /// UUID filter value
-        block_uuid: String,
-        /// Property path within the block
-        property_path: Vec<String>,
-    },
+    /// Path with at least one uuid-indexed array level, to any depth:
+    /// `sections[uuid='x'].features[uuid='y'].title`
+    /// Flattens to JsonPointer `/sections/x/features/y/title`.
+    Indexed(Vec<PathSegment>),
 }
 
 impl TranslationPath {
@@ -32,49 +46,44 @@ impl TranslationPath {
         TranslationPath::Property(segments)
     }
 
-    /// Create a block property path
-    pub fn block_property(
-        array_field: impl Into<String>,
-        block_uuid: impl Into<String>,
-        property_path: Vec<String>,
-    ) -> Self {
-        TranslationPath::BlockProperty {
-            array_field: array_field.into(),
-            block_uuid: block_uuid.into(),
-            property_path,
-        }
+    /// Create an indexed path from an ordered list of segments
+    pub fn indexed(segments: Vec<PathSegment>) -> Self {
+        TranslationPath::Indexed(segments)
     }
 
-    /// Convert to JsonPointer string for node-level translations
-    /// Returns None for block properties (those use separate storage)
-    pub fn to_json_pointer(&self) -> Option<String> {
+    /// Convert to a flat JsonPointer string.
+    ///
+    /// Both plain and uuid-indexed paths are addressable as node-overlay
+    /// pointers; a uuid-indexed segment expands to `/field/uuid`. The resolver
+    /// resolves these to any depth by matching uuid segments against array
+    /// items.
+    pub fn to_json_pointer(&self) -> String {
         match self {
-            TranslationPath::Property(segments) => Some(format!("/{}", segments.join("/"))),
-            TranslationPath::BlockProperty { .. } => None,
-        }
-    }
-
-    /// Get the block UUID if this is a block property path
-    pub fn block_uuid(&self) -> Option<&str> {
-        match self {
-            TranslationPath::Property(_) => None,
-            TranslationPath::BlockProperty { block_uuid, .. } => Some(block_uuid),
-        }
-    }
-
-    /// Get the property path within a block as JsonPointer
-    pub fn block_property_pointer(&self) -> Option<String> {
-        match self {
-            TranslationPath::Property(_) => None,
-            TranslationPath::BlockProperty { property_path, .. } => {
-                Some(format!("/{}", property_path.join("/")))
+            TranslationPath::Property(segments) => format!("/{}", segments.join("/")),
+            TranslationPath::Indexed(segments) => {
+                let mut out = String::new();
+                for seg in segments {
+                    match seg {
+                        PathSegment::Field(name) => {
+                            out.push('/');
+                            out.push_str(name);
+                        }
+                        PathSegment::Indexed { field, uuid } => {
+                            out.push('/');
+                            out.push_str(field);
+                            out.push('/');
+                            out.push_str(uuid);
+                        }
+                    }
+                }
+                out
             }
         }
     }
 
-    /// Check if this is a block property path
-    pub fn is_block_property(&self) -> bool {
-        matches!(self, TranslationPath::BlockProperty { .. })
+    /// Check if this is a uuid-indexed path
+    pub fn is_indexed(&self) -> bool {
+        matches!(self, TranslationPath::Indexed(_))
     }
 
     /// Check if this is a simple property path
@@ -87,18 +96,17 @@ impl std::fmt::Display for TranslationPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TranslationPath::Property(segments) => write!(f, "{}", segments.join(".")),
-            TranslationPath::BlockProperty {
-                array_field,
-                block_uuid,
-                property_path,
-            } => {
-                write!(
-                    f,
-                    "{}[uuid='{}'].{}",
-                    array_field,
-                    block_uuid,
-                    property_path.join(".")
-                )
+            TranslationPath::Indexed(segments) => {
+                let parts: Vec<String> = segments
+                    .iter()
+                    .map(|seg| match seg {
+                        PathSegment::Field(name) => name.clone(),
+                        PathSegment::Indexed { field, uuid } => {
+                            format!("{}[uuid='{}']", field, uuid)
+                        }
+                    })
+                    .collect();
+                write!(f, "{}", parts.join("."))
             }
         }
     }
@@ -276,16 +284,14 @@ impl TranslateStatement {
         "TRANSLATE"
     }
 
-    /// Get only node-level translations (non-block)
-    pub fn node_translations(&self) -> impl Iterator<Item = &TranslationAssignment> {
+    /// Get only plain (non-indexed) property translations
+    pub fn property_translations(&self) -> impl Iterator<Item = &TranslationAssignment> {
         self.assignments.iter().filter(|a| a.path.is_property())
     }
 
-    /// Get only block-level translations
-    pub fn block_translations(&self) -> impl Iterator<Item = &TranslationAssignment> {
-        self.assignments
-            .iter()
-            .filter(|a| a.path.is_block_property())
+    /// Get only uuid-indexed translations
+    pub fn indexed_translations(&self) -> impl Iterator<Item = &TranslationAssignment> {
+        self.assignments.iter().filter(|a| a.path.is_indexed())
     }
 }
 
@@ -319,8 +325,8 @@ mod tests {
     fn test_translation_path_property() {
         let path = TranslationPath::property(vec!["title".to_string()]);
         assert!(path.is_property());
-        assert!(!path.is_block_property());
-        assert_eq!(path.to_json_pointer(), Some("/title".to_string()));
+        assert!(!path.is_indexed());
+        assert_eq!(path.to_json_pointer(), "/title");
         assert_eq!(path.to_string(), "title");
     }
 
@@ -328,28 +334,51 @@ mod tests {
     fn test_translation_path_nested_property() {
         let path = TranslationPath::property(vec!["metadata".to_string(), "author".to_string()]);
         assert!(path.is_property());
-        assert_eq!(path.to_json_pointer(), Some("/metadata/author".to_string()));
+        assert_eq!(path.to_json_pointer(), "/metadata/author");
         assert_eq!(path.to_string(), "metadata.author");
     }
 
     #[test]
-    fn test_translation_path_block_property() {
-        let path = TranslationPath::block_property(
-            "blocks",
-            "550e8400-e29b-41d4",
-            vec!["content".to_string(), "text".to_string()],
-        );
-        assert!(path.is_block_property());
+    fn test_translation_path_indexed_single_level() {
+        let path = TranslationPath::indexed(vec![
+            PathSegment::Indexed {
+                field: "blocks".to_string(),
+                uuid: "550e8400-e29b-41d4".to_string(),
+            },
+            PathSegment::Field("content".to_string()),
+            PathSegment::Field("text".to_string()),
+        ]);
+        assert!(path.is_indexed());
         assert!(!path.is_property());
-        assert_eq!(path.to_json_pointer(), None);
-        assert_eq!(path.block_uuid(), Some("550e8400-e29b-41d4"));
         assert_eq!(
-            path.block_property_pointer(),
-            Some("/content/text".to_string())
+            path.to_json_pointer(),
+            "/blocks/550e8400-e29b-41d4/content/text"
         );
         assert_eq!(
             path.to_string(),
             "blocks[uuid='550e8400-e29b-41d4'].content.text"
+        );
+    }
+
+    #[test]
+    fn test_translation_path_indexed_nested_levels() {
+        // sections[uuid='s1'].features[uuid='f1'].title
+        let path = TranslationPath::indexed(vec![
+            PathSegment::Indexed {
+                field: "sections".to_string(),
+                uuid: "s1".to_string(),
+            },
+            PathSegment::Indexed {
+                field: "features".to_string(),
+                uuid: "f1".to_string(),
+            },
+            PathSegment::Field("title".to_string()),
+        ]);
+        assert!(path.is_indexed());
+        assert_eq!(path.to_json_pointer(), "/sections/s1/features/f1/title");
+        assert_eq!(
+            path.to_string(),
+            "sections[uuid='s1'].features[uuid='f1'].title"
         );
     }
 
@@ -420,16 +449,19 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_statement_block_assignment() {
+    fn test_translate_statement_indexed_assignment() {
         let stmt = TranslateStatement::new(
             "Page",
             "de",
             vec![TranslationAssignment::new(
-                TranslationPath::block_property(
-                    "blocks",
-                    "550e8400",
-                    vec!["content".to_string(), "text".to_string()],
-                ),
+                TranslationPath::indexed(vec![
+                    PathSegment::Indexed {
+                        field: "blocks".to_string(),
+                        uuid: "550e8400".to_string(),
+                    },
+                    PathSegment::Field("content".to_string()),
+                    PathSegment::Field("text".to_string()),
+                ]),
                 TranslationValue::String("Hallo Welt".to_string()),
             )],
             Some(TranslateFilter::path("/post")),
@@ -441,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_and_block_translations() {
+    fn test_property_and_indexed_translations() {
         let stmt = TranslateStatement::new(
             "Page",
             "de",
@@ -451,19 +483,25 @@ mod tests {
                     TranslationValue::String("Titel".to_string()),
                 ),
                 TranslationAssignment::new(
-                    TranslationPath::block_property("blocks", "550e8400", vec!["text".to_string()]),
+                    TranslationPath::indexed(vec![
+                        PathSegment::Indexed {
+                            field: "blocks".to_string(),
+                            uuid: "550e8400".to_string(),
+                        },
+                        PathSegment::Field("text".to_string()),
+                    ]),
                     TranslationValue::String("Hallo".to_string()),
                 ),
             ],
             Some(TranslateFilter::path("/post")),
         );
 
-        let node_trans: Vec<_> = stmt.node_translations().collect();
-        let block_trans: Vec<_> = stmt.block_translations().collect();
+        let prop_trans: Vec<_> = stmt.property_translations().collect();
+        let indexed_trans: Vec<_> = stmt.indexed_translations().collect();
 
-        assert_eq!(node_trans.len(), 1);
-        assert_eq!(block_trans.len(), 1);
-        assert!(node_trans[0].path.is_property());
-        assert!(block_trans[0].path.is_block_property());
+        assert_eq!(prop_trans.len(), 1);
+        assert_eq!(indexed_trans.len(), 1);
+        assert!(prop_trans[0].path.is_property());
+        assert!(indexed_trans[0].path.is_indexed());
     }
 }

@@ -4,7 +4,6 @@
 //! for translation-aware UPDATE statements.
 
 use nom::{
-    branch::alt,
     bytes::complete::tag_no_case,
     character::complete::{char, multispace0, multispace1},
     combinator::opt,
@@ -15,7 +14,9 @@ use nom::{
 
 use super::filters::{translate_filter, translation_value};
 use super::helpers::{identifier, quoted_string};
-use crate::ast::translate::{TranslateStatement, TranslationAssignment, TranslationPath};
+use crate::ast::translate::{
+    PathSegment, TranslateStatement, TranslationAssignment, TranslationPath,
+};
 
 /// Error type for TRANSLATE statement parsing
 #[derive(Debug, Clone, PartialEq)]
@@ -182,51 +183,71 @@ fn translation_assignment(input: &str) -> IResult<&str, TranslationAssignment> {
     Ok((input, TranslationAssignment::new(path, value)))
 }
 
-/// Parse a translation path: either simple property or block property
-fn translation_path(input: &str) -> IResult<&str, TranslationPath> {
-    alt((block_property_path, simple_property_path)).parse(input)
+/// A single dot-separated path component: an identifier with an optional
+/// `[uuid='...']` array index.
+struct PathComponent {
+    name: String,
+    uuid: Option<String>,
 }
 
-/// Parse simple property path: `field` or `field.nested.deep`
-fn simple_property_path(input: &str) -> IResult<&str, TranslationPath> {
-    let (input, first) = identifier(input)?;
-    let (input, rest) = nom::multi::many0(preceded(char('.'), identifier)).parse(input)?;
-
-    let mut segments = vec![first.to_string()];
-    segments.extend(rest.into_iter().map(|s| s.to_string()));
-
-    Ok((input, TranslationPath::Property(segments)))
-}
-
-/// Parse block property path: `blocks[uuid='...'].content.text`
-fn block_property_path(input: &str) -> IResult<&str, TranslationPath> {
-    // Parse array field name
-    let (input, array_field) = identifier(input)?;
-
-    // Parse [uuid='...']
+/// Parse a `[uuid='...']` index suffix, returning the uuid value.
+fn uuid_index(input: &str) -> IResult<&str, String> {
     let (input, _) = char('[').parse(input)?;
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = tag_no_case("uuid").parse(input)?;
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0.parse(input)?;
-    let (input, block_uuid) = quoted_string(input)?;
+    let (input, uuid) = quoted_string(input)?;
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = char(']').parse(input)?;
+    Ok((input, uuid.to_string()))
+}
 
-    // Parse property path within the block: .content.text
-    let (input, property_segments) =
-        nom::multi::many1(preceded(char('.'), identifier)).parse(input)?;
-
+/// Parse one path component: `field` or `field[uuid='...']`.
+fn path_component(input: &str) -> IResult<&str, PathComponent> {
+    let (input, name) = identifier(input)?;
+    let (input, uuid) = opt(uuid_index).parse(input)?;
     Ok((
         input,
-        TranslationPath::BlockProperty {
-            array_field: array_field.to_string(),
-            block_uuid: block_uuid.to_string(),
-            property_path: property_segments
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect(),
+        PathComponent {
+            name: name.to_string(),
+            uuid,
         },
     ))
+}
+
+/// Parse a translation path: dot-separated components, each optionally
+/// uuid-indexed, to any depth. Examples:
+/// - `title`                                     → Property
+/// - `metadata.author`                           → Property
+/// - `blocks[uuid='x'].content.text`             → Indexed (one level)
+/// - `sections[uuid='s1'].features[uuid='f1'].title` → Indexed (two levels)
+fn translation_path(input: &str) -> IResult<&str, TranslationPath> {
+    let (input, first) = path_component(input)?;
+    let (input, rest) = nom::multi::many0(preceded(char('.'), path_component)).parse(input)?;
+
+    let mut components = vec![first];
+    components.extend(rest);
+
+    let has_index = components.iter().any(|c| c.uuid.is_some());
+
+    let path = if has_index {
+        let segments = components
+            .into_iter()
+            .map(|c| match c.uuid {
+                Some(uuid) => PathSegment::Indexed {
+                    field: c.name,
+                    uuid,
+                },
+                None => PathSegment::Field(c.name),
+            })
+            .collect();
+        TranslationPath::Indexed(segments)
+    } else {
+        let segments = components.into_iter().map(|c| c.name).collect();
+        TranslationPath::Property(segments)
+    };
+
+    Ok((input, path))
 }

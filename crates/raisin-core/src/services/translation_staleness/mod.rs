@@ -43,6 +43,7 @@ use raisin_models::translations::{
     TranslationHashRecord,
 };
 use raisin_storage::{BranchRepository, Storage, TranslationRepository};
+use raisin_validation::field_helpers::NON_TRANSLATABLE_KEYS;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -109,13 +110,15 @@ impl<S: Storage> TranslationStalenessService<S> {
                 fields.insert(pointer.clone(), value.clone());
             }
 
-            // For composite arrays, extract nested translatable fields
-            // Note: For nested structures, we currently don't have nested schema info,
-            // so we still use type-based extraction for nested content
+            // For composite/element arrays, extract nested translatable fields.
+            // Array items are addressed by their `uuid` (matching the overlay
+            // convention `/field/<uuid>/leaf`), falling back to numeric index
+            // only when an item has no uuid.
             if let PropertyValue::Array(items) = value {
                 for (idx, item) in items.iter().enumerate() {
+                    let seg = Self::array_child_segment(item, idx);
                     Self::extract_nested_translatable(
-                        &format!("/{}/{}", key, idx),
+                        &format!("/{}/{}", key, seg),
                         item,
                         &mut fields,
                     );
@@ -125,6 +128,9 @@ impl<S: Storage> TranslationStalenessService<S> {
             // For objects, extract nested translatable fields
             if let PropertyValue::Object(obj) = value {
                 for (nested_key, nested_value) in obj {
+                    if NON_TRANSLATABLE_KEYS.contains(&nested_key.as_str()) {
+                        continue;
+                    }
                     Self::extract_nested_translatable(
                         &format!("/{}/{}", key, nested_key),
                         nested_value,
@@ -137,7 +143,29 @@ impl<S: Storage> TranslationStalenessService<S> {
         fields
     }
 
-    /// Helper to extract nested translatable fields
+    /// Segment used to address an array child in a translation pointer.
+    ///
+    /// Returns the item's `uuid` when present (an `Object` with a `uuid` string,
+    /// or an `Element`), matching the overlay convention `/field/<uuid>/leaf`
+    /// that the resolver navigates by matching uuid segments against array
+    /// items. Falls back to the numeric index for items without a uuid.
+    fn array_child_segment(item: &PropertyValue, idx: usize) -> String {
+        match item {
+            PropertyValue::Object(obj) => match obj.get("uuid") {
+                Some(PropertyValue::String(uuid)) if !uuid.is_empty() => uuid.clone(),
+                _ => idx.to_string(),
+            },
+            PropertyValue::Element(element) if !element.uuid.is_empty() => element.uuid.clone(),
+            _ => idx.to_string(),
+        }
+    }
+
+    /// Helper to extract nested translatable fields.
+    ///
+    /// Array items are addressed by uuid (via [`Self::array_child_segment`]), so
+    /// the uuid for an `Element` array item comes from the array parent — the
+    /// `Element` branch here only descends into its content and does not re-add
+    /// the uuid (which would double it).
     fn extract_nested_translatable(
         prefix: &str,
         value: &PropertyValue,
@@ -150,11 +178,15 @@ impl<S: Storage> TranslationStalenessService<S> {
         match value {
             PropertyValue::Array(items) => {
                 for (idx, item) in items.iter().enumerate() {
-                    Self::extract_nested_translatable(&format!("{}/{}", prefix, idx), item, fields);
+                    let seg = Self::array_child_segment(item, idx);
+                    Self::extract_nested_translatable(&format!("{}/{}", prefix, seg), item, fields);
                 }
             }
             PropertyValue::Object(obj) => {
                 for (key, nested_value) in obj {
+                    if NON_TRANSLATABLE_KEYS.contains(&key.as_str()) {
+                        continue;
+                    }
                     Self::extract_nested_translatable(
                         &format!("{}/{}", prefix, key),
                         nested_value,
@@ -167,6 +199,9 @@ impl<S: Storage> TranslationStalenessService<S> {
                 for item in &composite.items {
                     if !item.uuid.is_empty() {
                         for (key, nested_value) in &item.content {
+                            if NON_TRANSLATABLE_KEYS.contains(&key.as_str()) {
+                                continue;
+                            }
                             Self::extract_nested_translatable(
                                 &format!("{}/{}/{}", prefix, item.uuid, key),
                                 nested_value,
@@ -177,8 +212,12 @@ impl<S: Storage> TranslationStalenessService<S> {
                 }
             }
             PropertyValue::Element(element) => {
-                // For elements, content is translatable
+                // The uuid (if any) is supplied by the array parent; descend
+                // straight into the element's content.
                 for (key, nested_value) in &element.content {
+                    if NON_TRANSLATABLE_KEYS.contains(&key.as_str()) {
+                        continue;
+                    }
                     Self::extract_nested_translatable(
                         &format!("{}/{}", prefix, key),
                         nested_value,
@@ -451,5 +490,37 @@ mod tests {
         >::is_translatable_value(&PropertyValue::Boolean(
             true
         )));
+    }
+
+    #[test]
+    fn test_extract_nested_translatable_addresses_by_uuid() {
+        // A composite (features) nested inside a section, both addressed by
+        // uuid, two array levels deep.
+        let features = PropertyValue::Array(vec![PropertyValue::Object(HashMap::from([
+            ("uuid".to_string(), PropertyValue::String("f1".to_string())),
+            ("title".to_string(), PropertyValue::String("T1".to_string())),
+        ]))]);
+        let section = PropertyValue::Object(HashMap::from([
+            ("uuid".to_string(), PropertyValue::String("s1".to_string())),
+            (
+                "heading".to_string(),
+                PropertyValue::String("Hello".to_string()),
+            ),
+            ("features".to_string(), features),
+        ]));
+        let sections = PropertyValue::Array(vec![section]);
+
+        let mut fields = HashMap::new();
+        TranslationStalenessService::<raisin_storage_memory::InMemoryStorage>::extract_nested_translatable(
+            "/sections",
+            &sections,
+            &mut fields,
+        );
+
+        assert!(fields.contains_key(&JsonPointer::new("/sections/s1/heading")));
+        assert!(fields.contains_key(&JsonPointer::new("/sections/s1/features/f1/title")));
+        // Structural uuid keys must NOT be extracted, and never numeric indices.
+        assert!(!fields.contains_key(&JsonPointer::new("/sections/s1/uuid")));
+        assert!(!fields.contains_key(&JsonPointer::new("/sections/0/heading")));
     }
 }

@@ -318,18 +318,40 @@ pub fn is_translatable(field: &FieldSchema) -> bool {
     }
 }
 
+/// Whether `field`, or any inline CompositeField descendant, has a translatable
+/// field. Used to decide whether a repeatable composite needs item UUIDs even
+/// when only a *nested* composite carries the translatable content.
+///
+/// Recurses through inline `CompositeField` sub-fields. `SectionField` /
+/// `ElementField` reference external element types (not inline `fields`), so
+/// their translatable descendants are enforced when the validator descends into
+/// those element types — not here.
+fn has_translatable_descendant(field: &FieldSchema) -> bool {
+    if is_translatable(field) {
+        return true;
+    }
+    match field {
+        FieldSchema::CompositeField { fields, .. } => {
+            fields.iter().any(has_translatable_descendant)
+        }
+        _ => false,
+    }
+}
+
 /// Check if a CompositeField requires UUID on each item.
 ///
-/// A CompositeField requires UUIDs when it is repeatable (`multiple: true`)
-/// AND has at least one translatable sub-field. Without UUIDs, translation
-/// overlays cannot address individual items and would replace the entire array,
-/// losing non-translatable fields.
+/// A CompositeField requires UUIDs when it is repeatable (`multiple: true`) AND
+/// has a translatable field anywhere in its (inline) sub-tree — including a
+/// translatable field inside a *nested* CompositeField. Item UUIDs are needed
+/// to anchor the translation pointer (`/field/<uuid>/…`) through this level;
+/// without them, translation overlays cannot address individual items and would
+/// replace the entire array, losing non-translatable fields.
 ///
 /// Returns `false` for non-CompositeField variants.
 pub fn composite_requires_uuid(field: &FieldSchema) -> bool {
     match field {
         FieldSchema::CompositeField { base, fields, .. } => {
-            base.multiple.unwrap_or(false) && fields.iter().any(|f| is_translatable(f))
+            base.multiple.unwrap_or(false) && fields.iter().any(has_translatable_descendant)
         }
         _ => false,
     }
@@ -493,6 +515,66 @@ mod tests {
         // Non-CompositeField → false
         let text_field = create_text_field("test", None, None);
         assert!(!composite_requires_uuid(&text_field));
+    }
+
+    #[test]
+    fn test_composite_requires_uuid_nested_translatable() {
+        // Outer repeatable composite with NO directly-translatable sub-field,
+        // but a nested repeatable composite whose leaf IS translatable.
+        // The outer items still need uuids to anchor the deep pointer.
+        let inner = FieldSchema::CompositeField {
+            base: FieldTypeSchema {
+                name: "features".to_string(),
+                multiple: Some(true),
+                ..Default::default()
+            },
+            fields: vec![FieldSchema::TextField {
+                base: FieldTypeSchema {
+                    name: "title".to_string(),
+                    translatable: Some(true),
+                    ..Default::default()
+                },
+                config: None,
+            }],
+            layout: None,
+        };
+        let outer = FieldSchema::CompositeField {
+            base: FieldTypeSchema {
+                name: "sections".to_string(),
+                multiple: Some(true),
+                ..Default::default()
+            },
+            fields: vec![inner],
+            layout: None,
+        };
+        assert!(composite_requires_uuid(&outer));
+
+        // Same shape but the nested leaf is NOT translatable → no uuid required.
+        let inner_plain = FieldSchema::CompositeField {
+            base: FieldTypeSchema {
+                name: "features".to_string(),
+                multiple: Some(true),
+                ..Default::default()
+            },
+            fields: vec![FieldSchema::TextField {
+                base: FieldTypeSchema {
+                    name: "icon".to_string(),
+                    ..Default::default()
+                },
+                config: None,
+            }],
+            layout: None,
+        };
+        let outer_plain = FieldSchema::CompositeField {
+            base: FieldTypeSchema {
+                name: "sections".to_string(),
+                multiple: Some(true),
+                ..Default::default()
+            },
+            fields: vec![inner_plain],
+            layout: None,
+        };
+        assert!(!composite_requires_uuid(&outer_plain));
     }
 
     #[test]

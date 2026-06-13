@@ -213,7 +213,6 @@ pub fn execute_plan<
             PhysicalPlan::PhysicalTranslate {
                 locale,
                 node_translations,
-                block_translations,
                 filter,
                 workspace,
                 branch_override,
@@ -221,7 +220,6 @@ pub fn execute_plan<
                 crate::physical_plan::dml_executor::execute_translate(
                     locale,
                     node_translations,
-                    block_translations,
                     filter,
                     workspace,
                     branch_override,

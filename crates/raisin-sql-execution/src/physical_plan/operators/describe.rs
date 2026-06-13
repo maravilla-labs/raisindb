@@ -334,7 +334,6 @@ impl PhysicalPlan {
             PhysicalPlan::PhysicalTranslate {
                 locale,
                 node_translations,
-                block_translations,
                 filter,
                 ..
             } => {
@@ -344,10 +343,9 @@ impl PhysicalPlan {
                     ""
                 };
                 format!(
-                    "Translate: locale='{}' ({} node props, {} blocks){}",
+                    "Translate: locale='{}' ({} translations){}",
                     locale,
                     node_translations.len(),
-                    block_translations.len(),
                     filter_str
                 )
             }

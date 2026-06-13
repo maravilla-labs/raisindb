@@ -197,6 +197,7 @@ mod tests {
             multiple: None,
             design_value: None,
             translatable: None,
+            meta: None,
         }
     }
 

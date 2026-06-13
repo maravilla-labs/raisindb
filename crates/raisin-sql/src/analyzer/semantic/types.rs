@@ -177,8 +177,9 @@ pub struct AnalyzedCopy {
 /// ```
 ///
 /// Updates translations for nodes in a specific locale.
-/// Node-level translations use JsonPointer format.
-/// Block-level translations are stored separately keyed by block UUID.
+/// All translations flatten to JsonPointer format. uuid-indexed paths
+/// (`/sections/<uuid>/features/<uuid>/title`) are resolved to any depth by the
+/// resolver matching uuid segments against array items' `uuid`s.
 #[derive(Debug, Clone)]
 pub struct AnalyzedTranslate {
     /// The table/node type name (e.g., "Page", "BlogPost")
@@ -187,15 +188,9 @@ pub struct AnalyzedTranslate {
     pub workspace: String,
     /// The target locale code (e.g., "de", "fr", "en-US")
     pub locale: String,
-    /// Node-level translations: JsonPointer -> value
-    /// e.g., "/title" -> "Titel", "/metadata/author" -> "Jean"
+    /// Translations as flat JsonPointer -> value, including uuid-indexed paths.
+    /// e.g., "/title" -> "Titel", "/sections/s1/features/f1/title" -> "Titel"
     pub node_translations: std::collections::HashMap<String, AnalyzedTranslationValue>,
-    /// Block-level translations: block_uuid -> (JsonPointer -> value)
-    /// e.g., "550e8400" -> { "/content/text" -> "Hallo" }
-    pub block_translations: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, AnalyzedTranslationValue>,
-    >,
     /// Filter to select nodes to translate
     pub filter: Option<AnalyzedTranslateFilter>,
     /// Optional branch override (from IN BRANCH clause)
