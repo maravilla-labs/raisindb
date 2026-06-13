@@ -250,8 +250,38 @@ composite item lacks a `uuid` — even when only the inner composite is
 translatable and the outer one has no directly-translatable field of its own.
 
 The same flat pointers are what the REST `raisin:cmd/translate` command and the
-SQL `UPDATE … FOR LOCALE` statement write — see the SQL reference's TRANSLATE
-section for the SQL form.
+SQL `UPDATE … FOR LOCALE` statement write.
+
+## SQL: `UPDATE … FOR LOCALE`
+
+Translations can also be written in SQL. The form is:
+
+```sql
+UPDATE <workspace> FOR LOCALE '<locale>' [IN BRANCH '<branch>']
+    SET <path> = <value> [, ...]
+    WHERE <path = '...' | id = '...'>
+```
+
+**Important:** the token after `UPDATE` is the **workspace name** — the same
+table identifier used in `SELECT … FROM <workspace>` — **NOT** a node type.
+RaisinDB SQL tables are workspaces. `UPDATE Page …` means "translate in the
+workspace named `Page`", not "translate nodes of type Page". To restrict by node
+type, add `AND node_type = '...'` to the `WHERE`.
+
+The `SET` path supports nested uuid-indexed addressing to any depth, and multiple
+targets in one statement:
+
+```sql
+-- 'Page' below is the WORKSPACE name, not a node type
+UPDATE Page FOR LOCALE 'de'
+    SET title = 'Titel',
+        sections[uuid='s1'].heading = 'Funktionen',
+        sections[uuid='s1'].features[uuid='f1'].title = 'Schnelle Entwicklung'
+    WHERE path = '/content/home';
+```
+
+Each `array[uuid='…']` level flattens to `/array/<uuid>/…` in the overlay, the
+same pointer the REST command uses.
 
 ## Frontend Locale Store
 
