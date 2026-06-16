@@ -101,7 +101,13 @@ impl NodeRepositoryImpl {
             &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
         )?;
 
-        // Add compound indexes if NodeType defines them
+        // Compound indexes: tombstone the OLD value entries first, then write the
+        // new ones. Without the tombstone, a column value change (e.g. status
+        // held -> confirmed) would leave the stale old-value entry live and a scan
+        // keyed on the old value would still return this node.
+        self.add_compound_tombstones_to_batch(
+            &mut batch, &old_node, tenant_id, repo_id, branch, workspace,
+        )?;
         self.add_compound_indexes_to_batch(
             &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
         )

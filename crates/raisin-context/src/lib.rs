@@ -46,9 +46,9 @@ mod tier;
 pub use context::{IsolationMode, TenantContext};
 pub use rate_limit::{RateLimitInfo, RateLimiter};
 pub use repository::{
-    Branch, BranchDivergence, ConflictResolution, ConflictType, MergeConflict, MergeResult,
-    MergeStrategy, RepositoryConfig, RepositoryContext, RepositoryInfo, ResolutionType, Tag,
-    WorkspaceConfig, WorkspaceScope,
+    Branch, BranchDiff, BranchDivergence, ConflictResolution, ConflictType, MergeConflict,
+    MergeResult, MergeStrategy, NodeDiffInfo, RepositoryConfig, RepositoryContext, RepositoryInfo,
+    ResolutionType, Tag, WorkspaceConfig, WorkspaceScope,
 };
 pub use resolver::{resolve_tenant_id, TenantResolver, DEFAULT_TENANT_ID, TENANT_ID_HEADER};
 pub use tier::{Operation, ServiceTier, TierProvider};

@@ -38,6 +38,7 @@ pub use callbacks::{
     FunctionExecuteContext,
     HttpRequestCallback,
     NodeAddResourceCallback,
+    NodeApplyChildOrderCallback,
     NodeCreateCallback,
     NodeDeleteCallback,
     NodeGetByIdCallback,

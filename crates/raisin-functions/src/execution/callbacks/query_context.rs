@@ -158,18 +158,39 @@ where
 
         tracing::debug!(sql = %final_sql, "Executing SQL statement via QueryContext");
 
+        // DML emits a single summary row carrying the real `affected_rows` count;
+        // read that value rather than counting emitted rows (which is always 1 for
+        // DML and would break compare-and-swap callers). Fall back to a row count
+        // for statements that don't surface the summary column.
         let mut stream = engine.execute(&final_sql).await?;
+        let mut affected: i64 = 0;
         let mut row_count: i64 = 0;
+        let mut saw_affected = false;
 
-        while let Some(_row_result) = stream.next().await {
+        while let Some(row_result) = stream.next().await {
+            let row = row_result?;
             row_count += 1;
+            if let Some(value) = row.columns.get("affected_rows") {
+                match value {
+                    PropertyValue::Integer(n) => {
+                        affected += *n;
+                        saw_affected = true;
+                    }
+                    PropertyValue::Float(f) => {
+                        affected += *f as i64;
+                        saw_affected = true;
+                    }
+                    _ => {}
+                }
+            }
         }
 
+        let result = if saw_affected { affected } else { row_count };
         tracing::debug!(
-            affected_rows = row_count,
+            affected_rows = result,
             "SQL statement completed via QueryContext"
         );
-        Ok(row_count)
+        Ok(result)
     }
 
     /// Execute raw SQL string with parameters and return result rows.

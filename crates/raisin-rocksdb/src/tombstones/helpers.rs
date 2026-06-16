@@ -47,6 +47,8 @@ pub(super) fn hash_property_value(value: &PropertyValue) -> String {
 #[derive(Debug, Clone)]
 pub struct ExtractedReference {
     pub workspace: String,
+    /// Target node id — used to key the reverse reference index (move-stable).
+    pub id: String,
     pub path: String,
 }
 
@@ -75,6 +77,7 @@ fn extract_references_recursive(
                 path.to_string(),
                 ExtractedReference {
                     workspace: r.workspace.clone(),
+                    id: r.id.clone(),
                     path: r.path.clone(),
                 },
             ));

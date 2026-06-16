@@ -101,6 +101,16 @@ impl FunctionApi for MockFunctionApi {
         Ok(mock_children(workspace, parent_path, count))
     }
 
+    async fn node_apply_child_order(
+        &self,
+        _workspace: &str,
+        _parent_path: &str,
+        _source_branch: &str,
+        _target_branch: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     // ========== SQL Operations ==========
 
     async fn sql_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {

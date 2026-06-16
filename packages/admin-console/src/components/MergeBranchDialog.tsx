@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { X, GitMerge, GitBranch, ChevronDown, AlertCircle, CheckCircle, Info, ArrowRight, Trash2 } from 'lucide-react'
-import { branchesApi, Branch, MergeStrategy, MergeResult, BranchDivergence } from '../api/branches'
+import { branchesApi, Branch, MergeStrategy, MergeResult, BranchDivergence, BranchDiff } from '../api/branches'
 import ConflictResolutionPanel from './ConflictResolutionPanel'
 
 type MergeDirection = 'into-current' | 'from-current'
@@ -28,6 +28,7 @@ export default function MergeBranchDialog({
   const [branches, setBranches] = useState<Branch[]>([])
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
   const [divergence, setDivergence] = useState<BranchDivergence | null>(null)
+  const [branchDiff, setBranchDiff] = useState<BranchDiff | null>(null)
   const [strategy, setStrategy] = useState<MergeStrategy>('ThreeWay')
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
@@ -56,6 +57,7 @@ export default function MergeBranchDialog({
       // Reset state
       setSelectedBranch(null)
       setDivergence(null)
+      setBranchDiff(null)
       setError(null)
       setMergeResult(null)
       setDeleteAfterMerge(false)
@@ -75,6 +77,7 @@ export default function MergeBranchDialog({
       }
     } else {
       setDivergence(null)
+      setBranchDiff(null)
       setMessage('')
     }
   }, [selectedBranch, currentBranch, mergeDirection])
@@ -135,12 +138,21 @@ export default function MergeBranchDialog({
     if (!selectedBranch || !sourceBranch || !targetBranch) return
 
     try {
-      // Compare from the perspective of source against target
-      const data = await branchesApi.compare(repoId, sourceBranch, targetBranch)
-      setDivergence(data)
+      // Compare (counts) and diff (per-node changes) from the source against the target.
+      const [divergenceData, diffData] = await Promise.all([
+        branchesApi.compare(repoId, sourceBranch, targetBranch),
+        branchesApi.diff(repoId, sourceBranch, targetBranch).catch((err: any) => {
+          // Diff is best-effort (requires RocksDB storage); never block the merge UI on it.
+          console.error('Failed to fetch branch diff:', err)
+          return null
+        }),
+      ])
+      setDivergence(divergenceData)
+      setBranchDiff(diffData)
     } catch (err: any) {
       console.error('Failed to fetch divergence:', err)
       setDivergence(null)
+      setBranchDiff(null)
     }
   }
 
@@ -453,6 +465,58 @@ export default function MergeBranchDialog({
               </div>
             </div>
           )}
+
+          {/* Changes to be merged (per-node diff, incl. reordered siblings) */}
+          {branchDiff && (() => {
+            const reordered = branchDiff.modified.filter((n) => n.operation === 'reordered')
+            const modified = branchDiff.modified.filter((n) => n.operation !== 'reordered')
+            const groups = [
+              { label: 'Added', color: 'text-green-400', dot: 'bg-green-400', items: branchDiff.added },
+              { label: 'Modified', color: 'text-yellow-400', dot: 'bg-yellow-400', items: modified },
+              { label: 'Reordered', color: 'text-blue-400', dot: 'bg-blue-400', items: reordered },
+              { label: 'Deleted', color: 'text-red-400', dot: 'bg-red-400', items: branchDiff.deleted },
+            ].filter((g) => g.items.length > 0)
+            const total = groups.reduce((n, g) => n + g.items.length, 0)
+            if (total === 0) return null
+            return (
+              <div className="p-4 bg-gray-800/40 border border-gray-700 rounded-lg space-y-3">
+                <p className="text-sm font-medium text-gray-300">
+                  Changes to merge <span className="text-gray-500">({total})</span>
+                </p>
+                {groups.map((g) => (
+                  <div key={g.label} className="space-y-1">
+                    <p className={`text-xs font-semibold ${g.color}`}>
+                      {g.label} ({g.items.length})
+                    </p>
+                    <ul className="space-y-0.5">
+                      {g.items.slice(0, 8).map((n, i) => (
+                        <li
+                          key={`${g.label}-${n.node_id}-${n.translation_locale ?? ''}-${i}`}
+                          className="flex items-center gap-2 text-xs font-mono text-gray-400"
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${g.dot}`} />
+                          <span className="truncate">{n.path || n.node_id}</span>
+                          {n.translation_locale && (
+                            <span className="text-[10px] px-1 rounded bg-gray-700 text-gray-300">
+                              {n.translation_locale}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                      {g.items.length > 8 && (
+                        <li className="text-xs text-gray-500">…and {g.items.length - 8} more</li>
+                      )}
+                    </ul>
+                  </div>
+                ))}
+                {reordered.length > 0 && (
+                  <p className="text-[11px] text-gray-500">
+                    Reordered nodes carry their new sibling order into the merge.
+                  </p>
+                )}
+              </div>
+            )
+          })()}
 
           {/* Merge Strategy */}
           <div>

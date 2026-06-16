@@ -169,8 +169,12 @@ async fn resolve_single_reference(
             reference.id,
             reference.path
         );
-    } else if reference.path.is_empty() {
-        // UUID-based reference without path - look up to populate path
+    } else {
+        // UUID-based reference - (re)populate raisin:path from the target's
+        // CURRENT path. We refresh even when path is already set so the
+        // forward-index value and client-facing raisin:path stay accurate
+        // after the target has moved (the id-keyed reverse index is unaffected
+        // either way). Resolving on re-save keeps decoration in sync.
         let workspace = if reference.workspace.is_empty() {
             source_workspace
         } else {
@@ -184,7 +188,7 @@ async fn resolve_single_reference(
             }
 
             tracing::debug!(
-                "Populated path for UUID reference: {} -> {}",
+                "Refreshed path for UUID reference: {} -> {}",
                 reference.id,
                 reference.path
             );

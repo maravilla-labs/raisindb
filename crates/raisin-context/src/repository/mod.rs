@@ -9,8 +9,8 @@ mod workspace;
 mod tests;
 
 pub use branch::{
-    Branch, BranchDivergence, ConflictResolution, ConflictType, MergeConflict, MergeResult,
-    MergeStrategy, ResolutionType, Tag,
+    Branch, BranchDiff, BranchDivergence, ConflictResolution, ConflictType, MergeConflict,
+    MergeResult, MergeStrategy, NodeDiffInfo, ResolutionType, Tag,
 };
 pub use config::{RepositoryConfig, RepositoryInfo};
 pub use context::RepositoryContext;

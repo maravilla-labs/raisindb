@@ -179,6 +179,7 @@ export enum RequestType {
   NodeReorder = 'node_reorder',
   NodeMoveChildBefore = 'node_move_child_before',
   NodeMoveChildAfter = 'node_move_child_after',
+  NodeApplyChildOrder = 'node_apply_child_order',
 
   // Property path operations
   PropertyGet = 'property_get',
@@ -208,6 +209,7 @@ export enum RequestType {
   BranchUpdateHead = 'branch_update_head',
   BranchMerge = 'branch_merge',
   BranchCompare = 'branch_compare',
+  BranchDiff = 'branch_diff',
 
   // Tag operations
   TagCreate = 'tag_create',

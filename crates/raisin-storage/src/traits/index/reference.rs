@@ -82,11 +82,13 @@ pub trait ReferenceIndexRepository: Send + Sync {
     ///
     /// # Returns
     /// Vector of (source_node_id, property_path) tuples
+    /// `target_id` is the referenced node's stable node id (not its path) — the
+    /// reverse index is keyed by id so it survives target moves.
     fn find_referencing_nodes(
         &self,
         scope: StorageScope<'_>,
         target_workspace: &str,
-        target_path: &str,
+        target_id: &str,
         published_only: bool,
     ) -> impl std::future::Future<Output = Result<Vec<(String, String)>>> + Send;
 

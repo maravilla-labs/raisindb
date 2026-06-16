@@ -34,6 +34,8 @@ import { sseManager } from '../api/management'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast, ToastContainer } from '../components/Toast'
 
+import DiagramErrorBoundary from '../components/flows/DiagramErrorBoundary'
+
 // Lazily load the diagram view (pulls in @raisindb/flow-designer)
 const FlowInstanceDiagram = lazy(() => import('../components/flows/FlowInstanceDiagram'))
 
@@ -569,15 +571,17 @@ export default function RepositoryFlows() {
 
                         {/* Diagram View */}
                         {expandedView === 'diagram' && repo && (
-                          <Suspense
-                            fallback={
-                              <div className="h-32 flex items-center justify-center text-sm text-zinc-500">
-                                Loading diagram…
-                              </div>
-                            }
-                          >
-                            <FlowInstanceDiagram repo={repo} instance={instance} />
-                          </Suspense>
+                          <DiagramErrorBoundary>
+                            <Suspense
+                              fallback={
+                                <div className="h-32 flex items-center justify-center text-sm text-zinc-500">
+                                  Loading diagram…
+                                </div>
+                              }
+                            >
+                              <FlowInstanceDiagram repo={repo} instance={instance} />
+                            </Suspense>
+                          </DiagramErrorBoundary>
                         )}
 
                         {expandedView === 'details' && (

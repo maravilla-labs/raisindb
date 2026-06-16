@@ -181,15 +181,39 @@ impl CanonicalPredicate {
             CanonicalPredicate::JsonPropertyEq {
                 table,
                 json_col,
-                key: _,
+                key,
                 value,
             } => {
+                // Reconstruct the original `properties->>'key' = value` predicate.
+                //
+                // NOTE: this must round-trip back to text extraction, NOT
+                // `properties @> value`. The `@>` form drops the key entirely and,
+                // for a scalar pattern against an object, `json_contains` is always
+                // false (object == scalar) — so any JsonPropertyEq that survives as
+                // a row-level filter (e.g. when a more selective predicate such as
+                // `path =` wins the scan) silently matched zero rows. `->>` yields
+                // text, so we compare against the value rendered as plain text
+                // (mirroring PropertyIndexScan's value encoding) rather than a
+                // JSON-encoded literal.
                 let col = TypedExpr::column(table.clone(), json_col.clone(), DataType::JsonB);
-                let pat = TypedExpr::literal(Literal::JsonB(value.clone()));
-                TypedExpr::new(
-                    Expr::JsonContains {
+                let key_expr = TypedExpr::literal(Literal::Text(key.clone()));
+                let extract = TypedExpr::new(
+                    Expr::JsonExtractText {
                         object: Box::new(col),
-                        pattern: Box::new(pat),
+                        key: Box::new(key_expr),
+                    },
+                    DataType::Nullable(Box::new(DataType::Text)),
+                );
+                let value_text = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let rhs = TypedExpr::literal(Literal::Text(value_text));
+                TypedExpr::new(
+                    Expr::BinaryOp {
+                        left: Box::new(extract),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(rhs),
                     },
                     DataType::Boolean,
                 )

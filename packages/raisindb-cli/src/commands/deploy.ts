@@ -7,6 +7,8 @@ import { uploadPackage, installPackage } from './package.js';
 interface DeployOptions {
   server?: string;
   repo?: string;
+  /** Target branch to upload the package to (defaults to "main"). */
+  branch?: string;
   /** Also install the package after upload (deploy alone only uploads). */
   install?: boolean;
 }
@@ -45,7 +47,7 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
 
   // Step 3: Upload
   console.log(`\nUploading ${path.basename(rapFile)}...`);
-  await uploadPackage(rapFile, options.server, options.repo);
+  await uploadPackage(rapFile, options.server, options.repo, undefined, options.branch || 'main');
 
   // Clean up .rap file
   if (fs.existsSync(rapFile)) {
@@ -54,7 +56,7 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
 
   // Step 4 (optional): Install
   if (options.install) {
-    await installPackage(manifest.name, options.server, options.repo);
+    await installPackage(manifest.name, options.server, options.repo, options.branch || 'main');
   }
 
   console.log(`\nDeployed ${manifest.name} v${manifest.version} successfully${options.install ? ' (installed)' : ''}.`);

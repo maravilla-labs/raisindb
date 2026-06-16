@@ -163,6 +163,17 @@ impl FunctionApi for RaisinFunctionApi {
             .await
     }
 
+    async fn node_apply_child_order(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        source_branch: &str,
+        target_branch: &str,
+    ) -> Result<()> {
+        self.impl_node_apply_child_order(workspace, parent_path, source_branch, target_branch)
+            .await
+    }
+
     // ========== SQL Operations ==========
 
     async fn sql_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {

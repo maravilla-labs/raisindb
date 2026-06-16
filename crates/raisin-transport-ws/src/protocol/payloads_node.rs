@@ -113,6 +113,15 @@ pub struct NodeMoveChildAfterPayload {
     pub after_child_name: String,
 }
 
+/// Replay a parent's child order from `source_branch` onto the request's
+/// (target) branch — the cross-branch ordering primitive used by selective
+/// publish flows. The target branch + workspace come from the request context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeApplyChildOrderPayload {
+    pub parent_path: String,
+    pub source_branch: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tree operation payloads
 // ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ pub async fn reindex_start(
             "property" => index_types.push(IndexType::Property),
             "reference" => index_types.push(IndexType::Reference),
             "child_order" => index_types.push(IndexType::ChildOrder),
+            "compound" => index_types.push(IndexType::Compound),
             "all" => {
                 index_types.clear();
                 index_types.push(IndexType::All);
@@ -63,7 +64,7 @@ pub async fn reindex_start(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: format!(
-                            "Invalid index type: '{}'. Valid types: 'all', 'property', 'reference', 'child_order'",
+                            "Invalid index type: '{}'. Valid types: 'all', 'property', 'reference', 'child_order', 'compound'",
                             index_type_str
                         ),
                     }),

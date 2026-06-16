@@ -365,8 +365,8 @@ mod tests {
 
         // Upper bound check (shouldn't have too many extra methods)
         assert!(
-            method_count <= 68,
-            "Expected at most 68 methods, got {}. Did you accidentally duplicate some bindings?",
+            method_count <= 70,
+            "Expected at most 70 methods, got {}. Did you accidentally duplicate some bindings?",
             method_count
         );
 

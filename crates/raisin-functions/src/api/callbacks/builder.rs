@@ -22,6 +22,7 @@ pub struct RaisinFunctionApiCallbacks {
     pub node_move: Option<NodeMoveCallback>,
     pub node_query: Option<NodeQueryCallback>,
     pub node_get_children: Option<NodeGetChildrenCallback>,
+    pub node_apply_child_order: Option<NodeApplyChildOrderCallback>,
     pub node_add_resource: Option<NodeAddResourceCallback>,
     pub sql_query: Option<SqlQueryCallback>,
     pub sql_execute: Option<SqlExecuteCallback>,
@@ -111,6 +112,11 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_node_get_children(mut self, callback: NodeGetChildrenCallback) -> Self {
         self.node_get_children = Some(callback);
+        self
+    }
+
+    pub fn with_node_apply_child_order(mut self, callback: NodeApplyChildOrderCallback) -> Self {
+        self.node_apply_child_order = Some(callback);
         self
     }
 

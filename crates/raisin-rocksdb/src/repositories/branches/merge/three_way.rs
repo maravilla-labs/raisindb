@@ -264,7 +264,16 @@ impl BranchRepositoryImpl {
             .await?;
 
         // Copy changed indexes from source branch to target branch
-        // This ensures all changes from source are visible in target
+        // This ensures all changes from source are visible in target.
+        //
+        // NOTE on ordering: ORDERED_CHILDREN entries are copied verbatim, so a
+        // parent that gained independently-numbered children on both branches can
+        // end up with two children sharing a fractional order_label on the target.
+        // We deliberately do NOT dedup/rebalance here (it would require the full
+        // node-repo stack at the branch layer). Instead the ordering is repaired
+        // lazily and safely the next time that parent is reordered, via
+        // `NodeRepositoryImpl::heal_ordering_if_corrupt`. Reads are unaffected
+        // (get_ordered_child_ids dedups by child id).
         self.copy_branch_indexes(
             tenant_id,
             repo_id,

@@ -259,7 +259,10 @@ fn extract_dml_workspace_branch(
                 raisin_sql::analyzer::DmlTableTarget::Workspace(ws) => ws.clone(),
                 _ => "default".to_string(),
             },
-            default_branch.to_string(),
+            insert
+                .branch_override
+                .clone()
+                .unwrap_or_else(|| default_branch.to_string()),
         ),
         AnalyzedStatement::Update(update) => (
             match &update.target {

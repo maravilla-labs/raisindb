@@ -186,7 +186,7 @@ pub(super) fn extract_branch_predicate(filter: &TypedExpr) -> (Option<String>, O
 
 /// Extract branch name from a typed expression
 /// Returns Some(branch_name) for string literals
-fn extract_branch_value(expr: &TypedExpr) -> Option<Option<String>> {
+pub(super) fn extract_branch_value(expr: &TypedExpr) -> Option<Option<String>> {
     match &expr.expr {
         Expr::Literal(Literal::Text(s)) => Some(Some(s.clone())),
         _ => None,

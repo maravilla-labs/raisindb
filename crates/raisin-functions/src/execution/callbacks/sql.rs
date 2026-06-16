@@ -171,17 +171,46 @@ where
 
             tracing::debug!(final_sql = %final_sql, "Executing substituted SQL");
 
-            // 4. Execute and count affected rows
+            // 4. Execute and report affected rows.
+            //
+            // DML (UPDATE/DELETE/INSERT) emits a single summary row carrying the
+            // real `affected_rows` count. We MUST read that value — counting the
+            // emitted rows would always return 1 for any DML, which silently
+            // breaks callers that branch on the affected count (a guarded UPDATE
+            // that matched 0 rows would look like it affected 1).
+            // Fall back to counting rows for statements that don't surface the
+            // summary column.
             let mut stream = engine.execute(&final_sql).await?;
+            let mut affected: i64 = 0;
             let mut row_count: i64 = 0;
+            let mut saw_affected = false;
 
-            while let Some(_row_result) = stream.next().await {
+            while let Some(row_result) = stream.next().await {
+                let row = row_result?;
                 row_count += 1;
+                if let Some(value) = row.columns.get("affected_rows") {
+                    match value {
+                        PropertyValue::Integer(n) => {
+                            affected += *n;
+                            saw_affected = true;
+                        }
+                        PropertyValue::Float(f) => {
+                            affected += *f as i64;
+                            saw_affected = true;
+                        }
+                        _ => {}
+                    }
+                }
             }
 
-            tracing::debug!(row_count = row_count, "SQL execute completed");
+            let result = if saw_affected { affected } else { row_count };
+            tracing::debug!(
+                affected_rows = result,
+                saw_affected = saw_affected,
+                "SQL execute completed"
+            );
 
-            Ok(row_count)
+            Ok(result)
         })
     })
 }

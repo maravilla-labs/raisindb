@@ -105,7 +105,7 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
                 branch,
                 workspace,
                 &reference.workspace,
-                &reference.path,
+                &reference.id,
                 node_id,
                 &property_path,
                 revision,
@@ -162,7 +162,7 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
                     branch,
                     workspace,
                     &reference.workspace,
-                    &reference.path,
+                    &reference.id,
                     node_id,
                     &property_path,
                     revision,
@@ -197,7 +197,7 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
         &self,
         scope: StorageScope<'_>,
         target_workspace: &str,
-        target_path: &str,
+        target_id: &str,
         published_only: bool,
     ) -> Result<Vec<(String, String)>> {
         let StorageScope {
@@ -219,7 +219,7 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
             .push(workspace)
             .push(tag)
             .push(target_workspace)
-            .push(target_path)
+            .push(target_id)
             .build_prefix();
 
         let cf = cf_handle(&self.db, cf::REFERENCE_INDEX)?;

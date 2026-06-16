@@ -7,7 +7,8 @@ use futures::StreamExt;
 use raisin_models::nodes::Node;
 use raisin_sql_execution::{QueryEngine, StaticCatalog};
 use raisin_storage::{
-    CreateNodeOptions, NodeRepository, RelationRepository, Storage, StorageScope,
+    BranchScope, CommitMetadata, CreateNodeOptions, NodeRepository, NodeTypeRepository,
+    RelationRepository, RepoScope, Storage, StorageScope, WorkspaceRepository,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -47,6 +48,17 @@ fn create_test_catalog(workspaces: &[&str]) -> Arc<StaticCatalog> {
         catalog.register_workspace(workspace.to_string());
     }
     Arc::new(catalog)
+}
+
+/// Execute a SQL statement and drain its result stream (panics on error).
+async fn run_sql(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql: &str) {
+    let mut stream = engine
+        .execute(sql)
+        .await
+        .unwrap_or_else(|e| panic!("SQL failed [{sql}]: {e}"));
+    while let Some(row) = stream.next().await {
+        row.unwrap_or_else(|e| panic!("row error [{sql}]: {e}"));
+    }
 }
 
 /// Helper to create test nodes in a specific branch
@@ -239,6 +251,208 @@ async fn test_query_with_branch_override() {
 
     // Should get nodes from staging branch (including content folder)
     assert_eq!(results.len(), 3);
+}
+
+/// INSERT with a `__branch` pseudo-column must write to that branch, independent
+/// of the engine's default/context branch. This is what lets a server-side
+/// function read one branch and INSERT into another in a single execution.
+#[tokio::test]
+async fn test_insert_with_branch_override() {
+    let (storage, _temp_dir) = create_test_storage().await; // main + staging exist
+    let tenant_id = "test_tenant";
+    let repo_id = "test_repo";
+    let workspace = "default";
+
+    let catalog = create_test_catalog(&[workspace]);
+
+    // The SQL INSERT path validates the target workspace exists (repo-scoped).
+    // Workspace::new has no allowed_node_types restriction, so any type is allowed.
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new(tenant_id, repo_id),
+            raisin_models::workspace::Workspace::new(workspace.to_string()),
+        )
+        .await
+        .expect("create default workspace");
+
+    // INSERT validates the node type exists on the TARGET branch (node types are
+    // branch-scoped), so register raisin:Page on `staging`.
+    storage
+        .node_types()
+        .create(
+            BranchScope::new(tenant_id, repo_id, "staging"),
+            serde_json::from_value(serde_json::json!({ "name": "raisin:Page" }))
+                .expect("nodetype json"),
+            CommitMetadata {
+                message: "test".to_string(),
+                actor: "test".to_string(),
+                is_system: true,
+            },
+        )
+        .await
+        .expect("create raisin:Page nodetype on staging");
+
+    // Engine default branch = "main", system auth (as function execution uses).
+    let engine = QueryEngine::new(
+        storage.clone(),
+        tenant_id.to_string(),
+        repo_id.to_string(),
+        "main".to_string(),
+    )
+    .with_catalog(catalog)
+    .with_auth(raisin_models::auth::AuthContext::system());
+
+    // INSERT targeting the `staging` branch via __branch, while default is main.
+    let insert = "INSERT INTO default (__branch, path, node_type) \
+                  VALUES ('staging', '/xbranch1', 'raisin:Page')";
+    let mut s = engine.execute(insert).await.expect("insert failed");
+    while let Some(r) = s.next().await {
+        r.expect("insert row");
+    }
+
+    // Visible on staging.
+    let mut staging = engine
+        .execute("SELECT path FROM default WHERE __branch = 'staging' AND path = '/xbranch1'")
+        .await
+        .expect("select staging failed");
+    let mut staging_rows = 0;
+    while let Some(r) = staging.next().await {
+        r.expect("staging row");
+        staging_rows += 1;
+    }
+    assert_eq!(staging_rows, 1, "inserted node should exist on staging");
+
+    // NOT visible on main (the engine default branch).
+    let mut main = engine
+        .execute("SELECT path FROM default WHERE path = '/xbranch1'")
+        .await
+        .expect("select main failed");
+    let mut main_rows = 0;
+    while let Some(r) = main.next().await {
+        r.expect("main row");
+        main_rows += 1;
+    }
+    assert_eq!(main_rows, 0, "inserted node must NOT leak onto main");
+}
+
+/// Per-node branch diff: nodes added/modified/deleted on a forked branch are
+/// classified correctly via the revision-log walk (no full-listing scan).
+#[tokio::test]
+async fn test_branch_diff_per_node() {
+    use raisin_storage::BranchRepository;
+
+    let (storage, _temp_dir) = create_test_storage().await; // main + staging exist
+    let tenant_id = "test_tenant";
+    let repo_id = "test_repo";
+    let workspace = "default";
+
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new(tenant_id, repo_id),
+            raisin_models::workspace::Workspace::new(workspace.to_string()),
+        )
+        .await
+        .expect("create workspace");
+
+    // Node type on main → the fork copies it onto publish.
+    storage
+        .node_types()
+        .create(
+            BranchScope::new(tenant_id, repo_id, "main"),
+            serde_json::from_value(serde_json::json!({ "name": "raisin:Page" }))
+                .expect("nodetype json"),
+            CommitMetadata {
+                message: "t".to_string(),
+                actor: "t".to_string(),
+                is_system: true,
+            },
+        )
+        .await
+        .expect("create nodetype");
+
+    // Seed two nodes on main through the commit path (records revisions).
+    let main_engine = QueryEngine::new(
+        storage.clone(),
+        tenant_id.to_string(),
+        repo_id.to_string(),
+        "main".to_string(),
+    )
+    .with_catalog(create_test_catalog(&[workspace]))
+    .with_auth(raisin_models::auth::AuthContext::system());
+    run_sql(
+        &main_engine,
+        "INSERT INTO default (id, path, node_type, properties) VALUES ('keep-id','/keep','raisin:Page','{}'::JSONB)",
+    )
+    .await;
+    run_sql(
+        &main_engine,
+        "INSERT INTO default (id, path, node_type, properties) VALUES ('gone-id','/gone','raisin:Page','{}'::JSONB)",
+    )
+    .await;
+
+    // Fork publish from main (copies node type + both nodes).
+    storage
+        .branches()
+        .create_branch(
+            tenant_id,
+            repo_id,
+            "publish",
+            "u",
+            None,
+            Some("main".to_string()),
+            false,
+            false,
+        )
+        .await
+        .expect("fork publish");
+
+    // On publish: add one, modify one, delete one.
+    let pub_engine = QueryEngine::new(
+        storage.clone(),
+        tenant_id.to_string(),
+        repo_id.to_string(),
+        "publish".to_string(),
+    )
+    .with_catalog(create_test_catalog(&[workspace]))
+    .with_auth(raisin_models::auth::AuthContext::system());
+    run_sql(
+        &pub_engine,
+        "INSERT INTO default (id, path, node_type, properties) VALUES ('new-id','/new','raisin:Page','{}'::JSONB)",
+    )
+    .await;
+    run_sql(
+        &pub_engine,
+        "UPDATE default SET properties = '{\"x\":1}'::JSONB WHERE path = '/keep'",
+    )
+    .await;
+    run_sql(&pub_engine, "DELETE FROM default WHERE path = '/gone'").await;
+
+    // Diff publish vs main — O(commits since fork), not a full listing.
+    let diff = storage
+        .branches_impl()
+        .diff_branches(tenant_id, repo_id, "publish", "main")
+        .await
+        .expect("diff_branches");
+
+    assert!(
+        diff.added.iter().any(|n| n.node_id == "new-id"),
+        "added should contain new-id, got {:?}",
+        diff.added
+    );
+    assert!(
+        diff.modified.iter().any(|n| n.node_id == "keep-id"),
+        "modified should contain keep-id, got {:?}",
+        diff.modified
+    );
+    assert!(
+        diff.deleted.iter().any(|n| n.node_id == "gone-id"),
+        "deleted should contain gone-id, got {:?}",
+        diff.deleted
+    );
+    // /new path resolves on the branch.
+    assert!(diff.added.iter().any(|n| n.path.as_deref() == Some("/new")));
 }
 
 #[tokio::test]

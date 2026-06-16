@@ -20,7 +20,8 @@ use raisin_storage::JobType;
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 use super::types::{
-    ActionCounts, DryRunLogEntry, DryRunResponse, DryRunSummary, InstallMode, InstallResponse,
+    ActionCounts, DryRunLogEntry, DryRunResponse, DryRunSummary, InstallMode, InstallQuery,
+    InstallResponse,
 };
 
 /// Install a package (extract and apply node types, workspaces, content).
@@ -31,12 +32,13 @@ use super::types::{
 pub async fn install_package(
     State(state): State<AppState>,
     Path((repo, package_name)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<InstallQuery>,
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<InstallResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
     let tenant_id = tenant_info.tenant_id.as_str();
-    let branch = "main";
+    let branch = query.branch.as_deref().unwrap_or("main");
     let workspace = "packages";
 
     let node_service =
@@ -125,12 +127,13 @@ pub async fn install_package(
 pub async fn uninstall_package(
     State(state): State<AppState>,
     Path((repo, package_name)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<InstallQuery>,
     Extension(tenant_info): Extension<TenantInfo>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<InstallResponse>, ApiError> {
     let auth_context = auth.map(|Extension(ctx)| ctx);
     let tenant_id = tenant_info.tenant_id.as_str();
-    let branch = "main";
+    let branch = query.branch.as_deref().unwrap_or("main");
     let workspace = "packages";
 
     let node_service =

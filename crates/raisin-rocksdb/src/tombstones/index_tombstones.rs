@@ -163,7 +163,7 @@ pub(super) fn tombstone_reference_indexes(
             ctx.branch,
             ctx.workspace,
             &reference.workspace,
-            &reference.path,
+            &reference.id,
             &node.id,
             &property_path,
             revision,

@@ -313,6 +313,7 @@ declare namespace raisin {
     function move(workspace: string, nodePath: string, newParentPath: string): Promise<RaisinNode>;
     function query(workspace: string, query: any): Promise<RaisinNode[]>;
     function getChildren(workspace: string, parentPath: string, limit?: number | null): Promise<RaisinNode[]>;
+    function applyChildOrder(workspace: string, parentPath: string, sourceBranch: string, targetBranch: string): Promise<void>;
     function addResource(workspace: string, nodePath: string, propertyPath: string, uploadData: any): Promise<any>;
     /**
      * Start a transaction for atomic multi-node operations.

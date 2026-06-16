@@ -24,8 +24,9 @@ mod tree;
 // Re-export all public handler functions so callers can use the same paths.
 pub use crud::{handle_node_create, handle_node_delete, handle_node_get, handle_node_update};
 pub use operations::{
-    handle_node_copy, handle_node_copy_tree, handle_node_move, handle_node_move_child_after,
-    handle_node_move_child_before, handle_node_rename, handle_node_reorder,
+    handle_node_apply_child_order, handle_node_copy, handle_node_copy_tree, handle_node_move,
+    handle_node_move_child_after, handle_node_move_child_before, handle_node_rename,
+    handle_node_reorder,
 };
 pub use properties::{handle_property_get, handle_property_update};
 pub use query::{handle_node_query, handle_node_query_by_path, handle_node_query_by_property};

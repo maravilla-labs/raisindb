@@ -55,7 +55,7 @@ pub fn reference_forward_key_versioned(
         .build()
 }
 
-/// Reference index key (reverse): {tenant}\0{repo}\0{branch}\0{workspace}\0ref_rev{_pub}\0{target_workspace}\0{target_path}\0{source_node_id}\0{property_path}
+/// Reference index key (reverse): {tenant}\0{repo}\0{branch}\0{workspace}\0ref_rev{_pub}\0{target_workspace}\0{target_id}\0{source_node_id}\0{property_path}
 #[deprecated(
     since = "0.1.0",
     note = "Use reference_reverse_key_versioned for revision-aware storage"
@@ -66,7 +66,7 @@ pub fn reference_reverse_key(
     branch: &str,
     workspace: &str,
     target_workspace: &str,
-    target_path: &str,
+    target_id: &str,
     source_node_id: &str,
     property_path: &str,
     published: bool,
@@ -79,7 +79,7 @@ pub fn reference_reverse_key(
         .push(workspace)
         .push(tag)
         .push(target_workspace)
-        .push(target_path)
+        .push(target_id)
         .push(source_node_id)
         .push(property_path)
         .build()
@@ -92,7 +92,7 @@ pub fn reference_reverse_key_versioned(
     branch: &str,
     workspace: &str,
     target_workspace: &str,
-    target_path: &str,
+    target_id: &str,
     source_node_id: &str,
     property_path: &str,
     revision: &HLC,
@@ -106,7 +106,7 @@ pub fn reference_reverse_key_versioned(
         .push(workspace)
         .push(tag)
         .push(target_workspace)
-        .push(target_path)
+        .push(target_id)
         .push(source_node_id)
         .push(property_path)
         .push_revision(revision)
@@ -120,7 +120,7 @@ pub fn reference_reverse_prefix(
     branch: &str,
     workspace: &str,
     target_workspace: &str,
-    target_path: &str,
+    target_id: &str,
     published: bool,
 ) -> Vec<u8> {
     let tag = if published { "ref_rev_pub" } else { "ref_rev" };
@@ -131,6 +131,6 @@ pub fn reference_reverse_prefix(
         .push(workspace)
         .push(tag)
         .push(target_workspace)
-        .push(target_path)
+        .push(target_id)
         .build_prefix()
 }

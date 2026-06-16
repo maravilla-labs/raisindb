@@ -159,6 +159,10 @@ pub(crate) fn management_routes(_state: &AppState) -> Router<AppState> {
                 get(crate::handlers::branches::compare_branches),
             )
             .route(
+                "/api/management/repositories/{tenant_id}/{repo_id}/branches/{branch}/diff/{base_branch}",
+                get(crate::handlers::branches::diff_branches),
+            )
+            .route(
                 "/api/management/repositories/{tenant_id}/{repo_id}/branches/{target_branch}/merge",
                 post(crate::handlers::branches::merge_branches),
             )

@@ -113,6 +113,9 @@ where
         RequestType::NodeMoveChildAfter => {
             handle_node_move_child_after(state, connection_state, request).await
         }
+        RequestType::NodeApplyChildOrder => {
+            handle_node_apply_child_order(state, connection_state, request).await
+        }
 
         // Tree operations
         RequestType::NodeListChildren => {
@@ -265,6 +268,7 @@ where
         }
         RequestType::BranchMerge => handle_branch_merge(state, connection_state, request).await,
         RequestType::BranchCompare => handle_branch_compare(state, connection_state, request).await,
+        RequestType::BranchDiff => handle_branch_diff(state, connection_state, request).await,
 
         // Tag operations
         RequestType::TagCreate => handle_tag_create(state, connection_state, request).await,

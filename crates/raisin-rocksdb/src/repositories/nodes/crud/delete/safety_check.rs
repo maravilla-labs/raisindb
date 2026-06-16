@@ -84,8 +84,9 @@ impl NodeRepositoryImpl {
         node_id: &str,
     ) -> Result<()> {
         for published in [false, true] {
+            // Reverse index is keyed by the TARGET's node id (stable across moves).
             let ref_prefix = keys::reference_reverse_prefix(
-                tenant_id, repo_id, branch, workspace, workspace, &node.path, published,
+                tenant_id, repo_id, branch, workspace, workspace, &node.id, published,
             );
 
             let iter = self.db.prefix_iterator_cf(cf_reference, &ref_prefix);

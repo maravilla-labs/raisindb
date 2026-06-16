@@ -312,6 +312,7 @@ pub enum IndexType {
     ChildOrder,
     FullText,
     Vector,
+    Compound,
     All,
 }
 

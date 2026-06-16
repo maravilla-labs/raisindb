@@ -60,7 +60,9 @@ function lastSegment(path: string): string {
 
 /**
  * Normalize a designer-format node tree: legacy snapshots may carry
- * `function_ref` as a plain string instead of a RaisinReference object.
+ * reference fields (`function_ref`, `agent_ref`, `chat_config.agent_ref`) as a
+ * plain string instead of a RaisinReference object. Convert each so the
+ * renderer (which calls getRefDisplayName/getRefPath) always sees an object.
  */
 function normalizeDesignerNodes(nodes: DesignerFlowNode[]): DesignerFlowNode[] {
   return nodes.map((node) => {
@@ -68,14 +70,27 @@ function normalizeDesignerNodes(nodes: DesignerFlowNode[]): DesignerFlowNode[] {
       return { ...node, children: normalizeDesignerNodes(node.children || []) }
     }
     const props = (node.properties || {}) as FlowStepProperties
-    const rawRef = props.function_ref as unknown
-    if (typeof rawRef === 'string') {
-      return {
-        ...node,
-        properties: { ...props, function_ref: toReference(rawRef) },
-      }
+    const nextProps: FlowStepProperties = { ...props }
+    let changed = false
+
+    if (typeof (props.function_ref as unknown) === 'string') {
+      nextProps.function_ref = toReference(props.function_ref as unknown as string)
+      changed = true
     }
-    return node
+    if (typeof (props.agent_ref as unknown) === 'string') {
+      nextProps.agent_ref = toReference(props.agent_ref as unknown as string)
+      changed = true
+    }
+    const chatConfig = props.chat_config as { agent_ref?: unknown } | undefined
+    if (chatConfig && typeof chatConfig.agent_ref === 'string') {
+      nextProps.chat_config = {
+        ...chatConfig,
+        agent_ref: toReference(chatConfig.agent_ref),
+      } as FlowStepProperties['chat_config']
+      changed = true
+    }
+
+    return changed ? { ...node, properties: nextProps } : node
   })
 }
 

@@ -286,6 +286,7 @@ pub enum RequestType {
     NodeReorder,
     NodeMoveChildBefore,
     NodeMoveChildAfter,
+    NodeApplyChildOrder,
 
     // Tree operations
     NodeListChildren,
@@ -327,6 +328,7 @@ pub enum RequestType {
     BranchUpdateHead,
     BranchMerge,
     BranchCompare,
+    BranchDiff,
 
     // Tag operations
     TagCreate,

@@ -114,3 +114,16 @@ pub type NodeGetChildrenCallback = Arc<
         + Send
         + Sync,
 >;
+
+/// Callback for replaying a parent's child order from `source_branch` onto
+/// `target_branch`.
+pub type NodeApplyChildOrderCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // parent_path
+            String, // source_branch
+            String, // target_branch
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;

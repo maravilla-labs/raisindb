@@ -12,9 +12,9 @@ use crate::{
     error::WsError,
     handler::WsState,
     protocol::{
-        BranchComparePayload, BranchCreatePayload, BranchDeletePayload, BranchGetHeadPayload,
-        BranchGetPayload, BranchListPayload, BranchMergePayload, BranchUpdateHeadPayload,
-        RequestEnvelope, ResponseEnvelope,
+        BranchComparePayload, BranchCreatePayload, BranchDeletePayload, BranchDiffPayload,
+        BranchGetHeadPayload, BranchGetPayload, BranchListPayload, BranchMergePayload,
+        BranchUpdateHeadPayload, RequestEnvelope, ResponseEnvelope,
     },
 };
 
@@ -248,25 +248,22 @@ where
         .as_ref()
         .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))?;
 
-    // We need to downcast to RocksDB storage to access calculate_divergence
-    // This is a limitation of the current storage abstraction
-    let storage_any = &state.storage as &dyn std::any::Any;
+    // Use the concrete RocksDB handle already held by WsState (the generic
+    // `state.storage` cannot be downcast through the `S: Storage` erasure).
+    let rocksdb_storage = state
+        .rocksdb_storage
+        .as_ref()
+        .ok_or_else(|| WsError::OperationError("RocksDB storage not available".to_string()))?;
 
-    if let Some(rocksdb_storage) = storage_any.downcast_ref::<raisin_rocksdb::RocksDBStorage>() {
-        let divergence = rocksdb_storage
-            .branches_impl()
-            .calculate_divergence(tenant_id, repo, &payload.branch, &payload.base_branch)
-            .await?;
+    let divergence = rocksdb_storage
+        .branches_impl()
+        .calculate_divergence(tenant_id, repo, &payload.branch, &payload.base_branch)
+        .await?;
 
-        Ok(Some(ResponseEnvelope::success(
-            request.request_id,
-            serde_json::to_value(divergence)?,
-        )))
-    } else {
-        Err(WsError::OperationError(
-            "Branch comparison requires RocksDB storage".to_string(),
-        ))
-    }
+    Ok(Some(ResponseEnvelope::success(
+        request.request_id,
+        serde_json::to_value(divergence)?,
+    )))
 }
 
 /// Stub for non-RocksDB builds
@@ -284,6 +281,60 @@ where
         request.request_id,
         "NOT_SUPPORTED".to_string(),
         "Branch comparison requires RocksDB storage feature".to_string(),
+    )))
+}
+
+/// Handle branch diff (per-node added/modified/deleted relative to the base)
+#[cfg(feature = "storage-rocksdb")]
+pub async fn handle_branch_diff<S, B>(
+    state: &Arc<WsState<S, B>>,
+    _connection_state: &Arc<RwLock<ConnectionState>>,
+    request: RequestEnvelope,
+) -> Result<Option<ResponseEnvelope>, WsError>
+where
+    S: Storage + 'static,
+    B: raisin_binary::BinaryStorage,
+{
+    let payload: BranchDiffPayload = serde_json::from_value(request.payload.clone())?;
+
+    let tenant_id = &request.context.tenant_id;
+    let repo = request
+        .context
+        .repository
+        .as_ref()
+        .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))?;
+
+    let rocksdb_storage = state
+        .rocksdb_storage
+        .as_ref()
+        .ok_or_else(|| WsError::OperationError("RocksDB storage not available".to_string()))?;
+
+    let diff = rocksdb_storage
+        .branches_impl()
+        .diff_branches(tenant_id, repo, &payload.branch, &payload.base_branch)
+        .await?;
+
+    Ok(Some(ResponseEnvelope::success(
+        request.request_id,
+        serde_json::to_value(diff)?,
+    )))
+}
+
+/// Stub for non-RocksDB builds
+#[cfg(not(feature = "storage-rocksdb"))]
+pub async fn handle_branch_diff<S, B>(
+    _state: &Arc<WsState<S, B>>,
+    _connection_state: &Arc<RwLock<ConnectionState>>,
+    request: RequestEnvelope,
+) -> Result<Option<ResponseEnvelope>, WsError>
+where
+    S: Storage,
+    B: raisin_binary::BinaryStorage,
+{
+    Ok(Some(ResponseEnvelope::error(
+        request.request_id,
+        "NOT_SUPPORTED".to_string(),
+        "Branch diff requires RocksDB storage feature".to_string(),
     )))
 }
 
@@ -307,14 +358,37 @@ where
         .as_ref()
         .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))?;
 
-    // TODO: Implement merge once MergeStrategy is defined in raisin_storage
-    // For now, return not implemented
-    _ = (tenant_id, repo, payload); // Suppress unused variable warnings
+    // Use the concrete RocksDB handle already held by WsState, mirroring the
+    // HTTP merge handler (raisin-transport-http/src/handlers/branches.rs).
+    let rocksdb_storage = state
+        .rocksdb_storage
+        .as_ref()
+        .ok_or_else(|| WsError::OperationError("RocksDB storage not available".to_string()))?;
 
-    Ok(Some(ResponseEnvelope::error(
+    // payload.strategy: Option<String> -> MergeStrategy. Default to ThreeWay;
+    // merge_branches() fast-forwards internally whenever that is possible.
+    let strategy = match payload.strategy.as_deref() {
+        Some("FastForward") | Some("fast_forward") => raisin_context::MergeStrategy::FastForward,
+        _ => raisin_context::MergeStrategy::ThreeWay,
+    };
+    let message = payload.message.as_deref().unwrap_or("Merge");
+
+    let result = rocksdb_storage
+        .branches_impl()
+        .merge_branches(
+            tenant_id,
+            repo,
+            &payload.target_branch,
+            &payload.source_branch,
+            strategy,
+            message,
+            "system", // TODO: derive actor from connection_state once available
+        )
+        .await?;
+
+    Ok(Some(ResponseEnvelope::success(
         request.request_id,
-        "NOT_IMPLEMENTED".to_string(),
-        "Branch merging not yet implemented".to_string(),
+        serde_json::to_value(result)?,
     )))
 }
 

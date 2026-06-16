@@ -51,6 +51,24 @@ export interface MergeBranchRequest {
   actor: string
 }
 
+/** Per-node change in a branch diff (operation: added | modified | deleted | reordered). */
+export interface NodeDiffInfo {
+  node_id: string
+  workspace: string
+  path?: string | null
+  operation: string
+  translation_locale?: string
+}
+
+/** Per-node diff of a branch relative to a base branch's merge-base. */
+export interface BranchDiff {
+  common_ancestor: string
+  added: NodeDiffInfo[]
+  /** Includes both content changes (operation "modified") and "reordered" entries. */
+  modified: NodeDiffInfo[]
+  deleted: NodeDiffInfo[]
+}
+
 export interface ConflictResolution {
   node_id: string
   resolution_type: 'keep-ours' | 'keep-theirs' | 'manual'
@@ -172,6 +190,15 @@ export const branchesApi = {
   compare: (repoId: string, branch: string, baseBranch: string) =>
     api.get<BranchDivergence>(
       `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${branch}/compare/${baseBranch}`
+    ),
+
+  /**
+   * Per-node diff of a branch relative to a base branch (added/modified/deleted/reordered).
+   * GET /api/management/repositories/{tenant}/{repo}/branches/{branch}/diff/{baseBranch}
+   */
+  diff: (repoId: string, branch: string, baseBranch: string) =>
+    api.get<BranchDiff>(
+      `/api/management/repositories/${getCurrentTenantId()}/${repoId}/branches/${branch}/diff/${baseBranch}`
     ),
 
   /**

@@ -370,7 +370,7 @@ impl NodeRepositoryImpl {
                     branch,
                     workspace,
                     &ref_data.workspace,
-                    &ref_data.path,
+                    &ref_data.id,
                     id,
                     prop_path,
                     revision,

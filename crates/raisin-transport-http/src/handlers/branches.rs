@@ -15,7 +15,7 @@ use axum::{
     Json,
 };
 
-use raisin_context::{Branch, BranchDivergence, MergeResult, MergeStrategy};
+use raisin_context::{Branch, BranchDiff, BranchDivergence, MergeResult, MergeStrategy};
 use raisin_hlc::HLC;
 use raisin_storage::{BranchRepository, Storage};
 
@@ -224,6 +224,30 @@ pub async fn compare_branches(
         .await?;
 
     Ok(Json(divergence))
+}
+
+/// Per-node diff of a branch relative to a base branch (added/modified/deleted).
+///
+/// GET /api/management/repositories/{tenant_id}/{repo_id}/branches/{branch}/diff/{base_branch}
+///
+/// Unlike `compare` (counts only), this enumerates which nodes changed since the
+/// branches diverged — cost scales with the size of the change, not the repo.
+#[cfg(feature = "storage-rocksdb")]
+pub async fn diff_branches(
+    State(state): State<AppState>,
+    Path((tenant_id, repo_id, branch, base_branch)): Path<(String, String, String, String)>,
+) -> Result<Json<BranchDiff>, ApiError> {
+    let rocksdb_storage = state
+        .rocksdb_storage
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("RocksDB storage not available"))?;
+
+    let diff = rocksdb_storage
+        .branches_impl()
+        .diff_branches(&tenant_id, &repo_id, &branch, &base_branch)
+        .await?;
+
+    Ok(Json(diff))
 }
 
 /// Merge a source branch into a target branch

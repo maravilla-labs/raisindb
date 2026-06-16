@@ -128,4 +128,20 @@ export class Branches {
       RequestType.BranchCompare
     );
   }
+
+  /**
+   * Per-node diff of `branch` relative to `baseBranch` (added/modified/deleted).
+   *
+   * Cheaper than reading both branch listings: cost scales with the number of
+   * changed nodes since the branches diverged, not the total content.
+   */
+  async diff(branch: string, baseBranch: string): Promise<unknown> {
+    return this.sendRequest(
+      {
+        branch,
+        base_branch: baseBranch
+      },
+      RequestType.BranchDiff
+    );
+  }
 }

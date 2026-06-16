@@ -162,6 +162,19 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     )
     .await?;
 
+    // 10b. Index compound indexes (multi-column). Mirrors the repository path so
+    // SQL-created nodes are visible to compound-index scans.
+    indexing::index_compound_indexes(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node,
+        &revision,
+    )
+    .await?;
+
     // 11. Add ORDERED_CHILDREN index entry (FAST PATH)
     let parent_id = ordering::lookup_parent_id(
         tx,

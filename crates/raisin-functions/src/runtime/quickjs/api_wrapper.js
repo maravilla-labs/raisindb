@@ -268,6 +268,8 @@ globalThis.raisin = {
             const results = JSON.parse(__raisin_internal.nodes_getChildren(workspace, path, limit));
             return results.map(n => wrapNode(n, workspace));
         },
+        // Replay a parent's child order from sourceBranch onto targetBranch.
+        applyChildOrder: (workspace, parentPath, sourceBranch, targetBranch) => __raisin_internal.nodes_applyChildOrder(workspace, parentPath, sourceBranch, targetBranch),
         // Transaction API - returns a context object with node operations
         beginTransaction: () => {
             const txId = __raisin_internal.tx_begin();

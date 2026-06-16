@@ -185,7 +185,7 @@ impl OperationApplicator {
                     branch,
                     workspace,
                     &ref_data.workspace,
-                    &ref_data.path,
+                    &ref_data.id,
                     &node.id,
                     prop_path,
                     &revision,

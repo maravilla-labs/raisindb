@@ -381,7 +381,7 @@ interface UploadState {
  * @param repo - Optional repository name override
  * @param targetPath - Optional target path in repository (e.g., "/my-folder/package-name")
  */
-export async function uploadPackage(filePath: string, serverUrl?: string, repo?: string, targetPath?: string): Promise<void> {
+export async function uploadPackage(filePath: string, serverUrl?: string, repo?: string, targetPath?: string, branch = 'main'): Promise<void> {
   const resolvedFile = path.resolve(filePath);
 
   if (!fs.existsSync(resolvedFile)) {
@@ -465,7 +465,7 @@ export async function uploadPackage(filePath: string, serverUrl?: string, repo?:
     updateProgress({ progress: 30, message: 'Uploading to server...' });
 
     // Use the api.ts uploadPackage function
-    const result = await apiUploadPackage(targetRepo, fileContent, fileName, targetPath);
+    const result = await apiUploadPackage(targetRepo, fileContent, fileName, targetPath, branch);
 
     updateProgress({ progress: 60, message: 'Upload received by server' });
 
@@ -671,7 +671,7 @@ async function waitForInstalled(
  * Waits for the background install job and reports the final lifecycle
  * state ('installed' = success, 'failed' = error with detail).
  */
-export async function installPackage(packageName: string, serverUrl?: string, repo?: string): Promise<void> {
+export async function installPackage(packageName: string, serverUrl?: string, repo?: string, branch = 'main'): Promise<void> {
   const server = serverUrl || getServer();
   if (!server) {
     throw new Error('No server configured. Use --server option or run /connect first.');
@@ -685,10 +685,10 @@ export async function installPackage(packageName: string, serverUrl?: string, re
   // Get repo from env/config or use 'default'
   const targetRepo = repo || getDefaultRepo() || 'default';
 
-  console.log(`Installing package '${packageName}' in repository '${targetRepo}'...`);
+  console.log(`Installing package '${packageName}' in repository '${targetRepo}' (branch: ${branch})...`);
 
   try {
-    const response = await apiInstallPackage(targetRepo, packageName);
+    const response = await apiInstallPackage(targetRepo, packageName, branch);
 
     if (response.installed && !response.job_id) {
       // Already installed (server-side no-op)

@@ -111,9 +111,9 @@ pub use scope::{
 
 // Re-export all storage traits from the traits module
 pub use traits::{
-    ArchetypeRepository, CompoundColumnValue, CompoundIndexRepository, CompoundIndexScanEntry,
-    ElementTypeRepository, NodeRepository, NodeTypeRepository, ProcessingRulesRepository,
-    PropertyIndexRepository, PropertyScanEntry, ReferenceIndexRepository, RegistryRepository,
-    RelationRepository, Storage, Transaction, TreeRepository, VersioningRepository,
-    WorkspaceRepository,
+    apply_child_order_from_branch, ArchetypeRepository, CompoundColumnValue,
+    CompoundIndexRepository, CompoundIndexScanEntry, ElementTypeRepository, NodeRepository,
+    NodeTypeRepository, ProcessingRulesRepository, PropertyIndexRepository, PropertyScanEntry,
+    ReferenceIndexRepository, RegistryRepository, RelationRepository, Storage, Transaction,
+    TreeRepository, VersioningRepository, WorkspaceRepository,
 };

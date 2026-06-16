@@ -51,6 +51,7 @@ export interface SyncOptions {
   dryRun?: boolean;
   repo?: string;
   server?: string;
+  branch?: string;
   init?: boolean;
 }
 
@@ -99,6 +100,7 @@ export async function syncPackage(
   // Apply command-line overrides
   if (options.server) config.server = options.server;
   if (options.repo) config.repository = options.repo;
+  if (options.branch) config.branch = options.branch;
 
   // Verify authentication
   const token = getToken();
@@ -155,7 +157,7 @@ async function promptForSyncConfig(
     server,
     repo || 'default',
     `/${packageName}`,
-    'main'
+    options.branch || 'main'
   );
 
   console.log(`Configured sync to ${server}/${config.repository}${config.remote_path}`);

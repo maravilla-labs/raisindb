@@ -91,14 +91,39 @@ pub async fn execute_reference_index_scan<S: Storage + 'static>(
     );
 
     Ok(Box::pin(try_stream! {
-        let referencing_nodes = storage
-            .reference_index()
-            .find_referencing_nodes(
-                StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                &target_workspace, &target_path, false,
+        // The reverse reference index is keyed by the target's STABLE node id
+        // (so it survives target moves), but queries name the target by path.
+        // Resolve path -> id once here; an unresolvable target has no referrers.
+        // NOTE: the target lives in `target_workspace` (which may differ from the
+        // FROM/source `workspace` being scanned), so resolve in the TARGET's
+        // workspace — otherwise cross-workspace references resolve to nothing.
+        let target_id = storage
+            .nodes()
+            .get_node_id_by_path(
+                StorageScope::new(&tenant_id, &repo_id, &branch, &target_workspace),
+                &target_path,
+                max_revision.as_ref(),
             )
             .await
             .map_err(|e| ExecutionError::Backend(e.to_string()))?;
+
+        let referencing_nodes = match target_id {
+            Some(target_id) => storage
+                .reference_index()
+                .find_referencing_nodes(
+                    StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                    &target_workspace, &target_id, false,
+                )
+                .await
+                .map_err(|e| ExecutionError::Backend(e.to_string()))?,
+            None => {
+                tracing::debug!(
+                    "   ReferenceIndexScan: target '{}:{}' not found; 0 referrers",
+                    target_workspace, target_path
+                );
+                Vec::new()
+            }
+        };
 
         tracing::debug!(
             "   ReferenceIndexScan: found {} referencing nodes",

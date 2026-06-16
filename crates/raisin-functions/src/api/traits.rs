@@ -113,6 +113,18 @@ pub trait FunctionApi: Send + Sync {
         limit: Option<u32>,
     ) -> Result<Vec<Value>>;
 
+    /// Replay a parent's child order from `source_branch` onto `target_branch`.
+    ///
+    /// Used by selective publish flows to carry node sibling-order across
+    /// branches (a per-node SQL UPSERT publish never touches the ordering index).
+    async fn node_apply_child_order(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        source_branch: &str,
+        target_branch: &str,
+    ) -> Result<()>;
+
     // ========== SQL Operations ==========
 
     /// Execute a SQL query and return results

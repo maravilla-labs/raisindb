@@ -41,6 +41,14 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         "TRANSACTION: put_node called"
     );
 
+    // Stamp the modification timestamp at the lowest write level: every UPDATE
+    // (existing node) bumps `updated_at`. Creates carry their own `updated_at`
+    // from build time. Previously NO write path stamped it on update, so
+    // `updated_at` stayed frozen at creation for the life of a node.
+    if existing_node.is_some() {
+        normalized_node.updated_at = Some(chrono::Utc::now());
+    }
+
     // 4a. Check RLS permission
     rls::check_put_permission(tx, &normalized_node, existing_node.as_ref(), workspace)?;
 
@@ -171,6 +179,25 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         .await?;
     }
     indexing::index_unique_properties(
+        tx,
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node,
+        &revision,
+    )
+    .await?;
+
+    // 11b. Handle compound index updates: tombstone the OLD value entries first
+    // (a column value change such as status held -> confirmed must not leave a
+    // stale old-value entry live), then write the new entries.
+    if let Some(ref old_node) = existing_node {
+        indexing::tombstone_compound_indexes_tx(
+            tx, &tenant_id, &repo_id, &branch, workspace, old_node,
+        )?;
+    }
+    indexing::index_compound_indexes(
         tx,
         &tenant_id,
         &repo_id,

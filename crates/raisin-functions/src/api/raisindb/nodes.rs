@@ -133,4 +133,30 @@ impl RaisinFunctionApi {
 
         callback(workspace.to_string(), parent_path.to_string(), limit).await
     }
+
+    pub(crate) async fn impl_node_apply_child_order(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        source_branch: &str,
+        target_branch: &str,
+    ) -> Result<()> {
+        let callback = self
+            .callbacks
+            .node_apply_child_order
+            .as_ref()
+            .ok_or_else(|| {
+                raisin_error::Error::Validation(
+                    "Node apply child order callback not configured".to_string(),
+                )
+            })?;
+
+        callback(
+            workspace.to_string(),
+            parent_path.to_string(),
+            source_branch.to_string(),
+            target_branch.to_string(),
+        )
+        .await
+    }
 }

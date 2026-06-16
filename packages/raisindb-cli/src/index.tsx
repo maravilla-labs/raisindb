@@ -106,9 +106,10 @@ packageCmd
   .description('Install a package by name')
   .option('-s, --server <url>', 'Server URL')
   .option('-r, --repo <name>', 'Repository name (default: from config or "default")')
+  .option('-b, --branch <name>', 'Target branch (default: "main")')
   .action(async (name, options) => {
     try {
-      await installPackage(name, options.server, options.repo);
+      await installPackage(name, options.server, options.repo, options.branch || 'main');
       process.exit(0);
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));
@@ -127,6 +128,7 @@ packageCmd
   .option('-n, --dry-run', 'Show what would be synced without making changes')
   .option('-r, --repo <name>', 'Target repository')
   .option('-s, --server <url>', 'Server URL')
+  .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('--init', 'Initialize sync configuration')
   .action(async (directory, options) => {
     try {
@@ -193,6 +195,7 @@ packageCmd
   .description('Validate, build, and upload package in one step')
   .option('-s, --server <url>', 'Server URL')
   .option('-r, --repo <name>', 'Repository name')
+  .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('-i, --install', 'Install the package after upload')
   .action(async (folder, options) => {
     try {
@@ -212,6 +215,7 @@ program
   .description('Validate, build, and upload a package (alias for "package deploy")')
   .option('-s, --server <url>', 'Server URL')
   .option('-r, --repo <name>', 'Repository name')
+  .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('-i, --install', 'Install the package after upload')
   .action(async (folder, options) => {
     try {
@@ -234,6 +238,7 @@ program
   .option('-n, --dry-run', 'Show what would be synced without making changes')
   .option('-r, --repo <name>', 'Target repository')
   .option('-s, --server <url>', 'Server URL')
+  .option('-b, --branch <name>', 'Target branch (default: "main")')
   .option('--init', 'Initialize sync configuration')
   .action(async (directory, options) => {
     try {

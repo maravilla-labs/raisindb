@@ -330,8 +330,9 @@ export class NodeOperations {
    * @returns Renamed node
    */
   async rename(nodePath: string, newName: string): Promise<Node> {
+    // Server NodeRenamePayload expects `old_path` (not `node_path`).
     const payload = {
-      node_path: nodePath,
+      old_path: nodePath,
       new_name: newName,
     };
 
@@ -348,10 +349,10 @@ export class NodeOperations {
    * @returns Copied node
    */
   async copy(fromPath: string, toParentPath: string, newName?: string): Promise<Node> {
-    const payload: { from_path: string; to_parent_path: string; new_name?: string; deep: boolean } = {
-      from_path: fromPath,
-      to_parent_path: toParentPath,
-      deep: false,
+    // Server NodeCopyPayload expects `source_path` / `target_parent`.
+    const payload: { source_path: string; target_parent: string; new_name?: string } = {
+      source_path: fromPath,
+      target_parent: toParentPath,
     };
 
     if (newName !== undefined) {
@@ -371,10 +372,10 @@ export class NodeOperations {
    * @returns Copied node tree
    */
   async copyTree(fromPath: string, toParentPath: string, newName?: string): Promise<Node> {
-    const payload: { from_path: string; to_parent_path: string; new_name?: string; deep: boolean } = {
-      from_path: fromPath,
-      to_parent_path: toParentPath,
-      deep: true,
+    // Server NodeCopyTreePayload expects `source_path` / `target_parent`.
+    const payload: { source_path: string; target_parent: string; new_name?: string } = {
+      source_path: fromPath,
+      target_parent: toParentPath,
     };
 
     if (newName !== undefined) {
@@ -438,6 +439,26 @@ export class NodeOperations {
 
     const result = await this.sendRequest(payload, 'node_move_child_after');
     return result as Node;
+  }
+
+  /**
+   * Replay a parent's child order from another branch onto the current branch.
+   *
+   * Carries node sibling-order across branches — useful for selective publish
+   * flows, where copying node content (e.g. via SQL) does not move the ordering
+   * index. Only children that exist under the parent on both branches are
+   * reordered. The target branch is the connection's current branch.
+   *
+   * @param parentPath - Parent node path
+   * @param sourceBranch - Branch to copy the child order FROM
+   */
+  async applyChildOrder(parentPath: string, sourceBranch: string): Promise<void> {
+    const payload = {
+      parent_path: parentPath,
+      source_branch: sourceBranch,
+    };
+
+    await this.sendRequest(payload, 'node_apply_child_order');
   }
 
   // ========================================================================

@@ -151,6 +151,24 @@ impl PhysicalPlanner {
                 }
             }
 
+            // REFERENCES('workspace:/path') - inbound reference scan via the reverse
+            // reference index. Canonicalizing it HERE (the execution planner) is what
+            // makes ReferenceIndexScan actually get selected; without this arm the
+            // predicate stays `Other` and falls back to a row-eval post-filter that
+            // silently needs `properties` materialized in the row.
+            Expr::Function { name, args, .. } if name.to_uppercase() == "REFERENCES" => {
+                if args.len() == 1 {
+                    if let Expr::Literal(Literal::Text(target)) = &args[0].expr {
+                        if let Some((ws, path)) = target.split_once(':') {
+                            return Some(CanonicalPredicate::References {
+                                target_workspace: ws.to_string(),
+                                target_path: path.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+
             // ST_DWithin(geometry, ST_Point(lon, lat), radius) - spatial proximity scan
             Expr::Function { name, args, .. } if name.to_uppercase() == "ST_DWITHIN" => {
                 if args.len() == 3 {
@@ -249,6 +267,16 @@ impl PhysicalPlanner {
                 }
 
                 // JSON property: properties->>'key' = 'value'
+                //
+                // NOTE: only the *bare* `properties->>'key'` form is canonicalized to
+                // JsonPropertyEq here. The documented cast form
+                // `properties->>'key'::String = 'value'` is intentionally left as
+                // `Other` (a verbatim row-level filter). Canonicalizing the cast form
+                // would let it match a compound index, which only returns correct
+                // results when that index is populated —
+                // an unbuilt/stale compound index would silently return zero rows.
+                // Keeping the cast form as `Other` preserves the full-scan + verbatim
+                // filter path callers rely on for correctness.
                 if let Expr::JsonExtractText { object, key } = &left.expr {
                     if let (Expr::Column { table, column }, Expr::Literal(Literal::Text(key_str))) =
                         (&object.expr, &key.expr)

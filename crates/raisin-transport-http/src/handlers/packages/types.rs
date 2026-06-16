@@ -156,6 +156,9 @@ pub enum InstallMode {
 pub struct InstallQuery {
     #[serde(default)]
     pub mode: InstallMode,
+    /// Target branch (defaults to "main" when omitted).
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// SSE events for package installation progress

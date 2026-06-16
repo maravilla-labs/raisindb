@@ -47,6 +47,39 @@ pub struct BranchDivergence {
     pub common_ancestor: HLC,
 }
 
+/// Per-node change in a branch diff (relative to the merge-base).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeDiffInfo {
+    /// Node id that changed
+    pub node_id: String,
+    /// Workspace the node belongs to
+    pub workspace: String,
+    /// Path on the diffed branch (None when only a tombstone exists, e.g. some deletes)
+    pub path: Option<String>,
+    /// Operation: "added" | "modified" | "deleted" | "reordered"
+    pub operation: String,
+    /// Translation locale when the change is to a translation (None = base node)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub translation_locale: Option<String>,
+}
+
+/// Per-node diff of a branch relative to a base branch's merge-base.
+///
+/// Unlike [`BranchDivergence`] (which returns only ahead/behind counts), this
+/// enumerates exactly which nodes changed since the two branches diverged —
+/// cost is O(commits since fork), not O(total nodes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchDiff {
+    /// The common ancestor (merge-base) the diff is computed against
+    pub common_ancestor: HLC,
+    /// Nodes present on the branch but not on the base (operation "added")
+    pub added: Vec<NodeDiffInfo>,
+    /// Nodes changed on the branch (operation "modified" / "reordered")
+    pub modified: Vec<NodeDiffInfo>,
+    /// Nodes removed on the branch (operation "deleted")
+    pub deleted: Vec<NodeDiffInfo>,
+}
+
 /// Merge strategy for branch merges
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum MergeStrategy {

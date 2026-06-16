@@ -43,7 +43,7 @@ pub use index::{
     CompoundColumnValue, CompoundIndexRepository, CompoundIndexScanEntry, PropertyIndexRepository,
     PropertyScanEntry, ReferenceIndexRepository,
 };
-pub use node::NodeRepository;
+pub use node::{apply_child_order_from_branch, NodeRepository};
 pub use processing_rules::ProcessingRulesRepository;
 pub use registry::{RegistryRepository, TreeRepository};
 pub use relation::{GlobalRelationEntry, RelationRepository};

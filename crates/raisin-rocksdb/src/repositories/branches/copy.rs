@@ -126,8 +126,18 @@ impl BranchRepositoryImpl {
             let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
 
             // Find the revision bytes (they're encoded as descending u64)
-            // The revision index varies by CF and key structure
-            let revision_opt = self.extract_revision_from_key_parts(&parts, cf_name, &value)?;
+            // The revision index varies by CF and key structure.
+            //
+            // ORDERED_CHILDREN is special: its key embeds a 16-byte ~HLC that can
+            // itself contain null bytes, so naive split-based indexing mis-locates
+            // the revision and silently DROPS the entry (revision_opt == None). Parse
+            // it directly from the raw key instead, walking null boundaries like the
+            // query path does.
+            let revision_opt = if cf_name == cf::ORDERED_CHILDREN {
+                Self::extract_ordered_children_revision(&key)
+            } else {
+                self.extract_revision_from_key_parts(&parts, cf_name, &value)?
+            };
 
             // Only copy if revision <= max_revision
             if let Some(revision) = revision_opt {
@@ -170,6 +180,48 @@ impl BranchRepositoryImpl {
                     }
                 }
                 Some(segment) if segment == b"nodetype_versions" => {
+                    if value.len() == 16 {
+                        HLC::decode_descending(value).ok()
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else if cf_name == cf::ARCHETYPES {
+            // Schema key: {tenant}\0{repo}\0{branch}\0archetypes\0{name}\0{~revision}
+            //   -> revision at index 5
+            // Version index: {tenant}\0{repo}\0{branch}\0archetype_versions\0{name}\0{version}
+            //   -> revision stored in the value (descending HLC)
+            match parts.get(3).copied() {
+                Some(segment) if segment == b"archetypes" => match parts.get(5) {
+                    Some(rev_part) if rev_part.len() == 16 => {
+                        keys::decode_descending_revision(rev_part).ok()
+                    }
+                    _ => None,
+                },
+                Some(segment) if segment == b"archetype_versions" => {
+                    if value.len() == 16 {
+                        HLC::decode_descending(value).ok()
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else if cf_name == cf::ELEMENT_TYPES {
+            // Schema key: {tenant}\0{repo}\0{branch}\0element_types\0{name}\0{~revision}
+            //   -> revision at index 5
+            // Version index: {tenant}\0{repo}\0{branch}\0element_type_versions\0{name}\0{version}
+            //   -> revision stored in the value (descending HLC)
+            match parts.get(3).copied() {
+                Some(segment) if segment == b"element_types" => match parts.get(5) {
+                    Some(rev_part) if rev_part.len() == 16 => {
+                        keys::decode_descending_revision(rev_part).ok()
+                    }
+                    _ => None,
+                },
+                Some(segment) if segment == b"element_type_versions" => {
                     if value.len() == 16 {
                         HLC::decode_descending(value).ok()
                     } else {
@@ -246,6 +298,39 @@ impl BranchRepositoryImpl {
         };
 
         Ok(revision_opt)
+    }
+
+    /// Extract the revision from an ORDERED_CHILDREN key by walking null
+    /// boundaries (the embedded ~HLC may contain null bytes, so `key.split(\0)`
+    /// cannot be trusted here).
+    ///
+    /// Key: `{tenant}\0{repo}\0{branch}\0{workspace}\0ordered\0{parent_id}\0{order_label}\0{~HLC-16}\0{child_id}`
+    fn extract_ordered_children_revision(key: &[u8]) -> Option<HLC> {
+        // Walk to the 6th null byte (end of parent_id == start of order_label).
+        let mut null_count = 0;
+        let mut prefix_end = 0;
+        for (i, &byte) in key.iter().enumerate() {
+            if byte == 0 {
+                null_count += 1;
+                if null_count == 6 {
+                    prefix_end = i + 1;
+                    break;
+                }
+            }
+        }
+        if null_count < 6 {
+            return None;
+        }
+
+        let after_prefix = &key[prefix_end..];
+        // order_label runs until the next null; the 16-byte ~HLC follows it.
+        let order_label_end = after_prefix.iter().position(|&b| b == 0)?;
+        let hlc_start = order_label_end + 1;
+        let hlc_end = hlc_start + 16;
+        if after_prefix.len() < hlc_end {
+            return None;
+        }
+        keys::decode_descending_revision(&after_prefix[hlc_start..hlc_end]).ok()
     }
 
     /// Build a new key with a different branch name

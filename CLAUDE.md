@@ -90,19 +90,34 @@ Start a 3-node test cluster: `./scripts/start-cluster.sh`
 
 ### JSON Property Queries
 
-When querying JSON properties with the `->>` operator, cast the **key** to `String`, not the result:
+Query JSON properties with the `->>` operator. **Prefer the `::String` key-cast
+form** — it evaluates as a verbatim row-level filter, so it is always correct,
+including when combined with `path =` / `node_type =` and on workspaces that have
+compound indexes:
 
 ```sql
--- ✅ Correct: Cast the key
+-- ✅ Recommended: cast the key. Verbatim filter, always correct.
 SELECT * FROM 'workspace' WHERE properties->>'user_id'::String = $1
-SELECT * FROM 'workspace' WHERE properties->>'email'::String = $1
 
--- ❌ Wrong: Cast the result (causes "Cannot coerce type TEXT? to TEXT" error)
-SELECT * FROM 'workspace' WHERE (properties->>'user_id')::String = $1
+-- ✅ Property predicate combined with a path/id equality:
+UPDATE 'workspace' SET properties = $1::jsonb
+  WHERE path = $2 AND properties->>'seq'::String = $3
 
--- ❌ Wrong: No cast (returns empty results)
-SELECT * FROM 'workspace' WHERE properties->>'user_id' = $1
+-- ✅ Number-valued properties: ->> yields text, so compare against a string.
+--    (e.g. seq stored as JSON 0 → compare against '0', not 0)
+SELECT * FROM 'workspace' WHERE properties->>'seq'::String = '0'
 ```
+
+Notes:
+- `->>` always yields **text**; compare against a string literal even for
+  number/bool-valued properties (`properties->>'seq'::String = '0'`).
+- The bare form (`properties->>'k' = v`, no cast) is canonicalized and may be
+  routed to the `property_index` or a **compound index**. It now matches
+  correctly when combined with another predicate (fixed `JsonPropertyEq::to_expr`,
+  which previously rebuilt it as `@>` and dropped the key — that was the old
+  "no cast returns empty results" symptom). However, if a matching compound index
+  is unbuilt/stale it can still return zero rows — so when in doubt, use the cast
+  form.
 
 ## Code Conventions
 

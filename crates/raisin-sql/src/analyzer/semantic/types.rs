@@ -312,6 +312,9 @@ pub struct AnalyzedInsert {
     /// When true, uses `put_node()` which will update if node exists at path
     /// When false, uses `add_node()` which fails if node already exists
     pub is_upsert: bool,
+    /// Optional branch override (from a `__branch` pseudo-column in the column list)
+    /// None = use default/context branch, Some(name) = insert into a specific branch
+    pub branch_override: Option<String>,
 }
 
 /// Analyzed UPDATE statement

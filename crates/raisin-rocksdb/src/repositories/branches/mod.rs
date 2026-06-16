@@ -11,6 +11,7 @@
 mod conflict;
 mod copy;
 mod crud;
+mod diff;
 mod divergence;
 mod head;
 mod merge;

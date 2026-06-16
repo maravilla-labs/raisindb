@@ -5,6 +5,7 @@
 
 use parking_lot::RwLock;
 use raisin_storage::transactional::TransactionalStorage;
+use raisin_storage::Storage;
 use std::sync::Arc;
 
 use crate::{
@@ -12,9 +13,9 @@ use crate::{
     error::WsError,
     handler::WsState,
     protocol::{
-        NodeCopyPayload, NodeCopyTreePayload, NodeMoveChildAfterPayload,
-        NodeMoveChildBeforePayload, NodeMovePayload, NodeRenamePayload, NodeReorderPayload,
-        RequestEnvelope, ResponseEnvelope,
+        NodeApplyChildOrderPayload, NodeCopyPayload, NodeCopyTreePayload,
+        NodeMoveChildAfterPayload, NodeMoveChildBeforePayload, NodeMovePayload, NodeRenamePayload,
+        NodeReorderPayload, RequestEnvelope, ResponseEnvelope,
     },
 };
 
@@ -220,6 +221,39 @@ where
             None,
         )
         .await?;
+
+    Ok(Some(ResponseEnvelope::success(
+        request.request_id,
+        serde_json::to_value(())?,
+    )))
+}
+
+/// Handle "apply child order from another branch" — replays `source_branch`'s
+/// sibling order for a parent onto the request's (target) branch. The primitive
+/// a selective publish uses to carry node order across branches.
+pub async fn handle_node_apply_child_order<S, B>(
+    state: &Arc<WsState<S, B>>,
+    _connection_state: &Arc<RwLock<ConnectionState>>,
+    request: RequestEnvelope,
+) -> Result<Option<ResponseEnvelope>, WsError>
+where
+    S: raisin_storage::Storage + TransactionalStorage,
+    B: raisin_binary::BinaryStorage,
+{
+    let payload: NodeApplyChildOrderPayload = serde_json::from_value(request.payload.clone())?;
+    let ctx = extract_context(&request)?;
+
+    raisin_storage::apply_child_order_from_branch(
+        state.storage.nodes(),
+        ctx.tenant_id,
+        ctx.repo,
+        ctx.branch, // target = the request's branch
+        &payload.source_branch,
+        ctx.workspace,
+        &payload.parent_path,
+        None,
+    )
+    .await?;
 
     Ok(Some(ResponseEnvelope::success(
         request.request_id,

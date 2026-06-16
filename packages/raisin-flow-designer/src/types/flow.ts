@@ -24,20 +24,28 @@ export interface RaisinReference {
 }
 
 /**
- * Helper to extract display name from a reference path
+ * Helper to extract display name from a reference path.
+ *
+ * Tolerant of malformed inputs: a plain string ref (legacy/unnormalized
+ * snapshots) or a reference object missing both `raisin:path` and
+ * `raisin:ref` no longer throws — it degrades to a best-effort label.
  */
-export function getRefDisplayName(ref: RaisinReference): string {
-  const path = ref['raisin:path'] || ref['raisin:ref'];
+export function getRefDisplayName(ref: RaisinReference | string | null | undefined): string {
+  const path = getRefPath(ref);
+  if (!path) return '';
   // Get last segment of path as display name
   const segments = path.split('/').filter(Boolean);
   return segments[segments.length - 1] || path;
 }
 
 /**
- * Helper to get the full path from a reference
+ * Helper to get the full path from a reference.
+ * Accepts a plain string ref or a (possibly incomplete) reference object.
  */
-export function getRefPath(ref: RaisinReference): string {
-  return ref['raisin:path'] || ref['raisin:ref'];
+export function getRefPath(ref: RaisinReference | string | null | undefined): string {
+  if (!ref) return '';
+  if (typeof ref === 'string') return ref;
+  return ref['raisin:path'] || ref['raisin:ref'] || '';
 }
 
 /** Flow-level error strategy */

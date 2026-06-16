@@ -197,8 +197,9 @@ export async function listPackages(repo: string): Promise<PackageSummary[]> {
  * @param fileContent - Package file content as Buffer
  * @param fileName - Original filename (e.g., "my-package-1.0.0.rap")
  * @param targetPath - Optional target path (e.g., "/my-folder/my-package"). Defaults to package name from filename.
+ * @param branch - Target branch (defaults to "main").
  */
-export async function uploadPackage(repo: string, fileContent: Buffer, fileName: string, targetPath?: string): Promise<PackageUploadResult> {
+export async function uploadPackage(repo: string, fileContent: Buffer, fileName: string, targetPath?: string, branch = 'main'): Promise<PackageUploadResult> {
   const baseUrl = getBaseUrl();
 
   // Extract package name from filename (remove .rap extension)
@@ -211,7 +212,7 @@ export async function uploadPackage(repo: string, fileContent: Buffer, fileName:
     : packageName;
 
   // Use unified endpoint with nodeType parameter (camelCase per RepoQuery struct)
-  const url = `${baseUrl}/api/repository/${repo}/main/head/packages/${encodeURIComponent(nodePath)}?nodeType=raisin:Package`;
+  const url = `${baseUrl}/api/repository/${repo}/${branch}/head/packages/${encodeURIComponent(nodePath)}?nodeType=raisin:Package`;
 
   const formData = new FormData();
   formData.append('file', new Blob([fileContent]), fileName);
@@ -311,9 +312,10 @@ export interface InstallResponse {
 /**
  * Install a package (starts a background install job)
  */
-export async function installPackage(repo: string, packageName: string): Promise<InstallResponse> {
+export async function installPackage(repo: string, packageName: string, branch = 'main'): Promise<InstallResponse> {
   const baseUrl = getBaseUrl();
-  const url = `${baseUrl}/api/repos/${repo}/packages/${encodeURIComponent(packageName)}/install`;
+  const branchQuery = branch && branch !== 'main' ? `?branch=${encodeURIComponent(branch)}` : '';
+  const url = `${baseUrl}/api/repos/${repo}/packages/${encodeURIComponent(packageName)}/install${branchQuery}`;
 
   const response = await fetch(url, {
     method: 'POST',

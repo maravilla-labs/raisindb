@@ -14,7 +14,7 @@ use super::{
         catalog::{is_schema_table, SchemaTableKind, TableDef},
         error::{AnalysisError, Result},
     },
-    predicates::extract_branch_predicate,
+    predicates::{extract_branch_predicate, extract_branch_value},
     types::{AnalyzedDelete, AnalyzedInsert, AnalyzedStatement, AnalyzedUpdate, DmlTableTarget},
     AnalyzerContext,
 };
@@ -44,7 +44,12 @@ impl<'a> AnalyzerContext<'a> {
         // Determine target and get schema
         let (target, schema) = self.resolve_dml_target(&table_name)?;
 
-        // Extract column names if specified, otherwise use all columns in order
+        // Extract column names if specified, otherwise use all columns in order.
+        // A `__branch` pseudo-column (if present) selects the target branch for
+        // this INSERT instead of a real property; track its position so it can be
+        // pulled out of each VALUES row. It is only valid with an explicit column
+        // list (the all-columns shorthand has nowhere to place it).
+        let mut branch_col_idx: Option<usize> = None;
         let columns = if insert.columns.is_empty() {
             // No columns specified - use all columns in schema order
             schema
@@ -55,8 +60,17 @@ impl<'a> AnalyzerContext<'a> {
         } else {
             // Validate specified columns exist in schema
             let mut cols = Vec::new();
-            for col_ident in &insert.columns {
+            for (i, col_ident) in insert.columns.iter().enumerate() {
                 let col_name = col_ident.value.clone();
+                if col_name == "__branch" {
+                    if branch_col_idx.is_some() {
+                        return Err(AnalysisError::UnsupportedStatement(
+                            "INSERT may specify __branch at most once".to_string(),
+                        ));
+                    }
+                    branch_col_idx = Some(i);
+                    continue; // pseudo-column: not a real property
+                }
                 if schema.get_column(&col_name).is_none() {
                     return Err(AnalysisError::ColumnNotFound {
                         table: table_name.clone(),
@@ -68,21 +82,31 @@ impl<'a> AnalyzerContext<'a> {
             cols
         };
 
+        // Number of values each row must provide: the raw column count when an
+        // explicit list was given (includes __branch), else the schema width.
+        let expected_row_len = if insert.columns.is_empty() {
+            columns.len()
+        } else {
+            insert.columns.len()
+        };
+
         // Analyze VALUES clause - each row should have values matching column count
         let mut typed_values = Vec::new();
+        let mut branch_override: Option<String> = None;
 
         if let Some(source) = &insert.source {
             if let sqlparser::ast::SetExpr::Values(values) = &*source.body {
                 for row in &values.rows {
-                    if row.len() != columns.len() {
+                    if row.len() != expected_row_len {
                         return Err(AnalysisError::InvalidArgumentCount {
                             function: format!("INSERT INTO {}", table_name),
-                            expected: columns.len(),
+                            expected: expected_row_len,
                             actual: row.len(),
                         });
                     }
 
                     let mut typed_row = Vec::new();
+                    let mut col_cursor = 0; // index into `columns` (real properties)
                     for (idx, value_expr) in row.iter().enumerate() {
                         // Temporarily add the table to context for expression analysis
                         self.current_tables.push(super::TableRef {
@@ -100,8 +124,31 @@ impl<'a> AnalyzerContext<'a> {
                         // Remove temporary table
                         self.current_tables.pop();
 
+                        // The __branch pseudo-column: must be a constant string
+                        // literal and consistent across all rows.
+                        if Some(idx) == branch_col_idx {
+                            let value = match extract_branch_value(&typed_expr) {
+                                Some(Some(s)) => s,
+                                _ => {
+                                    return Err(AnalysisError::UnsupportedStatement(
+                                        "INSERT __branch must be a string literal".to_string(),
+                                    ))
+                                }
+                            };
+                            match &branch_override {
+                                None => branch_override = Some(value),
+                                Some(existing) if existing != &value => {
+                                    return Err(AnalysisError::UnsupportedStatement(
+                                        "INSERT __branch must be the same for all rows".to_string(),
+                                    ))
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         // Get expected column type
-                        let col_name = &columns[idx];
+                        let col_name = &columns[col_cursor];
                         let col_def = schema.get_column(col_name).ok_or_else(|| {
                             AnalysisError::InternalError(format!(
                                 "Column {} disappeared during analysis",
@@ -118,6 +165,7 @@ impl<'a> AnalyzerContext<'a> {
                         }
 
                         typed_row.push(typed_expr);
+                        col_cursor += 1;
                     }
                     typed_values.push(typed_row);
                 }
@@ -138,6 +186,7 @@ impl<'a> AnalyzerContext<'a> {
             columns,
             values: typed_values,
             is_upsert,
+            branch_override,
         }))
     }
 
@@ -460,5 +509,62 @@ mod tests {
         assert_eq!(SchemaTableKind::NodeTypes.table_name(), "NodeTypes");
         assert_eq!(SchemaTableKind::Archetypes.table_name(), "Archetypes");
         assert_eq!(SchemaTableKind::ElementTypes.table_name(), "ElementTypes");
+    }
+
+    fn analyzer_with_default_ws() -> crate::analyzer::Analyzer {
+        let mut catalog = crate::analyzer::StaticCatalog::default_nodes_schema();
+        catalog.register_workspace("default".to_string());
+        crate::analyzer::Analyzer::with_catalog(Box::new(catalog))
+    }
+
+    #[test]
+    fn test_insert_branch_override_extracted() {
+        let analyzer = analyzer_with_default_ws();
+        let stmt = analyzer
+            .analyze("INSERT INTO default (__branch, id, name) VALUES ('publish', 'x', 'x')")
+            .expect("analyze should succeed");
+        match stmt {
+            AnalyzedStatement::Insert(ins) => {
+                assert_eq!(ins.branch_override.as_deref(), Some("publish"));
+                // __branch must NOT survive as a real column/value
+                assert!(!ins.columns.iter().any(|c| c == "__branch"));
+                assert_eq!(ins.columns, vec!["id".to_string(), "name".to_string()]);
+                assert_eq!(ins.values[0].len(), 2);
+            }
+            other => panic!("expected Insert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_insert_without_branch_override() {
+        let analyzer = analyzer_with_default_ws();
+        let stmt = analyzer
+            .analyze("INSERT INTO default (id, name) VALUES ('x', 'x')")
+            .expect("analyze should succeed");
+        match stmt {
+            AnalyzedStatement::Insert(ins) => assert_eq!(ins.branch_override, None),
+            other => panic!("expected Insert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_insert_branch_non_literal_errors() {
+        let analyzer = analyzer_with_default_ws();
+        // A numeric (non-text) __branch value is not a valid branch literal.
+        let result =
+            analyzer.analyze("INSERT INTO default (__branch, id, name) VALUES (123, 'x', 'x')");
+        assert!(result.is_err(), "non-literal __branch should be rejected");
+    }
+
+    #[test]
+    fn test_insert_branch_inconsistent_across_rows_errors() {
+        let analyzer = analyzer_with_default_ws();
+        let result = analyzer.analyze(
+            "INSERT INTO default (__branch, id, name) VALUES ('publish', 'a', 'a'), ('main', 'b', 'b')",
+        );
+        assert!(
+            result.is_err(),
+            "differing __branch across rows should be rejected"
+        );
     }
 }

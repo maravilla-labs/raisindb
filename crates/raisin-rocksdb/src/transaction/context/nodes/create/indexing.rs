@@ -421,6 +421,90 @@ pub(super) async fn tombstone_unique_properties(
     Ok(())
 }
 
+/// Index a node's compound indexes (multi-column) within the transaction batch.
+///
+/// The transaction (SQL DML) write path historically did NOT maintain compound
+/// indexes — only the repository path did — so any node written via
+/// `raisin.sql.execute`/pgwire/HTTP SQL was invisible to compound-index scans.
+/// This mirrors `index_unique_properties`: fetch the NodeType async (before the
+/// batch lock), then write entries synchronously via the shared encoder.
+pub(super) async fn index_compound_indexes(
+    tx: &RocksDBTransaction,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node: &Node,
+    revision: &HLC,
+) -> Result<()> {
+    use raisin_storage::NodeTypeRepository;
+
+    // Get NodeType to read compound-index definitions (async - before batch lock)
+    let node_type = match tx
+        .node_repo
+        .node_type_repo
+        .get(
+            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+            &node.node_type,
+            None,
+        )
+        .await?
+    {
+        Some(nt) => nt,
+        None => return Ok(()), // No NodeType = no compound indexes
+    };
+
+    let compound_indexes = match node_type.compound_indexes {
+        Some(ref indexes) if !indexes.is_empty() => indexes,
+        _ => return Ok(()), // No compound indexes defined
+    };
+
+    // Now lock the batch for synchronous writes (no await while held)
+    let mut batch = tx
+        .batch
+        .lock()
+        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+
+    crate::repositories::NodeRepositoryImpl::write_compound_entries_to_batch(
+        tx.db.as_ref(),
+        &mut batch,
+        compound_indexes,
+        node,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        revision,
+    )
+}
+
+/// Tombstone a node's existing compound-index entries within the transaction
+/// batch (used on UPDATE before re-indexing). Without this, a column value
+/// change (e.g. status held -> confirmed) would leave the stale old-value entry
+/// live and a scan keyed on the old value would still return the node.
+pub(super) fn tombstone_compound_indexes_tx(
+    tx: &RocksDBTransaction,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    old_node: &Node,
+) -> Result<()> {
+    use crate::tombstones::{
+        tombstone_compound_indexes_only, TombstoneColumnFamilies, TombstoneContext,
+    };
+
+    let ctx = TombstoneContext::new(tenant_id, repo_id, branch, workspace);
+    let cfs = TombstoneColumnFamilies::from_arc_db(&tx.db)?;
+
+    let mut batch = tx
+        .batch
+        .lock()
+        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+
+    tombstone_compound_indexes_only(&mut batch, tx.db.as_ref(), &ctx, &cfs, old_node)
+}
+
 /// Index references for a node
 ///
 /// Creates both forward and reverse reference indexes:
@@ -485,7 +569,7 @@ pub(super) fn index_node_references(
             branch,
             workspace,
             &reference.workspace,
-            &reference.path,
+            &reference.id,
             &node.id,
             &property_path,
             revision,

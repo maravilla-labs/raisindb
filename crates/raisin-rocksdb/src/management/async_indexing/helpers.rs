@@ -143,6 +143,26 @@ pub(super) async fn clear_order_indexes(
     Ok(())
 }
 
+/// Clear all compound indexes for a workspace (draft + published)
+pub(super) async fn clear_compound_indexes(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+) -> Result<()> {
+    let cf_compound = cf_handle(storage.db(), cf::COMPOUND_INDEX)?;
+
+    for published in [false, true] {
+        let prefix = keys::compound_index_workspace_prefix(
+            tenant_id, repo_id, branch, workspace, published,
+        );
+        delete_with_prefix(storage, cf_compound, &prefix)?;
+    }
+
+    Ok(())
+}
+
 /// Delete all keys with a given prefix
 fn delete_with_prefix(
     storage: &RocksDBStorage,

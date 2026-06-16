@@ -77,7 +77,7 @@ mod tests {
         let count = reg.methods().len();
 
         // We expect approximately 55+ methods:
-        // - nodes: 10 (get, getById, create, update, delete, updateProperty, move, query, getChildren, addResource)
+        // - nodes: 11 (get, getById, create, update, delete, updateProperty, move, query, getChildren, applyChildOrder, addResource)
         // - sql: 2 (query, execute)
         // - http: 1 (request)
         // - ai: 4 (completion, listModels, getDefaultModel, embed)

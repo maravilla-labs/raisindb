@@ -266,49 +266,87 @@ impl FlowInstanceExecutionHandler {
             }
         }
 
-        // Call raisin-flow-runtime executor
+        // Call raisin-flow-runtime executor.
+        //
+        // Delivery to the flow instance uses optimistic concurrency; a transient
+        // `VersionConflict` ("instance modified by another process") just means
+        // another writer touched it in the same instant. Retry INLINE with a
+        // short backoff (~25ms, up to ~1s) so a step advances in milliseconds —
+        // only fall through to the job system's slow retry/backoff (10s/30s/60s)
+        // if contention genuinely persists past the inline budget. Without this,
+        // every flow step paid the ~10s first-retry backoff for a conflict that
+        // clears in milliseconds.
         let start = std::time::Instant::now();
-        let result = match execution_type.as_str() {
-            "start" => {
-                // Start: execute flow from the beginning
-                raisin_flow_runtime::runtime::execute_flow(&instance_id, &callbacks).await
-            }
-            "resume" => {
-                // Resume: use resume_flow to properly handle the function result
-                // Extract function result from job context metadata if available
-                let resume_data = context
-                    .metadata
-                    .get("function_result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+        let resume_data = if execution_type.as_str() == "resume" {
+            context
+                .metadata
+                .get("function_result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        };
+        let mut conflict_attempts = 0u32;
+        const MAX_CONFLICT_RETRIES: u32 = 20;
+        let result = loop {
+            let attempt = match execution_type.as_str() {
+                "start" => {
+                    // Start: execute flow from the beginning
+                    raisin_flow_runtime::runtime::execute_flow(&instance_id, &callbacks).await
+                }
+                "resume" => {
+                    // Resume: use resume_flow to properly handle the function result
+                    tracing::debug!(
+                        instance_id = %instance_id,
+                        has_result = !resume_data.is_null(),
+                        "Resuming flow with result data"
+                    );
 
-                tracing::debug!(
-                    instance_id = %instance_id,
-                    has_result = !resume_data.is_null(),
-                    "Resuming flow with result data"
-                );
-
-                raisin_flow_runtime::runtime::resume_flow(&instance_id, resume_data, &callbacks)
+                    raisin_flow_runtime::runtime::resume_flow(
+                        &instance_id,
+                        resume_data.clone(),
+                        &callbacks,
+                    )
                     .await
-            }
-            "timeout_check" => {
-                // Timeout check / scheduled wake-up: no-op if the wait is not
-                // yet due; resumes Scheduled/Retry waits whose time arrived;
-                // enforces the timeout (timeout_edge or fail) for other waits.
-                tracing::debug!(
-                    instance_id = %instance_id,
-                    "Checking flow timeout"
-                );
+                }
+                "timeout_check" => {
+                    // Timeout check / scheduled wake-up: no-op if the wait is not
+                    // yet due; resumes Scheduled/Retry waits whose time arrived;
+                    // enforces the timeout (timeout_edge or fail) for other waits.
+                    tracing::debug!(
+                        instance_id = %instance_id,
+                        "Checking flow timeout"
+                    );
 
-                raisin_flow_runtime::runtime::check_flow_timeout(&instance_id, &callbacks).await
-            }
-            _ => {
-                return Err(Error::Validation(format!(
-                    "Unknown execution type: {}",
-                    execution_type
-                )));
+                    raisin_flow_runtime::runtime::check_flow_timeout(&instance_id, &callbacks).await
+                }
+                _ => {
+                    return Err(Error::Validation(format!(
+                        "Unknown execution type: {}",
+                        execution_type
+                    )));
+                }
+            };
+
+            match attempt {
+                Err(raisin_flow_runtime::types::FlowError::VersionConflict)
+                    if conflict_attempts < MAX_CONFLICT_RETRIES =>
+                {
+                    conflict_attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    continue;
+                }
+                other => break other,
             }
         };
+        if conflict_attempts > 0 {
+            tracing::debug!(
+                instance_id = %instance_id,
+                execution_type = %execution_type,
+                conflict_attempts,
+                "Resolved flow version conflict(s) via inline retry"
+            );
+        }
 
         let elapsed = start.elapsed();
 

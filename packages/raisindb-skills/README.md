@@ -14,6 +14,7 @@ npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 |-------|-------------|
 | **raisindb-overview** | Core concepts: path-as-URL routing, archetype-to-component mapping, project structure |
 | **raisindb-content-modeling** | Define NodeTypes, Archetypes, ElementTypes in YAML |
+| **raisindb-branch-workflows** | Fork, compare, and merge branches; `onBranch` scoping; deploy/sync/install `--branch` |
 | **raisindb-frontend-sveltekit** | SvelteKit frontend with dynamic routing and component registries |
 | **raisindb-frontend-react** | React Router frontend with SSR-to-WebSocket upgrade |
 | **raisindb-sql** | SQL syntax: CRUD, JSONB, hierarchy queries, graph relations |

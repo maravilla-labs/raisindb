@@ -31,14 +31,29 @@ impl BranchRepository for BranchRepositoryImpl {
         include_revision_history: bool,
     ) -> Result<Branch> {
         // Capture source branch for index copying before moving upstream_branch
+        let explicit_source = upstream_branch.clone();
         let source_branch_for_indexes = upstream_branch.as_deref().unwrap_or("main").to_string();
+
+        // When no explicit revision is given but a source branch was explicitly
+        // requested (e.g. `fromBranch: "main"`), fork from that branch's current
+        // HEAD so the new branch is a real copy (nodes, indexes, archetypes, ...)
+        // rather than an empty branch. Without this, `fromBranch`-only creates
+        // produced an empty branch and archetype lookups failed on it.
+        let effective_revision = match from_revision {
+            Some(rev) => Some(rev),
+            None if explicit_source.is_some() => self
+                .get_branch(tenant_id, repo_id, &source_branch_for_indexes)
+                .await?
+                .map(|b| b.head),
+            None => None,
+        };
 
         let branch = Branch {
             name: branch_name.to_string(),
-            head: from_revision.unwrap_or_else(|| HLC::new(0, 0)),
+            head: effective_revision.unwrap_or_else(|| HLC::new(0, 0)),
             created_at: chrono::Utc::now(),
             created_by: created_by.to_string(),
-            created_from: from_revision,
+            created_from: effective_revision,
             upstream_branch,
             protected,
             description: None,
@@ -73,8 +88,8 @@ impl BranchRepository for BranchRepositoryImpl {
             }
         }
 
-        // Copy revision-aware indexes from source branch up to from_revision
-        if let Some(ref max_revision) = from_revision {
+        // Copy revision-aware indexes from source branch up to the effective revision
+        if let Some(ref max_revision) = effective_revision {
             tracing::info!(
                 "Copying indexes from branch '{}' at revision {:?} to new branch '{}'",
                 source_branch_for_indexes,

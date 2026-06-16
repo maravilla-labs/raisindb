@@ -13,8 +13,8 @@ use raisin_storage::{IndexType, RebuildStats};
 use rocksdb::WriteBatch;
 
 use super::helpers::{
-    clear_order_indexes, clear_path_indexes, clear_property_indexes, clear_reference_indexes,
-    extract_references, get_current_revision, scan_nodes,
+    clear_compound_indexes, clear_order_indexes, clear_path_indexes, clear_property_indexes,
+    clear_reference_indexes, extract_references, get_current_revision, scan_nodes,
 };
 
 /// Rebuild indexes for a repository + workspace
@@ -58,6 +58,10 @@ pub async fn rebuild_indexes(
             rebuild_order_indexes(storage, tenant_id, repo_id, branch, workspace, &mut stats)
                 .await?;
         }
+        IndexType::Compound => {
+            rebuild_compound_indexes(storage, tenant_id, repo_id, branch, workspace, &mut stats)
+                .await?;
+        }
         IndexType::All => {
             rebuild_path_indexes(storage, tenant_id, repo_id, branch, workspace, &mut stats)
                 .await?;
@@ -66,6 +70,8 @@ pub async fn rebuild_indexes(
             rebuild_reference_indexes(storage, tenant_id, repo_id, branch, workspace, &mut stats)
                 .await?;
             rebuild_order_indexes(storage, tenant_id, repo_id, branch, workspace, &mut stats)
+                .await?;
+            rebuild_compound_indexes(storage, tenant_id, repo_id, branch, workspace, &mut stats)
                 .await?;
         }
         IndexType::FullText | IndexType::Vector => {
@@ -454,7 +460,7 @@ async fn rebuild_reference_indexes(
                 branch,
                 workspace,
                 &reference.workspace,
-                &reference.path,
+                &reference.id,
                 &node.id,
                 &prop_path,
                 &current_revision,
@@ -466,6 +472,92 @@ async fn rebuild_reference_indexes(
 
         // Commit batch every 500 nodes
         if stats.items_processed % 500 == 0 {
+            storage
+                .db()
+                .write(batch)
+                .map_err(|e| raisin_error::Error::storage(format!("Batch write failed: {}", e)))?;
+            batch = WriteBatch::default();
+        }
+    }
+
+    // Commit remaining items
+    if !batch.is_empty() {
+        storage.db().write(batch).map_err(|e| {
+            raisin_error::Error::storage(format!("Final batch write failed: {}", e))
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Rebuild compound (multi-column) indexes for all nodes in a workspace.
+///
+/// Clears existing compound entries, then re-writes them from each node using the
+/// same encoder as the live write paths (`write_compound_entries_to_batch`). This
+/// both backfills data written before the index existed and repairs drift from
+/// any path that previously skipped compound maintenance. NodeType definitions
+/// are cached by node_type name to avoid a per-node async fetch.
+async fn rebuild_compound_indexes(
+    storage: &RocksDBStorage,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    stats: &mut RebuildStats,
+) -> Result<()> {
+    use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
+    use raisin_storage::NodeTypeRepository;
+    use std::collections::HashMap;
+
+    tracing::info!("Rebuilding compound indexes");
+
+    // 1. Get all nodes
+    let nodes = scan_nodes(storage, tenant_id, repo_id, branch, workspace).await?;
+
+    // 2. Clear existing compound indexes for this workspace (draft + published)
+    clear_compound_indexes(storage, tenant_id, repo_id, branch, workspace).await?;
+
+    // 3. Rebuild from nodes
+    let mut batch = WriteBatch::default();
+    let current_revision = get_current_revision(storage, tenant_id, repo_id, branch).await?;
+
+    // Cache compound-index definitions per node_type (None = no compound indexes)
+    let mut defs_cache: HashMap<String, Option<Vec<CompoundIndexDefinition>>> = HashMap::new();
+
+    for node in nodes {
+        stats.items_processed += 1;
+
+        // Resolve (and cache) this node_type's compound-index definitions
+        if !defs_cache.contains_key(&node.node_type) {
+            let defs = storage
+                .node_types
+                .get(
+                    raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+                    &node.node_type,
+                    None,
+                )
+                .await?
+                .and_then(|nt| nt.compound_indexes)
+                .filter(|defs| !defs.is_empty());
+            defs_cache.insert(node.node_type.clone(), defs);
+        }
+
+        if let Some(Some(defs)) = defs_cache.get(&node.node_type) {
+            crate::repositories::NodeRepositoryImpl::write_compound_entries_to_batch(
+                storage.db(),
+                &mut batch,
+                defs,
+                &node,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &current_revision,
+            )?;
+        }
+
+        // Commit batch every 1000 nodes to avoid memory issues
+        if stats.items_processed % 1000 == 0 {
             storage
                 .db()
                 .write(batch)

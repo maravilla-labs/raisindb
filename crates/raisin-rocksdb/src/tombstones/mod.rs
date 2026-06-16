@@ -113,6 +113,25 @@ impl<'a> TombstoneColumnFamilies<'a> {
     }
 }
 
+/// Tombstone ONLY the compound-index entries for a node.
+///
+/// Used on UPDATE when a node's compound-index column values may have changed:
+/// the old-value entries must be tombstoned before the new-value entries are
+/// written, otherwise a scan keyed on the OLD value still returns the node
+/// (e.g. a status `held` -> `confirmed` flip would leave a stale `held` entry).
+/// This is a focused public wrapper around the internal compound tombstone used
+/// by `add_node_tombstones`, so both the repository and transaction update paths
+/// can reuse it without tombstoning every other index family.
+pub fn tombstone_compound_indexes_only(
+    batch: &mut WriteBatch,
+    db: &DB,
+    ctx: &TombstoneContext,
+    cfs: &TombstoneColumnFamilies,
+    node: &Node,
+) -> Result<()> {
+    index_tombstones::tombstone_compound_indexes(batch, db, ctx, cfs, node)
+}
+
 /// Add ALL required tombstones for a node deletion to a WriteBatch
 ///
 /// This is the SINGLE SOURCE OF TRUTH for node deletion tombstones.

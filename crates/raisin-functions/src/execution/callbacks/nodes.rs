@@ -31,9 +31,9 @@ use serde_json::Value;
 use super::query_context::QueryContext;
 use super::sql_generator;
 use crate::api::{
-    NodeCreateCallback, NodeDeleteCallback, NodeGetByIdCallback, NodeGetCallback,
-    NodeGetChildrenCallback, NodeMoveCallback, NodeQueryCallback, NodeUpdateCallback,
-    NodeUpdatePropertyCallback,
+    NodeApplyChildOrderCallback, NodeCreateCallback, NodeDeleteCallback, NodeGetByIdCallback,
+    NodeGetCallback, NodeGetChildrenCallback, NodeMoveCallback, NodeQueryCallback,
+    NodeUpdateCallback, NodeUpdatePropertyCallback,
 };
 
 // ============================================================================
@@ -321,6 +321,41 @@ where
                 })?;
 
                 Ok(moved_node)
+            })
+        },
+    )
+}
+
+/// Create node_apply_child_order callback.
+///
+/// Reorders a parent's children on the current (context) branch to match their
+/// order on `source_branch`. Goes directly through the storage NodeRepository
+/// (not SQL) because order lives in the ordered-children index, not in columns.
+pub fn create_node_apply_child_order<S, B>(
+    query_ctx: Arc<QueryContext<S, B>>,
+) -> NodeApplyChildOrderCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    Arc::new(
+        move |workspace: String,
+              parent_path: String,
+              source_branch: String,
+              target_branch: String| {
+            let ctx = query_ctx.clone();
+            Box::pin(async move {
+                raisin_storage::apply_child_order_from_branch(
+                    ctx.deps.storage.nodes(),
+                    &ctx.tenant_id,
+                    &ctx.repo_id,
+                    &target_branch,
+                    &source_branch,
+                    &workspace,
+                    &parent_path,
+                    None,
+                )
+                .await
             })
         },
     )

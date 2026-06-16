@@ -4,9 +4,10 @@ use super::super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
-use rocksdb::WriteBatch;
+use rocksdb::{WriteBatch, DB};
 
 impl NodeRepositoryImpl {
     /// Add compound indexes for a node based on its NodeType's compound_indexes configuration
@@ -45,7 +46,40 @@ impl NodeRepositoryImpl {
             _ => return Ok(()), // No compound indexes defined
         };
 
-        let cf_compound = cf_handle(&self.db, cf::COMPOUND_INDEX)?;
+        Self::write_compound_entries_to_batch(
+            &self.db,
+            batch,
+            compound_indexes,
+            node,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            revision,
+        )
+    }
+
+    /// Write compound-index entries for a node into a WriteBatch (synchronous).
+    ///
+    /// This is the SINGLE source of compound-index write encoding, shared by the
+    /// repository create/update paths, the transaction (SQL DML) path, and the
+    /// compound-index rebuild. Callers must resolve the NodeType's
+    /// `compound_indexes` first (an async NodeType fetch) and pass it in, keeping
+    /// this body lock-friendly and `await`-free so it can run while a WriteBatch
+    /// mutex guard is held.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn write_compound_entries_to_batch(
+        db: &DB,
+        batch: &mut WriteBatch,
+        compound_indexes: &[CompoundIndexDefinition],
+        node: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+    ) -> Result<()> {
+        let cf_compound = cf_handle(db, cf::COMPOUND_INDEX)?;
         let is_published = node.published_at.is_some();
 
         // Process each compound index
@@ -99,6 +133,28 @@ impl NodeRepositoryImpl {
         }
 
         Ok(())
+    }
+
+    /// Tombstone a node's existing compound-index entries (for UPDATE).
+    ///
+    /// On an update the column values may have changed; the old-value entries
+    /// must be tombstoned before the new ones are written so a scan keyed on the
+    /// OLD value no longer returns the node. Reuses the shared tombstone logic.
+    pub(crate) fn add_compound_tombstones_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        node: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+    ) -> Result<()> {
+        use crate::tombstones::{
+            tombstone_compound_indexes_only, TombstoneColumnFamilies, TombstoneContext,
+        };
+        let ctx = TombstoneContext::new(tenant_id, repo_id, branch, workspace);
+        let cfs = TombstoneColumnFamilies::from_arc_db(&self.db)?;
+        tombstone_compound_indexes_only(batch, self.db.as_ref(), &ctx, &cfs, node)
     }
 
     /// Extract a compound column value from a node based on the property name

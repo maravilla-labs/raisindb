@@ -241,6 +241,39 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // nodes.applyChildOrder(workspace, parentPath, sourceBranch, targetBranch)
+        ApiMethodDescriptor {
+            internal_name: "nodes_applyChildOrder",
+            js_name: "applyChildOrder",
+            py_name: "apply_child_order",
+            category: "nodes",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("parentPath", ArgType::String),
+                ArgSpec::new("sourceBranch", ArgType::String),
+                ArgSpec::new("targetBranch", ArgType::String),
+            ],
+            return_type: ReturnType::Void,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let parent_path = parser.string()?;
+                    let source_branch = parser.string()?;
+                    let target_branch = parser.string()?;
+                    api.node_apply_child_order(
+                        &workspace,
+                        &parent_path,
+                        &source_branch,
+                        &target_branch,
+                    )
+                    .await?;
+                    Ok(InvokeResult::Void)
+                })
+            },
+        },
         // nodes.addResource(workspace, nodePath, propertyPath, uploadData)
         ApiMethodDescriptor {
             internal_name: "nodes_addResource",

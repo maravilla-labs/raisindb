@@ -36,6 +36,7 @@
 
 mod operations;
 mod queries;
+mod rebalance;
 mod reorder;
 
 // Re-export nothing - all functions are pub(super) and accessed via NodeRepositoryImpl

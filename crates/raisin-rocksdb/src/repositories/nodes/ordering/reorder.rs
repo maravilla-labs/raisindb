@@ -145,6 +145,16 @@ impl NodeRepositoryImpl {
                 message.unwrap_or("Reorder operation").to_string(),
             );
 
+            // Record the reordered child so it surfaces in branch diffs (e.g. the
+            // admin-console merge "Reordered" group). Conflict detection skips
+            // Reordered entries, so this does not create spurious merge conflicts.
+            let changed_nodes = vec![raisin_storage::NodeChangeInfo {
+                node_id: target_child_id.to_string(),
+                workspace: workspace.to_string(),
+                operation: raisin_models::tree::ChangeOperation::Reordered,
+                translation_locale: None,
+            }];
+
             let rev_meta = raisin_storage::RevisionMeta {
                 revision,
                 parent: Some(parent_revision),
@@ -154,7 +164,7 @@ impl NodeRepositoryImpl {
                 actor: op_meta.actor.clone(),
                 message: op_meta.message.clone(),
                 is_system: op_meta.is_system,
-                changed_nodes: vec![],
+                changed_nodes,
                 changed_node_types: Vec::new(),
                 changed_archetypes: Vec::new(),
                 changed_element_types: Vec::new(),

@@ -39,14 +39,15 @@ impl NodeRepositoryImpl {
                 );
                 batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
 
-                // Reverse reference index (from target to this node)
+                // Reverse reference index (from target to this node), keyed by the
+                // target's stable node id — survives target moves (path is mutable).
                 let rev_key = keys::reference_reverse_key_versioned(
                     tenant_id,
                     repo_id,
                     branch,
                     workspace,
                     &ref_data.workspace,
-                    &ref_data.path,
+                    &ref_data.id,
                     &node.id,
                     prop_path,
                     revision,

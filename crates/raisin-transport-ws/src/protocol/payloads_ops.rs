@@ -73,6 +73,12 @@ pub struct BranchComparePayload {
     pub base_branch: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchDiffPayload {
+    pub branch: String,
+    pub base_branch: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tag operation payloads
 // ---------------------------------------------------------------------------

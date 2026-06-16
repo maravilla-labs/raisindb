@@ -7,8 +7,7 @@ use crate::index_types::{ForwardReferenceIndex, ReverseReferenceIndex};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::properties::{
-    extract_references, group_references_by_target, reference_target_key, PropertyValue,
-    RaisinReference,
+    extract_references, group_references_by_target, PropertyValue, RaisinReference,
 };
 use raisin_storage::scope::StorageScope;
 use raisin_storage::ReferenceIndexRepository;
@@ -30,7 +29,8 @@ pub struct InMemoryReferenceIndexRepo {
 
     // Reverse index (target -> sources):
     // composite_key -> target_key -> Vec<(source_node_id, property_path)>
-    // target_key format: "{target_workspace}:{target_path}"
+    // target_key format: "{target_workspace}:{target_id}" — keyed by the
+    // target's stable node id so it survives target moves.
     draft_reverse: ReverseReferenceIndex,
     published_reverse: ReverseReferenceIndex,
 }
@@ -49,6 +49,13 @@ impl InMemoryReferenceIndexRepo {
     /// Create composite key for repository isolation (branchless)
     fn composite_key(tenant_id: &str, repo_id: &str, workspace: &str) -> String {
         format!("{}/{}/{}", tenant_id, repo_id, workspace)
+    }
+
+    /// Reverse-index key for a target: `{workspace}:{id}`. Keyed by the target's
+    /// stable node id (NOT its path) so it survives target moves — distinct from
+    /// the path-based `reference_target_key` used for the forward index.
+    fn reverse_target_key(workspace: &str, id: &str) -> String {
+        format!("{}:{}", workspace, id)
     }
 }
 
@@ -96,7 +103,7 @@ impl ReferenceIndexRepository for InMemoryReferenceIndexRepo {
             let workspace_reverse = reverse.entry(key).or_default();
 
             for (prop_path, reference) in references {
-                let target_key = reference_target_key(&reference);
+                let target_key = Self::reverse_target_key(&reference.workspace, &reference.id);
 
                 workspace_reverse
                     .entry(target_key)
@@ -144,7 +151,8 @@ impl ReferenceIndexRepository for InMemoryReferenceIndexRepo {
                 let mut reverse = reverse_index.write().unwrap();
                 if let Some(workspace_reverse) = reverse.get_mut(&key) {
                     for (_, reference) in references {
-                        let target_key = reference_target_key(&reference);
+                        let target_key =
+                            Self::reverse_target_key(&reference.workspace, &reference.id);
 
                         if let Some(sources) = workspace_reverse.get_mut(&target_key) {
                             sources.retain(|(source_id, _)| source_id != node_id);
@@ -183,7 +191,7 @@ impl ReferenceIndexRepository for InMemoryReferenceIndexRepo {
         &self,
         scope: StorageScope<'_>,
         target_workspace: &str,
-        target_path: &str,
+        target_id: &str,
         published_only: bool,
     ) -> Result<Vec<(String, String)>> {
         let reverse_index = if published_only {
@@ -194,7 +202,7 @@ impl ReferenceIndexRepository for InMemoryReferenceIndexRepo {
 
         let reverse = reverse_index.read().unwrap();
         let key = Self::composite_key(scope.tenant_id, scope.repo_id, scope.workspace);
-        let target_key = format!("{}:{}", target_workspace, target_path);
+        let target_key = Self::reverse_target_key(target_workspace, target_id);
 
         let results = reverse
             .get(&key)

@@ -649,3 +649,81 @@ pub trait NodeRepository: Send + Sync {
         is_root_node: bool,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
+
+/// Replay a parent's child ordering from one branch onto another.
+///
+/// Branch *merge* already carries ordering (it copies the ordered-children
+/// index), so the admin-console "create branch → merge back" flow publishes
+/// order for free. But a selective, per-node publish (e.g. Studio's SQL-UPSERT
+/// publish) never touches the ordering index, so sibling-order changes on the
+/// source branch are lost.
+///
+/// This helper closes that gap: it reads `source_branch`'s visible child order
+/// for `parent_path` and replays it onto `target_branch` using the ordinary
+/// (self-healing) reorder operations — only for children that exist on both
+/// branches. Children present on the target but absent from the source keep
+/// their relative position at the end.
+///
+/// It is generic over any [`NodeRepository`], so transports, host bindings and
+/// flow steps can all share one implementation.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_child_order_from_branch<R>(
+    repo: &R,
+    tenant_id: &str,
+    repo_id: &str,
+    target_branch: &str,
+    source_branch: &str,
+    workspace: &str,
+    parent_path: &str,
+    actor: Option<&str>,
+) -> Result<()>
+where
+    R: NodeRepository,
+{
+    use crate::node_operations::ListOptions;
+    use std::collections::HashSet;
+
+    // Source order (in visible / fractional order).
+    let source = repo
+        .list_children(
+            StorageScope::new(tenant_id, repo_id, source_branch, workspace),
+            parent_path,
+            ListOptions::default(),
+        )
+        .await?;
+
+    // Names present on the target (only these can be reordered).
+    let target = repo
+        .list_children(
+            StorageScope::new(tenant_id, repo_id, target_branch, workspace),
+            parent_path,
+            ListOptions::default(),
+        )
+        .await?;
+    let target_names: HashSet<String> = target.into_iter().map(|n| n.name).collect();
+
+    // Walk the source order; sequence the matching target children to match.
+    let message = Some("Apply published order");
+    let mut prev: Option<String> = None;
+    for child in source {
+        if !target_names.contains(&child.name) {
+            continue;
+        }
+        let scope = StorageScope::new(tenant_id, repo_id, target_branch, workspace);
+        match &prev {
+            // First matching child -> move to the front.
+            None => {
+                repo.reorder_child(scope, parent_path, &child.name, 0, message, actor)
+                    .await?;
+            }
+            // Subsequent children -> place immediately after the previous one.
+            Some(p) => {
+                repo.move_child_after(scope, parent_path, &child.name, p, message, actor)
+                    .await?;
+            }
+        }
+        prev = Some(child.name);
+    }
+
+    Ok(())
+}

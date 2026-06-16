@@ -322,6 +322,17 @@ const orange = (s: string) => `\x1b[38;5;208m${s}\x1b[0m`;
 // --- Server Start ---
 
 export async function serverStart(args: string[], options: { verbose?: boolean; production?: boolean; detach?: boolean; port?: string; pgwirePort?: string }): Promise<void> {
+  // If the first positional arg is an existing directory, treat it as the
+  // project working directory (where ./.data/rocksdb lives) instead of
+  // forwarding it to the server binary, which only accepts flags.
+  if (args.length > 0 && !args[0].startsWith('-')) {
+    const projectDir = path.resolve(args[0]);
+    if (fs.existsSync(projectDir) && fs.statSync(projectDir).isDirectory()) {
+      process.chdir(projectDir);
+      args = args.slice(1);
+    }
+  }
+
   const installPath = getInstallPath();
 
   // Auto-install if needed

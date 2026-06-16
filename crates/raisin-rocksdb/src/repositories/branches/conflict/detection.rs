@@ -208,6 +208,15 @@ impl BranchRepositoryImpl {
             }
 
             for change in &meta.changed_nodes {
+                // Reorders are tracked in changed_nodes so they surface in branch
+                // diffs, but they must NOT participate in conflict detection:
+                // sibling order is reconciled by the ORDERED_CHILDREN index copy
+                // during merge (source wins), not by property-level resolution.
+                // Treating a reorder as a change here would spuriously flag a node
+                // reordered on one branch + edited on the other as BothModified.
+                if change.operation == raisin_models::tree::ChangeOperation::Reordered {
+                    continue;
+                }
                 let key = (change.node_id.clone(), change.translation_locale.clone());
                 changes.entry(key).or_insert((
                     change.workspace.clone(),

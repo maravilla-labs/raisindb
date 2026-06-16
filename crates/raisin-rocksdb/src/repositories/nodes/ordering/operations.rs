@@ -53,6 +53,12 @@ impl NodeRepositoryImpl {
                 raisin_error::Error::NotFound(format!("Child '{}' not found", child_name))
             })?;
 
+        // 3b. Self-heal: a prior inter-branch copy/merge can leave this parent
+        // with colliding fractional labels. Relabel before computing positions so
+        // `between()` always has strictly-increasing neighbors to insert between.
+        self.heal_ordering_if_corrupt(tenant_id, repo_id, branch, workspace, &parent_id, actor)
+            .await?;
+
         // 4. Get ordered child IDs (lightweight - no full node objects)
         // Use None for max_revision since reorder operations always work on current HEAD
         let child_ids = self
@@ -176,6 +182,10 @@ impl NodeRepositoryImpl {
                     before_child_name
                 ))
             })?;
+
+        // 3b. Self-heal colliding order labels left by inter-branch copy/merge.
+        self.heal_ordering_if_corrupt(tenant_id, repo_id, branch, workspace, &parent_id, actor)
+            .await?;
 
         // 4. Get ordered child IDs
         // Use None for max_revision since move operations always work on current HEAD
@@ -307,6 +317,10 @@ impl NodeRepositoryImpl {
                     after_child_name
                 ))
             })?;
+
+        // 3b. Self-heal colliding order labels left by inter-branch copy/merge.
+        self.heal_ordering_if_corrupt(tenant_id, repo_id, branch, workspace, &parent_id, actor)
+            .await?;
 
         // 4. Get ordered child IDs for position calculation
         // Use None for max_revision since move operations always work on current HEAD

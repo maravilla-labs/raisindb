@@ -22,6 +22,10 @@ fn make_reference(id: &str, workspace: &str, path: &str) -> RaisinReference {
     }
 }
 
+// NOTE: the reverse reference index is keyed by the TARGET's stable node id
+// (not its path), so `find_referencing_nodes` takes the target id — these tests
+// look up by the `id` passed to `make_reference`, not the path.
+
 #[tokio::test]
 async fn test_index_and_find_references() {
     let repo = InMemoryReferenceIndexRepo::new();
@@ -43,14 +47,9 @@ async fn test_index_and_find_references() {
     .await
     .unwrap();
 
-    // Find nodes referencing the target
+    // Find nodes referencing the target (by target id)
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/assets/hero.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
 
@@ -92,24 +91,14 @@ async fn test_publish_status_update() {
 
     // Should find in draft
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/img.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
 
     // Should NOT find in published
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/img.png",
-            true,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", true)
         .await
         .unwrap();
     assert_eq!(results.len(), 0);
@@ -127,24 +116,14 @@ async fn test_publish_status_update() {
 
     // Should now find in published
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/img.png",
-            true,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", true)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
 
     // Should NOT find in draft anymore
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/img.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 0);
@@ -182,12 +161,7 @@ async fn test_workspace_isolation() {
 
     // repo1 should only see node1
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/shared.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -195,12 +169,7 @@ async fn test_workspace_isolation() {
 
     // repo2 should only see node2
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo2", "main", "ws1"),
-            "ws1",
-            "/shared.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo2", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -234,12 +203,7 @@ async fn test_unindex_references() {
 
     // Verify indexed
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/img1.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -256,23 +220,13 @@ async fn test_unindex_references() {
 
     // Should no longer find
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/img1.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 0);
 
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/img2.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "2", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 0);
@@ -302,19 +256,15 @@ async fn test_multiple_references_to_same_target() {
     .await
     .unwrap();
 
-    // Should find both property paths
+    // Should find both property paths (by target id)
     let results = repo
-        .find_referencing_nodes(
-            scope("tenant1", "repo1", "main", "ws1"),
-            "ws1",
-            "/logo.png",
-            false,
-        )
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
         .await
         .unwrap();
     assert_eq!(results.len(), 2);
 
-    // Get unique references (deduplicated)
+    // Get unique references (deduplicated). NOTE: the forward grouping key
+    // (`reference_target_key`) is still "{workspace}:{path}" — unchanged.
     let unique = repo
         .get_unique_references(scope("tenant1", "repo1", "main", "ws1"), "node1", false)
         .await
@@ -367,17 +317,111 @@ async fn test_nested_references() {
     assert_eq!(node_refs[0].0, "sections.0.background");
     assert_eq!(node_refs[0].1.path, "/bg.png");
 
-    // Reverse lookup should work
+    // Reverse lookup should work (by target id)
+    let results = repo
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "bg", false)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "node1");
+    assert_eq!(results[0].1, "sections.0.background");
+}
+
+/// The reverse index is keyed by the target's stable id, so a reference indexed
+/// against an OLD path is still found by id (this is the whole point — it
+/// survives the target moving to a new path). Looking up by the path string
+/// must NOT match.
+#[tokio::test]
+async fn test_reverse_lookup_keyed_by_id_not_path() {
+    let repo = InMemoryReferenceIndexRepo::new();
+
+    let mut props = HashMap::new();
+    props.insert(
+        "image".to_string(),
+        PropertyValue::Reference(make_reference("asset-uuid", "ws1", "/assets/old.png")),
+    );
+
+    repo.index_references(
+        scope("tenant1", "repo1", "main", "ws1"),
+        "node1",
+        &props,
+        &test_revision(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Found by stable id...
+    let by_id = repo
+        .find_referencing_nodes(
+            scope("tenant1", "repo1", "main", "ws1"),
+            "ws1",
+            "asset-uuid",
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_id.len(), 1);
+    assert_eq!(by_id[0].0, "node1");
+
+    // ...but NOT by the path (proves it is not path-keyed). Even after the
+    // target moves to "/assets/new.png", the id lookup above keeps working
+    // with no re-indexing of the referrer.
+    let by_old_path = repo
+        .find_referencing_nodes(
+            scope("tenant1", "repo1", "main", "ws1"),
+            "ws1",
+            "/assets/old.png",
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_old_path.len(), 0);
+
+    let by_new_path = repo
+        .find_referencing_nodes(
+            scope("tenant1", "repo1", "main", "ws1"),
+            "ws1",
+            "/assets/new.png",
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_new_path.len(), 0);
+}
+
+/// A UUID reference whose target does not exist yet is still indexed by id and
+/// is found once we look it up by that id.
+#[tokio::test]
+async fn test_reference_to_not_yet_existing_target() {
+    let repo = InMemoryReferenceIndexRepo::new();
+
+    let mut props = HashMap::new();
+    props.insert(
+        "ref".to_string(),
+        // No path populated — target not created yet.
+        PropertyValue::Reference(make_reference("future-uuid", "ws1", "")),
+    );
+
+    repo.index_references(
+        scope("tenant1", "repo1", "main", "ws1"),
+        "node1",
+        &props,
+        &test_revision(),
+        false,
+    )
+    .await
+    .unwrap();
+
     let results = repo
         .find_referencing_nodes(
             scope("tenant1", "repo1", "main", "ws1"),
             "ws1",
-            "/bg.png",
+            "future-uuid",
             false,
         )
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, "node1");
-    assert_eq!(results[0].1, "sections.0.background");
 }
