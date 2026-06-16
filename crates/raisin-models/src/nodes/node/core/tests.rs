@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_effective_types_stamp_and_query() {
         let mut node = Node {
-            node_type: "studio:Article".to_string(),
+            node_type: "app:Article".to_string(),
             ..Default::default()
         };
 
@@ -188,30 +188,30 @@ mod tests {
         assert!(node.effective_mixins().is_empty());
 
         node.set_effective_types(
-            vec!["studio:SEO".to_string(), "studio:Timestamps".to_string()],
+            vec!["app:SEO".to_string(), "app:Timestamps".to_string()],
             vec![
-                "studio:Article".to_string(),
-                "studio:Content".to_string(),
-                "studio:SEO".to_string(),
-                "studio:Timestamps".to_string(),
+                "app:Article".to_string(),
+                "app:Content".to_string(),
+                "app:SEO".to_string(),
+                "app:Timestamps".to_string(),
             ],
         );
 
         // has_mixin reads $mixins
-        assert!(node.has_mixin("studio:SEO"));
-        assert!(node.has_mixin("studio:Timestamps"));
+        assert!(node.has_mixin("app:SEO"));
+        assert!(node.has_mixin("app:Timestamps"));
         assert!(!node.has_mixin("evil:Admin"));
-        assert!(!node.has_mixin("studio:Article")); // node_type is not a mixin
+        assert!(!node.has_mixin("app:Article")); // node_type is not a mixin
 
         // is_a reads node_type + $supertypes
-        assert!(node.is_a("studio:Article")); // own node_type
-        assert!(node.is_a("studio:Content")); // extends ancestor
-        assert!(node.is_a("studio:SEO")); // via mixin
-        assert!(!node.is_a("studio:Unrelated"));
+        assert!(node.is_a("app:Article")); // own node_type
+        assert!(node.is_a("app:Content")); // extends ancestor
+        assert!(node.is_a("app:SEO")); // via mixin
+        assert!(!node.is_a("app:Unrelated"));
 
         assert_eq!(
             node.effective_mixins(),
-            vec!["studio:SEO".to_string(), "studio:Timestamps".to_string()]
+            vec!["app:SEO".to_string(), "app:Timestamps".to_string()]
         );
     }
 }
