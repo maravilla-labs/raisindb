@@ -69,7 +69,7 @@ fn eval_membership(
 /// True when the node carries the given mixin (type-declared, transitively).
 ///
 /// ```sql
-/// SELECT * FROM 'workspace' WHERE HAS_MIXIN(properties, 'studio:SEO')
+/// SELECT * FROM 'workspace' WHERE HAS_MIXIN(properties, 'app:SEO')
 /// ```
 pub struct HasMixinFunction;
 
@@ -99,7 +99,7 @@ impl SqlFunction for HasMixinFunction {
 /// already includes the node_type, so the node_type need not be passed separately.
 ///
 /// ```sql
-/// SELECT * FROM 'workspace' WHERE IS_A(properties, 'studio:Folder')
+/// SELECT * FROM 'workspace' WHERE IS_A(properties, 'app:Folder')
 /// ```
 pub struct IsAFunction;
 

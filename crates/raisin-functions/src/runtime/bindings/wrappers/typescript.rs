@@ -354,14 +354,14 @@ interface RaisinNode {
   /**
    * True if this node carries the given mixin (type-declared, transitively).
    * Backed by the server-materialized effective-mixin set.
-   * @param mixinName - e.g., "studio:SEO"
+   * @param mixinName - e.g., "app:SEO"
    */
   hasMixin(mixinName: string): boolean;
 
   /**
    * True if this node "is a" given type — its node_type, any `extends` ancestor,
    * or any effective mixin.
-   * @param typeName - e.g., "studio:Folder"
+   * @param typeName - e.g., "app:Folder"
    */
   isNodeType(typeName: string): boolean;
 }
