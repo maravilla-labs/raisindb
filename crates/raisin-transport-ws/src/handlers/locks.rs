@@ -21,12 +21,14 @@ use crate::{
     protocol::{RequestEnvelope, ResponseEnvelope},
 };
 
+/// Maximum lease a caller may request (anti-abuse: no indefinite holds).
+/// Mirrors `MAX_LOCK_TTL_MS` in the SQL lock functions.
+const MAX_LOCK_TTL_MS: i64 = 300_000;
+
 #[derive(Deserialize)]
 struct AcquirePayload {
     key: String,
     ttl_ms: i64,
-    #[serde(default)]
-    owner: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +69,35 @@ where
     })
 }
 
+/// ACL gate for lock / inventory operations, returning the owner identity
+/// derived from the connection's auth context (never trusted from the
+/// payload). Requires an authenticated, non-anonymous caller (system context
+/// always allowed). A held lock is a denial-of-service vector, so anonymous /
+/// unauthenticated requests are rejected. Mirrors `check_lock_permission` in
+/// the SQL lock functions.
+fn require_owner(connection_state: &Arc<RwLock<ConnectionState>>) -> Result<String, WsError> {
+    let conn = connection_state.read();
+    match conn.auth_context() {
+        Some(ctx) if ctx.is_system || !ctx.is_anonymous => Ok(ctx.actor_id()),
+        Some(_) => Err(WsError::PermissionDenied),
+        None => Err(WsError::NotAuthenticated),
+    }
+}
+
+/// Validate & convert a requested TTL, rejecting non-positive and over-cap
+/// values. Mirrors `validate_ttl` in the SQL lock functions.
+fn validate_ttl(ttl_ms: i64) -> Result<Duration, WsError> {
+    if ttl_ms <= 0 {
+        return Err(WsError::InvalidRequest("ttl_ms must be positive".to_string()));
+    }
+    if ttl_ms > MAX_LOCK_TTL_MS {
+        return Err(WsError::InvalidRequest(format!(
+            "ttl_ms exceeds the maximum lease of {MAX_LOCK_TTL_MS} ms"
+        )));
+    }
+    Ok(Duration::from_millis(ttl_ms as u64))
+}
+
 fn scoped_key(request: &RequestEnvelope, name: &str) -> Result<String, WsError> {
     let tenant = &request.context.tenant_id;
     let repo = request
@@ -81,18 +112,18 @@ fn scoped_key(request: &RequestEnvelope, name: &str) -> Result<String, WsError> 
 /// Handle `locks.acquire`
 pub async fn handle_locks_acquire<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    let owner = require_owner(connection_state)?;
     let payload: AcquirePayload = serde_json::from_value(request.payload.clone())?;
     let mgr = manager(state)?;
     let key = scoped_key(&request, &payload.key)?;
-    let owner = payload.owner.unwrap_or_else(|| "anonymous".to_string());
-    let ttl = Duration::from_millis(payload.ttl_ms.max(0) as u64);
+    let ttl = validate_ttl(payload.ttl_ms)?;
 
     let guard = mgr.try_acquire(&key, &owner, ttl).await?;
     let body = match guard {
@@ -110,13 +141,14 @@ where
 /// Handle `locks.release`
 pub async fn handle_locks_release<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    require_owner(connection_state)?;
     let payload: ReleasePayload = serde_json::from_value(request.payload.clone())?;
     let mgr = manager(state)?;
     let key = scoped_key(&request, &payload.key)?;
@@ -130,17 +162,18 @@ where
 /// Handle `locks.renew`
 pub async fn handle_locks_renew<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    require_owner(connection_state)?;
     let payload: RenewPayload = serde_json::from_value(request.payload.clone())?;
     let mgr = manager(state)?;
     let key = scoped_key(&request, &payload.key)?;
-    let ttl = Duration::from_millis(payload.ttl_ms.max(0) as u64);
+    let ttl = validate_ttl(payload.ttl_ms)?;
     let renewed = mgr.renew(&key, payload.token, ttl).await?;
     Ok(Some(ResponseEnvelope::success(
         request.request_id,
@@ -151,13 +184,14 @@ where
 /// Handle `inventory.claim`
 pub async fn handle_inventory_claim<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    require_owner(connection_state)?;
     let payload: ClaimPayload = serde_json::from_value(request.payload.clone())?;
     let mgr = manager(state)?;
     let pool = scoped_key(&request, &payload.pool)?;
@@ -172,13 +206,14 @@ where
 /// Handle `inventory.release`
 pub async fn handle_inventory_release<S, B>(
     state: &Arc<WsState<S, B>>,
-    _connection_state: &Arc<RwLock<ConnectionState>>,
+    connection_state: &Arc<RwLock<ConnectionState>>,
     request: RequestEnvelope,
 ) -> Result<Option<ResponseEnvelope>, WsError>
 where
     S: Storage + TransactionalStorage,
     B: raisin_binary::BinaryStorage,
 {
+    require_owner(connection_state)?;
     let payload: ReleaseClaimPayload = serde_json::from_value(request.payload.clone())?;
     let mgr = manager(state)?;
     let pool = scoped_key(&request, &payload.pool)?;

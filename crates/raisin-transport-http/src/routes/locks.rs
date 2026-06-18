@@ -9,8 +9,13 @@ use crate::state::AppState;
 
 /// Build routes for lease-locks (`/locks/*`) and counting reservations
 /// (`/inventory/*`).
-pub(crate) fn locks_routes(_state: &AppState) -> Router<AppState> {
-    Router::new()
+///
+/// `optional_auth_middleware` is layered on so the `AuthContext` extension is
+/// populated for authenticated callers; the handlers ACL-gate on it (lock /
+/// inventory operations reject anonymous/unauthenticated requests).
+pub(crate) fn locks_routes(state: &AppState) -> Router<AppState> {
+    #[allow(unused_mut)]
+    let mut router = Router::new()
         .route(
             "/api/{repo}/{branch}/locks/acquire",
             post(crate::handlers::locks::acquire_lock),
@@ -30,5 +35,16 @@ pub(crate) fn locks_routes(_state: &AppState) -> Router<AppState> {
         .route(
             "/api/{repo}/{branch}/inventory/release",
             post(crate::handlers::locks::release_inventory),
-        )
+        );
+
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        use crate::middleware::optional_auth_middleware;
+        use axum::middleware::from_fn_with_state;
+
+        router = router.layer(from_fn_with_state(state.clone(), optional_auth_middleware));
+    }
+
+    let _ = state;
+    router
 }
