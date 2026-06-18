@@ -37,7 +37,7 @@ mod subquery;
 use super::{AnalyzerContext, Result};
 use crate::analyzer::{
     error::AnalysisError,
-    typed_expr::{Expr, TypedExpr},
+    typed_expr::{BinaryOperator, Expr, TypedExpr},
     types::DataType,
 };
 use sqlparser::ast::Expr as SqlExpr;
@@ -135,7 +135,83 @@ impl<'a> AnalyzerContext<'a> {
                 self.analyze_compound_field_access(root, access_chain)
             }
 
+            // Standard SQL null-safe comparison (SQL:1999). Desugared into
+            // existing IS NULL / equality constructs so the executor needs no
+            // dedicated operator.
+            SqlExpr::IsDistinctFrom(left, right) => {
+                self.analyze_is_distinct_from(left, right, false)
+            }
+            SqlExpr::IsNotDistinctFrom(left, right) => {
+                self.analyze_is_distinct_from(left, right, true)
+            }
+
             _ => Err(AnalysisError::UnsupportedExpression(format!("{:?}", expr))),
         }
+    }
+
+    /// Desugar `a IS [NOT] DISTINCT FROM b` into a NULL-safe boolean expression
+    /// built from `IS NULL` / `IS NOT NULL` and `=`/`<>`. RaisinDB evaluates a
+    /// comparison with a NULL operand as false, which makes these forms exact:
+    ///
+    /// - `a IS DISTINCT FROM b`  ⇒ `(a IS NULL AND b IS NOT NULL)
+    ///                              OR (a IS NOT NULL AND b IS NULL)
+    ///                              OR (a <> b)`
+    /// - `a IS NOT DISTINCT FROM b` ⇒ `(a IS NULL AND b IS NULL)
+    ///                              OR (a IS NOT NULL AND b IS NOT NULL AND a = b)`
+    fn analyze_is_distinct_from(
+        &self,
+        left: &SqlExpr,
+        right: &SqlExpr,
+        negated: bool,
+    ) -> Result<TypedExpr> {
+        let a = self.analyze_expr(left)?;
+        let b = self.analyze_expr(right)?;
+
+        let boolean = |e: Expr| TypedExpr::new(e, DataType::Boolean);
+        let bin = |l: TypedExpr, op: BinaryOperator, r: TypedExpr| {
+            TypedExpr::new(
+                Expr::BinaryOp {
+                    left: Box::new(l),
+                    op,
+                    right: Box::new(r),
+                },
+                DataType::Boolean,
+            )
+        };
+        let is_null = |e: TypedExpr| boolean(Expr::IsNull { expr: Box::new(e) });
+        let is_not_null = |e: TypedExpr| boolean(Expr::IsNotNull { expr: Box::new(e) });
+
+        let result = if negated {
+            // a IS NOT DISTINCT FROM b
+            let both_null = bin(is_null(a.clone()), BinaryOperator::And, is_null(b.clone()));
+            let both_present = bin(
+                is_not_null(a.clone()),
+                BinaryOperator::And,
+                is_not_null(b.clone()),
+            );
+            let both_equal = bin(
+                both_present,
+                BinaryOperator::And,
+                bin(a, BinaryOperator::Eq, b),
+            );
+            bin(both_null, BinaryOperator::Or, both_equal)
+        } else {
+            // a IS DISTINCT FROM b
+            let a_null_b_present = bin(
+                is_null(a.clone()),
+                BinaryOperator::And,
+                is_not_null(b.clone()),
+            );
+            let a_present_b_null = bin(
+                is_not_null(a.clone()),
+                BinaryOperator::And,
+                is_null(b.clone()),
+            );
+            let exactly_one_null = bin(a_null_b_present, BinaryOperator::Or, a_present_b_null);
+            let both_present_unequal = bin(a, BinaryOperator::NotEq, b);
+            bin(exactly_one_null, BinaryOperator::Or, both_present_unequal)
+        };
+
+        Ok(result)
     }
 }

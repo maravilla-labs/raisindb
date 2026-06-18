@@ -136,7 +136,12 @@ fn resolve_entry_file(function_path: &str, entry_file: &str) -> (String, String)
 /// Prints SQL execution events in cyan and returns 0 affected rows.
 pub fn create_debug_sql_executor() -> SqlExecutorCallback {
     Arc::new(
-        move |sql: String, tenant_id: String, repo_id: String, branch: String, actor: String| {
+        move |sql: String,
+              tenant_id: String,
+              repo_id: String,
+              branch: String,
+              actor: String,
+              _auth: Option<raisin_models::auth::AuthContext>| {
             Box::pin(async move {
                 eprintln!(
                     "\n{BOLD}{CYAN}[SQL_EXEC]{RESET} {CYAN}tenant={} repo={} branch={}{RESET}",
@@ -426,6 +431,7 @@ mod tests {
             "myrepo".to_string(),
             "main".to_string(),
             "system".to_string(),
+            None,
         )
         .await;
         assert!(result.is_ok());

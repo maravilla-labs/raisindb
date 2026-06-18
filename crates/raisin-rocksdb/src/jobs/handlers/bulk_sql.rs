@@ -13,13 +13,17 @@
 //! executor callback when starting the job system.
 
 use raisin_error::{Error, Result};
+use raisin_models::auth::AuthContext;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
 use std::sync::Arc;
 
 /// Callback type for SQL execution
 ///
 /// This callback is provided by the transport layer which has access to QueryEngine.
-/// It takes (sql, tenant_id, repo_id, branch, actor) and returns the number of affected rows.
+/// It takes `(sql, tenant_id, repo_id, branch, actor, auth_context)` and returns the
+/// number of affected rows. `auth_context` is the identity that submitted the
+/// original (synchronous) request, captured at enqueue time so the deferred bulk
+/// write runs under the same RLS — never escalated to system.
 pub type SqlExecutorCallback = Arc<
     dyn Fn(
             String,
@@ -27,6 +31,7 @@ pub type SqlExecutorCallback = Arc<
             String,
             String,
             String,
+            Option<AuthContext>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64>> + Send>>
         + Send
         + Sync,
@@ -99,6 +104,22 @@ impl BulkSqlHandler {
         };
         tracing::debug!(sql = %sql_preview, "SQL batch to execute");
 
+        // Recover the submitter's auth context (stored at enqueue time) so the
+        // deferred write runs with the same RLS as the original request. If it
+        // is missing we deliberately do NOT fall back to system — the executor
+        // runs unprivileged (anonymous) so a lost identity fails closed.
+        let auth_context = context
+            .metadata
+            .get("auth_context")
+            .and_then(|v| serde_json::from_value::<AuthContext>(v.clone()).ok());
+
+        if auth_context.is_none() {
+            tracing::warn!(
+                job_id = %job.id,
+                "BulkSql job has no stored auth context; running unprivileged"
+            );
+        }
+
         // Execute via callback
         let start = std::time::Instant::now();
         let affected_rows = executor(
@@ -107,6 +128,7 @@ impl BulkSqlHandler {
             context.repo_id.clone(),
             context.branch.clone(),
             actor,
+            auth_context,
         )
         .await?;
 

@@ -548,3 +548,818 @@ async fn test_node_event_trigger_starts_flow() {
 
     println!("\n🎉 Node-event trigger -> workflow E2E passed\n");
 }
+
+/// Regression: a node-event trigger (`event_kinds: ["Updated"]`) must fire when
+/// the node is changed via a raw SQL `UPDATE` — not only via the SDK/REST node
+/// API. A COMPOUND `WHERE` (e.g. `path = .. AND properties->>'status' = ..`)
+/// routes to the async bulk-SQL job path; if that path doesn't actually execute
+/// the write, no NodeEvent is emitted and triggers silently never fire.
+#[tokio::test]
+#[ignore] // Run with --include-ignored (boots a real server)
+async fn test_node_event_trigger_fires_on_sql_update() {
+    println!("\n🧪 Testing node-event trigger fires on SQL UPDATE\n");
+
+    let config = ServerConfig::new(8097);
+    let server = ServerHandle::start(config)
+        .await
+        .expect("Failed to start server");
+
+    let mut token = None;
+    for _ in 0..30 {
+        match authenticate(&server.base_url, TENANT, ADMIN_USER, ADMIN_PASS).await {
+            Ok(t) => {
+                token = Some(t);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    let token = token.expect("auth");
+    let client = Client::new();
+
+    let repo_response = client
+        .post(format!("{}/api/repositories", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({ "repo_id": REPO }))
+        .send()
+        .await
+        .expect("create repo");
+    assert!(repo_response.status().is_success());
+    println!("✅ Repository created");
+
+    // Flow: empty designer-format definition (start -> end).
+    let mut flow_node_id = None;
+    for _ in 0..60 {
+        let _ = client
+            .post(format!(
+                "{}/api/repository/{}/main/head/functions/",
+                server.base_url, REPO
+            ))
+            .bearer_auth(&token)
+            .json(
+                &json!({"node": {"name": "flows", "node_type": "raisin:Folder", "properties": {}}}),
+            )
+            .send()
+            .await;
+
+        let response = client
+            .post(format!(
+                "{}/api/repository/{}/main/head/functions/flows",
+                server.base_url, REPO
+            ))
+            .bearer_auth(&token)
+            .json(&json!({
+                "node": {
+                    "name": "on-item-updated",
+                    "node_type": "raisin:Flow",
+                    "properties": {
+                        "name": "on-item-updated",
+                        "title": "On Item Updated",
+                        "enabled": true,
+                        "workflow_data": {
+                            "nodes": [
+                                { "id": "start", "step_type": "start", "next_node": "end" },
+                                { "id": "end", "step_type": "end" }
+                            ]
+                        }
+                    }
+                }
+            }))
+            .send()
+            .await
+            .expect("create flow");
+        if response.status().is_success() {
+            let fetched = client
+                .get(format!(
+                    "{}/api/repository/{}/main/head/functions/flows/on-item-updated",
+                    server.base_url, REPO
+                ))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("fetch flow node");
+            let body: Value = fetched.json().await.unwrap();
+            flow_node_id = body["id"].as_str().map(String::from);
+            if flow_node_id.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let flow_node_id = flow_node_id.expect("flow node id");
+    println!("✅ Flow created: {}", flow_node_id);
+
+    // Trigger: fire on raisin:Folder *Updated* in the functions workspace.
+    let _ = client
+        .post(format!(
+            "{}/api/repository/{}/main/head/functions/",
+            server.base_url, REPO
+        ))
+        .bearer_auth(&token)
+        .json(
+            &json!({"node": {"name": "triggers", "node_type": "raisin:Folder", "properties": {}}}),
+        )
+        .send()
+        .await;
+    let trigger_response = client
+        .post(format!(
+            "{}/api/repository/{}/main/head/functions/triggers",
+            server.base_url, REPO
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "node": {
+                "name": "on-item-updated-trigger",
+                "node_type": "raisin:Trigger",
+                "properties": {
+                    "name": "on-item-updated-trigger",
+                    "title": "On Item Updated",
+                    "trigger_type": "node_event",
+                    "enabled": true,
+                    "config": { "event_kinds": ["Updated"] },
+                    "filters": {
+                        "workspaces": ["functions"],
+                        "node_types": ["raisin:Folder"]
+                    },
+                    "function_flow": {
+                        "raisin:ref": flow_node_id,
+                        "raisin:workspace": "functions"
+                    }
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("create trigger");
+    assert!(
+        trigger_response.status().is_success(),
+        "trigger creation failed: {}",
+        trigger_response.text().await.unwrap_or_default()
+    );
+    println!("✅ Updated-trigger created");
+
+    // Create the target folder via REST (its Created event must NOT match the
+    // Updated-only trigger).
+    let target = client
+        .post(format!(
+            "{}/api/repository/{}/main/head/functions/",
+            server.base_url, REPO
+        ))
+        .bearer_auth(&token)
+        .json(&json!({"node": {"name": "sql-update-target", "node_type": "raisin:Folder", "properties": {"status": "new"}}}))
+        .send()
+        .await
+        .expect("create target node");
+    assert!(target.status().is_success());
+    println!("✅ Target folder created (Created event should be ignored)");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Fire the event via raw SQL UPDATE with a COMPOUND WHERE.
+    // NOTE: `path = .. AND properties->>'status' = ..` fails
+    // `extract_node_identifier_from_filter` and routes to the BULK update path
+    // (execute_bulk_update_workspace / async BulkSql job). A simple
+    // `WHERE path = ..` would instead take the single-node path.
+    let sql_response = client
+        .post(format!("{}/api/sql/{}", server.base_url, REPO))
+        .bearer_auth(&token)
+        .json(&json!({
+            "sql": "UPDATE 'functions' SET properties = properties || '{\"status\":\"maintenance\"}'::jsonb WHERE path = '/sql-update-target' AND properties->>'status'::String = 'new'",
+            "params": []
+        }))
+        .send()
+        .await
+        .expect("sql update");
+    assert!(
+        sql_response.status().is_success(),
+        "sql update failed: {}",
+        sql_response.text().await.unwrap_or_default()
+    );
+    println!("✅ SQL UPDATE issued - waiting for the triggered flow");
+
+    // A flow instance triggered by OUR sql-updated node must appear & complete.
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut triggered: Option<Value> = None;
+    while std::time::Instant::now() < deadline {
+        let response = client
+            .post(format!("{}/api/sql/{}", server.base_url, REPO))
+            .bearer_auth(&token)
+            .json(&json!({
+                "sql": "SELECT id, path, properties FROM 'raisin:system' WHERE node_type = 'raisin:FlowInstance'",
+                "params": []
+            }))
+            .send()
+            .await
+            .expect("sql query");
+        if response.status().is_success() {
+            let body: Value = response.json().await.unwrap();
+            let rows = body["rows"]
+                .as_array()
+                .cloned()
+                .or_else(|| body["data"].as_array().cloned())
+                .unwrap_or_default();
+            triggered = rows.into_iter().find(|r| {
+                let ti = &r["properties"]["variables"]["__trigger_info"];
+                ti["event_type"] == json!("updated")
+                    && ti["node_path"] == json!("/sql-update-target")
+            });
+            if triggered.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let instance = triggered
+        .expect("SQL UPDATE did not fire the Updated node-event trigger within 45s");
+    let trigger_info = &instance["properties"]["variables"]["__trigger_info"];
+    assert_eq!(trigger_info["node_type"], json!("raisin:Folder"));
+    assert_eq!(trigger_info["event_type"], json!("updated"));
+    assert_eq!(trigger_info["node_path"], json!("/sql-update-target"));
+
+    println!("\n🎉 SQL-UPDATE node-event trigger E2E passed\n");
+}
+
+/// Regression: a node-event trigger (`event_kinds: ["Created"]`) must fire when a
+/// node is created via raw SQL `INSERT`. Unlike a compound UPDATE, INSERT is
+/// never routed to the async bulk path — it commits synchronously — so this
+/// pins that the Created event reaches triggers from the SQL surface too.
+#[tokio::test]
+#[ignore] // Run with --include-ignored (boots a real server)
+async fn test_node_event_trigger_fires_on_sql_insert() {
+    println!("\n🧪 Testing node-event trigger fires on SQL INSERT\n");
+
+    let config = ServerConfig::new(8098);
+    let server = ServerHandle::start(config)
+        .await
+        .expect("Failed to start server");
+
+    let mut token = None;
+    for _ in 0..30 {
+        match authenticate(&server.base_url, TENANT, ADMIN_USER, ADMIN_PASS).await {
+            Ok(t) => {
+                token = Some(t);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    let token = token.expect("auth");
+    let client = Client::new();
+
+    let repo_response = client
+        .post(format!("{}/api/repositories", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({ "repo_id": REPO }))
+        .send()
+        .await
+        .expect("create repo");
+    assert!(repo_response.status().is_success());
+    println!("✅ Repository created");
+
+    // Flow (start -> end).
+    let mut flow_node_id = None;
+    for _ in 0..60 {
+        let _ = client
+            .post(format!(
+                "{}/api/repository/{}/main/head/functions/",
+                server.base_url, REPO
+            ))
+            .bearer_auth(&token)
+            .json(
+                &json!({"node": {"name": "flows", "node_type": "raisin:Folder", "properties": {}}}),
+            )
+            .send()
+            .await;
+
+        let response = client
+            .post(format!(
+                "{}/api/repository/{}/main/head/functions/flows",
+                server.base_url, REPO
+            ))
+            .bearer_auth(&token)
+            .json(&json!({
+                "node": {
+                    "name": "on-item-created",
+                    "node_type": "raisin:Flow",
+                    "properties": {
+                        "name": "on-item-created",
+                        "title": "On Item Created",
+                        "enabled": true,
+                        "workflow_data": {
+                            "nodes": [
+                                { "id": "start", "step_type": "start", "next_node": "end" },
+                                { "id": "end", "step_type": "end" }
+                            ]
+                        }
+                    }
+                }
+            }))
+            .send()
+            .await
+            .expect("create flow");
+        if response.status().is_success() {
+            let fetched = client
+                .get(format!(
+                    "{}/api/repository/{}/main/head/functions/flows/on-item-created",
+                    server.base_url, REPO
+                ))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("fetch flow node");
+            let body: Value = fetched.json().await.unwrap();
+            flow_node_id = body["id"].as_str().map(String::from);
+            if flow_node_id.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let flow_node_id = flow_node_id.expect("flow node id");
+    println!("✅ Flow created: {}", flow_node_id);
+
+    // Trigger: fire on raisin:Folder *Created* in the functions workspace.
+    let _ = client
+        .post(format!(
+            "{}/api/repository/{}/main/head/functions/",
+            server.base_url, REPO
+        ))
+        .bearer_auth(&token)
+        .json(
+            &json!({"node": {"name": "triggers", "node_type": "raisin:Folder", "properties": {}}}),
+        )
+        .send()
+        .await;
+    let trigger_response = client
+        .post(format!(
+            "{}/api/repository/{}/main/head/functions/triggers",
+            server.base_url, REPO
+        ))
+        .bearer_auth(&token)
+        .json(&json!({
+            "node": {
+                "name": "on-item-created-trigger",
+                "node_type": "raisin:Trigger",
+                "properties": {
+                    "name": "on-item-created-trigger",
+                    "title": "On Item Created",
+                    "trigger_type": "node_event",
+                    "enabled": true,
+                    "config": { "event_kinds": ["Created"] },
+                    "filters": {
+                        "workspaces": ["functions"],
+                        "node_types": ["raisin:Folder"]
+                    },
+                    "function_flow": {
+                        "raisin:ref": flow_node_id,
+                        "raisin:workspace": "functions"
+                    }
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("create trigger");
+    assert!(
+        trigger_response.status().is_success(),
+        "trigger creation failed: {}",
+        trigger_response.text().await.unwrap_or_default()
+    );
+    println!("✅ Created-trigger created");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Fire the event via raw SQL INSERT (the SQL surface, not REST/SDK).
+    let sql_response = client
+        .post(format!("{}/api/sql/{}", server.base_url, REPO))
+        .bearer_auth(&token)
+        .json(&json!({
+            "sql": "INSERT INTO 'functions' (id, path, node_type, properties) VALUES ('sqlfolder','/sql-created-folder','raisin:Folder','{}'::JSONB)",
+            "params": []
+        }))
+        .send()
+        .await
+        .expect("sql insert");
+    assert!(
+        sql_response.status().is_success(),
+        "sql insert failed: {}",
+        sql_response.text().await.unwrap_or_default()
+    );
+    println!("✅ SQL INSERT issued - waiting for the triggered flow");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut triggered: Option<Value> = None;
+    while std::time::Instant::now() < deadline {
+        let response = client
+            .post(format!("{}/api/sql/{}", server.base_url, REPO))
+            .bearer_auth(&token)
+            .json(&json!({
+                "sql": "SELECT id, path, properties FROM 'raisin:system' WHERE node_type = 'raisin:FlowInstance'",
+                "params": []
+            }))
+            .send()
+            .await
+            .expect("sql query");
+        if response.status().is_success() {
+            let body: Value = response.json().await.unwrap();
+            let rows = body["rows"]
+                .as_array()
+                .cloned()
+                .or_else(|| body["data"].as_array().cloned())
+                .unwrap_or_default();
+            triggered = rows.into_iter().find(|r| {
+                let ti = &r["properties"]["variables"]["__trigger_info"];
+                ti["event_type"] == json!("created")
+                    && ti["node_path"] == json!("/sql-created-folder")
+            });
+            if triggered.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let instance =
+        triggered.expect("SQL INSERT did not fire the Created node-event trigger within 45s");
+    let trigger_info = &instance["properties"]["variables"]["__trigger_info"];
+    assert_eq!(trigger_info["node_type"], json!("raisin:Folder"));
+    assert_eq!(trigger_info["event_type"], json!("created"));
+    assert_eq!(trigger_info["node_path"], json!("/sql-created-folder"));
+
+    println!("\n🎉 SQL-INSERT node-event trigger E2E passed\n");
+}
+
+/// Reproduction probe for a reported case: a `Created` trigger that does NOT
+/// fire when a `app:Equipment`-shaped node (compound_indexes + auditable, in
+/// a dedicated content workspace) is created via SQL INSERT — while Updated on
+/// the same node works. Mirrors the real node-type/trigger shape as closely as a
+/// test can without the full package.
+#[tokio::test]
+#[ignore] // Run with --include-ignored (boots a real server)
+async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
+    println!("\n🧪 Reproduction: Created trigger on compound-indexed nodetype via SQL INSERT\n");
+
+    let config = ServerConfig::new(8100);
+    let server = ServerHandle::start(config)
+        .await
+        .expect("Failed to start server");
+
+    let mut token = None;
+    for _ in 0..30 {
+        match authenticate(&server.base_url, TENANT, ADMIN_USER, ADMIN_PASS).await {
+            Ok(t) => {
+                token = Some(t);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    let token = token.expect("auth");
+    let client = Client::new();
+
+    assert!(client
+        .post(format!("{}/api/repositories", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({ "repo_id": REPO }))
+        .send()
+        .await
+        .expect("create repo")
+        .status()
+        .is_success());
+
+    // NodeType "app:Equipment": compound index + auditable + indexed status,
+    // matching the reported shape. Retry until the schema system is ready.
+    let mut nt_ok = false;
+    for _ in 0..60 {
+        let nt = client
+            .post(format!(
+                "{}/api/management/{}/main/nodetypes",
+                server.base_url, REPO
+            ))
+            .bearer_auth(&token)
+            .json(&json!({
+                "node_type": {
+                    "name": "app:Equipment",
+                    "description": "equipment",
+                    "properties": [
+                        { "name": "title", "type": "String", "required": true },
+                        { "name": "status", "type": "String", "default": "available", "index": ["Property"] }
+                    ],
+                    "auditable": true,
+                    "versionable": true,
+                    "indexable": true,
+                    "compound_indexes": [{
+                        "name": "equipment_status_updated",
+                        "has_order_column": true,
+                        "columns": [
+                            { "property": "status", "column_type": "String" },
+                            { "property": "__updated_at", "column_type": "Timestamp", "ascending": false }
+                        ]
+                    }],
+                    "allowed_children": []
+                },
+                "commit": { "message": "create app:Equipment", "actor": "test" }
+            }))
+            .send()
+            .await
+            .expect("create nodetype");
+        if nt.status().is_success() {
+            nt_ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(nt_ok, "failed to create app:Equipment nodetype");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    println!("✅ app:Equipment nodetype created");
+
+    // Content workspace "equipment" allowing app:Equipment (and raisin:Folder
+    // for the auto-seeded root). Created after the schema system is up.
+    let mut ws_ok = false;
+    for _ in 0..60 {
+        let ws = client
+            .put(format!("{}/api/workspaces/{}/equipment", server.base_url, REPO))
+            .bearer_auth(&token)
+            .json(&json!({
+                "name": "equipment",
+                "description": "equipment ws",
+                "allowed_node_types": ["app:Equipment", "raisin:Folder"],
+                "allowed_root_node_types": ["app:Equipment", "raisin:Folder"],
+                "depends_on": [],
+                "config": { "default_branch": "main", "node_type_pins": {} }
+            }))
+            .send()
+            .await
+            .expect("create ws");
+        if ws.status().is_success() {
+            ws_ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(ws_ok, "failed to create equipment workspace");
+    println!("✅ equipment workspace created");
+
+    // Archetype "app:EquipmentPage" (base_node_type app:Equipment) — the
+    // distinctive bit of the reported INSERT. Field-less + non-strict so any
+    // properties validate; we only need the archetype to be resolvable.
+    let arch = client
+        .post(format!("{}/api/management/{}/main/archetypes", server.base_url, REPO))
+        .bearer_auth(&token)
+        .json(&json!({
+            "archetype": {
+                "name": "app:EquipmentPage",
+                "title": "Equipment",
+                "base_node_type": "app:Equipment",
+                "version": 1,
+                "fields": []
+            }
+        }))
+        .send()
+        .await
+        .expect("create archetype");
+    assert!(arch.status().is_success(), "archetype: {}", arch.text().await.unwrap_or_default());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    println!("✅ app:EquipmentPage archetype created");
+
+    // Flow + Created trigger filtered exactly like mint-equipment-codes.
+    let mut flow_node_id = None;
+    for _ in 0..60 {
+        let _ = client
+            .post(format!("{}/api/repository/{}/main/head/functions/", server.base_url, REPO))
+            .bearer_auth(&token)
+            .json(&json!({"node": {"name": "flows", "node_type": "raisin:Folder", "properties": {}}}))
+            .send()
+            .await;
+        let response = client
+            .post(format!("{}/api/repository/{}/main/head/functions/flows", server.base_url, REPO))
+            .bearer_auth(&token)
+            .json(&json!({
+                "node": {
+                    "name": "on-equipment-created", "node_type": "raisin:Flow",
+                    "properties": {
+                        "name": "on-equipment-created", "title": "On Equipment Created", "enabled": true,
+                        "workflow_data": { "nodes": [
+                            { "id": "start", "step_type": "start", "next_node": "end" },
+                            { "id": "end", "step_type": "end" } ] }
+                    }
+                }
+            }))
+            .send()
+            .await
+            .expect("create flow");
+        if response.status().is_success() {
+            let fetched = client
+                .get(format!("{}/api/repository/{}/main/head/functions/flows/on-equipment-created", server.base_url, REPO))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("fetch flow");
+            let body: Value = fetched.json().await.unwrap();
+            flow_node_id = body["id"].as_str().map(String::from);
+            if flow_node_id.is_some() { break; }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let flow_node_id = flow_node_id.expect("flow node id");
+
+    let _ = client
+        .post(format!("{}/api/repository/{}/main/head/functions/", server.base_url, REPO))
+        .bearer_auth(&token)
+        .json(&json!({"node": {"name": "triggers", "node_type": "raisin:Folder", "properties": {}}}))
+        .send()
+        .await;
+    let trig = client
+        .post(format!("{}/api/repository/{}/main/head/functions/triggers", server.base_url, REPO))
+        .bearer_auth(&token)
+        .json(&json!({
+            "node": {
+                "name": "mint-equipment-codes", "node_type": "raisin:Trigger",
+                "properties": {
+                    "name": "mint-equipment-codes", "title": "Mint", "trigger_type": "node_event", "enabled": true,
+                    "config": { "event_kinds": ["Created"] },
+                    "filters": { "workspaces": ["equipment"], "node_types": ["app:Equipment"] },
+                    "function_flow": { "raisin:ref": flow_node_id, "raisin:workspace": "functions" }
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("create trigger");
+    assert!(trig.status().is_success(), "trigger: {}", trig.text().await.unwrap_or_default());
+    println!("✅ Created-trigger created");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // SQL INSERT a app:Equipment node (the reported failing operation).
+    let ins = client
+        .post(format!("{}/api/sql/{}", server.base_url, REPO))
+        .bearer_auth(&token)
+        .json(&json!({
+            "sql": "INSERT INTO 'equipment' (path, node_type, archetype, properties) VALUES ('/test-x', 'app:Equipment', 'app:EquipmentPage', '{\"title\":\"X\",\"status\":\"available\"}'::JSONB)",
+            "params": []
+        }))
+        .send()
+        .await
+        .expect("sql insert");
+    assert!(ins.status().is_success(), "insert: {}", ins.text().await.unwrap_or_default());
+    println!("✅ SQL INSERT issued (server log: /tmp/raisin-test-server-8100.log)");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    let mut fired = false;
+    while std::time::Instant::now() < deadline && !fired {
+        let resp = client
+            .post(format!("{}/api/sql/{}", server.base_url, REPO))
+            .bearer_auth(&token)
+            .json(&json!({
+                "sql": "SELECT properties FROM 'raisin:system' WHERE node_type = 'raisin:FlowInstance'",
+                "params": []
+            }))
+            .send()
+            .await
+            .expect("query");
+        if resp.status().is_success() {
+            let body: Value = resp.json().await.unwrap();
+            let rows = body["rows"].as_array().cloned().or_else(|| body["data"].as_array().cloned()).unwrap_or_default();
+            fired = rows.iter().any(|r| {
+                let ti = &r["properties"]["variables"]["__trigger_info"];
+                ti["event_type"] == json!("created") && ti["node_path"] == json!("/test-x")
+            });
+        }
+        if !fired { tokio::time::sleep(Duration::from_millis(500)).await; }
+    }
+
+    assert!(
+        fired,
+        "Created trigger did NOT fire on SQL INSERT of app:Equipment (reproduced the bug)"
+    );
+    println!("\n🎉 Created trigger fired on compound-indexed nodetype INSERT\n");
+}
+
+/// Regression: a multi-statement SQL batch that mixes an INSERT with a
+/// complex-WHERE UPDATE is routed to the async bulk-SQL job *as a whole*
+/// (`batch_requires_async` flags the batch because of the UPDATE). Every
+/// statement in that batch must actually execute — the INSERT must create its
+/// node and the UPDATE must modify its node. The old stub ran nothing, silently
+/// dropping the entire batch (so batched creates produced no node at all).
+#[tokio::test]
+#[ignore] // Run with --include-ignored (boots a real server)
+async fn test_sql_batch_insert_plus_bulk_update_both_apply() {
+    println!("\n🧪 Testing batched INSERT + complex UPDATE both apply via async path\n");
+
+    let config = ServerConfig::new(8099);
+    let server = ServerHandle::start(config)
+        .await
+        .expect("Failed to start server");
+
+    let mut token = None;
+    for _ in 0..30 {
+        match authenticate(&server.base_url, TENANT, ADMIN_USER, ADMIN_PASS).await {
+            Ok(t) => {
+                token = Some(t);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    let token = token.expect("auth");
+    let client = Client::new();
+
+    assert!(client
+        .post(format!("{}/api/repositories", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({ "repo_id": REPO }))
+        .send()
+        .await
+        .expect("create repo")
+        .status()
+        .is_success());
+    println!("✅ Repository created");
+
+    // Seed an existing folder (with a property the compound UPDATE will match on).
+    let mut seeded = false;
+    for _ in 0..60 {
+        let resp = client
+            .post(format!(
+                "{}/api/repository/{}/main/head/functions/",
+                server.base_url, REPO
+            ))
+            .bearer_auth(&token)
+            .json(&json!({"node": {"name": "batch-existing", "node_type": "raisin:Folder", "properties": {"seed": "yes", "status": "before"}}}))
+            .send()
+            .await
+            .expect("seed existing");
+        if resp.status().is_success() {
+            seeded = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(seeded, "failed to seed existing folder");
+    println!("✅ Seeded /batch-existing");
+
+    // ONE SQL request: INSERT a new node AND a compound-WHERE UPDATE. The UPDATE's
+    // complex WHERE forces the whole batch onto the async bulk-SQL job.
+    let batch = "INSERT INTO 'functions' (id, path, node_type, properties) \
+         VALUES ('bnew','/batch-new','raisin:Folder','{\"k\":\"v\"}'::JSONB); \
+         UPDATE 'functions' SET properties = properties || '{\"status\":\"after\"}'::jsonb \
+         WHERE path = '/batch-existing' AND properties->>'seed'::String = 'yes'";
+    let sql_response = client
+        .post(format!("{}/api/sql/{}", server.base_url, REPO))
+        .bearer_auth(&token)
+        .json(&json!({ "sql": batch, "params": [] }))
+        .send()
+        .await
+        .expect("sql batch");
+    assert!(
+        sql_response.status().is_success(),
+        "sql batch failed: {}",
+        sql_response.text().await.unwrap_or_default()
+    );
+    println!("✅ Batched INSERT+UPDATE issued (async) - waiting for both effects");
+
+    // Poll until BOTH effects are visible: the new node exists AND the existing
+    // node was updated. Either missing => the batch was partially/fully dropped.
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut insert_ok = false;
+    let mut update_ok = false;
+    while std::time::Instant::now() < deadline && !(insert_ok && update_ok) {
+        let resp = client
+            .post(format!("{}/api/sql/{}", server.base_url, REPO))
+            .bearer_auth(&token)
+            .json(&json!({
+                "sql": "SELECT path, properties FROM 'functions' WHERE path = '/batch-new' OR path = '/batch-existing'",
+                "params": []
+            }))
+            .send()
+            .await
+            .expect("verify query");
+        if resp.status().is_success() {
+            let body: Value = resp.json().await.unwrap();
+            let rows = body["rows"]
+                .as_array()
+                .cloned()
+                .or_else(|| body["data"].as_array().cloned())
+                .unwrap_or_default();
+            insert_ok = rows.iter().any(|r| r["path"] == json!("/batch-new"));
+            update_ok = rows.iter().any(|r| {
+                r["path"] == json!("/batch-existing")
+                    && (r["properties"]["status"] == json!("after")
+                        || r["properties"]["status"]["String"] == json!("after"))
+            });
+        }
+        if insert_ok && update_ok {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    assert!(
+        insert_ok,
+        "the INSERT half of the batch did not apply (node /batch-new missing)"
+    );
+    assert!(
+        update_ok,
+        "the UPDATE half of the batch did not apply (/batch-existing not 'after')"
+    );
+
+    println!("\n🎉 Batched INSERT + complex UPDATE both applied via async path\n");
+}

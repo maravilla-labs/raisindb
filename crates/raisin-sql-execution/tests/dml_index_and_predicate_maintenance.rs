@@ -56,10 +56,7 @@ async fn run_sql_count(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql
 }
 
 /// Run a DML statement and return its reported `affected_rows` count.
-async fn run_dml_affected(
-    engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>,
-    sql: &str,
-) -> i64 {
+async fn run_dml_affected(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql: &str) -> i64 {
     let mut stream = engine
         .execute(sql)
         .await
@@ -177,7 +174,11 @@ async fn dml_index_and_predicate_maintenance() {
 
     // A number-valued property is found via a string comparison (`->>` yields text).
     assert_eq!(
-        run_sql_count(&engine, "SELECT path FROM items WHERE properties->>'seq' = '0'").await,
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE properties->>'seq' = '0'"
+        )
+        .await,
         1,
         "number-valued property must be matchable via a string literal"
     );
@@ -198,14 +199,20 @@ async fn dml_index_and_predicate_maintenance() {
          WHERE path = '/counter-a' AND properties->>'seq'::String = '0'",
     )
     .await;
-    assert_eq!(stale, 0, "a guard matching no row must report 0 affected rows");
+    assert_eq!(
+        stale, 0,
+        "a guard matching no row must report 0 affected rows"
+    );
     let fresh = run_dml_affected(
         &engine,
         "UPDATE items SET properties = '{\"value\":4,\"seq\":1}'::jsonb \
          WHERE path = '/counter-a' AND properties->>'seq'::String = '1'",
     )
     .await;
-    assert_eq!(fresh, 1, "a guard matching a row must report 1 affected row");
+    assert_eq!(
+        fresh, 1,
+        "a guard matching a row must report 1 affected row"
+    );
 
     // Regression for JsonPropertyEq::to_expr: when `path` wins the scan, the JSON
     // equality becomes a remaining row-level filter — it must still match.
@@ -263,19 +270,162 @@ async fn dml_index_and_predicate_maintenance() {
         "UPDATE items SET properties = '{\"group\":\"/g1\",\"status\":\"closed\",\"expires_at\":\"2026-01-01T00:00:00.000Z\"}'::jsonb WHERE path = '/rec-0'",
     )
     .await;
-    assert_eq!(count_compound(&storage, "open").await, N - 1, "updated record must leave the old index value");
-    assert_eq!(count_compound(&storage, "closed").await, 1, "updated record must enter the new index value");
+    assert_eq!(
+        count_compound(&storage, "open").await,
+        N - 1,
+        "updated record must leave the old index value"
+    );
+    assert_eq!(
+        count_compound(&storage, "closed").await,
+        1,
+        "updated record must enter the new index value"
+    );
 
     // A property-filtered DELETE removes the matching records.
-    assert_eq!(run_sql_count(&engine, "SELECT path FROM items WHERE node_type = 'test:Record'").await, N);
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE node_type = 'test:Record'"
+        )
+        .await,
+        N
+    );
     run_sql_count(
         &engine,
         "DELETE FROM items WHERE properties->>'group'::String = '/g1'",
     )
     .await;
     assert_eq!(
-        run_sql_count(&engine, "SELECT path FROM items WHERE node_type = 'test:Record'").await,
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE node_type = 'test:Record'"
+        )
+        .await,
         0,
         "property-filtered DELETE must remove the matching records"
+    );
+}
+
+/// Regression: an `IN (...)` list over a JSON-cast property must affect exactly
+/// the same rows under UPDATE as it matches under SELECT.
+///
+/// A bug report claimed `properties->>'status'::String IN ('in_use','reserved')`
+/// matches in a SELECT but updates 0 rows — an alleged planner quirk. The code
+/// path says otherwise: a compound/`IN` WHERE routes UPDATE through the bulk path
+/// (`find_matching_node_ids`), which re-runs the *identical* SELECT through the
+/// same optimizer/planner, and `IN` is never canonicalized/index-routed (it stays
+/// a verbatim row-level filter, like the cast `=` form). This test pins that down
+/// for both the `path = ... AND IN (...)` compound form and the bulk-only pure
+/// `IN (...)` form.
+#[tokio::test]
+async fn dml_in_list_json_cast_update() {
+    let (storage, _td) = create_test_storage().await;
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new(TENANT, REPO),
+            raisin_models::workspace::Workspace::new(WS.to_string()),
+        )
+        .await
+        .expect("create workspace");
+
+    create_node_type(&storage, serde_json::json!({ "name": "test:Item" })).await;
+
+    let catalog = create_test_catalog(&[WS]);
+    let engine = QueryEngine::new(
+        storage.clone(),
+        TENANT.to_string(),
+        REPO.to_string(),
+        BRANCH.to_string(),
+    )
+    .with_catalog(catalog)
+    .with_auth(raisin_models::auth::AuthContext::system());
+
+    // Three items, one per status. `in_use` and `reserved` are the IN-list targets.
+    for (id, path, status) in [
+        ("i1", "/i1", "in_use"),
+        ("i2", "/i2", "reserved"),
+        ("i3", "/i3", "available"),
+    ] {
+        run_sql_count(
+            &engine,
+            &format!(
+                "INSERT INTO items (id, path, node_type, properties) VALUES \
+                 ('{id}','{path}','test:Item','{{\"status\":\"{status}\"}}'::JSONB)",
+            ),
+        )
+        .await;
+    }
+
+    const IN_FILTER: &str =
+        "properties->>'status'::String IN ('in_use','reserved')";
+
+    // Baseline: SELECT matches exactly the two targeted rows.
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            &format!("SELECT path FROM items WHERE {IN_FILTER}"),
+        )
+        .await,
+        2,
+        "SELECT with IN over a JSON cast must match in_use + reserved"
+    );
+
+    // Form A — `path = ... AND IN (...)` (compound predicate, routes to bulk path).
+    // The IN guard holds for /i1, so the UPDATE must affect exactly 1 row.
+    let affected_a = run_dml_affected(
+        &engine,
+        &format!(
+            "UPDATE items SET properties = '{{\"status\":\"checked_out\"}}'::jsonb \
+             WHERE path = '/i1' AND {IN_FILTER}",
+        ),
+    )
+    .await;
+    assert_eq!(
+        affected_a, 1,
+        "path + IN UPDATE must affect the single matching row (not 0)"
+    );
+
+    // SELECT now sees only /i2 (reserved); /i1 flipped to checked_out.
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            &format!("SELECT path FROM items WHERE {IN_FILTER}"),
+        )
+        .await,
+        1,
+        "after updating /i1, only reserved remains matchable by IN"
+    );
+
+    // Form B — pure `IN (...)` (no path/id), the bulk-only path. Affected count
+    // must equal what SELECT matches right before it: exactly /i2.
+    let select_before = run_sql_count(
+        &engine,
+        &format!("SELECT path FROM items WHERE {IN_FILTER}"),
+    )
+    .await;
+    let affected_b = run_dml_affected(
+        &engine,
+        &format!(
+            "UPDATE items SET properties = '{{\"status\":\"checked_out\"}}'::jsonb \
+             WHERE {IN_FILTER}",
+        ),
+    )
+    .await;
+    assert_eq!(
+        affected_b as usize, select_before,
+        "bulk IN UPDATE must affect exactly the rows SELECT matched"
+    );
+    assert_eq!(affected_b, 1, "only /i2 should remain to update");
+
+    // The verbatim filter actually applied: nothing matches the IN list now.
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            &format!("SELECT path FROM items WHERE {IN_FILTER}"),
+        )
+        .await,
+        0,
+        "all in_use/reserved rows are now checked_out"
     );
 }

@@ -48,6 +48,7 @@ use super::debug::{
 use super::executor;
 use super::types::{
     ExecutionCallbacks, ExecutionDependencies, ExecutionMode, FunctionExecutionConfig,
+    SqlExecutorCallback,
 };
 use raisin_binary::BinaryStorage;
 use raisin_storage::transactional::TransactionalStorage;
@@ -236,7 +237,11 @@ impl ExecutionProvider {
         B: BinaryStorage + 'static,
     {
         ExecutionCallbacks {
-            sql_executor: Some(create_debug_sql_executor()), // TODO: Real SQL executor
+            sql_executor: Some(create_sql_executor(
+                deps.storage.clone(),
+                deps.indexing_engine.clone(),
+                deps.hnsw_engine.clone(),
+            )),
             function_executor: Some(executor::create_function_executor(
                 deps.clone(),
                 config.clone(),
@@ -250,6 +255,93 @@ impl ExecutionProvider {
             )),
         }
     }
+}
+
+/// Build a real bulk-SQL executor backed by `QueryEngine`.
+///
+/// Async bulk `UPDATE`/`DELETE` jobs (any WHERE clause that isn't a simple
+/// `id = '…'` / `path = '…'`) are dispatched to the `BulkSql` job handler, which
+/// delegates to this callback. It runs the SQL synchronously through a fresh
+/// `QueryEngine` built **without** a `job_registrar` — we are already inside a
+/// job and must execute the bulk op inline rather than enqueue another one.
+///
+/// Executing the writes through the normal commit path is what emits
+/// `NodeEvent`s, so node-event triggers fire for SQL-driven changes. Returning
+/// the stub (which wrote nothing and reported 0 rows) silently dropped every
+/// async bulk write and never fired triggers.
+///
+/// RLS is preserved: the engine runs under `auth` — the identity that submitted
+/// the original request, captured at enqueue time — so the deferred write can
+/// touch exactly the rows the caller could touch synchronously. It is **never**
+/// escalated to system. If the identity is missing the engine runs anonymous
+/// (fails closed) rather than over-privileged.
+fn create_sql_executor<S>(
+    storage: Arc<S>,
+    indexing_engine: Option<Arc<raisin_indexer::TantivyIndexingEngine>>,
+    hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
+) -> SqlExecutorCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+{
+    use futures::StreamExt;
+    use raisin_models::auth::AuthContext;
+    use raisin_models::nodes::properties::PropertyValue;
+    use raisin_sql_execution::{QueryEngine, StaticCatalog};
+    use raisin_storage::{RepoScope, WorkspaceRepository};
+
+    Arc::new(
+        move |sql: String,
+              tenant_id: String,
+              repo_id: String,
+              branch: String,
+              actor: String,
+              auth: Option<AuthContext>| {
+            let storage = storage.clone();
+            let indexing_engine = indexing_engine.clone();
+            let hnsw_engine = hnsw_engine.clone();
+
+            Box::pin(async move {
+                // Register every workspace so `FROM <workspace>` resolves.
+                let workspaces = storage
+                    .workspaces()
+                    .list(RepoScope::new(&tenant_id, &repo_id))
+                    .await?;
+                let mut catalog = StaticCatalog::default_nodes_schema();
+                for ws in &workspaces {
+                    catalog.register_workspace(ws.name.clone());
+                }
+
+                // Run under the submitter's identity (captured at enqueue time)
+                // so RLS matches a synchronous request. Fall back to anonymous —
+                // never system — when the identity is absent.
+                let auth = auth.unwrap_or_else(AuthContext::anonymous);
+                let mut engine =
+                    QueryEngine::new(storage.clone(), &tenant_id, &repo_id, &branch)
+                        .with_catalog(Arc::new(catalog))
+                        .with_auth(auth)
+                        .with_default_actor(actor);
+                if let Some(idx) = &indexing_engine {
+                    engine = engine.with_indexing_engine(idx.clone());
+                }
+                if let Some(hnsw) = &hnsw_engine {
+                    engine = engine.with_hnsw_engine(hnsw.clone());
+                }
+
+                // Forced-sync execution: do not enqueue another async bulk job.
+                let mut stream = engine.execute_batch_sync(&sql).await?;
+                let mut affected_rows = 0i64;
+                while let Some(row) = stream.next().await {
+                    let row = row?;
+                    match row.columns.get("affected_rows") {
+                        Some(PropertyValue::Integer(n)) => affected_rows += *n,
+                        Some(PropertyValue::Float(f)) => affected_rows += *f as i64,
+                        _ => {}
+                    }
+                }
+                Ok(affected_rows)
+            })
+        },
+    )
 }
 
 #[cfg(test)]

@@ -37,7 +37,9 @@ async fn create_test_storage() -> (Arc<raisin_rocksdb::RocksDBStorage>, TempDir)
     (Arc::new(storage), temp_dir)
 }
 
-fn engine(storage: Arc<raisin_rocksdb::RocksDBStorage>) -> QueryEngine<raisin_rocksdb::RocksDBStorage> {
+fn engine(
+    storage: Arc<raisin_rocksdb::RocksDBStorage>,
+) -> QueryEngine<raisin_rocksdb::RocksDBStorage> {
     let mut catalog = StaticCatalog::default_nodes_schema();
     catalog.register_workspace(WS.to_string());
     QueryEngine::new(

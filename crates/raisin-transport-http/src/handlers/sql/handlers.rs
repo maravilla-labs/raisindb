@@ -159,7 +159,13 @@ async fn build_engine(
 
     let catalog = engine::build_catalog(state, tenant_id, repo, &embedding_config).await?;
 
-    let job_registrar = engine::create_job_registrar(rocksdb_storage, tenant_id, repo, branch);
+    let job_registrar = engine::create_job_registrar(
+        rocksdb_storage,
+        tenant_id,
+        repo,
+        branch,
+        auth_context.clone(),
+    );
     let restore_tree_registrar =
         engine::create_restore_tree_registrar(rocksdb_storage, tenant_id, repo, branch);
 

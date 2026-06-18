@@ -11,6 +11,7 @@ use raisin_sql_execution::{
     FunctionInvokeCallback, FunctionInvokeSyncCallback, JobRegistrarCallback, QueryEngine,
     RestoreTreeRegistrarCallback, StaticCatalog,
 };
+use raisin_models::auth::AuthContext;
 use raisin_storage::{scope::RepoScope, JobType, Storage, WorkspaceRepository};
 
 use crate::error::ApiError;
@@ -59,22 +60,30 @@ pub(super) async fn build_catalog(
 }
 
 /// Create job registrar callback for async bulk SQL operations.
+///
+/// `auth_context` is the identity of the request that submitted the SQL. It is
+/// persisted with the job so the deferred bulk write executes under the same RLS
+/// as a synchronous request would — the async path must never silently escalate
+/// to system privileges.
 pub(super) fn create_job_registrar(
     rocksdb_storage: &raisin_rocksdb::RocksDBStorage,
     tenant_id: &str,
     repo: &str,
     branch: &str,
+    auth_context: Option<AuthContext>,
 ) -> JobRegistrarCallback {
     let rocksdb = rocksdb_storage.clone();
     let tenant_id_owned = tenant_id.to_string();
     let repo_owned = repo.to_string();
     let branch_owned = branch.to_string();
+    let auth_owned = auth_context;
 
     Arc::new(move |sql: String, actor: String| {
         let rocksdb = rocksdb.clone();
         let tenant_id = tenant_id_owned.clone();
         let repo_id = repo_owned.clone();
         let branch = branch_owned.clone();
+        let auth = auth_owned.clone();
 
         Box::pin(async move {
             let job_registry = rocksdb.job_registry();
@@ -89,6 +98,12 @@ pub(super) fn create_job_registrar(
             // Create job context
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("sql".to_string(), serde_json::json!(sql));
+            // Persist the submitter's identity so the deferred write keeps their RLS.
+            if let Some(auth) = &auth {
+                if let Ok(auth_json) = serde_json::to_value(auth) {
+                    metadata.insert("auth_context".to_string(), auth_json);
+                }
+            }
 
             let job_context = raisin_storage::jobs::JobContext {
                 tenant_id: tenant_id.clone(),
