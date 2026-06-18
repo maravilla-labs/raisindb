@@ -64,6 +64,7 @@ pub mod services {
     pub mod workspace_service;
 }
 pub mod audit_adapter;
+pub mod audit_events;
 pub mod init;
 pub mod nodetype_init;
 pub mod package_init;
@@ -72,6 +73,7 @@ pub mod workspace_init;
 pub mod workspace_structure_init;
 
 pub use audit_adapter::RepoAuditAdapter;
+pub use audit_events::AuditEventHandler;
 pub use connection::{
     NodeServiceBuilder, RaisinConnection, Repository, RepositoryManagement, ServerConfig,
     TenantScope, Workspace,

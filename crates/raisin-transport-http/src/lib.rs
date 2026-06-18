@@ -35,6 +35,7 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod embeddings;
     pub mod functions;
+    pub mod history;
     #[cfg(feature = "storage-rocksdb")]
     pub mod hybrid_search;
     #[cfg(feature = "storage-rocksdb")]
@@ -42,6 +43,7 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod identity_users;
     pub mod inbox;
+    pub mod locks;
     pub mod management;
     pub mod mixins;
     pub mod node_types;

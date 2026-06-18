@@ -13,7 +13,30 @@
 // NodeVersion and NodeVersionSummary types
 use crate::nodes::Node;
 use chrono::Utc;
+use raisin_hlc::HLC;
 use serde::{Deserialize, Serialize};
+
+/// A single entry in a node's revision history (git-log style).
+///
+/// Returned by the node-history APIs (HTTP `…/nodes/{id}/history`, the WS
+/// `node_history` request, `raisin.nodes.history()` in functions, and the JS
+/// SDK `node.history()`). Lightweight by design: it carries enough to render a
+/// history list (when / who / deleted) and the `revision` to fetch the full
+/// snapshot on demand via the existing `at/{revision}` reads.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NodeRevisionEntry {
+    /// The HLC revision at which this change was committed. Serializes as the
+    /// canonical `"timestamp-counter"` string usable with `at_revision` reads.
+    pub revision: HLC,
+    /// When this revision was written (the snapshot's `updated_at`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<Utc>>,
+    /// Who authored this revision (the snapshot's `updated_by`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
+    /// True when this revision is a tombstone (the node was deleted at this revision).
+    pub deleted: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeVersion {

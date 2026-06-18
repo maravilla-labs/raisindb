@@ -144,7 +144,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
 
     /// Creates a folder node at the given path if it doesn't exist.
     /// Used by ensure_path_exists to auto-create missing parent folders.
-    async fn create_folder_if_missing(&self, path: &str) -> Result<()> {
+    /// `folder_type` is the NodeType used for created ancestors (e.g. `raisin:Folder`).
+    async fn create_folder_if_missing(&self, path: &str, folder_type: &str) -> Result<()> {
         // Check if already exists
         if self.get_by_path(path).await?.is_some() {
             return Ok(());
@@ -164,7 +165,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             id: nanoid::nanoid!(),
             name: name.to_string(),
             path: path.to_string(),
-            node_type: "raisin:Folder".to_string(),
+            node_type: folder_type.to_string(),
             archetype: None,
             properties: Default::default(),
             children: vec![],
@@ -189,8 +190,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
     }
 
     /// Ensures that all parent directories in a path exist, creating them as folders if needed.
-    /// This is used for deep node creation.
-    async fn ensure_path_exists(&self, path: &str) -> Result<()> {
+    /// This is used for deep node creation. Created ancestors use `folder_type`.
+    async fn ensure_path_exists(&self, path: &str, folder_type: &str) -> Result<()> {
         if path.is_empty() || path == "/" {
             return Ok(());
         }
@@ -206,7 +207,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             current_path.push('/');
             current_path.push_str(segment);
 
-            self.create_folder_if_missing(&current_path).await?;
+            self.create_folder_if_missing(&current_path, folder_type)
+                .await?;
         }
 
         Ok(())
@@ -360,12 +362,49 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         parent_path: &str,
         node: models::nodes::Node,
     ) -> Result<models::nodes::Node> {
+        self.add_deep_node_typed(parent_path, node, "raisin:Folder")
+            .await
+    }
+
+    /// Like [`add_deep_node`], but auto-created ancestor folders use `folder_type`
+    /// instead of the default `raisin:Folder`.
+    pub async fn add_deep_node_typed(
+        &self,
+        parent_path: &str,
+        node: models::nodes::Node,
+        folder_type: &str,
+    ) -> Result<models::nodes::Node> {
         // Ensure all parent directories exist, creating folders as needed
         if parent_path != "/" && !parent_path.is_empty() {
-            self.ensure_path_exists(parent_path).await?;
+            self.ensure_path_exists(parent_path, folder_type).await?;
         }
 
         // Now use standard add_node (parent is guaranteed to exist)
         self.add_node(parent_path, node).await
+    }
+
+    /// Upserts a node by path with deep creation (auto-creates missing ancestor folders).
+    ///
+    /// Resolves any existing node at `node.path` and reuses its id so the operation is a
+    /// true upsert-by-path (create if absent, update in place if present). Ancestors are
+    /// created as `folder_type`.
+    pub async fn upsert_deep_node(
+        &self,
+        parent_path: &str,
+        mut node: models::nodes::Node,
+        folder_type: &str,
+    ) -> Result<models::nodes::Node> {
+        // Ensure all parent directories exist, creating folders as needed
+        if parent_path != "/" && !parent_path.is_empty() {
+            self.ensure_path_exists(parent_path, folder_type).await?;
+        }
+
+        // Preserve the existing node's id so upsert updates in place (upsert keys by id).
+        if let Some(existing) = self.get_by_path(&node.path).await? {
+            node.id = existing.id;
+        }
+
+        self.upsert(node.clone()).await?;
+        Ok(node)
     }
 }

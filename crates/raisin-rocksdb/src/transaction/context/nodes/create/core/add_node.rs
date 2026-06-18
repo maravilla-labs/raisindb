@@ -4,6 +4,7 @@
 
 use raisin_error::Result;
 use raisin_models::nodes::Node;
+use raisin_storage::transactional::TransactionalContext;
 
 use crate::transaction::RocksDBTransaction;
 
@@ -41,6 +42,19 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
 
     // 3. Extract metadata (tenant, repo, branch)
     let (tenant_id, repo_id, branch) = metadata::extract_metadata(tx)?;
+
+    // 3b. Stamp authorship for this CREATE. Mirrors put_node so every create
+    // path records who made the node. Actor: auth context → raw actor →
+    // "anonymous". Don't overwrite an explicitly-supplied created_by.
+    let actor = tx
+        .get_auth_context()?
+        .map(|a| a.actor_id())
+        .or(tx.get_actor()?)
+        .unwrap_or_else(|| "anonymous".to_string());
+    normalized_node.updated_by = Some(actor.clone());
+    if normalized_node.created_by.is_none() {
+        normalized_node.created_by = Some(actor);
+    }
 
     // 3a. Check CREATE permission
     rls::check_create_permission(tx, &normalized_node, workspace)?;

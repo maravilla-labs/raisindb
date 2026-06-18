@@ -193,9 +193,9 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
                 }
             }
 
-            // Audit log the delete operation
-            if let (Some(a), Some(n)) = (&self.audit, before) {
-                a.write(&n, AuditLogAction::Delete, None).await?;
+            // Audit log the delete operation (gated on the NodeType `auditable` flag)
+            if let Some(n) = before {
+                self.audit_write(&n, AuditLogAction::Delete, None).await?;
             }
         }
         Ok(res)

@@ -92,6 +92,26 @@ pub trait NodeRepository: Send + Sync {
         max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Option<NodeWithPopulatedChildren>>> + Send;
 
+    /// List a node's revision history, newest first (git-log style).
+    ///
+    /// Walks the MVCC revisions of the node and returns a lightweight entry per
+    /// revision (`revision`, `updated_at`, `updated_by`, `deleted`). This is
+    /// always available regardless of the `auditable` flag — it reflects the
+    /// structural version history, not the opt-in audit log.
+    ///
+    /// Use the returned `revision` with the `at_revision` reads to fetch the
+    /// full snapshot of any historical version.
+    ///
+    /// # Arguments
+    /// * `node_id` - Node identifier
+    /// * `limit` - Optional cap on the number of revisions returned (newest first)
+    fn get_node_history(
+        &self,
+        scope: StorageScope<'_>,
+        node_id: &str,
+        limit: Option<usize>,
+    ) -> impl std::future::Future<Output = Result<Vec<models::nodes::NodeRevisionEntry>>> + Send;
+
     /// Create a new node (fails if node with same ID or path already exists).
     ///
     /// Use this for:

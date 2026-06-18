@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = { workspace = true }
 raisin-storage = { path = "../raisin-storage" }
 raisin-context = { path = "../raisin-context" }
 raisin-error = { path = "../raisin-error" }

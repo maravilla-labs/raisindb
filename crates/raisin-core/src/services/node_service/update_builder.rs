@@ -103,9 +103,11 @@ impl<'a, S: Storage + TransactionalStorage> UpdateBuilder<'a, S> {
             node.translations = Some(trans);
         }
 
-        // 3. System fields set automatically
+        // 3. System fields set automatically.
+        // updated_at / updated_by (and created_by) are stamped at the lowest
+        // write level in the transaction layer (put_node), so all write paths
+        // record authorship uniformly — no need to set them here.
         node.updated_at = Some(chrono::Utc::now());
-        // Note: updated_by could be set from context if available in future
 
         // 4. NOTE: Schema validation is now performed in transaction layer
         // (TransactionalContext.put_node) for consistent validation across all paths.
@@ -113,10 +115,10 @@ impl<'a, S: Storage + TransactionalStorage> UpdateBuilder<'a, S> {
         // 5. Persist to storage (with versioning)
         self.service.update_node(node.clone()).await?;
 
-        // 6. Audit if enabled
-        if let Some(audit) = &self.service.audit {
-            audit.write(&node, AuditLogAction::Update, None).await?;
-        }
+        // 6. Audit if enabled (gated on the NodeType `auditable` flag)
+        self.service
+            .audit_write(&node, AuditLogAction::Update, None)
+            .await?;
 
         Ok(node)
     }

@@ -7,7 +7,10 @@ use std::sync::Arc;
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
-use raisin_storage::{transactional::TransactionalStorage, Storage};
+use raisin_models::nodes::audit_log::AuditLogAction;
+use raisin_storage::{
+    transactional::TransactionalStorage, BranchScope, NodeTypeRepository, Storage,
+};
 
 use crate::services::node_validation::NodeValidator;
 use crate::traits::Audit;
@@ -134,6 +137,49 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
     /// Get the current authentication context (if set).
     pub fn auth_context(&self) -> Option<&AuthContext> {
         self.auth_context.as_ref()
+    }
+
+    /// Write an audit-log entry for `node`, gated on the NodeType `auditable`
+    /// flag.
+    ///
+    /// Audit logging happens only when (a) an audit sink is configured AND
+    /// (b) the node's NodeType is marked `auditable = true`. The flag is the
+    /// opt-in switch — non-auditable types produce no audit-log entries.
+    ///
+    /// Note: this is independent of revision history. The structural MVCC
+    /// version history (see [`Self::history`]) is always available regardless
+    /// of `auditable`.
+    ///
+    /// If the NodeType can't be resolved, auditing is skipped rather than
+    /// failing the surrounding write.
+    pub(crate) async fn audit_write(
+        &self,
+        node: &raisin_models::nodes::Node,
+        action: AuditLogAction,
+        details: Option<String>,
+    ) -> Result<()> {
+        let Some(audit) = &self.audit else {
+            return Ok(());
+        };
+
+        let auditable = self
+            .storage
+            .node_types()
+            .get(
+                BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
+                &node.node_type,
+                None,
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|nt| nt.auditable())
+            .unwrap_or(false);
+
+        if auditable {
+            audit.write(node, action, details).await?;
+        }
+        Ok(())
     }
 
     /// Get the current storage scope as a `StorageScope` struct.

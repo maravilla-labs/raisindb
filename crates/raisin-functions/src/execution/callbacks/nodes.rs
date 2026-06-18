@@ -32,8 +32,8 @@ use super::query_context::QueryContext;
 use super::sql_generator;
 use crate::api::{
     NodeApplyChildOrderCallback, NodeCreateCallback, NodeDeleteCallback, NodeGetByIdCallback,
-    NodeGetCallback, NodeGetChildrenCallback, NodeMoveCallback, NodeQueryCallback,
-    NodeUpdateCallback, NodeUpdatePropertyCallback,
+    NodeGetCallback, NodeGetChildrenCallback, NodeHistoryCallback, NodeMoveCallback,
+    NodeQueryCallback, NodeUpdateCallback, NodeUpdatePropertyCallback,
 };
 
 // ============================================================================
@@ -80,6 +80,48 @@ where
             Ok(rows.into_iter().next())
         })
     })
+}
+
+/// Create node_history callback: `raisin.nodes.history(workspace, nodeId, limit)`
+///
+/// Returns the node's MVCC revision history (newest first). Unlike the other
+/// read callbacks this does not route through SQL (there is no SQL surface for
+/// revision history); it calls the storage `get_node_history` primitive
+/// directly. Functions run server-side with a system/granted auth context, so
+/// no per-row RLS filtering is applied here.
+pub fn create_node_history<S, B>(query_ctx: Arc<QueryContext<S, B>>) -> NodeHistoryCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    Arc::new(
+        move |workspace: String, node_id: String, limit: Option<u32>| {
+            let ctx = query_ctx.clone();
+
+            Box::pin(async move {
+                use raisin_storage::NodeRepository;
+                let scope =
+                    StorageScope::new(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, &workspace);
+                let entries = ctx
+                    .deps
+                    .storage
+                    .nodes()
+                    .get_node_history(scope, &node_id, limit.map(|l| l as usize))
+                    .await?;
+                entries
+                    .into_iter()
+                    .map(|e| {
+                        serde_json::to_value(e).map_err(|err| {
+                            raisin_error::Error::Internal(format!(
+                                "Failed to serialize revision entry: {}",
+                                err
+                            ))
+                        })
+                    })
+                    .collect()
+            })
+        },
+    )
 }
 
 /// Create node_get_children callback: `raisin.nodes.getChildren(workspace, parentPath, limit)`

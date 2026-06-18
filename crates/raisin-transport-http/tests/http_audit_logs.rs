@@ -79,6 +79,7 @@ async fn setup_test_service_with_audit() -> (
         None,
         #[cfg(feature = "storage-rocksdb")]
         None,
+        None, // lock_manager
     );
 
     (app, node_svc, audit_repo)

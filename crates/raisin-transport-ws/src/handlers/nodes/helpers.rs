@@ -118,6 +118,9 @@ where
         conn.auth_context().cloned()
     };
 
+    // Audit logging is handled globally by the event-bus AuditEventHandler
+    // (covers node API, SQL DML, and functions uniformly), so the per-service
+    // audit sink is not wired here.
     let mut node_service = NodeService::new_with_context(
         state.storage.clone(),
         ctx.tenant_id.to_string(),

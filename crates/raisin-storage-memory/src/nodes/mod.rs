@@ -139,6 +139,18 @@ impl NodeRepository for InMemoryNodeRepo {
         }))
     }
 
+    async fn get_node_history(
+        &self,
+        _scope: StorageScope<'_>,
+        _node_id: &str,
+        _limit: Option<usize>,
+    ) -> Result<Vec<models::nodes::NodeRevisionEntry>> {
+        // The in-memory store keeps only current state (no revision retention),
+        // so no history is available. Returns empty rather than fabricating a
+        // single fake revision.
+        Ok(Vec::new())
+    }
+
     async fn create(
         &self,
         scope: StorageScope<'_>,

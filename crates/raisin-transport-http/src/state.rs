@@ -51,7 +51,6 @@ pub struct AppState {
     pub(crate) ws_svc: Arc<WorkspaceService<Store>>,
     pub(crate) bin: Arc<Bin>,
     pub(crate) audit: Arc<AuditRepo>,
-    pub(crate) audit_adapter: Arc<RepoAuditAdapter<AuditRepo>>,
     /// Registry of upload processors for node-type-specific upload handling
     pub(crate) upload_processors: Arc<UploadProcessorRegistry>,
     /// Whether anonymous access is enabled globally.
@@ -92,6 +91,8 @@ pub struct AppState {
     pub(crate) auth_service: Option<Arc<raisin_rocksdb::AuthService>>,
     /// Shared schema stats cache for data-driven query plan selectivity estimation
     pub(crate) schema_stats_cache: Option<SharedSchemaStatsCache>,
+    /// Atomic locks / inventory manager. `None` when the subsystem is disabled.
+    pub(crate) lock_manager: Option<raisin_locks::LockManagerHandle>,
 }
 
 impl AppState {
@@ -117,6 +118,9 @@ impl AppState {
     pub(crate) fn node_service_for_workspace(&self, workspace_id: &str) -> NodeService<Store> {
         // For single-tenant mode, use default tenant/repo/branch
         // TODO: In multi-tenant mode, extract these from headers/path
+        // Audit logging is handled globally by the event-bus AuditEventHandler
+        // (covers node API, SQL DML, and functions uniformly), so the per-service
+        // audit sink is not wired here.
         NodeService::new_with_context(
             self.storage.clone(),
             "default".to_string(), // tenant_id
@@ -124,7 +128,6 @@ impl AppState {
             "main".to_string(),    // branch
             workspace_id.to_string(),
         )
-        .with_audit(self.audit_adapter.clone())
     }
 
     /// Create a NodeService with full repository-first context
@@ -139,14 +142,15 @@ impl AppState {
         workspace_id: &str,
         auth: Option<AuthContext>,
     ) -> NodeService<Store> {
+        // Audit logging is handled globally by the event-bus AuditEventHandler;
+        // the per-service audit sink is intentionally not wired here.
         let svc = NodeService::new_with_context(
             self.storage.clone(),
             tenant_id.to_string(),
             repository.to_string(),
             branch.to_string(),
             workspace_id.to_string(),
-        )
-        .with_audit(self.audit_adapter.clone());
+        );
 
         // Apply auth context for RLS filtering if provided
         match auth {
@@ -280,6 +284,7 @@ pub fn router(storage: Arc<Store>) -> Router {
         #[cfg(feature = "storage-rocksdb")]
         None, // auth_service
         None, // schema_stats_cache
+        None, // lock_manager
     );
     router
 }
@@ -289,7 +294,9 @@ pub fn router_with_bin_and_audit(
     ws_svc: Arc<WorkspaceService<Store>>,
     bin: Arc<Bin>,
     audit: Arc<AuditRepo>,
-    audit_adapter: Arc<RepoAuditAdapter<AuditRepo>>,
+    // Retained for signature compatibility; audit is now handled by the
+    // event-bus AuditEventHandler rather than a per-service sink.
+    _audit_adapter: Arc<RepoAuditAdapter<AuditRepo>>,
     anonymous_enabled: bool,
     dev_mode: bool,
     server_version: String,
@@ -305,6 +312,7 @@ pub fn router_with_bin_and_audit(
     >,
     #[cfg(feature = "storage-rocksdb")] auth_service: Option<Arc<raisin_rocksdb::AuthService>>,
     schema_stats_cache: Option<SharedSchemaStatsCache>,
+    lock_manager: Option<raisin_locks::LockManagerHandle>,
 ) -> (Router, AppState) {
     let connection = Arc::new(RaisinConnection::with_storage(storage.clone()));
 
@@ -329,7 +337,6 @@ pub fn router_with_bin_and_audit(
         ws_svc,
         bin,
         audit,
-        audit_adapter,
         upload_processors,
         anonymous_enabled,
         dev_mode,
@@ -355,6 +362,7 @@ pub fn router_with_bin_and_audit(
         #[cfg(feature = "storage-rocksdb")]
         auth_service,
         schema_stats_cache,
+        lock_manager,
     };
 
     // NOTE: Global CorsLayer has been removed in favor of unified_cors_middleware

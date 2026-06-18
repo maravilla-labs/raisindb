@@ -63,6 +63,31 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // nodes.history(workspace, id, limit?)
+        ApiMethodDescriptor {
+            internal_name: "nodes_history",
+            js_name: "history",
+            py_name: "history",
+            category: "nodes",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("id", ArgType::String),
+                ArgSpec::new("limit", ArgType::OptionalU32),
+            ],
+            return_type: ReturnType::JsonArray,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let id = parser.string()?;
+                    let limit = parser.optional_u32()?;
+                    let result = api.node_history(&workspace, &id, limit).await?;
+                    Ok(InvokeResult::JsonArray(result))
+                })
+            },
+        },
         // nodes.create(workspace, parentPath, data)
         ApiMethodDescriptor {
             internal_name: "nodes_create",

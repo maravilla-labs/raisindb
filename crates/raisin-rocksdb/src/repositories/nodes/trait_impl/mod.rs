@@ -29,7 +29,7 @@ mod workspace_validation;
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
-use raisin_models::nodes::{DeepNode, Node, NodeWithChildren};
+use raisin_models::nodes::{DeepNode, Node, NodeRevisionEntry, NodeWithChildren};
 use raisin_storage::{
     BranchScope, CreateNodeOptions, DeleteNodeOptions, ListOptions, NodeRepository,
     NodeWithPopulatedChildren, StorageScope, UpdateNodeOptions,
@@ -71,6 +71,42 @@ impl NodeRepository for NodeRepositoryImpl {
         } = scope;
         self.dispatch_get_with_children(tenant_id, repo_id, branch, workspace, id, max_revision)
             .await
+    }
+
+    async fn get_node_history(
+        &self,
+        scope: StorageScope<'_>,
+        node_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<NodeRevisionEntry>> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        // Reuse the existing MVCC history walk (newest-first via descending
+        // revision encoding) and project each snapshot to a lightweight entry.
+        let history = self
+            .get_history(tenant_id, repo_id, branch, workspace, node_id, limit)
+            .await?;
+        Ok(history
+            .into_iter()
+            .map(|(revision, node)| match node {
+                Some(n) => NodeRevisionEntry {
+                    revision,
+                    updated_at: n.updated_at,
+                    updated_by: n.updated_by,
+                    deleted: false,
+                },
+                None => NodeRevisionEntry {
+                    revision,
+                    updated_at: None,
+                    updated_by: None,
+                    deleted: true,
+                },
+            })
+            .collect())
     }
 
     async fn create(

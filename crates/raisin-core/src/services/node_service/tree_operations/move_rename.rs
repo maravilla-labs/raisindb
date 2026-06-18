@@ -131,14 +131,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
                 None, // TODO: Accept operation metadata from caller
             )
             .await?;
-        if let Some(a) = &self.audit {
+        if self.audit.is_some() {
             if let Some(n) = self
                 .storage
                 .nodes()
                 .get(self.scope(), id, self.revision.as_ref())
                 .await?
             {
-                a.write(
+                self.audit_write(
                     &n,
                     AuditLogAction::Move,
                     Some(format!("new_path={}", new_path)),
@@ -208,14 +208,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         // Note: With physical ROOT node using IDs in children array,
         // renaming doesn't affect ROOT node since IDs don't change
         // No action needed for root-level nodes
-        if let Some(a) = &self.audit {
+        if self.audit.is_some() {
             if let Some(n) = self
                 .storage
                 .nodes()
                 .get_by_path(self.scope(), &new_path, self.revision.as_ref())
                 .await?
             {
-                a.write(
+                self.audit_write(
                     &n,
                     AuditLogAction::Rename,
                     Some(format!("new_name={}", new_name)),

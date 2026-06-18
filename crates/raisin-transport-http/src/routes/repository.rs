@@ -126,5 +126,18 @@ pub(crate) fn repository_routes(state: &AppState) -> Router<AppState> {
             get(crate::handlers::audit::audit_get_by_path),
         );
 
+    // ----------------------------------------------------------------
+    // Node revision-history (git-style file history) REST endpoints
+    // ----------------------------------------------------------------
+    router = router
+        .route(
+            "/api/history/{repo}/{branch}/{ws}/by-id/{id}",
+            get(crate::handlers::history::history_get_by_id),
+        )
+        .route(
+            "/api/history/{repo}/{branch}/{ws}/{*node_path}",
+            get(crate::handlers::history::history_get_by_path),
+        );
+
     router
 }

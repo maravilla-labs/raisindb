@@ -55,14 +55,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             .nodes()
             .update_property_by_path(self.scope(), node_path, property_path, value.clone())
             .await?;
-        if let Some(a) = &self.audit {
+        if self.audit.is_some() {
             if let Some(n) = self
                 .storage
                 .nodes()
                 .get_by_path(self.scope(), node_path, self.revision.as_ref())
                 .await?
             {
-                a.write(
+                self.audit_write(
                     &n,
                     AuditLogAction::UpdateProperty,
                     Some(format!("property_path={}", property_path)),

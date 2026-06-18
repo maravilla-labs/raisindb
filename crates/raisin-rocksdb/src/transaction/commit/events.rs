@@ -107,7 +107,21 @@ impl RocksDBTransaction {
         branch_name: &str,
         changed_nodes: &ChangedNodesMap,
     ) {
+        use raisin_storage::transactional::TransactionalContext;
         use raisin_storage::NodeRepository;
+
+        // Resolve the acting identity once for this commit. Mirrors put_node's
+        // actor resolution (auth context → raw actor → "anonymous"). Carried on
+        // every event as `metadata.actor` so downstream consumers (e.g. the
+        // audit-log subscriber) attribute writes from ANY path — node API, SQL
+        // DML, functions — uniformly, including deletes (where node_data is None).
+        let actor = self
+            .get_auth_context()
+            .ok()
+            .flatten()
+            .map(|a| a.actor_id())
+            .or_else(|| self.get_actor().ok().flatten())
+            .unwrap_or_else(|| "anonymous".to_string());
 
         for (node_id, change) in changed_nodes.iter() {
             let workspace = &change.workspace;
@@ -182,6 +196,10 @@ impl RocksDBTransaction {
             metadata.insert(
                 "source".to_string(),
                 serde_json::Value::String("local".to_string()),
+            );
+            metadata.insert(
+                "actor".to_string(),
+                serde_json::Value::String(actor.clone()),
             );
             if let Some(data) = node_data {
                 metadata.insert("node_data".to_string(), data);

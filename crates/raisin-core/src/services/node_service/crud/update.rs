@@ -86,9 +86,8 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
 
         ctx.put_node(&self.workspace_id, &node).await?;
 
-        if let Some(a) = &self.audit {
-            a.write(&node, AuditLogAction::Update, None).await?;
-        }
+        self.audit_write(&node, AuditLogAction::Update, None)
+            .await?;
 
         ctx.commit().await?;
 

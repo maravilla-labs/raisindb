@@ -14,6 +14,9 @@ mod rls_helpers;
 // Revision / time-travel helpers
 mod revision;
 
+// Revision-history listing (git-style "file history")
+mod history;
+
 // Workspace delta overlay
 mod workspace_delta;
 

@@ -801,3 +801,401 @@ async fn test_workspace_isolation() {
     assert_eq!(ws1_nodes[0].name, "article1");
     assert_eq!(ws2_nodes[0].name, "article2");
 }
+
+/// Authorship stamping (created_by/updated_by) + revision history listing.
+///
+/// Authorship is stamped at the RocksDB transaction layer (`put_node`) and
+/// history is read from MVCC revisions, so this test builds a RocksDB-backed
+/// store directly (the in-memory store retains no history and doesn't stamp
+/// authorship).
+#[tokio::test]
+async fn test_authorship_and_revision_history() {
+    use raisin_models::auth::AuthContext;
+    use raisin_models::permissions::ResolvedPermissions;
+    use raisin_models::workspace::Workspace;
+    use raisin_storage::{
+        BranchRepository, RepoScope, RepositoryManagementRepository, WorkspaceRepository,
+    };
+
+    // Resolved user context: distinct identity, full permissions (so RLS allows
+    // the write while authorship still records the real user id).
+    let user_ctx = |uid: &str| {
+        AuthContext::for_user(uid.to_string()).with_permissions(ResolvedPermissions::system_admin())
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(raisin_rocksdb::RocksDBStorage::new(dir.path()).unwrap());
+    // Bootstrap the default repo / workspace / branch the NodeService writes against.
+    storage
+        .repository_management()
+        .create_repository(
+            "default",
+            "default",
+            raisin_context::RepositoryConfig::default(),
+        )
+        .await
+        .unwrap();
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new("default", "default"),
+            Workspace::new("default".to_string()),
+        )
+        .await
+        .unwrap();
+    storage
+        .branches()
+        .create_branch(
+            "default",
+            "default",
+            "main",
+            "test-user",
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    create_test_node_type(
+        &*storage,
+        "test:Doc",
+        vec![create_property_schema(
+            "title",
+            PropertyType::String,
+            true,
+            false,
+        )],
+        false,
+        true,
+    )
+    .await;
+
+    // CREATE as user123
+    let svc_create = NodeService::new(storage.clone()).with_auth(user_ctx("user123"));
+    let mut props = HashMap::new();
+    props.insert("title".to_string(), PropertyValue::String("v1".to_string()));
+    let created = svc_create
+        .add_node("/", create_test_node("doc", "test:Doc", props))
+        .await
+        .unwrap();
+    let id = created.id.clone();
+
+    // Authorship stamped on create.
+    let svc_read = NodeService::new(storage.clone()).with_auth(AuthContext::system());
+    let fetched = svc_read.get(&id).await.unwrap().expect("node exists");
+    assert_eq!(
+        fetched.created_by.as_deref(),
+        Some("user123"),
+        "created_by stamped on create"
+    );
+    assert_eq!(
+        fetched.updated_by.as_deref(),
+        Some("user123"),
+        "updated_by stamped on create"
+    );
+    let created_at = fetched.created_at;
+    assert!(created_at.is_some(), "created_at set on create");
+
+    // UPDATE as user456
+    let svc_update = NodeService::new(storage.clone()).with_auth(user_ctx("user456"));
+    let mut to_update = svc_read.get(&id).await.unwrap().unwrap();
+    to_update
+        .properties
+        .insert("title".to_string(), PropertyValue::String("v2".to_string()));
+    svc_update.update_node(to_update).await.unwrap();
+
+    let after = svc_read.get(&id).await.unwrap().unwrap();
+    assert_eq!(
+        after.created_by.as_deref(),
+        Some("user123"),
+        "created_by preserved on update"
+    );
+    assert_eq!(
+        after.updated_by.as_deref(),
+        Some("user456"),
+        "updated_by reflects the updater"
+    );
+    assert_eq!(
+        after.created_at, created_at,
+        "created_at preserved across update"
+    );
+
+    // HISTORY lists revisions newest-first with per-revision authorship.
+    let history = svc_read.history(&id, None).await.unwrap();
+    assert!(
+        history.len() >= 2,
+        "expected >= 2 revisions, got {}",
+        history.len()
+    );
+    assert_eq!(
+        history[0].updated_by.as_deref(),
+        Some("user456"),
+        "newest revision authored by the updater"
+    );
+    assert!(!history[0].deleted, "newest revision is not a tombstone");
+    assert_eq!(
+        history.last().unwrap().updated_by.as_deref(),
+        Some("user123"),
+        "oldest revision authored by the creator"
+    );
+
+    // limit caps the result.
+    let limited = svc_read.history(&id, Some(1)).await.unwrap();
+    assert_eq!(limited.len(), 1, "limit caps the number of revisions");
+}
+
+/// Event-bus audit: a node write produces an audit-log entry via the
+/// `AuditEventHandler` subscriber (the path SQL DML and functions also use,
+/// since every write commits through the same event-emitting transaction layer).
+/// Gated on the NodeType `auditable` flag.
+#[tokio::test]
+async fn test_event_bus_audit_logging() {
+    use raisin_audit::{AuditRepository, InMemoryAuditRepo};
+    use raisin_core::AuditEventHandler;
+    use raisin_models::auth::AuthContext;
+    use raisin_models::nodes::audit_log::AuditLogAction;
+    use raisin_models::permissions::ResolvedPermissions;
+    use raisin_models::workspace::Workspace;
+    use raisin_storage::{
+        BranchRepository, RepoScope, RepositoryManagementRepository, WorkspaceRepository,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(raisin_rocksdb::RocksDBStorage::new(dir.path()).unwrap());
+    storage
+        .repository_management()
+        .create_repository(
+            "default",
+            "default",
+            raisin_context::RepositoryConfig::default(),
+        )
+        .await
+        .unwrap();
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new("default", "default"),
+            Workspace::new("default".to_string()),
+        )
+        .await
+        .unwrap();
+    storage
+        .branches()
+        .create_branch(
+            "default",
+            "default",
+            "main",
+            "test-user",
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Register the global audit subscriber on the storage event bus — exactly
+    // as main.rs does for the running server.
+    let audit_repo = Arc::new(InMemoryAuditRepo::default());
+    storage
+        .event_bus()
+        .subscribe(Arc::new(AuditEventHandler::new(
+            audit_repo.clone(),
+            storage.clone(),
+        )));
+
+    // Auditable NodeType.
+    create_test_node_type_auditable(&*storage, "audit:Doc", true).await;
+    // Non-auditable NodeType.
+    create_test_node_type_auditable(&*storage, "plain:Doc", false).await;
+
+    let svc = NodeService::new(storage.clone()).with_auth(
+        AuthContext::for_user("alice").with_permissions(ResolvedPermissions::system_admin()),
+    );
+
+    // Write an auditable node.
+    let audited = svc
+        .add_node("/", create_test_node("doc1", "audit:Doc", HashMap::new()))
+        .await
+        .unwrap();
+    // Write a non-auditable node.
+    let plain = svc
+        .add_node("/", create_test_node("doc2", "plain:Doc", HashMap::new()))
+        .await
+        .unwrap();
+
+    // Event handlers run asynchronously (tokio::spawn) after commit, so poll briefly.
+    let mut logs = Vec::new();
+    for _ in 0..40 {
+        logs = audit_repo.get_logs_by_node_id(&audited.id).await.unwrap();
+        if !logs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(
+        logs.len(),
+        1,
+        "auditable node should have exactly one audit entry"
+    );
+    assert_eq!(logs[0].action, AuditLogAction::Create);
+    assert_eq!(
+        logs[0].user_id.as_deref(),
+        Some("alice"),
+        "actor recorded from commit"
+    );
+
+    // Non-auditable node produces no audit entry.
+    let plain_logs = audit_repo.get_logs_by_node_id(&plain.id).await.unwrap();
+    assert!(
+        plain_logs.is_empty(),
+        "non-auditable node must not be audited"
+    );
+}
+
+/// Helper: upsert a minimal NodeType with a chosen `auditable` flag.
+async fn create_test_node_type_auditable<S: Storage>(storage: &S, name: &str, auditable: bool) {
+    let node_type = NodeType {
+        id: Some(name.to_string()),
+        strict: Some(false),
+        name: name.to_string(),
+        extends: None,
+        mixins: Vec::new(),
+        overrides: None,
+        description: None,
+        icon: None,
+        version: Some(1),
+        properties: Some(vec![]),
+        allowed_children: Vec::new(),
+        required_nodes: Vec::new(),
+        initial_structure: None,
+        versionable: Some(true),
+        publishable: Some(true),
+        auditable: Some(auditable),
+        indexable: Some(true),
+        index_types: None,
+        created_at: Some(chrono::Utc::now()),
+        updated_at: None,
+        published_at: None,
+        published_by: None,
+        previous_version: None,
+        compound_indexes: None,
+        is_mixin: None,
+    };
+    storage
+        .node_types()
+        .upsert(
+            BranchScope::new("default", "default", "main"),
+            node_type,
+            CommitMetadata::system("create test node type"),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_add_deep_node_creates_ancestors() {
+    use raisin_models::auth::AuthContext;
+    let storage = setup_storage();
+    let service = NodeService::new(storage.clone()).with_auth(AuthContext::system());
+
+    create_test_node_type(&*storage, "test:Folder", vec![], false, true).await;
+    create_test_node_type(
+        &*storage,
+        "test:Article",
+        vec![create_property_schema(
+            "title",
+            PropertyType::String,
+            true,
+            false,
+        )],
+        false,
+        true,
+    )
+    .await;
+
+    let mut props = HashMap::new();
+    props.insert("title".to_string(), PropertyValue::String("Hi".to_string()));
+    let node = create_test_node("leaf", "test:Article", props);
+
+    // Parent path /reports/2026 does not exist yet -- it must be auto-created.
+    let created = service
+        .add_deep_node_typed("/reports/2026", node, "test:Folder")
+        .await
+        .expect("deep create should succeed");
+    assert_eq!(created.path, "/reports/2026/leaf");
+
+    // Ancestors are auto-created using the requested folder type.
+    let reports = service
+        .get_by_path("/reports")
+        .await
+        .unwrap()
+        .expect("/reports should be auto-created");
+    assert_eq!(reports.node_type, "test:Folder");
+    let y2026 = service
+        .get_by_path("/reports/2026")
+        .await
+        .unwrap()
+        .expect("/reports/2026 should be auto-created");
+    assert_eq!(y2026.node_type, "test:Folder");
+}
+
+#[tokio::test]
+async fn test_upsert_deep_node_creates_then_updates_in_place() {
+    use raisin_models::auth::AuthContext;
+    let storage = setup_storage();
+    let service = NodeService::new(storage.clone()).with_auth(AuthContext::system());
+
+    create_test_node_type(&*storage, "test:Folder", vec![], false, true).await;
+    create_test_node_type(
+        &*storage,
+        "test:Doc",
+        vec![create_property_schema(
+            "title",
+            PropertyType::String,
+            false,
+            false,
+        )],
+        false,
+        true,
+    )
+    .await;
+
+    // First upsert: node + ancestors created.
+    let mut props = HashMap::new();
+    props.insert("title".to_string(), PropertyValue::String("v1".to_string()));
+    let mut node = create_test_node("doc", "test:Doc", props);
+    node.id = "doc-1".to_string();
+    node.path = "/space/docs/doc".to_string();
+
+    let first = service
+        .upsert_deep_node("/space/docs", node, "test:Folder")
+        .await
+        .expect("first upsert should succeed");
+    assert_eq!(first.path, "/space/docs/doc");
+
+    // Second upsert at the same path: should update in place, reusing the id.
+    let mut props2 = HashMap::new();
+    props2.insert("title".to_string(), PropertyValue::String("v2".to_string()));
+    let mut node2 = create_test_node("doc", "test:Doc", props2);
+    node2.path = "/space/docs/doc".to_string();
+
+    let second = service
+        .upsert_deep_node("/space/docs", node2, "test:Folder")
+        .await
+        .expect("second upsert should succeed");
+    assert_eq!(second.id, first.id, "upsert-by-path should reuse the id");
+
+    let fetched = service
+        .get_by_path("/space/docs/doc")
+        .await
+        .unwrap()
+        .expect("node should exist");
+    assert_eq!(
+        fetched.properties.get("title"),
+        Some(&PropertyValue::String("v2".to_string())),
+        "second upsert should update the title in place"
+    );
+}

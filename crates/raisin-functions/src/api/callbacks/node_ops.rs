@@ -31,6 +31,18 @@ pub type NodeGetByIdCallback = Arc<
         + Sync,
 >;
 
+/// Callback for node revision-history operations (git-style "file history")
+pub type NodeHistoryCallback = Arc<
+    dyn Fn(
+            String,      // workspace
+            String,      // node_id
+            Option<u32>, // limit
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Value>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Callback for node creation
 pub type NodeCreateCallback = Arc<
     dyn Fn(

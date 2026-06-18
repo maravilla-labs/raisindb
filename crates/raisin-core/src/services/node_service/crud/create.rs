@@ -183,9 +183,8 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             }
         }
 
-        if let Some(a) = &self.audit {
-            a.write(&node, AuditLogAction::Update, None).await?;
-        }
+        self.audit_write(&node, AuditLogAction::Update, None)
+            .await?;
 
         tracing::info!(
             node_id = %node.id,
@@ -338,9 +337,8 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             }
         }
 
-        if let Some(a) = &self.audit {
-            a.write(&node, AuditLogAction::Update, None).await?;
-        }
+        self.audit_write(&node, AuditLogAction::Update, None)
+            .await?;
 
         ctx.commit().await?;
 

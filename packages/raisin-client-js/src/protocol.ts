@@ -459,6 +459,18 @@ export interface NodeCreatePayload {
 }
 
 /**
+ * Deep create/upsert payload. `path` is the full node path; missing ancestor
+ * folders are auto-created as `parent_node_type` (defaults to `raisin:Folder`).
+ */
+export interface NodeCreateDeepPayload {
+  node_type: string;
+  path: string;
+  properties: Record<string, PropertyValue>;
+  content?: unknown;
+  parent_node_type?: string;
+}
+
+/**
  * Node update payload
  */
 export interface NodeUpdatePayload {
@@ -479,6 +491,63 @@ export interface NodeDeletePayload {
  */
 export interface NodeGetPayload {
   node_id: string;
+}
+
+/**
+ * Node history payload (git-style "file history").
+ * Identify the node by either `node_id` or `path`.
+ */
+export interface NodeHistoryPayload {
+  node_id?: string;
+  path?: string;
+  /** Maximum number of revisions to return (newest first). Unbounded if omitted. */
+  limit?: number;
+}
+
+/**
+ * A single entry in a node's revision history (newest first).
+ *
+ * Use `revision` with `atRevision(revision)` reads to fetch the full snapshot
+ * of that historical version.
+ */
+export interface RevisionEntry {
+  /** HLC revision string ("timestamp-counter"), usable with atRevision(). */
+  revision: string;
+  /** When this revision was written (ISO 8601 string). */
+  updated_at?: string;
+  /** User ID who authored this revision. */
+  updated_by?: string;
+  /** True when the node was deleted at this revision (tombstone). */
+  deleted: boolean;
+}
+
+/**
+ * Audit-log query payload. Identify the node by either `node_id` or `path`.
+ * Audit logs are only produced for NodeTypes marked `auditable`.
+ */
+export interface AuditQueryPayload {
+  node_id?: string;
+  path?: string;
+}
+
+/**
+ * A single audit-log entry for a node.
+ *
+ * Only produced for NodeTypes marked `auditable`. Distinct from a
+ * {@link RevisionEntry} (the always-on structural MVCC history).
+ */
+export interface AuditLogEntry {
+  id: string;
+  node_id: string;
+  path: string;
+  workspace: string;
+  /** User ID that performed the action (the node's `updated_by` at write time). */
+  user_id?: string;
+  /** Action performed, e.g. "Create" | "Update" | "Delete" | "Publish" | … */
+  action: string;
+  /** ISO 8601 timestamp. */
+  timestamp: string;
+  details?: string;
 }
 
 /**

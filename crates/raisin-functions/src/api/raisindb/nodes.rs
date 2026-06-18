@@ -31,6 +31,19 @@ impl RaisinFunctionApi {
         callback(workspace.to_string(), id.to_string()).await
     }
 
+    pub(crate) async fn impl_node_history(
+        &self,
+        workspace: &str,
+        node_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<Value>> {
+        let callback = self.callbacks.node_history.as_ref().ok_or_else(|| {
+            raisin_error::Error::Validation("Node history callback not configured".to_string())
+        })?;
+
+        callback(workspace.to_string(), node_id.to_string(), limit).await
+    }
+
     pub(crate) async fn impl_node_create(
         &self,
         workspace: &str,

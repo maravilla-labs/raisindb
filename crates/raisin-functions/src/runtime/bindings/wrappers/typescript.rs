@@ -372,6 +372,22 @@ interface ResourceUploadData {
   name?: string;
 }
 
+/**
+ * A single entry in a node's revision history (newest first), returned by
+ * raisin.nodes.history(). Use `revision` with an at-revision read to fetch the
+ * full snapshot of that historical version.
+ */
+interface RaisinRevisionEntry {
+  /** HLC revision string ("timestamp-counter"). */
+  revision: string;
+  /** When this revision was written (ISO 8601 string). */
+  updated_at?: string;
+  /** User ID who authored this revision. */
+  updated_by?: string;
+  /** True when the node was deleted at this revision (tombstone). */
+  deleted: boolean;
+}
+
 interface NodeCreateData {
   name?: string;
   path?: string;
@@ -458,6 +474,7 @@ fn generate_nodes_namespace(
             "nodes_get" | "nodes_getById" => Some("Promise<RaisinNode | null>"),
             "nodes_create" | "nodes_update" | "nodes_move" => Some("Promise<RaisinNode>"),
             "nodes_query" | "nodes_getChildren" => Some("Promise<RaisinNode[]>"),
+            "nodes_history" => Some("Promise<RaisinRevisionEntry[]>"),
             _ => None,
         };
 
@@ -467,6 +484,17 @@ fn generate_nodes_namespace(
             code.push_str(&generate_ts_method(method, 4));
         }
     }
+
+    // createDeep / upsertDeep - JS-composite methods from api_wrapper.js (auto-managed
+    // transaction), not backed by a registry descriptor.
+    code.push_str("    /**\n");
+    code.push_str("     * Create a node under parentPath, auto-creating any missing ancestor folders.\n");
+    code.push_str("     */\n");
+    code.push_str("    function createDeep(workspace: string, parentPath: string, data: any, parentNodeType?: string): Promise<RaisinNode>;\n");
+    code.push_str("    /**\n");
+    code.push_str("     * Upsert a node by path (create-or-update), auto-creating any missing ancestor folders.\n");
+    code.push_str("     */\n");
+    code.push_str("    function upsertDeep(workspace: string, data: any, parentNodeType?: string): Promise<void>;\n");
 
     // beginTransaction - from api_wrapper.js, not in registry
     code.push_str("    /**\n");
@@ -661,6 +689,14 @@ mod tests {
         assert!(
             dts.contains("function beginTransaction"),
             "Should have beginTransaction"
+        );
+        assert!(
+            dts.contains("function createDeep"),
+            "Should have top-level createDeep"
+        );
+        assert!(
+            dts.contains("function upsertDeep"),
+            "Should have top-level upsertDeep"
         );
         assert!(
             dts.contains("resize(options: ResizeOptions)"),

@@ -6,14 +6,19 @@ import {
   Node,
   PropertyValue,
   NodeCreatePayload,
+  NodeCreateDeepPayload,
   NodeUpdatePayload,
   NodeDeletePayload,
   NodeGetPayload,
+  NodeHistoryPayload,
   NodeQueryPayload,
   RelationAddPayload,
   RelationRemovePayload,
   RelationsGetPayload,
   NodeRelationships,
+  RevisionEntry,
+  AuditQueryPayload,
+  AuditLogEntry,
 } from './protocol';
 
 /**
@@ -28,6 +33,14 @@ export interface NodeCreateOptions {
   properties?: Record<string, PropertyValue>;
   /** Node content (optional) */
   content?: unknown;
+}
+
+/**
+ * Options for creating/upserting a node with auto-created ancestor folders
+ */
+export interface NodeCreateDeepOptions extends NodeCreateOptions {
+  /** NodeType used for auto-created ancestor folders (defaults to `raisin:Folder`) */
+  parentNodeType?: string;
 }
 
 /**
@@ -86,6 +99,44 @@ export class NodeOperations {
   }
 
   /**
+   * Create a node, auto-creating any missing ancestor folders.
+   *
+   * @param options - Node creation options (with optional `parentNodeType`)
+   * @returns Created node
+   */
+  async createDeep(options: NodeCreateDeepOptions): Promise<Node> {
+    const payload: NodeCreateDeepPayload = {
+      node_type: options.type,
+      path: options.path,
+      properties: options.properties ?? {},
+      content: options.content,
+      parent_node_type: options.parentNodeType,
+    };
+
+    const result = await this.sendRequest(payload, 'node_create_deep');
+    return result as Node;
+  }
+
+  /**
+   * Upsert a node by path (create-or-update), auto-creating any missing ancestor folders.
+   *
+   * @param options - Node creation options (with optional `parentNodeType`)
+   * @returns Upserted node
+   */
+  async upsertDeep(options: NodeCreateDeepOptions): Promise<Node> {
+    const payload: NodeCreateDeepPayload = {
+      node_type: options.type,
+      path: options.path,
+      properties: options.properties ?? {},
+      content: options.content,
+      parent_node_type: options.parentNodeType,
+    };
+
+    const result = await this.sendRequest(payload, 'node_upsert_deep');
+    return result as Node;
+  }
+
+  /**
    * Update an existing node
    *
    * @param id - Node ID
@@ -139,6 +190,79 @@ export class NodeOperations {
       }
       throw error;
     }
+  }
+
+  /**
+   * List a node's revision history (git-style "file history"), newest first.
+   *
+   * Each entry carries the `revision` (usable with `atRevision()` reads to
+   * fetch the full snapshot), plus when/who and whether the node was deleted
+   * at that revision. Always available regardless of the NodeType `auditable`
+   * flag — it reflects the structural MVCC version history.
+   *
+   * @param id - Node ID
+   * @param options - Optional `{ limit }` to cap the number of revisions
+   * @returns Array of revision entries (newest first)
+   *
+   * @example
+   * ```typescript
+   * const history = await ws.nodes().history(nodeId, { limit: 50 });
+   * for (const rev of history) {
+   *   const snapshot = await ws.atRevision(rev.revision).nodes().get(nodeId);
+   * }
+   * ```
+   */
+  async history(id: string, options?: { limit?: number }): Promise<RevisionEntry[]> {
+    const payload: NodeHistoryPayload = {
+      node_id: id,
+      limit: options?.limit,
+    };
+    const result = await this.sendRequest(payload, 'node_history');
+    return (result as RevisionEntry[]) ?? [];
+  }
+
+  /**
+   * List a node's revision history by path (newest first).
+   *
+   * @param path - Node path
+   * @param options - Optional `{ limit }` to cap the number of revisions
+   * @returns Array of revision entries (newest first)
+   */
+  async historyByPath(path: string, options?: { limit?: number }): Promise<RevisionEntry[]> {
+    const payload: NodeHistoryPayload = {
+      path,
+      limit: options?.limit,
+    };
+    const result = await this.sendRequest(payload, 'node_history');
+    return (result as RevisionEntry[]) ?? [];
+  }
+
+  /**
+   * Query a node's audit-log entries by ID.
+   *
+   * Audit logs are only produced for NodeTypes marked `auditable`. This is
+   * distinct from {@link history}, which is the always-on structural revision
+   * history available for every node.
+   *
+   * @param id - Node ID
+   * @returns Array of audit-log entries
+   */
+  async auditLog(id: string): Promise<AuditLogEntry[]> {
+    const payload: AuditQueryPayload = { node_id: id };
+    const result = await this.sendRequest(payload, 'audit_query');
+    return (result as AuditLogEntry[]) ?? [];
+  }
+
+  /**
+   * Query a node's audit-log entries by path.
+   *
+   * @param path - Node path
+   * @returns Array of audit-log entries
+   */
+  async auditLogByPath(path: string): Promise<AuditLogEntry[]> {
+    const payload: AuditQueryPayload = { path };
+    const result = await this.sendRequest(payload, 'audit_query');
+    return (result as AuditLogEntry[]) ?? [];
   }
 
   /**

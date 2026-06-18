@@ -4,6 +4,7 @@
 
 use raisin_error::Result;
 use raisin_models::nodes::Node;
+use raisin_storage::transactional::TransactionalContext;
 
 use crate::transaction::RocksDBTransaction;
 
@@ -41,12 +42,39 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         "TRANSACTION: put_node called"
     );
 
-    // Stamp the modification timestamp at the lowest write level: every UPDATE
-    // (existing node) bumps `updated_at`. Creates carry their own `updated_at`
-    // from build time. Previously NO write path stamped it on update, so
-    // `updated_at` stayed frozen at creation for the life of a node.
-    if existing_node.is_some() {
+    // Stamp authorship + modification timestamp at the lowest write level so
+    // EVERY write path (NodeService, UpdateBuilder, SQL DML, functions) records
+    // them uniformly — previously most paths left created_by/updated_by as None.
+    //
+    // Resolve the acting identity: prefer the full auth context (which yields
+    // impersonation/ward-aware actor ids via actor_id()), fall back to the raw
+    // actor string, and finally to "anonymous" for embedded/unauthenticated
+    // writes so the field is never silently empty.
+    let actor = tx
+        .get_auth_context()?
+        .map(|a| a.actor_id())
+        .or(tx.get_actor()?)
+        .unwrap_or_else(|| "anonymous".to_string());
+
+    if let Some(existing) = existing_node.as_ref() {
+        // UPDATE: bump updated_at/updated_by, but never let an incoming None wipe
+        // the original creation metadata (SQL UPDATE rebuilds the node without
+        // these fields, and most callers don't carry them through).
         normalized_node.updated_at = Some(chrono::Utc::now());
+        normalized_node.updated_by = Some(actor);
+        if normalized_node.created_by.is_none() {
+            normalized_node.created_by = existing.created_by.clone();
+        }
+        if normalized_node.created_at.is_none() {
+            normalized_node.created_at = existing.created_at;
+        }
+    } else {
+        // CREATE: stamp both authorship fields. created_at/updated_at are carried
+        // from build time by the create paths.
+        normalized_node.updated_by = Some(actor.clone());
+        if normalized_node.created_by.is_none() {
+            normalized_node.created_by = Some(actor);
+        }
     }
 
     // 4a. Check RLS permission

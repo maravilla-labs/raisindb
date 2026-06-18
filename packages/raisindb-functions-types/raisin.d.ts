@@ -180,6 +180,22 @@ interface ResourceUploadData {
   name?: string;
 }
 
+/**
+ * A single entry in a node's revision history (newest first), returned by
+ * raisin.nodes.history(). Use `revision` with an at-revision read to fetch the
+ * full snapshot of that historical version.
+ */
+interface RaisinRevisionEntry {
+  /** HLC revision string ("timestamp-counter"). */
+  revision: string;
+  /** When this revision was written (ISO 8601 string). */
+  updated_at?: string;
+  /** User ID who authored this revision. */
+  updated_by?: string;
+  /** True when the node was deleted at this revision (tombstone). */
+  deleted: boolean;
+}
+
 interface NodeCreateData {
   name?: string;
   path?: string;
@@ -303,9 +319,21 @@ declare namespace raisin {
     function delete(url: string, options?: HttpOptions): Promise<HttpResponse>;
   }
 
+  namespace inventory {
+    function claim(pool: string, n: number, capacity: number): Promise<any>;
+    function release(pool: string, n: number): Promise<number>;
+  }
+
+  namespace locks {
+    function acquire(key: string, ttlMs: number, owner?: string | null): Promise<any>;
+    function release(key: string, token: number): Promise<boolean>;
+    function renew(key: string, token: number, ttlMs: number): Promise<boolean>;
+  }
+
   namespace nodes {
     function get(workspace: string, path: string): Promise<RaisinNode | null>;
     function getById(workspace: string, id: string): Promise<RaisinNode | null>;
+    function history(workspace: string, id: string, limit?: number | null): Promise<RaisinRevisionEntry[]>;
     function create(workspace: string, parentPath: string, data: any): Promise<RaisinNode>;
     function update(workspace: string, path: string, data: any): Promise<RaisinNode>;
     function delete(workspace: string, path: string): Promise<void>;
@@ -315,6 +343,14 @@ declare namespace raisin {
     function getChildren(workspace: string, parentPath: string, limit?: number | null): Promise<RaisinNode[]>;
     function applyChildOrder(workspace: string, parentPath: string, sourceBranch: string, targetBranch: string): Promise<void>;
     function addResource(workspace: string, nodePath: string, propertyPath: string, uploadData: any): Promise<any>;
+    /**
+     * Create a node under parentPath, auto-creating any missing ancestor folders.
+     */
+    function createDeep(workspace: string, parentPath: string, data: any, parentNodeType?: string): Promise<RaisinNode>;
+    /**
+     * Upsert a node by path (create-or-update), auto-creating any missing ancestor folders.
+     */
+    function upsertDeep(workspace: string, data: any, parentNodeType?: string): Promise<void>;
     /**
      * Start a transaction for atomic multi-node operations.
      * @example

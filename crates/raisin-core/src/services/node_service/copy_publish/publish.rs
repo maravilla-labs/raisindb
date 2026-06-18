@@ -35,9 +35,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         node.published_by = Some(actor);
         self.update_node(node.clone()).await?;
 
-        if let Some(a) = &self.audit {
-            a.write(&node, AuditLogAction::Publish, None).await?;
-        }
+        self.audit_write(&node, AuditLogAction::Publish, None)
+            .await?;
 
         let current_revision = self
             .storage
@@ -106,18 +105,16 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         root.published_at = Some(chrono::Utc::now());
         root.published_by = Some(actor.clone());
         self.update_node(root.clone()).await?;
-        if let Some(a) = &self.audit {
-            a.write(&root, AuditLogAction::Publish, None).await?;
-        }
+        self.audit_write(&root, AuditLogAction::Publish, None)
+            .await?;
 
         // Publish all descendants
         for mut node in descendants {
             node.published_at = Some(chrono::Utc::now());
             node.published_by = Some(actor.clone());
             self.update_node(node.clone()).await?;
-            if let Some(a) = &self.audit {
-                a.write(&node, AuditLogAction::Publish, None).await?;
-            }
+            self.audit_write(&node, AuditLogAction::Publish, None)
+                .await?;
         }
 
         Ok(())
@@ -136,9 +133,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         node.published_by = None;
         self.update_node(node.clone()).await?;
 
-        if let Some(a) = &self.audit {
-            a.write(&node, AuditLogAction::Unpublish, None).await?;
-        }
+        self.audit_write(&node, AuditLogAction::Unpublish, None)
+            .await?;
 
         let current_revision = self
             .storage
@@ -178,9 +174,8 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             n.published_at = None;
             n.published_by = None;
             self.update_node(n.clone()).await?;
-            if let Some(a) = &self.audit {
-                a.write(&n, AuditLogAction::Unpublish, None).await?;
-            }
+            self.audit_write(&n, AuditLogAction::Unpublish, None)
+                .await?;
         }
         Ok(())
     }

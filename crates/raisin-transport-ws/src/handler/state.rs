@@ -161,6 +161,14 @@ where
 
     /// Shared schema stats cache for data-driven selectivity estimation
     pub schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
+
+    /// Atomic locks / inventory manager. `None` when the subsystem is disabled.
+    pub lock_manager: Option<raisin_locks::LockManagerHandle>,
+
+    /// Audit-log query store (shared with the HTTP transport). Used by the
+    /// `audit_query` request to read a node's audit-log entries. Audit *writes*
+    /// are produced globally by the event-bus `AuditEventHandler`, not here.
+    pub audit: Arc<raisin_audit::InMemoryAuditRepo>,
 }
 
 impl<S, B> WsState<S, B>
@@ -187,6 +195,8 @@ where
             Arc<raisin_hnsw::HnswIndexingEngine>,
         >,
         schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
+        lock_manager: Option<raisin_locks::LockManagerHandle>,
+        audit: Arc<raisin_audit::InMemoryAuditRepo>,
     ) -> Self {
         let event_bus = storage.event_bus();
         let auth_service = Arc::new(JwtAuthService::new(&config.jwt_secret));
@@ -225,6 +235,8 @@ where
             #[cfg(feature = "storage-rocksdb")]
             hnsw_engine,
             schema_stats_cache,
+            lock_manager,
+            audit,
         }
     }
 

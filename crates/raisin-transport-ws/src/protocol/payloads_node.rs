@@ -21,6 +21,21 @@ pub struct NodeCreatePayload {
     pub content: Option<serde_json::Value>,
 }
 
+/// Create (or upsert) a node, auto-creating any missing ancestor folders.
+///
+/// `path` is the full node path; missing ancestors are created as
+/// `parent_node_type` (defaults to `raisin:Folder`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeCreateDeepPayload {
+    pub node_type: String,
+    pub path: String,
+    pub properties: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_node_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeUpdatePayload {
     pub node_id: String,
@@ -37,6 +52,32 @@ pub struct NodeDeletePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeGetPayload {
     pub node_id: String,
+}
+
+/// Request a node's revision history (git-style "file history"), newest first.
+///
+/// Identify the node by either `node_id` or `path` (at least one required).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeHistoryPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Maximum number of revisions to return (newest first). Unbounded if omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Query a node's audit-log entries.
+///
+/// Identify the node by either `node_id` or `path` (at least one required).
+/// Audit logs are only produced for NodeTypes marked `auditable`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditQueryPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

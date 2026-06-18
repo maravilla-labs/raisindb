@@ -55,7 +55,12 @@ export type { WorkspaceCreateOptions, WorkspaceUpdateOptions } from './workspace
 
 // Node operations
 export { NodeOperations } from './nodes';
-export type { NodeCreateOptions, NodeUpdateOptions, NodeQueryOptions } from './nodes';
+export type {
+  NodeCreateOptions,
+  NodeCreateDeepOptions,
+  NodeUpdateOptions,
+  NodeQueryOptions,
+} from './nodes';
 
 // Transactions
 export { Transaction } from './transactions';
@@ -115,9 +120,14 @@ export type {
   NodeRelationships,
   PropertyValue,
   NodeCreatePayload,
+  NodeCreateDeepPayload,
   NodeUpdatePayload,
   NodeDeletePayload,
   NodeGetPayload,
+  NodeHistoryPayload,
+  RevisionEntry,
+  AuditQueryPayload,
+  AuditLogEntry,
   NodeQueryPayload,
   RelationAddPayload,
   RelationRemovePayload,
