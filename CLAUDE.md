@@ -119,6 +119,65 @@ Notes:
   is unbuilt/stale it can still return zero rows — so when in doubt, use the cast
   form.
 
+## Node Revision History & Authorship
+
+**Authorship is stamped at the transaction layer.** `created_by` / `updated_by`
+(and `updated_at`) are filled in the two low-level write functions every path
+funnels through: `add_node.rs` (the optimized CREATE path) and `put_node.rs`
+(create-or-update), both under `raisin-rocksdb/.../create/core/`. They resolve
+the actor from the transaction's auth context (`actor_id()`) → raw actor →
+`"anonymous"`. `put_node` preserves the original `created_by`/`created_at` on
+update. Don't re-stamp these in higher layers — and if you add a new low-level
+write path, stamp it there too.
+
+**Revision history (git-style "file history")** lists a node's MVCC revisions,
+newest first, via `NodeService::history(id, limit)` →
+`NodeRepository::get_node_history` (reuses `get_history`). Entries are lightweight
+(`NodeRevisionEntry { revision, updated_at, updated_by, deleted }`); use the
+`revision` with the `rev/{revision}` time-travel reads to fetch a full snapshot.
+Always available regardless of `auditable` — it's structural, not opt-in.
+Surfaces:
+- **HTTP**: `GET /api/history/{repo}/{branch}/{ws}/by-id/{id}` and `/{*node_path}` (`?limit=`)
+- **WS**: `node_history` request (`{ node_id | path, limit }`)
+- **JS SDK**: `ws.nodes().history(id, { limit })` / `historyByPath(path, …)`
+- **Functions**: `raisin.nodes.history(workspace, id, limit?)`
+
+**The `auditable` NodeType flag gates the audit log** (not history). Audit-log
+entries are written only when an audit sink is configured AND the node's NodeType
+has `auditable = true`, enforced in `NodeService::audit_write` (`node_service/core.rs`).
+Non-auditable types produce no audit-log entries but still have full MVCC history.
+The audit sink (`RepoAuditAdapter` → `InMemoryAuditRepo`) is built once in `main.rs`
+and shared by both transports: HTTP and WS each wire it via `NodeService::with_audit`,
+and the same `audit_repo` backs the read APIs. Query audit logs via:
+- **HTTP**: `GET /api/audit/{repo}/{branch}/{ws}/by-id/{id}` and `/{*node_path}`
+- **WS**: `audit_query` request (`{ node_id | path }`)
+The adapter records `node.updated_by` as the log's `user_id`, so audit authorship is
+reliable now that authorship is stamped at the transaction layer (above).
+
+## Atomic Locks & Inventory (`raisin-locks`)
+
+Backend-pluggable acquire / tie-breaker primitive for ticket-sale-style workloads.
+Opt-in via the `[locks]` config section (`enabled`, `backend = "inprocess" | "redis"`).
+Build with `--features locks-redis` (server) to enable the Redis backend.
+
+- **Lease-lock**: `try_acquire(key, owner, ttl)` returns a monotonic **fencing
+  token** or `None` (held). Pass the token into the guarded write and reject
+  stale tokens to prevent a paused holder from clobbering newer state.
+- **Counting reservation**: `claim(pool, n, capacity)` atomically decrements a
+  pool, never going below zero — the "N seats left" primitive.
+- **`inprocess` is single-node only.** Multi-node clusters MUST use `redis` or
+  they will oversell; the server logs a warning on `inprocess` + replication.
+- A single `Arc<dyn LockManager>` is built in `main.rs` and shared across all
+  surfaces. Keys are scoped `{tenant}\0{repo}\0{branch}\0{name}` by callers.
+
+Surfaces:
+- **Functions (QuickJS/Starlark)**: `raisin.locks.acquire/release/renew`,
+  `raisin.inventory.claim/release`.
+- **WS node API**: `locks_acquire`/`locks_release`/`locks_renew`/
+  `inventory_claim`/`inventory_release` request types.
+- **HTTP**: `POST /api/{repo}/{branch}/locks/{acquire,release,renew}` and
+  `/inventory/{claim,release}` (409 on contention / sold-out).
+
 ## Code Conventions
 
 - Use `{ workspace = true }` for common dependencies

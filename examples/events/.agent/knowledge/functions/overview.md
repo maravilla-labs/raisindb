@@ -50,7 +50,8 @@ All functions have access to the global `raisin` object.
 | `get(workspace, path)` | Get a node by workspace and path |
 | `getByPath(workspace, path)` | Alias for get |
 | `create(workspace, parentPath, data)` | Create a child node |
-| `createDeep(workspace, parentPath, data)` | Create node and any missing ancestors |
+| `createDeep(workspace, parentPath, data, parentNodeType?)` | Create node and any missing ancestors (ancestors default to `raisin:Folder`) |
+| `upsertDeep(workspace, data, parentNodeType?)` | Create-or-update by path, auto-creating missing ancestors |
 | `update(workspace, path, data)` | Update a node's properties |
 | `delete(workspace, path)` | Delete a node |
 | `move(workspace, fromPath, toPath)` | Move a node to a new parent |

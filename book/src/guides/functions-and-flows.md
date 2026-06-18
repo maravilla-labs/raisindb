@@ -130,44 +130,56 @@ const rows = await raisin.sql.query(sql, params?);
 const count = await raisin.sql.execute(sql, params?);
 ```
 
-#### Transaction Operations -- `raisin.tx.*`
+#### Transaction Operations -- `raisin.nodes.beginTransaction()`
 
-Functions can group multiple operations into atomic transactions:
+Functions can group multiple operations into atomic transactions. Start one with
+`raisin.nodes.beginTransaction()` and call operations on the returned `tx` object (there is
+no `raisin.tx` namespace):
 
 ```javascript
-const txId = await raisin.tx.begin();
+const tx = raisin.nodes.beginTransaction();
 
 try {
-    await raisin.tx.create(txId, workspace, parentPath, nodeData);
-    await raisin.tx.update(txId, workspace, path, updateData);
-    await raisin.tx.delete(txId, workspace, path);
+    tx.create(workspace, parentPath, nodeData);
+    tx.update(workspace, path, updateData);
+    tx.delete(workspace, path);
 
     // Read within transaction (sees uncommitted changes)
-    const node = await raisin.tx.get(txId, workspace, id);
-    const node = await raisin.tx.getByPath(txId, workspace, path);
-    const children = await raisin.tx.listChildren(txId, workspace, parentPath);
+    const node = tx.get(workspace, id);
+    const byPath = tx.getByPath(workspace, path);
+    const children = tx.listChildren(workspace, parentPath);
 
     // Bulk operations
-    await raisin.tx.add(txId, workspace, data);
-    await raisin.tx.put(txId, workspace, data);
-    await raisin.tx.upsert(txId, workspace, data);
-    await raisin.tx.createDeep(txId, workspace, parentPath, data, parentNodeType);
-    await raisin.tx.upsertDeep(txId, workspace, data, parentNodeType);
+    tx.add(workspace, data);
+    tx.put(workspace, data);
+    tx.upsert(workspace, data);
+    tx.createDeep(workspace, parentPath, data, parentNodeType);
+    tx.upsertDeep(workspace, data, parentNodeType);
 
-    // Move and property updates
-    await raisin.tx.move(txId, workspace, path, newParentPath);
-    await raisin.tx.updateProperty(txId, workspace, path, propertyPath, value);
-    await raisin.tx.deleteById(txId, workspace, id);
+    // Property updates (tx.move is not supported -- see api notes)
+    tx.updateProperty(workspace, path, propertyPath, value);
+    tx.deleteById(workspace, id);
 
     // Set transaction metadata
-    await raisin.tx.setActor(txId, "user-123");
-    await raisin.tx.setMessage(txId, "Batch import completed");
+    tx.setActor("user-123");
+    tx.setMessage("Batch import completed");
 
-    await raisin.tx.commit(txId);
+    tx.commit();
 } catch (e) {
-    await raisin.tx.rollback(txId);
+    tx.rollback();
     throw e;
 }
+```
+
+For the common case of "create a node and any missing ancestor folders" you don't need a
+transaction -- call the top-level helper directly, which manages its own transaction:
+
+```javascript
+// Creates /reports and /reports/2026 as raisin:Folder if absent, then the node.
+const node = raisin.nodes.createDeep(workspace, "/reports/2026", data);
+
+// Create-or-update by path, auto-creating ancestors:
+raisin.nodes.upsertDeep(workspace, { path: "/reports/2026/q2", node_type: "...", ... });
 ```
 
 #### HTTP Operations -- `raisin.http.*` and `fetch`

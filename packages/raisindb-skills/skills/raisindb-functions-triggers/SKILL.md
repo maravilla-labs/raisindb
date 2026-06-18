@@ -94,23 +94,52 @@ properties:
 
 The exported function name must match `entry_file`.
 
-### Trigger-Invoked (receives `context`)
+### Trigger-Invoked (the event is wrapped in `flow_input`)
+
+A `node_event` trigger does **NOT** hand your function a flat `{ path, node }`. The
+event is wrapped in `flow_input`. The full payload:
+
+```jsonc
+{
+  "flow_input": {
+    "event": { "type": "Created|Updated|Deleted|…", "node_id": "…", "node_type": "ws:Type", "node_path": "/foo" },
+    "node":  { "id": "…", "name": "foo", "path": "/foo", "node_type": "…", "properties": { … }, … },
+    "workspace": "myworkspace"
+  },
+  "previous_results": { … }   // present even for a single function_path trigger
+}
+```
 
 ```javascript
 async function handleTaskCompleted(context) {
-  const { event, workspace } = context.flow_input;
+  const { event, node, workspace } = context.flow_input;
   // event.type = "Created" | "Updated" | "Deleted" | ...
   // event.node_path, event.node_id, event.node_type
 
-  const node = await raisin.nodes.get(workspace, event.node_path);
-  if (!node) return { success: false, error: 'Not found' };
+  // The CHANGED NODE (incl. properties) is already in the payload — use it directly.
+  // This also avoids an index lag where a just-Created node isn't fetchable yet:
+  const props = node?.properties ?? (await raisin.nodes.get(workspace, event.node_path))?.properties;
+  if (!props) return { success: false, error: 'Not found' };
 
   // ... process ...
   return { success: true };
 }
 ```
 
-### Directly-Invoked / AI Tool (receives `input`)
+> ⚠️ **#1 trigger mistake: reading the node/path from the wrong place.** From a
+> trigger the path is **only** at `context.flow_input.event.node_path` and the node
+> at `context.flow_input.node` — *not* `context.path`, `context.node`, `context.node_path`,
+> or any flat field (those are the **directly-invoked** shape below). Symptom: the
+> trigger fires and the function returns *success* in the admin console's
+> trigger-evaluation view, but does nothing / returns `not_found` / reads `undefined`,
+> because your handler looked at the top level. Write handlers that accept BOTH shapes
+> if the same function is also invoked manually:
+> `const path = input.equipment_path || input.flow_input?.event?.node_path || input.flow_input?.node?.path;`
+
+### Directly-Invoked / AI Tool (receives a flat `input`)
+
+A manual `db.functions().invokeSync(path, { ... })` (or AI-tool call) passes your
+object **flat** — no `flow_input` wrapper.
 
 ```javascript
 async function handleMoveCard(input) {
@@ -135,7 +164,8 @@ async function handleMoveCard(input) {
 | `get(workspace, path)` | Get node by path |
 | `getById(workspace, id)` | Get node by ID |
 | `create(workspace, parentPath, data)` | Create a child node |
-| `createDeep(workspace, parentPath, data)` | Create node + missing ancestors |
+| `createDeep(workspace, parentPath, data, parentNodeType?)` | Create node + missing ancestors (default `raisin:Folder`) |
+| `upsertDeep(workspace, data, parentNodeType?)` | Create-or-update by path + missing ancestors |
 | `update(workspace, path, data)` | Update node properties |
 | `delete(workspace, path)` | Delete a node |
 | `move(workspace, fromPath, toPath)` | Move a node |
