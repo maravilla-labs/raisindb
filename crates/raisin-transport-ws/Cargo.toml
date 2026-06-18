@@ -58,6 +58,7 @@ reqwest = { workspace = true, optional = true }
 bytes = "1.10.1"
 anyhow.workspace = true
 raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
+raisin-locks = { path = "../raisin-locks" }
 
 [dev-dependencies]
 tower = "0.5"

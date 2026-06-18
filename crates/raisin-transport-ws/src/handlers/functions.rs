@@ -349,6 +349,7 @@ mod inner {
             ai_config_store: None,
             job_registry: None,
             job_data_store: None,
+            lock_manager: state.lock_manager.clone(),
         });
 
         // Build callbacks via canonical create_production_callbacks

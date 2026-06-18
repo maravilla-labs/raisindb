@@ -47,3 +47,11 @@ zip = { version = "2.1", default-features = false, features = ["deflate"] }
 geo = "0.32"
 geojson = { version = "0.24", features = ["geo-types"] }
 geohash = "0.13.1"
+
+# Disk/build tuning — keep target/ from ballooning across feature-set rebuilds.
+# debug info is the largest contributor; deps never need it.
+[profile.dev]
+debug = "line-tables-only"   # enough for panic backtraces with line numbers
+
+[profile.dev.package."*"]
+debug = false                # dependencies: no debug info at all

@@ -17,6 +17,7 @@ pub mod events;
 pub mod flows;
 pub mod functions;
 pub mod http;
+pub mod locks;
 pub mod nodes;
 pub mod notify;
 pub mod pdf;
@@ -41,6 +42,7 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(functions::methods());
     methods.extend(flows::methods());
     methods.extend(notify::methods());
+    methods.extend(locks::methods());
 
     // Resource operations
     methods.extend(resources::methods());
@@ -270,6 +272,12 @@ mod tests {
             "date_format",
             "date_add_days",
             "date_diff_days",
+            // Lock / inventory operations (5)
+            "lock_acquire",
+            "lock_release",
+            "lock_renew",
+            "inventory_claim",
+            "inventory_release",
         ];
 
         let reg = build_registry();
@@ -312,6 +320,7 @@ mod tests {
         let normalized = name
             // Plurals to singular for category prefixes
             .replace("nodes_", "node_")
+            .replace("locks_", "lock_")
             .replace("events_", "event_")
             .replace("tasks_", "task_")
             .replace("functions_", "function_")
@@ -356,6 +365,7 @@ mod tests {
         let method_count = reg.methods().len();
 
         // Expected: 62 methods from FunctionApi (54 original + 7 date methods + 1 notify method)
+        // plus 5 lock/inventory methods.
         // This test helps catch accidental duplicate registrations or missing methods
         assert!(
             method_count >= 58,
@@ -365,8 +375,8 @@ mod tests {
 
         // Upper bound check (shouldn't have too many extra methods)
         assert!(
-            method_count <= 70,
-            "Expected at most 70 methods, got {}. Did you accidentally duplicate some bindings?",
+            method_count <= 80,
+            "Expected at most 80 methods, got {}. Did you accidentally duplicate some bindings?",
             method_count
         );
 

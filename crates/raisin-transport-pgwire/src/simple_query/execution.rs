@@ -78,6 +78,10 @@ where
             engine = engine.with_auth(auth);
         }
 
+        if let Some(ref mgr) = self.lock_manager {
+            engine = engine.with_lock_manager(mgr.clone());
+        }
+
         // Set indexing engines if available
         #[cfg(feature = "indexing")]
         {

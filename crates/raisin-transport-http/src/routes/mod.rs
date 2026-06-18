@@ -13,6 +13,7 @@
 mod admin;
 mod auth;
 mod functions;
+mod locks;
 mod management;
 mod packages;
 mod repository;
@@ -67,6 +68,9 @@ pub fn routes(state: AppState) -> Router {
 
     // Functions, flows, webhooks, triggers
     router = router.merge(functions::function_routes(&state));
+
+    // Atomic locks / inventory
+    router = router.merge(locks::locks_routes(&state));
 
     // Apply unified CORS middleware for all routes (RocksDB only)
     // Implements hierarchical CORS resolution: Repo -> Tenant -> Global

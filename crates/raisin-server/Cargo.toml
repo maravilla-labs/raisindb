@@ -57,6 +57,7 @@ reqwest = { workspace = true, features = ["json"] }
 raisin-ai = { version = "0.1.0", path = "../raisin-ai" }
 raisin-packages = { path = "../raisin-packages" }
 raisin-hlc = { path = "../raisin-hlc" }
+raisin-locks = { path = "../raisin-locks" }
 raisin-deps = { path = "../raisin-deps" }
 include_dir = "0.7"
 zip = "2.2"
@@ -73,6 +74,8 @@ store-memory = ["raisin-transport-http/store-memory", "dep:raisin-storage-memory
 store-mongo = ["raisin-transport-http/store-mongo"]
 storage-rocksdb = ["raisin-transport-http/storage-rocksdb", "dep:raisin-rocksdb", "dep:raisin-replication", "dep:rocksdb", "dep:raisin-indexer", "dep:raisin-hnsw", "dep:raisin-embeddings", "dep:raisin-sql-execution", "dep:raisin-functions"]
 websocket = ["dep:raisin-transport-ws"]
+# Distributed (Redis-backed) lock backend; in-process backend is always available.
+locks-redis = ["raisin-locks/redis"]
 pgwire = ["dep:pgwire", "dep:raisin-transport-pgwire", "raisin-transport-pgwire/indexing"]
 # AI features (forwarded from raisin-ai)
 ai = ["pdf", "pdf-markdown", "candle", "ocr"]

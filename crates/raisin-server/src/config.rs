@@ -130,6 +130,9 @@ pub struct ServerConfigFile {
     /// PostgreSQL wire protocol configuration
     #[serde(default)]
     pub pgwire: PgWireConfig,
+    /// Atomic locks / inventory subsystem configuration
+    #[serde(default)]
+    pub locks: raisin_locks::LocksConfig,
 }
 
 /// HTTP server configuration

@@ -76,6 +76,17 @@ pub trait FunctionApi: Send + Sync {
     /// Get a node by ID
     async fn node_get_by_id(&self, workspace: &str, id: &str) -> Result<Option<Value>>;
 
+    /// List a node's revision history (git-style "file history"), newest first.
+    ///
+    /// Returns an array of revision entries (`revision`, `updated_at`,
+    /// `updated_by`, `deleted`). `limit` caps the number returned.
+    async fn node_history(
+        &self,
+        workspace: &str,
+        node_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<Value>>;
+
     /// Create a new node
     async fn node_create(&self, workspace: &str, parent_path: &str, data: Value) -> Result<Value>;
 
@@ -406,4 +417,30 @@ pub trait FunctionApi: Send + Sync {
 
     /// Execute a SQL statement (admin context - bypasses permission checks)
     async fn admin_sql_execute(&self, sql: &str, params: Vec<Value>) -> Result<i64>;
+
+    // ========== Lock / Inventory Operations ==========
+
+    /// Try once to acquire a lease-lock on `key`. Returns the lock guard
+    /// (`{ key, token, expires_at_ms }`) on success or `None` if held.
+    async fn lock_acquire(
+        &self,
+        key: &str,
+        ttl_ms: i64,
+        owner: Option<String>,
+    ) -> Result<Option<Value>>;
+
+    /// Release a lease-lock held with the given fencing `token`. Returns whether
+    /// the lock was actually released (false if already gone / not owner).
+    async fn lock_release(&self, key: &str, token: i64) -> Result<bool>;
+
+    /// Renew (extend) a lease-lock held with `token`. Returns false if the lease
+    /// was already lost.
+    async fn lock_renew(&self, key: &str, token: i64, ttl_ms: i64) -> Result<bool>;
+
+    /// Atomically claim `n` units from inventory `pool` (seeded to `capacity` on
+    /// first touch). Returns `{ remaining }` on success or `None` if sold out.
+    async fn inventory_claim(&self, pool: &str, n: i64, capacity: i64) -> Result<Option<Value>>;
+
+    /// Return `n` units to inventory `pool`. Returns the new remaining count.
+    async fn inventory_release(&self, pool: &str, n: i64) -> Result<i64>;
 }

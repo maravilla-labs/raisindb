@@ -103,6 +103,9 @@ pub struct ExecutionContext<S: Storage> {
     pub function_invoke: Option<crate::engine::FunctionInvokeCallback>,
     /// Optional callback for sync function invocation (INVOKE_SYNC)
     pub function_invoke_sync: Option<crate::engine::FunctionInvokeSyncCallback>,
+    /// Atomic lock / inventory manager for RAISIN_TRY_ACQUIRE/RAISIN_CLAIM/etc.
+    /// `None` when the locks subsystem is disabled.
+    pub lock_manager: Option<Arc<dyn raisin_locks::LockManager>>,
 }
 
 impl<S: Storage> ExecutionContext<S> {
@@ -138,12 +141,19 @@ impl<S: Storage> ExecutionContext<S> {
             auth_context: None,      // Default: no RLS filtering (system context)
             function_invoke: None,
             function_invoke_sync: None,
+            lock_manager: None,
         }
     }
 
     /// Set the authentication context for RLS filtering
     pub fn with_auth_context(mut self, auth: AuthContext) -> Self {
         self.auth_context = Some(auth);
+        self
+    }
+
+    /// Set the atomic lock / inventory manager
+    pub fn with_lock_manager(mut self, manager: Arc<dyn raisin_locks::LockManager>) -> Self {
+        self.lock_manager = Some(manager);
         self
     }
 
@@ -290,6 +300,7 @@ impl<S: Storage> Clone for ExecutionContext<S> {
             auth_context: self.auth_context.clone(), // Clone auth context for RLS filtering
             function_invoke: self.function_invoke.clone(),
             function_invoke_sync: self.function_invoke_sync.clone(),
+            lock_manager: self.lock_manager.clone(),
         }
     }
 }

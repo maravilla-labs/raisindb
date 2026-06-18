@@ -28,3 +28,20 @@ port = 9002
 peer_id = "node3"
 address = "127.0.0.1"
 port = 9003
+
+# Atomic locks / inventory subsystem (acquire / tie-breaker primitive).
+# Exposed to server-side functions (raisin.locks.* / raisin.inventory.*),
+# the WS node API, and HTTP (/api/{repo}/{branch}/locks|inventory/*).
+[locks]
+enabled = true
+# "inprocess" = single-node only (DashMap). For a multi-node cluster like this
+# one you MUST use "redis", or claims/locks will not coordinate across nodes
+# and will oversell. The server logs a warning if inprocess + replication.
+# NOTE: backend="redis" requires building the server with --features locks-redis.
+backend = "redis"
+reaper_interval_secs = 30
+
+[locks.redis]
+url = "redis://127.0.0.1:6379/0"
+# Key prefix; isolates multiple RaisinDB clusters sharing one Redis.
+namespace = "raisin:locks"

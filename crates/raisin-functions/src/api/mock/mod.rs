@@ -20,6 +20,8 @@ use mock_helpers::*;
 pub struct MockFunctionApi {
     context: Value,
     logs: std::sync::Mutex<Vec<(String, String)>>,
+    /// Real in-process lock manager so lock/inventory mocks behave correctly.
+    locks: raisin_locks::InProcessLockManager,
 }
 
 impl MockFunctionApi {
@@ -28,6 +30,7 @@ impl MockFunctionApi {
         Self {
             context,
             logs: std::sync::Mutex::new(Vec::new()),
+            locks: raisin_locks::InProcessLockManager::new(),
         }
     }
 
@@ -52,6 +55,15 @@ impl FunctionApi for MockFunctionApi {
 
     async fn node_get_by_id(&self, workspace: &str, id: &str) -> Result<Option<Value>> {
         Ok(Some(mock_node(workspace, "/mock-path", id, "raisin:Page")))
+    }
+
+    async fn node_history(
+        &self,
+        _workspace: &str,
+        _node_id: &str,
+        _limit: Option<u32>,
+    ) -> Result<Vec<Value>> {
+        Ok(vec![])
     }
 
     async fn node_create(&self, workspace: &str, parent_path: &str, data: Value) -> Result<Value> {
@@ -512,5 +524,46 @@ impl FunctionApi for MockFunctionApi {
     }
     async fn admin_sql_execute(&self, sql: &str, params: Vec<Value>) -> Result<i64> {
         self.sql_execute(sql, params).await
+    }
+
+    // ========== Lock / Inventory Operations ==========
+
+    async fn lock_acquire(
+        &self,
+        key: &str,
+        ttl_ms: i64,
+        owner: Option<String>,
+    ) -> Result<Option<Value>> {
+        use raisin_locks::LockManager;
+        let owner = owner.unwrap_or_else(|| "mock".to_string());
+        let ttl = std::time::Duration::from_millis(ttl_ms.max(0) as u64);
+        let guard = self.locks.try_acquire(key, &owner, ttl).await?;
+        Ok(guard.map(|g| serde_json::to_value(g).unwrap_or(Value::Null)))
+    }
+
+    async fn lock_release(&self, key: &str, token: i64) -> Result<bool> {
+        use raisin_locks::LockManager;
+        self.locks.release(key, token as u64).await
+    }
+
+    async fn lock_renew(&self, key: &str, token: i64, ttl_ms: i64) -> Result<bool> {
+        use raisin_locks::LockManager;
+        let ttl = std::time::Duration::from_millis(ttl_ms.max(0) as u64);
+        self.locks.renew(key, token as u64, ttl).await
+    }
+
+    async fn inventory_claim(&self, pool: &str, n: i64, capacity: i64) -> Result<Option<Value>> {
+        use raisin_locks::LockManager;
+        let remaining = self
+            .locks
+            .claim(pool, n.max(0) as u64, capacity.max(0) as u64)
+            .await?;
+        Ok(remaining.map(|r| serde_json::json!({ "remaining": r })))
+    }
+
+    async fn inventory_release(&self, pool: &str, n: i64) -> Result<i64> {
+        use raisin_locks::LockManager;
+        let remaining = self.locks.release_claim(pool, n.max(0) as u64).await?;
+        Ok(remaining as i64)
     }
 }

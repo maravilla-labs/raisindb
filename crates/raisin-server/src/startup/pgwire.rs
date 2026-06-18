@@ -88,6 +88,7 @@ where
     pub indexing_engine: Option<Arc<raisin_indexer::TantivyIndexingEngine>>,
     pub hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
     pub schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
+    pub lock_manager: Option<Arc<dyn raisin_locks::LockManager>>,
 }
 
 #[cfg(all(feature = "pgwire", feature = "storage-rocksdb"))]
@@ -118,6 +119,10 @@ where
             handler = handler.with_schema_stats_cache(cache.clone());
         }
 
+        if let Some(ref mgr) = self.lock_manager {
+            handler = handler.with_lock_manager(mgr.clone());
+        }
+
         Arc::new(handler)
     }
 
@@ -130,6 +135,10 @@ where
 
         if let Some(ref cache) = self.schema_stats_cache {
             handler = handler.with_schema_stats_cache(cache.clone());
+        }
+
+        if let Some(ref mgr) = self.lock_manager {
+            handler = handler.with_lock_manager(mgr.clone());
         }
 
         Arc::new(handler)
@@ -152,6 +161,7 @@ pub fn start_pgwire_server(
     indexing_engine: Option<Arc<raisin_indexer::TantivyIndexingEngine>>,
     hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
     schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
+    lock_manager: Option<Arc<dyn raisin_locks::LockManager>>,
     bind_address: &str,
     port: u16,
     max_connections: usize,
@@ -168,6 +178,7 @@ pub fn start_pgwire_server(
         indexing_engine,
         hnsw_engine,
         schema_stats_cache,
+        lock_manager,
     };
 
     // Create pgwire config

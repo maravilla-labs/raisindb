@@ -18,12 +18,14 @@
 //! - [`builder`] - `RaisinFunctionApiCallbacks` builder
 
 mod builder;
+mod lock_ops;
 mod node_ops;
 mod service_ops;
 mod sql_ops;
 mod transaction_ops;
 
 pub use builder::RaisinFunctionApiCallbacks;
+pub use lock_ops::*;
 pub use node_ops::*;
 pub use service_ops::*;
 pub use sql_ops::*;

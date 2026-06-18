@@ -100,6 +100,8 @@ pub struct MergedConfig {
     pub cors_allowed_origins: Vec<String>,
     /// Development mode — allows insecure defaults for secrets.
     pub dev_mode: bool,
+    /// Atomic locks / inventory subsystem configuration
+    pub locks: raisin_locks::LocksConfig,
 }
 
 impl ServerConfig {
@@ -231,6 +233,12 @@ impl ServerConfig {
             .map(|c| c.server.cors_allowed_origins.clone())
             .unwrap_or_default();
 
+        // Locks subsystem config from TOML (no CLI override for now)
+        let locks = toml_config
+            .as_ref()
+            .map(|c| c.locks.clone())
+            .unwrap_or_default();
+
         Ok(MergedConfig {
             port,
             data_dir,
@@ -250,6 +258,7 @@ impl ServerConfig {
             anonymous_enabled,
             cors_allowed_origins,
             dev_mode: self.dev_mode,
+            locks,
         })
     }
 }

@@ -271,9 +271,12 @@ pub enum RequestType {
 
     // Node operations
     NodeCreate,
+    NodeCreateDeep,
+    NodeUpsertDeep,
     NodeUpdate,
     NodeDelete,
     NodeGet,
+    NodeHistory,
     NodeQuery,
     NodeQueryByPath,
     NodeQueryByProperty,
@@ -408,4 +411,11 @@ pub enum RequestType {
     // Function operations
     FunctionInvoke,
     FunctionInvokeSync,
+
+    // Lock / inventory operations
+    LocksAcquire,
+    LocksRelease,
+    LocksRenew,
+    InventoryClaim,
+    InventoryRelease,
 }

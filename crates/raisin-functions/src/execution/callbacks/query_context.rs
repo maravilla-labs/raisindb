@@ -107,6 +107,9 @@ where
         if let Some(hnsw) = &self.deps.hnsw_engine {
             engine = engine.with_hnsw_engine(hnsw.clone());
         }
+        if let Some(mgr) = &self.deps.lock_manager {
+            engine = engine.with_lock_manager(mgr.clone());
+        }
 
         // Use system context if no auth provided (for trigger/function execution)
         let auth = self

@@ -63,6 +63,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         if let Some(ref cb) = self.function_invoke_sync {
             ctx.function_invoke_sync = Some(cb.clone());
         }
+        if let Some(ref mgr) = self.lock_manager {
+            ctx.lock_manager = Some(mgr.clone());
+        }
 
         let stream = execute_plan(&physical_plan, &ctx).await?;
         Ok(stream)

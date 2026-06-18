@@ -246,9 +246,40 @@ globalThis.raisin = {
             const data = JSON.parse(__raisin_internal.nodes_getById(workspace, id));
             return wrapNode(data, workspace);
         },
+        // List a node's revision history (git-style "file history"), newest first.
+        // Returns plain revision entries ({revision, updated_at, updated_by, deleted}),
+        // not node objects. Use the `revision` with an at-revision read to fetch a snapshot.
+        history: (workspace, id, limit) => {
+            return JSON.parse(__raisin_internal.nodes_history(workspace, id, limit));
+        },
         create: (workspace, parent, data) => {
             const result = JSON.parse(__raisin_internal.nodes_create(workspace, parent, JSON.stringify(data)));
             return wrapNode(result, workspace);
+        },
+        // Create a node under parentPath, auto-creating any missing ancestor folders.
+        // Wraps a single-shot transaction (begin -> createDeep -> commit) so it can be
+        // called directly on raisin.nodes without managing a transaction by hand.
+        createDeep: (workspace, parentPath, data, parentNodeType = 'raisin:Folder') => {
+            const tx = globalThis.raisin.nodes.beginTransaction();
+            try {
+                const result = tx.createDeep(workspace, parentPath, data, parentNodeType);
+                tx.commit();
+                return wrapNode(result, workspace);
+            } catch (e) {
+                try { tx.rollback(); } catch (_) {}
+                throw e;
+            }
+        },
+        // Upsert a node by path (create-or-update), auto-creating any missing ancestor folders.
+        upsertDeep: (workspace, data, parentNodeType = 'raisin:Folder') => {
+            const tx = globalThis.raisin.nodes.beginTransaction();
+            try {
+                tx.upsertDeep(workspace, data, parentNodeType);
+                tx.commit();
+            } catch (e) {
+                try { tx.rollback(); } catch (_) {}
+                throw e;
+            }
         },
         update: (workspace, path, data) => {
             const result = JSON.parse(__raisin_internal.nodes_update(workspace, path, JSON.stringify(data)));
@@ -431,6 +462,33 @@ globalThis.raisin = {
     crypto: {
         uuid: () => __raisin_internal.crypto_uuid()
     },
+    // Atomic lease-locks (mutual exclusion with fencing tokens).
+    // Requires the [locks] subsystem to be enabled in server config, else throws.
+    locks: {
+        // acquire(key, ttlMs, owner?) -> { acquired, key?, token?, expires_at_ms? }
+        // Check `.acquired`: true with the fence token, or false on a lost tie-breaker.
+        acquire: (key, ttlMs, owner) => {
+            const r = JSON.parse(__raisin_internal.locks_acquire(key, ttlMs, owner === undefined ? null : owner));
+            if (r && r.error) throw new Error(r.error);
+            return r;
+        },
+        // release(key, token) -> bool (true if released)
+        release: (key, token) => __raisin_internal.locks_release(key, token),
+        // renew(key, token, ttlMs) -> bool (false if the lease was lost)
+        renew: (key, token, ttlMs) => __raisin_internal.locks_renew(key, token, ttlMs),
+    },
+    // Counting reservations (claim N of M units without overselling).
+    inventory: {
+        // claim(pool, n, capacity) -> { claimed, remaining? }
+        // Check `.claimed`: true with `.remaining`, or false when sold out.
+        claim: (pool, n, capacity) => {
+            const r = JSON.parse(__raisin_internal.inventory_claim(pool, n, capacity));
+            if (r && r.error) throw new Error(r.error);
+            return r;
+        },
+        // release(pool, n) -> number (new remaining count)
+        release: (pool, n) => __raisin_internal.inventory_release(pool, n),
+    },
     pdf: {
         // Extract text from PDF - base64Data is the PDF content
         // Returns { text, pages, isScanned, pageCount }
@@ -508,6 +566,9 @@ globalThis.raisin = {
             ai: globalThis.raisin.ai,
             functions: globalThis.raisin.functions,
             tasks: globalThis.raisin.tasks,
+            // locks/inventory have no RLS implications - reuse the same managers
+            locks: globalThis.raisin.locks,
+            inventory: globalThis.raisin.inventory,
             // context remains the same
             context: globalThis.raisin.context
         };

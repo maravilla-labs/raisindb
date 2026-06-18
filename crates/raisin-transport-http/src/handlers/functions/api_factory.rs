@@ -56,6 +56,7 @@ pub(crate) fn build_function_api(
         ai_config_store,
         job_registry: None,
         job_data_store: None,
+        lock_manager: state.lock_manager.clone(),
     });
 
     // Build all callbacks via canonical factory

@@ -21,6 +21,7 @@ mod element_types;
 mod flow_events;
 mod flows;
 mod functions;
+mod locks;
 mod node_types;
 mod nodes;
 mod repositories;
@@ -37,6 +38,7 @@ pub use element_types::*;
 pub use flow_events::*;
 pub use flows::*;
 pub use functions::*;
+pub use locks::*;
 pub use node_types::*;
 pub use nodes::*;
 pub use repositories::*;
@@ -73,9 +75,17 @@ where
 
         // Node operations
         RequestType::NodeCreate => handle_node_create(state, connection_state, request).await,
+        RequestType::NodeCreateDeep => {
+            handle_node_create_deep(state, connection_state, request).await
+        }
+        RequestType::NodeUpsertDeep => {
+            handle_node_upsert_deep(state, connection_state, request).await
+        }
         RequestType::NodeUpdate => handle_node_update(state, connection_state, request).await,
         RequestType::NodeDelete => handle_node_delete(state, connection_state, request).await,
         RequestType::NodeGet => handle_node_get(state, connection_state, request).await,
+        RequestType::NodeHistory => handle_node_history(state, connection_state, request).await,
+        RequestType::AuditQuery => handle_audit_query(state, connection_state, request).await,
         RequestType::NodeQuery => handle_node_query(state, connection_state, request).await,
         RequestType::NodeQueryByPath => {
             handle_node_query_by_path(state, connection_state, request).await
@@ -301,6 +311,17 @@ where
         }
         RequestType::FunctionInvokeSync => {
             handle_function_invoke_sync(state, connection_state, request).await
+        }
+
+        // Lock / inventory operations
+        RequestType::LocksAcquire => handle_locks_acquire(state, connection_state, request).await,
+        RequestType::LocksRelease => handle_locks_release(state, connection_state, request).await,
+        RequestType::LocksRenew => handle_locks_renew(state, connection_state, request).await,
+        RequestType::InventoryClaim => {
+            handle_inventory_claim(state, connection_state, request).await
+        }
+        RequestType::InventoryRelease => {
+            handle_inventory_release(state, connection_state, request).await
         }
 
         // Not yet implemented

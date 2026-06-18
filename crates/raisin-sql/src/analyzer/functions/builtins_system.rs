@@ -8,6 +8,52 @@ pub(super) fn register(registry: &mut FunctionRegistry) {
     register_geospatial(registry);
     register_auth(registry);
     register_invoke(registry);
+    register_locks(registry);
+}
+
+/// Atomic lock / inventory functions. Thin wrappers over the configured
+/// `LockManager` (see `raisin-locks`). All side-effecting, hence non-deterministic.
+fn register_locks(registry: &mut FunctionRegistry) {
+    // RAISIN_TRY_ACQUIRE(key TEXT, ttl_ms BIGINT) -> JSONB {acquired, token, expires_at_ms}
+    registry.register(FunctionSignature {
+        name: "RAISIN_TRY_ACQUIRE".into(),
+        params: vec![DataType::Text, DataType::BigInt],
+        return_type: DataType::JsonB,
+        is_deterministic: false,
+        category: FunctionCategory::System,
+    });
+    // RAISIN_RELEASE(key TEXT, token BIGINT) -> BOOLEAN
+    registry.register(FunctionSignature {
+        name: "RAISIN_RELEASE".into(),
+        params: vec![DataType::Text, DataType::BigInt],
+        return_type: DataType::Boolean,
+        is_deterministic: false,
+        category: FunctionCategory::System,
+    });
+    // RAISIN_RENEW(key TEXT, token BIGINT, ttl_ms BIGINT) -> BOOLEAN
+    registry.register(FunctionSignature {
+        name: "RAISIN_RENEW".into(),
+        params: vec![DataType::Text, DataType::BigInt, DataType::BigInt],
+        return_type: DataType::Boolean,
+        is_deterministic: false,
+        category: FunctionCategory::System,
+    });
+    // RAISIN_CLAIM(pool TEXT, n BIGINT, capacity BIGINT) -> JSONB {claimed, remaining}
+    registry.register(FunctionSignature {
+        name: "RAISIN_CLAIM".into(),
+        params: vec![DataType::Text, DataType::BigInt, DataType::BigInt],
+        return_type: DataType::JsonB,
+        is_deterministic: false,
+        category: FunctionCategory::System,
+    });
+    // RAISIN_RELEASE_CLAIM(pool TEXT, n BIGINT) -> BIGINT (new remaining)
+    registry.register(FunctionSignature {
+        name: "RAISIN_RELEASE_CLAIM".into(),
+        params: vec![DataType::Text, DataType::BigInt],
+        return_type: DataType::BigInt,
+        is_deterministic: false,
+        category: FunctionCategory::System,
+    });
 }
 
 /// System information functions (PostgreSQL compatibility).

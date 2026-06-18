@@ -23,6 +23,7 @@
 
 mod api_admin;
 mod api_fetch;
+mod api_locks;
 mod api_misc;
 mod api_nodes;
 mod api_resources;

@@ -99,6 +99,53 @@ def handler(input):
         assert_eq!(exec_result.output, Some(serde_json::json!("hello")));
     }
 
+    /// Parity with the QuickJS `test_locks_and_inventory_bindings`: `raisin.locks.*`
+    /// and `raisin.inventory.*` are exposed via the shared registry and behave
+    /// identically (guard-or-None, {remaining}-or-None).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_locks_and_inventory_bindings() {
+        let runtime = StarlarkRuntime::new();
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+        let code = r#"
+def handler(input):
+    first = raisin.inventory.claim("flight:1", 1, 2)
+    second = raisin.inventory.claim("flight:1", 1, 2)
+    sold_out = raisin.inventory.claim("flight:1", 1, 2)
+    lock = raisin.locks.acquire("seat:14A", 5000)
+    contended = raisin.locks.acquire("seat:14A", 5000)
+    released = raisin.locks.release("seat:14A", lock["token"])
+    return {
+        "firstClaimed": first["claimed"],
+        "firstRemaining": first["remaining"],
+        "secondRemaining": second["remaining"],
+        "soldOut": sold_out["claimed"],
+        "acquired": lock["acquired"],
+        "acquiredToken": lock["token"],
+        "contended": contended["acquired"],
+        "released": released,
+    }
+"#;
+
+        let context = create_test_context();
+        let metadata = FunctionMetadata::starlark("test-locks");
+
+        let result = runtime
+            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .await
+            .expect("execution ok");
+        assert!(result.success, "function errored: {:?}", result.error);
+        let output = result.output.unwrap();
+        assert_eq!(output["firstClaimed"], true);
+        assert_eq!(output["firstRemaining"], 1);
+        assert_eq!(output["secondRemaining"], 0);
+        assert_eq!(output["soldOut"], false); // sold out → claimed:false
+        assert_eq!(output["acquired"], true);
+        assert!(output["acquiredToken"].as_i64().unwrap() > 0);
+        assert_eq!(output["contended"], false); // contended → acquired:false
+        assert_eq!(output["released"], true);
+    }
+
     #[tokio::test]
     async fn test_execute_with_context() {
         let runtime = StarlarkRuntime::new();

@@ -21,6 +21,7 @@ pub mod events;
 pub mod flows;
 pub mod functions;
 pub mod http;
+pub mod locks;
 pub mod nodes;
 pub mod query_context;
 pub mod resources;
@@ -79,6 +80,7 @@ where
         // Node operations - all routed through SQL for consistent auto-commit
         node_get: Some(nodes::create_node_get(query_ctx.clone())),
         node_get_by_id: Some(nodes::create_node_get_by_id(query_ctx.clone())),
+        node_history: Some(nodes::create_node_history(query_ctx.clone())),
         node_get_children: Some(nodes::create_node_get_children(query_ctx.clone())),
         node_query: Some(nodes::create_node_query(query_ctx.clone())),
         node_create: Some(nodes::create_node_create(query_ctx.clone())),
@@ -235,6 +237,48 @@ where
         pdf_process_from_storage: Some(resources::create_pdf_process_from_storage(
             deps.binary_storage.clone(),
         )),
+
+        // Lock / inventory operations - only available when the subsystem is configured
+        lock_acquire: deps.lock_manager.as_ref().map(|m| {
+            locks::create_lock_acquire(
+                m.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+            )
+        }),
+        lock_release: deps.lock_manager.as_ref().map(|m| {
+            locks::create_lock_release(
+                m.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+            )
+        }),
+        lock_renew: deps.lock_manager.as_ref().map(|m| {
+            locks::create_lock_renew(
+                m.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+            )
+        }),
+        inventory_claim: deps.lock_manager.as_ref().map(|m| {
+            locks::create_inventory_claim(
+                m.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+            )
+        }),
+        inventory_release: deps.lock_manager.as_ref().map(|m| {
+            locks::create_inventory_release(
+                m.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+            )
+        }),
     }
 }
 

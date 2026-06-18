@@ -28,6 +28,7 @@ mod context;
 mod events;
 mod functions;
 mod http;
+mod locks;
 mod network_policy;
 mod nodes;
 mod resources;
@@ -114,6 +115,15 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn node_get_by_id(&self, workspace: &str, id: &str) -> Result<Option<Value>> {
         self.impl_node_get_by_id(workspace, id).await
+    }
+
+    async fn node_history(
+        &self,
+        workspace: &str,
+        node_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<Value>> {
+        self.impl_node_history(workspace, node_id, limit).await
     }
 
     async fn node_create(&self, workspace: &str, parent_path: &str, data: Value) -> Result<Value> {
@@ -504,6 +514,35 @@ impl FunctionApi for RaisinFunctionApi {
     async fn admin_sql_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {
         self.impl_admin_sql_query(sql, params).await
     }
+
+    // ========== Lock / Inventory Operations ==========
+
+    async fn lock_acquire(
+        &self,
+        key: &str,
+        ttl_ms: i64,
+        owner: Option<String>,
+    ) -> Result<Option<Value>> {
+        self.impl_lock_acquire(key, ttl_ms, owner).await
+    }
+
+    async fn lock_release(&self, key: &str, token: i64) -> Result<bool> {
+        self.impl_lock_release(key, token).await
+    }
+
+    async fn lock_renew(&self, key: &str, token: i64, ttl_ms: i64) -> Result<bool> {
+        self.impl_lock_renew(key, token, ttl_ms).await
+    }
+
+    async fn inventory_claim(&self, pool: &str, n: i64, capacity: i64) -> Result<Option<Value>> {
+        self.impl_inventory_claim(pool, n, capacity).await
+    }
+
+    async fn inventory_release(&self, pool: &str, n: i64) -> Result<i64> {
+        self.impl_inventory_release(pool, n).await
+    }
+
+    // ========== Admin SQL (continued) ==========
 
     async fn admin_sql_execute(&self, sql: &str, params: Vec<Value>) -> Result<i64> {
         self.impl_admin_sql_execute(sql, params).await

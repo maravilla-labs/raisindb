@@ -48,7 +48,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 async fn main() {
     // Parse command-line arguments and merge configuration sources
     let cli_config = startup::ServerConfig::parse();
-    let server_config = cli_config.merge().expect("Failed to load configuration");
+    let mut server_config = cli_config.merge().expect("Failed to load configuration");
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
@@ -70,6 +70,17 @@ async fn main() {
         tracing::warn!("  DEV-MODE ENABLED — insecure defaults are allowed.");
         tracing::warn!("  Do NOT use --dev-mode in production!");
         tracing::warn!("============================================================");
+
+        // Default the locks/inventory subsystem on (in-process) for dev-mode so
+        // `raisin.inventory.claim/release` work out of the box without a config
+        // file. A single-node in-process backend is correct for local dev. An
+        // explicitly-enabled `[locks]` section (e.g. backend = redis) is left
+        // untouched; we only flip it on when it would otherwise be disabled.
+        if !server_config.locks.enabled {
+            server_config.locks.enabled = true;
+            server_config.locks.backend = raisin_locks::LockBackend::InProcess;
+            tracing::warn!("  Locks subsystem defaulted to in-process (dev-mode).");
+        }
     } else {
         // In production mode, required secrets must be set
         let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
@@ -245,6 +256,45 @@ async fn main() {
     startup::binary::register_builtin_package_handler(&storage, &bin).await;
 
     // ========================================================================
+    // Locks / inventory subsystem
+    // ========================================================================
+    //
+    // A single shared LockManager is constructed here and handed to every
+    // surface (functions runtime, WS, HTTP) so they all coordinate against the
+    // same source of truth. In-process is single-node only; the Redis backend
+    // is required for correct mutual exclusion across a cluster.
+    let lock_manager: Option<raisin_locks::LockManagerHandle> = match raisin_locks::build(
+        &server_config.locks,
+    )
+    .await
+    {
+        Ok(Some(mgr)) => {
+            tracing::info!(
+                backend = ?server_config.locks.backend,
+                "Locks/inventory subsystem enabled"
+            );
+            if server_config.locks.backend == raisin_locks::LockBackend::InProcess
+                && server_config.replication_enabled
+            {
+                tracing::warn!(
+                    "locks.backend = inprocess while replication is enabled — \
+                         in-process locks do NOT coordinate across cluster nodes and \
+                         will oversell. Use the Redis backend for multi-node deployments."
+                );
+            }
+            Some(mgr)
+        }
+        Ok(None) => {
+            tracing::info!("Locks/inventory subsystem disabled");
+            None
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to initialize locks subsystem; continuing without it");
+            None
+        }
+    };
+
+    // ========================================================================
     // Job system initialization
     // ========================================================================
 
@@ -336,6 +386,7 @@ async fn main() {
                 ai_config_store: Some(Arc::new(storage.tenant_ai_config_repository())),
                 job_registry: Some(storage.job_registry().clone()),
                 job_data_store: Some(storage.job_data_store().clone()),
+                lock_manager: lock_manager.clone(),
             });
 
             let execution_callbacks = ExecutionProvider::create_callbacks_with_deps(
@@ -706,6 +757,19 @@ async fn main() {
 
     let audit_repo = Arc::new(raisin_audit::InMemoryAuditRepo::default());
     let audit_adapter = Arc::new(RepoAuditAdapter::new(audit_repo.clone()));
+
+    // Audit logging is driven by a single event-bus subscriber: every write path
+    // (node API, SQL DML, functions) commits through the transaction layer, which
+    // emits a NodeEvent per change. This handler turns those into audit-log
+    // entries for NodeTypes marked `auditable` — so audit is uniform across all
+    // transports and write surfaces, not just the node API.
+    storage
+        .event_bus()
+        .subscribe(Arc::new(raisin_core::AuditEventHandler::new(
+            audit_repo.clone(),
+            storage.clone(),
+        )));
+
     let ws_svc = Arc::new(WorkspaceService::new(storage.clone()));
 
     // Clone engines for pgwire before they're consumed by HTTP router
@@ -747,6 +811,7 @@ async fn main() {
         #[cfg(feature = "storage-rocksdb")]
         Some(auth_service.clone()),
         Some(schema_stats_cache.clone()),
+        lock_manager.clone(),
     );
 
     let admin_router = Router::new()
@@ -832,6 +897,8 @@ async fn main() {
             #[cfg(feature = "storage-rocksdb")]
             ws_hnsw_engine,
             Some(schema_stats_cache.clone()),
+            lock_manager.clone(),
+            audit_repo.clone(),
         ));
 
         let ws_router = Router::new()
@@ -896,6 +963,7 @@ async fn main() {
                 pgwire_indexing_engine,
                 pgwire_hnsw_engine,
                 Some(schema_stats_cache.clone()),
+                lock_manager.clone(),
                 &server_config.pgwire_bind_address,
                 server_config.pgwire_port,
                 server_config.pgwire_max_connections,
@@ -967,6 +1035,21 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal(batch_token))
         .await
         .expect("Failed to serve HTTP application");
+
+    // Tear down the dedicated job-pool runtimes OFF the async context.
+    //
+    // `main` runs inside the `#[tokio::main]` runtime, and these three runtimes
+    // are owned here, so letting them drop normally at the end of `main` panics:
+    //   "Cannot drop a runtime in a context where blocking is not allowed."
+    // A runtime's `Drop` blocks to join its worker threads, and blocking is
+    // forbidden inside an async context. `shutdown_background()` hands that
+    // teardown to a separate thread, so SIGTERM/Ctrl-C shutdown exits cleanly.
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        for rt in [_rt_runtime, _bg_runtime, _sys_runtime].into_iter().flatten() {
+            rt.shutdown_background();
+        }
+    }
 }
 
 /// Wait for SIGINT (Ctrl-C) or SIGTERM, then cancel the batch

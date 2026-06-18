@@ -31,6 +31,7 @@ static_assertions = "1.1.0"
 postgres-types = "0.2.11"
 raisin-storage = { version = "0.1.0", path = "../raisin-storage" }
 raisin-core = { version = "0.1.0", path = "../raisin-core" }
+raisin-locks = { path = "../raisin-locks" }
 chrono = { workspace = true }
 uuid = { workspace = true }
 

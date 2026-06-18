@@ -8,11 +8,13 @@
 use crate::physical_plan::executor::Row;
 use raisin_core::services::reference_resolver::ReferenceResolver;
 use raisin_error::Error;
+use raisin_locks::LockManager;
 use raisin_models::nodes::properties::{extract_references, PropertyValue, RaisinReference};
 use raisin_sql::analyzer::{BinaryOperator, Expr, Literal, TypedExpr};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use super::core::eval_expr;
 use super::helpers::{
@@ -47,7 +49,15 @@ pub fn eval_expr_async<'a, S: raisin_storage::Storage + 'a>(
                 filter: _,
             } if matches!(
                 name.to_uppercase().as_str(),
-                "EMBEDDING" | "RESOLVE" | "INVOKE" | "INVOKE_SYNC"
+                "EMBEDDING"
+                    | "RESOLVE"
+                    | "INVOKE"
+                    | "INVOKE_SYNC"
+                    | "RAISIN_TRY_ACQUIRE"
+                    | "RAISIN_RELEASE"
+                    | "RAISIN_RENEW"
+                    | "RAISIN_CLAIM"
+                    | "RAISIN_RELEASE_CLAIM"
             ) =>
             {
                 eval_function_async(name, args, row, ctx).await
@@ -323,6 +333,12 @@ async fn eval_function_async<S: raisin_storage::Storage>(
         "INVOKE" => eval_invoke(args, row, ctx).await,
         "INVOKE_SYNC" => eval_invoke_sync(args, row, ctx).await,
 
+        "RAISIN_TRY_ACQUIRE" => eval_raisin_try_acquire(args, row, ctx).await,
+        "RAISIN_RELEASE" => eval_raisin_release(args, row, ctx).await,
+        "RAISIN_RENEW" => eval_raisin_renew(args, row, ctx).await,
+        "RAISIN_CLAIM" => eval_raisin_claim(args, row, ctx).await,
+        "RAISIN_RELEASE_CLAIM" => eval_raisin_release_claim(args, row, ctx).await,
+
         _ => Err(Error::Validation(format!(
             "Unknown async function: {}",
             name
@@ -553,6 +569,225 @@ async fn parse_invoke_args<S: raisin_storage::Storage>(
         None
     };
     Ok((path, input, workspace))
+}
+
+// ── Lock / inventory functions (RAISIN_TRY_ACQUIRE etc.) ────────────────────
+//
+// Thin wrappers over the configured `LockManager` (raisin-locks). Locking is a
+// rare edge case; eventual consistency remains the default for everything else.
+// All are ACL-gated (authenticated, non-anonymous) and TTL-capped to prevent
+// abuse — a held lock is a denial-of-service vector.
+
+/// Maximum lease a SQL caller may request (anti-abuse: no indefinite holds).
+const MAX_LOCK_TTL_MS: i64 = 300_000;
+
+/// Resolve the lock manager from context, or error if the subsystem is disabled.
+fn lock_manager<'a, S: raisin_storage::Storage>(
+    ctx: &'a crate::physical_plan::executor::ExecutionContext<S>,
+) -> Result<&'a std::sync::Arc<dyn LockManager>, Error> {
+    ctx.lock_manager.as_ref().ok_or_else(|| {
+        Error::Validation(
+            "Locks subsystem is disabled. Enable [locks] in server config.".to_string(),
+        )
+    })
+}
+
+/// ACL gate: locks require an authenticated, non-anonymous caller (system
+/// context always allowed). Mirrors the anonymous-deny policy used for ACL DML.
+fn check_lock_permission<S: raisin_storage::Storage>(
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+) -> Result<(), Error> {
+    match &ctx.auth_context {
+        Some(auth) if auth.is_system => Ok(()),
+        Some(auth) if !auth.is_anonymous => Ok(()),
+        Some(_) => Err(Error::Forbidden(
+            "Anonymous users cannot perform lock operations".to_string(),
+        )),
+        None => Err(Error::Forbidden(
+            "Lock operations require authentication".to_string(),
+        )),
+    }
+}
+
+/// Scope a user-supplied key to the current tenant/repo/branch so locks never
+/// collide across scopes (matches the convention in raisin-functions).
+fn scoped_lock_key<S: raisin_storage::Storage>(
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+    key: &str,
+) -> String {
+    format!(
+        "{}\0{}\0{}\0{}",
+        ctx.tenant_id, ctx.repo_id, ctx.branch, key
+    )
+}
+
+async fn eval_text_arg<S: raisin_storage::Storage>(
+    arg: &TypedExpr,
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+    what: &str,
+) -> Result<String, Error> {
+    match eval_expr_async(arg, row, ctx).await? {
+        Literal::Text(s) | Literal::Path(s) => Ok(s),
+        _ => Err(Error::Validation(format!("{what} must be text"))),
+    }
+}
+
+async fn eval_int_arg<S: raisin_storage::Storage>(
+    arg: &TypedExpr,
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+    what: &str,
+) -> Result<i64, Error> {
+    match eval_expr_async(arg, row, ctx).await? {
+        Literal::BigInt(n) => Ok(n),
+        Literal::Int(n) => Ok(n as i64),
+        _ => Err(Error::Validation(format!("{what} must be an integer"))),
+    }
+}
+
+/// Validate & convert a requested TTL, rejecting non-positive and over-cap values.
+fn validate_ttl(ttl_ms: i64) -> Result<Duration, Error> {
+    if ttl_ms <= 0 {
+        return Err(Error::Validation("ttl_ms must be positive".to_string()));
+    }
+    if ttl_ms > MAX_LOCK_TTL_MS {
+        return Err(Error::Validation(format!(
+            "ttl_ms exceeds the maximum lease of {MAX_LOCK_TTL_MS} ms"
+        )));
+    }
+    Ok(Duration::from_millis(ttl_ms as u64))
+}
+
+fn non_negative(n: i64, what: &str) -> Result<u64, Error> {
+    if n < 0 {
+        return Err(Error::Validation(format!("{what} must be non-negative")));
+    }
+    Ok(n as u64)
+}
+
+/// RAISIN_TRY_ACQUIRE(key, ttl_ms) -> JSONB {acquired, token?, expires_at_ms?}
+async fn eval_raisin_try_acquire<S: raisin_storage::Storage>(
+    args: &[TypedExpr],
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+) -> Result<Literal, Error> {
+    if args.len() != 2 {
+        return Err(Error::Validation(
+            "RAISIN_TRY_ACQUIRE requires 2 arguments: (key, ttl_ms)".to_string(),
+        ));
+    }
+    check_lock_permission(ctx)?;
+    let key = eval_text_arg(&args[0], row, ctx, "RAISIN_TRY_ACQUIRE key").await?;
+    let ttl = validate_ttl(eval_int_arg(&args[1], row, ctx, "RAISIN_TRY_ACQUIRE ttl_ms").await?)?;
+    let owner = ctx
+        .auth_context
+        .as_ref()
+        .and_then(|a| a.user_id.clone())
+        .unwrap_or_else(|| "sql".to_string());
+    let mgr = lock_manager(ctx)?;
+    let guard = mgr
+        .try_acquire(&scoped_lock_key(ctx, &key), &owner, ttl)
+        .await?;
+    Ok(Literal::JsonB(match guard {
+        Some(g) => serde_json::json!({
+            "acquired": true,
+            "key": key,
+            "token": g.token,
+            "expires_at_ms": g.expires_at_ms,
+        }),
+        None => serde_json::json!({ "acquired": false }),
+    }))
+}
+
+/// RAISIN_RELEASE(key, token) -> BOOLEAN
+async fn eval_raisin_release<S: raisin_storage::Storage>(
+    args: &[TypedExpr],
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+) -> Result<Literal, Error> {
+    if args.len() != 2 {
+        return Err(Error::Validation(
+            "RAISIN_RELEASE requires 2 arguments: (key, token)".to_string(),
+        ));
+    }
+    check_lock_permission(ctx)?;
+    let key = eval_text_arg(&args[0], row, ctx, "RAISIN_RELEASE key").await?;
+    let token = eval_int_arg(&args[1], row, ctx, "RAISIN_RELEASE token").await? as u64;
+    let mgr = lock_manager(ctx)?;
+    let released = mgr.release(&scoped_lock_key(ctx, &key), token).await?;
+    Ok(Literal::Boolean(released))
+}
+
+/// RAISIN_RENEW(key, token, ttl_ms) -> BOOLEAN
+async fn eval_raisin_renew<S: raisin_storage::Storage>(
+    args: &[TypedExpr],
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+) -> Result<Literal, Error> {
+    if args.len() != 3 {
+        return Err(Error::Validation(
+            "RAISIN_RENEW requires 3 arguments: (key, token, ttl_ms)".to_string(),
+        ));
+    }
+    check_lock_permission(ctx)?;
+    let key = eval_text_arg(&args[0], row, ctx, "RAISIN_RENEW key").await?;
+    let token = eval_int_arg(&args[1], row, ctx, "RAISIN_RENEW token").await? as u64;
+    let ttl = validate_ttl(eval_int_arg(&args[2], row, ctx, "RAISIN_RENEW ttl_ms").await?)?;
+    let mgr = lock_manager(ctx)?;
+    let renewed = mgr.renew(&scoped_lock_key(ctx, &key), token, ttl).await?;
+    Ok(Literal::Boolean(renewed))
+}
+
+/// RAISIN_CLAIM(pool, n, capacity) -> JSONB {claimed, remaining?}
+async fn eval_raisin_claim<S: raisin_storage::Storage>(
+    args: &[TypedExpr],
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+) -> Result<Literal, Error> {
+    if args.len() != 3 {
+        return Err(Error::Validation(
+            "RAISIN_CLAIM requires 3 arguments: (pool, n, capacity)".to_string(),
+        ));
+    }
+    check_lock_permission(ctx)?;
+    let pool = eval_text_arg(&args[0], row, ctx, "RAISIN_CLAIM pool").await?;
+    let n = non_negative(
+        eval_int_arg(&args[1], row, ctx, "RAISIN_CLAIM n").await?,
+        "RAISIN_CLAIM n",
+    )?;
+    let capacity = non_negative(
+        eval_int_arg(&args[2], row, ctx, "RAISIN_CLAIM capacity").await?,
+        "RAISIN_CLAIM capacity",
+    )?;
+    let mgr = lock_manager(ctx)?;
+    let remaining = mgr.claim(&scoped_lock_key(ctx, &pool), n, capacity).await?;
+    Ok(Literal::JsonB(match remaining {
+        Some(r) => serde_json::json!({ "claimed": true, "remaining": r }),
+        None => serde_json::json!({ "claimed": false }),
+    }))
+}
+
+/// RAISIN_RELEASE_CLAIM(pool, n) -> BIGINT (new remaining)
+async fn eval_raisin_release_claim<S: raisin_storage::Storage>(
+    args: &[TypedExpr],
+    row: &Row,
+    ctx: &crate::physical_plan::executor::ExecutionContext<S>,
+) -> Result<Literal, Error> {
+    if args.len() != 2 {
+        return Err(Error::Validation(
+            "RAISIN_RELEASE_CLAIM requires 2 arguments: (pool, n)".to_string(),
+        ));
+    }
+    check_lock_permission(ctx)?;
+    let pool = eval_text_arg(&args[0], row, ctx, "RAISIN_RELEASE_CLAIM pool").await?;
+    let n = non_negative(
+        eval_int_arg(&args[1], row, ctx, "RAISIN_RELEASE_CLAIM n").await?,
+        "RAISIN_RELEASE_CLAIM n",
+    )?;
+    let mgr = lock_manager(ctx)?;
+    let remaining = mgr.release_claim(&scoped_lock_key(ctx, &pool), n).await?;
+    Ok(Literal::BigInt(remaining as i64))
 }
 
 /// Convert a Literal to its string representation for string concatenation

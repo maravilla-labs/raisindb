@@ -139,6 +139,8 @@ pub struct QueryEngine<S: Storage> {
     pub(crate) function_invoke: Option<FunctionInvokeCallback>,
     /// Optional callback for sync function invocation (INVOKE_SYNC)
     pub(crate) function_invoke_sync: Option<FunctionInvokeSyncCallback>,
+    /// Atomic lock / inventory manager for RAISIN_TRY_ACQUIRE/RAISIN_CLAIM/etc.
+    pub(crate) lock_manager: Option<Arc<dyn raisin_locks::LockManager>>,
     /// Default actor for job registration
     pub(crate) default_actor: String,
     /// Repository configuration for locale-aware queries
@@ -181,6 +183,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             restore_tree_registrar: None,
             function_invoke: None,
             function_invoke_sync: None,
+            lock_manager: None,
             default_actor: "anonymous".to_string(),
             repository_config: None,
             auth_context: None,
@@ -245,6 +248,12 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     }
 
     /// Set the function invoke sync callback for INVOKE_SYNC() function
+    /// Set the atomic lock / inventory manager (enables RAISIN_TRY_ACQUIRE etc.)
+    pub fn with_lock_manager(mut self, manager: Arc<dyn raisin_locks::LockManager>) -> Self {
+        self.lock_manager = Some(manager);
+        self
+    }
+
     pub fn with_function_invoke_sync(mut self, cb: FunctionInvokeSyncCallback) -> Self {
         self.function_invoke_sync = Some(cb);
         self
@@ -579,6 +588,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         }
         if let Some(ref cb) = self.function_invoke_sync {
             ctx.function_invoke_sync = Some(cb.clone());
+        }
+        if let Some(ref mgr) = self.lock_manager {
+            ctx.lock_manager = Some(mgr.clone());
         }
 
         // Set function context for system functions (CURRENT_USER)

@@ -130,6 +130,7 @@ where
         ai_config_store: deps.ai_config_store.clone(),
         job_registry: deps.job_registry.clone(),
         job_data_store: deps.job_data_store.clone(),
+        lock_manager: deps.lock_manager.clone(),
     });
 
     // Check if function requires admin escalation (from function metadata)

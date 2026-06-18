@@ -1,0 +1,28 @@
+[package]
+name = "raisin-locks"
+version = "0.1.0"
+edition = "2021"
+description = "Lock management and inventory control (atomic acquire / tie-breaker) for RaisinDB"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enable the Redis-backed distributed lock manager.
+redis = ["dep:redis"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+schemars.workspace = true
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+raisin-error = { path = "../raisin-error" }
+dashmap = "6.1"
+redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

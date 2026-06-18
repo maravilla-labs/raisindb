@@ -5,6 +5,7 @@
 
 //! Builder for assembling all RaisinFunctionApi callbacks
 
+use super::lock_ops::*;
 use super::node_ops::*;
 use super::service_ops::*;
 use super::sql_ops::*;
@@ -15,6 +16,7 @@ use super::transaction_ops::*;
 pub struct RaisinFunctionApiCallbacks {
     pub node_get: Option<NodeGetCallback>,
     pub node_get_by_id: Option<NodeGetByIdCallback>,
+    pub node_history: Option<NodeHistoryCallback>,
     pub node_create: Option<NodeCreateCallback>,
     pub node_update: Option<NodeUpdateCallback>,
     pub node_delete: Option<NodeDeleteCallback>,
@@ -61,6 +63,12 @@ pub struct RaisinFunctionApiCallbacks {
     pub tx_list_children: Option<TxListChildrenCallback>,
     pub tx_move: Option<TxMoveCallback>,
     pub tx_update_property: Option<TxUpdatePropertyCallback>,
+    // Lock / inventory callbacks
+    pub lock_acquire: Option<LockAcquireCallback>,
+    pub lock_release: Option<LockReleaseCallback>,
+    pub lock_renew: Option<LockRenewCallback>,
+    pub inventory_claim: Option<InventoryClaimCallback>,
+    pub inventory_release: Option<InventoryReleaseCallback>,
 }
 
 impl RaisinFunctionApiCallbacks {
@@ -77,6 +85,11 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_node_get_by_id(mut self, callback: NodeGetByIdCallback) -> Self {
         self.node_get_by_id = Some(callback);
+        self
+    }
+
+    pub fn with_node_history(mut self, callback: NodeHistoryCallback) -> Self {
+        self.node_history = Some(callback);
         self
     }
 
@@ -301,6 +314,33 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_tx_update_property(mut self, callback: TxUpdatePropertyCallback) -> Self {
         self.tx_update_property = Some(callback);
+        self
+    }
+
+    // Lock / inventory builder methods
+
+    pub fn with_lock_acquire(mut self, callback: LockAcquireCallback) -> Self {
+        self.lock_acquire = Some(callback);
+        self
+    }
+
+    pub fn with_lock_release(mut self, callback: LockReleaseCallback) -> Self {
+        self.lock_release = Some(callback);
+        self
+    }
+
+    pub fn with_lock_renew(mut self, callback: LockRenewCallback) -> Self {
+        self.lock_renew = Some(callback);
+        self
+    }
+
+    pub fn with_inventory_claim(mut self, callback: InventoryClaimCallback) -> Self {
+        self.inventory_claim = Some(callback);
+        self
+    }
+
+    pub fn with_inventory_release(mut self, callback: InventoryReleaseCallback) -> Self {
+        self.inventory_release = Some(callback);
         self
     }
 }

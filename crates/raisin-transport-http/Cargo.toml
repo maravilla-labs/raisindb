@@ -51,6 +51,7 @@ rocksdb = { version = "0.24.0", optional = true }
 raisin-replication = { version = "0.1.0", path = "../raisin-replication", optional = true }
 tokio-tungstenite = "0.28.0"
 raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
+raisin-locks = { path = "../raisin-locks" }
 reqwest = { workspace = true, features = ["json"] }
 raisin-functions = { path = "../raisin-functions" }
 matchit = { workspace = true }

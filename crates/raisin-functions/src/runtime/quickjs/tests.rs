@@ -725,6 +725,65 @@ async fn test_raisin_nodes_transaction_rollback() {
     assert_eq!(output["rolledBack"], true);
 }
 
+/// Regression: `createDeep`/`upsertDeep` must be available directly on
+/// `raisin.nodes`, not only on a transaction object. The reported bug was
+/// `raisin.nodes.createDeep is not a function` because the method only existed
+/// inside `beginTransaction()`. The top-level helper wraps its own transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_raisin_nodes_create_deep_top_level() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            if (typeof raisin.nodes.createDeep !== 'function') {
+                return { success: false, error: 'createDeep is not a function' };
+            }
+            if (typeof raisin.nodes.upsertDeep !== 'function') {
+                return { success: false, error: 'upsertDeep is not a function' };
+            }
+            const created = raisin.nodes.createDeep('default', '/reports/2026', {
+                name: 'q2',
+                node_type: 'raisin:Folder',
+                properties: { title: 'Q2' }
+            });
+            raisin.nodes.upsertDeep('default', {
+                path: '/reports/2026/q2',
+                name: 'q2',
+                node_type: 'raisin:Folder',
+                properties: { title: 'Q2 updated' }
+            });
+            return { success: true, createdName: created.name };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("create_deep_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({
+        "tenant_id": "tenant1",
+        "repo_id": "repo1",
+        "branch": "main"
+    })));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    for log in &result.logs {
+        println!("[{}] {}", log.level, log.message);
+    }
+
+    assert!(result.success, "Function execution failed");
+    let output = result.output.unwrap();
+    assert_eq!(
+        output["success"], true,
+        "createDeep/upsertDeep should succeed: {:?}",
+        output.get("error")
+    );
+    assert_eq!(output["createdName"], "q2");
+}
+
 // ============= Timeout / interrupt backstop =============
 
 /// A busy loop never yields to the event loop, so `tokio::time::timeout`
@@ -1091,4 +1150,58 @@ async fn test_formdata_class() {
     assert_eq!(output["hasName"], true);
     assert_eq!(output["tags"], serde_json::json!(["rust", "javascript"]));
     assert_eq!(output["missingValue"], serde_json::Value::Null);
+}
+
+/// Regression: `raisin.locks.*` and `raisin.inventory.*` must be wired into the
+/// QuickJS `__raisin_internal` namespace (this was missing — only the shared
+/// registry / Starlark path had them, so JS threw "not a function").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_locks_and_inventory_bindings() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            // Inventory: claim 1 of 2 twice, then sell out.
+            const first = raisin.inventory.claim('flight:1', 1, 2);
+            const second = raisin.inventory.claim('flight:1', 1, 2);
+            const soldOut = raisin.inventory.claim('flight:1', 1, 2);
+
+            // Locks: acquire returns a fence token; second acquire loses.
+            const lock = raisin.locks.acquire('seat:14A', 5000);
+            const contended = raisin.locks.acquire('seat:14A', 5000);
+            const released = raisin.locks.release('seat:14A', lock.token);
+
+            return {
+                firstClaimed: first.claimed,
+                firstRemaining: first.remaining,
+                secondRemaining: second.remaining,
+                soldOut: soldOut.claimed,
+                acquired: lock.acquired,
+                acquiredToken: lock.token,
+                contended: contended.acquired,
+                released: released,
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("test_locks");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["firstClaimed"], true);
+    assert_eq!(output["firstRemaining"], 1);
+    assert_eq!(output["secondRemaining"], 0);
+    assert_eq!(output["soldOut"], false); // sold out → claimed:false
+    assert_eq!(output["acquired"], true);
+    assert!(output["acquiredToken"].as_i64().unwrap() > 0);
+    assert_eq!(output["contended"], false); // contended → acquired:false
+    assert_eq!(output["released"], true);
 }

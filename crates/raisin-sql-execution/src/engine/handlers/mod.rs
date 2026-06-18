@@ -233,6 +233,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         if let Some(ref cb) = self.function_invoke_sync {
             ctx.function_invoke_sync = Some(cb.clone());
         }
+        if let Some(ref mgr) = self.lock_manager {
+            ctx.lock_manager = Some(mgr.clone());
+        }
 
         execute_plan(&physical_plan, &ctx).await
     }
@@ -267,6 +270,13 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         }
         if let Some(ref cb) = self.function_invoke_sync {
             ctx.function_invoke_sync = Some(cb.clone());
+        }
+        if let Some(ref mgr) = self.lock_manager {
+            ctx.lock_manager = Some(mgr.clone());
+        }
+        // Propagate auth so ACL-gated functions (e.g. RAISIN_TRY_ACQUIRE) see the caller.
+        if let Some(ref auth) = self.auth_context {
+            ctx.auth_context = Some(auth.clone());
         }
 
         let empty_row = Row::new();
@@ -397,8 +407,16 @@ fn query_has_invoke_functions(q: &AnalyzedQuery) -> bool {
 fn expr_contains_invoke(expr: &TypedExpr) -> bool {
     match &expr.expr {
         Expr::Function { name, args, .. } => {
-            matches!(name.to_uppercase().as_str(), "INVOKE" | "INVOKE_SYNC")
-                || args.iter().any(|a| expr_contains_invoke(a))
+            matches!(
+                name.to_uppercase().as_str(),
+                "INVOKE"
+                    | "INVOKE_SYNC"
+                    | "RAISIN_TRY_ACQUIRE"
+                    | "RAISIN_RELEASE"
+                    | "RAISIN_RENEW"
+                    | "RAISIN_CLAIM"
+                    | "RAISIN_RELEASE_CLAIM"
+            ) || args.iter().any(|a| expr_contains_invoke(a))
         }
         Expr::BinaryOp { left, right, .. } => {
             expr_contains_invoke(left) || expr_contains_invoke(right)

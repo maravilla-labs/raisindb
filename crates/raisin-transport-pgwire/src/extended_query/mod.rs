@@ -85,6 +85,8 @@ where
     pub(crate) hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
     /// Shared schema stats cache for data-driven selectivity estimation
     pub(crate) schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
+    /// Atomic lock / inventory manager (enables RAISIN_TRY_ACQUIRE etc.)
+    pub(crate) lock_manager: Option<Arc<dyn raisin_locks::LockManager>>,
 }
 
 impl<S, V, P> RaisinExtendedQueryHandler<S, V, P>
@@ -109,6 +111,7 @@ where
             #[cfg(feature = "indexing")]
             hnsw_engine: None,
             schema_stats_cache: None,
+            lock_manager: None,
         }
     }
 
@@ -132,6 +135,12 @@ where
     /// Set the schema stats cache for data-driven selectivity estimation.
     pub fn with_schema_stats_cache(mut self, cache: raisin_core::SharedSchemaStatsCache) -> Self {
         self.schema_stats_cache = Some(cache);
+        self
+    }
+
+    /// Set the atomic lock / inventory manager.
+    pub fn with_lock_manager(mut self, manager: Arc<dyn raisin_locks::LockManager>) -> Self {
+        self.lock_manager = Some(manager);
         self
     }
 }

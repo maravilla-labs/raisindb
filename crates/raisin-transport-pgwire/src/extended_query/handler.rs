@@ -243,6 +243,10 @@ where
             engine = engine.with_auth(auth);
         }
 
+        if let Some(ref mgr) = self.lock_manager {
+            engine = engine.with_lock_manager(mgr.clone());
+        }
+
         // Execute the query using execute_batch for proper support
         let row_stream = engine.execute_batch(&sql).await.map_err(|e| {
             error!("Query execution failed: {}", e);

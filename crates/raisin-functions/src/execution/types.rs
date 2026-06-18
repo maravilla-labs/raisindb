@@ -63,6 +63,10 @@ where
 
     /// Job data store for storing job context (optional - nested function calls won't work without it)
     pub job_data_store: Option<Arc<raisin_rocksdb::JobDataStore>>,
+
+    /// Atomic locks / inventory manager (optional - `raisin.locks`/`raisin.inventory`
+    /// won't work without it)
+    pub lock_manager: Option<raisin_locks::LockManagerHandle>,
 }
 
 /// Configuration for function execution
