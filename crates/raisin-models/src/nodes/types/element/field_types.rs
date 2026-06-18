@@ -173,6 +173,27 @@ impl FieldSchemaBase for FieldSchema {
 }
 
 impl FieldSchema {
+    /// Returns a reference to the shared base field schema (name, index config, etc.).
+    pub fn base(&self) -> &FieldTypeSchema {
+        match self {
+            FieldSchema::TextField { base, .. }
+            | FieldSchema::RichTextField { base, .. }
+            | FieldSchema::NumberField { base, .. }
+            | FieldSchema::DateField { base, .. }
+            | FieldSchema::LocationField { base, .. }
+            | FieldSchema::BooleanField { base, .. }
+            | FieldSchema::MediaField { base, .. }
+            | FieldSchema::ReferenceField { base, .. }
+            | FieldSchema::OptionsField { base, .. }
+            | FieldSchema::JsonObjectField { base }
+            | FieldSchema::SectionField { base, .. }
+            | FieldSchema::ListingField { base, .. }
+            | FieldSchema::TagField { base, .. }
+            | FieldSchema::ElementField { base, .. }
+            | FieldSchema::CompositeField { base, .. } => base,
+        }
+    }
+
     /// Returns `true` if this field is an `ElementField`.
     pub fn is_element_field(&self) -> bool {
         matches!(self, FieldSchema::ElementField { .. })

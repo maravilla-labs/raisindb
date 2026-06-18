@@ -33,6 +33,7 @@ pub(super) fn perform_fulltext_search(
         query: params.q.clone(),
         limit: params.limit * 2, // Get more results for RRF merging
         revision: None,          // HTTP API uses latest/HEAD by default
+        shape_type: None,
     };
 
     // Perform fulltext search

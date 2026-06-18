@@ -86,6 +86,19 @@ where
             .with_catalog(Arc::new(catalog))
             .with_repository_config(repository.config.clone());
 
+        // Wire the indexing engines so full-text (FULLTEXT_MATCH) and vector SQL
+        // work over WebSocket, mirroring the HTTP and pgwire paths. Without this,
+        // such queries fail with "Full-text search requires an indexing engine".
+        #[cfg(feature = "storage-rocksdb")]
+        {
+            if let Some(ref idx) = state.indexing_engine {
+                engine = engine.with_indexing_engine(idx.clone());
+            }
+            if let Some(ref hnsw) = state.hnsw_engine {
+                engine = engine.with_hnsw_engine(hnsw.clone());
+            }
+        }
+
         // Wire schema stats cache for data-driven selectivity estimation
         if let Some(ref cache) = state.schema_stats_cache {
             engine = engine.with_schema_stats_cache(cache.clone());
@@ -358,6 +371,7 @@ where
                     ai_config_store: None,
                     job_registry: None,
                     job_data_store: None,
+                    lock_manager: ws_state.lock_manager.clone(),
                 });
 
                 let callbacks = raisin_functions::execution::callbacks::create_production_callbacks(

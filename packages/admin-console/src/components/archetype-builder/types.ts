@@ -1,3 +1,6 @@
+// Index types a field's value can be included in (mirrors NodeType IndexType)
+export type IndexType = 'Fulltext' | 'Vector' | 'Property'
+
 // Field types matching the Rust FieldSchema enum
 export type FieldType =
   | 'TextField'
@@ -30,6 +33,8 @@ export interface FieldTypeSchema {
   multiple?: boolean
   design_value?: boolean
   translatable?: boolean
+  /** Which indexes this field's value should be included in. Omitted = not indexed. */
+  index?: IndexType[]
   /** Free-form metadata; round-tripped as-is by the backend. */
   meta?: Record<string, any>
 }

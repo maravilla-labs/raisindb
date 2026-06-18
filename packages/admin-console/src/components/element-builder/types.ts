@@ -6,7 +6,7 @@
  */
 
 // Re-export shared types from archetype-builder
-export type { FieldSchema, FieldType, LayoutNode } from '../archetype-builder/types'
+export type { FieldSchema, FieldType, LayoutNode, IndexType } from '../archetype-builder/types'
 
 /**
  * Element type definition for the visual builder.

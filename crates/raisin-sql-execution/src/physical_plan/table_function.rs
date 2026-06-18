@@ -394,6 +394,7 @@ pub async fn execute_table_function<S: Storage + 'static>(
                     query: tantivy_query,
                     limit: 1000, // Default limit for table function
                     revision: max_revision,
+                    shape_type: None,
                 };
 
                 use async_stream::try_stream;
@@ -494,6 +495,7 @@ pub async fn execute_table_function<S: Storage + 'static>(
                             query: crate::physical_plan::fulltext::convert_postgres_query(&query),
                             limit: limit * 2,
                             revision: max_revision,
+                            shape_type: None,
                         };
                         if let Ok(results) = engine.search(&search_query) {
                             for (rank, result) in results.iter().enumerate() {

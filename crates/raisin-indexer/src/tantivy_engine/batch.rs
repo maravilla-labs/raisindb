@@ -5,23 +5,26 @@
 use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
-use raisin_storage::fulltext::FullTextIndexJob;
+use raisin_storage::fulltext::{FullTextIndexJob, NodeIndexPlan};
 
 use super::document::create_document;
 use super::language::register_language_tokenizer;
 use super::properties::flatten_properties;
-use super::schema::build_schema;
 use super::types::{BatchIndexContext, TantivyIndexingEngine};
 
 impl TantivyIndexingEngine {
     /// Batch index multiple nodes with a single Tantivy commit.
+    ///
+    /// Each node is paired with its precomputed [`NodeIndexPlan`] (resolved by the
+    /// caller, which has access to the type definitions), so batch reindexing
+    /// produces the same shape-driven documents as the single-node path.
     pub fn do_batch_index(
         &self,
         context: &BatchIndexContext,
-        nodes: Vec<Node>,
+        node_plans: Vec<(Node, NodeIndexPlan)>,
         delete_node_ids: Vec<String>,
     ) -> Result<usize> {
-        if nodes.is_empty() && delete_node_ids.is_empty() {
+        if node_plans.is_empty() && delete_node_ids.is_empty() {
             return Ok(0);
         }
 
@@ -29,7 +32,7 @@ impl TantivyIndexingEngine {
             tenant_id = %context.tenant_id,
             repo_id = %context.repo_id,
             branch = %context.branch,
-            nodes_to_index = nodes.len(),
+            nodes_to_index = node_plans.len(),
             nodes_to_delete = delete_node_ids.len(),
             "Starting batch index operation"
         );
@@ -43,7 +46,7 @@ impl TantivyIndexingEngine {
             register_language_tokenizer(index, lang)?;
         }
 
-        let (_schema, fields) = build_schema();
+        let fields = &cached.fields;
         let mut writer = Self::get_writer(index)?;
         let mut processed = 0;
 
@@ -53,7 +56,7 @@ impl TantivyIndexingEngine {
             processed += 1;
         }
 
-        for node in &nodes {
+        for (node, plan) in &node_plans {
             let node_id_term = tantivy::Term::from_field_text(fields.node_id, &node.id);
             writer.delete_term(node_id_term);
 
@@ -72,14 +75,15 @@ impl TantivyIndexingEngine {
                 properties_to_index: None,
             };
 
-            let default_content = flatten_properties(&temp_job, &node.properties);
+            let flattened = flatten_properties(plan, &node.properties);
             let default_doc = create_document(
                 &temp_job,
                 node,
                 &context.default_language,
                 &node.name,
-                &default_content,
-                &fields,
+                &flattened.content,
+                &flattened.shape_types,
+                fields,
             );
 
             writer
@@ -105,8 +109,9 @@ impl TantivyIndexingEngine {
                         node,
                         lang_code,
                         translated_name,
-                        &default_content,
-                        &fields,
+                        &flattened.content,
+                        &flattened.shape_types,
+                        fields,
                     );
 
                     writer
@@ -126,7 +131,7 @@ impl TantivyIndexingEngine {
             tenant_id = %context.tenant_id,
             repo_id = %context.repo_id,
             branch = %context.branch,
-            nodes_indexed = nodes.len(),
+            nodes_indexed = node_plans.len(),
             nodes_deleted = delete_node_ids.len(),
             total_processed = processed,
             "Batch index completed successfully"

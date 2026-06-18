@@ -6,35 +6,40 @@ use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::fulltext::{
-    FullTextIndexJob, FullTextSearchQuery, FullTextSearchResult, IndexingEngine,
+    FullTextIndexJob, FullTextSearchQuery, FullTextSearchResult, IndexingEngine, NodeIndexPlan,
 };
 
 use super::document::create_document;
 use super::language::register_language_tokenizer;
 use super::properties::flatten_properties;
-use super::schema::build_schema;
 use super::search::execute_search;
 use super::types::TantivyIndexingEngine;
 use super::utils::copy_dir_recursive;
 
 impl IndexingEngine for TantivyIndexingEngine {
-    fn do_index_node(&self, job: &FullTextIndexJob, node: &Node) -> Result<()> {
+    fn do_index_node_with_plan(
+        &self,
+        job: &FullTextIndexJob,
+        node: &Node,
+        plan: &NodeIndexPlan,
+    ) -> Result<()> {
         let cached = self.get_or_create_index(&job.tenant_id, &job.repo_id, &job.branch)?;
         let index = &cached.index;
         let default_lang = &job.default_language;
 
         register_language_tokenizer(index, default_lang)?;
 
-        let (_schema, fields) = build_schema();
-        let default_content = flatten_properties(job, &node.properties);
+        let fields = &cached.fields;
+        let flattened = flatten_properties(plan, &node.properties);
 
         let default_doc = create_document(
             job,
             node,
             default_lang,
             &node.name,
-            &default_content,
-            &fields,
+            &flattened.content,
+            &flattened.shape_types,
+            fields,
         );
         let mut documents = vec![default_doc];
 
@@ -54,14 +59,14 @@ impl IndexingEngine for TantivyIndexingEngine {
                     })
                     .unwrap_or(&node.name);
 
-                let translated_content = default_content.clone();
                 let doc = create_document(
                     job,
                     node,
                     lang_code,
                     translated_name,
-                    &translated_content,
-                    &fields,
+                    &flattened.content,
+                    &flattened.shape_types,
+                    fields,
                 );
                 documents.push(doc);
             }
@@ -88,7 +93,7 @@ impl IndexingEngine for TantivyIndexingEngine {
         let cached = self.get_or_create_index(&job.tenant_id, &job.repo_id, &job.branch)?;
         let index = &cached.index;
 
-        let (_schema, fields) = build_schema();
+        let fields = &cached.fields;
         let mut writer = Self::get_writer(index)?;
 
         if let Some(node_id) = &job.node_id {

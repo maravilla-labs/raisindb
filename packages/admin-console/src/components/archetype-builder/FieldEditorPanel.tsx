@@ -19,11 +19,13 @@ import {
   ChevronDown,
   Loader2,
   Braces,
+  Database,
 } from 'lucide-react'
 import { FIELD_TYPE_ICONS, FIELD_TYPE_COLORS } from './constants'
 import { cleanObject } from './utils'
 import { elementTypesApi, type ElementType as ApiElementType } from '../../api/elementtypes'
 import KeyValueEditor from '../shared/KeyValueEditor'
+import FieldIndexingPanel from '../shared/FieldIndexingPanel'
 import type { FieldSchema } from './types'
 
 // Simplified element type info for dropdown selection
@@ -44,7 +46,7 @@ interface FieldEditorPanelProps {
   currentElementTypeName?: string
 }
 
-type TabId = 'basic' | 'display' | 'validation' | 'config' | 'meta'
+type TabId = 'basic' | 'display' | 'validation' | 'config' | 'indexing' | 'meta'
 
 interface TabConfig {
   id: TabId
@@ -57,6 +59,7 @@ const TABS: TabConfig[] = [
   { id: 'display', icon: Eye, tooltip: 'Labels & presentation' },
   { id: 'validation', icon: Shield, tooltip: 'Constraints & rules' },
   { id: 'config', icon: Sliders, tooltip: 'Type-specific options' },
+  { id: 'indexing', icon: Database, tooltip: 'Field indexing' },
   { id: 'meta', icon: Braces, tooltip: 'Custom metadata' },
 ]
 
@@ -180,6 +183,13 @@ export default function FieldEditorPanel({
             updateConfig={updateConfig}
             elementTypes={elementTypes}
             loadingElementTypes={loadingElementTypes}
+          />
+        )}
+
+        {activeTab === 'indexing' && (
+          <FieldIndexingPanel
+            value={field.index}
+            onChange={(index) => updateField({ index } as Partial<FieldSchema>)}
           />
         )}
 

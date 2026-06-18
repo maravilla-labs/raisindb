@@ -8,7 +8,6 @@ use raisin_storage::fulltext::{FullTextSearchQuery, FullTextSearchResult};
 use tantivy::schema::Value;
 
 use super::query::{build_hlc_le_query, contains_wildcards, wildcard_to_regex};
-use super::schema::build_schema;
 use super::types::{SchemaFields, TantivyIndexingEngine};
 
 /// Executes a full-text search query against the Tantivy index.
@@ -20,13 +19,13 @@ pub(crate) fn execute_search(
     let index = &cached.index;
     let reader = &cached.reader;
 
-    let (_schema, fields) = build_schema();
+    let fields = &cached.fields;
     let searcher = reader.searcher();
 
     let text_query: Box<dyn tantivy::query::Query> = if contains_wildcards(&query.query) {
-        build_wildcard_query(&query.query, &fields)?
+        build_wildcard_query(&query.query, fields)?
     } else {
-        build_fuzzy_query(index, &query.query, &fields)?
+        build_fuzzy_query(index, &query.query, fields)?
     };
 
     let language_term = tantivy::Term::from_field_text(fields.language, &query.language);
@@ -41,7 +40,7 @@ pub(crate) fn execute_search(
         (tantivy::query::Occur::Must, text_query),
     ];
 
-    add_workspace_filter(&mut must_clauses, &query.workspace_ids, &fields);
+    add_workspace_filter(&mut must_clauses, &query.workspace_ids, fields);
 
     if let Some(revision) = query.revision {
         let revision_query = build_hlc_le_query(
@@ -50,6 +49,19 @@ pub(crate) fn execute_search(
             &revision,
         );
         must_clauses.push((tantivy::query::Occur::Must, revision_query));
+    }
+
+    if let (Some(shape_type), Some(shape_field)) = (&query.shape_type, fields.shape_types) {
+        let shape_term = tantivy::Term::from_field_text(shape_field, shape_type);
+        let shape_query = tantivy::query::TermQuery::new(
+            shape_term,
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+        tracing::debug!("Shape-type exact filter: {}", shape_type);
+        must_clauses.push((
+            tantivy::query::Occur::Must,
+            Box::new(shape_query) as Box<dyn tantivy::query::Query>,
+        ));
     }
 
     let final_query = tantivy::query::BooleanQuery::new(must_clauses);
@@ -62,7 +74,7 @@ pub(crate) fn execute_search(
         )
         .map_err(|e| Error::storage(format!("Search failed: {}", e)))?;
 
-    extract_results(&searcher, top_docs, &fields)
+    extract_results(&searcher, top_docs, fields)
 }
 
 fn build_wildcard_query(

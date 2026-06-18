@@ -14,6 +14,7 @@
 //!
 //! This struct defines the common properties shared by all field types in RaisinDB block schemas.
 
+use crate::nodes::properties::schema::IndexType;
 use crate::nodes::properties::PropertyValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,14 @@ pub struct FieldTypeSchema {
     /// Whether the field is translatable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translatable: Option<bool>,
+    /// Which indexes include this field's value (Fulltext / Vector / Property).
+    ///
+    /// Mirrors `PropertyValueSchema.index` on NodeType properties so element and
+    /// archetype fields are configurable the same way. `None`/empty means the
+    /// field value is NOT indexed — the element/archetype identity is always
+    /// searchable regardless (see shape-driven full-text indexing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<Vec<IndexType>>,
     /// Arbitrary, free-form metadata attached to the field.
     ///
     /// Not interpreted by the database; round-tripped as-is so editors and

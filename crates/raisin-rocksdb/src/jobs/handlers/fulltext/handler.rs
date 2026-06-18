@@ -10,6 +10,7 @@ use raisin_storage::{FullTextIndexJob, JobKind, RepositoryManagementRepository, 
 use std::sync::Arc;
 
 use super::error_counter::{FulltextErrorCounter, FulltextErrorKind};
+use super::plan::{resolve_index_plan, IndexPlanCache};
 use crate::jobs::{IndexKey, IndexLockManager};
 use crate::RocksDBStorage;
 
@@ -31,6 +32,9 @@ pub struct FulltextJobHandler {
     /// `RocksDBStorage` so the HTTP `/fulltext/errors` endpoint can
     /// read the same map without going through the worker.
     pub(super) error_counter: FulltextErrorCounter,
+    /// Per-type indexing-plan cache (shape-driven indexing). Avoids resolving
+    /// NodeType/Archetype/ElementType definitions from storage on every write.
+    pub(super) plan_cache: Arc<IndexPlanCache>,
 }
 
 impl FulltextJobHandler {
@@ -46,7 +50,13 @@ impl FulltextJobHandler {
             tantivy_engine,
             index_lock_manager,
             error_counter,
+            plan_cache: Arc::new(IndexPlanCache::new()),
         }
+    }
+
+    /// Shared accessor for the plan cache, used by the batch path.
+    pub(super) fn plan_cache(&self) -> &Arc<IndexPlanCache> {
+        &self.plan_cache
     }
 
     /// Record a failure on the per-(tenant,repo,branch) counter.
@@ -69,8 +79,47 @@ impl FulltextJobHandler {
             .await;
     }
 
+    /// In dev (tenant `default`), transparently migrate an out-of-date on-disk
+    /// index to the current schema version before processing a job. Production
+    /// (non-default tenants) is left to an explicit operator rebuild — a stale
+    /// index keeps working (degraded: no shape-type data) until then.
+    ///
+    /// Called BEFORE the per-index lock is acquired, since `rebuild_fulltext_index`
+    /// acquires that lock itself (re-entrant locking would deadlock). After a
+    /// rebuild the schema-version sidecar is current, so subsequent jobs no-op.
+    pub(super) async fn maybe_dev_auto_rebuild(&self, context: &JobContext) {
+        if context.tenant_id != "default" {
+            return;
+        }
+        if !self
+            .tantivy_engine
+            .is_index_stale(&context.tenant_id, &context.repo_id, &context.branch)
+        {
+            return;
+        }
+        tracing::info!(
+            tenant_id = %context.tenant_id,
+            repo_id = %context.repo_id,
+            branch = %context.branch,
+            "Dev mode: fulltext index schema out of date, auto-rebuilding"
+        );
+        if let Err(e) = crate::management::fulltext::rebuild_fulltext_index(
+            &self.storage,
+            &self.tantivy_engine,
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "Dev auto-rebuild of fulltext index failed");
+        }
+    }
+
     /// Handle fulltext index job (add/update/delete node)
     pub async fn handle_index(&self, job: &JobInfo, context: &JobContext) -> Result<()> {
+        self.maybe_dev_auto_rebuild(context).await;
+
         let (node_id, operation) = match &job.job_type {
             JobType::FulltextIndex { node_id, operation } => (node_id, operation),
             _ => {
@@ -242,13 +291,43 @@ impl FulltextJobHandler {
             properties_to_index: None,
         };
 
+        // Resolve the shape-driven indexing plan (cached per type). `None` means
+        // the node's type opts out of full-text indexing entirely.
+        let plan = resolve_index_plan(
+            &self.storage,
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+            &node,
+            &self.plan_cache,
+            &raisin_models::nodes::properties::schema::IndexType::Fulltext,
+        )
+        .await?;
+        let Some(plan) = plan else {
+            // Respect the opt-out and remove any stale document for this node.
+            let engine = Arc::clone(&self.tantivy_engine);
+            let delete_job = legacy_job.clone();
+            tokio::task::spawn_blocking(move || engine.do_delete_node(&delete_job))
+                .await
+                .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
+            tracing::debug!(
+                job_id = %job.id,
+                node_id = %node_id,
+                node_type = %node.node_type,
+                "Node type opts out of fulltext indexing; removed from index"
+            );
+            return Ok(());
+        };
+
         let engine = Arc::clone(&self.tantivy_engine);
         let job_clone = legacy_job.clone();
         let node_clone = node.clone();
 
-        tokio::task::spawn_blocking(move || engine.do_index_node(&job_clone, &node_clone))
-            .await
-            .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
+        tokio::task::spawn_blocking(move || {
+            engine.do_index_node_with_plan(&job_clone, &node_clone, &plan)
+        })
+        .await
+        .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;
 
         tracing::trace!(
             job_id = %job.id,

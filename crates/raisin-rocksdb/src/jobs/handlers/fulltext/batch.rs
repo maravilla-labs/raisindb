@@ -5,6 +5,7 @@
 
 use super::error_counter::FulltextErrorKind;
 use super::handler::FulltextJobHandler;
+use super::plan::resolve_index_plan;
 use raisin_error::{Error, Result};
 use raisin_indexer::BatchIndexContext;
 use raisin_models::auth::AuthContext;
@@ -43,6 +44,9 @@ impl FulltextJobHandler {
     }
 
     async fn handle_batch_index_inner(&self, job: &JobInfo, context: &JobContext) -> Result<()> {
+        // Dev-mode transparent schema migration (before acquiring the index lock).
+        self.maybe_dev_auto_rebuild(context).await;
+
         let operation_count = match &job.job_type {
             JobType::FulltextBatchIndex { operation_count } => *operation_count,
             _ => {
@@ -137,7 +141,27 @@ impl FulltextJobHandler {
             }
         }
 
-        let index_count = nodes_to_index.len();
+        // Resolve the shape-driven plan for each node (cached per type). Nodes
+        // whose type opts out of full-text indexing are removed instead.
+        let mut node_plans = Vec::with_capacity(nodes_to_index.len());
+        for node in nodes_to_index {
+            let plan = resolve_index_plan(
+                &self.storage,
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                &node,
+                self.plan_cache(),
+                &raisin_models::nodes::properties::schema::IndexType::Fulltext,
+            )
+            .await?;
+            match plan {
+                Some(plan) => node_plans.push((node, plan)),
+                None => delete_node_ids.push(node.id.clone()),
+            }
+        }
+
+        let index_count = node_plans.len();
         let delete_count = delete_node_ids.len();
 
         // Create batch context
@@ -154,7 +178,7 @@ impl FulltextJobHandler {
         let engine = Arc::clone(&self.tantivy_engine);
 
         let result = tokio::task::spawn_blocking(move || {
-            engine.do_batch_index(&batch_context, nodes_to_index, delete_node_ids)
+            engine.do_batch_index(&batch_context, node_plans, delete_node_ids)
         })
         .await
         .map_err(|e| Error::storage(format!("Blocking task failed: {}", e)))??;

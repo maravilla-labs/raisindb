@@ -22,6 +22,7 @@
 //! healthy index too — Tantivy's `delete_term + add_document` makes
 //! the per-node ops idempotent.
 
+use crate::jobs::handlers::fulltext::{resolve_index_plan, IndexPlanCache};
 use crate::jobs::IndexKey;
 use crate::management::async_indexing::helpers::scan_nodes;
 use crate::management::helpers::{list_branches, list_workspaces};
@@ -139,6 +140,21 @@ pub async fn reconcile_fulltext_index(
 ) -> Result<RebuildStats> {
     let start = std::time::Instant::now();
 
+    // A reconcile re-issues writes against the EXISTING on-disk index. If that
+    // index predates the current schema version it lacks newer fields (e.g.
+    // shape_types), so an in-place reconcile cannot add shape data. Escalate to a
+    // full rebuild, which recreates the directory at the current schema version.
+    // Checked before acquiring the lock, since rebuild acquires it itself.
+    if engine.is_index_stale(tenant_id, repo_id, branch) {
+        tracing::info!(
+            tenant_id,
+            repo_id,
+            branch,
+            "Index schema is out of date; escalating reconcile to a full rebuild"
+        );
+        return rebuild_fulltext_index(storage, engine, tenant_id, repo_id, branch).await;
+    }
+
     // Hold the same lock the worker uses, so reconcile can't
     // interleave Tantivy commits with the live batch handler.
     let key = IndexKey::new(tenant_id, repo_id, branch);
@@ -208,6 +224,10 @@ async fn reindex_all_workspaces(
     let mut total_processed = 0usize;
     let mut total_errors = 0usize;
 
+    // One plan cache for the whole rebuild: a 100k-node reindex resolves each
+    // distinct type only once.
+    let plan_cache = IndexPlanCache::new();
+
     for workspace in &workspaces {
         let nodes = match scan_nodes(storage, tenant_id, repo_id, branch, workspace).await {
             Ok(n) => n,
@@ -232,12 +252,34 @@ async fn reindex_all_workspaces(
         let ctx = batch_context(tenant_id, repo_id, branch, workspace);
         let engine_clone = engine.clone();
         for chunk in nodes.chunks(REBUILD_CHUNK_SIZE) {
-            let chunk_vec = chunk.to_vec();
+            // Resolve the shape-driven plan for each node (cached per type),
+            // skipping nodes whose type opts out of full-text indexing.
+            let mut node_plans = Vec::with_capacity(chunk.len());
+            for node in chunk {
+                match resolve_index_plan(
+                    storage,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    node,
+                    &plan_cache,
+                    &raisin_models::nodes::properties::schema::IndexType::Fulltext,
+                )
+                .await
+                {
+                    Ok(Some(plan)) => node_plans.push((node.clone(), plan)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!(workspace, error = %e, "resolve_index_plan failed during rebuild");
+                        total_errors += 1;
+                    }
+                }
+            }
             let ctx_clone =
                 batch_context(&ctx.tenant_id, &ctx.repo_id, &ctx.branch, &ctx.workspace_id);
             let engine_for_task = engine_clone.clone();
             let result = tokio::task::spawn_blocking(move || {
-                engine_for_task.do_batch_index(&ctx_clone, chunk_vec, Vec::new())
+                engine_for_task.do_batch_index(&ctx_clone, node_plans, Vec::new())
             })
             .await;
 

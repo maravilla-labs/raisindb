@@ -154,9 +154,8 @@ pub(super) async fn clear_compound_indexes(
     let cf_compound = cf_handle(storage.db(), cf::COMPOUND_INDEX)?;
 
     for published in [false, true] {
-        let prefix = keys::compound_index_workspace_prefix(
-            tenant_id, repo_id, branch, workspace, published,
-        );
+        let prefix =
+            keys::compound_index_workspace_prefix(tenant_id, repo_id, branch, workspace, published);
         delete_with_prefix(storage, cf_compound, &prefix)?;
     }
 

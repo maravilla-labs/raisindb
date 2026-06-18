@@ -37,6 +37,7 @@ zip = "2.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
+moka = { version = "0.12", features = ["sync"] }
 futures = { workspace = true }
 async-channel = "2.3"
 

@@ -22,6 +22,11 @@ pub struct FullTextSearchRequest {
     pub language: Option<String>,
     /// Maximum number of results (default: 20, max: 100)
     pub limit: Option<usize>,
+    /// Optional exact shape-type filter — only nodes carrying this identity
+    /// (their node_type, archetype, or a nested element_type) match. Pass the
+    /// full `ns:TypeName`, e.g. `launchpad:Hero`.
+    #[serde(default)]
+    pub shape_type: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -98,6 +103,7 @@ pub async fn fulltext_search(
             query: req.query,
             limit,
             revision: None, // HTTP API uses latest/HEAD by default
+            shape_type: req.shape_type.clone(),
         };
 
         // Execute search
@@ -146,6 +152,7 @@ pub async fn fulltext_search(
         query: req.query.clone(),
         limit,
         revision: None, // HTTP API uses latest/HEAD by default
+        shape_type: req.shape_type,
     };
 
     // Execute cross-workspace search

@@ -4,6 +4,7 @@
 //! embedding generation, deletion, and branch copy operations.
 
 use super::content_extraction::{extract_embeddable_content, hash_text};
+use crate::jobs::handlers::fulltext::IndexPlanCache;
 use crate::RocksDBStorage;
 use raisin_ai::storage::TenantAIConfigStore;
 use raisin_embeddings::config::{EmbeddingProvider, TenantEmbeddingConfig};
@@ -30,6 +31,9 @@ pub struct EmbeddingJobHandler {
     storage: Arc<RocksDBStorage>,
     hnsw_engine: Arc<HnswIndexingEngine>,
     master_key: [u8; 32],
+    /// Per-type vector indexing plan cache, shared across nodes for the handler's
+    /// lifetime (resolved for `IndexType::Vector`; never collides with fulltext).
+    plan_cache: Arc<IndexPlanCache>,
 }
 
 impl EmbeddingJobHandler {
@@ -43,6 +47,7 @@ impl EmbeddingJobHandler {
             storage,
             hnsw_engine,
             master_key,
+            plan_cache: Arc::new(IndexPlanCache::new()),
         }
     }
 
@@ -121,8 +126,14 @@ impl EmbeddingJobHandler {
             .ok_or_else(|| Error::NotFound(format!("Node {} not found", node_id)))?;
 
         // Extract embeddable content using schema-driven approach
-        let text =
-            extract_embeddable_content(&node, &config, self.storage.clone(), context).await?;
+        let text = extract_embeddable_content(
+            &node,
+            &config,
+            self.storage.clone(),
+            context,
+            &self.plan_cache,
+        )
+        .await?;
 
         if text.is_empty() {
             tracing::warn!(node_id = %node_id, "No embeddable content found, skipping");

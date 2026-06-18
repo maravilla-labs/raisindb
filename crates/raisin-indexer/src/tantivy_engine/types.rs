@@ -14,13 +14,17 @@ pub struct TantivyIndexingEngine {
     pub(crate) index_cache: Cache<String, Arc<CachedIndex>>,
 }
 
-/// Cached index with both Index and IndexReader for efficient searching
+/// Cached index with Index, IndexReader, and the field handles resolved from the
+/// index's ACTUAL on-disk schema (so an older index missing newer fields still
+/// works — its `shape_types` is simply `None` until a rebuild).
 pub(crate) struct CachedIndex {
     pub(crate) index: Index,
     pub(crate) reader: IndexReader,
+    pub(crate) fields: SchemaFields,
 }
 
 /// Tantivy schema field definitions
+#[derive(Clone)]
 pub(crate) struct SchemaFields {
     pub(crate) doc_id: Field,
     pub(crate) node_id: Field,
@@ -34,6 +38,8 @@ pub(crate) struct SchemaFields {
     pub(crate) updated_at: Field,
     pub(crate) name: Field,
     pub(crate) content: Field,
+    /// `None` for indexes built before the field existed (pre-v2 on-disk schema).
+    pub(crate) shape_types: Option<Field>,
 }
 
 /// Batch indexing context for bulk operations

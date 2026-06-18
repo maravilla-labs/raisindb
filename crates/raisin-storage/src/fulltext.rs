@@ -21,6 +21,7 @@ use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models::nodes::Node;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Job types for full-text indexing operations
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,6 +79,44 @@ pub struct FullTextIndexJob {
     pub properties_to_index: Option<Vec<String>>,
 }
 
+/// Which sub-fields of a nested element should have their value full-text indexed.
+///
+/// Built from a (resolved) ElementType's per-field `index` config: `include_fields`
+/// lists exactly the fields whose values to index (those marked `Fulltext`). The
+/// element's identity (its `element_type` shape_type) is always emitted regardless.
+///
+/// Semantics in the walker: a missing OR empty entry indexes NONE of the element's
+/// field values (identity-only default). An unresolved element type therefore
+/// contributes only its identity — matching the "identity-only by default" policy.
+#[derive(Debug, Clone, Default)]
+pub struct ElementFieldPlan {
+    /// Field names (within the element's `content`) whose values to full-text index.
+    pub include_fields: HashSet<String>,
+}
+
+/// Precomputed, storage-free plan describing how to full-text index one node.
+///
+/// Resolved once per node from cached per-type plans in the job handler, then passed
+/// by reference into the indexing engine so the engine performs no storage lookups or
+/// type resolution on the hot indexing path.
+#[derive(Debug, Clone, Default)]
+pub struct NodeIndexPlan {
+    /// The node's type name. Always emitted as a shape identity.
+    pub node_type: String,
+    /// The node's archetype name, if any. Emitted as a shape identity.
+    pub archetype: Option<String>,
+    /// Top-level property names to index by value. `None` selects the legacy
+    /// fallback (see `legacy_index_all_strings`); `Some` (possibly empty) indexes
+    /// exactly the listed properties.
+    pub top_level_props: Option<Vec<String>>,
+    /// Per-element-type field plans for nested `Element`/`Composite` blocks,
+    /// keyed by element_type name.
+    pub element_plans: HashMap<String, ElementFieldPlan>,
+    /// When true and `top_level_props` is `None`, index all top-level String
+    /// properties (legacy behavior, used for untyped/unresolved nodes).
+    pub legacy_index_all_strings: bool,
+}
+
 /// Query parameters for full-text search
 #[derive(Debug, Clone)]
 pub struct FullTextSearchQuery {
@@ -108,6 +147,11 @@ pub struct FullTextSearchQuery {
     /// Optional revision for point-in-time search
     /// None = HEAD/latest, Some(revision) = search at specific revision
     pub revision: Option<HLC>,
+
+    /// Optional exact shape-type filter. When set, only nodes carrying this
+    /// type identity (their `node_type`, `archetype`, or any nested
+    /// `element_type`) match. The value must be the full `ns:TypeName`.
+    pub shape_type: Option<String>,
 }
 
 /// Search result with relevance score
@@ -168,11 +212,31 @@ pub trait FullTextJobStore: Send + Sync {
 /// This trait is implemented by the Tantivy-based indexing engine in raisin-indexer.
 /// It handles the actual indexing, searching, and index management operations.
 pub trait IndexingEngine: Send + Sync {
-    /// Index a node with all its language variants
+    /// Index a node with all its language variants, driven by a precomputed plan.
     ///
-    /// The engine will create one document per language (default language + translations).
-    /// It uses the NodeTypeSchema to determine which properties should be indexed.
-    fn do_index_node(&self, job: &FullTextIndexJob, node: &Node) -> Result<()>;
+    /// The engine creates one document per language (default language + translations),
+    /// emitting the node's shape identities (node_type / archetype / nested element_types)
+    /// and indexing field values exactly as the `plan` dictates. The engine performs no
+    /// storage lookups or type resolution — all of that happened when the plan was built.
+    fn do_index_node_with_plan(
+        &self,
+        job: &FullTextIndexJob,
+        node: &Node,
+        plan: &NodeIndexPlan,
+    ) -> Result<()>;
+
+    /// Index a node without a precomputed plan (legacy / back-compat).
+    ///
+    /// Delegates to [`IndexingEngine::do_index_node_with_plan`] with a fallback plan
+    /// that indexes all top-level String properties and emits the node_type identity.
+    fn do_index_node(&self, job: &FullTextIndexJob, node: &Node) -> Result<()> {
+        let plan = NodeIndexPlan {
+            node_type: node.node_type.clone(),
+            legacy_index_all_strings: true,
+            ..Default::default()
+        };
+        self.do_index_node_with_plan(job, node, &plan)
+    }
 
     /// Remove a node from the index
     ///
