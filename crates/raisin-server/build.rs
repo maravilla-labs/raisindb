@@ -90,9 +90,19 @@ fn main() {
     }
 
     // Build WASM
+    //
+    // Clear the rustflags the outer `cargo build` exported into this build
+    // script's environment. The workspace `.cargo/config.toml` sets
+    // `-C split-debuginfo=unpacked` for the host target; cargo propagates it via
+    // `CARGO_ENCODED_RUSTFLAGS`, and nested wasm builds would otherwise inherit it
+    // and fail with "`-Csplit-debuginfo=unpacked` is unstable on this platform"
+    // (it is not valid for wasm32). Same applies to the frontend build below,
+    // which compiles `raisin-rel-wasm` via its prebuild step.
     let wasm_status = Command::new("wasm-pack")
         .args(["build", "--target", "web", "--out-dir", "pkg", "--release"])
         .current_dir(wasm_dir)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
         .status();
 
     match wasm_status {
@@ -158,6 +168,11 @@ fn main() {
     let status = Command::new(pkg_cmd)
         .args(["run", "build"])
         .current_dir(frontend_dir)
+        // See note on the wasm-pack call above: the frontend prebuild compiles
+        // raisin-rel-wasm to wasm32, which must not inherit the host's
+        // `-C split-debuginfo=unpacked`.
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
         .status()
         .expect("Failed to build frontend");
 

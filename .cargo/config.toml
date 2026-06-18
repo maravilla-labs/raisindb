@@ -1,0 +1,3 @@
+[target.aarch64-apple-darwin]
+# Keep debug info in separate .o files instead of bloating the final binaries.
+rustflags = ["-C", "split-debuginfo=unpacked"]
