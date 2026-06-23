@@ -155,7 +155,7 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
 
                     let node = if let Some(ref auth) = ctx_clone.auth_context {
                         let scope = PermissionScope::new(&relation.workspace, &branch);
-                        match rls_filter::filter_node(node, auth, &scope) {
+                        match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision_opt.as_ref()).await {
                             Some(n) => n,
                             None => continue,
                         }
@@ -221,7 +221,7 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
 
                     let node = if let Some(ref auth) = ctx_clone.auth_context {
                         let scope = PermissionScope::new(&src_workspace, &branch);
-                        match rls_filter::filter_node(node, auth, &scope) {
+                        match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision_opt.as_ref()).await {
                             Some(n) => n,
                             None => continue,
                         }

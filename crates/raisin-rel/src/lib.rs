@@ -112,6 +112,34 @@ pub fn eval(input: &str, ctx: &EvalContext) -> Result<Value, RelError> {
     Ok(evaluate(&expr, ctx)?)
 }
 
+/// Parse and evaluate an expression in one step, with async relation resolution.
+///
+/// This is the async counterpart to [`eval`]. It supports `RELATES … VIA`
+/// expressions by delegating graph path-finding to the provided
+/// [`RelationResolver`]. Non-graph expressions evaluate exactly as in [`eval`].
+///
+/// # Example
+///
+/// ```rust
+/// use raisin_rel::{eval_async, EvalContext, NoOpResolver, Value};
+///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let mut ctx = EvalContext::new();
+/// ctx.set("x", Value::Integer(42));
+///
+/// let result = eval_async("x > 10", &ctx, &NoOpResolver).await.unwrap();
+/// assert_eq!(result, Value::Boolean(true));
+/// # });
+/// ```
+pub async fn eval_async(
+    input: &str,
+    ctx: &EvalContext,
+    resolver: &dyn RelationResolver,
+) -> Result<Value, RelError> {
+    let expr = parse(input)?;
+    Ok(evaluate_async(&expr, ctx, resolver).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

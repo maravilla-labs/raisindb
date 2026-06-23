@@ -79,6 +79,13 @@ pub struct RocksDBStorage {
     pub(crate) event_bus: Arc<dyn EventBus>,
     pub(crate) config: RocksDBConfig,
 
+    // Shared in-memory RELATES reachability cache. A single instance is owned
+    // here and handed to BOTH the background `RelatesCache` compute job (which
+    // populates it + the durable GRAPH_CACHE column family) and the graph
+    // resolver factory (which reads it during RLS evaluation). Sharing one Arc
+    // is what lets the resolver see the job's precomputed reachability.
+    pub(crate) graph_cache_layer: Arc<crate::graph::GraphCacheLayer>,
+
     // Repository implementations
     pub(crate) nodes: NodeRepositoryImpl,
     pub(crate) node_types: NodeTypeRepositoryImpl,
@@ -254,6 +261,25 @@ impl Storage for RocksDBStorage {
 
     fn event_bus(&self) -> Arc<dyn EventBus> {
         self.event_bus.clone()
+    }
+
+    fn graph_resolver<'a>(
+        &'a self,
+        scope: raisin_storage::scope::BranchScope<'a>,
+        revision: &'a raisin_hlc::HLC,
+    ) -> Option<Box<dyn raisin_rel::eval::RelationResolver + 'a>> {
+        // Always cache-backed: the resolver's durable GRAPH_CACHE lookup is
+        // gated on having an in-memory layer, so we pass the shared layer + db
+        // and let it fall back to BFS on a miss.
+        Some(Box::new(crate::security::RocksDBGraphResolver::with_cache(
+            &self.relations,
+            scope.tenant_id,
+            scope.repo_id,
+            scope.branch,
+            revision,
+            self.db.clone(),
+            self.graph_cache_layer.clone(),
+        )))
     }
 
     async fn put_workspace_delta(&self, scope: StorageScope<'_>, node: &Node) -> Result<()> {

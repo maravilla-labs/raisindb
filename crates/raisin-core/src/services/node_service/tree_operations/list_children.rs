@@ -106,7 +106,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             };
 
             // Apply RLS filtering
-            let child_nodes = self.apply_rls_filter_many(child_nodes);
+            let child_nodes = self.apply_rls_filter_many(child_nodes).await;
             return Ok(models::tree::Page::new(child_nodes, next_cursor));
         }
 
@@ -125,7 +125,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             .await?;
 
         // Apply RLS filtering before pagination
-        let all_children = self.apply_rls_filter_many(all_children);
+        let all_children = self.apply_rls_filter_many(all_children).await;
 
         // Apply cursor filtering
         let start_after = cursor.map(|c| c.last_key.as_str());
@@ -209,7 +209,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
                 .await?;
 
             // Apply RLS filtering
-            return Ok(self.apply_rls_filter_many(nodes));
+            return Ok(self.apply_rls_filter_many(nodes).await);
         }
 
         // SLOW PATH: Use tree-based snapshots (historical revision)
@@ -281,7 +281,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         }
 
         // Apply RLS filtering
-        Ok(self.apply_rls_filter_many(child_nodes))
+        Ok(self.apply_rls_filter_many(child_nodes).await)
     }
 
     /// Lists root-level nodes with pagination
@@ -338,7 +338,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             }
 
             // Apply RLS filtering
-            let nodes = self.apply_rls_filter_many(nodes);
+            let nodes = self.apply_rls_filter_many(nodes).await;
 
             let next_cursor = if has_more {
                 items.last().map(|entry| {

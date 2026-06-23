@@ -255,38 +255,60 @@ pub async fn get_node(
             &tx.db, &value, &tenant_id, &repo_id, &branch, workspace, node_id, &revision,
         )?;
 
-        // RLS check - SECURITY: deny-by-default if no auth context
-        {
+        // RLS check - SECURITY: deny-by-default if no auth context.
+        // Clone the auth context out of the metadata guard so the guard is
+        // released before the async graph-resolver evaluation below.
+        let auth_opt = {
             let meta = tx
                 .metadata
                 .lock()
                 .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-            match &meta.auth_context {
-                Some(auth) => {
-                    use raisin_core::services::rls_filter;
-                    use raisin_models::permissions::{Operation, PermissionScope};
+            meta.auth_context.clone()
+        };
+        match auth_opt {
+            Some(auth) => {
+                use raisin_core::services::rls_filter;
+                use raisin_models::permissions::{Operation, PermissionScope};
+                use raisin_storage::{scope::BranchScope, Storage};
 
-                    let branch_str = meta.branch.as_ref().map(|s| s.as_str()).unwrap_or("main");
-                    let scope = PermissionScope::new(workspace, branch_str);
+                let (tid, rid, br): (&str, &str, &str) = (&tenant_id, &repo_id, &branch);
+                let scope = PermissionScope::new(workspace, br);
+                // Fast path: only build the cache-backed graph resolver when a
+                // permission actually carries a `RELATES … VIA` condition;
+                // otherwise evaluate synchronously with no per-read allocation.
+                let allowed = if auth.uses_graph_rls() {
+                    let resolver = tx
+                        .storage
+                        .graph_resolver(BranchScope::new(tid, rid, br), &head_revision);
+                    rls_filter::can_perform_async(
+                        &node,
+                        Operation::Read,
+                        &auth,
+                        &scope,
+                        resolver.as_deref(),
+                    )
+                    .await
+                } else {
+                    rls_filter::can_perform(&node, Operation::Read, &auth, &scope)
+                };
 
-                    if !rls_filter::can_perform(&node, Operation::Read, auth, &scope) {
-                        tracing::debug!(
-                            node_id = %node_id,
-                            workspace = %workspace,
-                            "RLS: denying read access to node"
-                        );
-                        return Ok(None);
-                    }
-                }
-                None => {
-                    // SECURITY: Deny read if no auth context set on transaction
-                    tracing::warn!(
+                if !allowed {
+                    tracing::debug!(
                         node_id = %node_id,
                         workspace = %workspace,
-                        "Transaction has no auth context - denying get_node read"
+                        "RLS: denying read access to node"
                     );
                     return Ok(None);
                 }
+            }
+            None => {
+                // SECURITY: Deny read if no auth context set on transaction
+                tracing::warn!(
+                    node_id = %node_id,
+                    workspace = %workspace,
+                    "Transaction has no auth context - denying get_node read"
+                );
+                return Ok(None);
             }
         }
 

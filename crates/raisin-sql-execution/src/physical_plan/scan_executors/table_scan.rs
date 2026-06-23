@@ -157,7 +157,7 @@ pub async fn execute_table_scan<S: Storage + 'static>(
             // Apply RLS filtering if auth context is set
             let node = if let Some(ref auth) = ctx_clone.auth_context {
                 let scope = PermissionScope::new(&workspace, &branch);
-                match rls_filter::filter_node(node, auth, &scope) {
+                match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision.as_ref()).await {
                     Some(n) => n,
                     None => {
                         // User doesn't have permission to see this node, skip it

@@ -211,6 +211,7 @@ impl RocksDBStorage {
             db: db.clone(),
             event_bus: event_bus.clone(),
             config: config.clone(),
+            graph_cache_layer: Arc::new(crate::graph::GraphCacheLayer::new()),
         };
 
         Ok(storage)

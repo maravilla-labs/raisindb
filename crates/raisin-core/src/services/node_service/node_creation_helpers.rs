@@ -242,11 +242,24 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         let clean_name = sanitize_name(&node.name)?;
         node.name = clean_name.clone();
 
-        // Validate parent exists (unless creating at root)
+        // Validate parent exists (unless creating at root).
+        // Use the lightweight id-only lookup: we only need to know the parent
+        // exists, not load it. self.get_by_path populates `has_children`, which
+        // scans ALL of the parent's children (O(children)) — that would make
+        // every insert under a parent O(N) and bulk-filling it O(N²).
         if parent_path != "/" && !parent_path.is_empty() {
-            let _parent = self.get_by_path(parent_path).await?.ok_or_else(|| {
-                raisin_error::Error::NotFound(format!("Parent node '{}' not found", parent_path))
-            })?;
+            let parent_exists = self
+                .storage
+                .nodes()
+                .get_node_id_by_path(self.scope(), parent_path, self.revision.as_ref())
+                .await?
+                .is_some();
+            if !parent_exists {
+                return Err(raisin_error::Error::NotFound(format!(
+                    "Parent node '{}' not found",
+                    parent_path
+                )));
+            }
             // Do NOT set node.parent here - storage layer will derive it from node.path
         }
         // Do NOT set node.parent - storage layer will derive it from node.path

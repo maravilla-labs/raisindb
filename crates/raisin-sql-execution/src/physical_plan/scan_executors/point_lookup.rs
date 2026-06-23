@@ -88,7 +88,7 @@ pub async fn execute_path_index_scan<S: Storage + 'static>(
             if node.path != "/" {
                 let node = if let Some(ref auth) = ctx_clone.auth_context {
                     let scope = PermissionScope::new(&workspace, &branch);
-                    match rls_filter::filter_node(node, auth, &scope) {
+                    match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision.as_ref()).await {
                         Some(n) => n,
                         None => {
                             tracing::debug!("   PathIndexScan: RLS filtered out node at path '{}'", path);
@@ -189,7 +189,7 @@ pub async fn execute_node_id_scan<S: Storage + 'static>(
             if node.path != "/" {
                 let node = if let Some(ref auth) = ctx_clone.auth_context {
                     let scope = PermissionScope::new(&workspace, &branch);
-                    match rls_filter::filter_node(node, auth, &scope) {
+                    match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision.as_ref()).await {
                         Some(n) => n,
                         None => {
                             tracing::debug!("   NodeIdScan: RLS filtered out node id '{}'", node_id);

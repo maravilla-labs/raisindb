@@ -36,7 +36,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
                 .await?
             {
                 // Apply RLS filtering to draft node
-                return Ok(self.apply_rls_filter(draft));
+                return Ok(self.apply_rls_filter(draft).await);
             }
         }
 
@@ -49,7 +49,10 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             .await?;
 
         // Apply RLS filtering
-        Ok(result.and_then(|node| self.apply_rls_filter(node)))
+        match result {
+            Some(node) => Ok(self.apply_rls_filter(node).await),
+            None => Ok(None),
+        }
     }
 
     /// Gets a node by its path
@@ -90,7 +93,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
                 self.revision
             );
             // Apply RLS filtering to draft node
-            return Ok(self.apply_rls_filter(draft));
+            return Ok(self.apply_rls_filter(draft).await);
         }
 
         // Fall back to committed storage (repository-scoped)
@@ -125,6 +128,9 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         }
 
         // Apply RLS filtering
-        Ok(result.and_then(|node| self.apply_rls_filter(node)))
+        match result {
+            Some(node) => Ok(self.apply_rls_filter(node).await),
+            None => Ok(None),
+        }
     }
 }

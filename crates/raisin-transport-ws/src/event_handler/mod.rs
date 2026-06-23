@@ -81,13 +81,15 @@ impl<S: Storage> WsEventHandler<S> {
                 self.forward_node_event(node_event, &connections).await;
             }
             Event::Repository(repo_event) => {
-                self.forward_repository_event(repo_event, &connections);
+                self.forward_repository_event(repo_event, &connections)
+                    .await;
             }
             Event::Workspace(ws_event) => {
-                self.forward_workspace_event(ws_event, &connections);
+                self.forward_workspace_event(ws_event, &connections).await;
             }
             Event::Replication(repl_event) => {
-                self.forward_replication_event(repl_event, &connections);
+                self.forward_replication_event(repl_event, &connections)
+                    .await;
             }
             Event::Schema(schema_event) => {
                 self.forward_schema_event(schema_event, &connections);

@@ -88,7 +88,9 @@ pub fn start_graph_cache_background_task(
     storage: Arc<RocksDBStorage>,
     config: GraphComputeConfig,
 ) -> Arc<GraphCacheState> {
-    let cache_layer = Arc::new(GraphCacheLayer::new());
+    // Use the storage-owned shared cache layer so the RLS graph resolver reads
+    // the same in-memory reachability this background task computes.
+    let cache_layer = storage.graph_cache_layer();
     let state = Arc::new(GraphCacheState::new(
         storage.clone(),
         Some(cache_layer.clone()),

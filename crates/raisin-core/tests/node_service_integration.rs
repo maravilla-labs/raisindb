@@ -1199,3 +1199,84 @@ async fn test_upsert_deep_node_creates_then_updates_in_place() {
         "second upsert should update the title in place"
     );
 }
+
+/// Data-integrity guard: creating a node under a non-existent parent must be
+/// rejected (no orphan nodes). This locks in the behavior of the parent-existence
+/// check after it was optimized from a full RLS-filtered node load to an O(1)
+/// path-index existence lookup — the integrity assertion must be unchanged.
+#[tokio::test]
+async fn test_create_under_missing_parent_rejected() {
+    use raisin_models::auth::AuthContext;
+    use raisin_models::permissions::ResolvedPermissions;
+    use raisin_models::workspace::Workspace;
+    use raisin_storage::{
+        BranchRepository, RepoScope, RepositoryManagementRepository, WorkspaceRepository,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(raisin_rocksdb::RocksDBStorage::new(dir.path()).unwrap());
+    storage
+        .repository_management()
+        .create_repository(
+            "default",
+            "default",
+            raisin_context::RepositoryConfig::default(),
+        )
+        .await
+        .unwrap();
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new("default", "default"),
+            Workspace::new("default".to_string()),
+        )
+        .await
+        .unwrap();
+    storage
+        .branches()
+        .create_branch(
+            "default", "default", "main", "test", None, None, false, false,
+        )
+        .await
+        .unwrap();
+    create_test_node_type(&*storage, "test:Doc", vec![], false, true).await;
+
+    let admin =
+        AuthContext::for_user("admin").with_permissions(ResolvedPermissions::system_admin());
+    let svc = NodeService::new(storage.clone()).with_auth(admin);
+
+    // Negative: parent does not exist → must be rejected (no orphan created).
+    let err = svc
+        .add_node(
+            "/does-not-exist",
+            create_test_node("child", "test:Doc", HashMap::new()),
+        )
+        .await;
+    assert!(
+        err.is_err(),
+        "creating under a non-existent parent must be rejected"
+    );
+    // And nothing was persisted under the bogus path.
+    assert!(
+        svc.get_by_path("/does-not-exist/child")
+            .await
+            .unwrap()
+            .is_none(),
+        "no orphan node should be created"
+    );
+
+    // Positive: create the parent, then the child succeeds.
+    svc.add_node("/", create_test_node("folder", "test:Doc", HashMap::new()))
+        .await
+        .unwrap();
+    svc.add_node(
+        "/folder",
+        create_test_node("child", "test:Doc", HashMap::new()),
+    )
+    .await
+    .expect("creating under an existing parent must succeed");
+    assert!(
+        svc.get_by_path("/folder/child").await.unwrap().is_some(),
+        "child under existing parent should be persisted"
+    );
+}

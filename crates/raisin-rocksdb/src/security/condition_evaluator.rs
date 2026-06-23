@@ -77,30 +77,6 @@ impl<'a> ConditionEvaluator<'a> {
         }
     }
 
-    /// Evaluate a REL expression that may require async operations (e.g., RELATES).
-    ///
-    /// This is the async version that supports graph relationship checks.
-    /// Use this when the expression contains RELATES or other async operations.
-    ///
-    /// # Arguments
-    /// * `expr` - REL expression string
-    /// * `node` - Node being evaluated
-    /// * `graph_resolver` - Optional graph resolver for RELATES expressions
-    ///
-    /// Returns true if the expression evaluates to a truthy value.
-    /// Returns false on parse/eval errors (fail-closed security).
-    pub async fn evaluate_rel_expression_async(
-        &self,
-        expr: &str,
-        node: &Node,
-        _graph_resolver: Option<&dyn RelationResolver>,
-    ) -> bool {
-        // For now, fall back to sync evaluation
-        // TODO: Implement async evaluation with RELATES support when REL parser
-        // supports RELATES expressions
-        self.evaluate_rel_expression(expr, node)
-    }
-
     /// Check if an expression requires async evaluation.
     ///
     /// Returns true if the expression contains RELATES or other async operations.

@@ -48,7 +48,7 @@ pub async fn execute_relate<
     let source_node = resolve_relate_node(&source.node_ref, &source.workspace, branch, ctx).await?;
 
     // Check RELATE permission on source node
-    check_relate_permission(&source_node, ctx, &source.workspace, branch)?;
+    check_relate_permission(&source_node, ctx, &source.workspace, branch).await?;
 
     let (source_id, source_node_type) = (source_node.id, source_node.node_type);
 
@@ -56,7 +56,7 @@ pub async fn execute_relate<
     let target_node = resolve_relate_node(&target.node_ref, &target.workspace, branch, ctx).await?;
 
     // Check READ permission on target node (to verify it can be referenced)
-    check_read_permission(&target_node, ctx, &target.workspace, branch)?;
+    check_read_permission(&target_node, ctx, &target.workspace, branch).await?;
 
     let (target_id, target_node_type) = (target_node.id, target_node.node_type);
 
@@ -126,7 +126,7 @@ pub async fn execute_unrelate<
     let source_node = resolve_relate_node(&source.node_ref, &source.workspace, branch, ctx).await?;
 
     // Check UNRELATE permission on source node
-    check_unrelate_permission(&source_node, ctx, &source.workspace, branch)?;
+    check_unrelate_permission(&source_node, ctx, &source.workspace, branch).await?;
 
     let source_id = source_node.id;
 
@@ -249,65 +249,83 @@ async fn resolve_relate_node_id<S: Storage + 'static>(
     }
 }
 
+/// Evaluate an RLS operation on a node, building a cache-backed graph resolver
+/// from the execution context so `RELATES … VIA` conditions are supported.
+async fn check_relation_op<S: Storage>(
+    node: &raisin_models::nodes::Node,
+    ctx: &ExecutionContext<S>,
+    workspace: &str,
+    branch: &str,
+    operation: raisin_models::permissions::Operation,
+) -> bool {
+    let auth = match ctx.auth_context {
+        Some(ref auth) => auth,
+        None => return true, // no auth context: this layer leaves the check to others
+    };
+    use raisin_core::services::rls_filter;
+    use raisin_models::permissions::PermissionScope;
+    use raisin_storage::scope::BranchScope;
+
+    let scope = PermissionScope::new(workspace, branch);
+    // Fast path: build the graph resolver only when a `RELATES` condition is present.
+    if !auth.uses_graph_rls() {
+        return rls_filter::can_perform(node, operation, auth, &scope);
+    }
+    let revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
+    let resolver = ctx.storage.graph_resolver(
+        BranchScope::new(&ctx.tenant_id, &ctx.repo_id, branch),
+        &revision,
+    );
+    rls_filter::can_perform_async(node, operation, auth, &scope, resolver.as_deref()).await
+}
+
 /// Check RELATE permission on a node via RLS.
-fn check_relate_permission<S: Storage>(
+async fn check_relate_permission<S: Storage>(
     node: &raisin_models::nodes::Node,
     ctx: &ExecutionContext<S>,
     workspace: &str,
     branch: &str,
 ) -> Result<(), Error> {
-    if let Some(ref auth) = ctx.auth_context {
-        use raisin_core::services::rls_filter;
-        use raisin_models::permissions::{Operation, PermissionScope};
-        let scope = PermissionScope::new(workspace, branch);
-        if !rls_filter::can_perform(node, Operation::Relate, auth, &scope) {
-            return Err(Error::PermissionDenied(format!(
-                "Cannot add relation from node in workspace '{}'",
-                workspace
-            )));
-        }
+    use raisin_models::permissions::Operation;
+    if !check_relation_op(node, ctx, workspace, branch, Operation::Relate).await {
+        return Err(Error::PermissionDenied(format!(
+            "Cannot add relation from node in workspace '{}'",
+            workspace
+        )));
     }
     Ok(())
 }
 
 /// Check READ permission on a node via RLS.
-fn check_read_permission<S: Storage>(
+async fn check_read_permission<S: Storage>(
     node: &raisin_models::nodes::Node,
     ctx: &ExecutionContext<S>,
     workspace: &str,
     branch: &str,
 ) -> Result<(), Error> {
-    if let Some(ref auth) = ctx.auth_context {
-        use raisin_core::services::rls_filter;
-        use raisin_models::permissions::{Operation, PermissionScope};
-        let scope = PermissionScope::new(workspace, branch);
-        if !rls_filter::can_perform(node, Operation::Read, auth, &scope) {
-            return Err(Error::PermissionDenied(format!(
-                "Cannot relate to node in workspace '{}'",
-                workspace
-            )));
-        }
+    use raisin_models::permissions::Operation;
+    if !check_relation_op(node, ctx, workspace, branch, Operation::Read).await {
+        return Err(Error::PermissionDenied(format!(
+            "Cannot relate to node in workspace '{}'",
+            workspace
+        )));
     }
     Ok(())
 }
 
 /// Check UNRELATE permission on a node via RLS.
-fn check_unrelate_permission<S: Storage>(
+async fn check_unrelate_permission<S: Storage>(
     node: &raisin_models::nodes::Node,
     ctx: &ExecutionContext<S>,
     workspace: &str,
     branch: &str,
 ) -> Result<(), Error> {
-    if let Some(ref auth) = ctx.auth_context {
-        use raisin_core::services::rls_filter;
-        use raisin_models::permissions::{Operation, PermissionScope};
-        let scope = PermissionScope::new(workspace, branch);
-        if !rls_filter::can_perform(node, Operation::Unrelate, auth, &scope) {
-            return Err(Error::PermissionDenied(format!(
-                "Cannot remove relation from node in workspace '{}'",
-                workspace
-            )));
-        }
+    use raisin_models::permissions::Operation;
+    if !check_relation_op(node, ctx, workspace, branch, Operation::Unrelate).await {
+        return Err(Error::PermissionDenied(format!(
+            "Cannot remove relation from node in workspace '{}'",
+            workspace
+        )));
     }
     Ok(())
 }

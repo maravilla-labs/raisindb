@@ -294,7 +294,10 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         }
 
         // RLS Authorization: Check if user can create at this path with this node_type
-        if !self.check_rls_create_permission(&node.path, &node.node_type) {
+        if !self
+            .check_rls_create_permission(&node.path, &node.node_type)
+            .await
+        {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot create node of type '{}' at path '{}'",
                 node.node_type, node.path

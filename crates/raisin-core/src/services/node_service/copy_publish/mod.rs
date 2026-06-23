@@ -57,7 +57,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
                 ))
             })?;
 
-        if !self.check_rls_permission(&source_node, Operation::Read) {
+        if !self
+            .check_rls_permission(&source_node, Operation::Read)
+            .await
+        {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot read source node at path '{}'",
                 source_path
@@ -71,7 +74,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             format!("{}/{}", target_parent, copied_name)
         };
 
-        if !self.check_rls_create_permission(&target_path, &source_node.node_type) {
+        if !self
+            .check_rls_create_permission(&target_path, &source_node.node_type)
+            .await
+        {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot create node at path '{}'",
                 target_path
@@ -164,7 +170,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
                 ))
             })?;
 
-        if !self.check_rls_permission(&source_node, Operation::Read) {
+        if !self
+            .check_rls_permission(&source_node, Operation::Read)
+            .await
+        {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot read source node at path '{}'",
                 source_path
@@ -178,7 +187,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             format!("{}/{}", target_parent, copied_name)
         };
 
-        if !self.check_rls_create_permission(&target_path, &source_node.node_type) {
+        if !self
+            .check_rls_create_permission(&target_path, &source_node.node_type)
+            .await
+        {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot create node at path '{}'",
                 target_path
@@ -204,7 +216,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             .await?;
 
         for descendant in &descendants {
-            if !self.check_rls_permission(descendant, Operation::Read) {
+            if !self.check_rls_permission(descendant, Operation::Read).await {
                 return Err(raisin_error::Error::PermissionDenied(format!(
                     "Permission denied: cannot read descendant node at path '{}'",
                     descendant.path

@@ -26,5 +26,6 @@ once_cell = "1.17"
 tokio-util = "0.7"
 serde_json.workspace = true
 raisin-events = { version = "0.1.0", path = "../raisin-events" }
+raisin-rel = { version = "0.1.0", path = "../raisin-rel" }
 futures = { workspace = true }
 dashmap = "5"

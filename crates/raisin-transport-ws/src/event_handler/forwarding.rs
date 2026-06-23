@@ -5,7 +5,7 @@
 use raisin_core::services::rls_filter;
 use raisin_models::nodes::Node;
 use raisin_models::permissions::{Operation, PermissionScope};
-use raisin_storage::Storage;
+use raisin_storage::{scope::BranchScope, Storage};
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
@@ -25,10 +25,13 @@ impl<S: Storage> WsEventHandler<S> {
     /// * `payload` - The event payload to send
     /// * `connections` - All active connections to check
     /// * `node_for_rls` - Optional node for RLS evaluation (None skips RLS)
-    pub(super) fn forward_to_matching_connections(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn forward_to_matching_connections(
         &self,
         workspace: &str,
         branch: &str,
+        tenant_id: &str,
+        repo_id: &str,
         path: &str,
         event_type: &str,
         node_type: Option<&str>,
@@ -51,56 +54,63 @@ impl<S: Storage> WsEventHandler<S> {
 
         let scope = PermissionScope::new(workspace, branch);
 
+        // Build a cache-backed graph resolver once (borrows self.storage) so
+        // `RELATES … VIA` RLS conditions can be evaluated. Only needed when
+        // there is a node to authorize. Evaluated at the latest committed state.
+        let revision = raisin_hlc::HLC::now();
+        let resolver = if node_for_rls.is_some() {
+            self.storage
+                .graph_resolver(BranchScope::new(tenant_id, repo_id, branch), &revision)
+        } else {
+            None
+        };
+
         for connection in connections {
-            let conn = connection.read();
+            // Phase 1: snapshot subscription-match + auth under the read guard,
+            // then release it before any await (parking_lot guards are not
+            // async-safe and must not be held across `.await`).
+            let (auth_opt, has_matching) = {
+                let conn = connection.read();
+                let has_matching = !conn
+                    .matches_subscription(workspace, path, event_type, node_type)
+                    .is_empty();
+                (conn.auth_context().cloned(), has_matching)
+            };
 
-            let all_subs = conn.get_subscriptions();
-            tracing::debug!(
-                "Connection {} has {} subscriptions",
-                conn.connection_id,
-                all_subs.len()
-            );
-            for (sub_id, filters) in &all_subs {
-                tracing::debug!("   Subscription {}: workspace={:?}, path={:?}, event_types={:?}, node_type={:?}",
-                    sub_id, filters.workspace, filters.path, filters.event_types, filters.node_type);
-            }
-
-            let matching_subs = conn.matches_subscription(workspace, path, event_type, node_type);
-
-            tracing::debug!(
-                "Connection {} has {} matching subscriptions",
-                conn.connection_id,
-                matching_subs.len()
-            );
-
-            if matching_subs.is_empty() {
+            if !has_matching {
                 continue;
             }
 
-            // RLS check: verify user can read this node
+            // Phase 2: RLS check (async; guard already released).
             if let Some(node) = node_for_rls {
-                if let Some(auth) = conn.auth_context() {
-                    if !auth.is_system
-                        && !rls_filter::can_perform(node, Operation::Read, auth, &scope)
-                    {
-                        rls_filtered_count += 1;
-                        tracing::debug!(
-                            connection_id = %conn.connection_id,
-                            user_id = ?auth.user_id,
-                            node_id = %node.id,
-                            "RLS filtered: user cannot read this node"
-                        );
-                        continue;
+                let allowed = match &auth_opt {
+                    Some(auth) if auth.is_system => true,
+                    Some(auth) => {
+                        rls_filter::can_perform_async(
+                            node,
+                            Operation::Read,
+                            auth,
+                            &scope,
+                            resolver.as_deref(),
+                        )
+                        .await
                     }
-                } else {
+                    None => false,
+                };
+                if !allowed {
                     rls_filtered_count += 1;
                     tracing::debug!(
-                        connection_id = %conn.connection_id,
-                        "RLS filtered: no auth context (anonymous)"
+                        node_id = %node.id,
+                        "RLS filtered: connection cannot read this node"
                     );
                     continue;
                 }
             }
+
+            // Phase 3: re-acquire the read guard and forward. No `.await` is
+            // held across the guard here.
+            let conn = connection.read();
+            let matching_subs = conn.matches_subscription(workspace, path, event_type, node_type);
 
             // Serialize node once if any subscription wants it (optimization)
             let node_json: Option<serde_json::Value> =

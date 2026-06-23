@@ -190,7 +190,7 @@ where
                 .await?
                 .ok_or_else(|| Error::NotFound(format!("Node at path '{}' not found", path)))?;
 
-            check_translate_permission(&node, ctx, workspace_id, branch)?;
+            check_translate_permission(&node, ctx, workspace_id, branch).await?;
             Ok(vec![node.id])
         }
         Some(AnalyzedTranslateFilter::Id(id)) => {
@@ -205,7 +205,7 @@ where
                 .await?
                 .ok_or_else(|| Error::NotFound(format!("Node with id '{}' not found", id)))?;
 
-            check_translate_permission(&node, ctx, workspace_id, branch)?;
+            check_translate_permission(&node, ctx, workspace_id, branch).await?;
             Ok(vec![id.clone()])
         }
         Some(AnalyzedTranslateFilter::PathAndType { path, node_type }) => {
@@ -227,7 +227,7 @@ where
                 )));
             }
 
-            check_translate_permission(&node, ctx, workspace_id, branch)?;
+            check_translate_permission(&node, ctx, workspace_id, branch).await?;
             Ok(vec![node.id])
         }
         Some(AnalyzedTranslateFilter::IdAndType { id, node_type }) => {
@@ -249,7 +249,7 @@ where
                 )));
             }
 
-            check_translate_permission(&node, ctx, workspace_id, branch)?;
+            check_translate_permission(&node, ctx, workspace_id, branch).await?;
             Ok(vec![id.clone()])
         }
         Some(AnalyzedTranslateFilter::NodeType(_node_type)) => Err(Error::Validation(
@@ -264,7 +264,7 @@ where
 }
 
 /// Check TRANSLATE permission on a node via RLS.
-fn check_translate_permission<S: Storage>(
+async fn check_translate_permission<S: Storage>(
     node: &raisin_models::nodes::Node,
     ctx: &ExecutionContext<S>,
     workspace_id: &str,
@@ -273,8 +273,27 @@ fn check_translate_permission<S: Storage>(
     if let Some(ref auth) = ctx.auth_context {
         use raisin_core::services::rls_filter;
         use raisin_models::permissions::{Operation, PermissionScope};
+        use raisin_storage::scope::BranchScope;
         let scope = PermissionScope::new(workspace_id, branch);
-        if !rls_filter::can_perform(node, Operation::Translate, auth, &scope) {
+        // Fast path: build the graph resolver only when a `RELATES` condition is present.
+        let allowed = if auth.uses_graph_rls() {
+            let revision = ctx.max_revision.unwrap_or_else(raisin_hlc::HLC::now);
+            let resolver = ctx.storage.graph_resolver(
+                BranchScope::new(&ctx.tenant_id, &ctx.repo_id, branch),
+                &revision,
+            );
+            rls_filter::can_perform_async(
+                node,
+                Operation::Translate,
+                auth,
+                &scope,
+                resolver.as_deref(),
+            )
+            .await
+        } else {
+            rls_filter::can_perform(node, Operation::Translate, auth, &scope)
+        };
+        if !allowed {
             return Err(Error::PermissionDenied(format!(
                 "Cannot translate node '{}'",
                 node.id

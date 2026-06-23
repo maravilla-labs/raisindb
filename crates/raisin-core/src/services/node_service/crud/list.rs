@@ -32,7 +32,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         let nodes = self.overlay_workspace_deltas(committed).await?;
 
         // Apply RLS filtering
-        Ok(self.apply_rls_filter_many(nodes))
+        Ok(self.apply_rls_filter_many(nodes).await)
     }
 
     /// Lists all nodes with a specific parent ID
@@ -91,7 +91,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             let nodes = self.overlay_workspace_deltas(committed).await?;
 
             // Apply RLS filtering
-            return Ok(self.apply_rls_filter_many(nodes));
+            return Ok(self.apply_rls_filter_many(nodes).await);
         }
 
         // SLOW PATH: Use tree-based traversal
@@ -143,7 +143,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         let nodes = self.overlay_workspace_deltas(committed).await?;
 
         // Apply RLS filtering - nodes are already sorted from storage
-        Ok(self.apply_rls_filter_many(nodes))
+        Ok(self.apply_rls_filter_many(nodes).await)
     }
 
     /// Lists all nodes in the workspace
@@ -192,7 +192,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
         let nodes = self.overlay_workspace_deltas(result_nodes).await?;
 
         // Apply RLS filtering
-        Ok(self.apply_rls_filter_many(nodes))
+        Ok(self.apply_rls_filter_many(nodes).await)
     }
 
     /// Check if a node has children

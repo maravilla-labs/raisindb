@@ -264,6 +264,24 @@ impl AuthContext {
         self.resolved_permissions.as_deref()
     }
 
+    /// Whether any resolved permission carries a graph-relationship
+    /// (`RELATES … VIA`) condition.
+    ///
+    /// Used as a cheap hot-path guard: when this is false, row-level-security
+    /// evaluation needs no graph resolver and can take the synchronous path,
+    /// avoiding per-operation resolver construction. `RELATES` is the REL
+    /// keyword for graph traversal, so its presence in a condition string is a
+    /// conservative, allocation-free signal.
+    pub fn uses_graph_rls(&self) -> bool {
+        self.resolved_permissions.as_deref().is_some_and(|p| {
+            p.permissions.iter().any(|perm| {
+                perm.condition
+                    .as_deref()
+                    .is_some_and(|c| c.contains("RELATES"))
+            })
+        })
+    }
+
     /// Check if the user has a specific role
     pub fn has_role(&self, role_id: &str) -> bool {
         if self.is_system {

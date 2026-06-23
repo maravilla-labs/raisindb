@@ -79,6 +79,7 @@ fn make_field_base(name: &str, required: bool, multiple: bool) -> FieldTypeSchem
         multiple: if multiple { Some(true) } else { None },
         design_value: None,
         translatable: None,
+        index: None,
         meta: None,
     }
 }

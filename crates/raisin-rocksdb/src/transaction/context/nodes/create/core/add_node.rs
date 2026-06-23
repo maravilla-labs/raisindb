@@ -57,7 +57,7 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     }
 
     // 3a. Check CREATE permission
-    rls::check_create_permission(tx, &normalized_node, workspace)?;
+    rls::check_create_permission(tx, &normalized_node, workspace).await?;
 
     // 4. Check for path conflict in transaction cache (read-your-writes)
     let cached_existing =

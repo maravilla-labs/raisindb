@@ -5987,6 +5987,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-recursion",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "dashmap 6.1.0",
@@ -6429,7 +6430,7 @@ dependencies = [
 
 [[package]]
 name = "raisin-server"
-version = "0.1.39"
+version = "0.1.40"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -6573,6 +6574,7 @@ dependencies = [
  "raisin-events",
  "raisin-hlc",
  "raisin-models",
+ "raisin-rel",
  "serde",
  "serde_json",
  "tokio",

@@ -17,9 +17,10 @@ use crate::repository::{
     BranchRepository, GarbageCollectionRepository, RepositoryManagementRepository,
     RevisionRepository, TagRepository,
 };
-use crate::scope::StorageScope;
+use crate::scope::{BranchScope, StorageScope};
 use crate::spatial::SpatialIndexRepository;
 use crate::translations::TranslationRepository;
+use raisin_hlc::HLC;
 
 use super::index::{CompoundIndexRepository, PropertyIndexRepository, ReferenceIndexRepository};
 use super::node::NodeRepository;
@@ -91,6 +92,26 @@ pub trait Storage: Send + Sync {
 
     /// Get the event bus for subscribing to storage events
     fn event_bus(&self) -> Arc<dyn EventBus>;
+
+    /// Build a graph relationship resolver for evaluating `RELATES … VIA`
+    /// conditions in row-level-security checks.
+    ///
+    /// The returned resolver answers reachability queries (`has_path`) over the
+    /// relation graph at the given `revision`, scoped to `scope`. Backends that
+    /// support graph traversal (e.g. RocksDB) override this to return a
+    /// cache-backed resolver; the default returns `None`, in which case callers
+    /// fall back to non-graph evaluation (RELATES conditions then fail closed).
+    ///
+    /// The resolver borrows `self`, so it is request-scoped — construct one per
+    /// RLS evaluation rather than caching it across requests.
+    fn graph_resolver<'a>(
+        &'a self,
+        scope: BranchScope<'a>,
+        revision: &'a HLC,
+    ) -> Option<Box<dyn raisin_rel::eval::RelationResolver + 'a>> {
+        let _ = (scope, revision);
+        None
+    }
 
     // Workspace delta operations (branch-scoped draft storage)
 

@@ -70,7 +70,7 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
 
         if let Some(node) = &before {
             // RLS Authorization: Check if user can delete this node
-            if !self.check_rls_permission(node, Operation::Delete) {
+            if !self.check_rls_permission(node, Operation::Delete).await {
                 return Err(raisin_error::Error::PermissionDenied(format!(
                     "Permission denied: cannot delete node at path '{}'",
                     path

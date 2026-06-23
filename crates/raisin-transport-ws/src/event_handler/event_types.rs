@@ -116,13 +116,16 @@ impl<S: Storage> WsEventHandler<S> {
         self.forward_to_matching_connections(
             workspace,
             &event.branch,
+            &event.tenant_id,
+            &event.repository_id,
             path,
             event_type,
             node_type,
             payload,
             connections,
             node_for_rls.as_ref(),
-        );
+        )
+        .await;
     }
 
     /// Resolve a node for RLS evaluation from metadata or storage.
@@ -197,7 +200,7 @@ impl<S: Storage> WsEventHandler<S> {
     }
 
     /// Forward a repository event to matching connections
-    pub(super) fn forward_repository_event(
+    pub(super) async fn forward_repository_event(
         &self,
         event: &RepositoryEvent,
         connections: &[Arc<parking_lot::RwLock<crate::connection::ConnectionState>>],
@@ -236,17 +239,20 @@ impl<S: Storage> WsEventHandler<S> {
         self.forward_to_matching_connections(
             workspace,
             branch,
+            &event.tenant_id,
+            &event.repository_id,
             path,
             event_type,
             node_type,
             payload,
             connections,
             None,
-        );
+        )
+        .await;
     }
 
     /// Forward a workspace event to matching connections
-    pub(super) fn forward_workspace_event(
+    pub(super) async fn forward_workspace_event(
         &self,
         event: &WorkspaceEvent,
         connections: &[Arc<parking_lot::RwLock<crate::connection::ConnectionState>>],
@@ -273,17 +279,20 @@ impl<S: Storage> WsEventHandler<S> {
         self.forward_to_matching_connections(
             workspace,
             branch,
+            &event.tenant_id,
+            &event.repository_id,
             path,
             event_type,
             node_type,
             payload,
             connections,
             None,
-        );
+        )
+        .await;
     }
 
     /// Forward a replication event to matching connections
-    pub(super) fn forward_replication_event(
+    pub(super) async fn forward_replication_event(
         &self,
         event: &ReplicationEvent,
         connections: &[Arc<parking_lot::RwLock<crate::connection::ConnectionState>>],
@@ -312,13 +321,16 @@ impl<S: Storage> WsEventHandler<S> {
         self.forward_to_matching_connections(
             workspace,
             branch,
+            &event.tenant_id,
+            &event.repository_id,
             path,
             event_type,
             node_type,
             payload,
             connections,
             None,
-        );
+        )
+        .await;
     }
 
     /// Forward a schema event to matching connections

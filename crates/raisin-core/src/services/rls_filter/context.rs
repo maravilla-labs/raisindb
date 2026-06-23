@@ -5,6 +5,7 @@
 
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::Node;
+use raisin_rel::eval::RelationResolver;
 use raisin_rel::{EvalContext, Value};
 use std::collections::HashMap;
 
@@ -12,6 +13,11 @@ use std::collections::HashMap;
 ///
 /// Returns true if the expression evaluates to a truthy value.
 /// Returns false on parse/eval errors (fail-closed security).
+///
+/// This is the synchronous path and cannot evaluate `RELATES … VIA`
+/// (graph-relationship) conditions — those require [`evaluate_rel_condition_async`]
+/// with a [`RelationResolver`]. A RELATES condition reaching this path errors
+/// during evaluation and therefore denies (fail-closed).
 pub(super) fn evaluate_rel_condition(expr: &str, node: &Node, auth: &AuthContext) -> bool {
     let ctx = build_rel_context(auth, node);
     match raisin_rel::eval(expr, &ctx) {
@@ -21,6 +27,40 @@ pub(super) fn evaluate_rel_condition(expr: &str, node: &Node, auth: &AuthContext
                 expr = %expr,
                 error = %e,
                 "REL condition evaluation failed in RLS filter"
+            );
+            false // Fail-closed: deny on error
+        }
+    }
+}
+
+/// Async counterpart to [`evaluate_rel_condition`] that can evaluate
+/// `RELATES … VIA` graph-relationship conditions.
+///
+/// When `resolver` is `Some`, the expression is evaluated with graph path
+/// resolution enabled. When `None`, it falls back to synchronous evaluation
+/// (so RELATES conditions fail closed, preserving prior behavior at call sites
+/// that cannot supply a resolver).
+///
+/// Returns false on parse/eval errors (fail-closed security).
+pub(super) async fn evaluate_rel_condition_async(
+    expr: &str,
+    node: &Node,
+    auth: &AuthContext,
+    resolver: Option<&dyn RelationResolver>,
+) -> bool {
+    let resolver = match resolver {
+        Some(r) => r,
+        None => return evaluate_rel_condition(expr, node, auth),
+    };
+
+    let ctx = build_rel_context(auth, node);
+    match raisin_rel::eval_async(expr, &ctx, resolver).await {
+        Ok(value) => value.is_truthy(),
+        Err(e) => {
+            tracing::warn!(
+                expr = %expr,
+                error = %e,
+                "REL condition evaluation failed in RLS filter (async)"
             );
             false // Fail-closed: deny on error
         }

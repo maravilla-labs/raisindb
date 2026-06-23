@@ -10,8 +10,9 @@ mod matching;
 use raisin_models::auth::AuthContext;
 use raisin_models::nodes::Node;
 use raisin_models::permissions::{Operation, PermissionScope};
+use raisin_rel::eval::RelationResolver;
 
-use context::evaluate_rel_condition;
+use context::{evaluate_rel_condition, evaluate_rel_condition_async};
 use matching::{apply_field_filter, find_matching_permission};
 
 /// Filter a single node based on RLS rules.
@@ -95,6 +96,65 @@ pub fn filter_nodes(nodes: Vec<Node>, auth: &AuthContext, scope: &PermissionScop
         .collect()
 }
 
+/// Async counterpart to [`filter_node`] that can evaluate `RELATES … VIA`
+/// graph-relationship conditions via the supplied `resolver`.
+///
+/// When `resolver` is `None`, behaves exactly like [`filter_node`] (RELATES
+/// conditions fail closed).
+pub async fn filter_node_async(
+    node: Node,
+    auth: &AuthContext,
+    scope: &PermissionScope,
+    resolver: Option<&dyn RelationResolver>,
+) -> Option<Node> {
+    if auth.is_system {
+        return Some(node);
+    }
+
+    let permissions = auth.permissions()?;
+
+    if permissions.is_system_admin {
+        return Some(node);
+    }
+
+    let matching_permission =
+        find_matching_permission(&node, &permissions.permissions, scope, Operation::Read);
+
+    match matching_permission {
+        Some(permission) => {
+            if let Some(condition) = &permission.condition {
+                if !evaluate_rel_condition_async(condition, &node, auth, resolver).await {
+                    tracing::debug!("REL condition not satisfied for node {}", node.id);
+                    return None;
+                }
+            }
+            Some(apply_field_filter(node, permission))
+        }
+        None => None,
+    }
+}
+
+/// Async counterpart to [`filter_nodes`]. Evaluates each node sequentially so a
+/// single graph resolver reference can be shared across the batch.
+pub async fn filter_nodes_async(
+    nodes: Vec<Node>,
+    auth: &AuthContext,
+    scope: &PermissionScope,
+    resolver: Option<&dyn RelationResolver>,
+) -> Vec<Node> {
+    if auth.is_system {
+        return nodes;
+    }
+
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        if let Some(filtered) = filter_node_async(node, auth, scope, resolver).await {
+            out.push(filtered);
+        }
+    }
+    out
+}
+
 /// Check if a user can perform an operation on a node.
 pub fn can_perform(
     node: &Node,
@@ -122,6 +182,47 @@ pub fn can_perform(
         Some(permission) => {
             if let Some(condition) = &permission.condition {
                 if !evaluate_rel_condition(condition, node, auth) {
+                    return false;
+                }
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Async counterpart to [`can_perform`] that can evaluate `RELATES … VIA`
+/// graph-relationship conditions via the supplied `resolver`.
+///
+/// When `resolver` is `None`, behaves exactly like [`can_perform`] (RELATES
+/// conditions fail closed).
+pub async fn can_perform_async(
+    node: &Node,
+    operation: Operation,
+    auth: &AuthContext,
+    scope: &PermissionScope,
+    resolver: Option<&dyn RelationResolver>,
+) -> bool {
+    if auth.is_system {
+        return true;
+    }
+
+    let permissions = match auth.permissions() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    if permissions.is_system_admin {
+        return true;
+    }
+
+    let matching_permission =
+        find_matching_permission(node, &permissions.permissions, scope, operation);
+
+    match matching_permission {
+        Some(permission) => {
+            if let Some(condition) = &permission.condition {
+                if !evaluate_rel_condition_async(condition, node, auth, resolver).await {
                     return false;
                 }
             }
@@ -200,6 +301,65 @@ pub fn can_create_at_path(
                     condition = %condition,
                     "RLS: create condition not satisfied - trying next permission"
                 );
+                continue;
+            }
+        }
+
+        return true;
+    }
+
+    false
+}
+
+/// Async counterpart to [`can_create_at_path`] that can evaluate `RELATES … VIA`
+/// graph-relationship conditions via the supplied `resolver`.
+///
+/// When `resolver` is `None`, behaves exactly like [`can_create_at_path`].
+pub async fn can_create_at_path_async(
+    path: &str,
+    node_type: &str,
+    auth: &AuthContext,
+    scope: &PermissionScope,
+    resolver: Option<&dyn RelationResolver>,
+) -> bool {
+    if auth.is_system {
+        return true;
+    }
+
+    let permissions = match auth.permissions() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    if permissions.is_system_admin {
+        return true;
+    }
+
+    // Candidate node for condition evaluation (lazily built once needed).
+    let mut candidate: Option<Node> = None;
+
+    for permission in &permissions.permissions {
+        if !permission.applies_to_scope(scope) {
+            continue;
+        }
+
+        if !permission.matches_path(path) {
+            continue;
+        }
+
+        if !permission.operations.contains(&Operation::Create) {
+            continue;
+        }
+
+        if let Some(types) = &permission.node_types {
+            if !types.contains(&node_type.to_string()) {
+                continue;
+            }
+        }
+
+        if let Some(condition) = &permission.condition {
+            let node = candidate.get_or_insert_with(|| candidate_node(path, node_type));
+            if !evaluate_rel_condition_async(condition, node, auth, resolver).await {
                 continue;
             }
         }

@@ -245,3 +245,133 @@ fn test_active_stewardship_source_in_condition() {
 
     assert!(filter_node(node, &auth, &scope).is_some());
 }
+
+// === Graph (RELATES) RLS tests — async path ===
+
+/// Mock resolver that records the path query it received and returns a fixed
+/// answer. Lets us assert RELATES conditions are routed to the resolver and that
+/// allow/deny follows its verdict.
+struct MockResolver {
+    answer: bool,
+}
+
+#[async_trait::async_trait]
+impl raisin_rel::eval::RelationResolver for MockResolver {
+    async fn has_path(
+        &self,
+        _source_id: &str,
+        _target_id: &str,
+        _relation_types: &[String],
+        _min_depth: u32,
+        _max_depth: u32,
+        _direction: raisin_rel::RelDirection,
+    ) -> Result<bool, raisin_rel::EvalError> {
+        Ok(self.answer)
+    }
+}
+
+fn relates_auth() -> AuthContext {
+    make_auth(
+        "guardian1",
+        vec![Permission::new("content/**", vec![Operation::Read])
+            .with_condition("node.created_by RELATES auth.local_user_id VIA 'PARENT_OF'")],
+    )
+    .with_local_user_id("guardian1")
+}
+
+fn child_node() -> Node {
+    let mut n = make_node("/content/child", "Article");
+    n.created_by = Some("child-user".to_string());
+    n
+}
+
+#[test]
+fn test_uses_graph_rls_detection() {
+    // A RELATES condition is detected (hot-path guard picks the async lane).
+    assert!(relates_auth().uses_graph_rls());
+
+    // A plain condition is not.
+    let plain = make_auth(
+        "user1",
+        vec![Permission::new("content/**", vec![Operation::Read])
+            .with_condition("node.owner_id == auth.local_user_id")],
+    );
+    assert!(!plain.uses_graph_rls());
+
+    // No conditions at all → not graph RLS.
+    let none = make_auth(
+        "user1",
+        vec![make_permission("content/**", vec![Operation::Read])],
+    );
+    assert!(!none.uses_graph_rls());
+}
+
+#[tokio::test]
+async fn test_relates_allows_when_path_exists() {
+    let auth = relates_auth();
+    let resolver = MockResolver { answer: true };
+    let result = filter_node_async(child_node(), &auth, &make_scope(), Some(&resolver)).await;
+    assert!(result.is_some(), "guardian with PARENT_OF path should read");
+}
+
+#[tokio::test]
+async fn test_relates_denies_when_no_path() {
+    let auth = relates_auth();
+    let resolver = MockResolver { answer: false };
+    let result = filter_node_async(child_node(), &auth, &make_scope(), Some(&resolver)).await;
+    assert!(result.is_none(), "no PARENT_OF path should deny");
+}
+
+#[tokio::test]
+async fn test_relates_fails_closed_without_resolver() {
+    // Without a resolver the async path falls back to sync evaluation, which
+    // cannot evaluate RELATES and therefore denies (fail-closed).
+    let auth = relates_auth();
+    let result = filter_node_async(child_node(), &auth, &make_scope(), None).await;
+    assert!(
+        result.is_none(),
+        "RELATES must fail closed with no resolver"
+    );
+}
+
+#[tokio::test]
+async fn test_can_perform_async_relates_allow_deny() {
+    let auth = relates_auth();
+    let node = child_node();
+    let scope = make_scope();
+
+    let allow = MockResolver { answer: true };
+    assert!(can_perform_async(&node, Operation::Read, &auth, &scope, Some(&allow)).await);
+
+    let deny = MockResolver { answer: false };
+    assert!(!can_perform_async(&node, Operation::Read, &auth, &scope, Some(&deny)).await);
+}
+
+#[tokio::test]
+async fn test_async_non_relates_condition_still_works() {
+    // A plain (non-graph) condition must still evaluate correctly on the async
+    // path even when a resolver is present.
+    let mut auth = make_auth(
+        "user1",
+        vec![Permission::new("content/**", vec![Operation::Read])
+            .with_condition("node.owner_id == auth.local_user_id")],
+    );
+    auth.local_user_id = Some("user1".to_string());
+    let resolver = MockResolver { answer: false };
+
+    let mut own = make_node("/content/a", "Article");
+    own.owner_id = Some("user1".to_string());
+    assert!(
+        filter_node_async(own, &auth, &make_scope(), Some(&resolver))
+            .await
+            .is_some()
+    );
+
+    let mut other = make_node("/content/b", "Article");
+    other.owner_id = Some("someone-else".to_string());
+    assert!(
+        filter_node_async(other, &auth, &make_scope(), Some(&resolver))
+            .await
+            .is_none()
+    );
+}

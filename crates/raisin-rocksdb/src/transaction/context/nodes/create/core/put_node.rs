@@ -78,7 +78,7 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     }
 
     // 4a. Check RLS permission
-    rls::check_put_permission(tx, &normalized_node, existing_node.as_ref(), workspace)?;
+    rls::check_put_permission(tx, &normalized_node, existing_node.as_ref(), workspace).await?;
 
     // 5. Validate based on operation type
     if existing_node.is_none() {

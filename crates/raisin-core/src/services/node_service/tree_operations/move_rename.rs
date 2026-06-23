@@ -39,7 +39,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
             .ok_or(raisin_error::Error::NotFound("node".into()))?;
 
         // RLS Authorization: Check if user can update the source node
-        if !self.check_rls_permission(&node, Operation::Update) {
+        if !self.check_rls_permission(&node, Operation::Update).await {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot move node from path '{}'",
                 from_path
@@ -50,7 +50,10 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         let new_path = format!("{}/{}", to_parent_path.trim_end_matches('/'), node.name);
 
         // RLS Authorization: Check if user can create at destination path
-        if !self.check_rls_create_permission(&new_path, &node.node_type) {
+        if !self
+            .check_rls_create_permission(&new_path, &node.node_type)
+            .await
+        {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot move node to path '{}'",
                 new_path
@@ -167,7 +170,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage> NodeServi
         // VALIDATION: Cannot rename published nodes - must unpublish first
         if let Some(node) = &before {
             // RLS Authorization: Check if user can update this node
-            if !self.check_rls_permission(node, Operation::Update) {
+            if !self.check_rls_permission(node, Operation::Update).await {
                 return Err(raisin_error::Error::PermissionDenied(format!(
                     "Permission denied: cannot rename node at path '{}'",
                     old_path

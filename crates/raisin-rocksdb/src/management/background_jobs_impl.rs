@@ -5,7 +5,6 @@
 
 use super::compaction;
 use super::{BackgroundJobsConfig, BackgroundJobsImpl};
-use crate::graph::GraphCacheLayer;
 use crate::RocksDBStorage;
 use async_trait::async_trait;
 use raisin_error::Result;
@@ -40,7 +39,9 @@ impl BackgroundJobs for RocksDBStorage {
             graph_compute_max_configs_per_tick: 10,
         };
 
-        let graph_cache_layer = Arc::new(GraphCacheLayer::new());
+        // Share the storage-owned cache layer so the resolver (Storage::graph_resolver)
+        // reads the same in-memory reachability this job populates.
+        let graph_cache_layer = self.graph_cache_layer.clone();
         let bg_jobs = BackgroundJobsImpl::new(Arc::new(self.clone()), graph_cache_layer, config);
 
         // Start jobs in a tokio task and return the handle
@@ -72,7 +73,8 @@ impl BackgroundJobs for RocksDBStorage {
             graph_compute_max_configs_per_tick: 10,
         };
 
-        let graph_cache_layer = Arc::new(GraphCacheLayer::new());
+        // Share the storage-owned cache layer (see start_background_jobs).
+        let graph_cache_layer = self.graph_cache_layer.clone();
         let bg_jobs = BackgroundJobsImpl::new(Arc::new(self.clone()), graph_cache_layer, config);
 
         let tenant_id = tenant.to_string();

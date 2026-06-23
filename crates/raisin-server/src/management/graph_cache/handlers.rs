@@ -182,8 +182,9 @@ pub async fn trigger_recompute(
         )));
     }
 
-    // Create a cache layer for the computation
-    let cache_layer = Arc::new(GraphCacheLayer::new());
+    // Use the storage-owned shared cache layer so a manual recompute warms the
+    // same in-memory cache the RLS graph resolver reads.
+    let cache_layer = state.storage.graph_cache_layer();
 
     // Spawn background task for recomputation
     let storage = state.storage.clone();

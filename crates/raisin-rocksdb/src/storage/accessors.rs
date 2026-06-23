@@ -35,6 +35,15 @@ impl RocksDBStorage {
         &self.lazy_index_manager
     }
 
+    /// Get the shared in-memory RELATES reachability cache layer.
+    ///
+    /// This is the single instance the graph resolver reads from during RLS
+    /// evaluation. Background graph-compute jobs must populate THIS instance
+    /// (clone the Arc) so the resolver sees their precomputed reachability.
+    pub fn graph_cache_layer(&self) -> Arc<crate::graph::GraphCacheLayer> {
+        self.graph_cache_layer.clone()
+    }
+
     /// Get the instance-based job registry
     ///
     /// Returns a reference to the JobRegistry used by this storage instance.

@@ -77,11 +77,14 @@ pub(super) async fn lookup_parent_id(
         }
         Some(None) => Ok(None), // Parent was deleted in this transaction
         None => {
-            // Not in cache, check committed storage
+            // Not in cache, check committed storage. Use the lightweight id-only
+            // lookup: we only need the parent's id, NOT the full node. The full
+            // get_by_path_impl populates `has_children`, which scans ALL of the
+            // parent's children (O(children)) — making every append O(N) and
+            // bulk-filling a parent O(N²). id-only is an O(1) path-index point read.
             tx.node_repo
-                .get_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
+                .get_node_id_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
                 .await
-                .map(|opt| opt.map(|p| p.id))
         }
     }
 }
@@ -123,8 +126,10 @@ pub(super) async fn lookup_old_parent_id(
         return Ok(Some("/".to_string()));
     }
 
+    // id-only lookup (see lookup_parent_id): avoids the O(children) has_children
+    // population from loading the full node.
     tx.node_repo
-        .get_by_path_impl(
+        .get_node_id_by_path_impl(
             tenant_id,
             repo_id,
             branch,
@@ -133,7 +138,6 @@ pub(super) async fn lookup_old_parent_id(
             None,
         )
         .await
-        .map(|opt| opt.map(|p| p.id))
 }
 
 /// Tombstone old ORDERED_CHILDREN entry
@@ -289,8 +293,15 @@ pub(super) fn add_ordered_child(
     );
     batch.put_cf(cf_ordered, ordered_key, node.name.as_bytes());
 
-    // Update transaction cache so next sibling in the same batch gets a unique label
+    // Update transaction cache so next sibling in the same batch gets a unique label.
+    // Only on append (is_new_node): an update preserves the existing (non-last)
+    // label and must not clobber the persistent "last child" cache.
     if is_new_node {
+        // Persist the O(1) "last child" metadata cache (see add_ordered_child_fast).
+        let metadata_key =
+            keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
+        batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
+
         let mut cache = tx
             .read_cache
             .lock()
@@ -384,6 +395,15 @@ pub(super) fn add_ordered_child_fast(
         &node.id,
     );
     batch.put_cf(cf_ordered, ordered_key, node.name.as_bytes());
+
+    // Persist the O(1) "last child" metadata cache so the NEXT transaction's
+    // get_last_order_label() hits it instead of falling back to an O(n) scan of
+    // all children. Without this, appending the Nth child under a parent is O(N)
+    // (and bulk-filling one parent is O(N²)). The fast path is always an append,
+    // so `order_label` is the new highest label.
+    let metadata_key =
+        keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
+    batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
 
     // Update transaction cache so next sibling in the same batch gets a unique label
     {

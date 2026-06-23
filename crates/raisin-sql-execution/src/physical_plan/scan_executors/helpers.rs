@@ -10,16 +10,46 @@
 //! - Locale resolution for translation queries
 //! - Node translation resolution
 
+use raisin_core::services::rls_filter;
 use raisin_core::services::translation_resolver::TranslationResolver;
 use raisin_error::Error;
+use raisin_hlc::HLC;
+use raisin_models::auth::AuthContext;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
+use raisin_models::permissions::PermissionScope;
 use raisin_models::translations::LocaleCode;
 use raisin_sql::analyzer::{BinaryOperator, Expr, Literal, TypedExpr};
-use raisin_storage::Storage;
+use raisin_storage::{scope::BranchScope, Storage};
 use std::sync::Arc;
 
 use crate::physical_plan::executor::ExecutionContext;
+
+/// Apply RLS to a single node, building a cache-backed graph resolver from
+/// `storage` so `RELATES … VIA` conditions are evaluated against the relation
+/// graph. This is the async counterpart to `rls_filter::filter_node` used
+/// throughout the scan executors; without it, graph-relationship RLS conditions
+/// fail closed. Relations are evaluated at `max_revision` (or latest when None).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn rls_filter_node_graph<S: Storage>(
+    storage: &S,
+    node: Node,
+    auth: &AuthContext,
+    scope: &PermissionScope,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    max_revision: Option<&HLC>,
+) -> Option<Node> {
+    // Hot-path fast lane: when no permission uses a graph (`RELATES`) condition,
+    // skip resolver construction entirely and take the synchronous path.
+    if !auth.uses_graph_rls() {
+        return rls_filter::filter_node(node, auth, scope);
+    }
+    let rev = max_revision.copied().unwrap_or_else(HLC::now);
+    let resolver = storage.graph_resolver(BranchScope::new(tenant_id, repo_id, branch), &rev);
+    rls_filter::filter_node_async(node, auth, scope, resolver.as_deref()).await
+}
 
 /// Extract a property predicate from a filter expression for filter-first fallback.
 ///

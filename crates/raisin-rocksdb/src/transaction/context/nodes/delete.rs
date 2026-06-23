@@ -95,22 +95,47 @@ pub async fn delete_node(tx: &RocksDBTransaction, workspace: &str, node_id: &str
         .await?
         .ok_or_else(|| raisin_error::Error::NotFound(format!("Node {} not found", node_id)))?;
 
-    // 2a. Check DELETE permission - SECURITY: deny-by-default if no auth context
-    {
+    // 2a. Check DELETE permission - SECURITY: deny-by-default if no auth context.
+    // Clone the auth context out of the guard so it is released before the async
+    // graph-resolver evaluation.
+    let auth_opt = {
         let meta = tx
             .metadata
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-        match &meta.auth_context {
+        meta.auth_context.clone()
+    };
+    {
+        match auth_opt {
             Some(auth) => {
                 use raisin_core::services::rls_filter;
                 use raisin_models::permissions::{Operation, PermissionScope};
+                use raisin_storage::{scope::BranchScope, Storage};
 
                 // Create permission scope from transaction context
-                let branch_str = meta.branch.as_ref().map(|s| s.as_str()).unwrap_or("main");
-                let scope = PermissionScope::new(workspace, branch_str);
+                let (tid, rid, br): (&str, &str, &str) = (&tenant_id, &repo_id, &branch);
+                let scope = PermissionScope::new(workspace, br);
+                // Fast path: build the resolver only when a `RELATES` condition
+                // is present; otherwise evaluate synchronously.
+                let allowed = if auth.uses_graph_rls() {
+                    // Write-time RLS evaluates relations at latest committed state.
+                    let revision = raisin_hlc::HLC::now();
+                    let resolver = tx
+                        .storage
+                        .graph_resolver(BranchScope::new(tid, rid, br), &revision);
+                    rls_filter::can_perform_async(
+                        &node,
+                        Operation::Delete,
+                        &auth,
+                        &scope,
+                        resolver.as_deref(),
+                    )
+                    .await
+                } else {
+                    rls_filter::can_perform(&node, Operation::Delete, &auth, &scope)
+                };
 
-                if !rls_filter::can_perform(&node, Operation::Delete, auth, &scope) {
+                if !allowed {
                     return Err(raisin_error::Error::PermissionDenied(format!(
                         "Cannot delete node at path '{}'",
                         node.path

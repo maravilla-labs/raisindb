@@ -109,67 +109,6 @@ impl<'a> PermissionChecker<'a> {
         Some(node)
     }
 
-    /// Check if the user can perform an operation on a node (async version).
-    ///
-    /// This version supports async conditions like RELATES.
-    pub async fn can_perform_async(
-        &self,
-        node: &Node,
-        operation: Operation,
-        graph_resolver: Option<&dyn raisin_rel::eval::RelationResolver>,
-    ) -> bool {
-        if self.auth.is_system {
-            return true;
-        }
-
-        let matching = self.find_matching_permissions(node);
-
-        if matching.is_empty() {
-            return false;
-        }
-
-        for permission in matching {
-            if self
-                .permission_allows_async(permission, node, operation, graph_resolver)
-                .await
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Check if the user can read a node (async version).
-    pub async fn can_read_async(
-        &self,
-        node: &Node,
-        graph_resolver: Option<&dyn raisin_rel::eval::RelationResolver>,
-    ) -> bool {
-        self.can_perform_async(node, Operation::Read, graph_resolver)
-            .await
-    }
-
-    /// Check if the user can update a node (async version).
-    pub async fn can_update_async(
-        &self,
-        node: &Node,
-        graph_resolver: Option<&dyn raisin_rel::eval::RelationResolver>,
-    ) -> bool {
-        self.can_perform_async(node, Operation::Update, graph_resolver)
-            .await
-    }
-
-    /// Check if the user can delete a node (async version).
-    pub async fn can_delete_async(
-        &self,
-        node: &Node,
-        graph_resolver: Option<&dyn raisin_rel::eval::RelationResolver>,
-    ) -> bool {
-        self.can_perform_async(node, Operation::Delete, graph_resolver)
-            .await
-    }
-
     /// Find all permissions that match a node's path and type.
     fn find_matching_permissions(&self, node: &Node) -> Vec<&Permission> {
         self.permissions
@@ -220,32 +159,6 @@ impl<'a> PermissionChecker<'a> {
             }
 
             if !evaluator.evaluate_rel_expression(condition, node) {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Check if a specific permission allows an operation on a node (async version).
-    async fn permission_allows_async(
-        &self,
-        permission: &Permission,
-        node: &Node,
-        operation: Operation,
-        graph_resolver: Option<&dyn raisin_rel::eval::RelationResolver>,
-    ) -> bool {
-        if !permission.operations.contains(&operation) {
-            return false;
-        }
-
-        if let Some(condition) = &permission.condition {
-            let evaluator = ConditionEvaluator::new(self.auth);
-
-            if !evaluator
-                .evaluate_rel_expression_async(condition, node, graph_resolver)
-                .await
-            {
                 return false;
             }
         }

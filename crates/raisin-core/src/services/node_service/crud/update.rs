@@ -43,7 +43,10 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             })?;
 
         // RLS Authorization: Check if user can update this node
-        if !self.check_rls_permission(&existing, Operation::Update) {
+        if !self
+            .check_rls_permission(&existing, Operation::Update)
+            .await
+        {
             return Err(raisin_error::Error::PermissionDenied(format!(
                 "Permission denied: cannot update node '{}' at path '{}'",
                 node.id, existing.path
