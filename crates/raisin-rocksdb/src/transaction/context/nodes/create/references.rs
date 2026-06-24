@@ -126,6 +126,17 @@ fn collect_references(properties: &HashMap<String, PropertyValue>) -> Vec<RefLoc
                     stack.push((obj_path, val));
                 }
             }
+            PropertyValue::Element(element) => {
+                // Element blocks (e.g. Studio content elements) carry their fields
+                // — including references like background_image/cta — in `content`,
+                // keyed like an object. Descend so element-nested refs are resolved
+                // too (otherwise path-based refs inside content are never normalized).
+                for (key, val) in &element.content {
+                    let mut el_path = current_path.clone();
+                    el_path.push(PathSegment::Key(key.clone()));
+                    stack.push((el_path, val));
+                }
+            }
             // Other types don't contain references
             _ => {}
         }
@@ -234,6 +245,14 @@ fn apply_resolved_reference(
             }
             (PropertyValue::Array(arr), PathSegment::Index(idx)) => {
                 if let Some(val) = arr.get_mut(*idx) {
+                    val
+                } else {
+                    return;
+                }
+            }
+            (PropertyValue::Element(element), PathSegment::Key(key)) => {
+                // Mirror collect_references: descend into element content on write-back.
+                if let Some(val) = element.content.get_mut(key) {
                     val
                 } else {
                     return;

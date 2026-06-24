@@ -366,6 +366,35 @@ impl<S: Storage> ReferenceResolver<S> {
                         .map(|(k, v)| (k.clone(), replace_in_value(v, resolved)))
                         .collect(),
                 ),
+                // Element/Composite blocks (e.g. Studio content) carry refs in their
+                // `content` map — recurse so element-nested refs are replaced too
+                // (mirrors extract_references; otherwise RESOLVE leaves them as-is).
+                PropertyValue::Element(element) => {
+                    let mut e = element.clone();
+                    e.content = element
+                        .content
+                        .iter()
+                        .map(|(k, v)| (k.clone(), replace_in_value(v, resolved)))
+                        .collect();
+                    PropertyValue::Element(e)
+                }
+                PropertyValue::Composite(composite) => {
+                    let mut c = composite.clone();
+                    c.items = composite
+                        .items
+                        .iter()
+                        .map(|item| {
+                            let mut e = item.clone();
+                            e.content = item
+                                .content
+                                .iter()
+                                .map(|(k, v)| (k.clone(), replace_in_value(v, resolved)))
+                                .collect();
+                            e
+                        })
+                        .collect();
+                    PropertyValue::Composite(c)
+                }
                 _ => value.clone(),
             }
         }
