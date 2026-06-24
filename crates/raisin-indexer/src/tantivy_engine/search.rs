@@ -53,10 +53,8 @@ pub(crate) fn execute_search(
 
     if let (Some(shape_type), Some(shape_field)) = (&query.shape_type, fields.shape_types) {
         let shape_term = tantivy::Term::from_field_text(shape_field, shape_type);
-        let shape_query = tantivy::query::TermQuery::new(
-            shape_term,
-            tantivy::schema::IndexRecordOption::Basic,
-        );
+        let shape_query =
+            tantivy::query::TermQuery::new(shape_term, tantivy::schema::IndexRecordOption::Basic);
         tracing::debug!("Shape-type exact filter: {}", shape_type);
         must_clauses.push((
             tantivy::query::Occur::Must,

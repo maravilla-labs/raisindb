@@ -138,11 +138,9 @@ async fn sql_insert_emits_created_for_system_and_nonsystem() {
     let (storage, _td) = setup().await;
 
     let events = Arc::new(Mutex::new(Vec::new()));
-    storage
-        .event_bus()
-        .subscribe(Arc::new(Recorder {
-            events: events.clone(),
-        }));
+    storage.event_bus().subscribe(Arc::new(Recorder {
+        events: events.clone(),
+    }));
 
     // Control: a system INSERT emits Created.
     run(

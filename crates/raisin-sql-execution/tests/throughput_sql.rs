@@ -158,7 +158,10 @@ fn item(name: &str, cat: &str, seq: usize) -> Node {
     let mut props = std::collections::HashMap::new();
     props.insert("cat".to_string(), PropertyValue::String(cat.to_string()));
     // Zero-pad so text ordering matches numeric ordering (keyset pagination).
-    props.insert("seq".to_string(), PropertyValue::String(format!("{seq:09}")));
+    props.insert(
+        "seq".to_string(),
+        PropertyValue::String(format!("{seq:09}")),
+    );
     Node {
         id: String::new(),
         name: name.to_string(),
@@ -245,7 +248,10 @@ async fn throughput_sql() {
     for i in 0..n {
         let b = i / BUCKET_CAP;
         if b != cur {
-            seeder.add_node("/", folder(&format!("bk{b}"))).await.unwrap();
+            seeder
+                .add_node("/", folder(&format!("bk{b}")))
+                .await
+                .unwrap();
             cur = b;
         }
         let cat = format!("c{}", i % CATS);

@@ -1046,7 +1046,10 @@ async fn main() {
     // teardown to a separate thread, so SIGTERM/Ctrl-C shutdown exits cleanly.
     #[cfg(feature = "storage-rocksdb")]
     {
-        for rt in [_rt_runtime, _bg_runtime, _sys_runtime].into_iter().flatten() {
+        for rt in [_rt_runtime, _bg_runtime, _sys_runtime]
+            .into_iter()
+            .flatten()
+        {
             rt.shutdown_background();
         }
     }

@@ -7,11 +7,11 @@ use std::sync::Arc;
 use raisin_embeddings::crypto::ApiKeyEncryptor;
 use raisin_embeddings::provider::create_provider;
 use raisin_embeddings::TenantEmbeddingConfigStore;
+use raisin_models::auth::AuthContext;
 use raisin_sql_execution::{
     FunctionInvokeCallback, FunctionInvokeSyncCallback, JobRegistrarCallback, QueryEngine,
     RestoreTreeRegistrarCallback, StaticCatalog,
 };
-use raisin_models::auth::AuthContext;
 use raisin_storage::{scope::RepoScope, JobType, Storage, WorkspaceRepository};
 
 use crate::error::ApiError;

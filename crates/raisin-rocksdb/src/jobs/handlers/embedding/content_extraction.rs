@@ -338,7 +338,10 @@ mod tests {
         let out = collect_plan_values(&plan, &props);
 
         // (a) marked element field IS embedded; unmarked is NOT.
-        assert!(out.contains("Embedded title"), "marked element field missing");
+        assert!(
+            out.contains("Embedded title"),
+            "marked element field missing"
+        );
         assert!(
             !out.contains("Hidden subtitle"),
             "unmarked element field leaked"

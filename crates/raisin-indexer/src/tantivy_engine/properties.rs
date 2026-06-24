@@ -50,7 +50,14 @@ pub(crate) fn flatten_properties(
             // Field name token preserves "search by field name" behavior.
             content.push(format!("{}:", name));
         }
-        walk(value, index_value, plan, &mut content, &mut shape_types, &mut seen);
+        walk(
+            value,
+            index_value,
+            plan,
+            &mut content,
+            &mut shape_types,
+            &mut seen,
+        );
     }
 
     FlattenOutput {
@@ -231,7 +238,10 @@ mod tests {
         // and as fuzzy content tokens, even when none of its fields are indexed.
         let plan = plan_with_elements("ns:Page", &[("launchpad:Hero", &[])]);
         let mut props = HashMap::new();
-        props.insert("body".to_string(), element("launchpad:Hero", &[("title", "Hi")]));
+        props.insert(
+            "body".to_string(),
+            element("launchpad:Hero", &[("title", "Hi")]),
+        );
 
         let out = flatten_properties(&plan, &props);
 
@@ -250,7 +260,10 @@ mod tests {
         let mut props = HashMap::new();
         props.insert(
             "body".to_string(),
-            element("launchpad:Hero", &[("title", "Indexed"), ("subtitle", "Hidden")]),
+            element(
+                "launchpad:Hero",
+                &[("title", "Indexed"), ("subtitle", "Hidden")],
+            ),
         );
 
         let out = flatten_properties(&plan, &props);
@@ -265,8 +278,16 @@ mod tests {
         let composite = PropertyValue::Composite(Composite {
             uuid: "c".to_string(),
             items: vec![
-                if let PropertyValue::Element(e) = element("a:One", &[]) { e } else { unreachable!() },
-                if let PropertyValue::Element(e) = element("a:Two", &[]) { e } else { unreachable!() },
+                if let PropertyValue::Element(e) = element("a:One", &[]) {
+                    e
+                } else {
+                    unreachable!()
+                },
+                if let PropertyValue::Element(e) = element("a:Two", &[]) {
+                    e
+                } else {
+                    unreachable!()
+                },
             ],
         });
         let mut props = HashMap::new();
@@ -296,8 +317,14 @@ mod tests {
         let mut plan = plan_with_elements("ns:Page", &[]);
         plan.top_level_props = Some(vec!["title".to_string()]);
         let mut props = HashMap::new();
-        props.insert("title".to_string(), PropertyValue::String("Keep".to_string()));
-        props.insert("internal".to_string(), PropertyValue::String("Drop".to_string()));
+        props.insert(
+            "title".to_string(),
+            PropertyValue::String("Keep".to_string()),
+        );
+        props.insert(
+            "internal".to_string(),
+            PropertyValue::String("Drop".to_string()),
+        );
 
         let out = flatten_properties(&plan, &props);
 

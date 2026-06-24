@@ -777,7 +777,8 @@ async fn test_raisin_nodes_create_deep_top_level() {
     assert!(result.success, "Function execution failed");
     let output = result.output.unwrap();
     assert_eq!(
-        output["success"], true,
+        output["success"],
+        true,
         "createDeep/upsertDeep should succeed: {:?}",
         output.get("error")
     );

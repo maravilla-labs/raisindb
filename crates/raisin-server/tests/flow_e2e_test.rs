@@ -769,8 +769,8 @@ async fn test_node_event_trigger_fires_on_sql_update() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    let instance = triggered
-        .expect("SQL UPDATE did not fire the Updated node-event trigger within 45s");
+    let instance =
+        triggered.expect("SQL UPDATE did not fire the Updated node-event trigger within 45s");
     let trigger_info = &instance["properties"]["variables"]["__trigger_info"];
     assert_eq!(trigger_info["node_type"], json!("raisin:Folder"));
     assert_eq!(trigger_info["event_type"], json!("updated"));
@@ -1077,7 +1077,10 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
     let mut ws_ok = false;
     for _ in 0..60 {
         let ws = client
-            .put(format!("{}/api/workspaces/{}/equipment", server.base_url, REPO))
+            .put(format!(
+                "{}/api/workspaces/{}/equipment",
+                server.base_url, REPO
+            ))
             .bearer_auth(&token)
             .json(&json!({
                 "name": "equipment",
@@ -1103,7 +1106,10 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
     // distinctive bit of the reported INSERT. Field-less + non-strict so any
     // properties validate; we only need the archetype to be resolvable.
     let arch = client
-        .post(format!("{}/api/management/{}/main/archetypes", server.base_url, REPO))
+        .post(format!(
+            "{}/api/management/{}/main/archetypes",
+            server.base_url, REPO
+        ))
         .bearer_auth(&token)
         .json(&json!({
             "archetype": {
@@ -1117,7 +1123,11 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
         .send()
         .await
         .expect("create archetype");
-    assert!(arch.status().is_success(), "archetype: {}", arch.text().await.unwrap_or_default());
+    assert!(
+        arch.status().is_success(),
+        "archetype: {}",
+        arch.text().await.unwrap_or_default()
+    );
     tokio::time::sleep(Duration::from_millis(300)).await;
     println!("✅ app:EquipmentPage archetype created");
 
@@ -1125,9 +1135,14 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
     let mut flow_node_id = None;
     for _ in 0..60 {
         let _ = client
-            .post(format!("{}/api/repository/{}/main/head/functions/", server.base_url, REPO))
+            .post(format!(
+                "{}/api/repository/{}/main/head/functions/",
+                server.base_url, REPO
+            ))
             .bearer_auth(&token)
-            .json(&json!({"node": {"name": "flows", "node_type": "raisin:Folder", "properties": {}}}))
+            .json(
+                &json!({"node": {"name": "flows", "node_type": "raisin:Folder", "properties": {}}}),
+            )
             .send()
             .await;
         let response = client
@@ -1149,23 +1164,33 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
             .expect("create flow");
         if response.status().is_success() {
             let fetched = client
-                .get(format!("{}/api/repository/{}/main/head/functions/flows/on-equipment-created", server.base_url, REPO))
+                .get(format!(
+                    "{}/api/repository/{}/main/head/functions/flows/on-equipment-created",
+                    server.base_url, REPO
+                ))
                 .bearer_auth(&token)
                 .send()
                 .await
                 .expect("fetch flow");
             let body: Value = fetched.json().await.unwrap();
             flow_node_id = body["id"].as_str().map(String::from);
-            if flow_node_id.is_some() { break; }
+            if flow_node_id.is_some() {
+                break;
+            }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let flow_node_id = flow_node_id.expect("flow node id");
 
     let _ = client
-        .post(format!("{}/api/repository/{}/main/head/functions/", server.base_url, REPO))
+        .post(format!(
+            "{}/api/repository/{}/main/head/functions/",
+            server.base_url, REPO
+        ))
         .bearer_auth(&token)
-        .json(&json!({"node": {"name": "triggers", "node_type": "raisin:Folder", "properties": {}}}))
+        .json(
+            &json!({"node": {"name": "triggers", "node_type": "raisin:Folder", "properties": {}}}),
+        )
         .send()
         .await;
     let trig = client
@@ -1185,7 +1210,11 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
         .send()
         .await
         .expect("create trigger");
-    assert!(trig.status().is_success(), "trigger: {}", trig.text().await.unwrap_or_default());
+    assert!(
+        trig.status().is_success(),
+        "trigger: {}",
+        trig.text().await.unwrap_or_default()
+    );
     println!("✅ Created-trigger created");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -1200,7 +1229,11 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
         .send()
         .await
         .expect("sql insert");
-    assert!(ins.status().is_success(), "insert: {}", ins.text().await.unwrap_or_default());
+    assert!(
+        ins.status().is_success(),
+        "insert: {}",
+        ins.text().await.unwrap_or_default()
+    );
     println!("✅ SQL INSERT issued (server log: /tmp/raisin-test-server-8100.log)");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(40);
@@ -1218,13 +1251,19 @@ async fn test_created_trigger_on_compound_indexed_nodetype_insert() {
             .expect("query");
         if resp.status().is_success() {
             let body: Value = resp.json().await.unwrap();
-            let rows = body["rows"].as_array().cloned().or_else(|| body["data"].as_array().cloned()).unwrap_or_default();
+            let rows = body["rows"]
+                .as_array()
+                .cloned()
+                .or_else(|| body["data"].as_array().cloned())
+                .unwrap_or_default();
             fired = rows.iter().any(|r| {
                 let ti = &r["properties"]["variables"]["__trigger_info"];
                 ti["event_type"] == json!("created") && ti["node_path"] == json!("/test-x")
             });
         }
-        if !fired { tokio::time::sleep(Duration::from_millis(500)).await; }
+        if !fired {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     assert!(

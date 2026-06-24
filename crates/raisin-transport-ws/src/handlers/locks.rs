@@ -88,7 +88,9 @@ fn require_owner(connection_state: &Arc<RwLock<ConnectionState>>) -> Result<Stri
 /// values. Mirrors `validate_ttl` in the SQL lock functions.
 fn validate_ttl(ttl_ms: i64) -> Result<Duration, WsError> {
     if ttl_ms <= 0 {
-        return Err(WsError::InvalidRequest("ttl_ms must be positive".to_string()));
+        return Err(WsError::InvalidRequest(
+            "ttl_ms must be positive".to_string(),
+        ));
     }
     if ttl_ms > MAX_LOCK_TTL_MS {
         return Err(WsError::InvalidRequest(format!(

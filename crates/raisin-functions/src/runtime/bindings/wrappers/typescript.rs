@@ -488,7 +488,9 @@ fn generate_nodes_namespace(
     // createDeep / upsertDeep - JS-composite methods from api_wrapper.js (auto-managed
     // transaction), not backed by a registry descriptor.
     code.push_str("    /**\n");
-    code.push_str("     * Create a node under parentPath, auto-creating any missing ancestor folders.\n");
+    code.push_str(
+        "     * Create a node under parentPath, auto-creating any missing ancestor folders.\n",
+    );
     code.push_str("     */\n");
     code.push_str("    function createDeep(workspace: string, parentPath: string, data: any, parentNodeType?: string): Promise<RaisinNode>;\n");
     code.push_str("    /**\n");

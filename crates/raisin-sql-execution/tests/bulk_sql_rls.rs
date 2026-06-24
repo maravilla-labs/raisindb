@@ -47,11 +47,10 @@ fn owner_scoped_user(user: &str) -> AuthContext {
         group_roles: vec![],
         effective_roles: vec![],
         groups: vec![],
-        permissions: vec![Permission::new(
-            "/**",
-            vec![Operation::Read, Operation::Update],
-        )
-        .with_condition("node.owner == auth.user_id".to_string())],
+        permissions: vec![
+            Permission::new("/**", vec![Operation::Read, Operation::Update])
+                .with_condition("node.owner == auth.user_id".to_string()),
+        ],
         is_system_admin: false,
         resolved_at: Some(std::time::Instant::now()),
     })
@@ -90,7 +89,10 @@ async fn try_exec(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql: &st
 }
 
 /// Read a node's `status` property via a (system) engine that sees every row.
-async fn status(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, path: &str) -> Option<String> {
+async fn status(
+    engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>,
+    path: &str,
+) -> Option<String> {
     let sql =
         format!("SELECT properties->>'status'::String AS status FROM items WHERE path = '{path}'");
     let mut stream = engine.execute(&sql).await.expect("status select");

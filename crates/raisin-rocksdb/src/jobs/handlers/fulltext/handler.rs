@@ -91,10 +91,11 @@ impl FulltextJobHandler {
         if context.tenant_id != "default" {
             return;
         }
-        if !self
-            .tantivy_engine
-            .is_index_stale(&context.tenant_id, &context.repo_id, &context.branch)
-        {
+        if !self.tantivy_engine.is_index_stale(
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+        ) {
             return;
         }
         tracing::info!(

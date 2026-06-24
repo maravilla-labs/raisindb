@@ -81,13 +81,7 @@ impl IndexPlanCache {
 
 /// Cache key for a resolved type decision. The `index_type` discriminant keeps
 /// Fulltext and Vector plans for the same type from colliding in the cache.
-fn scope_key(
-    tenant: &str,
-    repo: &str,
-    branch: &str,
-    name: &str,
-    index_type: &IndexType,
-) -> String {
+fn scope_key(tenant: &str, repo: &str, branch: &str, name: &str, index_type: &IndexType) -> String {
     format!(
         "{:?}\0{}\0{}\0{}\0{}",
         index_type, tenant, repo, branch, name

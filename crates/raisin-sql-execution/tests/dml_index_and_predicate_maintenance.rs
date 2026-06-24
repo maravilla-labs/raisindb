@@ -357,8 +357,7 @@ async fn dml_in_list_json_cast_update() {
         .await;
     }
 
-    const IN_FILTER: &str =
-        "properties->>'status'::String IN ('in_use','reserved')";
+    const IN_FILTER: &str = "properties->>'status'::String IN ('in_use','reserved')";
 
     // Baseline: SELECT matches exactly the two targeted rows.
     assert_eq!(

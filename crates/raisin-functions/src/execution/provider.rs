@@ -315,11 +315,10 @@ where
                 // so RLS matches a synchronous request. Fall back to anonymous —
                 // never system — when the identity is absent.
                 let auth = auth.unwrap_or_else(AuthContext::anonymous);
-                let mut engine =
-                    QueryEngine::new(storage.clone(), &tenant_id, &repo_id, &branch)
-                        .with_catalog(Arc::new(catalog))
-                        .with_auth(auth)
-                        .with_default_actor(actor);
+                let mut engine = QueryEngine::new(storage.clone(), &tenant_id, &repo_id, &branch)
+                    .with_catalog(Arc::new(catalog))
+                    .with_auth(auth)
+                    .with_default_actor(actor);
                 if let Some(idx) = &indexing_engine {
                     engine = engine.with_indexing_engine(idx.clone());
                 }
