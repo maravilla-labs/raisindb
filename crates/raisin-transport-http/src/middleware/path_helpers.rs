@@ -12,12 +12,20 @@
 /// - /api/sql/{repo}
 /// - /api/audit/{repo}/...
 /// - /api/management/{repo}/...
+/// - /mcp/{repo}/{branch}/{slug}
 pub(super) fn extract_repo_from_path(path: &str) -> Option<String> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     // Need at least 3 segments: ["api", "something", "{repo}", ...]
     if segments.len() >= 3 && segments[0] == "api" {
         return Some(segments[2].to_string());
+    }
+
+    // MCP transport: ["mcp", "{repo}", "{branch}", "{slug}"]. The repo is the
+    // segment immediately after the `mcp` root so auth resolves permissions
+    // against the correct repository rather than falling back to "default".
+    if segments.len() >= 2 && segments[0] == "mcp" {
+        return Some(segments[1].to_string());
     }
 
     None
@@ -37,6 +45,11 @@ pub(super) fn extract_repo_from_path(path: &str) -> Option<String> {
 /// - `/api/packages/{repo}/*` (package commands)
 pub(super) fn extract_repo_from_any_path(path: &str) -> Option<String> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    // Pattern: /mcp/{repo}/{branch}/{slug}
+    if segments.len() >= 2 && segments[0] == "mcp" {
+        return Some(segments[1].to_string());
+    }
 
     // Pattern: /auth/{repo}/...
     if segments.len() >= 2 && segments[0] == "auth" {

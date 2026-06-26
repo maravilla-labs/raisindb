@@ -55,6 +55,7 @@ impl AuthService {
             jti: uuid::Uuid::new_v4().to_string(),
             iss: Some("raisindb".to_string()),
             aud: None,
+            scope: None,
         };
 
         let access_token = encode(
@@ -100,15 +101,41 @@ impl AuthService {
     /// Validate a user access token and extract claims.
     ///
     /// Returns the `AuthClaims` if the token is valid.
+    ///
+    /// This is the login-token path: ordinary access tokens carry no `aud` claim
+    /// and authorize the caller against their full `raisin:access_control` roles.
+    /// A resource-bound token minted by the OAuth 2.1 authorization server carries
+    /// an `aud` (and narrowed `scope`) and is **rejected here** — accepting it
+    /// would let a token consented for one MCP resource act as a full login token
+    /// on every other endpoint (RFC 8707 audience confusion). Such tokens are
+    /// validated only by [`validate_resource_token`], which pins the audience to
+    /// the resource being accessed.
+    ///
+    /// `validate_aud` is left off so the rejection produces a clear, uniform
+    /// error rather than `jsonwebtoken`'s generic "audience present" failure.
+    ///
+    /// [`validate_resource_token`]: Self::validate_resource_token
     pub fn validate_user_token(&self, token: &str) -> Result<AuthClaims> {
+        let mut validation = Validation::default();
+        validation.validate_aud = false;
+
         let token_data = decode::<AuthClaims>(
             token,
             &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
-            &Validation::default(),
+            &validation,
         )
         .map_err(|e| raisin_error::Error::Unauthorized(format!("Invalid user token: {}", e)))?;
 
         let claims = token_data.claims;
+
+        // A resource-bound (audience-pinned) token must not authenticate as a
+        // general login token; it is only valid at its bound resource via
+        // `validate_resource_token`.
+        if claims.aud.is_some() {
+            return Err(raisin_error::Error::Unauthorized(
+                "Resource-bound token cannot be used as a login token".to_string(),
+            ));
+        }
 
         // Verify it's an access token (not refresh or admin)
         if !matches!(
@@ -201,6 +228,7 @@ impl AuthService {
             jti: uuid::Uuid::new_v4().to_string(),
             iss: Some("raisindb".to_string()),
             aud: None,
+            scope: None,
         };
 
         let access_token = encode(

@@ -769,3 +769,19 @@ raisindb sync ./package --repo myapp --watch --push
 - **Needs re-deploy** — only `manifest.yaml` and `workspaces/` (applied at install time). The watcher prints a hint.
 
 Re-running `raisindb deploy ./package --repo myapp --install` also updates existing schema (a reinstall upserts node types / archetypes / element types / mixins); **content nodes are left untouched**, so runtime edits aren't clobbered. Use `--watch` for the fast loop and `deploy --install` after manifest/workspace changes (or to ship a versioned `.rap`).
+
+> ⚠️ **A content node's `archetype` link is set ONLY by `deploy --install`, never
+> by `sync`.** `sync` pushes a content node's `name` / `node_type` / `properties`
+> but **not** its top-level `archetype` field — so a page first created via
+> `sync` resolves `archetype = null`, and the frontend archetype→component
+> registry can't pick a component for it. **Author archetyped content with
+> `deploy --install`.** Because reinstall leaves existing content untouched, it
+> won't backfill the archetype on an already-synced node — to fix one you must
+> **delete it and reinstall** so install recreates it fresh. (Same rule for
+> editing a shipped role's permissions or any other existing content node:
+> sync/reinstall won't change it — delete + reinstall.)
+
+> ℹ️ **There is no separate `slug` field.** RaisinDB is hierarchical: a node's
+> path/name *is* its slug, and the frontend maps the path to the URL directly.
+> Don't add a `slug` property to NodeTypes/archetypes — name the content folder
+> what you want the URL segment to be.

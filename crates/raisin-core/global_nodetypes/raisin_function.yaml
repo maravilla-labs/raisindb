@@ -112,6 +112,19 @@ properties:
     title: Metadata
     description: Custom metadata for the function
 
+  - name: mcp
+    type: Object
+    required: false
+    title: MCP Tool
+    description: |
+      Optional MCP tool declaration. When present, the function is promoted to a
+      tool on every raisin:McpServer whose data policy covers this function's
+      workspace.
+      Structure: { enabled (bool, default true), name (string, defaults to the
+      function name), description (string, defaults to the function description),
+      inputSchema (object, defaults to the function input_schema), scopes (array
+      of strings) }
+
 allowed_children:
   - raisin:Asset
   - raisin:Folder

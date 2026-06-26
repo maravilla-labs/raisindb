@@ -45,8 +45,11 @@ mod handlers {
     pub mod inbox;
     pub mod locks;
     pub mod management;
+    pub mod mcp;
     pub mod mixins;
     pub mod node_types;
+    #[cfg(feature = "storage-rocksdb")]
+    pub mod oauth_as;
     pub mod packages;
     #[cfg(feature = "storage-rocksdb")]
     pub mod processing_rules;

@@ -20,6 +20,9 @@ async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
+# Error handling
+thiserror = { workspace = true }
+
 # JWT and crypto
 jsonwebtoken = "9"
 bcrypt = "0.15"

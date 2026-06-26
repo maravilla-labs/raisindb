@@ -93,7 +93,21 @@ pub struct AppState {
     pub(crate) schema_stats_cache: Option<SharedSchemaStatsCache>,
     /// Atomic locks / inventory manager. `None` when the subsystem is disabled.
     pub(crate) lock_manager: Option<raisin_locks::LockManagerHandle>,
+    /// OAuth 2.1 authorization server backing the `/authorize`, `/token`,
+    /// `/register`, and discovery endpoints. Holds registered clients and
+    /// short-lived authorization codes in-process via the default store.
+    #[cfg(feature = "storage-rocksdb")]
+    pub(crate) oauth_server: Arc<raisin_auth::authserver::AuthorizationServer<OAuthStore>>,
 }
+
+/// The store backing the OAuth authorization server.
+///
+/// The in-memory implementation is a complete, real store suitable for
+/// single-node servers, the CLI dev server, and tests. A managed deployment can
+/// swap in a persistent implementation of the same store traits without
+/// changing the protocol logic.
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) type OAuthStore = raisin_auth::authserver::InMemoryAuthServerStore;
 
 impl AppState {
     /// Get access to the RaisinConnection for transaction API
@@ -331,6 +345,13 @@ pub fn router_with_bin_and_audit(
         None
     };
 
+    // The authorization server holds OAuth clients + codes in process. Codes are
+    // single-use and short-lived; clients persist for the server's lifetime.
+    #[cfg(feature = "storage-rocksdb")]
+    let oauth_server = Arc::new(raisin_auth::authserver::AuthorizationServer::new(Arc::new(
+        raisin_auth::authserver::InMemoryAuthServerStore::new(),
+    )));
+
     let state = AppState {
         storage,
         connection,
@@ -363,6 +384,8 @@ pub fn router_with_bin_and_audit(
         auth_service,
         schema_stats_cache,
         lock_manager,
+        #[cfg(feature = "storage-rocksdb")]
+        oauth_server,
     };
 
     // NOTE: Global CorsLayer has been removed in favor of unified_cors_middleware

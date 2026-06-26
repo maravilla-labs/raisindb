@@ -1,0 +1,33 @@
+name: raisin-mcp
+version: 1.0.0
+title: MCP Server Package
+description: >
+  Lets you declare Model Context Protocol (MCP) servers as content. Provides the
+  raisin:McpServer NodeType, whose nodes the MCP engine reads to assemble a live
+  tool set: built-in data tools gated by a data policy, plus custom tools that
+  map to raisin:Function nodes.
+author: RaisinDB Team
+license: MIT
+icon: plug
+color: "#0EA5E9"
+keywords:
+  - mcp
+  - model-context-protocol
+  - tools
+  - agent
+category: integration
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  nodetypes:
+    - raisin:McpServer
+  workspaces:
+    - mcp
+
+# The MCP engine discovers raisin:McpServer nodes in the `mcp` workspace (routing
+# requests as `/mcp/{repo}/{branch}/{slug}` by each node's `slug`). This package
+# provisions that workspace via workspaces/mcp.yaml (which allows the node type);
+# authors add their own raisin:McpServer nodes there (no server is shipped by
+# default).

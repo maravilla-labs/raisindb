@@ -211,6 +211,13 @@ fn collect_path_references(properties: &HashMap<String, PropertyValue>) -> Vec<(
             }
             PropertyValue::Array(items) => stack.extend(items.iter()),
             PropertyValue::Object(obj) => stack.extend(obj.values()),
+            // Content elements (Hero, Teaser, ActionButton…) carry their fields —
+            // including path references like cta/target/link — inside `content`,
+            // keyed like an object. Descend so element-nested refs are counted as
+            // dependencies; otherwise the topo-sort misses them and the referenced
+            // node may be installed AFTER the element that references it (the
+            // insert-time resolver in create/references.rs descends Elements too).
+            PropertyValue::Element(element) => stack.extend(element.content.values()),
             _ => {}
         }
     }
@@ -241,6 +248,17 @@ fn strip_recursive(value: &PropertyValue) -> PropertyValue {
                 .map(|(k, v)| (k.clone(), strip_recursive(v)))
                 .collect(),
         ),
+        // Strip path refs nested inside content elements too, so the first pass
+        // of a circular-reference element node carries no unresolved path refs.
+        PropertyValue::Element(element) => {
+            let mut e = element.clone();
+            e.content = element
+                .content
+                .iter()
+                .map(|(k, v)| (k.clone(), strip_recursive(v)))
+                .collect();
+            PropertyValue::Element(e)
+        }
         other => other.clone(),
     }
 }
@@ -286,6 +304,61 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Build a node whose only reference is nested inside a `content` element
+    /// (e.g. a Hero's `cta`, a Teaser's `target`) — the real-world shape that
+    /// regressed: refs live inside elements, not as top-level properties.
+    fn make_node_with_element_ref(workspace: &str, path: &str, ref_ws: &str, ref_path: &str) -> ContentEntry {
+        use raisin_models::nodes::properties::value::Element;
+        let mut el_content = HashMap::new();
+        el_content.insert(
+            "cta".to_string(),
+            PropertyValue::Reference(RaisinReference {
+                id: ref_path.to_string(),
+                workspace: ref_ws.to_string(),
+                path: String::new(),
+            }),
+        );
+        let element = PropertyValue::Element(Element {
+            uuid: "el-1".to_string(),
+            element_type: "standard:Hero".to_string(),
+            content: el_content,
+        });
+        let mut properties = HashMap::new();
+        properties.insert("content".to_string(), PropertyValue::Array(vec![element]));
+        ContentEntry::NodeDef {
+            workspace: workspace.to_string(),
+            yaml_path: String::new(),
+            node: Box::new(Node {
+                id: nanoid::nanoid!(),
+                node_type: "studio:Page".to_string(),
+                name: path.rsplit('/').next().unwrap_or("node").to_string(),
+                path: path.to_string(),
+                workspace: Some(workspace.to_string()),
+                properties,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_reference_nested_in_content_element_is_ordered() {
+        // Regression: /home has a Hero whose `cta` references /products. The
+        // referenced node must still be installed first even though the ref is
+        // buried inside a content Element (not a top-level property).
+        let entries = vec![
+            make_node_with_element_ref("stories", "/home", "stories", "/products"),
+            make_node("stories", "/products", vec![]),
+        ];
+        let sorted = sort_by_references(entries);
+        let paths = get_paths(&sorted.ordered);
+
+        assert_eq!(paths.len(), 2, "no false cycle");
+        assert!(sorted.circular.is_empty());
+        let products_pos = paths.iter().position(|p| p == "/products").unwrap();
+        let home_pos = paths.iter().position(|p| p == "/home").unwrap();
+        assert!(products_pos < home_pos, "element-nested ref target must come first");
     }
 
     #[test]

@@ -108,6 +108,10 @@ pub struct Provides {
     /// Content paths installed
     #[serde(default)]
     pub content: Vec<String>,
+
+    /// MCP server definition paths provided by this package
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
 }
 
 /// Workspace patch configuration
@@ -177,6 +181,16 @@ impl Manifest {
             return Err(PackageError::InvalidManifest(
                 "name must contain only alphanumeric characters, hyphens, and underscores".into(),
             ));
+        }
+
+        // Provided MCP server paths must be non-empty, mirroring the
+        // non-empty-path expectation of the other `provides` path lists.
+        for path in &self.provides.mcp_servers {
+            if path.trim().is_empty() {
+                return Err(PackageError::InvalidManifest(
+                    "provides.mcp_servers entries must be non-empty paths".into(),
+                ));
+            }
         }
 
         Ok(())
@@ -249,6 +263,40 @@ workspace_patches:
         assert_eq!(manifest.keywords.len(), 3);
         assert_eq!(manifest.provides.nodetypes.len(), 2);
         assert!(manifest.workspace_patches.contains_key("functions"));
+    }
+
+    #[test]
+    fn test_parse_mcp_servers_provides() {
+        let yaml = r##"
+name: raisin-mcp
+version: 1.0.0
+provides:
+  nodetypes:
+    - raisin:McpServer
+  mcp_servers:
+    - /mcp/default
+"##;
+        let manifest = Manifest::from_yaml(yaml).unwrap();
+        assert_eq!(manifest.provides.mcp_servers, vec!["/mcp/default".to_string()]);
+        assert!(manifest.validate().is_ok());
+
+        // Missing field deserializes to an empty list (backward compatible).
+        let bare = Manifest::from_yaml("name: x\nversion: 1.0.0\n").unwrap();
+        assert!(bare.provides.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_mcp_server_path() {
+        let manifest = Manifest {
+            name: "pkg".into(),
+            version: "1.0.0".into(),
+            provides: Provides {
+                mcp_servers: vec!["  ".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

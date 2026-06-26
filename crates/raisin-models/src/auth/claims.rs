@@ -93,8 +93,22 @@ pub struct AuthClaims {
     pub iss: Option<String>,
 
     /// Audience
+    ///
+    /// `None` for ordinary login tokens. Set to the MCP resource URL for tokens
+    /// minted by the OAuth 2.1 authorization server, binding the token to a
+    /// single resource (RFC 8707).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
+
+    /// Granted OAuth scopes (space-delimited).
+    ///
+    /// `None` for ordinary login tokens, whose authorization is resolved per
+    /// request from `raisin:access_control`. Set by the OAuth 2.1 authorization
+    /// server to the scopes the resource owner consented to (each scope is a
+    /// role or group id the identity holds), so a resource server can gate on
+    /// the token's scopes without widening the identity's effective access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl AuthClaims {
@@ -282,6 +296,7 @@ mod tests {
             jti: "jti-123".to_string(),
             iss: None,
             aud: None,
+            scope: None,
         };
 
         assert!(!claims.is_expired());
@@ -309,6 +324,7 @@ mod tests {
             jti: "jti-123".to_string(),
             iss: None,
             aud: None,
+            scope: None,
         };
 
         // With 5-minute threshold, should require reauth

@@ -1,0 +1,30 @@
+[package]
+name = "raisin-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "Model Context Protocol (MCP) server surface for RaisinDB"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+# Workspace-pinned external crates
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+# Internal RaisinDB crates (referenced by path)
+raisin-error = { path = "../raisin-error" }
+raisin-models = { path = "../raisin-models" }
+raisin-functions = { path = "../raisin-functions" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

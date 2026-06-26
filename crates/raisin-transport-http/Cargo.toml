@@ -39,6 +39,8 @@ raisin-embeddings = { path = "../raisin-embeddings" }
 nanoid = { workspace = true }
 percent-encoding = "2.3.2"
 urlencoding = "2.1"
+url = { workspace = true }
+base64 = { workspace = true }
 serde_yaml = "0.9.34"
 tracing = "0.1.41"
 chrono = { workspace = true }
@@ -54,6 +56,8 @@ raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
 raisin-locks = { path = "../raisin-locks" }
 reqwest = { workspace = true, features = ["json"] }
 raisin-functions = { path = "../raisin-functions" }
+raisin-mcp = { path = "../raisin-mcp" }
+raisin-events = { path = "../raisin-events" }
 matchit = { workspace = true }
 zip = { workspace = true }
 raisin-ai = { version = "0.1.0", path = "../raisin-ai" }

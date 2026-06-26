@@ -15,6 +15,8 @@ mod auth;
 mod functions;
 mod locks;
 mod management;
+mod mcp;
+mod oauth;
 mod packages;
 mod repository;
 
@@ -68,6 +70,12 @@ pub fn routes(state: AppState) -> Router {
 
     // Functions, flows, webhooks, triggers
     router = router.merge(functions::function_routes(&state));
+
+    // MCP (Model Context Protocol) Streamable HTTP transport
+    router = router.merge(mcp::mcp_routes(&state));
+
+    // OAuth 2.1 authorization server (discovery, registration, authorize, token)
+    router = router.merge(oauth::oauth_routes(&state));
 
     // Atomic locks / inventory
     router = router.merge(locks::locks_routes(&state));

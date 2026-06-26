@@ -1,0 +1,113 @@
+name: raisin:McpServer
+title: MCP Server
+description: >
+  Declares a Model Context Protocol (MCP) server as content. Each node defines
+  one MCP endpoint: its identity, the data policy governing the auto-generated
+  data tools, and any custom tools that map to raisin:Function nodes. The MCP
+  engine reads these property names verbatim to assemble the live tool set.
+icon: plug
+color: "#0EA5E9"
+
+properties:
+  - name: name
+    title: Name
+    type: string
+    required: true
+    description: Stable server name advertised during MCP initialization.
+
+  - name: slug
+    title: Slug
+    type: string
+    required: true
+    unique: true
+    description: URL-friendly identifier used to route requests to this server.
+
+  - name: version
+    title: Version
+    type: string
+    default: "1.0.0"
+    description: Server version string advertised during MCP initialization.
+
+  - name: instructions
+    title: Instructions
+    type: string
+    description: >
+      Natural-language usage instructions surfaced to the connecting client or
+      agent during initialization.
+    ui:
+      widget: textarea
+      rows: 6
+
+  - name: public
+    title: Public
+    type: boolean
+    default: false
+    description: >
+      Whether the server is reachable without authentication. When false the
+      caller must be authenticated. Note: if anonymous access is enabled for the
+      repository, an unauthenticated request resolves to the anonymous principal,
+      which still satisfies a non-public server that declares no `scopes`. To
+      restrict a non-public server to specific callers, declare `scopes` the
+      anonymous role does not hold (data tools remain row-level-security scoped
+      to the caller regardless).
+
+  - name: scopes
+    title: Scopes
+    type: array
+    items:
+      type: string
+    description: >
+      Scopes a caller must hold to open the server at all. Each scope is a role
+      or group id from raisin:access_control. On a non-public server, declaring
+      scopes is the reliable way to gate access — the anonymous role will not
+      hold a custom scope, so anonymous callers are rejected.
+
+  - name: data
+    title: Data Policy
+    type: object
+    description: >
+      Governs which workspaces, operations, and resources the auto-generated
+      data tools may touch.
+    structure:
+      workspaces:
+        type: array
+        items:
+          type: string
+        description: Workspaces whose nodes the data tools may operate on.
+      operations:
+        type: array
+        items:
+          type: string
+        description: >
+          Enabled data operations. One built-in tool is generated per entry.
+          Allowed values - query_nodes, get_node, search_nodes, create_node,
+          update_node, delete_node, list_workspaces.
+      resources:
+        type: boolean
+        description: Whether raisin:// resources are exposed for the workspaces above.
+
+  - name: tools
+    title: Custom Tools
+    type: array
+    description: >
+      Custom tools the server exposes, each mapping to a raisin:Function node.
+    items:
+      type: object
+      properties:
+        function:
+          type: string
+          description: Name of the raisin:Function node to invoke for this tool.
+        name:
+          type: string
+          description: Tool name advertised to clients.
+        description:
+          type: string
+          description: Human-readable description of what the tool does.
+        inputSchema:
+          type: object
+          description: JSON Schema describing the accepted argument object.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: Scopes a caller must hold to invoke this tool.

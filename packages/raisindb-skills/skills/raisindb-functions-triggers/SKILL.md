@@ -94,6 +94,20 @@ properties:
 
 The exported function name must match `entry_file`.
 
+> ⚠️ **The runtime is NOT CommonJS / ES modules at the top level.** Do **not**
+> end the file with `module.exports = { handler }` (or `exports.handler = …` /
+> `export default`) — they throw `module is not defined` at eval time and the run
+> fails (shows as "JavaScript syntax error" in the execution log). Just declare
+> the top-level function whose name matches `entry_file` (`index.js:myHandler` →
+> `async function myHandler(context) { … }`); the runtime calls it directly.
+> (Relative `import { x } from './utils.js'` IS still fine.)
+
+> ⚠️ **Updating a function's CODE pushes via `sync`, not `deploy --install`.** A
+> reinstall upserts *schema* but leaves existing *content* (which includes the
+> function `.js`) untouched — so an edited handler won't take effect after
+> `deploy --install` alone. Use `raisindb sync … --push` (or `--watch`) to push
+> the new code live, then the next trigger run uses it.
+
 ### Trigger-Invoked (the event is wrapped in `flow_input`)
 
 A `node_event` trigger does **NOT** hand your function a flat `{ path, node }`. The
@@ -579,8 +593,7 @@ async function handler(context) {
 
   return { success: true, count: rows.length };
 }
-
-module.exports = { handler };
+// No module.exports — the runtime finds `handler` from entry_file directly.
 ```
 
 **Frontend**: simple single-node fetch instead of a complex query:

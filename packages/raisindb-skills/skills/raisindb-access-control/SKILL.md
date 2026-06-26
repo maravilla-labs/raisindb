@@ -166,6 +166,97 @@ condition: "node.status == 'published'"
 condition: "node.created_by == auth.user_id || auth.roles.contains('editor')"
 ```
 
+## Gotchas (owner data, create, role assignment)
+
+- **An owner condition cannot gate `create`.** A permission whose `operations`
+  include `create` *together with* `condition: "node.created_by == auth.user_id"`
+  **denies** creation — at create-check time `created_by` isn't set yet, so the
+  condition evaluates false. **Split it**: one entry for `create` with **no**
+  condition, a second for `read`/`update`/`delete` with the owner condition.
+
+  ```yaml
+  permissions:
+    - { path: "/**", operations: [create], workspace: app_data }
+    - path: "/**"
+      operations: [read, update, delete]
+      workspace: app_data
+      condition: "node.created_by == auth.user_id"
+  ```
+
+- **Logged-in users cannot create arbitrary nodes under their own home.** The
+  built-in `authenticated_user` role only covers specific home subfolders
+  (inbox/outbox/sent/notifications). For per-user app data, use a **dedicated
+  workspace** + a custom role with the owner permission above — don't write
+  under the user's home path.
+
+- **Assigning a role to new users.** New accounts receive the repo's
+  `default_roles` (a property on the `raisin:RepoAuthConfig` node — there is no
+  CLI for it). To grant a custom role on signup, add a **trigger** on
+  `raisin:User` Created (filter `paths: ["/users/internal/*"]`,
+  `node_types: [raisin:User]`, workspace `raisin:access_control`) whose function
+  appends the role to the user's `properties.roles`. See
+  `raisindb-functions-triggers`. (After assignment, the user must reconnect/
+  re-login for the new role's permissions to take effect — sessions cache the
+  resolved permission set.)
+
+## Managing roles at runtime — SQL ACL DDL (and the reinstall trap)
+
+RaisinDB SQL has dedicated **ACL DDL** — prefer it over hand-editing a role node's
+`properties.permissions` JSON:
+
+```sql
+CREATE ROLE 'editor' ...                                    -- create
+ALTER ROLE 'Editor' ADD PERMISSION ALLOW read, update, delete
+        ON 'content' PATH '/**' WHERE node.created_by == auth.user_id;
+ALTER ROLE 'Editor' DROP PERMISSION 3;                      -- drop the Nth permission (0-based)
+ALTER ROLE 'Editor' ADD INHERITS ('authenticated_user');
+GRANT ROLE 'editor' TO USER 'user@example.com';             -- assign a role to a user
+REVOKE ROLE 'editor' FROM USER 'user@example.com';
+SHOW PERMISSIONS FOR ROLE 'Editor';
+```
+
+Hard-won caveats:
+
+- **`ALTER ROLE 'X'` keys off the role's NODE PATH SEGMENT, not its `role_id`.**
+  A role created from `content/.../roles/member/.node.yaml` with `name: Member`
+  lives at `/roles/Member` — so it's `ALTER ROLE 'Member'` (capitalized), even
+  though its `role_id` is `member`. Wrong casing → `Role 'x' not found`.
+  `GRANT ROLE` uses the `role_id`.
+- **ACL DDL requires an authenticated `system_admin` session.** A server API key
+  / SSR client is rejected with `Forbidden: Authentication required for access
+  control operations`. Run these in the admin console's SQL editor (or as a
+  server-side function, which executes in system context).
+- **`deploy --install` MERGES role permissions** (appends, does not replace). So
+  a role shipped in a package accumulates duplicate/stale permission entries on
+  every reinstall and drifts/corrupts. **Keep roles you'll evolve OUT of the
+  package** (don't ship them, or `.bak` them after first creation) and manage
+  them with `ALTER ROLE` instead — otherwise the next `deploy --install`
+  re-corrupts your fix.
+
+### The default `viewer` over-read foot-gun
+
+The default `viewer` role often grants `read` with **no workspace** (omitted =
+**all** workspaces) and `path: /**` — i.e. read EVERYTHING, including
+owner-scoped data in other workspaces. Since `viewer` is in `default_roles`,
+this silently breaks owner isolation: a per-user `members` workspace gated by
+`created_by == auth.user_id` still leaks because `viewer` unions an unconditioned
+read on top. **Scope `viewer` to the public content workspace only:**
+
+```sql
+ALTER ROLE 'Viewer' DROP PERMISSION 0;
+ALTER ROLE 'Viewer' ADD PERMISSION ALLOW read ON 'content' PATH '/**';
+```
+
+When isolation "works in a quick test but leaks later", check every role the
+user holds (especially `viewer`) for an unconditioned cross-workspace read —
+ACL grants are a UNION, so the most permissive matching grant wins.
+
+> **Identity note:** `auth.user_id` equals a node's `created_by` and is the
+> user's global identity id (verified). So `condition: node.created_by ==
+> auth.user_id` is the correct owner check, and `auth.user_id` is the value a
+> graph edge endpoint must equal for a `node RELATES auth.user_id VIA '...'`
+> condition to match.
+
 ## Creating Custom Roles in Package YAML
 
 Roles are shipped as part of a package under `content/_raisin__access_control/roles/{role-name}/.node.yaml`. The path prefix `_raisin__access_control` is the encoded form of the `raisin:access_control` workspace (colons become double underscores).

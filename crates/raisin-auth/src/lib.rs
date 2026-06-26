@@ -73,6 +73,7 @@
 //!
 //! - `oidc`: Enable OIDC support (requires `reqwest`)
 
+pub mod authserver;
 pub mod cache;
 pub mod jobs;
 pub mod registry;

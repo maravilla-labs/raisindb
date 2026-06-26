@@ -25,6 +25,7 @@ npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 | **raisindb-functions-triggers** | Server-side JavaScript functions and event-driven triggers |
 | **raisindb-workflows** | Durable workflows: designer format, loops, human approval tasks, saga compensation |
 | **raisindb-messaging-agents** | AI agents with tools, chat pipeline, proactive user coordination, token safeguards |
+| **raisindb-mcp-servers** | Expose data and functions as Model Context Protocol (MCP) servers: `raisin:McpServer`, auto data tools, custom function tools, auth, connecting a client |
 
 ## Learning Path
 
@@ -33,4 +34,4 @@ npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 3. **Build frontend** → `raisindb-frontend-sveltekit` or `raisindb-frontend-react`
 4. **Query data** → `raisindb-sql`
 
-Then as needed: `translations`, `auth`, `file-uploads`, `functions-triggers`, `access-control`
+Then as needed: `translations`, `auth`, `file-uploads`, `functions-triggers`, `access-control`, `mcp-servers`
