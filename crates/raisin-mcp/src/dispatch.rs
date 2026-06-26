@@ -171,7 +171,16 @@ impl Dispatcher {
         // Map a function-level failure onto an MCP `isError` result rather than a
         // protocol error; everything else propagates as a JSON-RPC error.
         match tool.call(identity, params.arguments).await {
-            Ok(value) => Ok(serde_json::to_value(CallToolResult::json(value))?),
+            // A tool that declares an `outputSchema` returns a result conforming
+            // to it, surfaced as `structuredContent` alongside the content block.
+            Ok(value) => {
+                let result = if descriptor.output_schema.is_some() {
+                    CallToolResult::json_structured(value)
+                } else {
+                    CallToolResult::json(value)
+                };
+                Ok(serde_json::to_value(result)?)
+            }
             Err(McpError::FunctionFailed(message)) => {
                 Ok(serde_json::to_value(CallToolResult::error(message))?)
             }

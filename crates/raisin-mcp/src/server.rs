@@ -122,6 +122,10 @@ pub struct CustomTool {
     /// JSON Schema describing the tool arguments.
     #[serde(rename = "inputSchema", default = "default_object_schema")]
     pub input_schema: Value,
+    /// JSON Schema describing the tool result. Inherited from the function's
+    /// `output_schema` when omitted; advertised as the MCP tool's `outputSchema`.
+    #[serde(rename = "outputSchema", default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
     /// Scopes a caller must hold to invoke this tool.
     #[serde(default)]
     pub scopes: Vec<String>,
@@ -129,6 +133,50 @@ pub struct CustomTool {
 
 fn default_object_schema() -> Value {
     serde_json::json!({ "type": "object", "properties": {} })
+}
+
+/// Schema and description metadata read off a `raisin:Function` node, used to
+/// fill the fields a server-side custom-tool declaration left out.
+#[derive(Debug, Clone)]
+pub struct FunctionMeta {
+    /// The function node's `name`.
+    pub name: String,
+    /// The function node's `description`, if any.
+    pub description: Option<String>,
+    /// The function node's `input_schema`, if an object.
+    pub input_schema: Option<Value>,
+    /// The function node's `output_schema`, if an object.
+    pub output_schema: Option<Value>,
+}
+
+impl FunctionMeta {
+    /// Read function metadata from a `raisin:Function` node's `properties`.
+    pub fn from_props(props: &Value) -> Option<Self> {
+        let name = props
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        let description = props
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let input_schema = props
+            .get("input_schema")
+            .cloned()
+            .filter(|v| v.is_object());
+        let output_schema = props
+            .get("output_schema")
+            .cloned()
+            .filter(|v| v.is_object());
+        Some(Self {
+            name,
+            description,
+            input_schema,
+            output_schema,
+        })
+    }
 }
 
 impl CustomTool {
@@ -175,6 +223,12 @@ impl CustomTool {
             .filter(|v| v.is_object())
             .unwrap_or_else(default_object_schema);
 
+        let output_schema = mcp
+            .get("outputSchema")
+            .cloned()
+            .or_else(|| props.get("output_schema").cloned())
+            .filter(|v| v.is_object());
+
         let scopes = mcp
             .get("scopes")
             .and_then(Value::as_array)
@@ -192,8 +246,28 @@ impl CustomTool {
             description,
             function,
             input_schema,
+            output_schema,
             scopes,
         })
+    }
+
+    /// Fill fields a server-side author omitted from the referenced function's
+    /// metadata: `description` when empty, `input_schema` when left at the empty
+    /// default, and `output_schema` when absent.
+    pub fn fill_defaults_from(&mut self, meta: &FunctionMeta) {
+        if self.description.is_empty() {
+            if let Some(description) = &meta.description {
+                self.description = description.clone();
+            }
+        }
+        if self.input_schema == default_object_schema() {
+            if let Some(input_schema) = &meta.input_schema {
+                self.input_schema = input_schema.clone();
+            }
+        }
+        if self.output_schema.is_none() {
+            self.output_schema = meta.output_schema.clone();
+        }
     }
 }
 
@@ -360,4 +434,84 @@ fn parse_custom_tools(node_name: &str, props: &Value) -> Result<Vec<CustomTool>>
         tools.push(tool);
     }
     Ok(tools)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn function_side_inherits_name_description_and_schemas() {
+        let props = json!({
+            "name": "recommend",
+            "description": "Recommend products",
+            "input_schema": { "type": "object", "properties": { "customer_id": { "type": "string" } } },
+            "output_schema": { "type": "object", "properties": { "items": { "type": "array" } } },
+            "mcp": { "enabled": true, "scopes": ["catalog:read"] }
+        });
+        let tool = CustomTool::from_function_properties(&props).expect("tool");
+        assert_eq!(tool.name, "recommend"); // defaults to the function name
+        assert_eq!(tool.function, "recommend");
+        assert_eq!(tool.description, "Recommend products");
+        assert_eq!(tool.input_schema, props["input_schema"]);
+        assert_eq!(tool.output_schema, Some(props["output_schema"].clone()));
+        assert_eq!(tool.scopes, vec!["catalog:read".to_string()]);
+    }
+
+    #[test]
+    fn function_side_none_without_mcp_or_when_disabled() {
+        assert!(CustomTool::from_function_properties(&json!({ "name": "f" })).is_none());
+        assert!(
+            CustomTool::from_function_properties(&json!({ "name": "f", "mcp": { "enabled": false } }))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn server_side_fill_defaults_from_function() {
+        let mut tool = CustomTool {
+            name: "recommend".to_string(),
+            description: String::new(),
+            function: "recommend".to_string(),
+            input_schema: default_object_schema(),
+            output_schema: None,
+            scopes: vec![],
+        };
+        let meta = FunctionMeta::from_props(&json!({
+            "name": "recommend",
+            "description": "Recommend products",
+            "input_schema": { "type": "object", "properties": { "customer_id": { "type": "string" } } },
+            "output_schema": { "type": "object" }
+        }))
+        .expect("meta");
+
+        tool.fill_defaults_from(&meta);
+        assert_eq!(tool.description, "Recommend products");
+        assert_eq!(Some(tool.input_schema.clone()), meta.input_schema);
+        assert_eq!(tool.output_schema, meta.output_schema);
+    }
+
+    #[test]
+    fn fill_defaults_keeps_explicit_values() {
+        let explicit_input = json!({ "type": "object", "properties": { "x": {} } });
+        let mut tool = CustomTool {
+            name: "t".to_string(),
+            description: "explicit".to_string(),
+            function: "f".to_string(),
+            input_schema: explicit_input.clone(),
+            output_schema: Some(json!({ "type": "string" })),
+            scopes: vec![],
+        };
+        let meta = FunctionMeta::from_props(&json!({
+            "name": "f", "description": "fn desc",
+            "input_schema": { "type": "object" }, "output_schema": { "type": "object" }
+        }))
+        .expect("meta");
+
+        tool.fill_defaults_from(&meta);
+        assert_eq!(tool.description, "explicit");
+        assert_eq!(tool.input_schema, explicit_input);
+        assert_eq!(tool.output_schema, Some(json!({ "type": "string" })));
+    }
 }

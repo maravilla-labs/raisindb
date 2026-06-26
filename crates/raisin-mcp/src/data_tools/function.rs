@@ -52,6 +52,7 @@ impl Tool for FunctionTool {
             ToolKind::Function,
         )
         .with_scopes(self.spec.scopes.clone())
+        .with_output_schema(self.spec.output_schema.clone())
     }
 
     async fn call(&self, identity: &McpIdentity, args: Value) -> Result<Value> {
@@ -61,10 +62,16 @@ impl Tool for FunctionTool {
             .await?;
 
         if result.success {
-            Ok(json!({
-                "output": result.output.unwrap_or(Value::Null),
-                "logs": result.logs,
-            }))
+            let output = result.output.unwrap_or(Value::Null);
+            // When the tool declares an `outputSchema`, return the function's
+            // output directly so it conforms to that schema (the dispatcher then
+            // surfaces it as `structuredContent`). Otherwise keep the wrapped
+            // `{ output, logs }` shape.
+            if self.spec.output_schema.is_some() {
+                Ok(output)
+            } else {
+                Ok(json!({ "output": output, "logs": result.logs }))
+            }
         } else {
             let message = result
                 .error

@@ -133,6 +133,7 @@ fn assembly_skips_custom_tools_without_invoker() {
         description: "Greet".to_string(),
         function: "greet_fn".to_string(),
         input_schema: json!({ "type": "object" }),
+        output_schema: None,
         scopes: vec!["greet".to_string()],
     };
     let descriptor = descriptor_with(vec![], vec![custom], vec![]);

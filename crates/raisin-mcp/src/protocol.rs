@@ -228,6 +228,10 @@ pub struct CallToolResult {
     /// `true` when the tool reported a domain-level failure.
     #[serde(rename = "isError", default)]
     pub is_error: bool,
+    /// Machine-readable result conforming to the tool's `outputSchema`, present
+    /// only for tools that declare one.
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
 }
 
 impl CallToolResult {
@@ -236,6 +240,17 @@ impl CallToolResult {
         Self {
             content: vec![ContentBlock::json(value)],
             is_error: false,
+            structured_content: None,
+        }
+    }
+
+    /// A successful result whose JSON value also satisfies the tool's
+    /// `outputSchema` — carried both as a content block and as `structuredContent`.
+    pub fn json_structured(value: Value) -> Self {
+        Self {
+            content: vec![ContentBlock::json(value.clone())],
+            is_error: false,
+            structured_content: Some(value),
         }
     }
 
@@ -244,6 +259,7 @@ impl CallToolResult {
         Self {
             content: vec![ContentBlock::text(message)],
             is_error: true,
+            structured_content: None,
         }
     }
 }

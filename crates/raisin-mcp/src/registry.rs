@@ -20,7 +20,7 @@
 //! set = built-in data tools (gated by the server's [`DataPolicy`]) + custom
 //! `raisin:Function` tools.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ use raisin_functions::FunctionApi;
 use crate::data_tools::build_data_tools;
 use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
-use crate::server::{CustomTool, McpServerDescriptor};
+use crate::server::{CustomTool, FunctionMeta, McpServerDescriptor};
 use crate::services::{SharedFunctionInvoker, SharedSearchProvider};
 
 /// NodeType name of an MCP server declaration node.
@@ -39,6 +39,9 @@ pub const MCP_SERVER_NODE_TYPE: &str = "raisin:McpServer";
 
 /// NodeType name of a serverless function node.
 pub const FUNCTION_NODE_TYPE: &str = "raisin:Function";
+
+/// Canonical workspace that holds `raisin:Function` nodes.
+const FUNCTIONS_WORKSPACE: &str = "functions";
 
 /// Default repository used when an identity does not pin one.
 pub const DEFAULT_REPO: &str = "default";
@@ -67,6 +70,9 @@ pub struct ToolDescriptor {
     /// JSON Schema describing the accepted argument object.
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// JSON Schema describing the tool's structured result, when known.
+    #[serde(rename = "outputSchema", default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
     /// Scopes a caller must hold to invoke this tool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
@@ -86,6 +92,7 @@ impl ToolDescriptor {
             name: name.into(),
             description: description.into(),
             input_schema,
+            output_schema: None,
             scopes: Vec::new(),
             kind,
         }
@@ -94,6 +101,12 @@ impl ToolDescriptor {
     /// Attach required scopes.
     pub fn with_scopes(mut self, scopes: Vec<String>) -> Self {
         self.scopes = scopes;
+        self
+    }
+
+    /// Attach a JSON Schema for the tool's structured result.
+    pub fn with_output_schema(mut self, output_schema: Option<Value>) -> Self {
+        self.output_schema = output_schema;
         self
     }
 
@@ -299,10 +312,42 @@ pub fn assemble_registry(
     Ok(registry)
 }
 
-/// Discover function-side MCP tools across a data policy's workspaces.
+/// Scan the `properties` of `raisin:Function` nodes that may feed MCP tools.
 ///
-/// Scans each workspace the server's [`DataPolicy`](crate::server::DataPolicy)
-/// covers for `raisin:Function` nodes carrying an `mcp` block (see
+/// Reads the canonical `functions` workspace plus any content workspaces the
+/// server's data policy covers (deduplicated). The result drives both function-side
+/// tool discovery and server-side schema inheritance.
+async fn scan_function_props(
+    backend: &Arc<dyn FunctionApi>,
+    data_workspaces: &[String],
+) -> Result<Vec<Value>> {
+    let mut workspaces: Vec<&str> = vec![FUNCTIONS_WORKSPACE];
+    for ws in data_workspaces {
+        if ws != FUNCTIONS_WORKSPACE {
+            workspaces.push(ws);
+        }
+    }
+
+    let mut props = Vec::new();
+    for ws in workspaces {
+        let table = crate::sql::quote_workspace(ws)?;
+        let sql = format!("SELECT properties FROM {table} WHERE node_type = $1");
+        let rows = backend
+            .sql_query(&sql, vec![json!(FUNCTION_NODE_TYPE)])
+            .await?;
+        for row in rows.as_array().cloned().unwrap_or_default() {
+            if let Some(p) = row.get("properties") {
+                props.push(p.clone());
+            }
+        }
+    }
+    Ok(props)
+}
+
+/// Discover function-side MCP tools.
+///
+/// Scans `raisin:Function` nodes (canonical `functions` workspace + the data
+/// policy's workspaces) for those carrying an `mcp` block (see
 /// [`CustomTool::from_function_properties`]) and returns one [`CustomTool`] per
 /// opted-in function. This is the *function-side* declaration form, complementing
 /// the server-side `tools` list on the `raisin:McpServer` node.
@@ -310,24 +355,11 @@ pub async fn discover_function_tools(
     backend: &Arc<dyn FunctionApi>,
     descriptor: &McpServerDescriptor,
 ) -> Result<Vec<CustomTool>> {
-    let mut tools = Vec::new();
-    for workspace in &descriptor.data_policy.workspaces {
-        let table = crate::sql::quote_workspace(workspace)?;
-        let sql = format!("SELECT properties FROM {table} WHERE node_type = $1");
-        let rows = backend
-            .sql_query(&sql, vec![json!(FUNCTION_NODE_TYPE)])
-            .await?;
-        for row in rows.as_array().cloned().unwrap_or_default() {
-            let props = match row.get("properties") {
-                Some(props) => props,
-                None => continue,
-            };
-            if let Some(tool) = CustomTool::from_function_properties(props) {
-                tools.push(tool);
-            }
-        }
-    }
-    Ok(tools)
+    let props = scan_function_props(backend, &descriptor.data_policy.workspaces).await?;
+    Ok(props
+        .iter()
+        .filter_map(CustomTool::from_function_properties)
+        .collect())
 }
 
 /// Resolve a server by `(workspace, slug)` and assemble its tool registry.
@@ -351,17 +383,41 @@ pub async fn assemble_for_slug(
     workspace: &str,
     slug: &str,
 ) -> Result<(McpServerDescriptor, ToolRegistry)> {
-    let descriptor = resolve_server_descriptor(discovery_backend, workspace, slug).await?;
+    let mut descriptor = resolve_server_descriptor(discovery_backend, workspace, slug).await?;
+
+    // One scan of the function nodes feeding this server, reused for server-side
+    // schema inheritance and function-side discovery.
+    let func_props =
+        scan_function_props(discovery_backend, &descriptor.data_policy.workspaces).await?;
+    let meta_by_name: HashMap<String, FunctionMeta> = func_props
+        .iter()
+        .filter_map(FunctionMeta::from_props)
+        .map(|m| (m.name.clone(), m))
+        .collect();
+
+    // Fill omitted server-side tool fields (description / inputSchema / outputSchema)
+    // from the referenced `raisin:Function`.
+    for tool in &mut descriptor.custom_tools {
+        if let Some(meta) = meta_by_name.get(&tool.function) {
+            tool.fill_defaults_from(meta);
+        }
+    }
+
     let mut registry = assemble_registry(&descriptor, services)?;
 
+    // Function-side tools (an `mcp` block on a raisin:Function). Server-side tools
+    // win on a name collision.
     if let Some(functions) = &services.functions {
-        let discovered = discover_function_tools(discovery_backend, &descriptor).await?;
-        for custom in discovered {
-            if registry.get(&custom.name).is_some() {
-                continue;
+        for props in &func_props {
+            if let Some(custom) = CustomTool::from_function_properties(props) {
+                if registry.get(&custom.name).is_some() {
+                    continue;
+                }
+                registry.register(crate::data_tools::FunctionTool::new(
+                    custom,
+                    functions.clone(),
+                ))?;
             }
-            let tool = crate::data_tools::FunctionTool::new(custom, functions.clone());
-            registry.register(tool)?;
         }
     }
 

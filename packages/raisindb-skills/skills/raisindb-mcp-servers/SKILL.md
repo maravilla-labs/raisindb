@@ -105,10 +105,11 @@ They operate on the `data.workspaces` you list, and **every call runs under the 
 
 ### Custom function tools
 
-A custom tool runs an existing `raisin:Function` (see the `raisindb-functions-triggers` skill) **as the calling identity** (no admin escalation). Two equivalent ways to declare one:
+A custom tool runs an existing `raisin:Function` (see the `raisindb-functions-triggers` skill) **as the calling identity** (no admin escalation).
 
-1. **Server-side** — the `tools:` list above (the server owns the mapping).
-2. **Function-side** — add an `mcp` block to the `raisin:Function` node so the function *is* a tool wherever the server's data policy covers its workspace:
+**Schemas are inherited — don't repeat them.** A `raisin:Function` already declares `input_schema` and `output_schema`. A custom tool reuses them: an omitted `name`/`description`/`inputSchema`/`outputSchema` is filled from the function in *both* forms below. The function's `output_schema` becomes the tool's `outputSchema`, and the result is returned as `structuredContent`.
+
+1. **Function-side** — add an `mcp` block to the `raisin:Function` node; a bare `enabled: true` is enough (it's exposed on every server — the `functions` workspace is always scanned):
 
 ```yaml
 # content/functions/lib/acme/recommend/.node.yaml
@@ -118,16 +119,14 @@ properties:
   entry_file: index.js:recommend
   language: javascript
   enabled: true
-  mcp:                                  # promote this function to an MCP tool
+  input_schema: { type: object, properties: { customer_id: { type: string } }, required: [customer_id] }
+  output_schema: { type: object, properties: { items: { type: array } } }
+  mcp:                                  # promoted to a tool, inheriting the schemas above
     enabled: true
-    name: recommend                     # defaults to the function name
-    description: Recommend products for a customer.
-    inputSchema:
-      type: object
-      properties: { customer_id: { type: string } }
-      required: [customer_id]
-    scopes: [catalog:read]
+    scopes: [catalog:read]             # add name/description/inputSchema only to override
 ```
+
+2. **Server-side** — the `tools:` list on the `raisin:McpServer` node. `inputSchema`/`outputSchema`/`description` are inherited from the referenced function when omitted, so a minimal entry is just `{ function, name, scopes }`. On a name collision the server-side entry wins.
 
 The function receives the tool arguments as its input and returns the tool result. A failed function surfaces as a tool error (`isError: true`), not a transport error.
 
