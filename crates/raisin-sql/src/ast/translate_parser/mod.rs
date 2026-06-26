@@ -65,6 +65,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_value_with_escaped_single_quote() {
+        // SQL-standard quote-doubling: '' inside a single-quoted string is a
+        // literal apostrophe. Common in French/Italian translations (c'est, l').
+        let sql = "UPDATE Page FOR LOCALE 'fr' SET title = 'C''est l''amour' WHERE path = '/post'";
+        let result = parse_translate(sql).unwrap().unwrap();
+        assert_eq!(
+            result.assignments[0].value,
+            TranslationValue::String("C'est l'amour".to_string())
+        );
+        assert_eq!(result.filter, Some(TranslateFilter::Path("/post".to_string())));
+    }
+
+    #[test]
+    fn test_parse_value_with_escaped_quote_then_more_assignments() {
+        // The escaped quote must not swallow the rest of the statement.
+        let sql = "UPDATE Page FOR LOCALE 'it' SET a = 'l''uomo', b = 'plain' WHERE path = '/p'";
+        let result = parse_translate(sql).unwrap().unwrap();
+        assert_eq!(result.assignments.len(), 2);
+        assert_eq!(
+            result.assignments[0].value,
+            TranslationValue::String("l'uomo".to_string())
+        );
+        assert_eq!(
+            result.assignments[1].value,
+            TranslationValue::String("plain".to_string())
+        );
+    }
+
+    #[test]
+    fn test_param_with_apostrophe_substitutes_then_parses() {
+        // End-to-end regression: a bound $-param whose value has an apostrophe is
+        // escaped to '' by substitute_params, then must parse back to the original.
+        let sql = "UPDATE Page FOR LOCALE 'fr' SET title = $1 WHERE path = $2";
+        let substituted = crate::params::substitute_params(
+            sql,
+            &[
+                serde_json::json!("c'est génial"),
+                serde_json::json!("/post"),
+            ],
+        )
+        .unwrap();
+        let result = parse_translate(&substituted).unwrap().unwrap();
+        assert_eq!(
+            result.assignments[0].value,
+            TranslationValue::String("c'est génial".to_string())
+        );
+    }
+
+    #[test]
     fn test_parse_nested_property() {
         let sql = "UPDATE Page FOR LOCALE 'fr' SET metadata.author = 'Jean' WHERE id = 'abc'";
         let result = parse_translate(sql).unwrap().unwrap();

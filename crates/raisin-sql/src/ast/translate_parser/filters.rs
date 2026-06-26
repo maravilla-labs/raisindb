@@ -12,7 +12,7 @@ use nom::{
     IResult, Parser,
 };
 
-use super::helpers::quoted_string;
+use super::helpers::{quoted_string, quoted_string_value};
 use crate::ast::translate::{TranslateFilter, TranslationValue};
 
 /// Parse a translation value: string literal, number, boolean, or NULL
@@ -27,8 +27,9 @@ pub(crate) fn translation_value(input: &str) -> IResult<&str, TranslationValue> 
         map(float_literal, TranslationValue::Float),
         // Integer
         map(integer_literal, TranslationValue::Integer),
-        // String (quoted)
-        map(quoted_string, |s| TranslationValue::String(s.to_string())),
+        // String (quoted) — quote-doubling aware so values may contain the
+        // delimiter (e.g. a French apostrophe: 'c''est' → c'est).
+        map(quoted_string_value, TranslationValue::String),
     ))
     .parse(input)
 }
