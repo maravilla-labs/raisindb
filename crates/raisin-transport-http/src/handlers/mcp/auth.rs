@@ -19,7 +19,7 @@ use axum::http::{header::AUTHORIZATION, HeaderMap};
 use raisin_models::auth::AuthContext;
 
 #[cfg(feature = "storage-rocksdb")]
-use crate::handlers::oauth_as::helpers::issuer_from_request;
+use crate::handlers::oauth_as::helpers::{issuer_from_request, load_tenant_trusted_hosts};
 #[cfg(feature = "storage-rocksdb")]
 use crate::state::AppState;
 
@@ -40,6 +40,7 @@ use crate::state::AppState;
 pub(super) async fn resolve_mcp_auth(
     state: &AppState,
     headers: &HeaderMap,
+    tenant_id: &str,
     repo: &str,
     branch: &str,
     slug: &str,
@@ -56,14 +57,15 @@ pub(super) async fn resolve_mcp_auth(
     };
 
     // The audience the authorization server minted and the protected-resource
-    // metadata advertises: `{issuer}/mcp/{repo}/{branch}/{slug}`.
-    let resource = format!(
-        "{}/mcp/{}/{}/{}",
-        issuer_from_request(headers),
-        repo,
-        branch,
-        slug
-    );
+    // metadata advertises: `{issuer}/mcp/{repo}/{branch}/{slug}`. The issuer host
+    // is validated against the tenant's trusted-host allowlist; an untrusted host
+    // cannot mint a matching audience, so the token confers nothing (fail closed).
+    let tenant_hosts = load_tenant_trusted_hosts(state, tenant_id).await;
+    let issuer = match issuer_from_request(headers, &tenant_hosts) {
+        Ok(issuer) => issuer,
+        Err(_) => return (ext_auth, None),
+    };
+    let resource = format!("{issuer}/mcp/{repo}/{branch}/{slug}");
 
     let claims = match auth_service.validate_resource_token(token, &resource) {
         Ok(claims) => claims,

@@ -61,6 +61,13 @@ pub struct TenantAuthConfig {
     /// Example: ["http://localhost:5173", "https://app.example.com"]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cors_allowed_origins: Vec<String>,
+
+    /// Hosts trusted to appear as the OAuth issuer / token audience for this
+    /// tenant, in addition to any globally trusted host suffixes. Use this to
+    /// authorize a tenant's custom domain(s) (exact host match, no scheme/port).
+    /// Example: ["app.acme.example", "acme.example"]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_oauth_hosts: Vec<String>,
 }
 
 impl Default for TenantAuthConfig {
@@ -75,6 +82,7 @@ impl Default for TenantAuthConfig {
             audit_enabled: true,
             anonymous_enabled: false,
             cors_allowed_origins: Vec::new(),
+            trusted_oauth_hosts: Vec::new(),
         }
     }
 }

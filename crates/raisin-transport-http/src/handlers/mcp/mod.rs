@@ -78,7 +78,7 @@ pub async fn handle_mcp(
     // token here against this endpoint's audience (or keep the middleware's
     // result for login tokens / API keys / anonymous).
     let (auth_context, consented_scopes) =
-        auth::resolve_mcp_auth(&state, &headers, &repo, &branch, &slug, ext_auth).await;
+        auth::resolve_mcp_auth(&state, &headers, &tenant_id, &repo, &branch, &slug, ext_auth).await;
 
     match dispatch(
         &state,
