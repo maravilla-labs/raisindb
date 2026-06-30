@@ -273,12 +273,15 @@ impl BatchIndexAggregator {
             .max()
             .unwrap_or(HLC::new(0, 0));
 
-        // Build batch operations
+        // Build batch operations. Carry each op's own workspace: ops are pooled by
+        // (tenant, repo, branch) only, so a flush can mix workspaces and the handler
+        // must look up each node in its own one (not `base_context`'s first workspace).
         let batch_ops: Vec<BatchIndexOperation> = operations
             .into_iter()
             .map(|op| BatchIndexOperation {
                 node_id: op.node_id,
                 operation: op.operation,
+                workspace_id: op.context.workspace_id,
             })
             .collect();
 

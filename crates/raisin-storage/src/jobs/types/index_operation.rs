@@ -30,4 +30,12 @@ pub struct BatchIndexOperation {
     pub node_id: String,
     /// Operation type (add/update or delete)
     pub operation: IndexOperation,
+    /// Workspace that owns the node. A batch is grouped by (tenant, repo, branch)
+    /// only — the per-branch Tantivy index is shared across workspaces — so a
+    /// single batch can mix workspaces (e.g. a repo-wide rebuild). The handler must
+    /// load each node from ITS OWN workspace, not the batch's first one. Defaults to
+    /// empty for batches serialized before this field existed (handler falls back to
+    /// the job context's workspace then).
+    #[serde(default)]
+    pub workspace_id: String,
 }

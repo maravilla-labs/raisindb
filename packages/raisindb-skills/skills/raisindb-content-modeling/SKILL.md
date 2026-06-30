@@ -156,6 +156,35 @@ All fields support: `name`, `title`, `required`, `translatable`, `description`, 
 | `translatable` | boolean | Field supports translation overlays |
 | `description` | string | Help text shown in the editor |
 | `multiple` | boolean | Allow multiple values (stores as array). Works on any field type. On `CompositeField`, creates a repeatable list of structured items |
+| `index` | string[] | Index types for this field's value, e.g. `[Fulltext]` (see below) |
+
+### Full-text searchable ELEMENT fields (`index: [Fulltext]`)
+
+`index: [Fulltext]` is not only for NodeType properties — an **ElementType field**
+can declare it too. The full-text indexer walks a node's content (the `content`
+array / SectionFields) and indexes each element field that opts in; element and
+archetype **identities** are always indexed (so a node is findable by the shapes it
+carries), while field **values** are opt-in per field. So to make a Hero's
+`subheadline` or a Pullquote's `quote` findable via `FULLTEXT_SEARCH`, mark those
+element fields — the parent node's `content` property does NOT need marking.
+
+```yaml
+# elementtypes/hero.yaml
+fields:
+  - $type: RichTextField
+    name: subheadline
+    translatable: true
+    index:
+      - Fulltext        # subheadline text becomes searchable
+```
+
+Notes:
+- The owning NodeType still needs `indexable: true` (the default for content node
+  types). Only `Fulltext`-marked fields contribute their text.
+- Existing nodes must be **re-indexed** after adding the config (the index plan is
+  resolved at index time). A node is re-indexed on its next update, or rebuild the
+  whole repo/branch via
+  `POST /api/admin/management/database/{tenant}/{repo}/fulltext/rebuild`.
 
 ### SectionField -- Composition Mechanism
 

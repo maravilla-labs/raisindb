@@ -116,7 +116,16 @@ impl FulltextJobHandler {
         for op in &operations {
             match &op.operation {
                 IndexOperation::AddOrUpdate => {
-                    match tx.get_node(&context.workspace_id, &op.node_id).await {
+                    // Load the node from ITS OWN workspace — a batch can mix
+                    // workspaces (pooled by tenant/repo/branch). Fall back to the job
+                    // context's workspace for batches queued before per-op workspace
+                    // existed (`workspace_id` empty there).
+                    let ws = if op.workspace_id.is_empty() {
+                        context.workspace_id.as_str()
+                    } else {
+                        op.workspace_id.as_str()
+                    };
+                    match tx.get_node(ws, &op.node_id).await {
                         Ok(Some(node)) => nodes_to_index.push(node),
                         Ok(None) => {
                             tracing::warn!(
@@ -140,6 +149,17 @@ impl FulltextJobHandler {
                 }
             }
         }
+
+        // Release the node-load transaction BEFORE resolving plans + indexing. The
+        // loaded `Node`s are owned values in `nodes_to_index`, so they outlive `tx`.
+        // `resolve_index_plan` performs its OWN storage reads (ElementType resolution
+        // per nested element type) and `do_batch_index` writes Tantivy — both deadlock
+        // against this still-open transaction's RocksDB locks. A deeply-nested node has
+        // many distinct nested element types, so it reliably hangs past the job
+        // watchdog (>300s) and retries forever. Dropping `tx` here removes the
+        // contention. (Previously masked: when the workspace was wrong every node was
+        // skipped as "not found", so this loop ran on an empty set and never deadlocked.)
+        drop(tx);
 
         // Resolve the shape-driven plan for each node (cached per type). Nodes
         // whose type opts out of full-text indexing are removed instead.

@@ -36,7 +36,14 @@ pub(crate) fn create_document(
     let mut doc = TantivyDocument::new();
     doc.add_text(fields.doc_id, &doc_id);
     doc.add_text(fields.node_id, &node.id);
-    doc.add_text(fields.workspace_id, &job.workspace_id);
+    // Stamp the doc with the NODE's own workspace, not the batch job's — a batch
+    // can mix workspaces (the per-branch index is shared), so `job.workspace_id`
+    // (the batch's first workspace) would mislabel the others and break
+    // workspace-scoped search. Fall back to the job's workspace when absent.
+    doc.add_text(
+        fields.workspace_id,
+        node.workspace.as_deref().unwrap_or(job.workspace_id.as_str()),
+    );
     doc.add_text(fields.language, language);
     doc.add_text(fields.path, &node.path);
     doc.add_text(fields.node_type, &node.node_type);
