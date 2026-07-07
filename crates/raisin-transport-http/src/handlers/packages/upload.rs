@@ -102,7 +102,17 @@ pub async fn upload_package(
 
     let properties = build_manifest_properties(&manifest, &stored, file_data.len());
 
-    let node_id = format!("package-{}", manifest.name);
+    // Re-uploads must land on the node already at this path: packages
+    // uploaded through the streaming endpoint carry nanoid ids, so an
+    // id-keyed upsert with the deterministic id would CREATE and fail on
+    // the path conflict — stranding the tenant on the stale bundle.
+    let node_id = match node_service
+        .get_by_path(&format!("/{}", manifest.name))
+        .await
+    {
+        Ok(Some(existing)) => existing.id,
+        _ => format!("package-{}", manifest.name),
+    };
     let node = models::nodes::Node {
         id: node_id.clone(),
         node_type: "raisin:Package".to_string(),
