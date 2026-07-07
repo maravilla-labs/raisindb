@@ -27,6 +27,28 @@ pub(super) async fn process_request<S, B>(
         request.request_type
     );
 
+    // SECURITY: The tenant is owned by the connection — established at
+    // upgrade time from the /sys path or x-tenant-id header, both of which
+    // the edge controls — never by message content. Handlers read
+    // `request.context.tenant_id`, so a client-supplied value would let any
+    // socket read or write another tenant's data. Clamp it here, mirroring
+    // the HTTP ensure_tenant semantics. This also fixes clients that bake
+    // "default" into their message context (e.g. the Studio SPA), whose
+    // queries previously landed in the wrong tenant.
+    let mut request = request;
+    {
+        let conn = connection_state.read();
+        if request.context.tenant_id != conn.tenant_id {
+            tracing::debug!(
+                request_tenant = %request.context.tenant_id,
+                connection_tenant = %conn.tenant_id,
+                request_id = %request_id,
+                "Overriding request context tenant with connection tenant"
+            );
+            request.context.tenant_id = conn.tenant_id.clone();
+        }
+    }
+
     // Check authentication if required
     let needs_auth = {
         let conn = connection_state.read();
