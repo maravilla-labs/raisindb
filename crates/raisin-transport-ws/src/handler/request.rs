@@ -49,6 +49,55 @@ pub(super) async fn process_request<S, B>(
         }
     }
 
+    // SECURITY: The repository is connection-owned for the same reason as
+    // the tenant. The connection's AuthContext (anonymous resolution or
+    // identity permissions) is resolved once, scoped to the upgrade-time
+    // repository — handlers pair the *message's* repository with that cached
+    // context, so a client naming a different repo would have its RLS
+    // evaluated against the wrong repo's permission set (e.g. reading a
+    // repo with anonymous access disabled through a connection that was
+    // anonymously authorized on another repo). Reject mismatches instead of
+    // silently overriding so misbehaving clients surface. System contexts
+    // (operator/admin) are exempt — cross-repo access within the clamped
+    // tenant is their intended scope.
+    let repo_scope_violation = {
+        let conn = connection_state.read();
+        let is_system = conn.auth_context().map(|a| a.is_system).unwrap_or(false);
+        if is_system {
+            None
+        } else {
+            // Connections without a repo in the upgrade path had their
+            // permissions resolved for "default" — hold them to it.
+            let conn_repo = conn.repository.clone().unwrap_or_else(|| "default".to_string());
+            match request.context.repository.as_deref() {
+                Some(req_repo) if req_repo != conn_repo => {
+                    Some((conn_repo, req_repo.to_string()))
+                }
+                _ => None,
+            }
+        }
+    };
+    if let Some((conn_repo, req_repo)) = repo_scope_violation {
+        tracing::warn!(
+            connection_repo = %conn_repo,
+            request_repo = %req_repo,
+            request_id = %request_id,
+            request_type = ?request.request_type,
+            "Rejecting request addressing a repository outside the connection's auth scope"
+        );
+        let response = ResponseEnvelope::error(
+            request_id.clone(),
+            "REPOSITORY_SCOPE_MISMATCH".to_string(),
+            format!(
+                "This connection is scoped to repository '{}'; open a connection to '{}' to address it",
+                conn_repo, req_repo
+            ),
+        );
+        let conn = connection_state.read();
+        let _ = conn.send_response(response);
+        return;
+    }
+
     // Check authentication if required
     let needs_auth = {
         let conn = connection_state.read();
