@@ -215,6 +215,16 @@ pub fn management_router(
         router
     };
 
+    // Operator package provisioning (upload + unified install command) — the
+    // same handlers as the customer /api package surface, mounted here so
+    // they inherit the admin-auth gate below (per-tenant admin JWT, or the
+    // operator superadmin bearer when configured). Lets the hosting control
+    // plane install packages into a tenant without touching customer-facing
+    // auth; self-hosted deployments still require a valid admin JWT here.
+    let router = router.merge(raisin_transport_http::operator_package_routes(
+        app_state.clone(),
+    ));
+
     // Apply security middlewares to the per-tenant router
     // ensure_tenant runs FIRST (outer), then require_admin (inner)
     // In Axum layers, later layers run first, so add require_admin first

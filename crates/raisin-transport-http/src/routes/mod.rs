@@ -17,8 +17,12 @@ mod locks;
 mod management;
 mod mcp;
 mod oauth;
+mod operator;
 mod packages;
 mod repository;
+
+#[cfg(feature = "storage-rocksdb")]
+pub use operator::operator_package_routes;
 
 use axum::routing::get;
 use axum::Router;

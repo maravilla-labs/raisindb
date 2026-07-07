@@ -13,6 +13,8 @@ mod errors;
 mod extractors;
 pub mod middleware;
 mod routes;
+#[cfg(feature = "storage-rocksdb")]
+pub use routes::operator_package_routes;
 pub mod state;
 mod types;
 pub mod upload_processors;
