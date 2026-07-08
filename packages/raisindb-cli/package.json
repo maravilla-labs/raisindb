@@ -1,6 +1,6 @@
 {
   "name": "@raisindb/cli",
-  "version": "0.1.0",
+  "version": "0.1.38",
   "type": "module",
   "description": "Interactive CLI for RaisinDB with Ink-based terminal UI",
   "bin": {
