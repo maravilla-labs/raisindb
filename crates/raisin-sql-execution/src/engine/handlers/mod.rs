@@ -38,16 +38,49 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     ) -> Result<RowStream, Error> {
         tracing::info!("Executing EXPLAIN query");
 
+        match explain_stmt.target.as_ref() {
+            AnalyzedStatement::Query(query) => {
+                self.explain_query(query, explain_stmt.verbose).await
+            }
+            AnalyzedStatement::Update(update) => {
+                self.explain_dml(
+                    "UPDATE",
+                    &update.target,
+                    update.filter.as_ref(),
+                    explain_stmt.verbose,
+                )
+                .await
+            }
+            AnalyzedStatement::Delete(delete) => {
+                self.explain_dml(
+                    "DELETE",
+                    &delete.target,
+                    delete.filter.as_ref(),
+                    explain_stmt.verbose,
+                )
+                .await
+            }
+            _ => Err(Error::Validation(
+                "EXPLAIN only supports SELECT, UPDATE, and DELETE statements".to_string(),
+            )),
+        }
+    }
+
+    /// EXPLAIN for a SELECT query.
+    async fn explain_query(
+        &self,
+        query: &AnalyzedQuery,
+        verbose: bool,
+    ) -> Result<RowStream, Error> {
         let plan_builder = PlanBuilder::new(self.catalog.as_ref());
         let logical_plan = plan_builder
-            .build(&AnalyzedStatement::Query((*explain_stmt.query).clone()))
+            .build(&AnalyzedStatement::Query(query.clone()))
             .map_err(|e| Error::Validation(format!("Plan error: {}", e)))?;
 
         let optimizer = Optimizer::default();
         let optimized_plan = optimizer.optimize(logical_plan.clone());
 
-        let workspace = explain_stmt
-            .query
+        let workspace = query
             .from
             .first()
             .and_then(|t| t.workspace.clone())
@@ -64,7 +97,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             index_catalog,
         );
 
-        if let Some(ref selection) = explain_stmt.query.selection {
+        if let Some(ref selection) = query.selection {
             if let Some(node_type_name) = helpers::extract_node_type_from_expr(selection) {
                 if let Some(indexes) = helpers::load_compound_indexes(
                     &*self.storage,
@@ -88,7 +121,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         let mut explain_output = String::new();
 
-        if explain_stmt.verbose {
+        if verbose {
             explain_output.push_str("=== Logical Plan ===\n");
             explain_output.push_str(&logical_plan.explain());
             explain_output.push_str("\n\n");
@@ -101,13 +134,150 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         explain_output.push_str("=== Physical Execution Plan ===\n");
         explain_output.push_str(&physical_plan.explain());
 
+        Ok(Self::explain_row_stream(explain_output))
+    }
+
+    /// EXPLAIN for UPDATE / DELETE — shows the actual row-matching strategy the
+    /// DML executor will use: the id/path point-lookup fast path, or the bulk
+    /// path's `SELECT id` physical plan (with compound indexes loaded, exactly
+    /// as `find_matching_node_ids` plans it).
+    async fn explain_dml(
+        &self,
+        op: &str,
+        target: &raisin_sql::analyzer::DmlTableTarget,
+        filter: Option<&TypedExpr>,
+        verbose: bool,
+    ) -> Result<RowStream, Error> {
+        use crate::physical_plan::dml_executor::node_helpers::extract_node_identifier_from_filter;
+        use raisin_sql::analyzer::DmlTableTarget;
+
+        let workspace = match target {
+            DmlTableTarget::Workspace(name) => name.clone(),
+            DmlTableTarget::SchemaTable(kind) => {
+                let out = format!(
+                    "=== {} Plan ===\nSchemaTableWrite: {} (direct schema mutation, no scan)",
+                    op,
+                    kind.table_name()
+                );
+                return Ok(Self::explain_row_stream(out));
+            }
+        };
+
+        // Fast path: WHERE id = '...' / path = '...' → a single point lookup.
+        let owned_filter = filter.cloned();
+        if let Ok(ident) = extract_node_identifier_from_filter(&owned_filter) {
+            let desc = match ident {
+                crate::physical_plan::dml_executor::node_helpers::NodeIdentifier::Id(id) => {
+                    format!("NodeIdLookup: id='{}' (O(1) point write)", id)
+                }
+                crate::physical_plan::dml_executor::node_helpers::NodeIdentifier::Path(p) => {
+                    format!("PathIndexLookup: path='{}' (O(1) point write)", p)
+                }
+            };
+            let out = format!(
+                "=== {} Plan ===\nTarget workspace: {}\nStrategy: fast path\n{}",
+                op, workspace, desc
+            );
+            return Ok(Self::explain_row_stream(out));
+        }
+
+        let Some(filter) = filter else {
+            let out = format!(
+                "=== {} Plan ===\nTarget workspace: {}\nStrategy: full workspace {} (no WHERE clause)",
+                op, workspace, op
+            );
+            return Ok(Self::explain_row_stream(out));
+        };
+
+        // Bulk path: plan the same `SELECT id FROM ws WHERE <filter>` the DML
+        // executor runs, with compound indexes loaded like find_matching_node_ids.
+        let analyzed_query = AnalyzedQuery {
+            ctes: vec![],
+            projection: vec![(
+                TypedExpr::column(
+                    workspace.clone(),
+                    "id".to_string(),
+                    raisin_sql::analyzer::DataType::Text,
+                ),
+                None,
+            )],
+            from: vec![raisin_sql::analyzer::TableRef {
+                table: workspace.clone(),
+                alias: None,
+                workspace: Some(workspace.clone()),
+                table_function: None,
+                subquery: None,
+                lateral_function: None,
+            }],
+            joins: vec![],
+            selection: Some(filter.clone()),
+            group_by: vec![],
+            aggregates: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            max_revision: None,
+            branch_override: None,
+            locales: vec![],
+            distinct: None,
+        };
+
+        let mut catalog = raisin_sql::StaticCatalog::default_nodes_schema();
+        catalog.register_workspace(workspace.clone());
+        let plan_builder = PlanBuilder::new(&catalog);
+        let logical_plan = plan_builder
+            .build(&AnalyzedStatement::Query(analyzed_query))
+            .map_err(|e| Error::Validation(format!("Plan error: {}", e)))?;
+
+        let optimizer = Optimizer::default();
+        let optimized_plan = optimizer.optimize(logical_plan.clone());
+
+        let mut physical_planner = PhysicalPlanner::with_context(
+            self.tenant_id.clone(),
+            self.repo_id.clone(),
+            self.branch.clone(),
+            workspace.clone(),
+        );
+
+        if let Some(node_type_name) = helpers::extract_node_type_from_expr(filter) {
+            if let Some(indexes) = helpers::load_compound_indexes(
+                &*self.storage,
+                &self.tenant_id,
+                &self.repo_id,
+                &self.branch,
+                &node_type_name,
+            )
+            .await
+            {
+                physical_planner.set_compound_indexes(indexes);
+            }
+        }
+
+        let physical_plan = physical_planner.plan(&optimized_plan)?;
+
+        let mut out = format!(
+            "=== {} Plan ===\nTarget workspace: {}\nStrategy: bulk (match ids via SELECT, then write per id)\n",
+            op, workspace
+        );
+        if verbose {
+            out.push_str("\n=== Matching Logical Plan ===\n");
+            out.push_str(&logical_plan.explain());
+            out.push('\n');
+        }
+        out.push_str("\n=== Matching Physical Plan ===\n");
+        out.push_str(&physical_plan.explain());
+
+        Ok(Self::explain_row_stream(out))
+    }
+
+    /// Wrap EXPLAIN text output into a single-row stream.
+    fn explain_row_stream(explain_output: String) -> RowStream {
         let mut row = Row::new();
         row.columns.insert(
             "QUERY PLAN".to_string(),
             PropertyValue::String(explain_output),
         );
-
-        Ok(Box::pin(stream::iter(vec![Ok(row)])))
+        Box::pin(stream::iter(vec![Ok(row)]))
     }
 
     /// Execute a SELECT query (extracted from execute() for reuse in batch)

@@ -112,30 +112,94 @@ impl PhysicalPlanner {
         })
     }
 
+    /// Collect the table qualifiers (names/aliases) a logical plan's output rows
+    /// are qualified with. Used to assign join-condition operands to a side.
+    pub(super) fn collect_plan_qualifiers(
+        plan: &raisin_sql::logical_plan::LogicalPlan,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        use raisin_sql::logical_plan::LogicalPlan;
+        match plan {
+            LogicalPlan::Scan { table, alias, .. } => {
+                out.insert(alias.clone().unwrap_or_else(|| table.clone()));
+            }
+            LogicalPlan::TableFunction { name, alias, .. } => {
+                out.insert(alias.clone().unwrap_or_else(|| name.clone()));
+            }
+            LogicalPlan::CTEScan {
+                cte_name, alias, ..
+            } => {
+                out.insert(alias.clone().unwrap_or_else(|| cte_name.clone()));
+                // Columns of a CTE may also be qualified by the CTE's name.
+                out.insert(cte_name.clone());
+            }
+            LogicalPlan::Subquery { alias, .. } => {
+                out.insert(alias.clone());
+            }
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Distinct { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::LateralMap { input, .. } => {
+                Self::collect_plan_qualifiers(input, out);
+            }
+            LogicalPlan::Join { left, right, .. } => {
+                Self::collect_plan_qualifiers(left, out);
+                Self::collect_plan_qualifiers(right, out);
+            }
+            LogicalPlan::SemiJoin { left, .. } => {
+                // A semi-join only outputs the left side's columns.
+                Self::collect_plan_qualifiers(left, out);
+            }
+            LogicalPlan::WithCTE { main_query, .. } => {
+                Self::collect_plan_qualifiers(main_query, out);
+            }
+            // DML / leaf nodes produce no join-relevant qualifiers.
+            _ => {}
+        }
+    }
+
     /// Extract equality join keys from a join condition
     ///
     /// Analyzes the join condition to determine if it consists of one or more equality
-    /// comparisons between columns from the left and right sides. Returns the left and
-    /// right join keys if successful.
+    /// comparisons where each operand references exactly one side of the join. Returns
+    /// the left- and right-side key expressions, side-corrected (an `ON b.x = a.y`
+    /// condition yields `a.y` in `left_keys` when `a` is the join's left input).
     ///
     /// # Supported Patterns
     ///
     /// - Simple equality: `a.id = b.id`
+    /// - Expression keys: `a.properties->>'ref_id' = b.id`, `CAST(a.x AS text) = b.y`
     /// - Multiple equalities (AND): `a.id = b.id AND a.name = b.name`
+    ///
+    /// `left_qualifiers` / `right_qualifiers` are the table names/aliases produced by
+    /// each join input, used to assign each operand to a side.
     ///
     /// # Returns
     ///
     /// `Some((left_keys, right_keys))` if the condition is a valid equality join,
-    /// `None` otherwise (including OR conditions, non-equality comparisons, etc.)
+    /// `None` otherwise (OR conditions, non-equality comparisons, operands mixing
+    /// both sides, or operands referencing no columns).
     pub(super) fn extract_equality_join_keys(
         condition: &Option<TypedExpr>,
+        left_qualifiers: &std::collections::HashSet<String>,
+        right_qualifiers: &std::collections::HashSet<String>,
     ) -> Option<(Vec<TypedExpr>, Vec<TypedExpr>)> {
         let condition = condition.as_ref()?;
 
         let mut left_keys = Vec::new();
         let mut right_keys = Vec::new();
 
-        Self::collect_equality_keys(&condition.expr, &mut left_keys, &mut right_keys)?;
+        Self::collect_equality_keys(
+            &condition.expr,
+            left_qualifiers,
+            right_qualifiers,
+            &mut left_keys,
+            &mut right_keys,
+        )?;
 
         if left_keys.is_empty() {
             return None;
@@ -147,63 +211,54 @@ impl PhysicalPlanner {
     /// Recursively collect equality join keys from an expression
     ///
     /// Handles:
-    /// - BinaryOp::Eq: Extract left and right columns
+    /// - BinaryOp::Eq: each operand must reference columns from exactly one side
     /// - BinaryOp::And: Recursively process both sides
     /// - Other operators: Return None (not supported for HashJoin)
-    pub(super) fn collect_equality_keys(
+    fn collect_equality_keys(
         expr: &Expr,
+        left_qualifiers: &std::collections::HashSet<String>,
+        right_qualifiers: &std::collections::HashSet<String>,
         left_keys: &mut Vec<TypedExpr>,
         right_keys: &mut Vec<TypedExpr>,
     ) -> Option<()> {
         match expr {
             Expr::BinaryOp { left, op, right } => match op {
                 BinaryOperator::Eq => {
-                    // Check if this is a column = column comparison
-                    if let (
-                        Expr::Column {
-                            table: left_table,
-                            column: left_column,
-                        },
-                        Expr::Column {
-                            table: right_table,
-                            column: right_column,
-                        },
-                    ) = (&left.expr, &right.expr)
-                    {
-                        // Ensure columns are from different tables
-                        if left_table != right_table {
+                    // Which side of the join does each operand belong to?
+                    let lhs_side = Self::expr_side(left, left_qualifiers, right_qualifiers)?;
+                    let rhs_side = Self::expr_side(right, left_qualifiers, right_qualifiers)?;
+
+                    match (lhs_side, rhs_side) {
+                        (JoinSide::Left, JoinSide::Right) => {
                             left_keys.push(left.as_ref().clone());
                             right_keys.push(right.as_ref().clone());
-                            return Some(());
+                            Some(())
                         }
-                    }
-
-                    // Also support right = left order
-                    if let (
-                        Expr::Column {
-                            table: right_table,
-                            column: right_column,
-                        },
-                        Expr::Column {
-                            table: left_table,
-                            column: left_column,
-                        },
-                    ) = (&right.expr, &left.expr)
-                    {
-                        if left_table != right_table {
-                            left_keys.push(left.as_ref().clone());
-                            right_keys.push(right.as_ref().clone());
-                            return Some(());
+                        (JoinSide::Right, JoinSide::Left) => {
+                            left_keys.push(right.as_ref().clone());
+                            right_keys.push(left.as_ref().clone());
+                            Some(())
                         }
+                        // Same-side equality (a.x = a.y) or unknown — not a join key
+                        _ => None,
                     }
-
-                    // Not a simple column-to-column comparison
-                    None
                 }
                 BinaryOperator::And => {
                     // For AND, we can collect keys from both sides
-                    Self::collect_equality_keys(&left.expr, left_keys, right_keys)?;
-                    Self::collect_equality_keys(&right.expr, left_keys, right_keys)?;
+                    Self::collect_equality_keys(
+                        &left.expr,
+                        left_qualifiers,
+                        right_qualifiers,
+                        left_keys,
+                        right_keys,
+                    )?;
+                    Self::collect_equality_keys(
+                        &right.expr,
+                        left_qualifiers,
+                        right_qualifiers,
+                        left_keys,
+                        right_keys,
+                    )?;
                     Some(())
                 }
                 _ => {
@@ -217,4 +272,119 @@ impl PhysicalPlanner {
             }
         }
     }
+
+    /// Determine which join side an operand belongs to: it must reference at
+    /// least one column and all its column qualifiers must resolve to exactly
+    /// one side. Subquery/window expressions are rejected.
+    fn expr_side(
+        expr: &TypedExpr,
+        left_qualifiers: &std::collections::HashSet<String>,
+        right_qualifiers: &std::collections::HashSet<String>,
+    ) -> Option<JoinSide> {
+        let mut qualifiers = std::collections::HashSet::new();
+        if !Self::collect_expr_qualifiers(expr, &mut qualifiers) {
+            return None;
+        }
+        if qualifiers.is_empty() {
+            // A constant operand is a filter, not a join key.
+            return None;
+        }
+        let all_left = qualifiers.iter().all(|q| left_qualifiers.contains(q));
+        let all_right = qualifiers.iter().all(|q| right_qualifiers.contains(q));
+        match (all_left, all_right) {
+            // Ambiguous (qualifier visible on both sides) or mixed — reject.
+            (true, true) | (false, false) => None,
+            (true, false) => Some(JoinSide::Left),
+            (false, true) => Some(JoinSide::Right),
+        }
+    }
+
+    /// Collect the table qualifiers referenced by an expression. Returns false
+    /// when the expression contains a construct that cannot serve as a hash key
+    /// (subqueries, window functions).
+    fn collect_expr_qualifiers(
+        expr: &TypedExpr,
+        out: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        match &expr.expr {
+            Expr::Column { table, .. } => {
+                out.insert(table.clone());
+                true
+            }
+            Expr::Literal(_) => true,
+            Expr::BinaryOp { left, right, .. } => {
+                Self::collect_expr_qualifiers(left, out)
+                    && Self::collect_expr_qualifiers(right, out)
+            }
+            Expr::UnaryOp { expr, .. } | Expr::Cast { expr, .. } => {
+                Self::collect_expr_qualifiers(expr, out)
+            }
+            Expr::IsNull { expr } | Expr::IsNotNull { expr } => {
+                Self::collect_expr_qualifiers(expr, out)
+            }
+            Expr::Between { expr, low, high } => {
+                Self::collect_expr_qualifiers(expr, out)
+                    && Self::collect_expr_qualifiers(low, out)
+                    && Self::collect_expr_qualifiers(high, out)
+            }
+            Expr::InList { expr, list, .. } => {
+                Self::collect_expr_qualifiers(expr, out)
+                    && list.iter().all(|e| Self::collect_expr_qualifiers(e, out))
+            }
+            Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+                Self::collect_expr_qualifiers(expr, out)
+                    && Self::collect_expr_qualifiers(pattern, out)
+            }
+            Expr::JsonExtract { object, key }
+            | Expr::JsonExtractText { object, key }
+            | Expr::JsonKeyExists { object, key }
+            | Expr::JsonRemove { object, key } => {
+                Self::collect_expr_qualifiers(object, out)
+                    && Self::collect_expr_qualifiers(key, out)
+            }
+            Expr::JsonContains { object, pattern } => {
+                Self::collect_expr_qualifiers(object, out)
+                    && Self::collect_expr_qualifiers(pattern, out)
+            }
+            Expr::JsonAnyKeyExists { object, keys } | Expr::JsonAllKeyExists { object, keys } => {
+                Self::collect_expr_qualifiers(object, out)
+                    && Self::collect_expr_qualifiers(keys, out)
+            }
+            Expr::JsonExtractPath { object, path }
+            | Expr::JsonExtractPathText { object, path }
+            | Expr::JsonRemoveAtPath { object, path }
+            | Expr::JsonPathMatch { object, path }
+            | Expr::JsonPathExists { object, path } => {
+                Self::collect_expr_qualifiers(object, out)
+                    && Self::collect_expr_qualifiers(path, out)
+            }
+            Expr::Function { args, filter, .. } => {
+                args.iter().all(|a| Self::collect_expr_qualifiers(a, out))
+                    && filter
+                        .as_ref()
+                        .map(|f| Self::collect_expr_qualifiers(f, out))
+                        .unwrap_or(true)
+            }
+            Expr::Case {
+                conditions,
+                else_expr,
+            } => {
+                conditions.iter().all(|(c, r)| {
+                    Self::collect_expr_qualifiers(c, out) && Self::collect_expr_qualifiers(r, out)
+                }) && else_expr
+                    .as_ref()
+                    .map(|e| Self::collect_expr_qualifiers(e, out))
+                    .unwrap_or(true)
+            }
+            // Subqueries and window functions cannot be hash-join keys.
+            Expr::InSubquery { .. } | Expr::Window { .. } => false,
+        }
+    }
+}
+
+/// Which input of a join an expression's columns belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinSide {
+    Left,
+    Right,
 }

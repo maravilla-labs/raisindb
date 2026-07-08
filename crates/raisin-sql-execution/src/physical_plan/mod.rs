@@ -73,6 +73,7 @@ pub mod semi_join;
 pub mod sort;
 pub mod table_function;
 pub mod types;
+pub mod union;
 pub mod window;
 
 #[cfg(test)]

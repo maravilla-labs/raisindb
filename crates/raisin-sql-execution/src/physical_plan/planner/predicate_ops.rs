@@ -129,17 +129,22 @@ impl PhysicalPlanner {
                     };
                     return Some((key.clone(), value_str));
                 }
-                // node_type column: node_type = 'value'
-                // This is indexed as __node_type pseudo-property in RocksDB
+                // Pseudo-property columns indexed by index_node_properties:
+                // node_type, archetype, name, created_by, updated_by → the
+                // corresponding __-prefixed entry in the property index.
                 CanonicalPredicate::ColumnEq { column, value, .. }
-                    if column.to_lowercase() == "node_type" =>
+                    if matches!(
+                        column.to_lowercase().as_str(),
+                        "node_type" | "archetype" | "name" | "created_by" | "updated_by"
+                    ) =>
                 {
                     // Extract string value from literal
                     if let raisin_sql::analyzer::Expr::Literal(
                         raisin_sql::analyzer::Literal::Text(s),
                     ) = &value.expr
                     {
-                        return Some(("__node_type".to_string(), s.clone()));
+                        let prop_name = format!("__{}", column.to_lowercase());
+                        return Some((prop_name, s.clone()));
                     }
                 }
                 // created_at column: created_at = now() or created_at = '2024-01-01'
@@ -231,18 +236,11 @@ impl PhysicalPlanner {
                 match p {
                     // Remove JSON property predicates matching the property name
                     CanonicalPredicate::JsonPropertyEq { key, .. } if key == prop_name => false,
-                    // Remove node_type column predicate if we're looking for __node_type
+                    // Remove pseudo-property column predicates whose indexed name
+                    // (__node_type, __archetype, __name, __created_by,
+                    // __updated_by, __created_at, __updated_at) matches.
                     CanonicalPredicate::ColumnEq { column, .. }
-                        if column.to_lowercase() == "node_type" && prop_name == "__node_type" =>
-                    {
-                        false
-                    }
-                    // Remove created_at/updated_at predicates
-                    CanonicalPredicate::ColumnEq { column, .. }
-                        if (column.to_lowercase() == "created_at"
-                            && prop_name == "__created_at")
-                            || (column.to_lowercase() == "updated_at"
-                                && prop_name == "__updated_at") =>
+                        if format!("__{}", column.to_lowercase()) == prop_name =>
                     {
                         false
                     }

@@ -112,13 +112,16 @@ define_physical_plan! {
             limit: Option<usize>,
         },
         /// Property index count scan (COUNT with property filter)
+        ///
+        /// `properties` holds one or more (name, value) pairs whose per-value
+        /// index counts are SUMMED — used for `COUNT(*)` over a single property
+        /// equality or over an `IN`/OR Union of disjoint property equalities.
         PropertyIndexCountScan {
             tenant_id: String,
             repo_id: String,
             branch: String,
             workspace: String,
-            property_name: String,
-            property_value: String,
+            properties: Vec<(String, String)>,
         },
         /// Ordered property scan with sort direction
         PropertyOrderScan {
@@ -329,6 +332,15 @@ define_physical_plan! {
         Distinct {
             input: Box<PhysicalPlan>,
             on_columns: Vec<String>,
+        },
+        /// Concatenate the row streams of several child plans in order.
+        ///
+        /// Used to expand `col IN (v1, v2, ...)` into a union of per-value
+        /// indexed equality scans. Because each distinct literal over a single
+        /// column selects a disjoint row set (a node has exactly one path, id,
+        /// node_type, or value at a given JSON key), no de-duplication is needed.
+        Union {
+            inputs: Vec<PhysicalPlan>,
         },
 
         // ── Join Operators ───────────────────────────────────────

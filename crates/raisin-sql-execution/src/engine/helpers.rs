@@ -21,7 +21,7 @@ pub(super) fn extract_node_type_from_analyzed(analyzed: &AnalyzedStatement) -> O
 }
 
 /// Recursively search a TypedExpr for `node_type = 'value'` pattern
-pub(super) fn extract_node_type_from_expr(expr: &TypedExpr) -> Option<String> {
+pub(crate) fn extract_node_type_from_expr(expr: &TypedExpr) -> Option<String> {
     match &expr.expr {
         Expr::BinaryOp {
             left,
@@ -57,7 +57,7 @@ pub(super) fn extract_node_type_from_expr(expr: &TypedExpr) -> Option<String> {
 /// Load compound indexes from NodeType storage
 ///
 /// Fetches the NodeType definition and extracts its compound_indexes field.
-pub(super) async fn load_compound_indexes<S: Storage>(
+pub(crate) async fn load_compound_indexes<S: Storage>(
     storage: &S,
     tenant_id: &str,
     repo_id: &str,

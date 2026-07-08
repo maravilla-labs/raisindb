@@ -303,14 +303,17 @@ impl QueryPlan {
                     "EXPLAIN (verbose={}, analyze={}, format={:?})\n",
                     explain.verbose, explain.analyze, explain.format
                 ));
-                output.push_str("Inner query:\n");
-                // Show simplified query info
-                let q = &explain.query;
-                output.push_str(&format!("  Projection: {} columns\n", q.projection.len()));
-                output.push_str(&format!(
-                    "  From: {:?}\n",
-                    q.from.iter().map(|t| &t.table).collect::<Vec<_>>()
-                ));
+                // Show simplified target info
+                if let AnalyzedStatement::Query(ref q) = *explain.target {
+                    output.push_str("Inner query:\n");
+                    output.push_str(&format!("  Projection: {} columns\n", q.projection.len()));
+                    output.push_str(&format!(
+                        "  From: {:?}\n",
+                        q.from.iter().map(|t| &t.table).collect::<Vec<_>>()
+                    ));
+                } else {
+                    output.push_str("Inner statement: DML\n");
+                }
             }
             AnalyzedStatement::Insert(insert) => {
                 output.push_str(&format!(

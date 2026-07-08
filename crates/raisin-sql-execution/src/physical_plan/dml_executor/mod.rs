@@ -27,7 +27,7 @@ mod bulk_operations;
 mod helpers;
 mod initial_structure;
 mod move_copy;
-mod node_helpers;
+pub(crate) mod node_helpers;
 mod order;
 mod relations;
 mod schema_builders;

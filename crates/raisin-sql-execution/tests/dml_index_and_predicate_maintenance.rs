@@ -428,3 +428,218 @@ async fn dml_in_list_json_cast_update() {
         "all in_use/reserved rows are now checked_out"
     );
 }
+
+/// End-to-end: `path IN (...)` / `id IN (...)` now plan to a Union of indexed
+/// point lookups (instead of a full TableScan). This exercises the Union
+/// executor and asserts it returns exactly the targeted rows — including when
+/// combined with a residual property predicate and with duplicate literals.
+#[tokio::test]
+async fn select_path_and_id_in_list_returns_exact_rows() {
+    let (storage, _td) = create_test_storage().await;
+    storage
+        .workspaces()
+        .put(
+            RepoScope::new(TENANT, REPO),
+            raisin_models::workspace::Workspace::new(WS.to_string()),
+        )
+        .await
+        .expect("create workspace");
+
+    create_node_type(&storage, serde_json::json!({ "name": "test:Item" })).await;
+
+    let catalog = create_test_catalog(&[WS]);
+    let engine = QueryEngine::new(
+        storage.clone(),
+        TENANT.to_string(),
+        REPO.to_string(),
+        BRANCH.to_string(),
+    )
+    .with_catalog(catalog)
+    .with_auth(raisin_models::auth::AuthContext::system());
+
+    for (id, path, kind) in [
+        ("a", "/a", "red"),
+        ("b", "/b", "blue"),
+        ("c", "/c", "red"),
+        ("d", "/d", "green"),
+    ] {
+        run_sql_count(
+            &engine,
+            &format!(
+                "INSERT INTO items (id, path, node_type, properties) VALUES \
+                 ('{id}','{path}','test:Item','{{\"kind\":\"{kind}\"}}'::JSONB)",
+            ),
+        )
+        .await;
+    }
+
+    // path IN over three of four paths → exactly 3 rows.
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE path IN ('/a','/b','/c')",
+        )
+        .await,
+        3,
+        "path IN must return exactly the three matching nodes"
+    );
+
+    // id IN over two ids → exactly 2 rows.
+    assert_eq!(
+        run_sql_count(&engine, "SELECT path FROM items WHERE id IN ('a','d')").await,
+        2,
+        "id IN must return exactly the two matching nodes"
+    );
+
+    // path IN combined with a residual property predicate: only /a and /c are red,
+    // so IN('/a','/b') AND kind='red' → just /a.
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE path IN ('/a','/b') AND properties->>'kind'::String = 'red'",
+        )
+        .await,
+        1,
+        "residual predicate must be applied to each Union branch"
+    );
+
+    // Duplicate literals must not double-count.
+    assert_eq!(
+        run_sql_count(&engine, "SELECT path FROM items WHERE path IN ('/a','/a')",).await,
+        1,
+        "duplicate literals in the IN list must yield the row once"
+    );
+
+    // A path not present yields no rows (and does not error).
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE path IN ('/a','/missing')",
+        )
+        .await,
+        1,
+        "absent paths in the IN list simply contribute no rows"
+    );
+
+    // ── OR folding: same-column ORs behave exactly like IN ──────────────
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE path = '/a' OR path = '/c'",
+        )
+        .await,
+        2,
+        "same-column OR must return exactly the matching rows"
+    );
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE properties->>'kind'::String = 'red' \
+             OR properties->>'kind'::String = 'green'",
+        )
+        .await,
+        3,
+        "JSON-property OR must return red(2) + green(1)"
+    );
+    // Heterogeneous OR (different columns) must still be correct (row filter).
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE path = '/a' OR properties->>'kind'::String = 'green'",
+        )
+        .await,
+        2,
+        "heterogeneous OR: /a plus the green /d"
+    );
+
+    // ── JSON property text range (lexicographic PropertyRangeScan) ──────
+    // kinds: red, blue, red, green → 'kind' > 'blue' matches red, red, green.
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE properties->>'kind'::String > 'blue'",
+        )
+        .await,
+        3,
+        "lexicographic > 'blue' must match green + 2×red"
+    );
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE properties->>'kind'::String >= 'green' \
+             AND properties->>'kind'::String < 'red'",
+        )
+        .await,
+        1,
+        "two-sided lexicographic range must apply BOTH bounds (only green)"
+    );
+
+    // ── Pseudo-property equality via property index ──────────────────────
+    assert_eq!(
+        run_sql_count(&engine, "SELECT path FROM items WHERE name = 'a'").await,
+        1,
+        "name equality must find the node named 'a'"
+    );
+    assert_eq!(
+        run_sql_count(
+            &engine,
+            "SELECT path FROM items WHERE name IN ('a','b','missing')",
+        )
+        .await,
+        2,
+        "name IN must find exactly a and b"
+    );
+
+    // ── COUNT over IN uses the summed property-index count ───────────────
+    let count_plan = run_explain(
+        &engine,
+        "EXPLAIN SELECT COUNT(*) FROM items WHERE node_type IN ('test:Item','test:Other')",
+    )
+    .await;
+    assert!(
+        count_plan.contains("PropertyIndexCountScan"),
+        "COUNT over node_type IN must use the summed index count: {}",
+        count_plan
+    );
+
+    // ── EXPLAIN UPDATE / DELETE show the real matching strategy ──────────
+    let fast = run_explain(
+        &engine,
+        "EXPLAIN UPDATE items SET properties = '{}'::jsonb WHERE path = '/a'",
+    )
+    .await;
+    assert!(
+        fast.contains("fast path") && fast.contains("PathIndexLookup"),
+        "EXPLAIN UPDATE by path must show the point-write fast path: {}",
+        fast
+    );
+
+    let bulk = run_explain(
+        &engine,
+        "EXPLAIN DELETE FROM items WHERE path IN ('/a','/b')",
+    )
+    .await;
+    assert!(
+        bulk.contains("bulk") && bulk.contains("PathIndexScan"),
+        "EXPLAIN DELETE with IN must show the bulk plan using indexed scans: {}",
+        bulk
+    );
+}
+
+/// Run an EXPLAIN statement and return the QUERY PLAN text.
+async fn run_explain(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql: &str) -> String {
+    let mut stream = engine
+        .execute(sql)
+        .await
+        .unwrap_or_else(|e| panic!("EXPLAIN failed [{sql}]: {e}"));
+    let mut out = String::new();
+    while let Some(row) = stream.next().await {
+        let row = row.unwrap_or_else(|e| panic!("row error [{sql}]: {e}"));
+        if let Some(raisin_models::nodes::properties::PropertyValue::String(s)) =
+            row.columns.get("QUERY PLAN")
+        {
+            out.push_str(s);
+        }
+    }
+    out
+}

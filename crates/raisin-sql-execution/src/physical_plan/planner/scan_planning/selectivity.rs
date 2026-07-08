@@ -37,6 +37,11 @@ impl PhysicalPlanner {
                 }
             }
             CanonicalPredicate::JsonPropertyEq { .. } => 0.05,
+            // IN predicates: roughly n * per-value equality selectivity, capped.
+            CanonicalPredicate::ColumnIn { values, .. } => (0.05 * values.len() as f64).min(1.0),
+            CanonicalPredicate::JsonPropertyIn { values, .. } => {
+                (0.05 * values.len() as f64).min(1.0)
+            }
             // CHILD_OF is highly selective (only direct children)
             CanonicalPredicate::ChildOf { .. } => 0.10,
             // DESCENDANT_OF is moderately selective (all descendants under a path)
@@ -80,6 +85,8 @@ impl PhysicalPlanner {
             // Range comparisons (>, <, >=, <=) - moderately selective
             // Similar to prefix ranges but can be more or less selective depending on the bound
             CanonicalPredicate::RangeCompare { .. } => 0.35,
+            // JSON property ranges - same profile as column ranges
+            CanonicalPredicate::JsonPropertyRange { .. } => 0.35,
             // Other predicates are not selective
             CanonicalPredicate::Other(_) => 1.00,
         }

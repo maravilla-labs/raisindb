@@ -28,9 +28,9 @@ impl<'a> PlanBuilder<'a> {
         match stmt {
             AnalyzedStatement::Query(query) => self.build_query(query),
             AnalyzedStatement::Explain(explain) => {
-                // For EXPLAIN, we still build the plan normally
+                // For EXPLAIN, we still build the target's plan normally
                 // The actual explain output is generated at execution time
-                self.build_query(&explain.query)
+                self.build(&explain.target)
             }
             AnalyzedStatement::Insert(insert) => self.build_insert(insert),
             AnalyzedStatement::Update(update) => self.build_update(update),

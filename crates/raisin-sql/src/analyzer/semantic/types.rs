@@ -350,8 +350,8 @@ pub struct AnalyzedDelete {
 /// EXPLAIN statement with options
 #[derive(Debug, Clone)]
 pub struct ExplainStatement {
-    /// The query to explain
-    pub query: Box<AnalyzedQuery>,
+    /// The statement to explain (SELECT, UPDATE, or DELETE)
+    pub target: Box<AnalyzedStatement>,
     /// Whether to include actual execution (EXPLAIN ANALYZE)
     pub analyze: bool,
     /// Format for output (TEXT, JSON)

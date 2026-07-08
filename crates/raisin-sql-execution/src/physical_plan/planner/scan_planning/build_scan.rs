@@ -72,13 +72,16 @@ impl PhysicalPlanner {
             CanonicalPredicate::PrefixRange { .. } => {
                 self.build_prefix_scan(canonical, table, alias, workspace, branch, projection)
             }
-            CanonicalPredicate::RangeCompare {
-                table: _,
-                column,
-                op,
-                value,
-            } => self.build_range_scan(
-                column, op, value, canonical, table, alias, schema, workspace, branch, projection,
+            CanonicalPredicate::RangeCompare { .. }
+            | CanonicalPredicate::JsonPropertyRange { .. } => self.build_range_scan(
+                best_predicate,
+                canonical,
+                table,
+                alias,
+                schema,
+                workspace,
+                branch,
+                projection,
                 context,
             ),
             CanonicalPredicate::PropertyPrefixRange {
@@ -380,12 +383,55 @@ impl PhysicalPlanner {
         ))
     }
 
+    /// Resolve the indexed property name for a range predicate, and encode its
+    /// bound value in the property-index key encoding.
+    ///
+    /// Returns `None` when the predicate is not a range on an indexable target.
+    fn range_target_and_bound(
+        &self,
+        pred: &CanonicalPredicate,
+    ) -> Option<(String, ComparisonOp, String)> {
+        match pred {
+            CanonicalPredicate::RangeCompare {
+                column, op, value, ..
+            } => {
+                let property_name = match column.to_lowercase().as_str() {
+                    "created_at" => "__created_at",
+                    "updated_at" => "__updated_at",
+                    _ => return None,
+                };
+                let lit = self.evaluate_constant_expr(value)?;
+                let encoded = match lit {
+                    Literal::Timestamp(ts) => {
+                        let nanos = ts.timestamp_nanos_opt().unwrap_or(0);
+                        format!("{:020}", nanos as i128)
+                    }
+                    Literal::Int(i) => format!("{:020}", i),
+                    _ => return None,
+                };
+                Some((property_name.to_string(), *op, encoded))
+            }
+            // JSON property ranges compare raw strings — the property index
+            // stores `hash_property_value` (the raw string for text values), so
+            // the bound is the literal itself.
+            CanonicalPredicate::JsonPropertyRange { key, op, value, .. } => {
+                Some((key.clone(), *op, value.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a PropertyRangeScan for a range predicate (timestamp column or JSON
+    /// property).
+    ///
+    /// Merges ALL range predicates on the same property into combined
+    /// lower/upper bounds (so `a >= x AND a <= y` and BETWEEN apply both bounds),
+    /// and strips ONLY the consumed predicates from the residual filter — range
+    /// predicates on other columns stay as row-level filters.
     #[allow(clippy::too_many_arguments)]
     fn build_range_scan(
         &self,
-        column: &str,
-        op: &ComparisonOp,
-        value: &TypedExpr,
+        best_predicate: &CanonicalPredicate,
         canonical: &[CanonicalPredicate],
         table: &str,
         alias: &Option<String>,
@@ -395,52 +441,64 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
-        let property_name = match column.to_lowercase().as_str() {
-            "created_at" => "__created_at",
-            "updated_at" => "__updated_at",
-            _ => {
-                return Err(Error::Validation(format!(
-                    "Range scan not supported for column: {}",
-                    column
-                )))
-            }
-        };
+        let (property_name, _, _) =
+            self.range_target_and_bound(best_predicate).ok_or_else(|| {
+                Error::Validation("Range scan not supported for this predicate".to_string())
+            })?;
 
-        let bound_value = if let Some(lit) = self.evaluate_constant_expr(value) {
-            match lit {
-                Literal::Timestamp(ts) => {
-                    let nanos = ts.timestamp_nanos_opt().unwrap_or(0);
-                    format!("{:020}", nanos as i128)
+        // Merge every range predicate on the same property; remember which
+        // canonical entries were consumed so only those leave the residual.
+        let mut lower_bound: Option<(String, bool)> = None;
+        let mut upper_bound: Option<(String, bool)> = None;
+        let mut consumed = vec![false; canonical.len()];
+
+        for (i, pred) in canonical.iter().enumerate() {
+            let Some((prop, op, encoded)) = self.range_target_and_bound(pred) else {
+                continue;
+            };
+            if prop != property_name {
+                continue;
+            }
+            let inclusive = op.is_inclusive();
+            if op.is_lower_bound() {
+                // Keep the tightest (greatest) lower bound.
+                let tighter = match &lower_bound {
+                    None => true,
+                    Some((existing, existing_incl)) => {
+                        encoded > *existing
+                            || (encoded == *existing && *existing_incl && !inclusive)
+                    }
+                };
+                if tighter {
+                    lower_bound = Some((encoded, inclusive));
                 }
-                Literal::Int(i) => format!("{:020}", i),
-                _ => {
-                    return Err(Error::Validation(format!(
-                        "Unsupported literal type for range comparison: {:?}",
-                        lit
-                    )))
+            } else {
+                // Keep the tightest (smallest) upper bound.
+                let tighter = match &upper_bound {
+                    None => true,
+                    Some((existing, existing_incl)) => {
+                        encoded < *existing
+                            || (encoded == *existing && *existing_incl && !inclusive)
+                    }
+                };
+                if tighter {
+                    upper_bound = Some((encoded, inclusive));
                 }
             }
-        } else {
-            return Err(Error::Validation(
-                "Could not evaluate constant expression for range comparison".to_string(),
-            ));
-        };
-
-        let is_inclusive = op.is_inclusive();
-        let (lower_bound, upper_bound) = if op.is_lower_bound() {
-            (Some((bound_value, is_inclusive)), None)
-        } else {
-            (None, Some((bound_value, is_inclusive)))
-        };
+            consumed[i] = true;
+        }
 
         let remaining: Vec<_> = canonical
             .iter()
-            .filter(|p| !matches!(p, CanonicalPredicate::RangeCompare { .. }))
-            .cloned()
+            .enumerate()
+            .filter(|(i, _)| !consumed[*i])
+            .map(|(_, p)| p.clone())
             .collect();
 
         let remaining_filter = self.combine_canonical_predicates(&remaining);
-        let ascending = op.is_lower_bound();
+        // Scan direction: forward when a lower bound exists (or both), reverse
+        // for upper-bound-only scans (matches the previous single-bound behavior).
+        let ascending = lower_bound.is_some();
 
         let scan = PhysicalPlan::PropertyRangeScan {
             tenant_id: self.default_tenant_id.to_string(),
@@ -452,7 +510,7 @@ impl PhysicalPlanner {
             schema,
             projection,
             filter: remaining_filter,
-            property_name: property_name.to_string(),
+            property_name,
             lower_bound,
             upper_bound,
             ascending,
@@ -584,6 +642,14 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
     ) -> PhysicalPlan {
         let reason = self.determine_scan_reason(canonical);
+        tracing::warn!(
+            table = %table,
+            workspace = %workspace,
+            reason = %reason,
+            "Query degraded to a full TableScan (no usable index for its predicates); \
+             this is slow under load — consider an indexed predicate (path/id =, \
+             node_type/property =, or an IN over those)"
+        );
         PhysicalPlan::TableScan {
             tenant_id: self.default_tenant_id.to_string(),
             repo_id: self.default_repo_id.to_string(),

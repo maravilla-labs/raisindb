@@ -79,14 +79,39 @@ impl<'a> AnalyzerContext<'a> {
             Statement::Query(query) => {
                 let analyzed_query = self.analyze_query(query)?;
                 Ok(AnalyzedStatement::Explain(ExplainStatement {
-                    query: Box::new(analyzed_query),
+                    target: Box::new(AnalyzedStatement::Query(analyzed_query)),
+                    analyze,
+                    format: explain_format,
+                    verbose,
+                }))
+            }
+            // EXPLAIN UPDATE / EXPLAIN DELETE — shows the row-matching plan
+            // (point lookup vs bulk index scan) without executing the DML.
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                ..
+            } => {
+                let analyzed = self.analyze_update(table, assignments, selection.as_ref())?;
+                Ok(AnalyzedStatement::Explain(ExplainStatement {
+                    target: Box::new(analyzed),
+                    analyze,
+                    format: explain_format,
+                    verbose,
+                }))
+            }
+            Statement::Delete(delete) => {
+                let analyzed = self.analyze_delete(delete)?;
+                Ok(AnalyzedStatement::Explain(ExplainStatement {
+                    target: Box::new(analyzed),
                     analyze,
                     format: explain_format,
                     verbose,
                 }))
             }
             _ => Err(AnalysisError::UnsupportedStatement(
-                "EXPLAIN only supports SELECT queries".into(),
+                "EXPLAIN only supports SELECT, UPDATE, and DELETE statements".into(),
             )),
         }
     }

@@ -135,6 +135,9 @@ pub fn execute_plan<
             PhysicalPlan::Distinct { .. } => {
                 crate::physical_plan::distinct::execute_distinct(plan, ctx).await
             }
+            PhysicalPlan::Union { .. } => {
+                crate::physical_plan::union::execute_union(plan, ctx).await
+            }
             PhysicalPlan::PhysicalInsert {
                 target,
                 columns,

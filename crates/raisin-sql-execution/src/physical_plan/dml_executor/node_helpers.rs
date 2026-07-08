@@ -45,7 +45,7 @@ pub fn classify_filter(filter: &Option<TypedExpr>) -> FilterComplexity {
 }
 
 /// Extract node identifier (id or path) from WHERE clause filter.
-pub(super) fn extract_node_identifier_from_filter(
+pub(crate) fn extract_node_identifier_from_filter(
     filter: &Option<TypedExpr>,
 ) -> Result<NodeIdentifier, Error> {
     let filter_expr = filter.as_ref().ok_or_else(|| {

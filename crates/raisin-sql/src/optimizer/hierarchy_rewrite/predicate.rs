@@ -33,11 +33,38 @@ pub enum CanonicalPredicate {
         key: String,
         value: serde_json::Value,
     },
+    /// `column IN (v1, v2, ...)` over a plain column (path, id, node_type, ...).
+    /// Expanded by the physical planner into a `Union` of per-value equality
+    /// scans when the column is backed by an index; otherwise reconstructed as a
+    /// row-level `IN` filter via `to_expr`.
+    ColumnIn {
+        table: String,
+        column: String,
+        values: Vec<TypedExpr>,
+    },
+    /// `properties->>'key' IN (v1, v2, ...)` over a JSON property.
+    JsonPropertyIn {
+        table: String,
+        json_col: String,
+        key: String,
+        values: Vec<serde_json::Value>,
+    },
     RangeCompare {
         table: String,
         column: String,
         op: ComparisonOp,
         value: TypedExpr,
+    },
+    /// `properties->>'key' <op> 'text'` — lexicographic range over a JSON
+    /// property. Only text values are canonicalized (the property index stores
+    /// raw strings and `->>` yields text, so lexicographic order is consistent
+    /// between the index scan and row-level evaluation).
+    JsonPropertyRange {
+        table: String,
+        json_col: String,
+        key: String,
+        op: ComparisonOp,
+        value: String,
     },
     PropertyPrefixRange {
         table: String,
@@ -218,6 +245,65 @@ impl CanonicalPredicate {
                     DataType::Boolean,
                 )
             }
+            CanonicalPredicate::ColumnIn {
+                table,
+                column,
+                values,
+            } => {
+                let col = TypedExpr::column(
+                    table.clone(),
+                    column.clone(),
+                    values
+                        .first()
+                        .map(|v| v.data_type.clone())
+                        .unwrap_or(DataType::Text),
+                );
+                TypedExpr::new(
+                    Expr::InList {
+                        expr: Box::new(col),
+                        list: values.clone(),
+                        negated: false,
+                    },
+                    DataType::Boolean,
+                )
+            }
+            CanonicalPredicate::JsonPropertyIn {
+                table,
+                json_col,
+                key,
+                values,
+            } => {
+                // Reconstruct `properties->>'key' IN (...)` as a text-extraction IN
+                // filter (same reasoning as JsonPropertyEq: `->>` yields text, so
+                // compare against the values rendered as plain text).
+                let col = TypedExpr::column(table.clone(), json_col.clone(), DataType::JsonB);
+                let key_expr = TypedExpr::literal(Literal::Text(key.clone()));
+                let extract = TypedExpr::new(
+                    Expr::JsonExtractText {
+                        object: Box::new(col),
+                        key: Box::new(key_expr),
+                    },
+                    DataType::Nullable(Box::new(DataType::Text)),
+                );
+                let list: Vec<TypedExpr> = values
+                    .iter()
+                    .map(|value| {
+                        let value_text = match value {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        TypedExpr::literal(Literal::Text(value_text))
+                    })
+                    .collect();
+                TypedExpr::new(
+                    Expr::InList {
+                        expr: Box::new(extract),
+                        list,
+                        negated: false,
+                    },
+                    DataType::Boolean,
+                )
+            }
             CanonicalPredicate::RangeCompare {
                 table,
                 column,
@@ -230,6 +316,34 @@ impl CanonicalPredicate {
                         left: Box::new(col),
                         op: op.to_binary_op(),
                         right: Box::new(value.clone()),
+                    },
+                    DataType::Boolean,
+                )
+            }
+            CanonicalPredicate::JsonPropertyRange {
+                table,
+                json_col,
+                key,
+                op,
+                value,
+            } => {
+                // Reconstruct `properties->>'key' <op> 'value'` (text comparison,
+                // same shape as JsonPropertyEq::to_expr).
+                let col = TypedExpr::column(table.clone(), json_col.clone(), DataType::JsonB);
+                let key_expr = TypedExpr::literal(Literal::Text(key.clone()));
+                let extract = TypedExpr::new(
+                    Expr::JsonExtractText {
+                        object: Box::new(col),
+                        key: Box::new(key_expr),
+                    },
+                    DataType::Nullable(Box::new(DataType::Text)),
+                );
+                let rhs = TypedExpr::literal(Literal::Text(value.clone()));
+                TypedExpr::new(
+                    Expr::BinaryOp {
+                        left: Box::new(extract),
+                        op: op.to_binary_op(),
+                        right: Box::new(rhs),
                     },
                     DataType::Boolean,
                 )

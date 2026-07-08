@@ -47,15 +47,13 @@ impl PhysicalPlan {
             } => {
                 format!("PropertyIndexScan: {}={}", property_name, property_value)
             }
-            PhysicalPlan::PropertyIndexCountScan {
-                property_name,
-                property_value,
-                ..
-            } => {
-                format!(
-                    "PropertyIndexCountScan: {}={}",
-                    property_name, property_value
-                )
+            PhysicalPlan::PropertyIndexCountScan { properties, .. } => {
+                let pairs = properties
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                format!("PropertyIndexCountScan: {}", pairs)
             }
             PhysicalPlan::PropertyOrderScan {
                 property_name,
@@ -431,6 +429,9 @@ impl PhysicalPlan {
             PhysicalPlan::LateralMap { column_name, .. } => {
                 format!("LateralMap: AS {}", column_name)
             }
+            PhysicalPlan::Union { inputs } => {
+                format!("Union: {} branch(es)", inputs.len())
+            }
             PhysicalPlan::Empty => "Empty (DDL)".to_string(),
         }
     }
@@ -491,6 +492,11 @@ impl PhysicalPlan {
                     "{}{}: {} (per outer row)\n",
                     lookup_prefix, lookup_type, inner_lookup.table
                 ));
+            }
+            PhysicalPlan::Union { inputs } => {
+                for input in inputs {
+                    output.push_str(&input.explain_impl(indent + 1));
+                }
             }
             PhysicalPlan::WithCTE { ctes, main_query } => {
                 // Explain each CTE

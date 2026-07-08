@@ -328,12 +328,31 @@ where
     let optimizer = Optimizer::default();
     let optimized = optimizer.optimize(logical_plan);
 
-    let physical_planner = PhysicalPlanner::with_context(
+    let mut physical_planner = PhysicalPlanner::with_context(
         ctx.tenant_id.to_string(),
         ctx.repo_id.to_string(),
         ctx.branch.to_string(),
         workspace.to_string(),
     );
+
+    // Load compound indexes so the bulk UPDATE/DELETE matching plan is as good
+    // as the equivalent SELECT (which loads them in execute_query). Without
+    // this, a WHERE clause served by a CompoundIndexScan for SELECT would
+    // degrade to a slower scan when re-planned here.
+    if let Some(node_type_name) = crate::engine::helpers::extract_node_type_from_expr(filter) {
+        if let Some(indexes) = crate::engine::helpers::load_compound_indexes(
+            &*ctx.storage,
+            &ctx.tenant_id,
+            &ctx.repo_id,
+            &ctx.branch,
+            &node_type_name,
+        )
+        .await
+        {
+            physical_planner.set_compound_indexes(indexes);
+        }
+    }
+
     let physical_plan = physical_planner.plan(&optimized)?;
 
     tracing::debug!("Physical plan for ID lookup: {}", physical_plan.describe());

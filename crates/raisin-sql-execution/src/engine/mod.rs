@@ -16,7 +16,7 @@ mod ai_config;
 mod batch;
 mod branch;
 mod handlers;
-mod helpers;
+pub(crate) mod helpers;
 mod restore;
 
 pub use batch::batch_requires_async;

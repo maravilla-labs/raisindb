@@ -89,21 +89,19 @@ pub async fn execute_property_index_count_scan<S: Storage + 'static>(
     plan: &PhysicalPlan,
     ctx: &ExecutionContext<S>,
 ) -> Result<RowStream, ExecutionError> {
-    let (tenant_id, repo_id, branch, workspace, property_name, property_value) = match plan {
+    let (tenant_id, repo_id, branch, workspace, properties) = match plan {
         PhysicalPlan::PropertyIndexCountScan {
             tenant_id,
             repo_id,
             branch,
             workspace,
-            property_name,
-            property_value,
+            properties,
         } => (
             tenant_id.clone(),
             repo_id.clone(),
             branch.clone(),
             workspace.clone(),
-            property_name.clone(),
-            property_value.clone(),
+            properties.clone(),
         ),
         _ => {
             return Err(ExecutionError::Backend(
@@ -115,20 +113,24 @@ pub async fn execute_property_index_count_scan<S: Storage + 'static>(
 
     let storage = ctx.storage.clone();
 
-    // Parse the property value into PropertyValue
-    let prop_value = PropertyValue::String(property_value.clone());
+    // Sum the per-value index counts. Multiple pairs come from IN/OR expansion
+    // over the same column, whose per-value row sets are disjoint.
+    let mut count = 0usize;
+    for (property_name, property_value) in &properties {
+        let prop_value = PropertyValue::String(property_value.clone());
 
-    // Execute count_by_property - this is fast and memory-efficient
-    let count = storage
-        .property_index()
-        .count_by_property(
-            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-            &property_name,
-            &prop_value,
-            false, // published_only = false (count all nodes)
-        )
-        .await
-        .map_err(|e| ExecutionError::Backend(e.to_string()))?;
+        // Execute count_by_property - this is fast and memory-efficient
+        count += storage
+            .property_index()
+            .count_by_property(
+                StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                property_name,
+                &prop_value,
+                false, // published_only = false (count all nodes)
+            )
+            .await
+            .map_err(|e| ExecutionError::Backend(e.to_string()))?;
+    }
 
     // Return a single row with the count
     let stream = try_stream! {

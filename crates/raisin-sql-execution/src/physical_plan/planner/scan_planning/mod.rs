@@ -41,6 +41,50 @@ impl PhysicalPlanner {
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
         let canonical = self.analyze_filter(filter)?;
+        self.plan_scan_from_canonical(
+            &canonical,
+            table,
+            alias,
+            schema,
+            workspace,
+            branch,
+            Some(filter.clone()),
+            projection,
+            context,
+        )
+    }
+
+    /// Plan a scan from already-canonicalized predicates.
+    ///
+    /// `fallback_filter` is the residual expression used when the scan degrades
+    /// to a `TableScan` (the original filter at the top level, or the combined
+    /// substituted predicates for a `Union` branch).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn plan_scan_from_canonical(
+        &self,
+        canonical: &[CanonicalPredicate],
+        table: &str,
+        alias: &Option<String>,
+        schema: Arc<TableSchema>,
+        workspace: &str,
+        branch: &str,
+        fallback_filter: Option<TypedExpr>,
+        projection: Option<Vec<String>>,
+        context: &PlanContext,
+    ) -> Result<PhysicalPlan, Error> {
+        // Priority 0: expand an indexable `col IN (...)` into a Union of
+        // per-value equality scans (each reusing the existing equality builders).
+        if let Some(union) = self.try_expand_in_union(
+            canonical,
+            table,
+            alias,
+            &schema,
+            workspace,
+            branch,
+            &projection,
+        )? {
+            return Ok(union);
+        }
 
         // Priority 1: Full-text search gets absolute priority
         if let Some((language, query, limit)) = self.extract_fulltext_predicate(&canonical) {
@@ -171,15 +215,169 @@ impl PhysicalPlanner {
 
         // Fallback: Table scan
         Ok(self.build_fallback_table_scan(
-            &canonical,
+            canonical,
             table,
             alias,
             schema,
             workspace,
             branch,
-            Some(filter.clone()),
+            fallback_filter,
             projection,
         ))
+    }
+
+    /// Expand an indexable `col IN (...)` predicate into a `Union` of per-value
+    /// equality scans. Returns `Ok(None)` when no indexable `IN` predicate is
+    /// present, or when any resulting branch would not be index-backed (in which
+    /// case the caller falls back to a single scan — never worse than today).
+    #[allow(clippy::too_many_arguments)]
+    fn try_expand_in_union(
+        &self,
+        canonical: &[CanonicalPredicate],
+        table: &str,
+        alias: &Option<String>,
+        schema: &Arc<TableSchema>,
+        workspace: &str,
+        branch: &str,
+        projection: &Option<Vec<String>>,
+    ) -> Result<Option<PhysicalPlan>, Error> {
+        // Find the first `IN` predicate whose column is plausibly indexed. The
+        // per-branch post-check below is the hard correctness guarantee; this is
+        // just a cheap pre-filter.
+        let idx = canonical.iter().position(|p| match p {
+            CanonicalPredicate::ColumnIn { column, .. } => self.column_in_indexable(column),
+            CanonicalPredicate::JsonPropertyIn { .. } => {
+                self.index_catalog.has_property_index() || !self.compound_indexes.is_empty()
+            }
+            _ => false,
+        });
+        let idx = match idx {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+
+        // Build the per-value equality predicates (de-duplicating the literal list).
+        let eq_preds: Vec<CanonicalPredicate> = match &canonical[idx] {
+            CanonicalPredicate::ColumnIn {
+                table: t,
+                column,
+                values,
+            } => {
+                let mut seen = Vec::new();
+                let mut preds = Vec::new();
+                for v in values {
+                    let key = format!("{:?}", v.expr);
+                    if seen.contains(&key) {
+                        continue;
+                    }
+                    seen.push(key);
+                    preds.push(CanonicalPredicate::ColumnEq {
+                        table: t.clone(),
+                        column: column.clone(),
+                        value: v.clone(),
+                    });
+                }
+                preds
+            }
+            CanonicalPredicate::JsonPropertyIn {
+                table: t,
+                json_col,
+                key,
+                values,
+            } => {
+                let mut seen: Vec<serde_json::Value> = Vec::new();
+                let mut preds = Vec::new();
+                for v in values {
+                    if seen.contains(v) {
+                        continue;
+                    }
+                    seen.push(v.clone());
+                    preds.push(CanonicalPredicate::JsonPropertyEq {
+                        table: t.clone(),
+                        json_col: json_col.clone(),
+                        key: key.clone(),
+                        value: v.clone(),
+                    });
+                }
+                preds
+            }
+            _ => return Ok(None),
+        };
+
+        if eq_preds.is_empty() {
+            return Ok(None);
+        }
+
+        // Other predicates (everything except the IN being expanded) apply to
+        // every branch.
+        let others: Vec<CanonicalPredicate> = canonical
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != idx)
+            .map(|(_, p)| p.clone())
+            .collect();
+
+        // Branches must not inherit LIMIT/ORDER pushdown — a Limit/Sort above the
+        // Union handles global ordering and bounding.
+        let branch_ctx = PlanContext::empty();
+
+        let mut branches = Vec::with_capacity(eq_preds.len());
+        for eq in eq_preds {
+            let mut sub = others.clone();
+            sub.push(eq);
+            let fb = self.combine_canonical_predicates(&sub);
+            let plan = self.plan_scan_from_canonical(
+                &sub,
+                table,
+                alias,
+                schema.clone(),
+                workspace,
+                branch,
+                fb,
+                projection.clone(),
+                &branch_ctx,
+            )?;
+
+            // Hard guarantee: only emit a Union if EVERY branch is index-backed.
+            // Otherwise N table scans would be strictly worse than one, so abandon
+            // and let the caller build a single (warned) TableScan.
+            if Self::plan_has_table_scan(&plan) {
+                return Ok(None);
+            }
+            branches.push(plan);
+        }
+
+        if branches.len() == 1 {
+            return Ok(Some(branches.pop().unwrap()));
+        }
+
+        tracing::info!(
+            "   Expanding IN(..) into Union of {} indexed scans",
+            branches.len()
+        );
+        Ok(Some(PhysicalPlan::Union { inputs: branches }))
+    }
+
+    /// Whether a `col IN (...)` over `column` can plausibly use an index.
+    fn column_in_indexable(&self, column: &str) -> bool {
+        match column.to_lowercase().as_str() {
+            "path" => self.index_catalog.has_path_index(),
+            "id" => true,
+            "node_type" | "archetype" | "name" | "created_by" | "updated_by" | "created_at"
+            | "updated_at" => {
+                self.index_catalog.has_property_index() || !self.compound_indexes.is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    /// Recursively test whether a plan contains a `TableScan` (i.e. is not fully
+    /// index-backed).
+    fn plan_has_table_scan(plan: &PhysicalPlan) -> bool {
+        if matches!(plan, PhysicalPlan::TableScan { .. }) {
+            return true;
+        }
+        plan.inputs().iter().any(|p| Self::plan_has_table_scan(p))
     }
 
     /// Try to match a compound index scan
@@ -202,7 +400,7 @@ impl PhysicalPlanner {
             .as_ref()
             .map(|(col, asc)| (col.as_str(), *asc));
 
-        let (index_name, equality_columns, ascending) =
+        let (index_name, equality_columns, ascending, claims_order) =
             self.try_match_compound_index(canonical, order_by_ref)?;
 
         let used_props: std::collections::HashSet<String> = equality_columns
@@ -230,11 +428,22 @@ impl PhysicalPlanner {
         let remaining_filter = self.combine_canonical_predicates(&remaining);
 
         tracing::info!(
-            "   Using CompoundIndexScan: index='{}', {} equality columns, ascending={}",
+            "   Using CompoundIndexScan: index='{}', {} equality columns, ascending={}, claims_order={}",
             index_name,
             equality_columns.len(),
-            ascending
+            ascending,
+            claims_order
         );
+
+        // LIMIT may only be pushed into the scan when its iteration order is the
+        // requested order (claims_order) or when no ORDER BY is pending —
+        // otherwise the scan would truncate in the wrong order before the Sort
+        // above re-orders.
+        let pushed_limit = if claims_order || context.order_by.is_none() {
+            context.limit
+        } else {
+            None
+        };
 
         Some(PhysicalPlan::CompoundIndexScan {
             tenant_id: self.default_tenant_id.to_string(),
@@ -245,11 +454,11 @@ impl PhysicalPlanner {
             alias: alias.clone(),
             index_name,
             equality_columns,
-            pre_sorted: true,
+            pre_sorted: claims_order,
             ascending,
             projection: projection.clone(),
             filter: remaining_filter,
-            limit: context.limit,
+            limit: pushed_limit,
         })
     }
 
@@ -268,20 +477,37 @@ impl PhysicalPlanner {
                 CanonicalPredicate::ChildOf { .. } => true,
                 CanonicalPredicate::DescendantOf { .. } => self.index_catalog.has_path_index(),
                 CanonicalPredicate::ColumnEq { column, .. } => {
+                    // All pseudo-properties written by index_node_properties:
+                    // __node_type, __archetype, __name, __created_by,
+                    // __updated_by, __created_at, __updated_at.
                     let col_lower = column.to_lowercase();
-                    (col_lower == "node_type"
-                        || col_lower == "created_at"
-                        || col_lower == "updated_at")
-                        && self.index_catalog.has_property_index()
+                    matches!(
+                        col_lower.as_str(),
+                        "node_type"
+                            | "archetype"
+                            | "name"
+                            | "created_by"
+                            | "updated_by"
+                            | "created_at"
+                            | "updated_at"
+                    ) && self.index_catalog.has_property_index()
                 }
                 CanonicalPredicate::JsonPropertyEq { .. } => {
                     self.index_catalog.has_property_index()
                 }
+                // IN predicates are handled by `try_expand_in_union`, not by
+                // best-predicate selection. If expansion was abandoned they fall
+                // through to a residual filter on a TableScan.
+                CanonicalPredicate::ColumnIn { .. } => false,
+                CanonicalPredicate::JsonPropertyIn { .. } => false,
                 CanonicalPredicate::DepthEq { .. } => false,
                 CanonicalPredicate::RangeCompare { column, .. } => {
                     let col_lower = column.to_lowercase();
                     (col_lower == "created_at" || col_lower == "updated_at")
                         && self.index_catalog.has_property_index()
+                }
+                CanonicalPredicate::JsonPropertyRange { .. } => {
+                    self.index_catalog.has_property_index()
                 }
                 CanonicalPredicate::PropertyPrefixRange { .. } => {
                     self.index_catalog.has_property_index()

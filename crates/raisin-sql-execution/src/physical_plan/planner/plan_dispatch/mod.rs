@@ -179,8 +179,18 @@ impl PhysicalPlanner {
                 let left_plan = self.plan_with_context(left, context)?;
                 let right_plan = self.plan_with_context(right, context)?;
 
+                // Which table qualifiers does each side produce? Used to assign
+                // join-condition operands (including expression keys like
+                // properties->>'x') to the correct side.
+                let mut left_qualifiers = std::collections::HashSet::new();
+                let mut right_qualifiers = std::collections::HashSet::new();
+                Self::collect_plan_qualifiers(left, &mut left_qualifiers);
+                Self::collect_plan_qualifiers(right, &mut right_qualifiers);
+
                 // Analyze condition to choose between HashJoin, IndexLookupJoin, and NestedLoopJoin
-                if let Some((left_keys, right_keys)) = Self::extract_equality_join_keys(condition) {
+                if let Some((left_keys, right_keys)) =
+                    Self::extract_equality_join_keys(condition, &left_qualifiers, &right_qualifiers)
+                {
                     // Check if we can use IndexLookupJoin (O(n) vs O(n+m) for HashJoin)
                     if matches!(
                         join_type,

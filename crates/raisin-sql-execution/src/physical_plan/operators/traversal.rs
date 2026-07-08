@@ -26,6 +26,7 @@ impl PhysicalPlan {
                 // Only the outer input is a plan; inner is dynamically created per row
                 vec![outer.as_ref()]
             }
+            PhysicalPlan::Union { inputs } => inputs.iter().collect(),
             PhysicalPlan::WithCTE { ctes, main_query } => {
                 // WithCTE has inputs from all CTE plans plus the main query
                 let mut inputs = vec![];
@@ -69,6 +70,7 @@ impl PhysicalPlan {
             PhysicalPlan::IndexLookupJoin { outer, .. } => {
                 vec![outer.as_mut()]
             }
+            PhysicalPlan::Union { inputs } => inputs.iter_mut().collect(),
             PhysicalPlan::WithCTE { ctes, main_query } => {
                 // WithCTE has inputs from all CTE plans plus the main query
                 let mut inputs = vec![];

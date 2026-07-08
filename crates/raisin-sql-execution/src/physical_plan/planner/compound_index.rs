@@ -5,8 +5,13 @@ use super::{
     SchemaStats, TypedExpr,
 };
 
-/// Result of a successful compound index match: (index_name, matched_equality_columns, ascending)
-pub type CompoundIndexMatch = (String, Vec<(String, String)>, bool);
+/// Result of a successful compound index match:
+/// (index_name, matched_equality_columns, ascending, claims_order)
+///
+/// `claims_order` is true when ALL equality columns matched and the trailing
+/// order column satisfies the query's ORDER BY — only then may the scan's
+/// iteration order be relied upon (e.g. for LIMIT pushdown under an ORDER BY).
+pub type CompoundIndexMatch = (String, Vec<(String, String)>, bool, bool);
 
 impl PhysicalPlanner {
     /// Extract a string literal argument for table functions
@@ -54,12 +59,16 @@ impl PhysicalPlanner {
 
     /// Try to match a compound index for the given query pattern
     ///
-    /// Returns Some((index_name, equality_columns)) if a compound index matches,
-    /// None otherwise.
+    /// Returns Some((index_name, equality_columns, ascending, claims_order)) if a
+    /// compound index matches, None otherwise.
     ///
-    /// A compound index matches when:
-    /// 1. All leading equality columns in the index have matching equality predicates
-    /// 2. If ORDER BY is present, it matches the trailing ordering column
+    /// Matching rules:
+    /// 1. A LEADING PREFIX (>= 1) of the index's equality columns must have
+    ///    matching equality predicates. Full prefix matches are preferred over
+    ///    partial ones; among equals, more matched columns win.
+    /// 2. `claims_order` is true only when ALL equality columns matched AND the
+    ///    trailing order column satisfies the query's ORDER BY — a partial match
+    ///    iterates in residual-column order, which is NOT the ORDER BY order.
     pub(super) fn try_match_compound_index(
         &self,
         predicates: &[CanonicalPredicate],
@@ -105,6 +114,10 @@ impl PhysicalPlanner {
             return None;
         }
 
+        // Track the best candidate: full matches beat partial ones, then more
+        // matched columns win.
+        let mut best: Option<(CompoundIndexMatch, bool, usize)> = None; // (match, full, count)
+
         for index in &self.compound_indexes {
             let equality_column_count = if index.has_order_column {
                 index.columns.len().saturating_sub(1)
@@ -112,24 +125,25 @@ impl PhysicalPlanner {
                 index.columns.len()
             };
 
+            // Match a leading prefix of the equality columns.
             let mut matched_columns: Vec<(String, String)> = Vec::new();
-            let mut all_match = true;
-
             for i in 0..equality_column_count {
                 let col = &index.columns[i];
                 if let Some(value) = equality_map.get(&col.property) {
                     matched_columns.push((col.property.clone(), value.clone()));
                 } else {
-                    all_match = false;
                     break;
                 }
             }
 
-            if !all_match {
+            if matched_columns.is_empty() {
                 continue;
             }
+            let full = matched_columns.len() == equality_column_count;
 
-            let ascending = if index.has_order_column {
+            // Order can only be claimed on a FULL equality match — a partial
+            // match iterates in unmatched-column order, not order-column order.
+            let (ascending, claims_order) = if full && index.has_order_column {
                 if let Some((order_col, is_asc)) = order_by {
                     let order_column = &index.columns[index.columns.len() - 1];
                     let order_col_normalized = if order_col.eq_ignore_ascii_case("created_at") {
@@ -140,25 +154,43 @@ impl PhysicalPlanner {
                         order_col
                     };
 
-                    if order_column.property != order_col_normalized {
-                        continue;
+                    if order_column.property == order_col_normalized {
+                        (is_asc, true)
+                    } else {
+                        // Index can't serve this ORDER BY; still usable as an
+                        // unordered equality filter (Sort above re-orders).
+                        (true, false)
                     }
-
-                    is_asc
                 } else {
-                    false
+                    (false, false)
                 }
             } else {
-                true
+                (true, false)
             };
 
-            tracing::info!(
-                "   Matched compound index '{}' with {} equality columns",
-                index.name,
-                matched_columns.len()
-            );
+            let candidate = (index.name.clone(), matched_columns, ascending, claims_order);
+            let count = candidate.1.len();
 
-            return Some((index.name.clone(), matched_columns, ascending));
+            let better = match &best {
+                None => true,
+                Some((_, best_full, best_count)) => {
+                    (full && !best_full) || (full == *best_full && count > *best_count)
+                }
+            };
+            if better {
+                best = Some((candidate, full, count));
+            }
+        }
+
+        if let Some(((name, cols, asc, claims_order), full, count)) = best {
+            tracing::info!(
+                "   Matched compound index '{}' with {} equality columns (full={}, claims_order={})",
+                name,
+                count,
+                full,
+                claims_order
+            );
+            return Some((name, cols, asc, claims_order));
         }
 
         None
