@@ -400,6 +400,55 @@ export async function listWorkspaces(repo: string): Promise<Workspace[]> {
 }
 
 /**
+ * Fetch the full workspace definition (incl. allowed_node_types /
+ * allowed_root_node_types), or null if it doesn't exist.
+ * GET /api/workspaces/{repo}/{name}
+ */
+export async function getWorkspaceRaw(
+  repo: string,
+  name: string
+): Promise<Record<string, unknown> | null> {
+  const baseUrl = getBaseUrl();
+  const response = await fetch(`${baseUrl}/api/workspaces/${repo}/${name}`, {
+    method: 'GET',
+    headers: getHeaders(),
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const errorData = (await response
+      .json()
+      .catch(() => ({ message: response.statusText }))) as { message?: string };
+    throw new Error(errorData.message || `Failed to get workspace '${name}': ${response.status}`);
+  }
+  return (await response.json()) as Record<string, unknown>;
+}
+
+/**
+ * Replace the full workspace definition (operator-only).
+ * PUT /api/workspaces/{repo}/{name}
+ */
+export async function putWorkspaceRaw(
+  repo: string,
+  name: string,
+  workspace: Record<string, unknown>
+): Promise<void> {
+  const baseUrl = getBaseUrl();
+  const response = await fetch(`${baseUrl}/api/workspaces/${repo}/${name}`, {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify(workspace),
+  });
+  if (!response.ok) {
+    const errorData = (await response
+      .json()
+      .catch(() => ({ message: response.statusText }))) as { message?: string };
+    throw new Error(
+      errorData.message || `Failed to update workspace '${name}': ${response.status}`
+    );
+  }
+}
+
+/**
  * List child nodes at a given path using REST API
  * GET /api/repository/{repo}/{branch}/head/{workspace}/{path}/
  */

@@ -3,6 +3,8 @@ import path from 'path';
 import yaml from 'yaml';
 import { createPackage } from './package.js';
 import { uploadPackage, installPackage } from './package.js';
+import { getDefaultRepo } from '../config.js';
+import { getWorkspaceRaw, putWorkspaceRaw } from '../api.js';
 
 interface DeployOptions {
   server?: string;
@@ -57,7 +59,94 @@ export async function deployPackage(folder: string, options: DeployOptions): Pro
   // Step 4 (optional): Install
   if (options.install) {
     await installPackage(manifest.name, options.server, options.repo, options.branch || 'main');
+
+    // Step 5: Reconcile EXISTING workspaces' allowed types. Package install
+    // seeds a NEW workspace with the full definition, but for an already-
+    // registered workspace it does not update allowed_root_node_types (and only
+    // partially allowed_node_types), so the package YAML drifts from the server.
+    // Re-apply both from each workspaces/*.yaml over the (operator) HTTP API.
+    const targetRepo = options.repo || getDefaultRepo() || 'default';
+    await reconcileWorkspaceAllowedTypes(resolvedFolder, targetRepo);
   }
 
   console.log(`\nDeployed ${manifest.name} v${manifest.version} successfully${options.install ? ' (installed)' : ''}.`);
+}
+
+/** Shallow string-array equality (order-sensitive, as the server stores them). */
+function sameTypes(a: unknown, b: string[]): boolean {
+  return Array.isArray(a) && a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/**
+ * Re-apply each package workspace's `allowed_node_types` /
+ * `allowed_root_node_types` to the server for workspaces that already exist,
+ * so a `deploy --install` over a pre-existing workspace picks up allowed-type
+ * changes (the server install path only fully seeds NEW workspaces).
+ *
+ * Reads `<folder>/workspaces/*.yaml` (the workspace-definition files), and for
+ * each that already exists on the server with drifted allowed types, GETs the
+ * current workspace, overlays the two arrays, and PUTs it back — preserving all
+ * other fields. New workspaces are left to the install path.
+ */
+export async function reconcileWorkspaceAllowedTypes(folder: string, repo: string): Promise<void> {
+  const wsDir = path.join(folder, 'workspaces');
+  if (!fs.existsSync(wsDir) || !fs.statSync(wsDir).isDirectory()) return;
+
+  const files = fs
+    .readdirSync(wsDir, { withFileTypes: true })
+    .filter((e) => e.isFile() && /\.ya?ml$/i.test(e.name))
+    .map((e) => path.join(wsDir, e.name));
+  if (files.length === 0) return;
+
+  let reconciled = 0;
+  for (const file of files) {
+    let def: Record<string, unknown>;
+    try {
+      def = (yaml.parse(fs.readFileSync(file, 'utf-8')) ?? {}) as Record<string, unknown>;
+    } catch {
+      continue; // malformed YAML is a validation concern, not this reconciler's
+    }
+
+    const name =
+      (typeof def.name === 'string' && def.name) || path.basename(file).replace(/\.ya?ml$/i, '');
+    const nodeTypes = def.allowed_node_types;
+    const rootTypes = def.allowed_root_node_types;
+    // Nothing to reconcile if the package doesn't declare allowed types.
+    if (!Array.isArray(nodeTypes) && !Array.isArray(rootTypes)) continue;
+
+    let existing: Record<string, unknown> | null;
+    try {
+      existing = await getWorkspaceRaw(repo, name);
+    } catch (e) {
+      console.warn(`  ⚠ could not read workspace '${name}': ${e instanceof Error ? e.message : e}`);
+      continue;
+    }
+    if (!existing) continue; // new workspace — install already seeded it fully
+
+    const updated = { ...existing };
+    let changed = false;
+    if (Array.isArray(nodeTypes) && !sameTypes(existing.allowed_node_types, nodeTypes as string[])) {
+      updated.allowed_node_types = nodeTypes;
+      changed = true;
+    }
+    if (Array.isArray(rootTypes) && !sameTypes(existing.allowed_root_node_types, rootTypes as string[])) {
+      updated.allowed_root_node_types = rootTypes;
+      changed = true;
+    }
+    if (!changed) continue;
+
+    try {
+      await putWorkspaceRaw(repo, name, updated);
+      reconciled++;
+      console.log(`  ↳ reconciled workspace '${name}' allowed types`);
+    } catch (e) {
+      console.warn(
+        `  ⚠ failed to reconcile workspace '${name}': ${e instanceof Error ? e.message : e}`
+      );
+    }
+  }
+
+  if (reconciled > 0) {
+    console.log(`Reconciled allowed types for ${reconciled} existing workspace(s).`);
+  }
 }
