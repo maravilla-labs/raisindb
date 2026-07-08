@@ -4392,6 +4392,93 @@ mod tree_operations {
         Ok(())
     }
 
+    /// Regression: the single-node `move_node` trait (the editor/API direct path)
+    /// must (a) re-path descendants — it previously only re-pathed the root — and
+    /// (b) emit move events so the job handler enqueues fulltext reindex +
+    /// reference retarget for every moved node (the direct path previously emitted
+    /// no events, so moved nodes stayed searchable/referenced at their OLD path).
+    #[tokio::test]
+    async fn test_move_node_single_reindexes_and_repaths_descendants() -> Result<()> {
+        let fixture = TestStorage::new().await?;
+        fixture.setup_standard_nodetypes().await?;
+        let storage = fixture.storage();
+        let nodes = storage.nodes();
+        let scope = || {
+            StorageScope::new(
+                constants::TENANT,
+                constants::REPO,
+                constants::BRANCH,
+                constants::WORKSPACE,
+            )
+        };
+
+        for (path, ty) in [
+            ("/w1", "raisin:Folder"),
+            ("/w1/project", "raisin:Folder"),
+            ("/w1/project/leaf", "raisin:Page"),
+            ("/w2", "raisin:Folder"),
+        ] {
+            let n = fixture.create_test_node(path, ty);
+            nodes
+                .create(scope(), n, CreateNodeOptions::default())
+                .await?;
+        }
+
+        let project = nodes
+            .get_by_path(scope(), "/w1/project", None)
+            .await?
+            .expect("project exists");
+        let leaf = nodes
+            .get_by_path(scope(), "/w1/project/leaf", None)
+            .await?
+            .expect("leaf exists");
+
+        // Move via the SINGLE-node trait — the editor/API direct path.
+        nodes
+            .move_node(scope(), &project.id, "/w2/project", None)
+            .await?;
+
+        // (a) Descendant was re-pathed (previously left stale at the old path).
+        assert!(
+            nodes
+                .get_by_path(scope(), "/w2/project/leaf", None)
+                .await?
+                .is_some(),
+            "descendant leaf should be re-pathed under the moved parent"
+        );
+        assert!(
+            nodes
+                .get_by_path(scope(), "/w1/project/leaf", None)
+                .await?
+                .is_none(),
+            "descendant leaf should not remain at its old path"
+        );
+
+        // (b) A RetargetReferences job was enqueued for the moved root AND the
+        // moved descendant (proves move events fire for the whole subtree).
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let jobs = storage.job_registry().list_jobs().await;
+        let retarget_ids: std::collections::HashSet<String> = jobs
+            .iter()
+            .filter_map(|job| match &job.job_type {
+                raisin_storage::jobs::JobType::RetargetReferences { node_id, .. } => {
+                    Some(node_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            retarget_ids.contains(&project.id),
+            "expected a RetargetReferences job for the moved root"
+        );
+        assert!(
+            retarget_ids.contains(&leaf.id),
+            "expected a RetargetReferences job for the moved descendant"
+        );
+
+        Ok(())
+    }
+
     /// Test: Move a deep tree (3+ levels) and verify all descendants
     ///
     /// This stress-tests move operations with complex nested hierarchies.

@@ -33,6 +33,7 @@ pub use handlers::{
     NodeCreatorCallback, NodeDeleteCleanupHandler, OpLogCompactionHandler,
     PackageCreateFromSelectionHandler, PackageExportHandler, PackageInstallHandler,
     PackageInstallMode, PackageProcessHandler, PropertyIndexJobHandler, RelationConsistencyHandler,
+    RetargetReferencesHandler,
     ReplicationGCHandler, ReplicationSyncHandler, RestoreTreeExecutorCallback, RestoreTreeHandler,
     ResumableUploadHandler, RevisionHistoryCopyHandler, RocksDBFlowCallbacks,
     RocksDBUserNodeCreator, ScheduledTriggerHandler, SnapshotHandler, SqlExecutorCallback,

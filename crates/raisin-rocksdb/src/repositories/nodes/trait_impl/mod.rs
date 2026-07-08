@@ -436,7 +436,12 @@ impl NodeRepository for NodeRepositoryImpl {
             branch,
             workspace,
         } = scope;
-        self.move_node_impl(
+        // Route single-node moves through the tree move: it re-paths the moved
+        // node AND all its descendants (the single-node path left descendants'
+        // PATH_INDEX/NODE_PATH stale) and emits move events for index
+        // maintenance (fulltext/reference). For a leaf the descendant scan
+        // returns just the node itself, so the cost is unchanged.
+        self.move_node_tree_impl(
             tenant_id,
             repo_id,
             branch,

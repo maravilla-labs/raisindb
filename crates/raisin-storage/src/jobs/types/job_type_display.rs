@@ -158,6 +158,15 @@ impl fmt::Display for JobType {
             Self::NodeDeleteCleanup { node_id, workspace } => {
                 write!(f, "NodeDeleteCleanup({}/{})", node_id, workspace)
             }
+            Self::RetargetReferences {
+                node_id,
+                workspace,
+                new_path,
+            } => {
+                // new_path is absolute (leading '/'), so this renders as
+                // node_id/workspace/<abs path…>; parse splits on '/'.
+                write!(f, "RetargetReferences({}/{}{})", node_id, workspace, new_path)
+            }
             Self::RelationConsistencyCheck { repair } => write!(
                 f,
                 "RelationConsistencyCheck(repair={})",

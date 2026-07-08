@@ -87,6 +87,40 @@ impl UnifiedJobEventHandler {
             );
         }
 
+        // Reference retarget: a MOVE changes the node's path, which is
+        // denormalized into the forward reference entries of every node that
+        // points AT it. The move emitter tags its events `moved:true`; enqueue a
+        // background job to rewrite those forward paths. Runs for local and
+        // replicated moves alike (like fulltext) since only a real move sets the
+        // flag.
+        let is_move = node_event
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("moved"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_move {
+            if let Some(new_path) = &node_event.path {
+                if let Err(e) = self
+                    .enqueue_job(
+                        JobType::RetargetReferences {
+                            node_id: node_event.node_id.clone(),
+                            workspace: node_event.workspace_id.clone(),
+                            new_path: new_path.clone(),
+                        },
+                        &context,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = %e,
+                        node_id = %node_event.node_id,
+                        "Failed to enqueue reference retarget job"
+                    );
+                }
+            }
+        }
+
         // Trigger evaluation and AI jobs - only for LOCAL events
         if !is_remote_event {
             self.handle_local_node_change(node_event, &context).await;

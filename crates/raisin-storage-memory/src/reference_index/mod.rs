@@ -249,6 +249,39 @@ impl ReferenceIndexRepository for InMemoryReferenceIndexRepo {
 
         Ok(group_references_by_target(references))
     }
+
+    async fn retarget_forward_path(
+        &self,
+        scope: StorageScope<'_>,
+        referrer_id: &str,
+        property_path: &str,
+        new_reference: &RaisinReference,
+        _revision: &HLC,
+        is_published: bool,
+    ) -> Result<()> {
+        let forward_index = if is_published {
+            &self.published_forward
+        } else {
+            &self.draft_forward
+        };
+        let key = Self::composite_key(scope.tenant_id, scope.repo_id, scope.workspace);
+
+        let mut forward = forward_index.write().unwrap();
+        if let Some(refs) = forward
+            .get_mut(&key)
+            .and_then(|nodes| nodes.get_mut(referrer_id))
+        {
+            // Replace the target snapshot for the matching property path; the
+            // reverse index (keyed by stable target id) needs no change.
+            for (pp, reference) in refs.iter_mut() {
+                if pp == property_path {
+                    *reference = new_reference.clone();
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -104,6 +104,21 @@ pub(crate) fn parse_tree_operations(s: &str) -> Result<Option<JobType>, String> 
             }
         }
     }
+    if let Some(rest) = s.strip_prefix("RetargetReferences(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            // Format: node_id/workspace/<absolute new_path…>. node_id and
+            // workspace never contain '/'; new_path is everything after,
+            // re-prefixed with the '/' the split consumed.
+            let p: Vec<&str> = c.split('/').collect();
+            if p.len() >= 3 {
+                return Ok(Some(JobType::RetargetReferences {
+                    node_id: p[0].to_string(),
+                    workspace: p[1].to_string(),
+                    new_path: format!("/{}", p[2..].join("/")),
+                }));
+            }
+        }
+    }
     if let Some(rest) = s.strip_prefix("RelationConsistencyCheck(repair=") {
         if let Some(rs) = rest.strip_suffix(')') {
             return Ok(Some(JobType::RelationConsistencyCheck {
@@ -112,4 +127,32 @@ pub(crate) fn parse_tree_operations(s: &str) -> Result<Option<JobType>, String> 
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::jobs::types::JobType;
+    use std::str::FromStr;
+
+    fn roundtrip(jt: JobType) {
+        let s: String = jt.clone().into();
+        let parsed = JobType::from_str(&s)
+            .unwrap_or_else(|e| panic!("parse of {:?} failed: {}", s, e));
+        assert_eq!(parsed, jt, "roundtrip mismatch via {:?}", s);
+    }
+
+    #[test]
+    fn retarget_references_roundtrips() {
+        // new_path is absolute and may nest; node_id/workspace have no '/'.
+        roundtrip(JobType::RetargetReferences {
+            node_id: "abc123".to_string(),
+            workspace: "content".to_string(),
+            new_path: "/w2/project/leaf".to_string(),
+        });
+        roundtrip(JobType::RetargetReferences {
+            node_id: "n".to_string(),
+            workspace: "assets".to_string(),
+            new_path: "/root".to_string(),
+        });
+    }
 }

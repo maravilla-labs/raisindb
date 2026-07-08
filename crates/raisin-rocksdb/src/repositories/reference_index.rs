@@ -276,7 +276,14 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
         let prefix_clone = prefix.clone();
         let iter = self.db.prefix_iterator_cf(cf, prefix);
 
+        // Forward keys are `…/{node_id}/{property_path}/{~revision}` with the
+        // revision encoded DESCENDING, so under each property_path prefix the
+        // newest entry sorts first. Keep only the newest live (non-tombstone)
+        // entry per property_path — earlier code returned every revision AND
+        // read `parts.last()` (the revision segment) as the property_path.
+        const TOMBSTONE: &[u8] = b"T";
         let mut results = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -288,16 +295,66 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
 
             let key_str = String::from_utf8_lossy(&key);
             let parts: Vec<&str> = key_str.split('\0').collect();
-
-            if let Some(property_path) = parts.last() {
-                let reference: RaisinReference = rmp_serde::from_slice(&value).map_err(|e| {
-                    raisin_error::Error::storage(format!("Deserialization error: {}", e))
-                })?;
-                results.push((property_path.to_string(), reference));
+            // property_path is the segment before the trailing revision segment.
+            if parts.len() < 2 {
+                continue;
             }
+            let property_path = parts[parts.len() - 2].to_string();
+
+            // Only the first (newest) entry per property_path counts.
+            if !seen.insert(property_path.clone()) {
+                continue;
+            }
+            // A tombstone as the newest entry means the reference was removed.
+            if value.as_ref() == TOMBSTONE {
+                continue;
+            }
+
+            let reference: RaisinReference = rmp_serde::from_slice(&value).map_err(|e| {
+                raisin_error::Error::storage(format!("Deserialization error: {}", e))
+            })?;
+            results.push((property_path, reference));
         }
 
         Ok(results)
+    }
+
+    async fn retarget_forward_path(
+        &self,
+        scope: StorageScope<'_>,
+        referrer_id: &str,
+        property_path: &str,
+        new_reference: &RaisinReference,
+        revision: &raisin_hlc::HLC,
+        is_published: bool,
+    ) -> Result<()> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        let cf = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
+
+        // Append a fresh forward entry at the move revision. The reverse index
+        // is keyed by the target's stable id and needs no change.
+        let forward_key = keys::reference_forward_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            referrer_id,
+            property_path,
+            revision,
+            is_published,
+        );
+        let value = rmp_serde::to_vec(new_reference)
+            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+        self.db
+            .put_cf(cf, forward_key, value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        Ok(())
     }
 
     async fn get_unique_references(

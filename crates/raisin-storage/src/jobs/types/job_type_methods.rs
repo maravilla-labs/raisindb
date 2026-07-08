@@ -45,6 +45,11 @@ impl JobType {
             Self::NodeDeleteCleanup { node_id, workspace } => {
                 format!("node_delete_cleanup:{}:{}", workspace, node_id)
             }
+            Self::RetargetReferences {
+                node_id, workspace, ..
+            } => {
+                format!("retarget_refs:{}:{}", workspace, node_id)
+            }
             Self::FulltextBranchCopy { source_branch } => {
                 format!("fulltext_branch_copy:{}", source_branch)
             }
@@ -337,6 +342,7 @@ impl JobType {
             | Self::VectorRestore
             | Self::PropertyIndexBuild { .. }
             | Self::CompoundIndexBuild { .. }
+            | Self::RetargetReferences { .. }
             | Self::IntegrityScan
             | Self::IndexRebuild
             | Self::IndexVerify

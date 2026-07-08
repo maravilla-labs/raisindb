@@ -197,6 +197,8 @@ impl RocksDBStorage {
             );
 
         let node_delete_cleanup_handler = ai_handlers::create_node_delete_cleanup_handler(&self);
+        let retarget_references_handler =
+            ai_handlers::create_retarget_references_handler(&self);
         let relation_consistency_handler = ai_handlers::create_relation_consistency_handler(&self);
         let auth_create_user_node_handler =
             ai_handlers::create_auth_user_node_handler(self.clone());
@@ -229,6 +231,7 @@ impl RocksDBStorage {
             copy_tree_handler,
             restore_tree_handler,
             node_delete_cleanup_handler,
+            retarget_references_handler,
             relation_consistency_handler,
             function_execution_handler,
             flow_execution_handler,

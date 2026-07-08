@@ -249,8 +249,11 @@ impl NodeRepositoryImpl {
 
         // Process all nodes (root + descendants): update PATH_INDEX and NODE_PATH
         let mut moved_node_ids = Vec::new();
+        // (node_id, old_path) for each moved node, for post-commit move events.
+        let mut moved_pairs: Vec<(String, String)> = Vec::new();
         for (node, depth) in &descendants {
             moved_node_ids.push(node.id.clone());
+            moved_pairs.push((node.id.clone(), node.path.clone()));
 
             // Calculate new path for this node
             let node_new_path = if *depth == 0 {
@@ -329,6 +332,24 @@ impl NodeRepositoryImpl {
                 .index_node_change(tenant_id, repo_id, &revision, node_id)
                 .await?;
         }
+
+        // Emit move events (root + descendants) so the subscribed job handler
+        // reindexes fulltext and retargets references to the NEW paths. Done
+        // after HEAD is updated so each node reads back at its new path.
+        let event_actor = operation_meta
+            .as_ref()
+            .map(|m| m.actor.clone())
+            .unwrap_or_else(|| "system".to_string());
+        self.emit_move_node_events(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &revision,
+            &moved_pairs,
+            &event_actor,
+        )
+        .await;
 
         // Store operation metadata if provided
         if let Some(op_meta) = operation_meta {

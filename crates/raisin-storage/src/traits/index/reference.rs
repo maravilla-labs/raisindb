@@ -124,4 +124,22 @@ pub trait ReferenceIndexRepository: Send + Sync {
     ) -> impl std::future::Future<
         Output = Result<HashMap<String, (Vec<String>, models::nodes::properties::RaisinReference)>>,
     > + Send;
+
+    /// Rewrite the forward-index entry for `(referrer_id, property_path)` so its
+    /// denormalized target snapshot matches `new_reference`.
+    ///
+    /// Used when a referenced (target) node MOVEs: the reverse index is keyed by
+    /// the target's stable id and needs no change, but the forward VALUE embeds a
+    /// snapshot of the target (`{workspace, id, path}`) whose `path` goes stale.
+    /// This appends a new forward entry at `revision` (the move revision) so a
+    /// latest-wins read returns the fresh path. `scope` is the REFERRER's scope.
+    fn retarget_forward_path(
+        &self,
+        scope: StorageScope<'_>,
+        referrer_id: &str,
+        property_path: &str,
+        new_reference: &models::nodes::properties::RaisinReference,
+        revision: &HLC,
+        is_published: bool,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }

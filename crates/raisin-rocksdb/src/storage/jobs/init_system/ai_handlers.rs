@@ -93,6 +93,16 @@ pub fn create_node_delete_cleanup_handler(
     ))
 }
 
+/// Create the reference retarget handler
+pub fn create_retarget_references_handler(
+    storage: &RocksDBStorage,
+) -> Arc<crate::jobs::RetargetReferencesHandler> {
+    Arc::new(crate::jobs::RetargetReferencesHandler::new(
+        storage.db.clone(),
+        storage.event_bus.clone(),
+    ))
+}
+
 /// Create the relation consistency handler
 pub fn create_relation_consistency_handler(
     storage: &RocksDBStorage,

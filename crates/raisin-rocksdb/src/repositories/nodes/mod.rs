@@ -41,7 +41,6 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub struct NodeRepositoryImpl {
     db: Arc<DB>,
-    #[allow(dead_code)]
     event_bus: Arc<dyn EventBus>,
     revision_repo: Arc<crate::repositories::RevisionRepositoryImpl>,
     branch_repo: Arc<crate::repositories::BranchRepositoryImpl>,

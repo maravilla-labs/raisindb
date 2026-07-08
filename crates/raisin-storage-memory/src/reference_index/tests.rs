@@ -69,6 +69,56 @@ async fn test_index_and_find_references() {
 }
 
 #[tokio::test]
+async fn test_retarget_forward_path_updates_denorm_path() {
+    let repo = InMemoryReferenceIndexRepo::new();
+
+    let mut props = HashMap::new();
+    props.insert(
+        "hero".to_string(),
+        PropertyValue::Reference(make_reference("1", "ws1", "/assets/hero.png")),
+    );
+    repo.index_references(
+        scope("tenant1", "repo1", "main", "ws1"),
+        "node1",
+        &props,
+        &test_revision(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Target "1" moved to a new path; retarget the referrer's forward entry.
+    let moved = make_reference("1", "ws1", "/assets/moved/hero.png");
+    repo.retarget_forward_path(
+        scope("tenant1", "repo1", "main", "ws1"),
+        "node1",
+        "hero",
+        &moved,
+        &test_revision(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Forward path is fresh; id/workspace preserved.
+    let node_refs = repo
+        .get_node_references(scope("tenant1", "repo1", "main", "ws1"), "node1", false)
+        .await
+        .unwrap();
+    assert_eq!(node_refs.len(), 1);
+    assert_eq!(node_refs[0].1.path, "/assets/moved/hero.png");
+    assert_eq!(node_refs[0].1.id, "1");
+    assert_eq!(node_refs[0].1.workspace, "ws1");
+
+    // Reverse index (keyed by stable target id) is unchanged.
+    let referrers = repo
+        .find_referencing_nodes(scope("tenant1", "repo1", "main", "ws1"), "ws1", "1", false)
+        .await
+        .unwrap();
+    assert_eq!(referrers, vec![("node1".to_string(), "hero".to_string())]);
+}
+
+#[tokio::test]
 async fn test_publish_status_update() {
     let repo = InMemoryReferenceIndexRepo::new();
 

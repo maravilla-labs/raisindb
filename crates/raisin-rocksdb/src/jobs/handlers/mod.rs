@@ -20,6 +20,7 @@ pub mod function_execution;
 pub mod huggingface_model;
 pub mod node_delete_cleanup;
 pub mod oplog_compaction;
+pub mod retarget_references;
 pub mod package_create_from_selection;
 pub mod package_export;
 pub mod package_install;
@@ -68,6 +69,7 @@ pub use function_execution::{
 };
 pub use huggingface_model::HuggingFaceModelHandler;
 pub use node_delete_cleanup::NodeDeleteCleanupHandler;
+pub use retarget_references::RetargetReferencesHandler;
 pub use oplog_compaction::OpLogCompactionHandler;
 pub use package_create_from_selection::PackageCreateFromSelectionHandler;
 pub use package_export::PackageExportHandler;
@@ -119,6 +121,7 @@ pub struct JobHandlerRegistry {
     pub copy_tree: Arc<CopyTreeHandler>,
     pub restore_tree: Arc<RestoreTreeHandler>,
     pub node_delete_cleanup: Arc<NodeDeleteCleanupHandler>,
+    pub retarget_references: Arc<RetargetReferencesHandler>,
     pub relation_consistency: Arc<RelationConsistencyHandler>,
     pub function_execution: Arc<FunctionExecutionHandler>,
     pub flow_execution: Arc<FlowExecutionHandler>,
@@ -155,6 +158,7 @@ impl JobHandlerRegistry {
         copy_tree: Arc<CopyTreeHandler>,
         restore_tree: Arc<RestoreTreeHandler>,
         node_delete_cleanup: Arc<NodeDeleteCleanupHandler>,
+        retarget_references: Arc<RetargetReferencesHandler>,
         relation_consistency: Arc<RelationConsistencyHandler>,
         function_execution: Arc<FunctionExecutionHandler>,
         flow_execution: Arc<FlowExecutionHandler>,
@@ -187,6 +191,7 @@ impl JobHandlerRegistry {
             copy_tree,
             restore_tree,
             node_delete_cleanup,
+            retarget_references,
             relation_consistency,
             function_execution,
             flow_execution,
@@ -279,6 +284,11 @@ impl JobHandlerRegistry {
             }
             JobType::NodeDeleteCleanup { .. } => self
                 .node_delete_cleanup
+                .handle(job, context)
+                .await
+                .map(|_| None),
+            JobType::RetargetReferences { .. } => self
+                .retarget_references
                 .handle(job, context)
                 .await
                 .map(|_| None),

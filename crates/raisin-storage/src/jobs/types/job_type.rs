@@ -123,6 +123,17 @@ pub enum JobType {
         node_id: String,
         workspace: String,
     },
+    /// Retarget the denormalized `path` in reference-index forward entries that
+    /// point at a moved node, so incoming references reflect its NEW path.
+    /// Enqueued (per moved node) when a node move emits its `Updated` event.
+    RetargetReferences {
+        /// The moved (target) node id.
+        node_id: String,
+        /// The moved node's workspace (the reference target workspace).
+        workspace: String,
+        /// The moved node's new path (authoritative).
+        new_path: String,
+    },
     RelationConsistencyCheck {
         repair: bool,
     },
@@ -251,6 +262,7 @@ impl JobType {
             JobType::AuthMagicLinkSend { .. } => 120,
             JobType::AuthAccessNotification { .. } => 120,
             JobType::NodeDeleteCleanup { .. } => 120,
+            JobType::RetargetReferences { .. } => 120,
             JobType::UploadSessionCleanup { .. } => 120,
             // Function/AI execution — can involve AI API calls (10-30s each)
             JobType::FunctionExecution { .. } => 300,
