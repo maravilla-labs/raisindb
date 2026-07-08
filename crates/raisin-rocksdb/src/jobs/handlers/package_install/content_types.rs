@@ -12,6 +12,7 @@
 
 //! Internal content types and utility functions for package installation
 
+use raisin_models::nodes::properties::value::Resource;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_models::translations::LocaleOverlay;
@@ -139,6 +140,25 @@ impl Default for AssetFileDef {
     }
 }
 
+/// A binary shipped in the package that belongs to an authored node's
+/// `Resource` property rather than becoming its own standalone `raisin:Asset`
+/// child node.
+///
+/// Matched during collection: a binary file that sits inside a `NodeDef`'s own
+/// directory and whose filename is referenced by one of that node's authored
+/// `Resource` properties (via `storage_key`/`url`/`name`). On install the bytes
+/// are ingested into blob storage and the authored `Resource` is rebound to the
+/// resulting [`raisin_binary::StoredObject`] — see `rebind_resource`.
+#[derive(Debug)]
+pub(super) struct BundledBinary {
+    /// Property name on the node holding the authored `Resource` to rebind.
+    pub property: String,
+    /// Original filename of the bundled binary (used for MIME/extension).
+    pub filename: String,
+    /// Raw bytes of the binary to ingest.
+    pub data: Vec<u8>,
+}
+
 /// Content entry collected from package ZIP
 #[derive(Debug)]
 pub(super) enum ContentEntry {
@@ -229,9 +249,104 @@ pub(super) fn derive_content_path(file_path: &str, node_name: &str) -> String {
     }
 }
 
+/// Extract the bundle-relative filename an authored `Resource` refers to, so a
+/// sibling binary in the package can be matched to the property it should
+/// populate.
+///
+/// Prefers the `storage_key` metadata, then `url`, then `name`, and returns the
+/// basename. Returns `None` if none is present.
+pub(super) fn resource_ref_filename(resource: &Resource) -> Option<String> {
+    let raw = resource
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("storage_key"))
+        .and_then(|v| match v {
+            PropertyValue::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .or_else(|| resource.url.clone())
+        .or_else(|| resource.name.clone())?;
+
+    let basename = raw.rsplit('/').next().unwrap_or(&raw);
+    if basename.is_empty() {
+        None
+    } else {
+        Some(basename.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raisin_models::timestamp::StorageTimestamp;
+
+    fn base_resource() -> Resource {
+        Resource {
+            uuid: "u".to_string(),
+            name: None,
+            size: None,
+            mime_type: None,
+            url: None,
+            metadata: None,
+            is_loaded: None,
+            is_external: None,
+            created_at: StorageTimestamp::now(),
+            updated_at: StorageTimestamp::now(),
+        }
+    }
+
+    #[test]
+    fn ref_filename_prefers_storage_key_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "storage_key".to_string(),
+            PropertyValue::String("logo-a1b2c3d4.png".to_string()),
+        );
+        let r = Resource {
+            name: Some("ignored".to_string()),
+            url: Some("also-ignored".to_string()),
+            metadata: Some(metadata),
+            ..base_resource()
+        };
+        assert_eq!(
+            resource_ref_filename(&r),
+            Some("logo-a1b2c3d4.png".to_string())
+        );
+    }
+
+    #[test]
+    fn ref_filename_falls_back_to_url_then_name() {
+        let by_url = Resource {
+            url: Some("hero.jpg".to_string()),
+            ..base_resource()
+        };
+        assert_eq!(resource_ref_filename(&by_url), Some("hero.jpg".to_string()));
+
+        let by_name = Resource {
+            name: Some("doc.pdf".to_string()),
+            ..base_resource()
+        };
+        assert_eq!(resource_ref_filename(&by_name), Some("doc.pdf".to_string()));
+    }
+
+    #[test]
+    fn ref_filename_returns_basename_of_a_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "storage_key".to_string(),
+            PropertyValue::String("nested/dir/file.bin".to_string()),
+        );
+        let r = Resource {
+            metadata: Some(metadata),
+            ..base_resource()
+        };
+        assert_eq!(resource_ref_filename(&r), Some("file.bin".to_string()));
+    }
+
+    #[test]
+    fn ref_filename_none_when_unset() {
+        assert_eq!(resource_ref_filename(&base_resource()), None);
+    }
 
     #[test]
     fn test_parse_asset_metadata_filename() {

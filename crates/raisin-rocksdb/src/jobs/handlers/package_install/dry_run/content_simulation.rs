@@ -6,12 +6,16 @@
 //! Dry run simulation for content nodes and package assets
 
 use raisin_error::{Error, Result};
+use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
 use raisin_storage::Storage;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
-use super::super::content_types::{derive_content_path, ContentNodeDef};
+use super::super::content_types::{
+    derive_content_path, resource_ref_filename, ContentNodeDef,
+};
 use super::super::handler::PackageInstallHandler;
 use super::super::types::{DryRunActionCounts, DryRunLogEntry, InstallMode};
 
@@ -43,13 +47,23 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             },
         }
 
-        // Collect content items from archive first (sync operation)
+        // Collect content items from archive first (sync operation).
+        //
+        // A binary that sits inside a content node's own directory and is
+        // referenced by one of that node's authored Resource properties is
+        // *folded into* the node (ingested + rebound at install time), not
+        // counted as a separate binary asset — mirroring `build_content_entries`.
         let items_to_check: Vec<ContentItem> = {
             let cursor = Cursor::new(zip_data);
             let mut archive = ZipArchive::new(cursor)
                 .map_err(|e| Error::Validation(format!("Invalid ZIP file: {}", e)))?;
 
             let mut items = Vec::new();
+            // (workspace, node_path) -> filenames referenced by authored Resources.
+            let mut resource_refs: HashMap<(String, String), Vec<String>> = HashMap::new();
+            // Deferred binaries: (workspace, asset_path, filename, size, containing_node_path)
+            let mut binary_candidates: Vec<(String, String, String, usize, String)> = Vec::new();
+
             for i in 0..archive.len() {
                 let mut file = archive
                     .by_index(i)
@@ -83,6 +97,22 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     let derived_name = content_def.derive_name(&name);
                     let derived_path = derive_content_path(&name, &derived_name);
 
+                    if let Some(props) = &content_def.properties {
+                        for value in props.values() {
+                            if let PropertyValue::Resource(resource) = value {
+                                if resource.is_external == Some(true) {
+                                    continue;
+                                }
+                                if let Some(fname) = resource_ref_filename(resource) {
+                                    resource_refs
+                                        .entry((workspace.clone(), derived_path.clone()))
+                                        .or_default()
+                                        .push(fname);
+                                }
+                            }
+                        }
+                    }
+
                     items.push(ContentItem::ContentNode {
                         workspace,
                         derived_name,
@@ -100,15 +130,34 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     } else {
                         format!("/{}/{}", parent_path, filename)
                     };
+                    let containing_node_path = format!("/{}", parent_path);
 
-                    items.push(ContentItem::BinaryAsset {
+                    binary_candidates.push((
                         workspace,
                         asset_path,
                         filename,
-                        size: content_bytes.len(),
-                    });
+                        content_bytes.len(),
+                        containing_node_path,
+                    ));
                 }
             }
+
+            // Emit only binaries that don't bind to an authored Resource.
+            for (workspace, asset_path, filename, size, containing_node_path) in binary_candidates {
+                let is_bundled = resource_refs
+                    .get(&(workspace.clone(), containing_node_path))
+                    .is_some_and(|refs| refs.iter().any(|f| *f == filename));
+                if is_bundled {
+                    continue;
+                }
+                items.push(ContentItem::BinaryAsset {
+                    workspace,
+                    asset_path,
+                    filename,
+                    size,
+                });
+            }
+
             items
         };
 

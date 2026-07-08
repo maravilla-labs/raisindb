@@ -16,9 +16,10 @@
 //! [`ContentEntry`] list and persisting YAML-defined nodes and binary
 //! asset files inside transactional batches.
 
+use raisin_binary::StoredObject;
 use raisin_error::Result;
 use raisin_models::auth::AuthContext;
-use raisin_models::nodes::properties::value::PropertyValue;
+use raisin_models::nodes::properties::value::{PropertyValue, Resource};
 use raisin_models::nodes::Node;
 use raisin_storage::jobs::JobId;
 use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
@@ -26,8 +27,8 @@ use raisin_storage::Storage;
 use std::collections::HashMap;
 
 use crate::jobs::handlers::package_install::content_types::{
-    compute_content_hash, derive_content_path, AssetFileDef, ContentEntry, InstallStats,
-    CONTENT_BATCH_SIZE,
+    compute_content_hash, derive_content_path, AssetFileDef, BundledBinary, ContentEntry,
+    InstallStats, CONTENT_BATCH_SIZE,
 };
 use crate::jobs::handlers::package_install::handler::PackageInstallHandler;
 use crate::jobs::handlers::package_install::install_content::reference_sort::strip_path_references;
@@ -43,9 +44,11 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Nodes with circular references are flagged with `__deferred_references`
     /// and handled in two passes: first installed without references, then
     /// re-upserted with full properties once all nodes exist.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::jobs::handlers::package_install) async fn install_sorted_entries(
         &self,
         entries: Vec<ContentEntry>,
+        bundled: &HashMap<(String, String), Vec<BundledBinary>>,
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
@@ -75,12 +78,34 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         workspace, node, ..
                     } => {
                         let folder_type = resolve_folder_type(folder_type_map, workspace);
+
+                        // Rebind authored Resource properties to any binaries
+                        // bundled beside this node, ingesting the bytes into
+                        // blob storage. No-op (borrows the original) when none.
+                        let mut owned_node;
+                        let node: &Node =
+                            match bundled.get(&(workspace.clone(), node.path.clone())) {
+                                Some(binaries) if !binaries.is_empty() => {
+                                    owned_node = node.as_ref().clone();
+                                    self.ingest_bundled_binaries(
+                                        &mut owned_node,
+                                        binaries,
+                                        binary_store,
+                                        job_id,
+                                        stats,
+                                    )
+                                    .await?;
+                                    &owned_node
+                                }
+                                _ => node.as_ref(),
+                            };
+
                         let is_deferred = node.properties.contains_key("__deferred_references");
 
                         if is_deferred {
                             // Strip path-based references and install skeleton first
                             let stripped_props = strip_path_references(&node.properties);
-                            let mut skeleton = node.as_ref().clone();
+                            let mut skeleton = node.clone();
                             skeleton.properties = stripped_props;
 
                             tracing::debug!(
@@ -102,7 +127,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                             .await?;
 
                             // Save original node for second pass
-                            let mut original = node.as_ref().clone();
+                            let mut original = node.clone();
                             original.properties.remove("__deferred_references");
                             deferred_nodes.push((
                                 workspace.clone(),
@@ -456,6 +481,83 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         Ok(())
     }
 
+    /// Ingest binaries bundled beside a content node and rebind the authored
+    /// `Resource` properties they populate to the resulting stored objects.
+    ///
+    /// The node's `.node.yaml` ships an authored `Resource` (with a
+    /// bundle-relative `storage_key`) plus the binary sitting in the same
+    /// directory; the binary was matched to its property during collection
+    /// (see `build_content_entries`). Here we upload the bytes and rewrite the
+    /// property so the Resource points at the real [`StoredObject`], mirroring
+    /// the HTTP upload path's `build_resource_value`.
+    async fn ingest_bundled_binaries(
+        &self,
+        node: &mut Node,
+        binaries: &[BundledBinary],
+        binary_store: Option<&super::super::types::BinaryStorageCallback>,
+        job_id: &JobId,
+        stats: &mut InstallStats,
+    ) -> Result<()> {
+        let Some(binary_store) = binary_store else {
+            tracing::warn!(
+                job_id = %job_id,
+                path = %node.path,
+                "Skipping bundled binaries: no binary storage callback configured"
+            );
+            return Ok(());
+        };
+
+        for bundled in binaries {
+            // Only rebind if the target property still holds an authored Resource.
+            let authored = match node.properties.get(&bundled.property) {
+                Some(PropertyValue::Resource(resource)) => resource.clone(),
+                _ => {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        path = %node.path,
+                        property = %bundled.property,
+                        "Bundled binary target is not a Resource property, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let mime_type = mime_guess::from_path(&bundled.filename)
+                .first()
+                .map(|m| m.to_string());
+            let ext = std::path::Path::new(&bundled.filename)
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string());
+
+            let stored = binary_store(
+                bundled.data.clone(),
+                mime_type,
+                ext,
+                Some(bundled.filename.clone()),
+                None,
+            )
+            .await?;
+
+            let rebound = rebind_resource(&authored, &stored);
+            node.properties.insert(
+                bundled.property.clone(),
+                PropertyValue::Resource(rebound),
+            );
+            stats.binary_files_installed += 1;
+
+            tracing::debug!(
+                job_id = %job_id,
+                path = %node.path,
+                property = %bundled.property,
+                storage_key = %stored.key,
+                "Rebound authored Resource to ingested bundled binary"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Install a translation for a content node within a transaction
     async fn install_translation(
         &self,
@@ -491,5 +593,30 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             }
         }
         Ok(())
+    }
+}
+
+/// Rebind an author-supplied `Resource` to a freshly-ingested binary, mirroring
+/// the HTTP upload path's `build_resource_value` (Resource format) while
+/// preserving the authored identity: `uuid`, `created_at`, and any custom
+/// metadata keys the package author set.
+fn rebind_resource(authored: &Resource, stored: &StoredObject) -> Resource {
+    let mut metadata = authored.metadata.clone().unwrap_or_default();
+    metadata.insert(
+        "storage_key".to_string(),
+        PropertyValue::String(stored.key.clone()),
+    );
+
+    Resource {
+        uuid: authored.uuid.clone(),
+        name: authored.name.clone().or_else(|| stored.name.clone()),
+        size: Some(stored.size),
+        mime_type: stored.mime_type.clone().or_else(|| authored.mime_type.clone()),
+        url: Some(stored.url.clone()),
+        metadata: Some(metadata),
+        is_loaded: Some(true),
+        is_external: Some(false),
+        created_at: authored.created_at,
+        updated_at: stored.updated_at.into(),
     }
 }

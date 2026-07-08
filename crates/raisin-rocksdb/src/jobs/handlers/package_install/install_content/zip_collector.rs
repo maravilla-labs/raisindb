@@ -16,6 +16,7 @@
 //! typed [`ContentEntry`] values from the raw data).
 
 use raisin_error::{Error, Result};
+use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::jobs::JobId;
 use raisin_storage::transactional::TransactionalStorage;
@@ -27,8 +28,8 @@ use zip::ZipArchive;
 use raisin_models::translations::LocaleOverlay;
 
 use crate::jobs::handlers::package_install::content_types::{
-    compute_content_hash, derive_content_path, parse_asset_metadata_filename, AssetFileDef,
-    ContentEntry, ContentNodeDef,
+    compute_content_hash, derive_content_path, parse_asset_metadata_filename,
+    resource_ref_filename, AssetFileDef, BundledBinary, ContentEntry, ContentNodeDef,
 };
 use crate::jobs::handlers::package_install::handler::PackageInstallHandler;
 use crate::jobs::handlers::package_install::translation::{
@@ -189,13 +190,29 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Converts YAML definitions into `ContentEntry::NodeDef` and binary files
     /// into `ContentEntry::BinaryFile`, then sorts by path depth so parent
     /// folders are created before their children.
+    ///
+    /// A binary that sits inside a `NodeDef`'s own directory and is referenced
+    /// by one of that node's authored `Resource` properties is *not* emitted as
+    /// a standalone asset. Instead it is returned in the bundled-binary map,
+    /// keyed by `(workspace, node_path)`, so the installer can ingest the bytes
+    /// and rebind the authored `Resource` to the stored object.
+    #[allow(clippy::type_complexity)]
     pub(in crate::jobs::handlers::package_install) fn build_content_entries(
         &self,
         collected: CollectedEntries,
         mut asset_metadata: HashMap<String, AssetFileDef>,
         job_id: &JobId,
-    ) -> Result<Vec<ContentEntry>> {
+    ) -> Result<(
+        Vec<ContentEntry>,
+        HashMap<(String, String), Vec<BundledBinary>>,
+    )> {
         let mut entries: Vec<ContentEntry> = Vec::new();
+        let mut bundled_map: HashMap<(String, String), Vec<BundledBinary>> = HashMap::new();
+
+        // Index of authored (non-external) Resource properties per node, so a
+        // sibling binary can be matched to the property it should populate:
+        //   (workspace, node_path) -> [(referenced_filename, property_name)]
+        let mut resource_refs: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
 
         // Add YAML-defined nodes
         for (workspace, yaml_path, content_def) in collected.yaml_nodes {
@@ -223,6 +240,20 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 ..Default::default()
             };
 
+            for (prop, value) in &node.properties {
+                if let PropertyValue::Resource(resource) = value {
+                    if resource.is_external == Some(true) {
+                        continue;
+                    }
+                    if let Some(fname) = resource_ref_filename(resource) {
+                        resource_refs
+                            .entry((workspace.clone(), node.path.clone()))
+                            .or_default()
+                            .push((fname, prop.clone()));
+                    }
+                }
+            }
+
             entries.push(ContentEntry::NodeDef {
                 workspace,
                 yaml_path,
@@ -230,8 +261,37 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             });
         }
 
-        // Add binary files as asset entries
+        // Add binary files as asset entries — unless a binary binds to an
+        // authored Resource property on the node that owns its directory.
         for (workspace, parent_path, filename, data) in collected.binary_files {
+            let containing_node_path = format!("/{}", parent_path);
+            if let Some(property) = resource_refs
+                .get(&(workspace.clone(), containing_node_path.clone()))
+                .and_then(|refs| {
+                    refs.iter()
+                        .find(|(fname, _)| *fname == filename)
+                        .map(|(_, prop)| prop.clone())
+                })
+            {
+                tracing::debug!(
+                    job_id = %job_id,
+                    workspace = %workspace,
+                    node_path = %containing_node_path,
+                    filename = %filename,
+                    property = %property,
+                    "Binding bundled binary to authored Resource property"
+                );
+                bundled_map
+                    .entry((workspace, containing_node_path))
+                    .or_default()
+                    .push(BundledBinary {
+                        property,
+                        filename,
+                        data,
+                    });
+                continue;
+            }
+
             let metadata_key = format!("{}/{}/{}", workspace, parent_path, filename);
             let metadata = asset_metadata.remove(&metadata_key);
             let content_hash = compute_content_hash(&data);
@@ -295,6 +355,6 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         result.extend(sorted.circular);
         result.extend(sorted.other);
 
-        Ok(result)
+        Ok((result, bundled_map))
     }
 }

@@ -13,6 +13,7 @@ import {
   partitionTranslationFiles,
   validateTranslationFiles,
 } from './translation-validator.js';
+import { validateBundledResources } from './bundled-resource-validator.js';
 import { mergeFlowResults, validatePackageFlows } from '../flow/package-doctor.js';
 
 // Dynamic import for WASM module (nodejs target)
@@ -217,7 +218,14 @@ export async function validatePackageDirectory(
   const wasmResults = await validatePackage(nonTranslationFiles);
   const translationResults = validateTranslationFiles(translationFiles, files);
   const flowResults = validatePackageFlows(packageDir, files);
-  return mergeFlowResults({ ...wasmResults, ...translationResults }, flowResults);
+  // Bundled-binary presence check reads the filesystem directly (binaries
+  // aren't in the YAML-only `files` map), so it takes packageDir.
+  const bundledResults = validateBundledResources(packageDir);
+  const merged = mergeFlowResults(
+    { ...wasmResults, ...translationResults },
+    flowResults
+  );
+  return mergeFlowResults(merged, bundledResults);
 }
 
 /**

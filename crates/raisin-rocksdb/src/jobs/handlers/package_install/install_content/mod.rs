@@ -98,12 +98,16 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         // Phase 1: Collect all files from ZIP, categorizing them
         let (entries, asset_metadata) = self.collect_content_entries(archive, job_id)?;
 
-        // Phase 2: Build content entries from collected data
-        let entries = self.build_content_entries(entries, asset_metadata, job_id)?;
+        // Phase 2: Build content entries from collected data. Binaries that
+        // populate an authored node's Resource property are pulled out into
+        // `bundled` (keyed by workspace + node path) instead of becoming
+        // standalone asset nodes.
+        let (entries, bundled) = self.build_content_entries(entries, asset_metadata, job_id)?;
 
         // Phase 3: Sort and install
         self.install_sorted_entries(
             entries,
+            &bundled,
             tenant_id,
             repo_id,
             branch,
