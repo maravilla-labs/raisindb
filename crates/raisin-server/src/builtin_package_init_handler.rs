@@ -126,30 +126,37 @@ where
         let builtin_packages = load_builtin_packages_with_hashes();
 
         for package_info in builtin_packages {
-            // Opt-out: some builtin packages (e.g. the connector adapters) are
-            // embedded and available for manual install, but must NOT be
-            // auto-installed into every repo on boot. Auto-installing them into
-            // repos that can't yet accept their node types produces endlessly
-            // retrying PackageInstall jobs that can starve the job worker pool.
-            if !package_info.manifest.auto_install {
-                info!(
-                    tenant_id = tenant_id,
-                    repo_id = repo_id,
-                    package = %package_info.manifest.name,
-                    "skipping auto-install (opt-out)"
-                );
-                continue;
-            }
+            // Opt-out packages (e.g. the heavy provider connector adapters) are
+            // still REGISTERED on boot — so they appear in the Integrations
+            // gallery and can be installed on demand — but their content is NOT
+            // written into every repo automatically. Auto-installing their
+            // content into repos that can't yet accept their node types produced
+            // endlessly retrying, concurrent PackageInstall jobs that starved the
+            // worker pool. Only `auto_install: true` packages (the lightweight
+            // base infra, e.g. raisin-integrations) get their content installed
+            // automatically; registration is a single inline write, serialized by
+            // this loop, so it cannot stampede.
+            let install_content = package_info.manifest.auto_install;
 
             // Get the embedded directory for this package
             if let Some(package_dir) =
                 raisin_core::package_init::get_builtin_package_dir(&package_info.manifest.name)
             {
                 match self
-                    .install_package(package_dir, tenant_id, repo_id, &package_info.content_hash)
+                    .install_package(
+                        package_dir,
+                        tenant_id,
+                        repo_id,
+                        &package_info.content_hash,
+                        install_content,
+                    )
                     .await
                 {
-                    Ok(()) => {
+                    // Only record the applied hash when content was actually
+                    // installed. Register-only packages are not "applied" yet —
+                    // recording them would hide a later on-demand install from
+                    // system-updates tracking.
+                    Ok(()) if install_content => {
                         // Record the applied hash for system updates tracking
                         if let Err(e) = self
                             .system_update_repo
@@ -184,6 +191,9 @@ where
                             );
                         }
                     }
+                    // Register-only success (auto_install: false): the package is
+                    // now available for on-demand install; nothing else to do.
+                    Ok(()) => {}
                     Err(e) => {
                         error!(
                             tenant_id = tenant_id,
@@ -208,13 +218,22 @@ where
         Ok(())
     }
 
-    /// Install a single embedded package
+    /// Register (and optionally install) a single embedded package.
+    ///
+    /// Both modes create/update the `raisin:Package` node and store the package
+    /// `.rap` bytes so the package is listable and installable on demand. When
+    /// `install_content` is `true` an install job is also enqueued to write the
+    /// package's content into the repo; when `false` the package is left
+    /// registered but uninstalled (`installed: false`) — the operator installs it
+    /// later from the Integrations gallery, which resolves the very node this
+    /// registration creates.
     async fn install_package(
         &self,
         package_dir: &Dir<'static>,
         tenant_id: &str,
         repo_id: &str,
         content_hash: &str,
+        install_content: bool,
     ) -> Result<()> {
         // Parse manifest (with fallback for include_dir path resolution issues)
         let manifest_file = package_dir
@@ -250,6 +269,36 @@ where
         // Check if package already exists and determine if we need to update
         let node_id = format!("package-{}", manifest.name);
         let existing = tx.get_node("packages", &node_id).await?;
+
+        // Register-only idempotency: for opt-out packages we only need the
+        // package node + its `.rap` bytes to exist so on-demand install works.
+        // If the node is already registered with a live binary, skip — otherwise
+        // every boot would needlessly re-zip and re-commit for each opt-out
+        // package in every repo (a self-inflicted write storm).
+        if !install_content {
+            if let Some(ref existing_node) = existing {
+                let resource_key = existing_node
+                    .properties
+                    .get("resource")
+                    .and_then(|v| match v {
+                        PropertyValue::Object(obj) => obj.get("key"),
+                        _ => None,
+                    })
+                    .and_then(|v| match v {
+                        PropertyValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    });
+                if let Some(key) = resource_key {
+                    if self.binary_storage.get(&key).await.is_ok() {
+                        info!(
+                            package_name = %manifest.name,
+                            "Builtin package already registered (auto-install opt-out), skipping"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         // Determine if this is an update vs new installation
         let is_update = if let Some(ref existing_node) = existing {
@@ -459,6 +508,18 @@ where
                 node_id = %node_id,
                 "Created package node, triggering installation job"
             );
+        }
+
+        // Register-only: the package node + `.rap` bytes are now persisted, so it
+        // is listable and installable on demand, but we do NOT enqueue a content
+        // install job (that is the opt-out that keeps boot from stampeding).
+        if !install_content {
+            info!(
+                package_name = %manifest.name,
+                node_id = %node_id,
+                "Registered builtin package for on-demand install (auto-install opt-out)"
+            );
+            return Ok(());
         }
 
         // Create installation job type

@@ -356,12 +356,12 @@ mod tests {
         assert_eq!(info.manifest.name, "raisin-auth");
     }
 
-    /// Connector adapters must stay embedded and available (builtin: true, so
-    /// still loaded here for manual install) while opting OUT of boot-time
-    /// auto-install (auto_install: false). This is what stops the install
-    /// storm that deadlocked the prod job queue.
+    /// The heavy provider adapters must stay embedded (builtin: true) but opt OUT
+    /// of boot-time auto-install (auto_install: false) — they are registered for
+    /// on-demand install only. Auto-installing their content into every repo was
+    /// the concurrent install storm that starved the prod job queue.
     #[test]
-    fn test_connectors_loaded_but_opt_out_of_auto_install() {
+    fn test_provider_adapters_opt_out_of_auto_install() {
         let packages = load_builtin_packages_with_hashes();
 
         for name in [
@@ -369,7 +369,6 @@ mod tests {
             "ms-graph-adapter",
             "google-calendar-adapter",
             "imap-adapter",
-            "raisin-integrations",
         ] {
             let info = packages
                 .iter()
@@ -377,8 +376,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("connector '{name}' must remain an available builtin"));
             assert!(
                 !info.manifest.auto_install,
-                "connector '{name}' must opt out of boot auto-install"
+                "provider adapter '{name}' must opt out of boot auto-install"
             );
         }
+    }
+
+    /// The lightweight base integration package MUST auto-install: new instances
+    /// need its raisin:system allowed-type patch + webhook-refresh function out of
+    /// the box. It depends only on globally-registered node types, so it cannot
+    /// hit the "repo can't accept the type" retry loop the heavy adapters did.
+    #[test]
+    fn test_raisin_integrations_auto_installs() {
+        let packages = load_builtin_packages_with_hashes();
+        let info = packages
+            .iter()
+            .find(|p| p.manifest.name == "raisin-integrations")
+            .expect("raisin-integrations must remain an available builtin");
+        assert!(
+            info.manifest.auto_install,
+            "raisin-integrations (base infra) must auto-install so new instances get it"
+        );
     }
 }

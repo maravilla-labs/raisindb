@@ -512,9 +512,8 @@ mod workspace_patch_tests {
     /// allowed_node_types (Phase 3 runs before content install in Phase 4).
     #[test]
     fn google_drive_manifest_declares_raisin_system_patch() {
-        let yaml = include_str!(
-            "../../../../../../builtin-packages/google-drive-adapter/manifest.yaml"
-        );
+        let yaml =
+            include_str!("../../../../../../builtin-packages/google-drive-adapter/manifest.yaml");
         let manifest: PackageManifest =
             serde_yaml::from_str(yaml).expect("google-drive-adapter manifest must parse");
 
@@ -545,9 +544,8 @@ mod workspace_patch_tests {
     /// without duplicating types that are already present.
     #[test]
     fn patch_adds_missing_types_to_existing_workspace() {
-        let yaml = include_str!(
-            "../../../../../../builtin-packages/google-drive-adapter/manifest.yaml"
-        );
+        let yaml =
+            include_str!("../../../../../../builtin-packages/google-drive-adapter/manifest.yaml");
         let manifest: PackageManifest = serde_yaml::from_str(yaml).unwrap();
         let system = manifest
             .workspace_patches
@@ -558,8 +556,10 @@ mod workspace_patch_tests {
 
         // Existing workspace created under the old schema: has some types but
         // NOT the connector types the patch introduces.
-        let mut allowed_node_types: Vec<String> =
-            vec!["raisin:Folder".to_string(), "raisin:Integration".to_string()];
+        let mut allowed_node_types: Vec<String> = vec![
+            "raisin:Folder".to_string(),
+            "raisin:Integration".to_string(),
+        ];
 
         for type_name in &add {
             if !allowed_node_types.contains(type_name) {

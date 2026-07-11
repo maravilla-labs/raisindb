@@ -21,9 +21,14 @@ category: integrations
 
 # Built-in package flag - embedded and available for manual install.
 builtin: true
-# Opt out of boot-time auto-install into every repo; install manually
-# from the Integrations gallery once the target repo can accept it.
-auto_install: false
+# Base integration infrastructure (webhook-refresh function + raisin:system
+# allowed-type patch for raisin:Integration / raisin:VirtualMount). It is
+# lightweight and depends only on globally-registered node types, so it is safe
+# to auto-install into every repo on boot — new instances get working
+# integration support out of the box. The heavy provider adapters
+# (google-drive/ms-graph/google-calendar/imap) stay auto_install: false and are
+# installed on demand from the Integrations gallery.
+auto_install: true
 
 provides:
   functions:

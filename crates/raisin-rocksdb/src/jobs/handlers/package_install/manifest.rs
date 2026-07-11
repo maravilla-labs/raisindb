@@ -90,8 +90,7 @@ mod tests {
     #[test]
     fn test_auto_install_field_round_trips() {
         // Absent → None (treated as auto-install by the boot scan default).
-        let bare: PackageManifest =
-            serde_yaml::from_str("name: x\nversion: 1.0.0\n").unwrap();
+        let bare: PackageManifest = serde_yaml::from_str("name: x\nversion: 1.0.0\n").unwrap();
         assert_eq!(bare.auto_install, None);
 
         // Explicit opt-out parses as Some(false).

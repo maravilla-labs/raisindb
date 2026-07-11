@@ -147,8 +147,20 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
         "all changes" // WriteBatch doesn't expose count easily
     );
 
-    tx.db
-        .write(batch_to_write)
+    // Run the atomic RocksDB write on Tokio's blocking pool. `rocksdb::DB::write`
+    // is a synchronous FFI call that can park for a long time on RocksDB's internal
+    // write-stall/write-stop backpressure. Executing it directly on a job-pool
+    // worker thread means a burst of concurrent commits (e.g. many package installs
+    // at once) can park every worker in this same blocking call simultaneously and
+    // wedge the whole pool — the deadlock that froze the job queue. Offloading to the
+    // elastic blocking pool keeps the async worker threads free to make progress;
+    // the commit is still awaited here, so ordering and consistency are unchanged.
+    let db = tx.db.clone();
+    tokio::task::spawn_blocking(move || db.write(batch_to_write))
+        .await
+        .map_err(|e| {
+            raisin_error::Error::storage(format!("Commit write task failed to join: {}", e))
+        })?
         .map_err(|e| raisin_error::Error::storage(format!("Transaction commit failed: {}", e)))?;
 
     tracing::debug!("Atomic commit successful");

@@ -31,8 +31,19 @@ impl JobPersistence for JobMetadataStore {
             executing_since: job_info.executing_since,
         };
 
-        // Persist using synchronous update (JobMetadataStore methods are sync)
-        self.update(job_id, &entry)
+        // Persist on Tokio's blocking pool. `update` does a synchronous
+        // `rocksdb::put_cf` that can park on RocksDB write-stall backpressure;
+        // this runs for every job status change and every 10s heartbeat across all
+        // in-flight jobs, so keeping it off the async job-pool worker threads stops
+        // a write-heavy burst from parking the threads that drive the queue. Callers
+        // already await this method, so ordering is unchanged.
+        let store = self.clone();
+        let job_id = job_id.clone();
+        tokio::task::spawn_blocking(move || store.update(&job_id, &entry))
+            .await
+            .map_err(|e| {
+                raisin_error::Error::storage(format!("Job persist task failed to join: {}", e))
+            })?
     }
 
     async fn delete_job(&self, tenant: &str, job_id: &JobId) -> Result<()> {
