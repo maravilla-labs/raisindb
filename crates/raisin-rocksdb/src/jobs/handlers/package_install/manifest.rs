@@ -36,6 +36,10 @@ pub struct PackageManifest {
     pub keywords: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Whether this builtin package is auto-installed into every repo on boot.
+    /// Defaults to `true` when absent; parsed here so the field round-trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_install: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Vec<PackageDependency>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,4 +81,22 @@ pub struct WorkspacePatch {
 pub struct AllowedNodeTypesPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub add: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auto_install_field_round_trips() {
+        // Absent → None (treated as auto-install by the boot scan default).
+        let bare: PackageManifest =
+            serde_yaml::from_str("name: x\nversion: 1.0.0\n").unwrap();
+        assert_eq!(bare.auto_install, None);
+
+        // Explicit opt-out parses as Some(false).
+        let opted_out: PackageManifest =
+            serde_yaml::from_str("name: x\nversion: 1.0.0\nauto_install: false\n").unwrap();
+        assert_eq!(opted_out.auto_install, Some(false));
+    }
 }

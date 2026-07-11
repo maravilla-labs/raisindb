@@ -126,6 +126,21 @@ where
         let builtin_packages = load_builtin_packages_with_hashes();
 
         for package_info in builtin_packages {
+            // Opt-out: some builtin packages (e.g. the connector adapters) are
+            // embedded and available for manual install, but must NOT be
+            // auto-installed into every repo on boot. Auto-installing them into
+            // repos that can't yet accept their node types produces endlessly
+            // retrying PackageInstall jobs that can starve the job worker pool.
+            if !package_info.manifest.auto_install {
+                info!(
+                    tenant_id = tenant_id,
+                    repo_id = repo_id,
+                    package = %package_info.manifest.name,
+                    "skipping auto-install (opt-out)"
+                );
+                continue;
+            }
+
             // Get the embedded directory for this package
             if let Some(package_dir) =
                 raisin_core::package_init::get_builtin_package_dir(&package_info.manifest.name)

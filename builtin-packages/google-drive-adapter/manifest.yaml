@@ -20,8 +20,11 @@ keywords:
 # Discovery contract for the admin console's Integrations gallery.
 category: integrations
 
-# Built-in package flag - auto-installed on repository creation
+# Built-in package flag - embedded and available for manual install.
 builtin: true
+# Opt out of boot-time auto-install into every repo; install manually
+# from the Integrations gallery once the target repo can accept it.
+auto_install: false
 
 provides:
   functions:

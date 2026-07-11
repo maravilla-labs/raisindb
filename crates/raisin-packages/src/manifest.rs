@@ -51,9 +51,16 @@ pub struct Manifest {
     #[serde(default)]
     pub category: Option<String>,
 
-    /// Whether this is a builtin package (auto-installed on repository creation)
+    /// Whether this is a builtin package (embedded + surfaced as available)
     #[serde(default)]
     pub builtin: Option<bool>,
+
+    /// Whether this builtin package should be auto-installed into every
+    /// repository on boot. Defaults to `true` when absent. Set to `false` to
+    /// keep the package embedded and available for manual install without
+    /// having the boot scan push it into every repo.
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
 
     /// Package dependencies
     #[serde(default)]
@@ -78,6 +85,10 @@ fn default_icon() -> String {
 
 fn default_color() -> String {
     "#6366F1".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Package dependency
@@ -303,6 +314,31 @@ provides:
     }
 
     #[test]
+    fn test_auto_install_defaults_true_and_parses_false() {
+        // Absent → defaults to true (backward compatible with existing manifests).
+        let default_manifest = Manifest::from_yaml("name: x\nversion: 1.0.0\n").unwrap();
+        assert!(
+            default_manifest.auto_install,
+            "auto_install must default to true when absent"
+        );
+
+        // Explicit opt-out round-trips as false.
+        let opted_out =
+            Manifest::from_yaml("name: x\nversion: 1.0.0\nbuiltin: true\nauto_install: false\n")
+                .unwrap();
+        assert!(
+            !opted_out.auto_install,
+            "auto_install: false must parse as false"
+        );
+        assert_eq!(opted_out.builtin, Some(true));
+
+        // Explicit true also parses.
+        let opted_in =
+            Manifest::from_yaml("name: x\nversion: 1.0.0\nauto_install: true\n").unwrap();
+        assert!(opted_in.auto_install);
+    }
+
+    #[test]
     fn test_validate_manifest() {
         let manifest = Manifest {
             name: "valid-package".into(),
@@ -334,6 +370,7 @@ impl Default for Manifest {
             keywords: Vec::new(),
             category: None,
             builtin: None,
+            auto_install: true,
             dependencies: Vec::new(),
             provides: Provides::default(),
             workspace_patches: HashMap::new(),

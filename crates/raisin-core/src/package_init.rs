@@ -355,4 +355,30 @@ mod tests {
         let info = package.unwrap();
         assert_eq!(info.manifest.name, "raisin-auth");
     }
+
+    /// Connector adapters must stay embedded and available (builtin: true, so
+    /// still loaded here for manual install) while opting OUT of boot-time
+    /// auto-install (auto_install: false). This is what stops the install
+    /// storm that deadlocked the prod job queue.
+    #[test]
+    fn test_connectors_loaded_but_opt_out_of_auto_install() {
+        let packages = load_builtin_packages_with_hashes();
+
+        for name in [
+            "google-drive-adapter",
+            "ms-graph-adapter",
+            "google-calendar-adapter",
+            "imap-adapter",
+            "raisin-integrations",
+        ] {
+            let info = packages
+                .iter()
+                .find(|p| p.manifest.name == name)
+                .unwrap_or_else(|| panic!("connector '{name}' must remain an available builtin"));
+            assert!(
+                !info.manifest.auto_install,
+                "connector '{name}' must opt out of boot auto-install"
+            );
+        }
+    }
 }
