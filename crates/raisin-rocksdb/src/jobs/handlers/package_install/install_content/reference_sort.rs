@@ -309,7 +309,12 @@ mod tests {
     /// Build a node whose only reference is nested inside a `content` element
     /// (e.g. a Hero's `cta`, a Teaser's `target`) — the real-world shape that
     /// regressed: refs live inside elements, not as top-level properties.
-    fn make_node_with_element_ref(workspace: &str, path: &str, ref_ws: &str, ref_path: &str) -> ContentEntry {
+    fn make_node_with_element_ref(
+        workspace: &str,
+        path: &str,
+        ref_ws: &str,
+        ref_path: &str,
+    ) -> ContentEntry {
         use raisin_models::nodes::properties::value::Element;
         let mut el_content = HashMap::new();
         el_content.insert(
@@ -358,7 +363,10 @@ mod tests {
         assert!(sorted.circular.is_empty());
         let products_pos = paths.iter().position(|p| p == "/products").unwrap();
         let home_pos = paths.iter().position(|p| p == "/home").unwrap();
-        assert!(products_pos < home_pos, "element-nested ref target must come first");
+        assert!(
+            products_pos < home_pos,
+            "element-nested ref target must come first"
+        );
     }
 
     #[test]

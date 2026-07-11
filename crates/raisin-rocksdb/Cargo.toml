@@ -16,6 +16,8 @@ raisin-validation = { path = "../raisin-validation" }
 raisin-error = { path = "../raisin-error" }
 raisin-context = { path = "../raisin-context" }
 raisin-core = { path = "../raisin-core" }
+raisin-crypto = { path = "../raisin-crypto" }
+raisin-locks = { path = "../raisin-locks" }
 raisin-events = { path = "../raisin-events" }
 raisin-embeddings = { path = "../raisin-embeddings" }
 raisin-indexer = { path = "../raisin-indexer" }
@@ -54,6 +56,7 @@ tracing = { workspace = true }
 uuid = { version = "1.18.1", features = ["v4"] }
 nanoid = { workspace = true }
 hex = { workspace = true }
+base64 = { workspace = true }
 num_cpus = "1.16"
 fractional_index = "2.0"
 hashbrown = { version = "0.14", features = ["serde"] }

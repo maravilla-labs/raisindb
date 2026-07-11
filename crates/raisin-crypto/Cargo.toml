@@ -1,0 +1,20 @@
+[package]
+name = "raisin-crypto"
+version = "0.1.0"
+edition = "2021"
+description = "Shared symmetric secret encryption (AES-256-GCM) and master-key loading for RaisinDB"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ring = "0.17"
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+raisin-error = { path = "../raisin-error" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

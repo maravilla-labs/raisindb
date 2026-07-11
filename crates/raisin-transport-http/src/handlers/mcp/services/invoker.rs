@@ -46,19 +46,18 @@ impl HttpFunctionInvoker {
         }
     }
 
-    async fn run(&self, identity: &McpIdentity, name: &str, input: Value) -> raisin_mcp::Result<ExecutionResult> {
+    async fn run(
+        &self,
+        identity: &McpIdentity,
+        name: &str,
+        input: Value,
+    ) -> raisin_mcp::Result<ExecutionResult> {
         let auth = identity.to_auth_context();
 
         // Resolve the function node (auth MUST be forwarded or RLS hides it).
-        let node = find_function_node(
-            &self.state,
-            &self.tenant_id,
-            &self.repo,
-            name,
-            Some(&auth),
-        )
-        .await
-        .map_err(|e| McpError::not_found(format!("function `{name}`: {e}")))?;
+        let node = find_function_node(&self.state, &self.tenant_id, &self.repo, name, Some(&auth))
+            .await
+            .map_err(|e| McpError::not_found(format!("function `{name}`: {e}")))?;
 
         let code = load_function_code(&self.state, &self.tenant_id, &self.repo, &node)
             .await
@@ -66,7 +65,10 @@ impl HttpFunctionInvoker {
         let loaded = build_loaded_function(&node, code)
             .map_err(|e| McpError::protocol(format!("building function `{name}`: {e}")))?;
 
-        let actor = identity.subject.clone().unwrap_or_else(|| "system".to_string());
+        let actor = identity
+            .subject
+            .clone()
+            .unwrap_or_else(|| "system".to_string());
         let mut context = ExecutionContext::new(&self.tenant_id, &self.repo, &self.branch, &actor)
             .with_workspace("functions")
             .with_input(input)

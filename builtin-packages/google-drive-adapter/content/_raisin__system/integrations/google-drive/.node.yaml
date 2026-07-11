@@ -1,0 +1,46 @@
+node_type: raisin:Integration
+properties:
+  title: Google Drive
+  provider_type: google-drive
+  docs_url: https://developers.google.com/drive/api/guides/about-sdk
+  setup_instructions: |
+    ## Connect Google Drive
+
+    1. Open the [Google Cloud console](https://console.cloud.google.com/) and
+       create (or pick) a project.
+    2. Under **APIs & Services → Library**, enable the **Google Drive API**.
+    3. Configure the **OAuth consent screen** (External or Internal), then go to
+       **Credentials → Create credentials → OAuth client ID**, type **Web
+       application**.
+    4. Under **Authorized redirect URIs**, add the **Redirect URI shown above**
+       in this editor, then save.
+    5. Copy the **Client ID** and **Client secret** into the fields on this page.
+       The secret is encrypted at rest and never stored in cleartext.
+    6. Keep the default scopes (`drive.readonly`, `drive.file`,
+       `drive.metadata.readonly`). Widen to `drive` only if you need
+       write-through to pre-existing files.
+    7. Click **Connect account** and grant access. Then create a mount to sync
+       a folder.
+  # Adapter path inside the `functions` workspace (see content/functions/adapters).
+  adapter_function: /adapters/google-drive
+  # Disabled until an operator supplies client_id/client_secret via the admin
+  # console. The client secret is NEVER stored here — the console encrypts it
+  # into client_secret_encrypted (AES-256-GCM) on the node.
+  enabled: false
+  oauth_config:
+    auth_url: https://accounts.google.com/o/oauth2/v2/auth
+    token_url: https://oauth2.googleapis.com/token
+    # Least-privilege defaults: read files/metadata + write to app-created files.
+    # For write-through to pre-existing files, an operator may widen this to
+    # https://www.googleapis.com/auth/drive.
+    scopes:
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+      - https://www.googleapis.com/auth/drive.metadata.readonly
+    # Filled in by the admin console to match the deployment's callback URL,
+    # e.g. https://<host>/api/integrations/oauth/callback
+    redirect_uri: ""
+    # Request a refresh token and force the consent screen so offline sync works.
+    access_type: offline
+    prompt: consent
+  # No connected_accounts, client_id, or client_secret_encrypted are shipped.

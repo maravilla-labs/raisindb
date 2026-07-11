@@ -135,7 +135,7 @@ mod tests {
         let size = estimate_property_value_size(&value);
         assert!(size >= 5);
 
-        let value = PropertyValue::Float(3.14);
+        let value = PropertyValue::Float(3.25);
         let size = estimate_property_value_size(&value);
         assert_eq!(size, std::mem::size_of::<f64>());
 

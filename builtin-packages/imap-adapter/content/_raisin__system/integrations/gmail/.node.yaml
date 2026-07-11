@@ -1,0 +1,74 @@
+node_type: raisin:Integration
+properties:
+  title: Gmail (Experimental)
+  # EXPERIMENTAL / PREVIEW connector. Speaks Gmail over REAL IMAP (RFC 3501) with
+  # implicit TLS via the native raisin.imap binding, authenticated with an XOAUTH2
+  # access token minted from the Google OAuth flow. Validate against your own
+  # account before relying on it in production.
+  provider_type: gmail
+  docs_url: https://developers.google.com/gmail/api/guides/push
+  setup_instructions: |
+    ## Connect Gmail (Experimental)
+
+    1. In the [Google Cloud console](https://console.cloud.google.com/), pick a
+       project and enable the **Gmail API** (APIs & Services → Library).
+    2. Create an **OAuth client ID** (**Web application**) and, under Authorized
+       redirect URIs, add the **Redirect URI shown above** in this editor.
+    3. Paste the **Client ID** and **Client secret** here (secret encrypted at
+       rest). Scope `https://mail.google.com/` is required.
+    4. Click **Connect account**, then create a mount to sync a mailbox.
+
+    ### Push via Pub/Sub (optional)
+    Gmail has no webhook, so real-time push rides Google Cloud Pub/Sub, and
+    **you must paste the mount's Notification URL into Pub/Sub yourself**:
+
+    1. Create a Pub/Sub **topic**; grant `gmail-api-push@system.gserviceaccount.com`
+       the **Pub/Sub Publisher** role on it.
+    2. Create a **push subscription** whose endpoint is the **Notification URL
+       shown on the mount** in this console.
+    3. On the mount's `sync_config`, set `pubsub_topic`, a `pubsub_verify_token`,
+       and `mode: hybrid`. Absent a topic, the mount stays poll-only.
+  # Shares the generic IMAP adapter — Gmail is reached as a standard IMAP server.
+  adapter_function: /adapters/imap
+  # Disabled until an operator completes the OAuth flow and connects a Google
+  # account via the admin console. No secret is ever stored on this node in
+  # cleartext, and no client_secret is shipped.
+  enabled: false
+  # Connection defaults for the adapter. The adapter reads api_config as template
+  # defaults and lets a mount's sync_config override any of host/port/tls/mailbox/
+  # auth per mount. `auth: xoauth2` selects the SASL XOAUTH2 handshake, using the
+  # connected account's OAuth access token as the IMAP login secret.
+  api_config:
+    protocol: imap
+    host: imap.gmail.com
+    port: 993
+    tls: true
+    default_mailbox: INBOX
+    auth: xoauth2
+  # PUSH (Experimental / Preview) — Gmail has no direct webhook, so push rides
+  # Google Cloud Pub/Sub. Set these on the MOUNT's sync_config (not here), because
+  # the topic is per-deployment. When sync_config.pubsub_topic is present the
+  # adapter reports supports_push:true and the engine arms `users.watch`; absent,
+  # the mount stays poll-only. See the imap-adapter README "Gmail push via Pub/Sub"
+  # for the one-time operator setup (create topic, grant gmail-api-push publisher,
+  # create a push subscription pointing at the mount's notifications endpoint).
+  #   sync_config:
+  #     mode: hybrid            # push + poll as a safety net (recommended)
+  #     interval_seconds: 300   # slow poll backstop while push is live
+  #     pubsub_topic: projects/<your-project>/topics/<your-topic>
+  #     pubsub_verify_token: <optional shared secret echoed as the subscription secret>
+  # A Pub/Sub ping is a pure INVALIDATION signal: its historyId is ignored and the
+  # engine simply re-runs the normal IMAP UID delta to fetch new mail.
+  # Google OAuth endpoints for minting the XOAUTH2 access token. The client secret
+  # is stored ONLY as client_secret_encrypted (AES-256-GCM) after an operator
+  # supplies it in the console — never here. access_type=offline + prompt=consent
+  # ensure a refresh token is issued so the engine can keep the access token fresh.
+  oauth_config:
+    auth_url: https://accounts.google.com/o/oauth2/v2/auth
+    token_url: https://oauth2.googleapis.com/token
+    scopes:
+      - https://mail.google.com/
+    redirect_uri: ""
+    access_type: offline
+    prompt: consent
+  # No connected_accounts, client_id, or client_secret_encrypted are shipped.

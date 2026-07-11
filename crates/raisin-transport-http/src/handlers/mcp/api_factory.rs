@@ -54,13 +54,7 @@ pub(super) fn build_mcp_function_api(
         lock_manager: state.lock_manager.clone(),
     });
 
-    let callbacks = create_production_callbacks(
-        deps,
-        tenant,
-        repo_id,
-        branch_owned,
-        auth_context,
-    );
+    let callbacks = create_production_callbacks(deps, tenant, repo_id, branch_owned, auth_context);
 
     Arc::new(RaisinFunctionApi::new(
         ExecutionContext::new(tenant_id, repo, branch, "system").with_workspace(workspace),

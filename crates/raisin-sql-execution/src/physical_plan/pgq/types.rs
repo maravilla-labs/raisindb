@@ -429,7 +429,7 @@ mod tests {
     fn test_sql_value_conversions() {
         assert_eq!(SqlValue::from(true), SqlValue::Boolean(true));
         assert_eq!(SqlValue::from(42i64), SqlValue::Integer(42));
-        assert_eq!(SqlValue::from(3.14f64), SqlValue::Float(3.14));
+        assert_eq!(SqlValue::from(3.25f64), SqlValue::Float(3.25));
         assert_eq!(SqlValue::from("hello"), SqlValue::String("hello".into()));
     }
 

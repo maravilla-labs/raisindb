@@ -72,11 +72,11 @@ pub mod dispatch;
 pub mod error;
 pub mod identity;
 pub mod protocol;
-mod sql;
 pub mod registry;
 pub mod resources;
 pub mod server;
 pub mod services;
+mod sql;
 pub mod transport;
 
 #[cfg(test)]

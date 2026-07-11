@@ -225,8 +225,8 @@ mod tests {
 
     #[test]
     fn test_float() {
-        let (_, lit) = number_literal(span("3.14")).unwrap();
-        assert_eq!(lit, Literal::Float(3.14));
+        let (_, lit) = number_literal(span("3.25")).unwrap();
+        assert_eq!(lit, Literal::Float(3.25));
 
         let (_, lit) = number_literal(span("-0.5")).unwrap();
         assert_eq!(lit, Literal::Float(-0.5));

@@ -165,7 +165,11 @@ impl fmt::Display for JobType {
             } => {
                 // new_path is absolute (leading '/'), so this renders as
                 // node_id/workspace/<abs path…>; parse splits on '/'.
-                write!(f, "RetargetReferences({}/{}{})", node_id, workspace, new_path)
+                write!(
+                    f,
+                    "RetargetReferences({}/{}{})",
+                    node_id, workspace, new_path
+                )
             }
             Self::RelationConsistencyCheck { repair } => write!(
                 f,
@@ -383,6 +387,25 @@ impl fmt::Display for JobType {
             Self::UploadSessionCleanup { upload_id } => {
                 write!(f, "UploadSessionCleanup({})", upload_id)
             }
+            Self::VirtualMountSyncCheck { tenant_id, repo_id } => write!(
+                f,
+                "VirtualMountSyncCheck({}/{})",
+                tenant_id.as_deref().unwrap_or("*"),
+                repo_id.as_deref().unwrap_or("*")
+            ),
+            Self::VirtualMountSync { mount_id, mode } => {
+                write!(f, "VirtualMountSync({}/{})", mount_id, mode)
+            }
+            Self::IntegrationTokenRefresh { tenant_id } => write!(
+                f,
+                "IntegrationTokenRefresh({})",
+                tenant_id.as_deref().unwrap_or("*")
+            ),
+            Self::VirtualMountSubscriptionRenew { tenant_id } => write!(
+                f,
+                "VirtualMountSubscriptionRenew({})",
+                tenant_id.as_deref().unwrap_or("*")
+            ),
             Self::Custom(name) => write!(f, "Custom({})", name),
         }
     }

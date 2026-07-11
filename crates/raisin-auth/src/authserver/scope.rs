@@ -54,7 +54,11 @@ impl IdentityGrants {
     /// The full set of scope strings the identity could be granted, namely the
     /// union of its roles and groups.
     pub fn grantable_scopes(&self) -> BTreeSet<String> {
-        self.roles.iter().chain(self.groups.iter()).cloned().collect()
+        self.roles
+            .iter()
+            .chain(self.groups.iter())
+            .cloned()
+            .collect()
     }
 }
 

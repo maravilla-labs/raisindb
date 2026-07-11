@@ -37,6 +37,7 @@ pub use callbacks::{
     FunctionExecuteCallback,
     FunctionExecuteContext,
     HttpRequestCallback,
+    IntegrationsSyncNowCallback,
     InventoryClaimCallback,
     InventoryReleaseCallback,
     LockAcquireCallback,

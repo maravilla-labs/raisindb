@@ -60,7 +60,10 @@ pub fn render_consent_form(validated: &ValidatedAuthorizationRequest, repo: &str
         Some(&validated.code_challenge_method.to_string()),
     ));
     if !validated.requested_scopes.is_empty() {
-        hidden_fields.push_str(&hidden("scope", Some(&validated.requested_scopes.join(" "))));
+        hidden_fields.push_str(&hidden(
+            "scope",
+            Some(&validated.requested_scopes.join(" ")),
+        ));
     }
     hidden_fields.push_str(&hidden("resource", Some(&validated.resource)));
     hidden_fields.push_str(&hidden("repo", Some(repo)));

@@ -60,7 +60,9 @@ pub fn issuer_from_request(
         .or_else(|| header_str(headers, "host"))
         .unwrap_or("localhost");
 
-    let issuer = format!("{proto}://{host}").trim_end_matches('/').to_string();
+    let issuer = format!("{proto}://{host}")
+        .trim_end_matches('/')
+        .to_string();
 
     let suffixes = trusted_host_suffixes();
     if suffixes.is_empty() && tenant_hosts.is_empty() {
@@ -208,12 +210,27 @@ mod tests {
 
     #[test]
     fn suffix_matches_apex_and_subdomain_only() {
-        assert!(matches_host_suffix("rdb.example.cloud", "rdb.example.cloud"));
-        assert!(matches_host_suffix("acme.rdb.example.cloud", ".rdb.example.cloud"));
-        assert!(matches_host_suffix("acme.rdb.example.cloud", "rdb.example.cloud"));
+        assert!(matches_host_suffix(
+            "rdb.example.cloud",
+            "rdb.example.cloud"
+        ));
+        assert!(matches_host_suffix(
+            "acme.rdb.example.cloud",
+            ".rdb.example.cloud"
+        ));
+        assert!(matches_host_suffix(
+            "acme.rdb.example.cloud",
+            "rdb.example.cloud"
+        ));
         // Not on a label boundary — must be rejected.
-        assert!(!matches_host_suffix("evilrdb.example.cloud", "rdb.example.cloud"));
-        assert!(!matches_host_suffix("rdb.example.cloud.evil.com", "rdb.example.cloud"));
+        assert!(!matches_host_suffix(
+            "evilrdb.example.cloud",
+            "rdb.example.cloud"
+        ));
+        assert!(!matches_host_suffix(
+            "rdb.example.cloud.evil.com",
+            "rdb.example.cloud"
+        ));
         assert!(!matches_host_suffix("anything", ""));
     }
 
@@ -224,7 +241,11 @@ mod tests {
 
         assert!(host_is_trusted("localhost:8088", &suffixes, &tenant));
         assert!(host_is_trusted("127.0.0.1", &suffixes, &tenant));
-        assert!(host_is_trusted("acme.rdb.example.cloud", &suffixes, &tenant));
+        assert!(host_is_trusted(
+            "acme.rdb.example.cloud",
+            &suffixes,
+            &tenant
+        ));
         assert!(host_is_trusted("app.acme.example", &[], &tenant)); // per-tenant exact
         assert!(!host_is_trusted("evil.com", &suffixes, &tenant));
         assert!(!host_is_trusted(

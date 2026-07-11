@@ -74,7 +74,10 @@ mod tests {
             result.assignments[0].value,
             TranslationValue::String("C'est l'amour".to_string())
         );
-        assert_eq!(result.filter, Some(TranslateFilter::Path("/post".to_string())));
+        assert_eq!(
+            result.filter,
+            Some(TranslateFilter::Path("/post".to_string()))
+        );
     }
 
     #[test]

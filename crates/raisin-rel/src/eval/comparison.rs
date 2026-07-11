@@ -76,8 +76,8 @@ mod tests {
 
     #[test]
     fn test_values_equal_floats() {
-        assert!(values_equal(&Value::Float(3.14), &Value::Float(3.14)));
-        assert!(!values_equal(&Value::Float(3.14), &Value::Float(2.71)));
+        assert!(values_equal(&Value::Float(3.25), &Value::Float(3.25)));
+        assert!(!values_equal(&Value::Float(3.25), &Value::Float(2.5)));
     }
 
     #[test]

@@ -13,9 +13,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
-use super::super::content_types::{
-    derive_content_path, resource_ref_filename, ContentNodeDef,
-};
+use super::super::content_types::{derive_content_path, resource_ref_filename, ContentNodeDef};
 use super::super::handler::PackageInstallHandler;
 use super::super::types::{DryRunActionCounts, DryRunLogEntry, InstallMode};
 

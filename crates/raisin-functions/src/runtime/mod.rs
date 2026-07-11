@@ -9,7 +9,9 @@
 //! in different languages (JavaScript, Starlark, SQL).
 
 pub mod bindings;
+pub mod crypto;
 pub mod fetch;
+pub mod imap;
 mod quickjs;
 mod sandbox;
 mod sql;

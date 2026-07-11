@@ -443,4 +443,64 @@ pub trait FunctionApi: Send + Sync {
 
     /// Return `n` units to inventory `pool`. Returns the new remaining count.
     async fn inventory_release(&self, pool: &str, n: i64) -> Result<i64>;
+
+    // ========== Integration / Mount Operations ==========
+
+    /// Trigger a "sync now" for a virtual mount (connector).
+    ///
+    /// Enqueues a one-shot `VirtualMountSync` job for `mount_id`, deduped per
+    /// mount so a webhook storm collapses into a single in-flight sync. `mode`
+    /// defaults to `"delta"` (pass `"full"` for a full re-sync).
+    ///
+    /// Returns `{ "job_id": String|null, "status": "queued"|"already_running" }`;
+    /// `job_id` is `null` when an in-flight sync deduped the request.
+    async fn integrations_sync_now(&self, mount_id: &str, mode: Option<&str>) -> Result<Value>;
+
+    // ========== IMAP Operations (native protocol binding) ==========
+
+    /// Fetch messages newer than a UID cursor from an IMAP mailbox.
+    ///
+    /// `conn` is `{ host, port, tls, username, password }` (password may be an
+    /// app password or an OAuth2 access token — never logged). `since_uid` is
+    /// the last-seen UID; only messages with a strictly greater UID are
+    /// returned. `opts` may carry `{ mailbox?: string, limit?: number }`
+    /// (mailbox defaults to `INBOX`, limit defaults to 200 and is hard-capped).
+    ///
+    /// Returns `{ messages: [...], highestUid, uidvalidity }`. The connection's
+    /// host:port MUST be authorized by the function's network policy; an
+    /// unauthorized host is refused before any socket is opened.
+    async fn imap_fetch_since(
+        &self,
+        conn: Value,
+        since_uid: i64,
+        opts: Option<Value>,
+    ) -> Result<Value>;
+
+    /// List all mailboxes (folders) on an IMAP account. See
+    /// [`imap_fetch_since`](Self::imap_fetch_since) for `conn` and policy rules.
+    async fn imap_list_mailboxes(&self, conn: Value) -> Result<Value>;
+
+    /// Fetch one full message by UID (headers, text, html, flags). `opts` may
+    /// carry `{ mailbox?: string }`. See [`imap_fetch_since`](Self::imap_fetch_since)
+    /// for `conn` and policy rules.
+    async fn imap_fetch_message(&self, conn: Value, uid: i64, opts: Option<Value>)
+        -> Result<Value>;
+
+    // ========== Crypto Operations (native primitives) ==========
+
+    /// Verify an RS256/ES256-signed JWT/OIDC token against a JWKS.
+    ///
+    /// `opts` is `{ jwks_url?, issuer?, audience?, algorithms? }`. The JWKS is
+    /// fetched from `jwks_url` (host authorized against the function's network
+    /// policy BEFORE any socket is opened, then briefly cached); the signature,
+    /// `exp`/`nbf`, and — when supplied — `iss`/`aud` are checked.
+    ///
+    /// Returns `{ valid: bool, claims?: object, error?: string }`. An invalid
+    /// token is reported as `{ valid: false, error }` (not a hard error); a hard
+    /// error is reserved for policy denial and an unreachable JWKS endpoint. The
+    /// token and decoded claims are never logged.
+    ///
+    /// This is a general primitive (any connector may use it to authenticate a
+    /// signed push/webhook); it is not provider-specific.
+    async fn crypto_verify_jwt(&self, token: &str, opts: Value) -> Result<Value>;
 }

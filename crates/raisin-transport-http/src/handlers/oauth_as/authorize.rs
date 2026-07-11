@@ -129,13 +129,11 @@ pub async fn authorize_get(
 
     let (repo, _branch, _slug) = match parse_mcp_resource(&validated.resource) {
         Some(parts) => parts,
-        None => {
-            return Html(
-                "<h1>Invalid resource</h1><p>The resource indicator is not an MCP endpoint URL.</p>"
-                    .to_string(),
-            )
-            .into_response()
-        }
+        None => return Html(
+            "<h1>Invalid resource</h1><p>The resource indicator is not an MCP endpoint URL.</p>"
+                .to_string(),
+        )
+        .into_response(),
     };
 
     Html(render_consent_form(&validated, &repo)).into_response()
@@ -180,9 +178,7 @@ pub async fn authorize_post(
     // Redirect back to the client with the code (and state, if supplied).
     let mut redirect = url::Url::parse(&validated.redirect_uri)
         .expect("redirect_uri was validated against the client registration");
-    redirect
-        .query_pairs_mut()
-        .append_pair("code", &code.code);
+    redirect.query_pairs_mut().append_pair("code", &code.code);
     if let Some(state_val) = &validated.state {
         redirect.query_pairs_mut().append_pair("state", state_val);
     }
@@ -208,9 +204,8 @@ async fn authenticate_owner(
 
     let repos = extract_repos(state).map_err(|e| e.into_response())?;
 
-    let access_denied = || {
-        access_denied_response("Invalid email or password, or insufficient consent")
-    };
+    let access_denied =
+        || access_denied_response("Invalid email or password, or insufficient consent");
 
     // Look up the identity and verify the password (same checks as login).
     let identity = match repos.identity.find_by_email(tenant_id, &form.email).await {
@@ -319,7 +314,9 @@ fn server_error_response(detail: &str) -> Response {
     tracing::error!(detail, "OAuth authorize internal error");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Html("<h1>Server error</h1><p>Unable to process the authorization request.</p>".to_string()),
+        Html(
+            "<h1>Server error</h1><p>Unable to process the authorization request.</p>".to_string(),
+        ),
     )
         .into_response()
 }

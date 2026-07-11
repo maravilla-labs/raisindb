@@ -1,0 +1,64 @@
+name: google-drive-adapter
+version: 1.0.0
+title: Google Drive Adapter
+description: >
+  Virtual-node adapter for Google Drive. Mount a Drive folder into a workspace
+  path and RaisinDB keeps it in sync as raisin:Folder / raisin:Asset nodes.
+  Ships the Drive v3 adapter function, a default mapping function, and a
+  pre-configured (disabled) raisin:Integration template you complete with your
+  own Google OAuth client in the admin console.
+author: RaisinDB Team
+license: BSL-1.1
+icon: hard-drive
+color: "#1a73e8"
+keywords:
+  - google-drive
+  - integration
+  - virtual-nodes
+  - sync
+  - adapter
+# Discovery contract for the admin console's Integrations gallery.
+category: integrations
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  functions:
+    - /adapters/google-drive
+    - /mappers/google-drive-default
+  # Pre-configured integration template (disabled until credentials are supplied).
+  content:
+    - raisin:system/integrations/google-drive
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Adapter + mapper functions
+    - root: /adapters/google-drive
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/google-drive-default
+      include:
+        - "**"
+      mode: merge
+
+    # Integration template in the system workspace
+    - root: /integrations/google-drive
+      workspace: raisin:system
+      include:
+        - "**"
+      mode: merge
+
+# Workspace configuration for auto-created folders
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+  raisin:system:
+    default_folder_type: raisin:Folder

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 # Internal crates
 raisin-error = { path = "../raisin-error" }
+raisin-crypto = { path = "../raisin-crypto" }
 raisin-models = { path = "../raisin-models" }
 raisin-storage = { path = "../raisin-storage" }
 raisin-events = { path = "../raisin-events" }
@@ -58,3 +59,22 @@ dashmap = "6.1"
 bytes = "1.0"
 image = "0.25"
 num_cpus = "1.16"
+
+# Native IMAP protocol binding (raisin.imap.*)
+# async-imap (runtime-tokio) drives the IMAP protocol directly over a tokio
+# AsyncRead/AsyncWrite stream; we supply a tokio-rustls TLS stream, reusing the
+# workspace rustls 0.23 / tokio-rustls 0.26 stack (no extra TLS major).
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+mail-parser = "0.11"
+tokio-rustls = "0.26"
+
+# Native JWT/OIDC verification binding (raisin.crypto.verifyJwt). Pinned to the
+# same 9.3 line the rest of the workspace already uses.
+jsonwebtoken = "9.3"
+webpki-roots = "1.0"
+
+[dev-dependencies]
+# Test-only: generate an ephemeral RSA keypair + JWK at runtime so no private
+# key material is ever committed to the repo (see runtime/crypto tests).
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"

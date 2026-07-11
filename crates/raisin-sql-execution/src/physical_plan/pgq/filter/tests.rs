@@ -32,8 +32,8 @@ mod tests {
             SqlValue::Integer(42)
         );
         assert_eq!(
-            evaluate_literal(&Literal::Float(3.14)),
-            SqlValue::Float(3.14)
+            evaluate_literal(&Literal::Float(3.25)),
+            SqlValue::Float(3.25)
         );
         assert_eq!(
             evaluate_literal(&Literal::Boolean(true)),

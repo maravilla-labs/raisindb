@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(to_pg_type(&PropertyValue::Null), Type::TEXT);
         assert_eq!(to_pg_type(&PropertyValue::Boolean(true)), Type::BOOL);
         assert_eq!(to_pg_type(&PropertyValue::Integer(42)), Type::INT8);
-        assert_eq!(to_pg_type(&PropertyValue::Float(3.14)), Type::FLOAT8);
+        assert_eq!(to_pg_type(&PropertyValue::Float(3.25)), Type::FLOAT8);
         assert_eq!(
             to_pg_type(&PropertyValue::Decimal(
                 Decimal::from_str("123.45").unwrap()
@@ -335,8 +335,8 @@ mod tests {
             "-123"
         );
         assert_eq!(
-            encode_value_text(&PropertyValue::Float(3.14)).unwrap(),
-            "3.14"
+            encode_value_text(&PropertyValue::Float(3.25)).unwrap(),
+            "3.25"
         );
         assert_eq!(
             encode_value_text(&PropertyValue::String("hello".to_string())).unwrap(),

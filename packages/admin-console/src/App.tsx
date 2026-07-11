@@ -56,6 +56,8 @@ import AgentEditor from './pages/agents/AgentEditor'
 import AgentDetail from './pages/agents/AgentDetail'
 import ConversationTrace from './pages/agents/ConversationTrace'
 import AccessControlSettings from './pages/AccessControlSettings'
+import Integrations from './pages/Integrations'
+import Mounts from './pages/Mounts'
 
 /**
  * Gate the tenant-wide /management hub to dev / single-operator mode.
@@ -179,6 +181,9 @@ function App() {
           {/* Packages routes */}
           <Route path="packages/*" element={<PackagesRouter />} />
           <Route path=":branch/packages/*" element={<PackagesRouter />} />
+          {/* Outbound integrations + virtual mounts (raisin:system workspace) */}
+          <Route path="integrations" element={<Integrations />} />
+          <Route path="mounts" element={<Mounts />} />
           <Route path="query" element={<SqlQuery />} />
           <Route path="logs" element={<RepositoryExecutionLogs />} />
           <Route path="flows" element={<RepositoryFlows />} />

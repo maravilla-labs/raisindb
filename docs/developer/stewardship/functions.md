@@ -518,6 +518,28 @@ await raisin.graph.deleteRelation(
 );
 ```
 
+### Integrations / connectors
+
+Trigger a virtual-mount ("connector") sync on demand — the host binding a provider
+webhook-refresh function calls to pull external changes into RaisinDB:
+
+```javascript
+// sync_now(mountId, mode?) — enqueue a deduped VirtualMountSync for the mount.
+// mode defaults to "delta"; pass "full" for a full re-reconcile.
+const r = await raisin.integrations.sync_now(mountId);           // delta
+const r2 = await raisin.integrations.sync_now(mountId, "full");  // full resync
+// r => { job_id: string | null, status: "queued" | "already_running" }
+// syncNow(...) is a camelCase alias.
+```
+
+`status: "already_running"` (with `job_id: null`) means a sync for that mount was
+already enqueued — the call is idempotent, deduped on `mount_id`, so a burst of
+provider webhooks collapses to one sync. Available in both the JavaScript
+(`raisin.integrations.sync_now`) and Starlark (`raisin.integrations.sync_now`)
+runtimes. The typical caller is the webhook-refresh function in the
+`raisin-integrations` package, wired to a `raisin:Trigger` with a per-mount
+`webhook_id`.
+
 ### Logging
 
 ```javascript

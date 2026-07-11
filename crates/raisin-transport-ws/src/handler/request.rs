@@ -68,11 +68,12 @@ pub(super) async fn process_request<S, B>(
         } else {
             // Connections without a repo in the upgrade path had their
             // permissions resolved for "default" — hold them to it.
-            let conn_repo = conn.repository.clone().unwrap_or_else(|| "default".to_string());
+            let conn_repo = conn
+                .repository
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
             match request.context.repository.as_deref() {
-                Some(req_repo) if req_repo != conn_repo => {
-                    Some((conn_repo, req_repo.to_string()))
-                }
+                Some(req_repo) if req_repo != conn_repo => Some((conn_repo, req_repo.to_string())),
                 _ => None,
             }
         }

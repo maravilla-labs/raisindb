@@ -91,8 +91,7 @@ pub fn authenticate_client(
             }
             Ok(())
         }
-        TokenEndpointAuthMethod::ClientSecretPost
-        | TokenEndpointAuthMethod::ClientSecretBasic => {
+        TokenEndpointAuthMethod::ClientSecretPost | TokenEndpointAuthMethod::ClientSecretBasic => {
             let secret = presented_secret.ok_or_else(|| {
                 AuthServerError::InvalidClient(
                     "confidential client must present a client_secret".to_string(),
@@ -248,9 +247,12 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         authenticate_client(&client, "client-1", None).unwrap();
-        let grant =
-            exchange_authorization_code(&token_request(&verifier), &code_for(&challenge, now + 300), now)
-                .unwrap();
+        let grant = exchange_authorization_code(
+            &token_request(&verifier),
+            &code_for(&challenge, now + 300),
+            now,
+        )
+        .unwrap();
 
         assert_eq!(grant.identity_id, "id-1");
         assert_eq!(grant.audience, "https://db.example.com/mcp/repo/main/srv");

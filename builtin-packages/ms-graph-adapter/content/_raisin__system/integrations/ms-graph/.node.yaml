@@ -1,0 +1,49 @@
+node_type: raisin:Integration
+properties:
+  title: Microsoft 365 (Preview)
+  provider_type: ms-graph
+  docs_url: https://learn.microsoft.com/en-us/graph/auth-register-app-v2
+  setup_instructions: |
+    ## Connect Microsoft 365 (Preview)
+
+    1. Open the [Azure Portal](https://portal.azure.com/) → **Microsoft Entra
+       ID → App registrations → New registration**.
+    2. For **Redirect URI**, choose platform **Web** and paste the **Redirect
+       URI shown above** in this editor.
+    3. On **Certificates & secrets**, create a **New client secret** and copy
+       its value now (it is shown only once).
+    4. On **API permissions**, add **Microsoft Graph → Delegated**:
+       `Mail.Read`, `Calendars.Read`, `Files.Read`, `offline_access`, then click
+       **Grant admin consent**.
+    5. Copy the **Application (client) ID** and the client secret into the fields
+       on this page. The secret is encrypted at rest.
+    6. Click **Connect account** and sign in. Then create a mount and set
+       **resource** to `mail`, `calendar`, or `files` (OneDrive).
+
+    **Push:** automatic. The engine registers the Graph subscription for you when
+    a mount uses `mode: webhook` or `hybrid` — no manual webhook setup needed.
+  # Adapter path inside the `functions` workspace (see content/functions/adapters).
+  adapter_function: /adapters/ms-graph
+  # EXPERIMENTAL / PREVIEW. Disabled until an operator supplies client_id and
+  # client_secret via the admin console. The client secret is NEVER stored here —
+  # the console encrypts it into client_secret_encrypted (AES-256-GCM) on the node.
+  enabled: false
+  oauth_config:
+    # Microsoft identity platform (v2.0) endpoints. `common` accepts both work/
+    # school (Azure AD) and personal Microsoft accounts; swap for a tenant id to
+    # restrict to a single tenant.
+    auth_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
+    # Least-privilege read scopes; offline_access yields a refresh token so the
+    # engine can keep the mount synced without re-consent.
+    scopes:
+      - offline_access
+      - Mail.Read
+      - Calendars.Read
+      - Files.Read
+    # Filled in by the admin console to match the deployment's callback URL,
+    # e.g. https://<host>/api/integrations/oauth/callback
+    redirect_uri: ""
+    # Force the consent screen so Microsoft issues a refresh token.
+    prompt: consent
+  # No connected_accounts, client_id, or client_secret_encrypted are shipped.

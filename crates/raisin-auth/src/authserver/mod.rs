@@ -238,7 +238,10 @@ mod tests {
     #[tokio::test]
     async fn full_authorization_code_flow() {
         let server = server();
-        let reg = server.register_client("tenant-a", registration()).await.unwrap();
+        let reg = server
+            .register_client("tenant-a", registration())
+            .await
+            .unwrap();
         let client_id = reg.client_id;
 
         let verifier = OidcStrategy::generate_code_verifier();
@@ -289,7 +292,10 @@ mod tests {
     #[tokio::test]
     async fn redeem_with_wrong_verifier_is_rejected() {
         let server = server();
-        let reg = server.register_client("tenant-a", registration()).await.unwrap();
+        let reg = server
+            .register_client("tenant-a", registration())
+            .await
+            .unwrap();
         let client_id = reg.client_id;
 
         let verifier = OidcStrategy::generate_code_verifier();

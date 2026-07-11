@@ -86,19 +86,27 @@ describe('mapChangeToNode', () => {
       expect(m.reason).toContain('deploy --install');
     });
 
-    it('flags nodetypes/', () => {
-      const m = mapChangeToNode('nodetypes/shift.yaml');
-      expect(m.kind).toBe('structural');
-    });
-
     it('flags workspaces/', () => {
       const m = mapChangeToNode('workspaces/staffing.yaml');
       expect(m.kind).toBe('structural');
     });
+  });
 
-    it('flags mixins/ and archetypes/', () => {
-      expect(mapChangeToNode('mixins/audited.yaml').kind).toBe('structural');
-      expect(mapChangeToNode('archetypes/page.yaml').kind).toBe('structural');
+  describe('schema changes (live-synced to the management API)', () => {
+    it('classifies nodetypes/ as schema', () => {
+      const m = mapChangeToNode('nodetypes/shift.yaml');
+      expect(m.kind).toBe('schema');
+      expect(m.schemaKind).toBe('nodetype');
+    });
+
+    it('classifies mixins/ and archetypes/ as schema', () => {
+      const mixin = mapChangeToNode('mixins/audited.yaml');
+      expect(mixin.kind).toBe('schema');
+      expect(mixin.schemaKind).toBe('mixin');
+
+      const archetype = mapChangeToNode('archetypes/page.yaml');
+      expect(archetype.kind).toBe('schema');
+      expect(archetype.schemaKind).toBe('archetype');
     });
   });
 

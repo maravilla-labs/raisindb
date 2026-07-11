@@ -11,7 +11,9 @@
  * - `{dir}/index.js|.py|.star`→ code asset child node `{dir}/index.js`
  * - other non-YAML files      → binary asset child node (full filename)
  * - `.node.{locale}.yaml` / `{name}.{locale}.yaml` → translation overlay
- * - manifest.yaml, nodetypes/, workspaces/, mixins/, archetypes/
+ * - nodetypes/, archetypes/, elementtypes/, mixins/
+ *                             → schema: live-synced to the management API (upsert)
+ * - manifest.yaml, workspaces/, static/
  *                             → structural: applied at install time only,
  *                               requires a re-deploy (deploy --install)
  */

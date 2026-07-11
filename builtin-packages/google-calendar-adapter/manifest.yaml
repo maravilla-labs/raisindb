@@ -1,0 +1,66 @@
+name: google-calendar-adapter
+version: 1.0.0
+title: Google Calendar Adapter (Experimental)
+description: >
+  Experimental virtual-node adapter for Google Calendar. Mount a calendar into a
+  workspace path and RaisinDB keeps its events in sync as raisin:Event nodes.
+  Ships the Calendar v3 adapter function, a default mapping function, and a
+  pre-configured (disabled) raisin:Integration template you complete with your
+  own Google OAuth client in the admin console. Preview feature — validate
+  against your own account before relying on it in production.
+author: RaisinDB Team
+license: BSL-1.1
+icon: calendar
+color: "#1a73e8"
+keywords:
+  - google-calendar
+  - integration
+  - virtual-nodes
+  - sync
+  - adapter
+  - experimental
+# Discovery contract for the admin console's Integrations gallery.
+category: integrations
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  functions:
+    - /adapters/google-calendar
+    - /mappers/google-calendar-default
+  # Pre-configured integration template (disabled until credentials are supplied).
+  content:
+    - raisin:system/integrations/google-calendar
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Adapter + mapper functions
+    - root: /adapters/google-calendar
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/google-calendar-default
+      include:
+        - "**"
+      mode: merge
+
+    # Integration template in the system workspace
+    - root: /integrations/google-calendar
+      workspace: raisin:system
+      include:
+        - "**"
+      mode: merge
+
+# Workspace configuration for auto-created folders
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+  raisin:system:
+    default_folder_type: raisin:Folder

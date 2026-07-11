@@ -95,11 +95,10 @@ pub(super) async fn resolve_mcp_auth(
         ctx = ctx.with_permissions(perms);
     }
 
-    let consented = claims.scope.as_deref().map(|s| {
-        s.split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    });
+    let consented = claims
+        .scope
+        .as_deref()
+        .map(|s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>());
 
     (Some(ctx), consented)
 }

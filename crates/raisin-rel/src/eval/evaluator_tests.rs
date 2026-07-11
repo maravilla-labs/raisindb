@@ -42,7 +42,7 @@ fn complex_ctx() -> EvalContext {
 fn test_literal() {
     let ctx = empty_ctx();
     assert_eq!(eval("42", &ctx).unwrap(), Value::Integer(42));
-    assert_eq!(eval("3.14", &ctx).unwrap(), Value::Float(3.14));
+    assert_eq!(eval("3.25", &ctx).unwrap(), Value::Float(3.25));
     assert_eq!(
         eval("'hello'", &ctx).unwrap(),
         Value::String("hello".to_string())

@@ -1,0 +1,56 @@
+node_type: raisin:Function
+properties:
+  title: Microsoft 365 Adapter
+  description: >
+    EXPERIMENTAL virtual-node adapter for Microsoft 365 over Microsoft Graph v1.0.
+    Translates the normalized adapter operations (capabilities, list, get,
+    get_content, get_changes, subscribe, renew, unsubscribe) into Graph REST calls.
+    The mount's sync_config.resource selects the surface ("mail" ->
+    mailFolders/messages, "calendar" -> calendars/events + calendarView, "files" ->
+    OneDrive drive items + delta). Read-only. Push-capable: subscribe/renew/
+    unsubscribe manage a Graph subscription whose notifications are a pure
+    invalidation signal. Invoked directly by the sync engine with a decrypted bearer
+    token; owns no token-refresh logic.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Async
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 120000
+    max_memory_bytes: 67108864
+  # Outbound access is restricted to Microsoft Graph and the Microsoft identity
+  # platform. `**` is required: `*` does not cross `/`, so it would not match
+  # multi-segment Graph paths like /v1.0/me/mailFolders/inbox/messages.
+  network_policy:
+    http_enabled: true
+    request_timeout_ms: 120000
+    max_concurrent_requests: 10
+    allowed_urls:
+      - "https://graph.microsoft.com/**"
+      - "https://login.microsoftonline.com/**"
+  input_schema:
+    type: object
+    required:
+      - operation
+    properties:
+      operation:
+        type: string
+        description: >
+          One of capabilities, list, get, get_content, get_changes, subscribe,
+          renew, unsubscribe
+      params:
+        type: object
+        description: Operation-specific arguments
+      credential:
+        type: object
+        description: Decrypted account credential { access_token, account_id, provider_type }
+      mount:
+        type: object
+        description: >
+          Read-only mount snapshot { mount_id, remote_root, mount_path, sync_config }.
+          sync_config.resource selects mail vs calendar; sync_config.window
+          { days_ahead, days_back } bounds the calendarView delta.
+  output_schema:
+    type: object
+    description: Operation-specific result (ExternalItem, page, Capabilities, Change feed, ...)

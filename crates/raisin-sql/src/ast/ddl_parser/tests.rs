@@ -271,7 +271,7 @@ fn test_parse_number_defaults() {
             CREATE NODETYPE 'test:Numbers'
             PROPERTIES (
                 count Number DEFAULT 42,
-                rate Number DEFAULT 3.14,
+                rate Number DEFAULT 3.25,
                 negative Number DEFAULT -10
             )
         "#;
@@ -284,7 +284,7 @@ fn test_parse_number_defaults() {
             );
             assert_eq!(
                 create.properties[1].default,
-                Some(DefaultValue::Number(3.14))
+                Some(DefaultValue::Number(3.25))
             );
             assert_eq!(
                 create.properties[2].default,

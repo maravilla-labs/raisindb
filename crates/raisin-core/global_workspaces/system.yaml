@@ -12,6 +12,8 @@ allowed_node_types:
   - raisin:Folder
   - raisin:FlowInstance
   - raisin:Node
+  - raisin:Integration
+  - raisin:VirtualMount
 allowed_root_node_types:
   - raisin:AuthConfig
   - raisin:ProviderConfig
@@ -104,6 +106,20 @@ initial_structure:
             icon: "activity"
             color: "#3b82f6"
             title: "Flow Instances"
+    # External system integrations
+    - node_type: raisin:Folder
+      name: integrations
+      properties:
+        icon: "plug"
+        color: "#0ea5e9"
+        title: "Integrations"
+    # Virtual mounts of external subtrees
+    - node_type: raisin:Folder
+      name: mounts
+      properties:
+        icon: "hard-drive"
+        color: "#14b8a6"
+        title: "Virtual Mounts"
 config:
   default_branch: main
   node_type_pins: {}

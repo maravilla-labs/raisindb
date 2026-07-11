@@ -124,7 +124,11 @@ pub struct CustomTool {
     pub input_schema: Value,
     /// JSON Schema describing the tool result. Inherited from the function's
     /// `output_schema` when omitted; advertised as the MCP tool's `outputSchema`.
-    #[serde(rename = "outputSchema", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "outputSchema",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub output_schema: Option<Value>,
     /// Scopes a caller must hold to invoke this tool.
     #[serde(default)]
@@ -162,10 +166,7 @@ impl FunctionMeta {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let input_schema = props
-            .get("input_schema")
-            .cloned()
-            .filter(|v| v.is_object());
+        let input_schema = props.get("input_schema").cloned().filter(|v| v.is_object());
         let output_schema = props
             .get("output_schema")
             .cloned()
@@ -462,10 +463,10 @@ mod tests {
     #[test]
     fn function_side_none_without_mcp_or_when_disabled() {
         assert!(CustomTool::from_function_properties(&json!({ "name": "f" })).is_none());
-        assert!(
-            CustomTool::from_function_properties(&json!({ "name": "f", "mcp": { "enabled": false } }))
-                .is_none()
-        );
+        assert!(CustomTool::from_function_properties(
+            &json!({ "name": "f", "mcp": { "enabled": false } })
+        )
+        .is_none());
     }
 
     #[test]

@@ -1,0 +1,44 @@
+node_type: raisin:Function
+properties:
+  title: Google Drive Adapter
+  description: >
+    Virtual-node adapter for Google Drive (Drive v3). Translates the normalized
+    adapter operations (capabilities, list, get, get_content, create, update,
+    delete, get_changes) into Google Drive REST calls. Invoked directly by the
+    sync engine with a decrypted access token; owns no token-refresh logic.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Async
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 120000
+    max_memory_bytes: 67108864
+  # Outbound access is restricted to Google's Drive/API and OAuth token hosts.
+  network_policy:
+    http_enabled: true
+    request_timeout_ms: 120000
+    max_concurrent_requests: 10
+    allowed_urls:
+      - "https://www.googleapis.com/**"
+      - "https://oauth2.googleapis.com/**"
+  input_schema:
+    type: object
+    required:
+      - operation
+    properties:
+      operation:
+        type: string
+        description: One of capabilities, list, get, get_content, create, update, delete, get_changes
+      params:
+        type: object
+        description: Operation-specific arguments
+      credential:
+        type: object
+        description: Decrypted account credential { access_token, account_id, provider_type }
+      mount:
+        type: object
+        description: Read-only mount snapshot { mount_id, remote_root, mount_path, sync_config }
+  output_schema:
+    type: object
+    description: Operation-specific result (ExternalItem, page, Capabilities, Change feed, ...)

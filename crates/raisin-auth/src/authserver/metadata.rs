@@ -129,7 +129,10 @@ mod tests {
     fn issuer_endpoints_are_derived() {
         let md = AuthorizationServerMetadata::for_issuer("https://db.example.com/");
         assert_eq!(md.issuer, "https://db.example.com");
-        assert_eq!(md.authorization_endpoint, "https://db.example.com/authorize");
+        assert_eq!(
+            md.authorization_endpoint,
+            "https://db.example.com/authorize"
+        );
         assert_eq!(md.token_endpoint, "https://db.example.com/token");
         assert_eq!(md.registration_endpoint, "https://db.example.com/register");
         assert_eq!(md.code_challenge_methods_supported, vec!["S256"]);

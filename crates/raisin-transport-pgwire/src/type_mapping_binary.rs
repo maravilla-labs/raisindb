@@ -383,9 +383,9 @@ mod tests {
 
     #[test]
     fn test_encode_value_binary_float() {
-        let value = PropertyValue::Float(3.14);
+        let value = PropertyValue::Float(3.25);
         let bytes = encode_value_binary(&value, &Type::FLOAT8).unwrap();
-        assert_eq!(bytes, encode_float8_binary(3.14));
+        assert_eq!(bytes, encode_float8_binary(3.25));
     }
 
     #[test]

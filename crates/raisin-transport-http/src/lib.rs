@@ -45,6 +45,8 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod identity_users;
     pub mod inbox;
+    #[cfg(feature = "storage-rocksdb")]
+    pub mod integrations;
     pub mod locks;
     pub mod management;
     pub mod mcp;

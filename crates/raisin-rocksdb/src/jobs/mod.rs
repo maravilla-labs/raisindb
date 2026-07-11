@@ -29,21 +29,22 @@ pub use handlers::{
     FlowChildrenListerCallback, FlowEventEmitterCallback, FlowExecutionHandler,
     FlowFunctionExecutorCallback, FlowInstanceExecutionHandler, FlowJobQueuerCallback,
     FlowNodeCreatorCallback, FlowNodeLoaderCallback, FlowNodeSaverCallback, FulltextJobHandler,
-    FunctionExecutionHandler, HuggingFaceModelHandler, JobHandlerRegistry, NodeChangeInfo,
-    NodeCreatorCallback, NodeDeleteCleanupHandler, OpLogCompactionHandler,
-    PackageCreateFromSelectionHandler, PackageExportHandler, PackageInstallHandler,
-    PackageInstallMode, PackageProcessHandler, PropertyIndexJobHandler, RelationConsistencyHandler,
-    RetargetReferencesHandler,
-    ReplicationGCHandler, ReplicationSyncHandler, RestoreTreeExecutorCallback, RestoreTreeHandler,
-    ResumableUploadHandler, RevisionHistoryCopyHandler, RocksDBFlowCallbacks,
+    FunctionExecutionHandler, HuggingFaceModelHandler, IntegrationTokenRefreshHandler,
+    JobHandlerRegistry, NodeChangeInfo, NodeCreatorCallback, NodeDeleteCleanupHandler,
+    OpLogCompactionHandler, PackageCreateFromSelectionHandler, PackageExportHandler,
+    PackageInstallHandler, PackageInstallMode, PackageProcessHandler, PropertyIndexJobHandler,
+    RelationConsistencyHandler, ReplicationGCHandler, ReplicationSyncHandler,
+    RestoreTreeExecutorCallback, RestoreTreeHandler, ResumableUploadHandler,
+    RetargetReferencesHandler, RevisionHistoryCopyHandler, RocksDBFlowCallbacks,
     RocksDBUserNodeCreator, ScheduledTriggerHandler, SnapshotHandler, SqlExecutorCallback,
     TranslationChangeInfo, TriggerEvaluationHandler, UploadSessionCleanupHandler,
+    VirtualMountSyncHandler,
 };
 // Additional exports for external use (transport layer callbacks)
 pub use handlers::{
-    create_trigger_matcher, cron_matches, FlowResumeCallback, FunctionEnabledChecker,
-    FunctionExecutionResult, FunctionExecutorCallback, ScheduledTriggerFinderCallback,
-    ScheduledTriggerMatch, TriggerMatch, TriggerMatcherCallback,
+    create_trigger_matcher, cron_matches, token_refresh_dedup_key, FlowResumeCallback,
+    FunctionEnabledChecker, FunctionExecutionResult, FunctionExecutorCallback,
+    ScheduledTriggerFinderCallback, ScheduledTriggerMatch, TriggerMatch, TriggerMatcherCallback,
 };
 pub use index_lock::{IndexKey, IndexLockManager};
 pub use metadata_store::{JobMetadataStore, PersistedJobEntry};

@@ -348,11 +348,37 @@ pub(super) fn register_flows_internal<'js>(
 pub(super) fn register_crypto_internal<'js>(
     ctx: &Ctx<'js>,
     internal: &Object<'js>,
+    api: Arc<dyn FunctionApi>,
 ) -> std::result::Result<(), rquickjs::Error> {
     let uuid_fn = Function::new(ctx.clone(), move || -> String {
         uuid::Uuid::new_v4().to_string()
     })?;
     internal.set("crypto_uuid", uuid_fn)?;
+
+    // crypto_verify_jwt(token, optsJson?) -> JSON string
+    //   { valid, claims?, error? }. The JWKS fetch honors the function's network
+    //   policy; the token and claims are never logged.
+    let api_verify = api.clone();
+    let verify_fn = Function::new(
+        ctx.clone(),
+        move |token: String, opts_json: Option<String>| {
+            let api = api_verify.clone();
+            let opts = opts_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let result =
+                run_async_blocking(async move { api.crypto_verify_jwt(&token, opts).await });
+            match result {
+                Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()),
+                Err(e) => {
+                    // Log only the error; never the token or claims.
+                    tracing::error!(error = %e, "crypto_verify_jwt failed");
+                    json_error(&e)
+                }
+            }
+        },
+    )?;
+    internal.set("crypto_verify_jwt", verify_fn)?;
 
     Ok(())
 }

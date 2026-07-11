@@ -9,6 +9,7 @@ import { syncPackage } from './commands/sync.js';
 import { clonePackage } from './commands/clone.js';
 import { createFromServer } from './commands/create-from-server.js';
 import { initPackage } from './commands/init.js';
+import { createAdapter } from './commands/create.js';
 import { deployPackage } from './commands/deploy.js';
 import { serverInstall, serverStart, serverVersion, serverUpdate, serverStop, serverStatus, serverLogs } from './commands/server.js';
 import { flowDoctor, flowExplain } from './commands/flow.js';
@@ -200,6 +201,28 @@ packageCmd
   .action(async (folder, options) => {
     try {
       await deployPackage(folder, options);
+      process.exit(0);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+// Scaffolding commands (offline). Grouped under the `create` verb so new
+// generators can be added as subcommands (e.g. `raisindb create adapter`).
+const createCmd = program
+  .command('create')
+  .description('Scaffold new RaisinDB artifacts');
+
+createCmd
+  .command('adapter <name>')
+  .description('Scaffold a connector-adapter package skeleton')
+  .option('-d, --dir <path>', 'Target directory (default: ./<name>-adapter)')
+  .option('-p, --provider <slug>', 'Provider type slug (default: <name>)')
+  .option('--description <text>', 'Package description')
+  .action(async (name, options) => {
+    try {
+      await createAdapter(name, options);
       process.exit(0);
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));

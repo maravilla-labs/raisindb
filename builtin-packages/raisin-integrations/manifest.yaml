@@ -1,0 +1,45 @@
+name: raisin-integrations
+version: 1.0.0
+title: Integration Support
+description: >
+  Provider-agnostic support functions for virtual mounts (connectors). Ships the
+  webhook-refresh function that a provider webhook (a raisin:Trigger with a
+  nanoid webhook_id) points at to enqueue an on-demand "sync now" for a mount.
+author: RaisinDB Team
+license: BSL-1.1
+icon: refresh-cw
+color: "#1a73e8"
+keywords:
+  - integration
+  - connector
+  - virtual-nodes
+  - sync
+  - webhook
+
+# Discovery contract for the admin console's Integrations gallery.
+category: integrations
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  functions:
+    - /lib/raisin/integrations/webhook-refresh
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    - root: /lib/raisin/integrations/webhook-refresh
+      include:
+        - "**"
+      mode: merge
+
+# Workspace configuration for auto-created folders
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder

@@ -43,6 +43,7 @@ pub struct RaisinFunctionApiCallbacks {
     pub function_execute: Option<FunctionExecuteCallback>,
     pub function_call: Option<FunctionCallCallback>,
     pub flow_run: Option<FlowRunCallback>,
+    pub integrations_sync_now: Option<IntegrationsSyncNowCallback>,
     // Transaction callbacks
     pub tx_begin: Option<TxBeginCallback>,
     pub tx_commit: Option<TxCommitCallback>,
@@ -227,6 +228,11 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_flow_run(mut self, callback: FlowRunCallback) -> Self {
         self.flow_run = Some(callback);
+        self
+    }
+
+    pub fn with_integrations_sync_now(mut self, callback: IntegrationsSyncNowCallback) -> Self {
+        self.integrations_sync_now = Some(callback);
         self
     }
 

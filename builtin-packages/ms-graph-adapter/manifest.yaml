@@ -1,0 +1,80 @@
+name: ms-graph-adapter
+version: 1.0.0
+title: Microsoft 365 Adapter (Preview)
+description: >
+  EXPERIMENTAL virtual-node adapter for Microsoft 365 over Microsoft Graph v1.0.
+  Mount an Outlook mail folder or a calendar into a workspace path and RaisinDB
+  keeps it in sync — messages become message-ish raisin:Node nodes and events
+  become raisin:Event nodes. Ships the Graph adapter function, a mail mapper and a
+  calendar mapper, and a pre-configured (disabled) raisin:Integration template you
+  complete with your own Microsoft Entra (Azure AD) OAuth app in the admin console.
+author: RaisinDB Team
+license: BSL-1.1
+icon: mail
+color: "#0078d4"
+keywords:
+  - microsoft-365
+  - microsoft-graph
+  - outlook
+  - calendar
+  - email
+  - integration
+  - virtual-nodes
+  - sync
+  - adapter
+  - experimental
+# Discovery contract for the admin console's Integrations gallery.
+category: integrations
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  functions:
+    - /adapters/ms-graph
+    - /mappers/ms-graph-mail
+    - /mappers/ms-graph-calendar
+    - /mappers/ms-graph-files
+  # Pre-configured integration template (disabled until credentials are supplied).
+  content:
+    - raisin:system/integrations/ms-graph
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Adapter + mapper functions
+    - root: /adapters/ms-graph
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/ms-graph-mail
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/ms-graph-calendar
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/ms-graph-files
+      include:
+        - "**"
+      mode: merge
+
+    # Integration template in the system workspace
+    - root: /integrations/ms-graph
+      workspace: raisin:system
+      include:
+        - "**"
+      mode: merge
+
+# Workspace configuration for auto-created folders
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+  raisin:system:
+    default_folder_type: raisin:Folder

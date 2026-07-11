@@ -71,7 +71,11 @@ pub struct ToolDescriptor {
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
     /// JSON Schema describing the tool's structured result, when known.
-    #[serde(rename = "outputSchema", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "outputSchema",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub output_schema: Option<Value>,
     /// Scopes a caller must hold to invoke this tool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -111,7 +115,11 @@ impl ToolDescriptor {
     }
 
     /// Build a no-argument data-tool descriptor.
-    pub fn no_args(name: impl Into<String>, description: impl Into<String>, kind: ToolKind) -> Self {
+    pub fn no_args(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        kind: ToolKind,
+    ) -> Self {
         Self::new(
             name,
             description,

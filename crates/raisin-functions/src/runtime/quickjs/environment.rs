@@ -19,6 +19,8 @@ use crate::types::LogEntry;
 
 use super::api_admin::register_admin_internal;
 use super::api_fetch::register_fetch_internal;
+use super::api_imap::register_imap_internal;
+use super::api_integrations::register_integrations_internal;
 use super::api_locks::register_locks_internal;
 use super::api_misc::{
     register_ai_internal, register_crypto_internal, register_events_internal,
@@ -118,7 +120,9 @@ fn setup_raisin_api<'js>(
     register_transaction_internal(ctx, &internal, api.clone())?;
     register_admin_internal(ctx, &internal, api.clone())?;
     register_locks_internal(ctx, &internal, api.clone())?;
-    register_crypto_internal(ctx, &internal)?;
+    register_integrations_internal(ctx, &internal, api.clone())?;
+    register_imap_internal(ctx, &internal, api.clone())?;
+    register_crypto_internal(ctx, &internal, api.clone())?;
 
     // Register W3C Fetch API internal functions
     register_fetch_internal(ctx, &internal, api.clone(), abort_registry, stream_registry)?;

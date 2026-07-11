@@ -460,7 +460,19 @@ globalThis.raisin = {
         create: (request) => JSON.parse(__raisin_internal.task_create(JSON.stringify(request)))
     },
     crypto: {
-        uuid: () => __raisin_internal.crypto_uuid()
+        uuid: () => __raisin_internal.crypto_uuid(),
+        // verifyJwt(token, opts?) -> { valid, claims?, error? }
+        // opts: { jwks_url?, issuer?, audience?, algorithms? }. The JWKS is
+        // fetched from jwks_url whose host must be authorized by the function's
+        // network policy (else the call is refused before any socket is opened).
+        // An invalid token resolves to { valid:false, error }; a policy denial or
+        // unreachable JWKS throws. The token and claims are never logged.
+        verifyJwt: (token, opts) => {
+            const r = JSON.parse(__raisin_internal.crypto_verify_jwt(
+                token, opts === undefined ? null : JSON.stringify(opts)));
+            if (r && r.error && r.valid === undefined) throw new Error(r.error);
+            return r;
+        }
     },
     // Atomic lease-locks (mutual exclusion with fencing tokens).
     // Requires the [locks] subsystem to be enabled in server config, else throws.
@@ -488,6 +500,59 @@ globalThis.raisin = {
         },
         // release(pool, n) -> number (new remaining count)
         release: (pool, n) => __raisin_internal.inventory_release(pool, n),
+    },
+    // Integration / mount ("connector") operations.
+    integrations: {
+        // sync_now(mountId, mode?) -> { job_id: string|null, status: "queued"|"already_running" }
+        // Enqueues a deduped VirtualMountSync for the mount. `mode` defaults to
+        // "delta" (pass "full" for a full re-sync). This is what a provider
+        // webhook-refresh function calls to pull external changes on demand.
+        sync_now: (mountId, mode) => {
+            const r = JSON.parse(__raisin_internal.integrations_sync_now(mountId, mode === undefined ? null : mode));
+            if (r && r.error) throw new Error(r.error);
+            return r;
+        },
+        // camelCase alias for consistency with other raisin.* namespaces.
+        syncNow: (mountId, mode) => {
+            const r = JSON.parse(__raisin_internal.integrations_sync_now(mountId, mode === undefined ? null : mode));
+            if (r && r.error) throw new Error(r.error);
+            return r;
+        },
+    },
+    // Native IMAP protocol operations (raisin.imap.*).
+    // `conn` = { host, port, tls: true, username, password }. The password may
+    // be an app password or an OAuth2 XOAUTH2 access token; it is never logged.
+    // The connection's host:port must be authorized by the function's network
+    // policy (e.g. allowed_urls: ["imaps://imap.example.org:993"]) or the call
+    // is refused before any socket is opened.
+    imap: {
+        // fetchSince(conn, sinceUid, opts?) -> { messages, highestUid, uidvalidity }
+        // opts: { mailbox?: string ("INBOX"), limit?: number (200, capped) }.
+        // Only messages with UID > sinceUid are returned. `highestUid` is the
+        // new cursor (unchanged when nothing is new); a changed `uidvalidity`
+        // means the mailbox reset and the caller must full-resync.
+        fetchSince: (conn, sinceUid, opts) => {
+            const r = JSON.parse(__raisin_internal.imap_fetch_since(
+                JSON.stringify(conn), sinceUid,
+                opts === undefined ? null : JSON.stringify(opts)));
+            if (r && r.error) throw new Error(r.error);
+            return r;
+        },
+        // listMailboxes(conn) -> [ { name, path, flags } ]
+        listMailboxes: (conn) => {
+            const r = JSON.parse(__raisin_internal.imap_list_mailboxes(JSON.stringify(conn)));
+            if (r && r.error) throw new Error(r.error);
+            return r;
+        },
+        // fetchMessage(conn, uid, opts?) -> { headers, from, to, subject, date,
+        //   text, html?, snippet, flags, message_id }. opts: { mailbox?: string }.
+        fetchMessage: (conn, uid, opts) => {
+            const r = JSON.parse(__raisin_internal.imap_fetch_message(
+                JSON.stringify(conn), uid,
+                opts === undefined ? null : JSON.stringify(opts)));
+            if (r && r.error) throw new Error(r.error);
+            return r;
+        },
     },
     pdf: {
         // Extract text from PDF - base64Data is the PDF content

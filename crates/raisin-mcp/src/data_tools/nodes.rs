@@ -232,7 +232,9 @@ impl Tool for UpdateNodeTool {
             .get("properties")
             .filter(|v| v.is_object())
             .cloned()
-            .ok_or_else(|| McpError::invalid_params("missing required object field `properties`"))?;
+            .ok_or_else(|| {
+                McpError::invalid_params("missing required object field `properties`")
+            })?;
 
         let data = json!({ "properties": properties });
         let updated = self

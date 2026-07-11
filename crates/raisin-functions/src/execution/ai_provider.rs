@@ -311,15 +311,9 @@ fn create_provider_instance(
 }
 
 /// Gets the master encryption key from environment variable.
+///
+/// Delegates to the shared loader, which reads `RAISIN_MASTER_KEY` only and
+/// hard-errors if it is missing/invalid (no fallback).
 fn get_master_key() -> Result<[u8; 32], raisin_error::Error> {
-    let hex = std::env::var("RAISIN_MASTER_KEY").map_err(|_| {
-        raisin_error::Error::Backend("RAISIN_MASTER_KEY environment variable not set".to_string())
-    })?;
-
-    let bytes = hex::decode(&hex)
-        .map_err(|e| raisin_error::Error::Backend(format!("Invalid RAISIN_MASTER_KEY: {}", e)))?;
-
-    bytes
-        .try_into()
-        .map_err(|_| raisin_error::Error::Backend("RAISIN_MASTER_KEY must be 32 bytes".to_string()))
+    raisin_crypto::master_key()
 }

@@ -79,6 +79,8 @@ pub use jobs::{
     dispatcher::JobDispatcher,
     // Flow job scheduler
     flow_scheduler::get_flow_job_scheduler,
+    // Integration token-refresh dedup-key derivation (periodic driver)
+    token_refresh_dedup_key,
     // Package installation callback types
     BinaryRetrievalCallback,
     BinaryStorageCallback,

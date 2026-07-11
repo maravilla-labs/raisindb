@@ -707,6 +707,7 @@ async fn test_lazy_index_trigger_after_catchup() {
             None,                                                  // flow_function_executor
             None,                                                  // flow_children_lister
             None,                                                  // ai_tool_call_node_creator
+            None,                                                  // lock_manager
             test_runtimes,                                         // per-category runtimes
             raisin_rocksdb::config::JobPoolsConfig::development(), // pools config
         )

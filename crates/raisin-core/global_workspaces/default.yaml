@@ -4,6 +4,7 @@ allowed_node_types:
   - raisin:Folder
   - raisin:Page
   - raisin:Asset
+  - raisin:Event
   - raisin:Node
 allowed_root_node_types:
   - raisin:Folder

@@ -239,7 +239,7 @@ fn test_property_filter_comparison_operators() {
 
     let mut props = HashMap::new();
     props.insert("count".to_string(), PropertyValue::Integer(50));
-    props.insert("score".to_string(), PropertyValue::Float(3.14));
+    props.insert("score".to_string(), PropertyValue::Float(3.25));
     props.insert(
         "status".to_string(),
         PropertyValue::String("active".to_string()),

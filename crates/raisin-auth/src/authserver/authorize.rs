@@ -130,8 +130,7 @@ pub fn validate_authorization_request(
 
     // Scope: must be a subset of what the client registered (when restricted).
     let requested_scopes = req.scope.as_deref().map(parse_scope).unwrap_or_default();
-    if let Err(bad) =
-        check_requested_against_client(&requested_scopes, &client.registered_scopes())
+    if let Err(bad) = check_requested_against_client(&requested_scopes, &client.registered_scopes())
     {
         return Err(AuthServerError::InvalidScope(format!(
             "scope '{bad}' is not permitted for this client"

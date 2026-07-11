@@ -25,8 +25,8 @@ use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
 use crate::protocol::{
     CallToolParams, CallToolResult, ContentBlock, InitializeResult, ListResourcesResult,
-    ListToolsResult, ReadResourceParams, ReadResourceResult, ResourcesCapability, ServerCapabilities,
-    ServerInfo, SubscribeResourceParams, ToolsCapability, PROTOCOL_VERSION,
+    ListToolsResult, ReadResourceParams, ReadResourceResult, ResourcesCapability,
+    ServerCapabilities, ServerInfo, SubscribeResourceParams, ToolsCapability, PROTOCOL_VERSION,
 };
 use crate::registry::ToolRegistry;
 use crate::resources::NodeResourceProvider;
@@ -88,7 +88,11 @@ impl Dispatcher {
     /// (without the JSON-RPC envelope).
     ///
     /// Enforces the server-level scope gate first, then routes the method.
-    pub async fn handle(&self, identity: &McpIdentity, request: &crate::protocol::JsonRpcRequest) -> Result<Value> {
+    pub async fn handle(
+        &self,
+        identity: &McpIdentity,
+        request: &crate::protocol::JsonRpcRequest,
+    ) -> Result<Value> {
         self.authorize_session(identity)?;
 
         match request.method.as_str() {

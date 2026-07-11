@@ -566,4 +566,109 @@ impl FunctionApi for MockFunctionApi {
         let remaining = self.locks.release_claim(pool, n.max(0) as u64).await?;
         Ok(remaining as i64)
     }
+
+    async fn integrations_sync_now(&self, _mount_id: &str, _mode: Option<&str>) -> Result<Value> {
+        // No job queue in the mock: report the request as freshly queued with a
+        // null job id, matching the real "already deduped" shape.
+        Ok(serde_json::json!({ "job_id": Value::Null, "status": "queued" }))
+    }
+
+    // ========== IMAP (deterministic in-memory fixtures) ==========
+
+    async fn imap_fetch_since(
+        &self,
+        _conn: Value,
+        since_uid: i64,
+        opts: Option<Value>,
+    ) -> Result<Value> {
+        let since = since_uid.max(0) as u32;
+        let limit = opts
+            .as_ref()
+            .and_then(|o| o.get("limit"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(200);
+
+        // Two fixed messages so downstream + wrapper tests are deterministic.
+        let all = mock_imap_messages();
+
+        let mut messages: Vec<Value> = all
+            .into_iter()
+            .filter(|(uid, _, _)| *uid > since)
+            .map(|(uid, from, subject)| {
+                serde_json::json!({
+                    "uid": uid,
+                    "headers": { "from": from, "subject": subject },
+                    "from": from,
+                    "to": "inbox@example.org",
+                    "subject": subject,
+                    "date": "Mon, 01 Jan 2024 00:00:00 +0000",
+                    "snippet": "",
+                    "flags": ["\\Seen"],
+                    "message_id": format!("<{uid}@mock.example.org>"),
+                })
+            })
+            .collect();
+        if messages.len() > limit {
+            messages.truncate(limit);
+        }
+
+        // Never emit a null cursor: when nothing is new, echo the input cursor.
+        let highest = messages
+            .iter()
+            .filter_map(|m| m.get("uid").and_then(|v| v.as_u64()))
+            .map(|u| u as u32)
+            .max()
+            .unwrap_or(since);
+
+        Ok(serde_json::json!({
+            "messages": messages,
+            "highestUid": highest,
+            "uidvalidity": 1u32,
+        }))
+    }
+
+    async fn imap_list_mailboxes(&self, _conn: Value) -> Result<Value> {
+        Ok(serde_json::json!([
+            { "name": "INBOX", "path": "INBOX", "flags": ["\\HasNoChildren"] },
+            { "name": "Sent", "path": "Sent", "flags": ["\\HasNoChildren"] },
+        ]))
+    }
+
+    async fn imap_fetch_message(
+        &self,
+        _conn: Value,
+        uid: i64,
+        _opts: Option<Value>,
+    ) -> Result<Value> {
+        let uid = uid.max(0) as u32;
+        Ok(serde_json::json!({
+            "uid": uid,
+            "headers": { "subject": format!("Mock message {uid}") },
+            "from": "alice@example.org",
+            "to": "inbox@example.org",
+            "subject": format!("Mock message {uid}"),
+            "date": "Mon, 01 Jan 2024 00:00:00 +0000",
+            "text": format!("Body of message {uid}."),
+            "snippet": format!("Body of message {uid}."),
+            "flags": ["\\Seen"],
+            "message_id": format!("<{uid}@mock.example.org>"),
+        }))
+    }
+
+    // ========== Crypto (deterministic) ==========
+
+    async fn crypto_verify_jwt(&self, _token: &str, _opts: Value) -> Result<Value> {
+        // Deterministic success so round-trip/wrapper tests don't need a real
+        // JWKS or network. Real verification lives in `runtime::crypto`.
+        Ok(serde_json::json!({ "valid": true, "claims": {} }))
+    }
+}
+
+/// Deterministic mock mailbox: `(uid, from, subject)` tuples.
+fn mock_imap_messages() -> Vec<(u32, &'static str, &'static str)> {
+    vec![
+        (101, "alice@example.org", "Mock One"),
+        (102, "bob@example.org", "Mock Two"),
+    ]
 }

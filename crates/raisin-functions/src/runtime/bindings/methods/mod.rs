@@ -17,6 +17,8 @@ pub mod events;
 pub mod flows;
 pub mod functions;
 pub mod http;
+pub mod imap;
+pub mod integrations;
 pub mod locks;
 pub mod nodes;
 pub mod notify;
@@ -43,6 +45,8 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(flows::methods());
     methods.extend(notify::methods());
     methods.extend(locks::methods());
+    methods.extend(integrations::methods());
+    methods.extend(imap::methods());
 
     // Resource operations
     methods.extend(resources::methods());
@@ -278,6 +282,14 @@ mod tests {
             "lock_renew",
             "inventory_claim",
             "inventory_release",
+            // Integration / mount operations (1)
+            "integrations_sync_now",
+            // IMAP operations (3)
+            "imap_fetch_since",
+            "imap_list_mailboxes",
+            "imap_fetch_message",
+            // Crypto operations (1)
+            "crypto_verify_jwt",
         ];
 
         let reg = build_registry();

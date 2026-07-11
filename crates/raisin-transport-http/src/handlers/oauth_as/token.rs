@@ -16,9 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form, Json};
 use serde::Deserialize;
 
-use raisin_auth::authserver::{
-    AuthServerError, AuthorizationCodeTokenRequest, TokenResponse,
-};
+use raisin_auth::authserver::{AuthServerError, AuthorizationCodeTokenRequest, TokenResponse};
 
 use super::helpers::oauth_error_response;
 use crate::middleware::TenantInfo;
@@ -142,9 +140,7 @@ fn resolve_client_credentials(
 ///
 /// Returns `Ok(None)` when no Basic header is present, and an error when the
 /// header is present but malformed.
-fn parse_basic_auth(
-    headers: &HeaderMap,
-) -> Result<Option<(String, String)>, AuthServerError> {
+fn parse_basic_auth(headers: &HeaderMap) -> Result<Option<(String, String)>, AuthServerError> {
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     let Some(value) = headers
@@ -161,8 +157,9 @@ fn parse_basic_auth(
     let decoded = STANDARD
         .decode(b64.trim())
         .map_err(|_| AuthServerError::InvalidClient("malformed Basic credentials".to_string()))?;
-    let text = String::from_utf8(decoded)
-        .map_err(|_| AuthServerError::InvalidClient("Basic credentials are not UTF-8".to_string()))?;
+    let text = String::from_utf8(decoded).map_err(|_| {
+        AuthServerError::InvalidClient("Basic credentials are not UTF-8".to_string())
+    })?;
     let (id, secret) = text.split_once(':').ok_or_else(|| {
         AuthServerError::InvalidClient("Basic credentials must be id:secret".to_string())
     })?;
@@ -179,10 +176,7 @@ mod tests {
     fn parses_basic_auth_header() {
         let mut headers = HeaderMap::new();
         let creds = STANDARD.encode("client-1:s3cr3t");
-        headers.insert(
-            AUTHORIZATION,
-            format!("Basic {creds}").parse().unwrap(),
-        );
+        headers.insert(AUTHORIZATION, format!("Basic {creds}").parse().unwrap());
         let parsed = parse_basic_auth(&headers).unwrap().unwrap();
         assert_eq!(parsed, ("client-1".to_string(), "s3cr3t".to_string()));
     }

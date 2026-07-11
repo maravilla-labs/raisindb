@@ -1,0 +1,115 @@
+name: raisin:Event
+description: Calendar event synced from an external calendar connector (experimental)
+icon: calendar
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Event title / summary
+
+  - name: start
+    type: String
+    required: false
+    title: Start
+    description: Event start time (ISO 8601)
+    index: [Property]
+
+  - name: end
+    type: String
+    required: false
+    title: End
+    description: Event end time (ISO 8601)
+    index: [Property]
+
+  - name: all_day
+    type: Boolean
+    required: false
+    title: All Day
+    description: Whether the event spans the whole day
+    default: false
+
+  - name: location
+    type: String
+    required: false
+    title: Location
+    description: Event location
+
+  - name: attendees
+    type: Array
+    required: false
+    title: Attendees
+    description: List of attendees
+
+  - name: organizer
+    type: String
+    required: false
+    title: Organizer
+    description: Event organizer
+
+  - name: recurrence
+    type: String
+    required: false
+    title: Recurrence
+    description: Recurrence rule (RRULE)
+
+  - name: status
+    type: String
+    required: false
+    title: Status
+    description: Event status (confirmed, tentative, cancelled, ...)
+
+  - name: url
+    type: String
+    required: false
+    title: URL
+    description: Link to the event in the source calendar
+
+  - name: calendar_id
+    type: String
+    required: false
+    title: Calendar ID
+    description: Identifier of the source calendar
+
+  # Reserved virtual-metadata properties written by the mount materializer.
+  # A strict type MUST declare these or synced writes are rejected.
+  - name: __virtual
+    type: Boolean
+    required: false
+    title: Virtual
+    description: Marks a mount-managed node (engine-owned)
+
+  - name: __mount_id
+    type: String
+    required: false
+    title: Mount ID
+    description: Owning mount node id (engine-owned)
+    index: [Property]
+
+  - name: __external_id
+    type: String
+    required: false
+    title: External ID
+    description: Provider item id, the stable upsert-match key (engine-owned)
+    index: [Property]
+
+  - name: __etag
+    type: String
+    required: false
+    title: Etag
+    description: Provider change token at last sync (engine-owned)
+
+  - name: __synced_at
+    type: String
+    required: false
+    title: Synced At
+    description: ISO 8601 timestamp of the last sync write (engine-owned)
+
+allowed_children: []
+versionable: false
+publishable: false
+auditable: false

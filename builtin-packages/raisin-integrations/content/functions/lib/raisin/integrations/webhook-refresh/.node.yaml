@@ -1,0 +1,44 @@
+node_type: raisin:Function
+properties:
+  title: Integration Webhook Refresh
+  description: >
+    Provider-agnostic webhook target for virtual mounts (connectors). A
+    raisin:Trigger with a nanoid webhook_id points here; on each provider
+    notification it resolves the mount id and enqueues a deduped "sync now"
+    (VirtualMountSync) so external changes are pulled on demand.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Sync
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 10000
+    max_memory_bytes: 33554432
+  input_schema:
+    type: object
+    description: >
+      HTTP trigger envelope. The mount id is read from http.query.mount_id,
+      http.body.mount_id, http.params.mount_id, or a top-level mount_id.
+    properties:
+      http:
+        type: object
+        description: HTTP request context { method, path, params, query, headers, body }
+      mount_id:
+        type: string
+        description: Target mount id (when invoked outside the HTTP envelope)
+  output_schema:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      mount_id:
+        type: string
+      job_id:
+        type: [string, "null"]
+        description: Enqueued sync job id, or null when an in-flight sync deduped it
+      status:
+        type: string
+        description: queued | already_running
+      reason:
+        type: string
+        description: Present when ok is false (e.g. no mount_id resolved)

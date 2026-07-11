@@ -15,6 +15,8 @@ import QueryBuilder from '../components/QueryBuilder'
 import LanguageSwitcher from '../components/LanguageSwitcher'
 import { useRepositoryContext } from '../hooks/useRepositoryContext'
 import { nodesApi, Node as NodeType } from '../api/nodes'
+import { integrationsApi } from '../api/integrations'
+import VirtualNodeBadge, { virtualMountId } from '../components/VirtualNodeBadge'
 import { branchesApi, BranchDivergence, Branch } from '../api/branches'
 import { repositoriesApi } from '../api/repositories'
 import MergeBranchDialog from '../components/MergeBranchDialog'
@@ -54,6 +56,8 @@ export default function ContentExplorer() {
   const [currentBranchInfo, setCurrentBranchInfo] = useState<Branch | null>(null)
   const [showMergeDialog, setShowMergeDialog] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null)
+  // Mount ids whose writeback is off — their virtual nodes render as read-only.
+  const [readOnlyMountIds, setReadOnlyMountIds] = useState<Set<string>>(new Set())
   const { toasts, error: showError, closeToast } = useToast()
 
   // Read revision from URL query params (keep as string, don't parse to number)
@@ -86,6 +90,27 @@ export default function ContentExplorer() {
     setCurrentLocale(locale)
     // The useEffect above will automatically reload nodes when currentLocale changes
   }
+
+  // Load virtual mounts once per repo to know which are read-only (writeback off).
+  useEffect(() => {
+    async function loadMounts() {
+      if (!repo) return
+      try {
+        const mounts = await integrationsApi.listMounts(repo)
+        const readOnly = new Set<string>()
+        for (const m of mounts) {
+          if (m.id && (m.write_config?.writeback || 'off') !== 'write_through') {
+            readOnly.add(m.id)
+          }
+        }
+        setReadOnlyMountIds(readOnly)
+      } catch {
+        // Non-fatal: badges simply won't show a read-only hint.
+        setReadOnlyMountIds(new Set())
+      }
+    }
+    loadMounts()
+  }, [repo])
 
   // Fetch repository config to get the default (main) branch
   useEffect(() => {
@@ -779,7 +804,16 @@ export default function ContentExplorer() {
                           onClick={() => handleNodeClick(node)}
                           className="p-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg cursor-pointer transition-colors"
                         >
-                          <div className="font-medium text-white text-sm">{node.name}</div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-white text-sm">{node.name}</span>
+                            <VirtualNodeBadge
+                              node={node}
+                              readOnly={(() => {
+                                const mid = virtualMountId(node)
+                                return !!mid && readOnlyMountIds.has(mid)
+                              })()}
+                            />
+                          </div>
                           <div className="text-xs text-gray-400 mt-1">{node.path}</div>
                           <div className="text-xs text-primary-400 mt-1">{node.node_type}</div>
                         </div>
@@ -792,6 +826,7 @@ export default function ContentExplorer() {
                       nodes={nodes}
                       expandedNodes={expandedNodes}
                       selectedNodeId={selectedNode?.id}
+                      readOnlyMountIds={readOnlyMountIds}
                       onNodeClick={handleNodeClick}
                       onNodeExpand={handleNodeExpand}
                       onEdit={(node) => {

@@ -117,10 +117,7 @@ impl AuthServerError {
     /// client or an unregistered redirect URI) MUST be shown directly to the
     /// resource owner rather than redirected (RFC 6749 §4.1.2.1).
     pub fn is_redirectable(&self) -> bool {
-        !matches!(
-            self,
-            Self::InvalidClient(_) | Self::InvalidRedirectUri(_)
-        )
+        !matches!(self, Self::InvalidClient(_) | Self::InvalidRedirectUri(_))
     }
 
     /// Render this error as the RFC 6749 §5.2 JSON body.

@@ -242,6 +242,27 @@ pub enum JobType {
     UploadSessionCleanup {
         upload_id: String,
     },
+    /// Periodic scan: find due virtual mounts and enqueue per-mount sync jobs
+    /// (mirrors `ScheduledTriggerCheck`).
+    VirtualMountSyncCheck {
+        tenant_id: Option<String>,
+        repo_id: Option<String>,
+    },
+    /// Sync a single virtual mount. `mode` is "delta" or "full".
+    VirtualMountSync {
+        mount_id: String,
+        mode: String,
+    },
+    /// Refresh expiring OAuth tokens across all integrations.
+    IntegrationTokenRefresh {
+        tenant_id: Option<String>,
+    },
+    /// Periodic scan: renew push/webhook subscriptions on virtual mounts whose
+    /// provider subscription is close to expiring (mirrors
+    /// `IntegrationTokenRefresh`).
+    VirtualMountSubscriptionRenew {
+        tenant_id: Option<String>,
+    },
     Custom(String),
 }
 
@@ -264,6 +285,11 @@ impl JobType {
             JobType::NodeDeleteCleanup { .. } => 120,
             JobType::RetargetReferences { .. } => 120,
             JobType::UploadSessionCleanup { .. } => 120,
+            JobType::VirtualMountSyncCheck { .. } => 60,
+            JobType::IntegrationTokenRefresh { .. } => 60,
+            JobType::VirtualMountSubscriptionRenew { .. } => 120,
+            // Long-running: syncing one mount can page through many remote items
+            JobType::VirtualMountSync { .. } => 600,
             // Function/AI execution — can involve AI API calls (10-30s each)
             JobType::FunctionExecution { .. } => 300,
             JobType::AIToolCallExecution { .. } => 300,

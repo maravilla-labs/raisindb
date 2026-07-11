@@ -29,8 +29,8 @@ pub(crate) fn oauth_routes(state: &AppState) -> Router<AppState> {
 
     #[cfg(feature = "storage-rocksdb")]
     {
-        use axum::routing::{get, post};
         use crate::handlers::oauth_as;
+        use axum::routing::{get, post};
 
         Router::new()
             .route(

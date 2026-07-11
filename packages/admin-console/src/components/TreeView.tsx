@@ -1,5 +1,6 @@
 import { ChevronRight, ChevronDown, Folder, FileText, Package, User, Calendar, Settings, Tag, Layout, Database } from 'lucide-react'
 import ContextMenu from './ContextMenu'
+import VirtualNodeBadge, { virtualMountId } from './VirtualNodeBadge'
 import type { Node } from '../api/nodes'
 
 interface TreeViewProps {
@@ -16,6 +17,8 @@ interface TreeViewProps {
   onDelete?: (node: Node) => void
   onCreateRoot?: () => void
   selectedNodeId?: string
+  /** Mount ids whose writeback is off — virtual nodes under them are read-only. */
+  readOnlyMountIds?: Set<string>
 }
 
 interface TreeNodeProps {
@@ -23,6 +26,7 @@ interface TreeNodeProps {
   level: number
   expandedNodes?: Set<string>
   selectedNodeId?: string
+  readOnlyMountIds?: Set<string>
   onNodeClick?: (node: Node) => void
   onNodeExpand?: (node: Node) => void
   onEdit?: (node: Node) => void
@@ -36,10 +40,12 @@ interface TreeNodeProps {
 }
 
 function TreeNode({
-  node, level, expandedNodes, selectedNodeId,
+  node, level, expandedNodes, selectedNodeId, readOnlyMountIds,
   onNodeClick, onNodeExpand, onEdit, onAddChild, onCopy, onMove, onPublish, onUnpublish, onDelete,
   isSelected
 }: TreeNodeProps) {
+  const mountId = virtualMountId(node)
+  const isReadOnly = !!mountId && !!readOnlyMountIds?.has(mountId)
   const isExpanded = expandedNodes?.has(node.id) || false
 
   // Use server-provided has_children when available, fall back to checking children array
@@ -107,6 +113,8 @@ function TreeNode({
 
         <span className="flex-1 truncate font-medium">{node.name}</span>
 
+        <VirtualNodeBadge node={node} readOnly={isReadOnly} />
+
         <span className="text-xs text-zinc-500">{node.node_type}</span>
 
         <div className="opacity-0 group-hover:opacity-100 transition-opacity">
@@ -132,6 +140,7 @@ function TreeNode({
               level={level + 1}
               expandedNodes={expandedNodes}
               selectedNodeId={selectedNodeId}
+              readOnlyMountIds={readOnlyMountIds}
               onNodeClick={onNodeClick}
               onNodeExpand={onNodeExpand}
               onEdit={onEdit}
@@ -153,7 +162,7 @@ function TreeNode({
 export default function TreeView({
   nodes, expandedNodes, onNodeClick, onNodeExpand,
   onEdit, onAddChild, onCopy, onMove, onPublish, onUnpublish, onDelete,
-  onCreateRoot, selectedNodeId
+  onCreateRoot, selectedNodeId, readOnlyMountIds
 }: TreeViewProps) {
   if (nodes.length === 0) {
     return (
@@ -182,6 +191,7 @@ export default function TreeView({
           level={0}
           expandedNodes={expandedNodes}
           selectedNodeId={selectedNodeId}
+          readOnlyMountIds={readOnlyMountIds}
           onNodeClick={onNodeClick}
           onNodeExpand={onNodeExpand}
           onEdit={onEdit}

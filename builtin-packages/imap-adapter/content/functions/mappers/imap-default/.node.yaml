@@ -1,0 +1,38 @@
+node_type: raisin:Function
+properties:
+  title: IMAP Default Mapper
+  description: >
+    Default mapping function for IMAP mounts. Maps mailboxes to
+    raisin:Folder and messages to raisin:Node (subject, from, to, date, snippet,
+    message_id, unread flag), carrying provider metadata through. Pure and
+    side-effect-free: called once per external item in the sync hot loop;
+    performs no I/O.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Async
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    required:
+      - external_item
+    properties:
+      external_item:
+        type: object
+        description: The normalized ExternalItem to map
+      mount:
+        type: object
+        description: Read-only mount snapshot { mount_id, mount_path, sync_config }
+  output_schema:
+    type: object
+    description: "{ node_type, name?, properties } or null to skip the item"
+    properties:
+      node_type:
+        type: string
+      name:
+        type: string
+      properties:
+        type: object

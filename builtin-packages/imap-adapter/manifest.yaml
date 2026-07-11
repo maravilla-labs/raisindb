@@ -1,0 +1,76 @@
+name: imap-adapter
+version: 1.1.0
+title: IMAP Mailbox Adapter
+description: >
+  Virtual-node adapter for IMAP mailboxes. Mount an inbox into a workspace path
+  and RaisinDB streams new messages in as ephemeral nodes that agents work and
+  that auto-expire. Speaks REAL IMAP (RFC 3501) over TLS via the native
+  raisin.imap binding — no JMAP proxy required. Ships the adapter function, a
+  default message mapper, and a pre-configured (disabled) raisin:Integration
+  template you complete with your own mailbox credentials in the admin console.
+author: RaisinDB Team
+license: BSL-1.1
+icon: mail
+color: "#d93025"
+keywords:
+  - imap
+  - tls
+  - email
+  - inbox
+  - integration
+  - virtual-nodes
+  - sync
+  - adapter
+  - ephemeral
+# Discovery contract for the admin console's Integrations gallery.
+category: integrations
+
+# Built-in package flag - auto-installed on repository creation
+builtin: true
+
+provides:
+  functions:
+    - /adapters/imap
+    - /mappers/imap-default
+  # Pre-configured integration template (disabled until credentials are supplied).
+  content:
+    - raisin:system/integrations/imap
+    # Experimental Gmail connector template (XOAUTH2 over IMAP), disabled.
+    - raisin:system/integrations/gmail
+
+# Sync configuration for package updates
+# Defines which paths this package owns to prevent conflicts with other packages
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # Adapter + mapper functions
+    - root: /adapters/imap
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/imap-default
+      include:
+        - "**"
+      mode: merge
+
+    # Integration templates in the system workspace
+    - root: /integrations/imap
+      workspace: raisin:system
+      include:
+        - "**"
+      mode: merge
+    - root: /integrations/gmail
+      workspace: raisin:system
+      include:
+        - "**"
+      mode: merge
+
+# Workspace configuration for auto-created folders
+workspace_patches:
+  functions:
+    default_folder_type: raisin:Folder
+  raisin:system:
+    default_folder_type: raisin:Folder

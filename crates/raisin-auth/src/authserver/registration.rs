@@ -245,8 +245,8 @@ mod tests {
     fn non_loopback_http_redirect_is_rejected() {
         let mut req = base_request();
         req.redirect_uris = vec!["http://evil.example.com/cb".to_string()];
-        let err = register_client("tenant-a", req, 1000)
-            .expect_err("non-loopback http must be rejected");
+        let err =
+            register_client("tenant-a", req, 1000).expect_err("non-loopback http must be rejected");
         assert_eq!(err.code(), "invalid_client_metadata");
     }
 

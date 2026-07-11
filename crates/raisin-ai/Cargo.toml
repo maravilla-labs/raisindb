@@ -42,6 +42,7 @@ futures = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 ring = "0.17"
+raisin-crypto = { path = "../raisin-crypto" }
 base64 = "0.22"
 regex = "1"
 once_cell = "1"

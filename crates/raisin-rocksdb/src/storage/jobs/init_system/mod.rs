@@ -15,6 +15,7 @@
 mod ai_handlers;
 mod flow_handlers;
 mod indexing_handlers;
+mod integration_handlers;
 mod package_handlers;
 mod replication_handlers;
 mod worker_setup;
@@ -72,6 +73,7 @@ impl RocksDBStorage {
         flow_function_executor: Option<FlowFunctionExecutorCallback>,
         flow_children_lister: Option<FlowChildrenListerCallback>,
         ai_tool_call_node_creator: Option<NodeCreatorCallback>,
+        lock_manager: Option<raisin_locks::LockManagerHandle>,
         runtimes: HashMap<JobCategory, tokio::runtime::Handle>,
         pools_config: JobPoolsConfig,
     ) -> Result<(Arc<RocksDBWorkerPool>, CancellationToken)> {
@@ -118,8 +120,9 @@ impl RocksDBStorage {
         let (copy_tree_handler, restore_tree_handler, revision_history_copy_handler) =
             flow_handlers::create_tree_handlers(&self, copy_tree_executor, restore_tree_executor);
 
-        // Clone function_executor for AI handler before consuming
+        // Clone function_executor for AI + virtual-mount handlers before consuming
         let function_executor_for_ai = function_executor.clone();
+        let function_executor_for_vmount = function_executor.clone();
 
         let function_execution_handler = flow_handlers::create_function_execution_handler(
             self.job_registry.clone(),
@@ -197,8 +200,7 @@ impl RocksDBStorage {
             );
 
         let node_delete_cleanup_handler = ai_handlers::create_node_delete_cleanup_handler(&self);
-        let retarget_references_handler =
-            ai_handlers::create_retarget_references_handler(&self);
+        let retarget_references_handler = ai_handlers::create_retarget_references_handler(&self);
         let relation_consistency_handler = ai_handlers::create_relation_consistency_handler(&self);
         let auth_create_user_node_handler =
             ai_handlers::create_auth_user_node_handler(self.clone());
@@ -214,6 +216,15 @@ impl RocksDBStorage {
         #[allow(deprecated)]
         let asset_processing_handler =
             ai_handlers::create_asset_processing_handler(self.clone(), binary_retrieval.as_ref());
+
+        let integration_token_refresh_handler =
+            integration_handlers::create_integration_token_refresh_handler(self.clone());
+
+        let virtual_mount_sync_handler = integration_handlers::create_virtual_mount_sync_handler(
+            self.clone(),
+            function_executor_for_vmount,
+            lock_manager,
+        );
 
         // --- Assemble handler registry ---
 
@@ -249,6 +260,8 @@ impl RocksDBStorage {
             upload_session_cleanup_handler,
             huggingface_model_handler,
             asset_processing_handler,
+            integration_token_refresh_handler,
+            virtual_mount_sync_handler,
         ));
 
         // --- Set up three-pool worker system ---

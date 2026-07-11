@@ -279,6 +279,7 @@ declare namespace raisin {
 
   namespace crypto {
     function uuid(): Promise<string>;
+    function verifyJwt(token: string, opts?: any | null): Promise<any>;
   }
 
   namespace date {
@@ -317,6 +318,16 @@ declare namespace raisin {
     function patch(url: string, options?: HttpOptions): Promise<HttpResponse>;
     /** HTTP DELETE */
     function delete(url: string, options?: HttpOptions): Promise<HttpResponse>;
+  }
+
+  namespace imap {
+    function fetchSince(conn: any, sinceUid: number, opts?: any | null): Promise<any>;
+    function listMailboxes(conn: any): Promise<any>;
+    function fetchMessage(conn: any, uid: number, opts?: any | null): Promise<any>;
+  }
+
+  namespace integrations {
+    function syncNow(mountId: string, mode?: string | null): Promise<any>;
   }
 
   namespace inventory {

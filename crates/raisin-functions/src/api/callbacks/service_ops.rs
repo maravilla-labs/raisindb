@@ -292,3 +292,19 @@ pub type FlowRunCallback = Arc<
         + Send
         + Sync,
 >;
+
+// ========== Integration / Mount Operation Callbacks ==========
+
+/// Callback for `raisin.integrations.sync_now(mountId, mode?)`.
+///
+/// Enqueues a one-shot `VirtualMountSync` job (deduped per mount via the
+/// `vmount-sync:{mount_id}` key) and returns
+/// `{ "job_id": String|null, "status": "queued"|"already_running" }`.
+pub type IntegrationsSyncNowCallback = Arc<
+    dyn Fn(
+            String,         // mount_id
+            Option<String>, // mode ("delta" | "full")
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;

@@ -22,6 +22,7 @@
 mod parse_admin;
 mod parse_functions;
 mod parse_indexing;
+mod parse_integrations;
 mod parse_jobs;
 mod parse_tree;
 
@@ -34,6 +35,7 @@ use parse_functions::{parse_ai_variants, parse_flow_variants, parse_function_var
 use parse_indexing::{
     parse_embedding_variants, parse_fulltext_variants, parse_index_build_variants,
 };
+use parse_integrations::parse_integration_variants;
 use parse_jobs::{
     parse_asset_processing, parse_bulk_sql, parse_huggingface_variants, parse_replication_variants,
 };
@@ -113,6 +115,9 @@ impl std::str::FromStr for JobType {
         if let Some(r) = parse_upload_variants(s)? {
             return Ok(r);
         }
+        if let Some(r) = parse_integration_variants(s)? {
+            return Ok(r);
+        }
         if let Some(r) = parse_custom(s)? {
             return Ok(r);
         }
@@ -124,5 +129,44 @@ impl TryFrom<String> for JobType {
     type Error = String;
     fn try_from(s: String) -> Result<Self, Self::Error> {
         s.parse()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobType;
+
+    fn round_trip(jt: JobType) {
+        let s: String = jt.clone().into();
+        let parsed: JobType = s.clone().try_into().expect("parse failed");
+        assert_eq!(jt, parsed, "round-trip mismatch via {s}");
+    }
+
+    #[test]
+    fn virtual_mount_and_integration_round_trip() {
+        round_trip(JobType::VirtualMountSyncCheck {
+            tenant_id: Some("acme".to_string()),
+            repo_id: Some("docs".to_string()),
+        });
+        round_trip(JobType::VirtualMountSyncCheck {
+            tenant_id: None,
+            repo_id: None,
+        });
+        round_trip(JobType::VirtualMountSync {
+            mount_id: "mount-123".to_string(),
+            mode: "delta".to_string(),
+        });
+        round_trip(JobType::VirtualMountSync {
+            mount_id: "mount-123".to_string(),
+            mode: "full".to_string(),
+        });
+        round_trip(JobType::IntegrationTokenRefresh {
+            tenant_id: Some("acme".to_string()),
+        });
+        round_trip(JobType::IntegrationTokenRefresh { tenant_id: None });
+        round_trip(JobType::VirtualMountSubscriptionRenew {
+            tenant_id: Some("acme".to_string()),
+        });
+        round_trip(JobType::VirtualMountSubscriptionRenew { tenant_id: None });
     }
 }

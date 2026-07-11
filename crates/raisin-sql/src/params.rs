@@ -156,11 +156,11 @@ mod tests {
     #[test]
     fn test_numeric_params() {
         let sql = "SELECT * FROM nodes WHERE version = $1 AND count > $2";
-        let params = vec![json!(42), json!(3.14)];
+        let params = vec![json!(42), json!(3.25)];
         let result = substitute_params(sql, &params).unwrap();
         assert_eq!(
             result,
-            "SELECT * FROM nodes WHERE version = 42 AND count > 3.14"
+            "SELECT * FROM nodes WHERE version = 42 AND count > 3.25"
         );
     }
 

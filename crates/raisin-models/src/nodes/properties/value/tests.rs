@@ -90,7 +90,7 @@ fn test_property_value_small_integer_becomes_integer() {
 #[test]
 fn test_property_value_float() {
     // Numbers with decimal points should be Float
-    let json = serde_json::json!(3.14159);
+    let json = serde_json::json!(3.12589);
     let deserialized: PropertyValue = serde_json::from_value(json).expect("should deserialize");
 
     assert!(
@@ -99,7 +99,7 @@ fn test_property_value_float() {
     );
 
     if let PropertyValue::Float(n) = deserialized {
-        assert!((n - 3.14159).abs() < 0.0001);
+        assert!((n - 3.12589).abs() < 0.0001);
     }
 }
 
@@ -739,7 +739,7 @@ fn test_element_complex_content_types() {
         PropertyValue::String("text".to_string()),
     );
     content.insert("integer".to_string(), PropertyValue::Integer(42));
-    content.insert("float".to_string(), PropertyValue::Float(3.14));
+    content.insert("float".to_string(), PropertyValue::Float(3.25));
     content.insert("boolean".to_string(), PropertyValue::Boolean(true));
     content.insert("null".to_string(), PropertyValue::Null);
     // Use heterogeneous array (String and Integer) to avoid Vector deserialization

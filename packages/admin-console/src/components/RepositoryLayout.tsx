@@ -34,7 +34,9 @@ import {
   Link2,
   Workflow,
   Inbox,
-  Bot
+  Bot,
+  Plug,
+  HardDrive
 } from 'lucide-react'
 
 export default function RepositoryLayout() {
@@ -103,7 +105,7 @@ export default function RepositoryLayout() {
     }
 
     // Routes with potential branch segment: /repo/branch/type/* or /repo/type/*
-    const routeTypes = ['nodetypes', 'mixins', 'archetypes', 'elementtypes', 'users', 'roles', 'groups', 'circles', 'relation-types', 'agents', 'packages', 'models', 'access-control']
+    const routeTypes = ['nodetypes', 'mixins', 'archetypes', 'elementtypes', 'users', 'roles', 'groups', 'circles', 'relation-types', 'agents', 'packages', 'models', 'access-control', 'integrations', 'mounts']
 
     for (const type of routeTypes) {
       // Pattern with branch: /repo/branch/type/*
@@ -546,6 +548,30 @@ export default function RepositoryLayout() {
             >
               <Package className="w-5 h-5 flex-shrink-0" />
               {!sidebarCollapsed && <span>Packages</span>}
+            </Link>
+            <Link
+              to={`/${repo}/integrations`}
+              className={`flex items-center rounded-lg transition-colors ${
+                isActive('/integrations')
+                  ? 'bg-primary-500 text-white font-semibold'
+                  : 'text-white/80 hover:bg-white/5 hover:text-white'
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
+              title={sidebarCollapsed ? 'Connectors' : ''}
+            >
+              <Plug className="w-5 h-5 flex-shrink-0" />
+              {!sidebarCollapsed && <span>Connectors</span>}
+            </Link>
+            <Link
+              to={`/${repo}/mounts`}
+              className={`flex items-center rounded-lg transition-colors ${
+                isActive('/mounts')
+                  ? 'bg-primary-500 text-white font-semibold'
+                  : 'text-white/80 hover:bg-white/5 hover:text-white'
+              } ${sidebarCollapsed ? 'mx-auto w-10 h-10 justify-center' : 'gap-3 px-4 py-2'}`}
+              title={sidebarCollapsed ? 'Mounts' : ''}
+            >
+              <HardDrive className="w-5 h-5 flex-shrink-0" />
+              {!sidebarCollapsed && <span>Mounts</span>}
             </Link>
             <Link
               to={`/${repo}/query`}

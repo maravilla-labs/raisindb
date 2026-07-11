@@ -902,6 +902,7 @@ mod tests {
         use super::super::*;
 
         #[test]
+        #[allow(clippy::approx_constant)]
         fn test_json_to_document_roundtrip() {
             let json = serde_json::json!({
                 "name": "test",

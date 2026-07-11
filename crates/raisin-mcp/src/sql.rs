@@ -41,7 +41,13 @@ mod tests {
 
     #[test]
     fn accepts_plain_and_system_workspaces() {
-        for ws in ["mcp", "content", "default", "raisin:access_control", "a-b_c.d"] {
+        for ws in [
+            "mcp",
+            "content",
+            "default",
+            "raisin:access_control",
+            "a-b_c.d",
+        ] {
             assert_eq!(quote_workspace(ws).unwrap(), format!("'{ws}'"));
         }
     }

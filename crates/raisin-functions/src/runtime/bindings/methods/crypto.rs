@@ -8,7 +8,9 @@
 //! Provides UUID generation to both QuickJS (JavaScript) and Starlark (Python) runtimes.
 
 use crate::api::FunctionApi;
-use crate::runtime::bindings::registry::{ApiMethodDescriptor, InvokeResult, ReturnType};
+use crate::runtime::bindings::registry::{
+    ApiMethodDescriptor, ArgParser, ArgSpec, ArgType, InvokeResult, ReturnType,
+};
 use futures::future::BoxFuture;
 use raisin_error::Result;
 use serde_json::Value;
@@ -29,6 +31,30 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                       _args: Vec<Value>|
              -> BoxFuture<'static, Result<InvokeResult>> {
                 Box::pin(async move { Ok(InvokeResult::String(uuid::Uuid::new_v4().to_string())) })
+            },
+        },
+        // crypto.verifyJwt(token, opts?) -> { valid, claims?, error? }
+        //   opts: { jwks_url?, issuer?, audience?, algorithms? }
+        ApiMethodDescriptor {
+            internal_name: "crypto_verify_jwt",
+            js_name: "verifyJwt",
+            py_name: "verify_jwt",
+            category: "crypto",
+            args: vec![
+                ArgSpec::new("token", ArgType::String),
+                ArgSpec::new("opts", ArgType::OptionalJson),
+            ],
+            return_type: ReturnType::Json,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let token = parser.string()?;
+                    let opts = parser.optional_json()?.unwrap_or(Value::Null);
+                    let result = api.crypto_verify_jwt(&token, opts).await?;
+                    Ok(InvokeResult::Json(result))
+                })
             },
         },
     ]

@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: BSL-1.1
+
+import { useRef, useState } from 'react'
+import { LinkIcon, Unlink, Loader2, UserCircle } from 'lucide-react'
+import { integrationsApi, type Integration, type ConnectedAccount } from '../../api/integrations'
+
+interface ConnectedAccountsProps {
+  repo: string
+  integration: Integration
+  /** Called after a connect/disconnect so the parent can reload the node. */
+  onChanged: () => void
+  onError: (title: string, message?: string) => void
+  onSuccess: (title: string, message?: string) => void
+}
+
+function expiryLabel(account: ConnectedAccount): string {
+  if (!account.expires_at) return ''
+  const when = new Date(account.expires_at * 1000)
+  const expired = account.expires_at * 1000 < Date.now()
+  return `${expired ? 'expired' : 'expires'} ${when.toLocaleString()}`
+}
+
+/**
+ * Connected-accounts list plus the "Connect account" OAuth popup flow.
+ *
+ * The popup navigates to the provider, then the server callback redirects it
+ * back to a same-origin URL. We poll the popup: once it is same-origin (or has
+ * closed) the flow is done and we ask the parent to reload.
+ */
+export default function ConnectedAccounts({
+  repo,
+  integration,
+  onChanged,
+  onError,
+  onSuccess,
+}: ConnectedAccountsProps) {
+  const [connecting, setConnecting] = useState(false)
+  const [disconnecting, setDisconnecting] = useState<string | null>(null)
+  const pollRef = useRef<number | null>(null)
+
+  const accounts = integration.connected_accounts || []
+
+  function stopPolling() {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
+
+  async function handleConnect() {
+    if (!integration.path) {
+      onError('Save first', 'Save the integration before connecting an account.')
+      return
+    }
+    setConnecting(true)
+    try {
+      const { auth_url } = await integrationsApi.oauthStart(repo, integration.path)
+      const popup = window.open(auth_url, 'raisin-oauth', 'width=520,height=680')
+      if (!popup) {
+        onError('Popup blocked', 'Allow popups for this site, then try again.')
+        setConnecting(false)
+        return
+      }
+
+      pollRef.current = window.setInterval(() => {
+        let sameOrigin = false
+        try {
+          // Throws while the popup is on the provider (cross-origin).
+          sameOrigin = !!popup.location.href && popup.location.host === window.location.host
+        } catch {
+          sameOrigin = false
+        }
+
+        if (popup.closed || sameOrigin) {
+          stopPolling()
+          if (!popup.closed) popup.close()
+          setConnecting(false)
+          // The callback appended the account server-side; reload to reflect it.
+          onSuccess('Account connected', 'Refreshing connected accounts…')
+          onChanged()
+        }
+      }, 600)
+    } catch (e: any) {
+      setConnecting(false)
+      onError('Connect failed', e?.message)
+    }
+  }
+
+  async function handleDisconnect(account: ConnectedAccount) {
+    if (!integration.path) return
+    setDisconnecting(account.id)
+    try {
+      await integrationsApi.oauthDisconnect(repo, integration.path, account.id)
+      onSuccess('Disconnected', account.label || account.id)
+      onChanged()
+    } catch (e: any) {
+      onError('Disconnect failed', e?.message)
+    } finally {
+      setDisconnecting(null)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-white">Connected accounts</h3>
+        <button
+          type="button"
+          onClick={handleConnect}
+          disabled={connecting || !integration.path}
+          className="flex items-center gap-2 px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <LinkIcon className="w-4 h-4" />}
+          Connect account
+        </button>
+      </div>
+
+      {accounts.length === 0 ? (
+        <p className="text-zinc-500 text-sm">No accounts connected yet.</p>
+      ) : (
+        <ul className="space-y-2">
+          {accounts.map((account) => (
+            <li
+              key={account.id}
+              className="flex items-center justify-between gap-3 px-3 py-2 bg-white/5 border border-white/10 rounded-lg"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <UserCircle className="w-5 h-5 text-primary-300 flex-shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-white text-sm truncate">
+                    {account.label || account.subject || account.id}
+                  </div>
+                  <div className="text-zinc-500 text-xs truncate">{expiryLabel(account)}</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleDisconnect(account)}
+                disabled={disconnecting === account.id}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors disabled:opacity-50"
+              >
+                {disconnecting === account.id ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Unlink className="w-3.5 h-3.5" />
+                )}
+                Disconnect
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}

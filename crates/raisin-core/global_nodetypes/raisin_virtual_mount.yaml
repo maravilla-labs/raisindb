@@ -1,0 +1,119 @@
+name: raisin:VirtualMount
+description: Mounts an external system subtree into a workspace path
+icon: hard-drive
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Human-readable mount title
+
+  - name: integration_ref
+    type: String
+    required: true
+    title: Integration Reference
+    description: Path of the raisin:Integration node backing this mount
+    index: [Property]
+
+  - name: account_ref
+    type: String
+    required: false
+    title: Account Reference
+    description: Identifier of the connected account (connected_accounts[].id)
+
+  - name: target_workspace
+    type: String
+    required: true
+    title: Target Workspace
+    description: Workspace into which the external subtree is mounted
+    index: [Property]
+
+  - name: target_branch
+    type: String
+    required: true
+    title: Target Branch
+    default: main
+    description: |
+      Branch the mount materializes into. The mount's own configuration always
+      lives on the repository's config (default) branch; this field selects the
+      branch the synced virtual nodes are written to. A forked branch that carries
+      a copy of this mount node is inert: the periodic scan only ever reads the
+      config branch, so a copy never triggers a second sync.
+    index: [Property]
+
+  - name: mount_path
+    type: String
+    required: true
+    title: Mount Path
+    description: Path prefix inside the target workspace
+
+  - name: remote_root
+    type: String
+    required: false
+    title: Remote Root
+    description: Provider-side root (folder id, mailbox, ...)
+
+  - name: adapter_function
+    type: String
+    required: false
+    title: Adapter Function
+    description: Optional override of the integration's default adapter function
+
+  - name: mapping_function
+    type: String
+    required: false
+    title: Mapping Function
+    description: Optional custom mapper function path
+
+  - name: sync_config
+    type: Object
+    required: false
+    title: Sync Configuration
+    description: |
+      Sync behaviour: {
+        mode: "poll" | "webhook" | "hybrid",
+        interval_seconds: 300,
+        include_patterns: [], exclude_patterns: [],
+        ephemeral: false, ttl_seconds: null, max_items_per_sync: 500
+      }
+
+  - name: write_config
+    type: Object
+    required: false
+    title: Write Configuration
+    description: |
+      Writeback behaviour: {
+        writeback: "off" | "write_through",
+        conflict: "remote_wins" | "error"
+      }
+
+  - name: state
+    type: Object
+    required: false
+    title: State
+    description: |
+      Engine-managed state (not user-edited): {
+        last_sync_token, last_sync_at, last_error,
+        consecutive_failures, status, writeback_supported
+      }
+      status is one of "ok" | "syncing" | "auth_required" | "degraded" |
+      "misconfigured". writeback_supported is false when the mount requests
+      write_through writeback but the engine/adapter cannot honour it (v1 has no
+      writeback implementation); the UI reads it to explain the limitation.
+
+  - name: enabled
+    type: Boolean
+    required: false
+    title: Enabled
+    description: Whether this mount is active
+    default: true
+    index: [Property]
+
+allowed_children: []
+versionable: false
+publishable: false
+auditable: true

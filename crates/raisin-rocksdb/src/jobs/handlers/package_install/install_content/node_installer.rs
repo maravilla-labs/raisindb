@@ -83,22 +83,22 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         // bundled beside this node, ingesting the bytes into
                         // blob storage. No-op (borrows the original) when none.
                         let mut owned_node;
-                        let node: &Node =
-                            match bundled.get(&(workspace.clone(), node.path.clone())) {
-                                Some(binaries) if !binaries.is_empty() => {
-                                    owned_node = node.as_ref().clone();
-                                    self.ingest_bundled_binaries(
-                                        &mut owned_node,
-                                        binaries,
-                                        binary_store,
-                                        job_id,
-                                        stats,
-                                    )
-                                    .await?;
-                                    &owned_node
-                                }
-                                _ => node.as_ref(),
-                            };
+                        let node: &Node = match bundled.get(&(workspace.clone(), node.path.clone()))
+                        {
+                            Some(binaries) if !binaries.is_empty() => {
+                                owned_node = node.as_ref().clone();
+                                self.ingest_bundled_binaries(
+                                    &mut owned_node,
+                                    binaries,
+                                    binary_store,
+                                    job_id,
+                                    stats,
+                                )
+                                .await?;
+                                &owned_node
+                            }
+                            _ => node.as_ref(),
+                        };
 
                         let is_deferred = node.properties.contains_key("__deferred_references");
 
@@ -540,10 +540,8 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             .await?;
 
             let rebound = rebind_resource(&authored, &stored);
-            node.properties.insert(
-                bundled.property.clone(),
-                PropertyValue::Resource(rebound),
-            );
+            node.properties
+                .insert(bundled.property.clone(), PropertyValue::Resource(rebound));
             stats.binary_files_installed += 1;
 
             tracing::debug!(
@@ -611,7 +609,10 @@ fn rebind_resource(authored: &Resource, stored: &StoredObject) -> Resource {
         uuid: authored.uuid.clone(),
         name: authored.name.clone().or_else(|| stored.name.clone()),
         size: Some(stored.size),
-        mime_type: stored.mime_type.clone().or_else(|| authored.mime_type.clone()),
+        mime_type: stored
+            .mime_type
+            .clone()
+            .or_else(|| authored.mime_type.clone()),
         url: Some(stored.url.clone()),
         metadata: Some(metadata),
         is_loaded: Some(true),

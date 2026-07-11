@@ -8,10 +8,10 @@
 //! RaisinDB's node storage with the `raisin-functions` runtime and
 //! the RocksDB job system when available.
 
-mod api_factory;
+pub(crate) mod api_factory;
 mod file_helpers;
 mod flow_events;
-mod helpers;
+pub(crate) mod helpers;
 mod invoke;
 mod list;
 mod run_file;

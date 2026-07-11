@@ -179,25 +179,11 @@ impl AppState {
     /// as a 64-character hex string.  In dev-mode, falls back to an all-zero key
     /// with a warning.  In production mode, returns an error if not set.
     pub(crate) fn get_master_key(&self) -> raisin_error::Result<[u8; 32]> {
-        let hex_key = std::env::var("RAISIN_MASTER_KEY")
-            .or_else(|_| std::env::var("EMBEDDING_MASTER_KEY"))
-            .ok();
-
-        match hex_key {
-            Some(hex) => {
-                let bytes = hex::decode(&hex).map_err(|e| {
-                    raisin_error::Error::Validation(format!(
-                        "RAISIN_MASTER_KEY is not valid hex: {e}"
-                    ))
-                })?;
-                let key: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-                    raisin_error::Error::Validation(format!(
-                        "RAISIN_MASTER_KEY must be 32 bytes (64 hex chars), got {} bytes",
-                        v.len()
-                    ))
-                })?;
-                Ok(key)
-            }
+        // Shared loader accepts RAISIN_MASTER_KEY with the legacy
+        // EMBEDDING_MASTER_KEY fallback, returning Ok(None) when neither is set
+        // and Err on an invalid value.
+        match raisin_crypto::master_key_with_embedding_fallback()? {
+            Some(key) => Ok(key),
             None if self.dev_mode => {
                 tracing::warn!(
                     "RAISIN_MASTER_KEY not set — using insecure all-zero key (dev-mode)"

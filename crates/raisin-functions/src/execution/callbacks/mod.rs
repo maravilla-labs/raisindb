@@ -21,6 +21,7 @@ pub mod events;
 pub mod flows;
 pub mod functions;
 pub mod http;
+pub mod integrations;
 pub mod locks;
 pub mod nodes;
 pub mod query_context;
@@ -175,6 +176,18 @@ where
                 data_store.clone(),
                 repo_id.clone(),
                 auth_context.clone(),
+            )),
+            _ => None,
+        },
+
+        // Integration / mount sync (raisin.integrations.sync_now) - only
+        // available when the job system dependencies are provided.
+        integrations_sync_now: match (&deps.job_registry, &deps.job_data_store) {
+            (Some(registry), Some(data_store)) => Some(integrations::create_integrations_sync_now(
+                registry.clone(),
+                data_store.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
             )),
             _ => None,
         },

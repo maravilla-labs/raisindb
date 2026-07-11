@@ -77,8 +77,10 @@ pub async fn handle_mcp(
     // The shared middleware rejects audience-bound OAuth tokens; resolve such a
     // token here against this endpoint's audience (or keep the middleware's
     // result for login tokens / API keys / anonymous).
-    let (auth_context, consented_scopes) =
-        auth::resolve_mcp_auth(&state, &headers, &tenant_id, &repo, &branch, &slug, ext_auth).await;
+    let (auth_context, consented_scopes) = auth::resolve_mcp_auth(
+        &state, &headers, &tenant_id, &repo, &branch, &slug, ext_auth,
+    )
+    .await;
 
     match dispatch(
         &state,
@@ -125,9 +127,7 @@ async fn dispatch(
     consented_scopes: Option<&[String]>,
     request: JsonRpcRequest,
 ) -> Result<Response, McpError> {
-    use raisin_mcp::{
-        assemble_for_slug, AssemblyServices, Dispatcher, NodeResourceProvider,
-    };
+    use raisin_mcp::{assemble_for_slug, AssemblyServices, Dispatcher, NodeResourceProvider};
 
     use api_factory::build_mcp_function_api;
     use identity::mcp_identity_from_auth;

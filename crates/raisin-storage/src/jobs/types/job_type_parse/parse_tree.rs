@@ -136,8 +136,8 @@ mod tests {
 
     fn roundtrip(jt: JobType) {
         let s: String = jt.clone().into();
-        let parsed = JobType::from_str(&s)
-            .unwrap_or_else(|e| panic!("parse of {:?} failed: {}", s, e));
+        let parsed =
+            JobType::from_str(&s).unwrap_or_else(|e| panic!("parse of {:?} failed: {}", s, e));
         assert_eq!(parsed, jt, "roundtrip mismatch via {:?}", s);
     }
 

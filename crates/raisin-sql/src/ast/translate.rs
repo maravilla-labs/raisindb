@@ -389,7 +389,7 @@ mod tests {
             "'hello'"
         );
         assert_eq!(TranslationValue::Integer(42).to_string(), "42");
-        assert_eq!(TranslationValue::Float(3.14).to_string(), "3.14");
+        assert_eq!(TranslationValue::Float(3.25).to_string(), "3.25");
         assert_eq!(TranslationValue::Boolean(true).to_string(), "true");
         assert_eq!(TranslationValue::Null.to_string(), "NULL");
     }

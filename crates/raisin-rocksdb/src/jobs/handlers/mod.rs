@@ -18,9 +18,9 @@ pub mod flow_instance_execution;
 pub mod fulltext;
 pub mod function_execution;
 pub mod huggingface_model;
+pub mod integration_token_refresh;
 pub mod node_delete_cleanup;
 pub mod oplog_compaction;
-pub mod retarget_references;
 pub mod package_create_from_selection;
 pub mod package_export;
 pub mod package_install;
@@ -31,12 +31,14 @@ pub mod replication_gc;
 pub mod replication_sync;
 pub mod restore_tree;
 pub mod resumable_upload;
+pub mod retarget_references;
 pub mod revision_history_copy;
 pub mod scheduled_trigger;
 pub mod snapshot;
 pub mod trigger_evaluation;
 pub mod trigger_matcher;
 pub mod vector_clock_verification;
+pub mod virtual_mount_sync;
 
 pub use ai_tool_call_execution::{AIToolCallExecutionHandler, NodeCreatorCallback};
 pub use ai_tool_result_aggregation::AIToolResultAggregationHandler;
@@ -68,8 +70,8 @@ pub use function_execution::{
     FunctionExecutorCallback,
 };
 pub use huggingface_model::HuggingFaceModelHandler;
+pub use integration_token_refresh::{token_refresh_dedup_key, IntegrationTokenRefreshHandler};
 pub use node_delete_cleanup::NodeDeleteCleanupHandler;
-pub use retarget_references::RetargetReferencesHandler;
 pub use oplog_compaction::OpLogCompactionHandler;
 pub use package_create_from_selection::PackageCreateFromSelectionHandler;
 pub use package_export::PackageExportHandler;
@@ -86,6 +88,7 @@ pub use restore_tree::{RestoreTreeExecutorCallback, RestoreTreeHandler};
 pub use resumable_upload::{
     BinaryUploadCallback, ResumableUploadHandler, UploadSessionCleanupHandler,
 };
+pub use retarget_references::RetargetReferencesHandler;
 pub use revision_history_copy::RevisionHistoryCopyHandler;
 pub use scheduled_trigger::{
     cron_matches, ScheduledTriggerFinderCallback, ScheduledTriggerHandler, ScheduledTriggerMatch,
@@ -96,6 +99,10 @@ pub use trigger_evaluation::{
     TriggerEventInfo, TriggerMatch, TriggerMatcherCallback,
 };
 pub use trigger_matcher::create_trigger_matcher;
+pub use virtual_mount_sync::{
+    AdapterError, AdapterInvoker, AdapterInvokerHandle, FunctionAdapterInvoker,
+    VirtualMountSyncHandler,
+};
 
 use crate::RocksDBStorage;
 use raisin_error::Result;
@@ -139,6 +146,8 @@ pub struct JobHandlerRegistry {
     pub upload_session_cleanup: Arc<UploadSessionCleanupHandler>,
     pub huggingface_model: Option<Arc<HuggingFaceModelHandler>>,
     pub asset_processing: Option<Arc<AssetProcessingHandler>>,
+    pub integration_token_refresh: Arc<IntegrationTokenRefreshHandler>,
+    pub virtual_mount_sync: Arc<VirtualMountSyncHandler>,
 }
 
 #[allow(deprecated)] // Contains AssetProcessingHandler which is deprecated but still used
@@ -176,6 +185,8 @@ impl JobHandlerRegistry {
         upload_session_cleanup: Arc<UploadSessionCleanupHandler>,
         huggingface_model: Option<Arc<HuggingFaceModelHandler>>,
         asset_processing: Option<Arc<AssetProcessingHandler>>,
+        integration_token_refresh: Arc<IntegrationTokenRefreshHandler>,
+        virtual_mount_sync: Arc<VirtualMountSyncHandler>,
     ) -> Self {
         Self {
             fulltext,
@@ -209,6 +220,8 @@ impl JobHandlerRegistry {
             upload_session_cleanup,
             huggingface_model,
             asset_processing,
+            integration_token_refresh,
+            virtual_mount_sync,
         }
     }
 
@@ -390,6 +403,16 @@ impl JobHandlerRegistry {
                     );
                     Ok(None)
                 }
+            }
+            JobType::IntegrationTokenRefresh { .. } => self
+                .integration_token_refresh
+                .handle(job, context)
+                .await
+                .map(|_| None),
+            JobType::VirtualMountSyncCheck { .. }
+            | JobType::VirtualMountSync { .. }
+            | JobType::VirtualMountSubscriptionRenew { .. } => {
+                self.virtual_mount_sync.handle(job, context).await
             }
             JobType::AssetProcessing { .. } => {
                 // Asset processing (PDF text extraction, image embeddings, captions)

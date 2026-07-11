@@ -164,7 +164,6 @@ export default function FlowInstanceDiagram({ repo, instance }: FlowInstanceDiag
   // Re-derive when the instance status/position changes (e.g. list refresh)
   useEffect(() => {
     setExecutionState(deriveExecutionState(instance, flow))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instance.status, instance.current_node_id, flow])
 
   // Live updates for in-flight instances

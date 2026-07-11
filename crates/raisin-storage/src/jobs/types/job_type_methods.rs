@@ -309,6 +309,26 @@ impl JobType {
                 options.generate_image_embedding,
                 options.generate_image_caption
             ),
+            Self::VirtualMountSyncCheck { tenant_id, repo_id } => format!(
+                "virtual_mount_sync_check:{}:{}",
+                tenant_id.as_deref().unwrap_or("*"),
+                repo_id.as_deref().unwrap_or("*")
+            ),
+            Self::VirtualMountSync { mount_id, .. } => {
+                format!("virtual_mount_sync:{}", mount_id)
+            }
+            Self::IntegrationTokenRefresh { tenant_id } => {
+                format!(
+                    "integration_token_refresh:{}",
+                    tenant_id.as_deref().unwrap_or("*")
+                )
+            }
+            Self::VirtualMountSubscriptionRenew { tenant_id } => {
+                format!(
+                    "virtual_mount_subscription_renew:{}",
+                    tenant_id.as_deref().unwrap_or("*")
+                )
+            }
             Self::Custom(name) => format!("custom:{}", name),
         }
     }
@@ -379,6 +399,10 @@ impl JobType {
             | Self::UploadSessionCleanup { .. }
             | Self::ResumableUploadComplete { .. }
             | Self::ScheduledTriggerCheck { .. }
+            | Self::VirtualMountSyncCheck { .. }
+            | Self::VirtualMountSync { .. }
+            | Self::IntegrationTokenRefresh { .. }
+            | Self::VirtualMountSubscriptionRenew { .. }
             | Self::OrphanCleanup
             | Self::Repair
             | Self::Custom(_) => JobCategory::System,

@@ -25,9 +25,12 @@
 mod admin;
 mod ai_ops;
 mod context;
+mod crypto;
 mod events;
 mod functions;
 mod http;
+mod imap;
+mod integrations;
 mod locks;
 mod network_policy;
 mod nodes;
@@ -540,6 +543,42 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn inventory_release(&self, pool: &str, n: i64) -> Result<i64> {
         self.impl_inventory_release(pool, n).await
+    }
+
+    // ========== Integration / Mount Operations ==========
+
+    async fn integrations_sync_now(&self, mount_id: &str, mode: Option<&str>) -> Result<Value> {
+        self.impl_integrations_sync_now(mount_id, mode).await
+    }
+
+    // ========== IMAP Operations ==========
+
+    async fn imap_fetch_since(
+        &self,
+        conn: Value,
+        since_uid: i64,
+        opts: Option<Value>,
+    ) -> Result<Value> {
+        self.impl_imap_fetch_since(conn, since_uid, opts).await
+    }
+
+    async fn imap_list_mailboxes(&self, conn: Value) -> Result<Value> {
+        self.impl_imap_list_mailboxes(conn).await
+    }
+
+    async fn imap_fetch_message(
+        &self,
+        conn: Value,
+        uid: i64,
+        opts: Option<Value>,
+    ) -> Result<Value> {
+        self.impl_imap_fetch_message(conn, uid, opts).await
+    }
+
+    // ========== Crypto (native primitives) ==========
+
+    async fn crypto_verify_jwt(&self, token: &str, opts: Value) -> Result<Value> {
+        self.impl_crypto_verify_jwt(token, opts).await
     }
 
     // ========== Admin SQL (continued) ==========

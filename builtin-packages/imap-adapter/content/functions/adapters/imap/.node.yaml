@@ -1,0 +1,70 @@
+node_type: raisin:Function
+properties:
+  title: IMAP Adapter
+  description: >
+    Virtual-node adapter for IMAP mailboxes, implemented over the native
+    raisin.imap binding (real RFC 3501 IMAP over implicit TLS). Translates the
+    normalized adapter operations (capabilities, list, get, get_content,
+    get_changes) into raisin.imap.{listMailboxes,fetchMessage,fetchSince}
+    calls. Read-only: create/update/delete are unsupported. Invoked directly by
+    the sync engine with a decrypted credential; owns no token-refresh logic.
+    EXPERIMENTAL Gmail push: when a mount sets sync_config.pubsub_topic the
+    adapter also serves subscribe/renew/unsubscribe via the Gmail users.watch /
+    users.stop REST API (Pub/Sub), reusing the XOAUTH2 OAuth token as bearer.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Async
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 180000
+    max_memory_bytes: 67108864
+  # network_policy authorizes the native IMAP egress. The binding builds a
+  # synthetic `imaps://<host>:<port>` URL from the connection and refuses to open
+  # a socket unless it matches an allowed_urls pattern. `http_enabled: true` is
+  # REQUIRED — it is the master switch for ALL native egress (HTTP *and* IMAP),
+  # not just raisin.http.fetch. Add your mail host as `imaps://<host>:993`.
+  network_policy:
+    http_enabled: true
+    request_timeout_ms: 180000
+    max_concurrent_requests: 10
+    allowed_urls:
+      - "imaps://imap.gmail.com:993"
+      - "imaps://imap.fastmail.com:993"
+      - "imaps://outlook.office365.com:993"
+      - "imaps://imap.mail.me.com:993"
+      # Add your provider's IMAP host explicitly, e.g.:
+      # - "imaps://imap.example.org:993"
+      # Gmail push (Pub/Sub watch): the subscribe/renew/unsubscribe ops call the
+      # Gmail REST API over HTTPS with the same OAuth token used for XOAUTH2 IMAP.
+      # `**` is required — `*` does not cross `/`. Only reached when a mount sets
+      # sync_config.pubsub_topic; plain IMAP mounts never call it.
+      - "https://gmail.googleapis.com/**"
+  input_schema:
+    type: object
+    required:
+      - operation
+    properties:
+      operation:
+        type: string
+        description: >
+          One of capabilities, list, get, get_content, get_changes, and — for a
+          Gmail mount that configures sync_config.pubsub_topic — subscribe, renew,
+          unsubscribe (Pub/Sub watch lifecycle).
+      params:
+        type: object
+        description: Operation-specific arguments
+      credential:
+        type: object
+        description: >
+          Decrypted account credential { username, password | app_password |
+          access_token, account_id, provider_type }. The secret is an app
+          password or an XOAUTH2 access token; it is never logged.
+      mount:
+        type: object
+        description: >
+          Read-only mount snapshot { mount_id, remote_root, mount_path,
+          sync_config }. sync_config carries host, port, tls, mailbox.
+  output_schema:
+    type: object
+    description: Operation-specific result (ExternalItem, page, Capabilities, Change feed, ...)

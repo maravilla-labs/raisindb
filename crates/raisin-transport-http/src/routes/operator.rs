@@ -37,7 +37,10 @@ use super::MAX_UPLOAD_SIZE;
 async fn admin_system_auth_context(mut req: Request<Body>, next: Next) -> Response {
     use raisin_models::auth::AuthContext;
     if req.extensions().get::<AuthContext>().is_none()
-        && req.extensions().get::<raisin_rocksdb::AdminClaims>().is_some()
+        && req
+            .extensions()
+            .get::<raisin_rocksdb::AdminClaims>()
+            .is_some()
     {
         req.extensions_mut().insert(AuthContext::system());
     }

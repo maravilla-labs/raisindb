@@ -126,6 +126,6 @@ fn test_frame_bounds_following() {
 fn test_extract_number() {
     assert_eq!(extract_number(&Literal::Int(42)), Some(42.0));
     assert_eq!(extract_number(&Literal::BigInt(100)), Some(100.0));
-    assert_eq!(extract_number(&Literal::Double(3.14)), Some(3.14));
+    assert_eq!(extract_number(&Literal::Double(3.25)), Some(3.25));
     assert_eq!(extract_number(&Literal::Text("not a number".into())), None);
 }

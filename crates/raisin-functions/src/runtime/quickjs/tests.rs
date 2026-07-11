@@ -1206,3 +1206,130 @@ async fn test_locks_and_inventory_bindings() {
     assert_eq!(output["contended"], false); // contended → acquired:false
     assert_eq!(output["released"], true);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_integrations_sync_now_wrapper_round_trips() {
+    let runtime = QuickJsRuntime::new();
+
+    // Exercises the raisin.integrations.sync_now wrapper end-to-end: the JS
+    // ergonomic wrapper -> __raisin_internal.integrations_sync_now -> FunctionApi
+    // -> JSON back into JS. The mock reports { job_id: null, status: "queued" }.
+    let code = r#"
+        function handler(input) {
+            var snake = raisin.integrations.sync_now("mount-abc");
+            var camel = raisin.integrations.syncNow("mount-abc", "full");
+            return {
+                status: snake.status,
+                jobIdNull: snake.job_id === null,
+                hasStatusKey: ("status" in snake),
+                camelStatus: camel.status,
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("test_integrations");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["status"], "queued");
+    assert_eq!(output["jobIdNull"], true);
+    assert_eq!(output["hasStatusKey"], true);
+    assert_eq!(output["camelStatus"], "queued");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_imap_wrapper_round_trips() {
+    let runtime = QuickJsRuntime::new();
+
+    // Exercises the raisin.imap.* wrappers end-to-end against the mock backend:
+    // JS wrapper -> JSON.stringify(conn) -> __raisin_internal.imap_* -> mock
+    // FunctionApi -> JSON back into JS. The mock returns two fixed messages
+    // (uids 101, 102) plus a stable mailbox list and message body.
+    let code = r#"
+        function handler(input) {
+            var conn = { host: "imap.example.org", port: 993, tls: true,
+                         username: "u@example.org", password: "app-pw" };
+            var since = raisin.imap.fetchSince(conn, 100, { mailbox: "INBOX", limit: 50 });
+            var boxes = raisin.imap.listMailboxes(conn);
+            var msg = raisin.imap.fetchMessage(conn, 102);
+            return {
+                count: since.messages.length,
+                highestUid: since.highestUid,
+                uidvalidity: since.uidvalidity,
+                firstUid: since.messages[0].uid,
+                firstFrom: since.messages[0].from,
+                firstSubject: since.messages[0].subject,
+                mailboxCount: boxes.length,
+                firstMailbox: boxes[0].name,
+                msgSubject: msg.subject,
+                msgText: msg.text,
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("test_imap");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["count"], 2);
+    assert_eq!(output["highestUid"], 102);
+    assert_eq!(output["uidvalidity"], 1);
+    assert_eq!(output["firstUid"], 101);
+    assert_eq!(output["firstFrom"], "alice@example.org");
+    assert_eq!(output["firstSubject"], "Mock One");
+    assert_eq!(output["mailboxCount"], 2);
+    assert_eq!(output["firstMailbox"], "INBOX");
+    assert_eq!(output["msgSubject"], "Mock message 102");
+    assert_eq!(output["msgText"], "Body of message 102.");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_crypto_verify_jwt_roundtrip() {
+    let runtime = QuickJsRuntime::new();
+
+    // Exercises raisin.crypto.verifyJwt end-to-end against the mock backend:
+    // JS wrapper -> __raisin_internal.crypto_verify_jwt -> mock FunctionApi
+    // (deterministic { valid:true, claims:{} }) -> JSON back into JS.
+    let code = r#"
+        function handler(input) {
+            var r = raisin.crypto.verifyJwt("header.payload.sig", {
+                jwks_url: "https://issuer.example.org/jwks",
+                issuer: "https://issuer.example.org",
+                audience: "my-service",
+                algorithms: ["RS256"],
+            });
+            return { valid: r.valid, hasClaims: typeof r.claims === "object" };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("test_crypto_verify_jwt");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["valid"], true);
+    assert_eq!(output["hasClaims"], true);
+}

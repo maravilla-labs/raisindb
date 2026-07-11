@@ -277,7 +277,10 @@ provides:
     - /mcp/default
 "##;
         let manifest = Manifest::from_yaml(yaml).unwrap();
-        assert_eq!(manifest.provides.mcp_servers, vec!["/mcp/default".to_string()]);
+        assert_eq!(
+            manifest.provides.mcp_servers,
+            vec!["/mcp/default".to_string()]
+        );
         assert!(manifest.validate().is_ok());
 
         // Missing field deserializes to an empty list (backward compatible).

@@ -604,6 +604,7 @@ async fn main() {
                     Some(flow_callbacks.function_executor),
                     Some(flow_callbacks.children_lister),
                     Some(ai_tool_call_node_creator),
+                    lock_manager.clone(),
                     worker_runtimes,
                     pools_config.clone(),
                 )
@@ -697,6 +698,115 @@ async fn main() {
                             .await
                         {
                             tracing::warn!(error = %e, "Failed to register ScheduledTriggerCheck job");
+                        }
+
+                        // Integration OAuth token refresh: enqueue at most once
+                        // per 10-minute window. The dedup key collapses every
+                        // 60s tick inside the same window to a single job, so
+                        // this effectively fires every 10 minutes (and stays
+                        // single-fire across cluster nodes via the registry
+                        // dedup). Idempotent registration needs the context
+                        // stored first, keyed by the same job id.
+                        let now_secs = chrono::Utc::now().timestamp().max(0) as u64;
+                        let dedup_key = raisin_rocksdb::token_refresh_dedup_key(now_secs);
+                        let refresh_job = raisin_storage::jobs::JobType::IntegrationTokenRefresh {
+                            tenant_id: None,
+                        };
+                        let refresh_job_id = raisin_storage::jobs::JobId::new();
+                        let refresh_context = raisin_storage::jobs::JobContext {
+                            tenant_id: "_system".to_string(),
+                            repo_id: String::new(),
+                            branch: String::new(),
+                            workspace_id: String::new(),
+                            revision: raisin_hlc::HLC::now(),
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) =
+                            job_data_store_for_loop.put(&refresh_job_id, &refresh_context)
+                        {
+                            tracing::warn!(error = %e, "Failed to store IntegrationTokenRefresh job context");
+                        } else if let Err(e) = registry_for_loop
+                            .register_job_with_id_idempotent(
+                                refresh_job_id,
+                                refresh_job,
+                                "_system".to_string(),
+                                dedup_key,
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to register IntegrationTokenRefresh job");
+                        }
+
+                        // Virtual-mount sync check: scan every ~60s for mounts
+                        // that are due and enqueue per-mount sync jobs. Dedup
+                        // by the wall-clock-minute bucket so overlapping ticks
+                        // (or cluster nodes) collapse to a single scan job; the
+                        // per-mount syncs it enqueues are themselves idempotent.
+                        let check_bucket = now_secs / 60;
+                        let vmount_check_job =
+                            raisin_storage::jobs::JobType::VirtualMountSyncCheck {
+                                tenant_id: None,
+                                repo_id: None,
+                            };
+                        let vmount_check_id = raisin_storage::jobs::JobId::new();
+                        let vmount_check_ctx = raisin_storage::jobs::JobContext {
+                            tenant_id: "_system".to_string(),
+                            repo_id: String::new(),
+                            branch: String::new(),
+                            workspace_id: String::new(),
+                            revision: raisin_hlc::HLC::now(),
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) =
+                            job_data_store_for_loop.put(&vmount_check_id, &vmount_check_ctx)
+                        {
+                            tracing::warn!(error = %e, "Failed to store VirtualMountSyncCheck job context");
+                        } else if let Err(e) = registry_for_loop
+                            .register_job_with_id_idempotent(
+                                vmount_check_id,
+                                vmount_check_job,
+                                "_system".to_string(),
+                                format!("vmount-check:{check_bucket}"),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to register VirtualMountSyncCheck job");
+                        }
+
+                        // Virtual-mount push-subscription renewal: enqueue at
+                        // most once per 30-minute window (dedup key collapses
+                        // every 60s tick inside the window). The handler renews
+                        // provider subscriptions expiring within a day, keeping
+                        // "on new email / on calendar change" push alive.
+                        let renew_bucket = now_secs / (30 * 60);
+                        let renew_job =
+                            raisin_storage::jobs::JobType::VirtualMountSubscriptionRenew {
+                                tenant_id: None,
+                            };
+                        let renew_id = raisin_storage::jobs::JobId::new();
+                        let renew_ctx = raisin_storage::jobs::JobContext {
+                            tenant_id: "_system".to_string(),
+                            repo_id: String::new(),
+                            branch: String::new(),
+                            workspace_id: String::new(),
+                            revision: raisin_hlc::HLC::now(),
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) = job_data_store_for_loop.put(&renew_id, &renew_ctx) {
+                            tracing::warn!(error = %e, "Failed to store VirtualMountSubscriptionRenew job context");
+                        } else if let Err(e) = registry_for_loop
+                            .register_job_with_id_idempotent(
+                                renew_id,
+                                renew_job,
+                                "_system".to_string(),
+                                format!("vmount-sub-renew:{renew_bucket}"),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to register VirtualMountSubscriptionRenew job");
                         }
                     }
                 });

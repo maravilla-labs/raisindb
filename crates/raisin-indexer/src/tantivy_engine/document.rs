@@ -42,7 +42,9 @@ pub(crate) fn create_document(
     // workspace-scoped search. Fall back to the job's workspace when absent.
     doc.add_text(
         fields.workspace_id,
-        node.workspace.as_deref().unwrap_or(job.workspace_id.as_str()),
+        node.workspace
+            .as_deref()
+            .unwrap_or(job.workspace_id.as_str()),
     );
     doc.add_text(fields.language, language);
     doc.add_text(fields.path, &node.path);
