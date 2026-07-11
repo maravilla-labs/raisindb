@@ -216,25 +216,35 @@ impl JobRegistry {
         dedup_key: String,
         max_retries: Option<u32>,
     ) -> Result<Option<JobId>> {
-        // Check if an active job with this dedup key already exists
-        {
+        // Check if an active job with this dedup key already exists.
+        //
+        // LOCK ORDER INVARIANT: `jobs` before `dedup_keys`, never the reverse.
+        // The insert block below nests `jobs.write()` → `dedup_keys.write()`;
+        // nesting `dedup_keys.read()` → `jobs.read()` here (as this code once
+        // did) is the opposite order — two concurrent registrations racing
+        // through the two blocks ABBA-deadlock the registry, and because the
+        // write-preferring `jobs` lock backs every heartbeat/claim/status
+        // update, that froze the ENTIRE job system under bursty load. Copy the
+        // id out and drop the dedup guard before touching `jobs`.
+        let existing_job_id = {
             let dedup_keys = self.dedup_keys.read().await;
-            if let Some(existing_job_id) = dedup_keys.get(&dedup_key) {
-                // Check if the existing job is still active
-                let jobs = self.jobs.read().await;
-                if let Some(job) = jobs.get(existing_job_id) {
-                    if matches!(
-                        job.status,
-                        JobStatus::Scheduled | JobStatus::Running | JobStatus::Executing
-                    ) {
-                        tracing::debug!(
-                            dedup_key = %dedup_key,
-                            existing_job_id = %existing_job_id,
-                            status = ?job.status,
-                            "Skipping duplicate job registration - active job exists"
-                        );
-                        return Ok(None);
-                    }
+            dedup_keys.get(&dedup_key).cloned()
+        };
+        if let Some(existing_job_id) = existing_job_id {
+            // Check if the existing job is still active (dedup guard dropped)
+            let jobs = self.jobs.read().await;
+            if let Some(job) = jobs.get(&existing_job_id) {
+                if matches!(
+                    job.status,
+                    JobStatus::Scheduled | JobStatus::Running | JobStatus::Executing
+                ) {
+                    tracing::debug!(
+                        dedup_key = %dedup_key,
+                        existing_job_id = %existing_job_id,
+                        status = ?job.status,
+                        "Skipping duplicate job registration - active job exists"
+                    );
+                    return Ok(None);
                 }
             }
         }
@@ -327,24 +337,27 @@ impl JobRegistry {
         dedup_key: String,
         max_retries: Option<u32>,
     ) -> Result<bool> {
-        // Check if an active job with this dedup key already exists
-        {
+        // Check if an active job with this dedup key already exists.
+        // LOCK ORDER INVARIANT: `jobs` before `dedup_keys` — see
+        // register_job_idempotent for the ABBA-deadlock rationale.
+        let existing_job_id = {
             let dedup_keys = self.dedup_keys.read().await;
-            if let Some(existing_job_id) = dedup_keys.get(&dedup_key) {
-                let jobs = self.jobs.read().await;
-                if let Some(job) = jobs.get(existing_job_id) {
-                    if matches!(
-                        job.status,
-                        JobStatus::Scheduled | JobStatus::Running | JobStatus::Executing
-                    ) {
-                        tracing::debug!(
-                            dedup_key = %dedup_key,
-                            existing_job_id = %existing_job_id,
-                            status = ?job.status,
-                            "Skipping duplicate job registration - active job exists"
-                        );
-                        return Ok(false);
-                    }
+            dedup_keys.get(&dedup_key).cloned()
+        };
+        if let Some(existing_job_id) = existing_job_id {
+            let jobs = self.jobs.read().await;
+            if let Some(job) = jobs.get(&existing_job_id) {
+                if matches!(
+                    job.status,
+                    JobStatus::Scheduled | JobStatus::Running | JobStatus::Executing
+                ) {
+                    tracing::debug!(
+                        dedup_key = %dedup_key,
+                        existing_job_id = %existing_job_id,
+                        status = ?job.status,
+                        "Skipping duplicate job registration - active job exists"
+                    );
+                    return Ok(false);
                 }
             }
         }
