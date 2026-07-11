@@ -31,10 +31,10 @@ builtin: true
 
 provides:
   functions:
-    - /adapters/ms-graph
-    - /mappers/ms-graph-mail
-    - /mappers/ms-graph-calendar
-    - /mappers/ms-graph-files
+    - /functions/adapters/ms-graph
+    - /functions/mappers/ms-graph-mail
+    - /functions/mappers/ms-graph-calendar
+    - /functions/mappers/ms-graph-files
   # Pre-configured integration template (disabled until credentials are supplied).
   content:
     - raisin:system/integrations/ms-graph
@@ -76,5 +76,9 @@ sync:
 workspace_patches:
   functions:
     default_folder_type: raisin:Folder
-  raisin:system:
+  "raisin:system":
     default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:Integration
+        - raisin:VirtualMount

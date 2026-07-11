@@ -27,8 +27,8 @@ builtin: true
 
 provides:
   functions:
-    - /adapters/google-calendar
-    - /mappers/google-calendar-default
+    - /functions/adapters/google-calendar
+    - /functions/mappers/google-calendar-default
   # Pre-configured integration template (disabled until credentials are supplied).
   content:
     - raisin:system/integrations/google-calendar
@@ -62,5 +62,9 @@ sync:
 workspace_patches:
   functions:
     default_folder_type: raisin:Folder
-  raisin:system:
+  "raisin:system":
     default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:Integration
+        - raisin:VirtualMount

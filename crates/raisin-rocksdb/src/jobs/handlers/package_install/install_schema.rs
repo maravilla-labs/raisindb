@@ -501,3 +501,80 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod workspace_patch_tests {
+    use super::super::manifest::PackageManifest;
+
+    /// The google-drive-adapter manifest must declare a `raisin:system`
+    /// workspace patch that adds both connector node types, so installing the
+    /// connector into a pre-existing repo self-heals the system workspace's
+    /// allowed_node_types (Phase 3 runs before content install in Phase 4).
+    #[test]
+    fn google_drive_manifest_declares_raisin_system_patch() {
+        let yaml = include_str!(
+            "../../../../../../builtin-packages/google-drive-adapter/manifest.yaml"
+        );
+        let manifest: PackageManifest =
+            serde_yaml::from_str(yaml).expect("google-drive-adapter manifest must parse");
+
+        let patches = manifest
+            .workspace_patches
+            .expect("manifest must declare workspace_patches");
+        let system = patches
+            .get("raisin:system")
+            .expect("workspace_patches must contain a raisin:system key");
+        let add = system
+            .allowed_node_types
+            .as_ref()
+            .and_then(|a| a.add.as_ref())
+            .expect("raisin:system patch must add allowed_node_types");
+
+        assert!(
+            add.iter().any(|t| t == "raisin:Integration"),
+            "must add raisin:Integration"
+        );
+        assert!(
+            add.iter().any(|t| t == "raisin:VirtualMount"),
+            "must add raisin:VirtualMount"
+        );
+    }
+
+    /// Mirrors the add-only merge in `apply_workspace_patches`: types the patch
+    /// declares are appended to an existing workspace that did NOT allow them,
+    /// without duplicating types that are already present.
+    #[test]
+    fn patch_adds_missing_types_to_existing_workspace() {
+        let yaml = include_str!(
+            "../../../../../../builtin-packages/google-drive-adapter/manifest.yaml"
+        );
+        let manifest: PackageManifest = serde_yaml::from_str(yaml).unwrap();
+        let system = manifest
+            .workspace_patches
+            .unwrap()
+            .remove("raisin:system")
+            .unwrap();
+        let add = system.allowed_node_types.unwrap().add.unwrap();
+
+        // Existing workspace created under the old schema: has some types but
+        // NOT the connector types the patch introduces.
+        let mut allowed_node_types: Vec<String> =
+            vec!["raisin:Folder".to_string(), "raisin:Integration".to_string()];
+
+        for type_name in &add {
+            if !allowed_node_types.contains(type_name) {
+                allowed_node_types.push(type_name.clone());
+            }
+        }
+
+        assert!(allowed_node_types.contains(&"raisin:VirtualMount".to_string()));
+        // No duplicate for the already-present raisin:Integration.
+        assert_eq!(
+            allowed_node_types
+                .iter()
+                .filter(|t| *t == "raisin:Integration")
+                .count(),
+            1
+        );
+    }
+}

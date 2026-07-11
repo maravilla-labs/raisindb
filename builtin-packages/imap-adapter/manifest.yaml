@@ -30,8 +30,8 @@ builtin: true
 
 provides:
   functions:
-    - /adapters/imap
-    - /mappers/imap-default
+    - /functions/adapters/imap
+    - /functions/mappers/imap-default
   # Pre-configured integration template (disabled until credentials are supplied).
   content:
     - raisin:system/integrations/imap
@@ -72,5 +72,9 @@ sync:
 workspace_patches:
   functions:
     default_folder_type: raisin:Folder
-  raisin:system:
+  "raisin:system":
     default_folder_type: raisin:Folder
+    allowed_node_types:
+      add:
+        - raisin:Integration
+        - raisin:VirtualMount

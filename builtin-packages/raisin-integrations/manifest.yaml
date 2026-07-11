@@ -24,7 +24,7 @@ builtin: true
 
 provides:
   functions:
-    - /lib/raisin/integrations/webhook-refresh
+    - /functions/lib/raisin/integrations/webhook-refresh
 
 # Sync configuration for package updates
 # Defines which paths this package owns to prevent conflicts with other packages
@@ -34,7 +34,7 @@ sync:
     on_conflict: prefer_server
 
   filters:
-    - root: /lib/raisin/integrations/webhook-refresh
+    - root: /functions/lib/raisin/integrations/webhook-refresh
       include:
         - "**"
       mode: merge
@@ -43,3 +43,8 @@ sync:
 workspace_patches:
   functions:
     default_folder_type: raisin:Folder
+  "raisin:system":
+    allowed_node_types:
+      add:
+        - raisin:Integration
+        - raisin:VirtualMount
