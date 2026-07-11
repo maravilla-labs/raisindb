@@ -26,10 +26,9 @@ properties:
   # Disabled until an operator supplies client_id/client_secret via the admin
   # console. The client secret is NEVER stored here — the console encrypts it
   # into client_secret_encrypted (AES-256-GCM) on the node.
+  # Experimental / preview connector (marked in the package title) — validate
+  # against your own Google account before relying on it in production.
   enabled: false
-  # Experimental / preview connector. Validate against your own Google account
-  # before relying on it in production.
-  experimental: true
   oauth_config:
     auth_url: https://accounts.google.com/o/oauth2/v2/auth
     token_url: https://oauth2.googleapis.com/token
