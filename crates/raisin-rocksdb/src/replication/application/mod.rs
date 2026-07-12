@@ -13,7 +13,6 @@
 //! - `node_operations` - Node CRUD operations (create, delete, update, move, etc.)
 //! - `tenant_operations` - Tenant, deployment, and repository operations
 //! - `user_operations` - User and workspace operations
-//! - `branch_operations` - Branch and revision metadata operations
 //! - `tag_operations` - Tag creation and deletion operations
 //! - `relation_operations` - Relation and archetype operations
 //! - `replication_core` - Core CRDT replication logic (LWW upsert, delete-wins)
@@ -31,7 +30,6 @@ mod index_writers;
 mod schema_operations;
 
 // Domain-specific operation modules
-mod branch_operations;
 mod identity_operations;
 mod node_operations;
 mod relation_operations;

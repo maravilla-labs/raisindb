@@ -88,6 +88,13 @@ impl OperationApplicator {
     }
 
     /// Apply a branch update operation
+    ///
+    /// UpdateBranch operations can arrive out of order (network delays, retries),
+    /// so this is last-write-wins BY REVISION, not by arrival order: an incoming
+    /// head is only applied if it is not older than what's already stored,
+    /// otherwise a delayed/duplicate peer message would silently regress head and
+    /// hide already-visible local writes (the same class of bug fixed in
+    /// `RocksDBTransaction::update_branch_head` for the local commit path).
     pub(in crate::replication::application) async fn apply_update_branch(
         &self,
         tenant_id: &str,
@@ -105,6 +112,29 @@ impl OperationApplicator {
             op.cluster_node_id,
             revision
         );
+
+        use raisin_storage::BranchRepository;
+        let current_head = self
+            .branch_repo
+            .get_branch(tenant_id, repo_id, &branch.name)
+            .await
+            .ok()
+            .flatten()
+            .map(|b| b.head);
+
+        if let Some(current_head) = current_head {
+            if branch.head < current_head {
+                tracing::warn!(
+                    "⏪ Ignoring older UpdateBranch: incoming {} < current {} ({}/{}/{})",
+                    branch.head,
+                    current_head,
+                    tenant_id,
+                    repo_id,
+                    branch.name
+                );
+                return Ok(());
+            }
+        }
 
         let key = keys::branch_key(tenant_id, repo_id, &branch.name);
         let cf = cf_handle(&self.db, cf::BRANCHES)?;

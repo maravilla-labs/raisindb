@@ -99,6 +99,24 @@ impl RocksDBTransaction {
                     raisin_error::Error::storage(format!("Branch deserialization error: {}", e))
                 })?;
 
+            // Monotonic advance: concurrent commits read-modify-write this same
+            // record, and an unconditional assignment lets a commit computed
+            // from an earlier revision overwrite one already advanced past it
+            // (lost update) - the losing commit's nodes are still durably
+            // written but sit ABOVE head and are invisible to any
+            // at_revision(head)-bound read until a later commit catches up.
+            // Matches BranchRepositoryImpl::update_head's guard; deliberate
+            // rollbacks go through set_head(), never through this commit path.
+            if *new_head <= branch.head {
+                tracing::debug!(
+                    "update_branch_head: skipping non-advancing head update branch={} current={:?} candidate={:?}",
+                    branch_name,
+                    branch.head,
+                    new_head
+                );
+                return Ok(branch);
+            }
+
             branch.head = *new_head;
 
             let value = rmp_serde::to_vec(&branch).map_err(|e| {

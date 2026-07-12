@@ -9,9 +9,28 @@
 //!     nodes, which live in the `raisin:system` workspace on the `main` branch
 //!     under `/integrations/{name}` and `/mounts/{name}`.
 
-import { api } from './client'
+import { api, ApiError } from './client'
 import { nodesApi, type Node } from './nodes'
 import { sqlApi } from './sql'
+
+/**
+ * `/integrations` and `/mounts` only exist once something has been installed
+ * or created under them. Before that, listing their children 404s ("Parent
+ * node not found") even though the correct answer is just an empty list.
+ */
+async function listChildrenOrEmpty(
+  repo: string,
+  branch: string,
+  workspace: string,
+  parentPath: string
+): Promise<Node[]> {
+  try {
+    return await nodesApi.listChildrenAtHead(repo, branch, workspace, parentPath)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return []
+    throw e
+  }
+}
 
 /** Workspace holding all integration + mount config nodes. */
 export const SYSTEM_WORKSPACE = 'raisin:system'
@@ -383,12 +402,7 @@ export const integrationsApi = {
   // ---- Integration config CRUD ----
 
   listIntegrations: async (repo: string): Promise<Integration[]> => {
-    const nodes = await nodesApi.listChildrenAtHead(
-      repo,
-      CONFIG_BRANCH,
-      SYSTEM_WORKSPACE,
-      INTEGRATIONS_ROOT
-    )
+    const nodes = await listChildrenOrEmpty(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, INTEGRATIONS_ROOT)
     return nodes
       .filter((n) => n.node_type === 'raisin:Integration')
       .map(nodeToIntegration)
@@ -467,12 +481,7 @@ export const integrationsApi = {
   // ---- Mount config CRUD ----
 
   listMounts: async (repo: string): Promise<VirtualMount[]> => {
-    const nodes = await nodesApi.listChildrenAtHead(
-      repo,
-      CONFIG_BRANCH,
-      SYSTEM_WORKSPACE,
-      MOUNTS_ROOT
-    )
+    const nodes = await listChildrenOrEmpty(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, MOUNTS_ROOT)
     return nodes
       .filter((n) => n.node_type === 'raisin:VirtualMount')
       .map(nodeToMount)
