@@ -79,6 +79,75 @@ pub struct BranchDiffPayload {
     pub base_branch: String,
 }
 
+/// Cross-branch node-set copy (branch promotion): copy `roots` (node paths on
+/// `source_branch`) onto `target_branch`, preserving node ids, in one atomic
+/// commit. `delete_missing` prunes target nodes absent from the source set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchCopyNodesPayload {
+    pub source_branch: String,
+    pub target_branch: String,
+    pub workspace: String,
+    pub roots: Vec<String>,
+    #[serde(default = "default_true")]
+    pub recursive: bool,
+    #[serde(default)]
+    pub delete_missing: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled invocation payloads
+// ---------------------------------------------------------------------------
+
+/// Create a one-shot scheduled invocation: run a function or flow once at
+/// `run_at`. A `run_at` in the past dispatches immediately. The optional
+/// `external_key` is a caller-supplied idempotency/lookup key that can later
+/// be used to find or cancel the invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledInvocationCreatePayload {
+    /// Invocation target kind: "function" or "flow"
+    pub target_kind: String,
+    /// Path of the target function or flow node
+    pub target_path: String,
+    /// Input passed to the target when it fires
+    #[serde(default)]
+    pub input: serde_json::Value,
+    /// When to fire (RFC3339 timestamp)
+    pub run_at: String,
+    /// Optional caller-supplied idempotency/lookup key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_key: Option<String>,
+    /// Branch the invocation executes against (defaults to "main")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Workspace the invocation executes against (defaults to "functions")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Retry attempts if the invocation fails (defaults to 0 — one-shot)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+}
+
+/// Reference a scheduled invocation by job id or external key (cancel / get).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledInvocationRefPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_key: Option<String>,
+}
+
+/// List scheduled invocations in the current repository.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScheduledInvocationListPayload {
+    /// Only invocations with this external key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_key: Option<String>,
+    /// Only invocations in this status ("scheduled", "running", "completed",
+    /// "cancelled", "failed")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Tag operation payloads
 // ---------------------------------------------------------------------------

@@ -7,9 +7,8 @@
 //!
 //! Exposes `raisin.integrations.sync_now(mountId, mode?)` to server-side
 //! functions: enqueues a deduped `VirtualMountSync` job for a virtual mount
-//! (connector). This drives the Starlark runtime (and any other consumer of the
-//! shared bindings registry); the QuickJS runtime registers the same call by
-//! hand in `runtime/quickjs/api_integrations.rs`.
+//! (connector). Both the Starlark and QuickJS runtimes consume this single
+//! definition through their registry gateways.
 
 use crate::api::FunctionApi;
 use crate::runtime::bindings::registry::{

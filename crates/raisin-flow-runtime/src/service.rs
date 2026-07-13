@@ -754,3 +754,78 @@ pub async fn get_instance_wait_type<S: Storage>(
     let (_node, instance) = load_instance(storage, repo, instance_id).await?;
     Ok(instance.wait_info.map(|w| w.wait_type))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TaskCompleter;
+
+    fn completer(id: &str, home: Option<&str>, is_admin: bool) -> TaskCompleter {
+        TaskCompleter {
+            id: id.to_string(),
+            home: home.map(|h| h.to_string()),
+            is_admin,
+        }
+    }
+
+    /// The confirmed-correct assignee string for an identity user is the
+    /// user HOME path (e.g. "/users/internal/admin-at-example-local"): it matches
+    /// the completer's `home`, regardless of leading-slash normalization. This
+    /// is the property `raisin.tasks.create` and the human_task step now store,
+    /// and the string `complete_task` / `get_inbox_task` authorize against.
+    #[test]
+    fn matches_assignee_by_home_path() {
+        let c = completer(
+            "cdc46e95-425d-4816-9da1-9a61776bbcf3",
+            Some("/users/internal/admin-at-example-local"),
+            false,
+        );
+        // Exact home path (as stored by the fixed standalone create + human_task).
+        assert!(c.matches_assignee("/users/internal/admin-at-example-local"));
+        // Normalization: leading slash is not significant on either side.
+        assert!(c.matches_assignee("users/internal/admin-at-example-local"));
+        // A different assignee is denied.
+        assert!(!c.matches_assignee("/users/internal/someone-else"));
+    }
+
+    /// The last-path-segment == caller-id fallback authorizes agent/service
+    /// assignees that have no home. Crucially, it does NOT fire for an
+    /// identity user against their real HOME-path assignee, because that path's
+    /// last segment is the slug (`admin-at-example-local`), not the caller's
+    /// uuid — which is exactly why the HOME path, not the bare uuid, is the
+    /// correct assignee string.
+    #[test]
+    fn matches_assignee_last_segment_fallback() {
+        // An agent whose id equals the assignee path's last segment matches.
+        let agent = completer("support", None, false);
+        assert!(agent.matches_assignee("/agents/support"));
+        assert!(!agent.matches_assignee("/agents/other"));
+
+        // A uuid-id caller (no home) does NOT match the HOME-path assignee via
+        // the fallback: the last segment is the slug, not the uuid. Such a
+        // caller is only authorized by the home-path comparison
+        // (matches_assignee_by_home_path), documenting why the bare uuid fails.
+        let uuid_caller = completer("cdc46e95-425d-4816-9da1-9a61776bbcf3", None, false);
+        assert!(!uuid_caller.matches_assignee("/users/internal/admin-at-example-local"));
+    }
+
+    /// Admins bypass the assignee check entirely.
+    #[test]
+    fn matches_assignee_admin_bypass() {
+        let admin = completer("root", None, true);
+        assert!(admin.matches_assignee("/users/anyone"));
+        assert!(admin.matches_assignee(""));
+    }
+
+    /// An empty assignee (the pre-fix standalone-task shape, which stored no
+    /// `assignee` property) is denied for a non-admin — the regression BUG C
+    /// fixed by writing the assignee property on create.
+    #[test]
+    fn matches_assignee_empty_denied_for_non_admin() {
+        let c = completer(
+            "cdc46e95-425d-4816-9da1-9a61776bbcf3",
+            Some("/users/internal/admin-at-example-local"),
+            false,
+        );
+        assert!(!c.matches_assignee(""));
+    }
+}

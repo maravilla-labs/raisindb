@@ -186,6 +186,23 @@ impl JobRegistry {
             handles.insert(job_id.clone(), h);
         }
 
+        // Persist delayed jobs at registration so they survive a restart
+        // while still pending. Immediately-dispatched jobs are persisted on
+        // their first status transition (claim), but a job scheduled for the
+        // future (register_job_at) has no status change until it fires — a
+        // restart in between would otherwise silently drop it.
+        if job_info.next_retry_at.is_some() {
+            if let Some(persistence) = &self.persistence {
+                if let Err(e) = persistence.persist_job(&job_id, &job_info).await {
+                    tracing::error!(
+                        job_id = %job_id,
+                        error = %e,
+                        "Failed to persist delayed job at registration"
+                    );
+                }
+            }
+        }
+
         // Notify monitors of new job (no locks held)
         self.monitors.broadcast_created(&job_info).await;
 

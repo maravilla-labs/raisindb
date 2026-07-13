@@ -206,6 +206,10 @@ impl fmt::Display for JobType {
                 (None, Some(r)) => write!(f, "ScheduledTriggerCheck(*/{})", r),
                 (None, None) => write!(f, "ScheduledTriggerCheck(*)"),
             },
+            Self::ScheduledInvocation {
+                invocation_id,
+                target_kind,
+            } => write!(f, "ScheduledInvocation({}/{})", target_kind, invocation_id),
             Self::FlowExecution {
                 flow_execution_id,
                 trigger_path,

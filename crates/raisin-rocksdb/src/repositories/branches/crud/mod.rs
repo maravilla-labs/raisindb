@@ -8,7 +8,8 @@ mod management;
 
 use crate::{cf, cf_handle, keys};
 use raisin_context::{
-    Branch, BranchDivergence, ConflictResolution, MergeConflict, MergeResult, MergeStrategy,
+    Branch, BranchDiff, BranchDivergence, ConflictResolution, MergeConflict, MergeResult,
+    MergeStrategy,
 };
 use raisin_error::Result;
 use raisin_hlc::HLC;
@@ -481,6 +482,16 @@ impl BranchRepository for BranchRepositoryImpl {
             base_branch,
         )
         .await
+    }
+
+    async fn diff_branches(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        base_branch: &str,
+    ) -> Result<BranchDiff> {
+        BranchRepositoryImpl::diff_branches(self, tenant_id, repo_id, branch, base_branch).await
     }
 
     async fn merge_branches(

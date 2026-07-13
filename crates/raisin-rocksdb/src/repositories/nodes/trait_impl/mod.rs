@@ -623,6 +623,32 @@ impl NodeRepository for NodeRepositoryImpl {
         .await
     }
 
+    async fn copy_nodes_across_branches(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        source_branch: &str,
+        target_branch: &str,
+        workspace: &str,
+        roots: &[String],
+        recursive: bool,
+        delete_missing: bool,
+        operation_meta: Option<raisin_models::operations::OperationMeta>,
+    ) -> Result<raisin_storage::CrossBranchCopySummary> {
+        self.copy_nodes_across_branches_impl(
+            tenant_id,
+            repo_id,
+            source_branch,
+            target_branch,
+            workspace,
+            roots,
+            recursive,
+            delete_missing,
+            operation_meta,
+        )
+        .await
+    }
+
     // -- Ordering -------------------------------------------------------------
 
     async fn reorder_child(

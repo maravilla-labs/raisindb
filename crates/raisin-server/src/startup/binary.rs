@@ -8,7 +8,7 @@ use raisin_binary::FilesystemBinaryStorage;
 #[cfg(feature = "s3")]
 use raisin_binary::S3BinaryStorage;
 #[cfg(feature = "storage-rocksdb")]
-use raisin_storage::Storage;
+use raisin_storage::{RepositoryManagementRepository, Storage};
 
 /// Initialize the binary storage backend based on feature flags.
 #[cfg(feature = "s3")]
@@ -60,4 +60,50 @@ pub async fn register_builtin_package_handler<B: BinaryStorage + 'static>(
 
     event_bus.subscribe(builtin_handler);
     tracing::info!("Builtin package init handler registered");
+}
+
+/// Re-sync embedded global (`raisin:*`) NodeTypes into every EXISTING
+/// repository so a schema change shipped in a new server binary propagates on
+/// upgrade — not only to repositories created after the change.
+///
+/// The `RepositoryCreated` handler registers global NodeTypes for NEW repos,
+/// but nothing re-registered them for repos created earlier. That meant a
+/// version-bumped global NodeType (e.g. `raisin:InboxTask` relaxing a required
+/// field so standalone `raisin.tasks.create` tasks validate) never reached an
+/// existing repository, and the old, stricter schema kept rejecting writes.
+///
+/// `init_repository_nodetypes` is version-gated: it only writes when the
+/// embedded NodeType version is newer than the one registered in the repo. So
+/// this is a cheap, idempotent no-op on every startup unless a global NodeType
+/// version actually increased.
+#[cfg(feature = "storage-rocksdb")]
+pub async fn resync_global_nodetypes(storage: &Arc<raisin_rocksdb::RocksDBStorage>) {
+    let repos = match storage.repository_management().list_repositories().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "Global NodeType resync: failed to list repositories");
+            return;
+        }
+    };
+
+    for repo_info in repos {
+        let branch = repo_info.config.default_branch.clone();
+        if let Err(e) = raisin_core::nodetype_init::init_repository_nodetypes(
+            storage.clone(),
+            &repo_info.tenant_id,
+            &repo_info.repo_id,
+            &branch,
+        )
+        .await
+        {
+            tracing::warn!(
+                tenant_id = %repo_info.tenant_id,
+                repo_id = %repo_info.repo_id,
+                branch = %branch,
+                error = %e,
+                "Global NodeType resync failed for repository"
+            );
+        }
+    }
+    tracing::info!("Global NodeType resync complete");
 }

@@ -178,18 +178,6 @@ impl PhysicalPlanner {
         None
     }
 
-    /// Remove prefix predicate from list
-    pub(super) fn remove_prefix_predicate(
-        &self,
-        predicates: &[CanonicalPredicate],
-    ) -> Vec<CanonicalPredicate> {
-        predicates
-            .iter()
-            .filter(|p| !matches!(p, CanonicalPredicate::PrefixRange { .. }))
-            .cloned()
-            .collect()
-    }
-
     /// Remove path equality predicate from list
     pub(super) fn remove_path_predicate(
         &self,
@@ -224,33 +212,6 @@ impl PhysicalPlanner {
             .collect()
     }
 
-    /// Remove specific property predicate from list
-    pub(super) fn remove_property_predicate(
-        &self,
-        predicates: &[CanonicalPredicate],
-        prop_name: &str,
-    ) -> Vec<CanonicalPredicate> {
-        predicates
-            .iter()
-            .filter(|p| {
-                match p {
-                    // Remove JSON property predicates matching the property name
-                    CanonicalPredicate::JsonPropertyEq { key, .. } if key == prop_name => false,
-                    // Remove pseudo-property column predicates whose indexed name
-                    // (__node_type, __archetype, __name, __created_by,
-                    // __updated_by, __created_at, __updated_at) matches.
-                    CanonicalPredicate::ColumnEq { column, .. }
-                        if format!("__{}", column.to_lowercase()) == prop_name =>
-                    {
-                        false
-                    }
-                    _ => true,
-                }
-            })
-            .cloned()
-            .collect()
-    }
-
     /// Combine canonical predicates back into a filter expression
     pub(super) fn combine_canonical_predicates(
         &self,
@@ -260,40 +221,24 @@ impl PhysicalPlanner {
             return None;
         }
 
-        // Filter out scan-level predicates that define the scan boundary and are
-        // inherently satisfied by the scan itself (e.g., DescendantOf is guaranteed
-        // by PrefixScan). Each build_*_scan method removes its own predicate from
-        // remaining, but this filter acts as a safety net.
+        // EVERY predicate handed to this function becomes part of the row-level
+        // residual filter — including hierarchy predicates (ChildOf, PrefixRange,
+        // DescendantOf, References), which round-trip through `to_expr()` to
+        // row-evaluable CHILD_OF / PATH_STARTS_WITH / DESCENDANT_OF / REFERENCES
+        // calls.
         //
-        // NOTE: SpatialDWithin is intentionally NOT filtered here. Two paths exist:
+        // Each build_*_scan method is responsible for removing exactly the
+        // predicate its scan GUARANTEES (and nothing else) from `remaining`
+        // before calling this. Historically this function also dropped all
+        // hierarchy predicates as a "safety net"; that silently discarded them
+        // whenever a DIFFERENT scan won the access-path choice (e.g.
+        // `WHERE path LIKE '/a/%' AND node_type = 'X'` planned as a
+        // PropertyIndexScan returned every 'X' node across ALL subtrees).
         //
-        // 1. Spatial scan selected (build_spatial_scan): SpatialDWithin is removed
-        //    from `remaining` explicitly in build_scan.rs, so it never reaches this
-        //    function. The spatial index handles distance filtering.
-        //
-        // 2. Non-spatial scan selected (e.g., DescendantOf wins by selectivity):
-        //    SpatialDWithin stays in `remaining` and is converted back to an
-        //    ST_DWithin(...) expression via `to_expr()`, then applied as a row-level
-        //    filter. This ensures correctness — rows outside the radius are excluded
-        //    even when the spatial index is not the primary scan method.
-        let filter_predicates: Vec<_> = predicates
-            .iter()
-            .filter(|p| {
-                !matches!(
-                    p,
-                    CanonicalPredicate::ChildOf { .. }
-                        | CanonicalPredicate::PrefixRange { .. }
-                        | CanonicalPredicate::DescendantOf { .. }
-                        | CanonicalPredicate::References { .. }
-                )
-            })
-            .collect();
-
-        if filter_predicates.is_empty() {
-            return None;
-        }
-
-        let exprs: Vec<TypedExpr> = filter_predicates.iter().map(|p| p.to_expr()).collect();
+        // SpatialDWithin follows the same rule: build_spatial_scan removes it
+        // when the spatial index drives the scan; otherwise it survives here as
+        // a row-level ST_DWITHIN filter.
+        let exprs: Vec<TypedExpr> = predicates.iter().map(|p| p.to_expr()).collect();
 
         if exprs.len() == 1 {
             return Some(exprs[0].clone());

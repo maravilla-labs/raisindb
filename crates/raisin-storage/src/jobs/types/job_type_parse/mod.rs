@@ -169,4 +169,16 @@ mod tests {
         });
         round_trip(JobType::VirtualMountSubscriptionRenew { tenant_id: None });
     }
+
+    #[test]
+    fn scheduled_invocation_round_trip() {
+        round_trip(JobType::ScheduledInvocation {
+            invocation_id: "V1StGXR8_Z5jdHi6B-myT".to_string(),
+            target_kind: "function".to_string(),
+        });
+        round_trip(JobType::ScheduledInvocation {
+            invocation_id: "abc123".to_string(),
+            target_kind: "flow".to_string(),
+        });
+    }
 }

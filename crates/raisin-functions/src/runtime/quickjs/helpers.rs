@@ -5,34 +5,14 @@
 
 //! Helper functions for the QuickJS runtime.
 //!
-//! Provides JSON error formatting and async-to-sync bridging utilities.
+//! Provides async-to-sync bridging utilities.
 
 /// Default timeout for external HTTP fetch requests (2 minutes).
-pub(super) const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// Creates a JSON error response with properly escaped error message.
 ///
-/// This prevents JSON injection vulnerabilities when error messages contain
-/// special characters like quotes.
-pub(super) fn json_error(message: impl std::fmt::Display) -> String {
-    serde_json::to_string(&serde_json::json!({ "error": message.to_string() }))
-        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
-}
-
-/// Creates a JSON error response with additional fields.
-pub(super) fn json_error_with_fields(
-    message: impl std::fmt::Display,
-    extra: serde_json::Value,
-) -> String {
-    let mut obj = serde_json::json!({ "error": message.to_string() });
-    if let (Some(obj_map), Some(extra_map)) = (obj.as_object_mut(), extra.as_object()) {
-        for (k, v) in extra_map {
-            obj_map.insert(k.clone(), v.clone());
-        }
-    }
-    serde_json::to_string(&obj)
-        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
-}
+/// Used by the W3C `fetch()` polyfill backend (`api_fetch.rs`). The
+/// `raisin.http.fetch` timeout lives in the shared registry invoker
+/// (`bindings/methods/http.rs`) so both runtimes get it.
+pub(super) const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Run an async function in a blocking context.
 ///

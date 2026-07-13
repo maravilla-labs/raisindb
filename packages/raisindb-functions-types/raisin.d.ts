@@ -277,6 +277,12 @@ declare namespace raisin {
     function embed(request: any): Promise<any>;
   }
 
+  namespace branches {
+    function diff(branch: string, baseBranch: string): Promise<any>;
+    function compare(branch: string, baseBranch: string): Promise<any>;
+    function copyNodes(sourceBranch: string, targetBranch: string, opts: any): Promise<any>;
+  }
+
   namespace crypto {
     function uuid(): Promise<string>;
     function verifyJwt(token: string, opts?: any | null): Promise<any>;
@@ -378,6 +384,13 @@ declare namespace raisin {
 
   namespace resources {
     function getBinary(storageKey: string): Promise<string>;
+  }
+
+  namespace scheduler {
+    function schedule(request: any): Promise<any>;
+    function cancel(jobIdOrKey: string): Promise<any>;
+    function list(filter?: any | null): Promise<any>;
+    function get(jobIdOrKey: string): Promise<any>;
   }
 
   namespace sql {

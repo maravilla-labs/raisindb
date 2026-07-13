@@ -33,6 +33,7 @@ pub mod restore_tree;
 pub mod resumable_upload;
 pub mod retarget_references;
 pub mod revision_history_copy;
+pub mod scheduled_invocation;
 pub mod scheduled_trigger;
 pub mod snapshot;
 pub mod trigger_evaluation;
@@ -90,6 +91,7 @@ pub use resumable_upload::{
 };
 pub use retarget_references::RetargetReferencesHandler;
 pub use revision_history_copy::RevisionHistoryCopyHandler;
+pub use scheduled_invocation::{FlowStartCallback, ScheduledInvocationHandler};
 pub use scheduled_trigger::{
     cron_matches, ScheduledTriggerFinderCallback, ScheduledTriggerHandler, ScheduledTriggerMatch,
 };
@@ -135,6 +137,7 @@ pub struct JobHandlerRegistry {
     pub flow_instance_execution: Arc<FlowInstanceExecutionHandler>,
     pub trigger_evaluation: Arc<TriggerEvaluationHandler>,
     pub scheduled_trigger: Arc<ScheduledTriggerHandler>,
+    pub scheduled_invocation: Arc<ScheduledInvocationHandler>,
     pub package_install: Arc<PackageInstallHandler<RocksDBStorage>>,
     pub package_process: Arc<PackageProcessHandler<RocksDBStorage>>,
     pub package_export: Arc<PackageExportHandler<RocksDBStorage>>,
@@ -174,6 +177,7 @@ impl JobHandlerRegistry {
         flow_instance_execution: Arc<FlowInstanceExecutionHandler>,
         trigger_evaluation: Arc<TriggerEvaluationHandler>,
         scheduled_trigger: Arc<ScheduledTriggerHandler>,
+        scheduled_invocation: Arc<ScheduledInvocationHandler>,
         package_install: Arc<PackageInstallHandler<RocksDBStorage>>,
         package_process: Arc<PackageProcessHandler<RocksDBStorage>>,
         package_export: Arc<PackageExportHandler<RocksDBStorage>>,
@@ -209,6 +213,7 @@ impl JobHandlerRegistry {
             flow_instance_execution,
             trigger_evaluation,
             scheduled_trigger,
+            scheduled_invocation,
             package_install,
             package_process,
             package_export,
@@ -331,6 +336,10 @@ impl JobHandlerRegistry {
                 .handle(job, context)
                 .await
                 .map(|_| None),
+            JobType::ScheduledInvocation { .. } => {
+                // One-shot scheduled invocation: routes to a function or flow
+                self.scheduled_invocation.handle(job, context).await
+            }
             JobType::PackageInstall { .. } => {
                 // Package installation returns result with install summary
                 self.package_install.handle(job, context).await

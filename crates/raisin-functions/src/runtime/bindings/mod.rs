@@ -15,13 +15,15 @@
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                    User Code (JS / Python)                   │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  QuickJS Runtime     │           │    Starlark Runtime      │
-//! │  (~100 lines adapter)│           │    (~100 lines adapter)  │
-//! ├──────────────────────┴───────────┴──────────────────────────┤
+//! │  QuickJS Runtime            │      Starlark Runtime          │
+//! │  quickjs/gateway.rs         │      starlark/gateway.rs       │
+//! │  (__raisin_call host fn)    │      (__raisin_call builtin)   │
+//! │  + quickjs/api_wrapper.js   │      + starlark/setup_code.rs  │
+//! ├─────────────────────────────┴───────────────────────────────┤
 //! │              SHARED BINDINGS REGISTRY                        │
-//! │   - All ~60 API methods defined ONCE                        │
+//! │   - Every API method defined ONCE (methods/*)               │
 //! │   - Declarative definitions per category                    │
-//! │   - Compile-time verification of completeness               │
+//! │   - Test-time verification of completeness                  │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │                    FunctionApi Trait                         │
 //! │              (Arc<dyn FunctionApi>)                          │
@@ -31,9 +33,14 @@
 //! ## Benefits
 //!
 //! - **Single Definition**: Each API method defined ONCE
-//! - **Compile-Time Verification**: Tests verify all FunctionApi methods are bound
-//! - **Generated Wrappers**: JS/Python wrappers generated from same source
+//! - **Test-Time Verification**: Tests verify all FunctionApi methods are bound
+//!   and that the QuickJS wrapper only references registered methods
 //! - **Same Invoker**: Both runtimes call identical Rust async functions
+//!
+//! Each runtime keeps a thin surface layer on top of its gateway (Starlark: a
+//! generated `raisin` struct that fails on any error envelope; QuickJS:
+//! `api_wrapper.js` with the frozen per-method error conventions the JS
+//! ecosystem depends on).
 //!
 //! ## Categories
 //!
@@ -52,12 +59,8 @@
 //! - `context` - Execution context
 //! - `internal` - Logging and internal helpers
 
-#[macro_use]
-pub mod macros;
-pub mod adapters;
 pub mod methods;
 pub mod registry;
-pub mod wrappers;
 
 // Re-export key types
 pub use methods::{all_methods, build_registry, methods_by_category, registry};

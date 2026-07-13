@@ -210,6 +210,7 @@ export enum RequestType {
   BranchMerge = 'branch_merge',
   BranchCompare = 'branch_compare',
   BranchDiff = 'branch_diff',
+  BranchCopyNodes = 'branch_copy_nodes',
 
   // Tag operations
   TagCreate = 'tag_create',
@@ -289,6 +290,12 @@ export enum RequestType {
   // Function operations
   FunctionInvoke = 'function_invoke',
   FunctionInvokeSync = 'function_invoke_sync',
+
+  // Scheduled invocation operations (one-shot, time-based function/flow runs)
+  ScheduledInvocationCreate = 'scheduled_invocation_create',
+  ScheduledInvocationCancel = 'scheduled_invocation_cancel',
+  ScheduledInvocationList = 'scheduled_invocation_list',
+  ScheduledInvocationGet = 'scheduled_invocation_get',
 }
 
 /**

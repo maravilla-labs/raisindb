@@ -151,6 +151,17 @@ pub enum JobType {
         tenant_id: Option<String>,
         repo_id: Option<String>,
     },
+    /// One-shot scheduled invocation of a function or flow at a fixed time.
+    ///
+    /// The variant is intentionally minimal (JobType round-trips through its
+    /// Display string): the rich payload — target path, input, actor,
+    /// external key, scheduled time — lives in the persisted `JobContext`.
+    ScheduledInvocation {
+        /// Unique invocation id (nanoid, slash-free).
+        invocation_id: String,
+        /// Invocation target kind: "function" or "flow".
+        target_kind: String,
+    },
     FlowExecution {
         flow_execution_id: String,
         trigger_path: String,
@@ -292,6 +303,7 @@ impl JobType {
             JobType::VirtualMountSync { .. } => 600,
             // Function/AI execution — can involve AI API calls (10-30s each)
             JobType::FunctionExecution { .. } => 300,
+            JobType::ScheduledInvocation { .. } => 300,
             JobType::AIToolCallExecution { .. } => 300,
             JobType::AICall { .. } => 300,
             JobType::FlowExecution { .. } => 300,

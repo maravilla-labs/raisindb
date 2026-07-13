@@ -95,6 +95,42 @@ impl<S: Storage> WorkspaceService<S> {
             };
 
             if should_create_root {
+                // The ROOT node is typed `raisin:Folder` and the transactional
+                // create path schema-validates it, so the built-in NodeTypes
+                // must exist BEFORE the commit below. In the server they are
+                // seeded by a RepositoryCreated event handler, but that runs
+                // asynchronously (and not at all for embedded/direct-storage
+                // users, e.g. integration tests) — creating a workspace right
+                // after the repository races it. Seed the built-ins here when
+                // the folder type is missing; `init_repository_nodetypes` is
+                // idempotent, so a concurrent handler run is harmless.
+                use raisin_storage::NodeTypeRepository as _;
+                let folder_exists = self
+                    .storage
+                    .node_types()
+                    .get(
+                        raisin_storage::scope::BranchScope::new(tenant_id, repo_id, &branch),
+                        "raisin:Folder",
+                        None,
+                    )
+                    .await?
+                    .is_some();
+                if !folder_exists {
+                    tracing::info!(
+                        "Built-in NodeTypes missing for {}/{}/{}; seeding before ROOT node creation",
+                        tenant_id,
+                        repo_id,
+                        branch
+                    );
+                    crate::nodetype_init::init_repository_nodetypes(
+                        self.storage.clone(),
+                        tenant_id,
+                        repo_id,
+                        &branch,
+                    )
+                    .await?;
+                }
+
                 let root_node = models::nodes::Node {
                     id: models::nodes::ROOT_NODE_ID.to_string(),
                     name: "root".to_string(),

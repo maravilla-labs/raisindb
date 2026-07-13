@@ -43,9 +43,26 @@ const FUNCTIONS_WORKSPACE: &str = "functions";
 /// `JobDataStore`) - mirrors the `RocksDBStorage` implementation in
 /// `raisin-rocksdb/src/jobs/flow_scheduler.rs`, but works from the
 /// function-execution dependencies instead of the storage handle.
-struct JobQueueFlowScheduler {
+///
+/// Shared with the `tasks` callback (`raisin.tasks.complete`), which resumes
+/// the owning flow through the same unified queue.
+pub(crate) struct JobQueueFlowScheduler {
     job_registry: Arc<raisin_storage::jobs::JobRegistry>,
     job_data_store: Arc<raisin_rocksdb::JobDataStore>,
+}
+
+impl JobQueueFlowScheduler {
+    /// Build a scheduler from the job-system dependencies (the same
+    /// `job_registry` + `job_data_store` carried on `ExecutionDependencies`).
+    pub(crate) fn new(
+        job_registry: Arc<raisin_storage::jobs::JobRegistry>,
+        job_data_store: Arc<raisin_rocksdb::JobDataStore>,
+    ) -> Self {
+        Self {
+            job_registry,
+            job_data_store,
+        }
+    }
 }
 
 #[async_trait]
@@ -122,10 +139,7 @@ where
 {
     Arc::new(move |flow_path: String, input: Value| {
         let deps = deps.clone();
-        let scheduler = JobQueueFlowScheduler {
-            job_registry: job_registry.clone(),
-            job_data_store: job_data_store.clone(),
-        };
+        let scheduler = JobQueueFlowScheduler::new(job_registry.clone(), job_data_store.clone());
         let repo = repo_id.clone();
         let actor = auth_context
             .as_ref()

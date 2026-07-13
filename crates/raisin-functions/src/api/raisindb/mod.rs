@@ -24,6 +24,7 @@
 
 mod admin;
 mod ai_ops;
+mod branches;
 mod context;
 mod crypto;
 mod events;
@@ -35,6 +36,7 @@ mod locks;
 mod network_policy;
 mod nodes;
 mod resources;
+mod scheduler;
 mod sql;
 mod tasks;
 mod tx;
@@ -287,6 +289,44 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn flow_run(&self, flow_path: &str, input: Value) -> Result<Value> {
         self.impl_flow_run(flow_path, input).await
+    }
+
+    // ========== Scheduled Invocation Operations ==========
+
+    async fn scheduler_schedule(&self, request: Value) -> Result<Value> {
+        self.impl_scheduler_schedule(request).await
+    }
+
+    async fn scheduler_cancel(&self, job_id_or_key: &str) -> Result<Value> {
+        self.impl_scheduler_cancel(job_id_or_key).await
+    }
+
+    async fn scheduler_list(&self, filter: Value) -> Result<Value> {
+        self.impl_scheduler_list(filter).await
+    }
+
+    async fn scheduler_get(&self, job_id_or_key: &str) -> Result<Value> {
+        self.impl_scheduler_get(job_id_or_key).await
+    }
+
+    // ========== Branch Operations ==========
+
+    async fn branch_diff(&self, branch: &str, base_branch: &str) -> Result<Value> {
+        self.impl_branch_diff(branch, base_branch).await
+    }
+
+    async fn branch_compare(&self, branch: &str, base_branch: &str) -> Result<Value> {
+        self.impl_branch_compare(branch, base_branch).await
+    }
+
+    async fn branch_copy_nodes(
+        &self,
+        source_branch: &str,
+        target_branch: &str,
+        opts: Value,
+    ) -> Result<Value> {
+        self.impl_branch_copy_nodes(source_branch, target_branch, opts)
+            .await
     }
 
     // ========== Date/Time Operations ==========

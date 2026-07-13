@@ -19,6 +19,6 @@ mod cascade;
 mod create;
 mod delete;
 mod helpers;
-mod indexing;
+pub(crate) mod indexing;
 mod read;
 mod update;

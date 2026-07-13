@@ -205,6 +205,64 @@ pub fn create_scheduled_trigger_handler(
     Arc::new(builder)
 }
 
+/// Create the one-shot scheduled invocation handler
+///
+/// The flow starter is built here (rather than injected from the transport
+/// layer) because the storage handle itself implements `FlowJobScheduler`,
+/// so flow instances can be started directly via the flow runtime service.
+pub fn create_scheduled_invocation_handler(
+    storage: Arc<RocksDBStorage>,
+    job_registry: Arc<JobRegistry>,
+    job_data_store: Arc<JobDataStore>,
+    dispatcher: Arc<JobDispatcher>,
+) -> Arc<crate::jobs::ScheduledInvocationHandler> {
+    let storage_for_flows = storage.clone();
+    let flow_starter: crate::jobs::FlowStartCallback = Arc::new(
+        move |_tenant_id: String,
+              repo_id: String,
+              _branch: String,
+              flow_path: String,
+              input: serde_json::Value,
+              actor: String| {
+            let storage = storage_for_flows.clone();
+            Box::pin(async move {
+                // The storage handle doubles as the flow job scheduler
+                // (see jobs/flow_scheduler.rs).
+                let scheduler: &dyn raisin_flow_runtime::service::FlowJobScheduler =
+                    storage.as_ref();
+                let result = raisin_flow_runtime::service::run_flow(
+                    storage.as_ref(),
+                    scheduler,
+                    &repo_id,
+                    &flow_path,
+                    input,
+                    actor,
+                    None,
+                )
+                .await
+                .map_err(|e| {
+                    raisin_error::Error::Backend(format!(
+                        "Failed to start scheduled flow '{}': {}",
+                        flow_path, e
+                    ))
+                })?;
+
+                Ok(serde_json::json!({
+                    "target_kind": "flow",
+                    "instance_id": result.instance_id,
+                    "job_id": result.job_id,
+                    "status": "queued",
+                }))
+            })
+        },
+    );
+
+    Arc::new(
+        crate::jobs::ScheduledInvocationHandler::new(job_registry, job_data_store, dispatcher)
+            .with_flow_starter(flow_starter),
+    )
+}
+
 /// Create bulk SQL handler
 pub fn create_bulk_sql_handler(
     sql_executor: Option<SqlExecutorCallback>,

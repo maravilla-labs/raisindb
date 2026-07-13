@@ -81,6 +81,20 @@ impl NodeRepositoryImpl {
             }
         };
 
+        // Stamp modification time at this write level too — mirrors the
+        // transaction-layer put_node stamping so non-transactional updates
+        // (e.g. property updates by path) also record when they happened.
+        // Never let an incoming None wipe the original creation metadata.
+        // (updated_by cannot be resolved here: the repository layer has no
+        // actor; put_node handles that where an auth context exists.)
+        node.updated_at = Some(chrono::Utc::now());
+        if node.created_at.is_none() {
+            node.created_at = old_node.created_at;
+        }
+        if node.created_by.is_none() {
+            node.created_by = old_node.created_by.clone();
+        }
+
         // VALIDATION 4: Check unique property constraints (O(1) lookup using UNIQUE_INDEX CF)
         // This allows the same node to keep its unique values (no conflict with itself)
         self.check_unique_constraints(&node, tenant_id, repo_id, branch, workspace)
@@ -95,6 +109,26 @@ impl NodeRepositoryImpl {
         let step_start = std::time::Instant::now();
 
         let mut batch = WriteBatch::default();
+
+        // Property index: tombstone stale OLD-value entries (value changed /
+        // property removed / published tag flipped) BEFORE writing the new
+        // entries. Without this, equality scans and index COUNTs on the old
+        // value keep matching this node forever (orphaned entries even survive
+        // restarts).
+        {
+            let cf_property = crate::cf_handle(&self.db, crate::cf::PROPERTY_INDEX)?;
+            super::indexing::property_indexes::add_stale_property_tombstones(
+                &mut batch,
+                cf_property,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &old_node,
+                &node,
+                &revision,
+            );
+        }
 
         // Use shared indexing helper (DRY)
         self.add_node_indexes_to_batch(

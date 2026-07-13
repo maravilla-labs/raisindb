@@ -25,6 +25,7 @@ mod locks;
 mod node_types;
 mod nodes;
 mod repositories;
+mod scheduler;
 mod subscriptions;
 mod tags;
 mod transactions;
@@ -42,6 +43,7 @@ pub use locks::*;
 pub use node_types::*;
 pub use nodes::*;
 pub use repositories::*;
+pub use scheduler::*;
 pub use subscriptions::*;
 pub use tags::*;
 pub use transactions::*;
@@ -279,6 +281,9 @@ where
         RequestType::BranchMerge => handle_branch_merge(state, connection_state, request).await,
         RequestType::BranchCompare => handle_branch_compare(state, connection_state, request).await,
         RequestType::BranchDiff => handle_branch_diff(state, connection_state, request).await,
+        RequestType::BranchCopyNodes => {
+            handle_branch_copy_nodes(state, connection_state, request).await
+        }
 
         // Tag operations
         RequestType::TagCreate => handle_tag_create(state, connection_state, request).await,
@@ -311,6 +316,20 @@ where
         }
         RequestType::FunctionInvokeSync => {
             handle_function_invoke_sync(state, connection_state, request).await
+        }
+
+        // Scheduled invocation operations
+        RequestType::ScheduledInvocationCreate => {
+            handle_scheduled_invocation_create(state, connection_state, request).await
+        }
+        RequestType::ScheduledInvocationCancel => {
+            handle_scheduled_invocation_cancel(state, connection_state, request).await
+        }
+        RequestType::ScheduledInvocationList => {
+            handle_scheduled_invocation_list(state, connection_state, request).await
+        }
+        RequestType::ScheduledInvocationGet => {
+            handle_scheduled_invocation_get(state, connection_state, request).await
         }
 
         // Lock / inventory operations

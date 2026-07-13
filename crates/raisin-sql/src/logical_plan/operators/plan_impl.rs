@@ -40,9 +40,11 @@ impl LogicalPlan {
                 ..
             } => {
                 let mut cols = vec![];
-                for (idx, expr) in group_by.iter().enumerate() {
+                for expr in group_by.iter() {
                     cols.push(SchemaColumn {
-                        name: format!("group_{}", idx),
+                        // Canonical group-key name — matches what the hash
+                        // aggregate executor materializes into its output rows.
+                        name: crate::logical_plan::group_key_column_name(expr),
                         data_type: expr.data_type.clone(),
                     });
                 }

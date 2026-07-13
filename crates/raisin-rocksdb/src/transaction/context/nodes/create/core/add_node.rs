@@ -59,6 +59,21 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 3a. Check CREATE permission
     rls::check_create_permission(tx, &normalized_node, workspace).await?;
 
+    // 3c. Reserve the path against concurrent creators BEFORE the existence
+    // check below. The existence check alone is a TOCTOU race: two concurrent
+    // transactions can both see "no node at path" and both commit, yielding two
+    // physical rows at one path. The reservation is held until this
+    // transaction's batch is durably written (or it rolls back / is dropped),
+    // and reserve-then-check ordering guarantees the loser either conflicts
+    // here or sees the winner's committed row in the check below.
+    tx.reserve_create_path(
+        &tenant_id,
+        &repo_id,
+        &branch,
+        workspace,
+        &normalized_node.path,
+    )?;
+
     // 4. Check for path conflict in transaction cache (read-your-writes)
     let cached_existing =
         super::super::super::read::get_node_by_path(tx, workspace, &normalized_node.path).await?;

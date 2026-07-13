@@ -1,7 +1,27 @@
 // RaisinDB JavaScript API wrapper
 // This code is evaluated at runtime to create the public globalThis.raisin API.
-// It wraps internal __raisin_internal.* functions (which return JSON strings)
-// into a developer-friendly API.
+//
+// Every raisin.* method dispatches through __raisin_call (a host function
+// registered by gateway.rs) into the SHARED bindings registry — the same
+// single-definition-per-method registry the Starlark runtime uses. The only
+// other host functions are the runtime-local __raisin_internal.temp_* helpers
+// (per-execution temp files backing the Resource class) and the W3C fetch
+// plumbing.
+//
+// The per-method bodies below are the FROZEN public surface contract:
+// method names, argument shapes, return shapes and — critically — the
+// per-method error conventions (throw vs null vs [] vs sentinel vs returned
+// error object). Do not "unify" them; the application ecosystem depends on
+// each one.
+
+// Dispatch a method through the shared bindings registry.
+// Returns the parsed result; a failed call yields the gateway's error
+// envelope { error: true, message: "..." } (it never throws for API errors).
+const __call = (method, args) => JSON.parse(__raisin_call(method, JSON.stringify(args)));
+
+// True only for the gateway's error envelope. Legitimate API payloads never
+// carry a top-level `error: true` with a string `message`.
+const __isErr = (r) => !!r && typeof r === 'object' && r.error === true && typeof r.message === 'string';
 
 // Resource class - represents a resource (file/binary) from node properties
 class Resource {
@@ -38,9 +58,9 @@ class Resource {
         if (!storageKey) {
             throw new Error('Resource has no storage_key in metadata');
         }
-        const result = __raisin_internal.resource_getBinary(storageKey);
-        if (result.startsWith('error:')) {
-            throw new Error(result.substring(6));
+        const result = __call('resources_getBinary', [storageKey]);
+        if (__isErr(result)) {
+            throw new Error(result.message);
         }
         return result;
     }
@@ -226,11 +246,8 @@ function wrapNode(nodeData, workspace) {
             } else {
                 uploadData = data;
             }
-            const result = __raisin_internal.node_addResource(
-                workspace, this.path, path, JSON.stringify(uploadData)
-            );
-            const parsed = JSON.parse(result);
-            if (parsed.error) throw new Error(parsed.error);
+            const parsed = __call('nodes_addResource', [workspace, this.path, path, uploadData]);
+            if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
             return parsed;
         }
     };
@@ -238,22 +255,28 @@ function wrapNode(nodeData, workspace) {
 
 globalThis.raisin = {
     nodes: {
+        // Reads swallow storage errors: a failed get resolves to null.
         get: (workspace, path) => {
-            const data = JSON.parse(__raisin_internal.nodes_get(workspace, path));
-            return wrapNode(data, workspace);
+            const data = __call('nodes_get', [workspace, path]);
+            return wrapNode(__isErr(data) ? null : data, workspace);
         },
         getById: (workspace, id) => {
-            const data = JSON.parse(__raisin_internal.nodes_getById(workspace, id));
-            return wrapNode(data, workspace);
+            const data = __call('nodes_getById', [workspace, id]);
+            return wrapNode(__isErr(data) ? null : data, workspace);
         },
         // List a node's revision history (git-style "file history"), newest first.
         // Returns plain revision entries ({revision, updated_at, updated_by, deleted}),
         // not node objects. Use the `revision` with an at-revision read to fetch a snapshot.
         history: (workspace, id, limit) => {
-            return JSON.parse(__raisin_internal.nodes_history(workspace, id, limit));
+            const results = __call('nodes_history', [workspace, id, limit]);
+            return __isErr(results) ? [] : results;
         },
         create: (workspace, parent, data) => {
-            const result = JSON.parse(__raisin_internal.nodes_create(workspace, parent, JSON.stringify(data)));
+            const result = __call('nodes_create', [workspace, parent, data]);
+            // A rejected create (permission denied, workspace allowlist, path
+            // conflict, validation) comes back as an error envelope — it must
+            // surface as an exception, never as a success-shaped node.
+            if (result && result.error) throw new Error(result.message || result.error);
             return wrapNode(result, workspace);
         },
         // Create a node under parentPath, auto-creating any missing ancestor folders.
@@ -282,162 +305,217 @@ globalThis.raisin = {
             }
         },
         update: (workspace, path, data) => {
-            const result = JSON.parse(__raisin_internal.nodes_update(workspace, path, JSON.stringify(data)));
+            const result = __call('nodes_update', [workspace, path, data]);
+            if (result && result.error) throw new Error(result.message || result.error);
             return wrapNode(result, workspace);
         },
-        delete: (workspace, path) => __raisin_internal.nodes_delete(workspace, path),
-        updateProperty: (workspace, nodePath, propertyPath, value) => __raisin_internal.nodes_updateProperty(workspace, nodePath, propertyPath, JSON.stringify(value)),
+        delete: (workspace, path) => {
+            const parsed = __call('nodes_delete', [workspace, path]);
+            if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+            return true;
+        },
+        updateProperty: (workspace, nodePath, propertyPath, value) => {
+            const parsed = __call('nodes_updateProperty', [workspace, nodePath, propertyPath, value]);
+            if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+            return true;
+        },
         move: (workspace, nodePath, newParentPath) => {
-            const result = JSON.parse(__raisin_internal.nodes_move(workspace, nodePath, newParentPath));
+            const result = __call('nodes_move', [workspace, nodePath, newParentPath]);
+            if (result && result.error) throw new Error(result.message || result.error);
             return wrapNode(result, workspace);
         },
+        // Reads swallow storage errors: a failed query resolves to [].
         query: (workspace, query) => {
-            const results = JSON.parse(__raisin_internal.nodes_query(workspace, JSON.stringify(query)));
-            return results.map(n => wrapNode(n, workspace));
+            const results = __call('nodes_query', [workspace, query]);
+            return (__isErr(results) ? [] : results).map(n => wrapNode(n, workspace));
         },
         getChildren: (workspace, path, limit) => {
-            const results = JSON.parse(__raisin_internal.nodes_getChildren(workspace, path, limit));
-            return results.map(n => wrapNode(n, workspace));
+            const results = __call('nodes_getChildren', [workspace, path, limit]);
+            return (__isErr(results) ? [] : results).map(n => wrapNode(n, workspace));
         },
         // Replay a parent's child order from sourceBranch onto targetBranch.
-        applyChildOrder: (workspace, parentPath, sourceBranch, targetBranch) => __raisin_internal.nodes_applyChildOrder(workspace, parentPath, sourceBranch, targetBranch),
+        applyChildOrder: (workspace, parentPath, sourceBranch, targetBranch) => {
+            const parsed = __call('nodes_applyChildOrder', [workspace, parentPath, sourceBranch, targetBranch]);
+            if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+            return true;
+        },
         // Transaction API - returns a context object with node operations
         beginTransaction: () => {
-            const txId = __raisin_internal.tx_begin();
-            if (txId.startsWith('error:')) {
-                throw new Error(txId.substring(6));
+            const txId = __call('tx_begin', []);
+            if (__isErr(txId)) {
+                throw new Error(txId.message);
             }
             return {
                 // Create node under parent path (auto-generates ID)
                 create: (workspace, parentPath, data) => {
-                    const result = __raisin_internal.tx_create(txId, workspace, parentPath, JSON.stringify(data));
-                    const parsed = JSON.parse(result);
-                    if (parsed.error) throw new Error(parsed.error);
+                    const parsed = __call('tx_create', [txId, workspace, parentPath, data]);
+                    if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
                     return parsed;
                 },
                 // Add node with explicit path (auto-generates ID if not provided)
                 add: (workspace, data) => {
-                    const result = __raisin_internal.tx_add(txId, workspace, JSON.stringify(data));
-                    const parsed = JSON.parse(result);
-                    if (parsed.error) throw new Error(parsed.error);
+                    const parsed = __call('tx_add', [txId, workspace, data]);
+                    if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
                     return parsed;
                 },
                 // Put node by ID (create or update, auto-generates ID if not provided)
                 put: (workspace, data) => {
-                    const result = __raisin_internal.tx_put(txId, workspace, JSON.stringify(data));
-                    if (result.startsWith('{"error":')) {
-                        throw new Error(JSON.parse(result).error);
+                    const result = __call('tx_put', [txId, workspace, data]);
+                    if (__isErr(result)) {
+                        throw new Error(result.message);
                     }
                 },
                 // Upsert node by path (create or update, auto-generates ID if not provided)
                 upsert: (workspace, data) => {
-                    const result = __raisin_internal.tx_upsert(txId, workspace, JSON.stringify(data));
-                    if (result.startsWith('{"error":')) {
-                        throw new Error(JSON.parse(result).error);
+                    const result = __call('tx_upsert', [txId, workspace, data]);
+                    if (__isErr(result)) {
+                        throw new Error(result.message);
                     }
                 },
                 // Create node with deep parent creation (auto-creates parent folders)
                 createDeep: (workspace, parentPath, data, parentNodeType = 'raisin:Folder') => {
-                    const result = __raisin_internal.tx_create_deep(txId, workspace, parentPath, JSON.stringify(data), parentNodeType);
-                    const parsed = JSON.parse(result);
-                    if (parsed.error) throw new Error(parsed.error);
+                    const parsed = __call('tx_createDeep', [txId, workspace, parentPath, data, parentNodeType]);
+                    if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
                     return parsed;
                 },
                 // Upsert node with deep parent creation (auto-creates parent folders)
                 upsertDeep: (workspace, data, parentNodeType = 'raisin:Folder') => {
-                    const result = __raisin_internal.tx_upsert_deep(txId, workspace, JSON.stringify(data), parentNodeType);
-                    if (result !== 'true') {
-                        const parsed = JSON.parse(result);
-                        if (parsed.error) throw new Error(parsed.error);
+                    const result = __call('tx_upsertDeep', [txId, workspace, data, parentNodeType]);
+                    if (result !== true && result && result.error) {
+                        throw new Error(result.message || result.error);
                     }
                 },
                 // Update existing node
                 update: (workspace, path, data) => {
-                    const result = __raisin_internal.tx_update(txId, workspace, path, JSON.stringify(data));
-                    if (result.startsWith('{"error":')) {
-                        throw new Error(JSON.parse(result).error);
+                    const result = __call('tx_update', [txId, workspace, path, data]);
+                    if (__isErr(result)) {
+                        throw new Error(result.message);
                     }
                 },
-                // Delete node by path
-                delete: (workspace, path) => __raisin_internal.tx_delete(txId, workspace, path),
-                // Delete node by ID
-                deleteById: (workspace, id) => __raisin_internal.tx_delete_by_id(txId, workspace, id),
-                // Get node by ID
+                // Delete node by path (errors swallowed to false, like commit-time bools)
+                delete: (workspace, path) => {
+                    const r = __call('tx_delete', [txId, workspace, path]);
+                    return __isErr(r) ? false : true;
+                },
+                // Delete node by ID (errors swallowed to false)
+                deleteById: (workspace, id) => {
+                    const r = __call('tx_deleteById', [txId, workspace, id]);
+                    return __isErr(r) ? false : true;
+                },
+                // Get node by ID (errors swallowed to null)
                 get: (workspace, id) => {
-                    const result = __raisin_internal.tx_get(txId, workspace, id);
-                    return result === 'null' ? null : JSON.parse(result);
+                    const result = __call('tx_get', [txId, workspace, id]);
+                    return __isErr(result) ? null : result;
                 },
-                // Get node by path
+                // Get node by path (errors swallowed to null)
                 getByPath: (workspace, path) => {
-                    const result = __raisin_internal.tx_get_by_path(txId, workspace, path);
-                    return result === 'null' ? null : JSON.parse(result);
+                    const result = __call('tx_getByPath', [txId, workspace, path]);
+                    return __isErr(result) ? null : result;
                 },
-                // List children of a node
-                listChildren: (workspace, parentPath) => JSON.parse(__raisin_internal.tx_list_children(txId, workspace, parentPath)),
-                // NOTE: tx.move() is intentionally NOT supported.
+                // List children of a node (errors swallowed to [])
+                listChildren: (workspace, parentPath) => {
+                    const results = __call('tx_listChildren', [txId, workspace, parentPath]);
+                    return __isErr(results) ? [] : results;
+                },
+                // NOTE: tx.move() is intentionally NOT supported (the registry's
+                // tx_move exists for other surfaces but is not exposed here).
                 // Move requires target parent to be committed, which conflicts with transaction semantics.
                 // For "move" within a transaction, use: tx.delete(oldPath) + tx.add(newPath, { id: sameId, ... })
                 // Update a single property
                 updateProperty: (workspace, nodePath, propertyPath, value) => {
-                    const result = __raisin_internal.tx_update_property(txId, workspace, nodePath, propertyPath, JSON.stringify(value));
-                    if (result.startsWith('{"error":')) {
-                        throw new Error(JSON.parse(result).error);
+                    const result = __call('tx_updateProperty', [txId, workspace, nodePath, propertyPath, value]);
+                    if (__isErr(result)) {
+                        throw new Error(result.message);
                     }
                 },
-                // Set actor for commit
-                setActor: (actor) => __raisin_internal.tx_set_actor(txId, actor),
-                // Set message for commit
-                setMessage: (message) => __raisin_internal.tx_set_message(txId, message),
+                // Set actor for commit (returns bool, errors swallowed to false)
+                setActor: (actor) => {
+                    const r = __call('tx_setActor', [txId, actor]);
+                    return __isErr(r) ? false : true;
+                },
+                // Set message for commit (returns bool, errors swallowed to false)
+                setMessage: (message) => {
+                    const r = __call('tx_setMessage', [txId, message]);
+                    return __isErr(r) ? false : true;
+                },
                 // Commit transaction
                 commit: () => {
-                    const success = __raisin_internal.tx_commit(txId);
-                    if (!success) throw new Error('Transaction commit failed');
+                    const r = __call('tx_commit', [txId]);
+                    if (__isErr(r)) throw new Error('Transaction commit failed');
                 },
                 // Rollback transaction
                 rollback: () => {
-                    const success = __raisin_internal.tx_rollback(txId);
-                    if (!success) throw new Error('Transaction rollback failed');
+                    const r = __call('tx_rollback', [txId]);
+                    if (__isErr(r)) throw new Error('Transaction rollback failed');
                 }
             };
         }
     },
     sql: {
-        query: (sql, params) => JSON.parse(__raisin_internal.sql_query(sql, params ? JSON.stringify(params) : null)),
-        execute: (sql, params) => __raisin_internal.sql_execute(sql, params ? JSON.stringify(params) : null)
+        // A failed query does NOT throw — it resolves to { error, rows: [] }.
+        query: (sql, params) => {
+            const r = __call('sql_query', [sql, Array.isArray(params) ? params : []]);
+            return __isErr(r) ? { error: r.message, rows: [] } : r;
+        },
+        // A failed execute does NOT throw — it resolves to -1.
+        execute: (sql, params) => {
+            const r = __call('sql_execute', [sql, Array.isArray(params) ? params : []]);
+            return __isErr(r) ? -1 : r;
+        }
     },
     http: {
-        fetch: (url, options) => JSON.parse(__raisin_internal.http_fetch(url, options ? JSON.stringify(options) : null))
+        // fetch(url, { method, headers, body, ... }). A failed request does
+        // NOT throw — it resolves to { error, status: 0, ok: false }.
+        fetch: (url, options) => {
+            const opts = options || {};
+            const method = typeof opts.method === 'string' ? opts.method : 'GET';
+            const r = __call('http_request', [method, url, opts]);
+            return __isErr(r) ? { error: r.message, status: 0, ok: false } : r;
+        }
     },
     events: {
-        emit: (eventType, data) => __raisin_internal.events_emit(eventType, JSON.stringify(data))
+        // Returns bool; a failed emit resolves to false (never throws).
+        emit: (eventType, data) => {
+            const r = __call('events_emit', [eventType, data]);
+            return __isErr(r) ? false : true;
+        }
     },
     ai: {
         completion: (request) => {
-            const result = __raisin_internal.ai_completion(JSON.stringify(request));
-            const parsed = JSON.parse(result);
-            if (parsed.error) {
-                throw new Error(parsed.error);
+            const parsed = __call('ai_completion', [request]);
+            if (parsed && parsed.error) {
+                throw new Error(parsed.message || parsed.error);
             }
             return parsed;
         },
         embed: (request) => {
-            const result = __raisin_internal.ai_embed(JSON.stringify(request));
-            const parsed = JSON.parse(result);
-            if (parsed.error) {
-                throw new Error(parsed.error);
+            const parsed = __call('ai_embed', [request]);
+            if (parsed && parsed.error) {
+                throw new Error(parsed.message || parsed.error);
             }
             return parsed;
         },
-        listModels: () => JSON.parse(__raisin_internal.ai_listModels()),
-        getDefaultModel: (useCase) => __raisin_internal.ai_getDefaultModel(useCase)
+        // Errors swallowed to [].
+        listModels: () => {
+            const models = __call('ai_listModels', []);
+            return __isErr(models) ? [] : models;
+        },
+        // Returns "" when no default is configured (or on error) — never null.
+        getDefaultModel: (useCase) => {
+            const r = __call('ai_getDefaultModel', [useCase]);
+            return (__isErr(r) || r === null || r === undefined) ? '' : r;
+        }
     },
     functions: {
-        execute: (functionPath, args, context) => JSON.parse(__raisin_internal.functions_execute(functionPath, JSON.stringify(args), JSON.stringify(context))),
+        // A failed execute does NOT throw — the { error } object is returned.
+        execute: (functionPath, args, context) => {
+            const r = __call('functions_execute', [functionPath, args, context]);
+            return __isErr(r) ? { error: r.message } : r;
+        },
+        // Simple function-to-function call; same returned-error-object semantics.
         call: (functionPath, args) => {
-            if (typeof __raisin_internal.functions_call !== 'function') {
-                throw new Error('raisin.functions.call() is not available — server binary may need rebuild: cargo build --release --package raisin-server --features "storage-rocksdb,websocket,pgwire"');
-            }
-            return JSON.parse(__raisin_internal.functions_call(functionPath, JSON.stringify(args)));
+            const r = __call('functions_call', [functionPath, args]);
+            return __isErr(r) ? { error: r.message } : r;
         }
     },
     flows: {
@@ -445,22 +523,120 @@ globalThis.raisin = {
         // { instance_id, job_id, status: "queued" } - poll the flow
         // instance API to observe progress.
         run: (flowPath, input) => {
-            if (typeof __raisin_internal.flows_run !== 'function') {
-                throw new Error('raisin.flows.run() is not available — server binary may need rebuild: cargo build --release --package raisin-server --features "storage-rocksdb,websocket,pgwire"');
-            }
-            const result = __raisin_internal.flows_run(flowPath, JSON.stringify(input || {}));
-            const parsed = JSON.parse(result);
+            const parsed = __call('flows_run', [flowPath, input || {}]);
             if (parsed && parsed.error) {
                 throw new Error(parsed.message || parsed.error);
             }
             return parsed;
         }
     },
+    branches: {
+        // Per-node diff of `branch` relative to `baseBranch`'s merge-base:
+        // exactly which nodes were added / modified / deleted since the two
+        // branches diverged. Returns
+        // { common_ancestor, added: [...], modified: [...], deleted: [...] }.
+        diff: (branch, baseBranch) => {
+            const r = __call('branches_diff', [branch, baseBranch]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        },
+        // Branch divergence (commits ahead/behind, like Git's tracking info).
+        // Returns { ahead, behind, common_ancestor }.
+        compare: (branch, baseBranch) => {
+            const r = __call('branches_compare', [branch, baseBranch]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        },
+        // Copy a node set from sourceBranch onto targetBranch (branch
+        // promotion): node ids preserved, one atomic commit on the target.
+        // opts: { workspace, roots: [paths], recursive? (default true),
+        // deleteMissing? (default false) }.
+        // Returns { copied, deleted, revision, changes: [...] }.
+        copyNodes: (sourceBranch, targetBranch, opts) => {
+            const r = __call('branches_copyNodes', [sourceBranch, targetBranch, opts || {}]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        }
+    },
+    scheduler: {
+        // Schedule a one-shot invocation of a function or flow at a fixed
+        // time. request: { targetKind: "function"|"flow", targetPath,
+        // input?, runAt (RFC3339 - a past time fires immediately),
+        // externalKey?, branch?, workspace?, maxRetries? (default 0) }.
+        // Returns { job_id, invocation_id, status: "scheduled", run_at }.
+        schedule: (request) => {
+            const r = __call('scheduler_schedule', [request || {}]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        },
+        // Cancel a pending scheduled invocation by job id or external key.
+        // Returns { job_id, status: "cancelled" }.
+        cancel: (jobIdOrKey) => {
+            const r = __call('scheduler_cancel', [jobIdOrKey]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        },
+        // List this repository's scheduled invocations.
+        // filter: { externalKey?, status? }. Returns { invocations: [...] }.
+        list: (filter) => {
+            const r = __call('scheduler_list', [filter || {}]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        },
+        // Fetch a single scheduled invocation by job id or external key.
+        get: (jobIdOrKey) => {
+            const r = __call('scheduler_get', [jobIdOrKey]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
+            }
+            return r;
+        }
+    },
     tasks: {
-        create: (request) => JSON.parse(__raisin_internal.task_create(JSON.stringify(request)))
+        // A failed create does NOT throw — the { error } object is returned.
+        create: (request) => {
+            const r = __call('tasks_create', [request]);
+            return __isErr(r) ? { error: r.message } : r;
+        },
+        // complete(taskId, response?) -> { id, task_id, task_path, status,
+        //   responded_at, flow }. Marks the task completed AND resumes the
+        //   owning flow (feeding `response` as __human_response); `flow` is
+        //   { instance_id, job_id } for a flow-owned task, else null. Validates
+        //   the caller is the assignee (or an admin). A failed completion
+        //   (wrong assignee, already completed, flow resume failed) THROWS —
+        //   silently dropping it would strand a parked flow forever.
+        complete: (taskId, response) => {
+            const r = __call('tasks_complete', [taskId, response === undefined ? {} : response]);
+            if (r && r.error) throw new Error(r.message || r.error);
+            return r;
+        }
+    },
+    // Send a system notification. Creates a raisin:Notification in the
+    // recipient's `{recipient}/notifications` folder (which must already exist).
+    // options: { title (required), body?, recipient (path) | recipientId (uuid),
+    //   priority?, type?, link?, data? }. Returns
+    // { success, notification_id, notification_path }; a failed send THROWS
+    // (missing folder, unknown recipient, validation) — a dropped notification
+    // is a real error the caller should see, matching scheduler/locks.
+    notify: (options) => {
+        const r = __call('notify_send', [options]);
+        if (r && r.error) throw new Error(r.message || r.error);
+        return r;
     },
     crypto: {
-        uuid: () => __raisin_internal.crypto_uuid(),
+        uuid: () => __call('crypto_uuid', []),
         // verifyJwt(token, opts?) -> { valid, claims?, error? }
         // opts: { jwks_url?, issuer?, audience?, algorithms? }. The JWKS is
         // fetched from jwks_url whose host must be authorized by the function's
@@ -468,9 +644,8 @@ globalThis.raisin = {
         // An invalid token resolves to { valid:false, error }; a policy denial or
         // unreachable JWKS throws. The token and claims are never logged.
         verifyJwt: (token, opts) => {
-            const r = JSON.parse(__raisin_internal.crypto_verify_jwt(
-                token, opts === undefined ? null : JSON.stringify(opts)));
-            if (r && r.error && r.valid === undefined) throw new Error(r.error);
+            const r = __call('crypto_verify_jwt', [token, opts === undefined ? null : opts]);
+            if (r && r.error && r.valid === undefined) throw new Error(r.message || r.error);
             return r;
         }
     },
@@ -480,26 +655,35 @@ globalThis.raisin = {
         // acquire(key, ttlMs, owner?) -> { acquired, key?, token?, expires_at_ms? }
         // Check `.acquired`: true with the fence token, or false on a lost tie-breaker.
         acquire: (key, ttlMs, owner) => {
-            const r = JSON.parse(__raisin_internal.locks_acquire(key, ttlMs, owner === undefined ? null : owner));
-            if (r && r.error) throw new Error(r.error);
+            const r = __call('locks_acquire', [key, ttlMs, owner === undefined ? null : owner]);
+            if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },
-        // release(key, token) -> bool (true if released)
-        release: (key, token) => __raisin_internal.locks_release(key, token),
+        // release(key, token) -> bool (true if released; errors swallowed to false)
+        release: (key, token) => {
+            const r = __call('locks_release', [key, token]);
+            return __isErr(r) ? false : r;
+        },
         // renew(key, token, ttlMs) -> bool (false if the lease was lost)
-        renew: (key, token, ttlMs) => __raisin_internal.locks_renew(key, token, ttlMs),
+        renew: (key, token, ttlMs) => {
+            const r = __call('locks_renew', [key, token, ttlMs]);
+            return __isErr(r) ? false : r;
+        },
     },
     // Counting reservations (claim N of M units without overselling).
     inventory: {
         // claim(pool, n, capacity) -> { claimed, remaining? }
         // Check `.claimed`: true with `.remaining`, or false when sold out.
         claim: (pool, n, capacity) => {
-            const r = JSON.parse(__raisin_internal.inventory_claim(pool, n, capacity));
-            if (r && r.error) throw new Error(r.error);
+            const r = __call('inventory_claim', [pool, n, capacity]);
+            if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },
-        // release(pool, n) -> number (new remaining count)
-        release: (pool, n) => __raisin_internal.inventory_release(pool, n),
+        // release(pool, n) -> number (new remaining count; -1 on error, never throws)
+        release: (pool, n) => {
+            const r = __call('inventory_release', [pool, n]);
+            return __isErr(r) ? -1 : r;
+        },
     },
     // Integration / mount ("connector") operations.
     integrations: {
@@ -508,14 +692,14 @@ globalThis.raisin = {
         // "delta" (pass "full" for a full re-sync). This is what a provider
         // webhook-refresh function calls to pull external changes on demand.
         sync_now: (mountId, mode) => {
-            const r = JSON.parse(__raisin_internal.integrations_sync_now(mountId, mode === undefined ? null : mode));
-            if (r && r.error) throw new Error(r.error);
+            const r = __call('integrations_sync_now', [mountId, mode === undefined ? null : mode]);
+            if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },
         // camelCase alias for consistency with other raisin.* namespaces.
         syncNow: (mountId, mode) => {
-            const r = JSON.parse(__raisin_internal.integrations_sync_now(mountId, mode === undefined ? null : mode));
-            if (r && r.error) throw new Error(r.error);
+            const r = __call('integrations_sync_now', [mountId, mode === undefined ? null : mode]);
+            if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },
     },
@@ -532,25 +716,21 @@ globalThis.raisin = {
         // new cursor (unchanged when nothing is new); a changed `uidvalidity`
         // means the mailbox reset and the caller must full-resync.
         fetchSince: (conn, sinceUid, opts) => {
-            const r = JSON.parse(__raisin_internal.imap_fetch_since(
-                JSON.stringify(conn), sinceUid,
-                opts === undefined ? null : JSON.stringify(opts)));
-            if (r && r.error) throw new Error(r.error);
+            const r = __call('imap_fetch_since', [conn, sinceUid, opts === undefined ? null : opts]);
+            if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },
         // listMailboxes(conn) -> [ { name, path, flags } ]
         listMailboxes: (conn) => {
-            const r = JSON.parse(__raisin_internal.imap_list_mailboxes(JSON.stringify(conn)));
-            if (r && r.error) throw new Error(r.error);
+            const r = __call('imap_list_mailboxes', [conn]);
+            if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },
         // fetchMessage(conn, uid, opts?) -> { headers, from, to, subject, date,
         //   text, html?, snippet, flags, message_id }. opts: { mailbox?: string }.
         fetchMessage: (conn, uid, opts) => {
-            const r = JSON.parse(__raisin_internal.imap_fetch_message(
-                JSON.stringify(conn), uid,
-                opts === undefined ? null : JSON.stringify(opts)));
-            if (r && r.error) throw new Error(r.error);
+            const r = __call('imap_fetch_message', [conn, uid, opts === undefined ? null : opts]);
+            if (r && r.error) throw new Error(r.message || r.error);
             return r;
         },
     },
@@ -558,79 +738,112 @@ globalThis.raisin = {
         // Extract text from PDF - base64Data is the PDF content
         // Returns { text, pages, isScanned, pageCount }
         extractText: (base64Data) => {
-            const result = __raisin_internal.pdf_extractText(base64Data);
-            if (result.startsWith('{"error":')) {
-                const parsed = JSON.parse(result);
-                throw new Error(parsed.error);
+            const r = __call('pdf_extractText', [base64Data]);
+            if (r && r.error) {
+                throw new Error(r.message || r.error);
             }
-            return JSON.parse(result);
+            return r;
         },
         // Get page count from PDF
         getPageCount: (base64Data) => {
-            const result = __raisin_internal.pdf_getPageCount(base64Data);
-            if (result < 0) {
+            const r = __call('pdf_getPageCount', [base64Data]);
+            if (typeof r !== 'number' || r < 0) {
                 throw new Error('Failed to get PDF page count');
             }
-            return result;
+            return r;
         },
         // OCR - Extract text from image using Tesseract
         // base64Data: base64-encoded image (PNG, JPEG, TIFF, etc.)
         // options: { languages: ["eng"], preserveLayout: false }
-        // Returns { text, available }
+        // Returns { text, available }. When OCR is unavailable the result is
+        // DATA ({ text: "", available: false, error }), not a thrown error.
         ocr: (base64Data, options) => {
-            const optionsStr = options ? JSON.stringify(options) : '{}';
-            const result = __raisin_internal.pdf_ocr(base64Data, optionsStr);
-            if (result.startsWith('{"error":')) {
-                const parsed = JSON.parse(result);
-                throw new Error(parsed.error);
+            const r = __call('pdf_ocr', [base64Data, options || {}]);
+            if (__isErr(r)) {
+                throw new Error(r.message);
             }
-            return JSON.parse(result);
+            return r;
         },
         // Async: Process PDF from storage key (no base64 overhead)
         // storageKey: storage key from resource metadata (e.g., "uploads/tenant/doc.pdf")
         // options: { ocr: true, ocrLanguages: ["eng"], generateThumbnail: true, thumbnailWidth: 200 }
         // Returns { text, pageCount, isScanned, ocrUsed, extractionMethod, thumbnail }
         processFromStorage: async (storageKey, options) => {
-            const optionsStr = options ? JSON.stringify(options) : '{}';
-            const result = __raisin_internal.pdf_processFromStorage(storageKey, optionsStr);
-            if (result.startsWith('{"error":')) {
-                const parsed = JSON.parse(result);
-                throw new Error(parsed.error);
+            const r = __call('pdf_processFromStorage', [storageKey, options || {}]);
+            if (r && r.error) {
+                throw new Error('PDF processing failed: ' + (r.message || r.error));
             }
-            return JSON.parse(result);
+            return r;
         }
     },
     // Admin escalation - returns a new raisin object with admin context
     // Requires requiresAdmin: true in function metadata
     asAdmin: function() {
         // Check if function has permission to escalate
-        if (!__raisin_internal.allows_admin_escalation()) {
+        if (__call('allowsAdminEscalation', []) !== true) {
             throw new Error("Function does not have permission to escalate to admin context. Set 'requiresAdmin: true' in function metadata.");
         }
 
         // Return a new raisin-like object that uses admin callbacks
-        // The admin callbacks bypass RLS filtering
+        // The admin callbacks bypass RLS filtering.
+        // Admin node reads do NOT wrapNode; reads swallow errors (null/[]),
+        // writes throw — same conventions as the non-admin namespace.
         return {
             nodes: {
-                get: (workspace, path) => JSON.parse(__raisin_internal.admin_nodes_get(workspace, path)),
-                getById: (workspace, id) => JSON.parse(__raisin_internal.admin_nodes_getById(workspace, id)),
-                create: (workspace, parent, data) => JSON.parse(__raisin_internal.admin_nodes_create(workspace, parent, JSON.stringify(data))),
-                update: (workspace, path, data) => JSON.parse(__raisin_internal.admin_nodes_update(workspace, path, JSON.stringify(data))),
-                delete: (workspace, path) => __raisin_internal.admin_nodes_delete(workspace, path),
-                updateProperty: (workspace, nodePath, propertyPath, value) => __raisin_internal.admin_nodes_updateProperty(workspace, nodePath, propertyPath, JSON.stringify(value)),
-                query: (workspace, query) => JSON.parse(__raisin_internal.admin_nodes_query(workspace, JSON.stringify(query))),
-                getChildren: (workspace, path, limit) => JSON.parse(__raisin_internal.admin_nodes_getChildren(workspace, path, limit)),
+                get: (workspace, path) => {
+                    const r = __call('admin_nodes_get', [workspace, path]);
+                    return __isErr(r) ? null : r;
+                },
+                getById: (workspace, id) => {
+                    const r = __call('admin_nodes_getById', [workspace, id]);
+                    return __isErr(r) ? null : r;
+                },
+                create: (workspace, parent, data) => {
+                    const result = __call('admin_nodes_create', [workspace, parent, data]);
+                    if (result && result.error) throw new Error(result.message || result.error);
+                    return result;
+                },
+                update: (workspace, path, data) => {
+                    const result = __call('admin_nodes_update', [workspace, path, data]);
+                    if (result && result.error) throw new Error(result.message || result.error);
+                    return result;
+                },
+                delete: (workspace, path) => {
+                    const parsed = __call('admin_nodes_delete', [workspace, path]);
+                    if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+                    return true;
+                },
+                updateProperty: (workspace, nodePath, propertyPath, value) => {
+                    const parsed = __call('admin_nodes_updateProperty', [workspace, nodePath, propertyPath, value]);
+                    if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+                    return true;
+                },
+                query: (workspace, query) => {
+                    const r = __call('admin_nodes_query', [workspace, query]);
+                    return __isErr(r) ? [] : r;
+                },
+                getChildren: (workspace, path, limit) => {
+                    const r = __call('admin_nodes_getChildren', [workspace, path, limit]);
+                    return __isErr(r) ? [] : r;
+                },
             },
             sql: {
-                query: (sql, params) => JSON.parse(__raisin_internal.admin_sql_query(sql, params ? JSON.stringify(params) : null)),
-                execute: (sql, params) => __raisin_internal.admin_sql_execute(sql, params ? JSON.stringify(params) : null)
+                query: (sql, params) => {
+                    const r = __call('admin_sql_query', [sql, Array.isArray(params) ? params : []]);
+                    return __isErr(r) ? { error: r.message, rows: [] } : r;
+                },
+                execute: (sql, params) => {
+                    const r = __call('admin_sql_execute', [sql, Array.isArray(params) ? params : []]);
+                    return __isErr(r) ? -1 : r;
+                }
             },
-            // http, events, ai, functions, tasks remain the same - no RLS implications
+            // http, events, ai, functions, tasks, notify remain the same - no RLS implications
             http: globalThis.raisin.http,
             events: globalThis.raisin.events,
             ai: globalThis.raisin.ai,
             functions: globalThis.raisin.functions,
             tasks: globalThis.raisin.tasks,
+            notify: globalThis.raisin.notify,
             // locks/inventory have no RLS implications - reuse the same managers
             locks: globalThis.raisin.locks,
             inventory: globalThis.raisin.inventory,

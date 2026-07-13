@@ -175,6 +175,14 @@ impl HumanTaskHandler {
             task_props["input_schema"] = schema;
         }
 
+        // Arbitrary structured payload for the task UI (raisin:InboxTask v4
+        // `data` slot). Lets a flow-created human task carry the same renderable
+        // payload standalone raisin.tasks.create tasks do; template expressions
+        // inside it are resolved with the rest of task_props below.
+        if let Some(data) = step.get_property("data").cloned() {
+            task_props["data"] = data;
+        }
+
         if let Some(due_seconds) = due_in_seconds {
             task_props["due_in_seconds"] = Value::Number(due_seconds.into());
         }

@@ -4,7 +4,7 @@
 //! between create and update operations, following DRY principles.
 
 mod compound_indexes;
-mod property_indexes;
+pub(crate) mod property_indexes;
 mod reference_indexes;
 mod relation_indexes;
 mod unique_indexes;

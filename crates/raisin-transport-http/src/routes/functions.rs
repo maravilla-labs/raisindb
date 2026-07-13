@@ -18,27 +18,37 @@ pub(crate) fn function_routes(state: &AppState) -> Router<AppState> {
         // List all functions in a repository
         .route(
             "/api/functions/{repo}",
-            get(crate::handlers::functions::list_functions),
+            get(crate::handlers::functions::list_functions).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // Get function details
         .route(
             "/api/functions/{repo}/{name}",
-            get(crate::handlers::functions::get_function),
+            get(crate::handlers::functions::get_function).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // Invoke a function (sync or async)
         .route(
             "/api/functions/{repo}/{name}/invoke",
-            post(crate::handlers::functions::invoke_function),
+            post(crate::handlers::functions::invoke_function).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // List function executions
         .route(
             "/api/functions/{repo}/{name}/executions",
-            get(crate::handlers::functions::list_executions),
+            get(crate::handlers::functions::list_executions).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // Get specific execution details
         .route(
             "/api/functions/{repo}/{name}/executions/{execution_id}",
-            get(crate::handlers::functions::get_execution),
+            get(crate::handlers::functions::get_execution).layer(
+                axum::middleware::from_fn_with_state(state.clone(), optional_auth_middleware),
+            ),
         )
         // Direct file execution (standalone JS files without parent Function)
         .route(

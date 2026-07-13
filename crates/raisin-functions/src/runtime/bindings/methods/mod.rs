@@ -10,6 +10,7 @@
 
 pub mod admin;
 pub mod ai;
+pub mod branches;
 pub mod context;
 pub mod crypto;
 pub mod date;
@@ -24,6 +25,7 @@ pub mod nodes;
 pub mod notify;
 pub mod pdf;
 pub mod resources;
+pub mod scheduler;
 pub mod sql;
 pub mod tasks;
 pub mod transactions;
@@ -43,6 +45,8 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(tasks::methods());
     methods.extend(functions::methods());
     methods.extend(flows::methods());
+    methods.extend(branches::methods());
+    methods.extend(scheduler::methods());
     methods.extend(notify::methods());
     methods.extend(locks::methods());
     methods.extend(integrations::methods());
@@ -377,7 +381,7 @@ mod tests {
         let method_count = reg.methods().len();
 
         // Expected: 62 methods from FunctionApi (54 original + 7 date methods + 1 notify method)
-        // plus 5 lock/inventory methods.
+        // plus 5 lock/inventory methods and 2 branch methods (diff/compare).
         // This test helps catch accidental duplicate registrations or missing methods
         assert!(
             method_count >= 58,
@@ -387,8 +391,8 @@ mod tests {
 
         // Upper bound check (shouldn't have too many extra methods)
         assert!(
-            method_count <= 80,
-            "Expected at most 80 methods, got {}. Did you accidentally duplicate some bindings?",
+            method_count <= 95,
+            "Expected at most 95 methods, got {}. Did you accidentally duplicate some bindings?",
             method_count
         );
 
@@ -413,54 +417,136 @@ mod tests {
         }
     }
 
+    /// The QuickJS surface (`quickjs/api_wrapper.js`) dispatches every
+    /// `raisin.*` method through `__raisin_call('<internal_name>', [...])`.
+    /// This test pins the wrapper to the registry in BOTH directions:
+    ///
+    /// 1. every method the wrapper references must exist in the registry
+    ///    (a typo'd or removed method fails here, not at function runtime);
+    /// 2. every registry method must either be referenced by the wrapper or
+    ///    be on the explicit not-exposed list — so adding a registry method
+    ///    forces a conscious decision about the JS surface.
     #[test]
-    fn test_javascript_and_python_wrappers_cover_all_methods() {
-        use crate::runtime::bindings::wrappers::javascript::get_wrapper_code as js_code;
-        use crate::runtime::bindings::wrappers::python::get_wrapper_code as py_code;
+    fn test_quickjs_wrapper_matches_registry() {
+        // Registry methods deliberately NOT exposed on the JS surface.
+        const NOT_EXPOSED_IN_JS: &[(&str, &str)] = &[
+            ("tx_move", "intentionally unsupported in JS transactions (see api_wrapper.js)"),
+            ("context_get", "raisin.context is injected as a data property by environment.rs"),
+            ("log", "JS uses the console host functions"),
+            ("date_now", "JS uses the native Date object"),
+            ("date_timestamp", "JS uses the native Date object"),
+            ("date_timestampMillis", "JS uses the native Date object"),
+            ("date_parse", "JS uses the native Date object"),
+            ("date_format", "JS uses the native Date object"),
+            ("date_addDays", "JS uses the native Date object"),
+            ("date_diffDays", "JS uses the native Date object"),
+            ("tasks_update", "not part of the frozen JS surface (create + complete only)"),
+            ("tasks_query", "not part of the frozen JS surface (create + complete only)"),
+        ];
 
-        let js = js_code();
-        let py = py_code();
+        let wrapper = include_str!("../../quickjs/api_wrapper.js");
 
-        // JS wrapper should have the raisin object
+        // Collect every literal __call('name', ...) reference.
+        let mut referenced = std::collections::HashSet::new();
+        for (idx, _) in wrapper.match_indices("__call(") {
+            let rest = &wrapper[idx + "__call(".len()..];
+            let rest = rest.trim_start();
+            let Some(rest) = rest.strip_prefix('\'') else {
+                panic!(
+                    "__call must be invoked with a literal single-quoted method name \
+                     (offset {} in api_wrapper.js)",
+                    idx
+                );
+            };
+            let name = rest
+                .split('\'')
+                .next()
+                .expect("unterminated method name in __call(...)");
+            referenced.insert(name.to_string());
+        }
         assert!(
-            js.contains("globalThis.raisin"),
-            "JS wrapper should define globalThis.raisin"
-        );
-
-        // Python wrapper should have the raisin struct
-        assert!(
-            py.contains("raisin = struct("),
-            "Python wrapper should define raisin struct"
+            !referenced.is_empty(),
+            "api_wrapper.js should dispatch through __call(...)"
         );
 
         let reg = build_registry();
+        let registry_names: std::collections::HashSet<&str> =
+            reg.methods().iter().map(|m| m.internal_name).collect();
 
-        // Check that all non-internal methods appear in the wrappers
-        for method in reg.methods() {
-            if method.category == "internal" {
-                continue;
-            }
-
-            // JavaScript wrapper should contain the JS method name
+        // 1. Wrapper references only registered methods.
+        for name in &referenced {
             assert!(
-                js.contains(method.js_name) || js.contains(&format!("{}:", method.js_name)),
-                "JS wrapper missing method '{}' (internal: {})",
-                method.js_name,
-                method.internal_name
-            );
-
-            // Python wrapper should contain the Python method name
-            // (checking for = _internal pattern)
-            let py_binding = format!("{} = _", method.py_name);
-            let py_binding_alt = format!("{}=_", method.py_name);
-            assert!(
-                py.contains(&py_binding)
-                    || py.contains(&py_binding_alt)
-                    || py.contains(method.py_name),
-                "Python wrapper missing method '{}' (internal: {})",
-                method.py_name,
-                method.internal_name
+                registry_names.contains(name.as_str()),
+                "api_wrapper.js calls '{}' which is not in the bindings registry",
+                name
             );
         }
+
+        // 2. Registry methods are either exposed or explicitly excluded.
+        let excluded: std::collections::HashSet<&str> =
+            NOT_EXPOSED_IN_JS.iter().map(|(n, _)| *n).collect();
+        for method in reg.methods() {
+            let name = method.internal_name;
+            assert!(
+                referenced.contains(name) || excluded.contains(name),
+                "Registry method '{}' is neither referenced by api_wrapper.js nor on the \
+                 NOT_EXPOSED_IN_JS list. Expose it in the wrapper (with an explicit error \
+                 convention) or add it to the list with a reason.",
+                name
+            );
+        }
+
+        // The exclusion list must not contain stale entries.
+        for (name, _) in NOT_EXPOSED_IN_JS {
+            assert!(
+                registry_names.contains(name),
+                "NOT_EXPOSED_IN_JS lists '{}' which is not in the registry",
+                name
+            );
+            assert!(
+                !referenced.contains(*name),
+                "NOT_EXPOSED_IN_JS lists '{}' but api_wrapper.js references it",
+                name
+            );
+        }
+    }
+
+    /// `raisin.notify` must be reachable from JavaScript functions. It used to
+    /// exist only in the Rust registry (as `notify_send`) and on the Starlark
+    /// surface, but the QuickJS wrapper never exposed it, so every JS call to
+    /// `raisin.notify(...)` threw "not a function". Guard the exposure here so
+    /// it cannot silently regress.
+    #[test]
+    fn test_notify_exposed_in_js() {
+        let wrapper = include_str!("../../quickjs/api_wrapper.js");
+        assert!(
+            wrapper.contains("__call('notify_send'"),
+            "api_wrapper.js must dispatch raisin.notify through __call('notify_send', ...)"
+        );
+
+        // And notify_send must be a real, registered binding.
+        let reg = build_registry();
+        assert!(
+            reg.methods().iter().any(|m| m.internal_name == "notify_send"),
+            "notify_send must exist in the bindings registry"
+        );
+
+        // raisin.tasks.create is the other framework-task surface JS relies on.
+        assert!(
+            wrapper.contains("__call('tasks_create'"),
+            "api_wrapper.js must expose raisin.tasks.create"
+        );
+
+        // raisin.tasks.complete must be reachable from JS: it marks a task
+        // completed AND resumes the owning flow (the P0 binding). Guard the
+        // exposure so it cannot silently regress back off the frozen surface.
+        assert!(
+            wrapper.contains("__call('tasks_complete'"),
+            "api_wrapper.js must expose raisin.tasks.complete"
+        );
+        assert!(
+            reg.methods().iter().any(|m| m.internal_name == "tasks_complete"),
+            "tasks_complete must exist in the bindings registry"
+        );
     }
 }

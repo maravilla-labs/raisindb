@@ -30,3 +30,6 @@ hex = "0.4"
 [dev-dependencies]
 # e2e tests validate shipped example flow definitions (.node.yaml) directly
 serde_yaml = "0.9"
+# task_completion.rs drives service::complete_task against real (in-memory)
+# storage to prove the tasks.complete binding resumes a parked human_task flow.
+raisin-storage-memory = { version = "0.1.0", path = "../raisin-storage-memory" }

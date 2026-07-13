@@ -79,6 +79,10 @@ impl JobType {
                 tenant_id.as_deref().unwrap_or("*"),
                 repo_id.as_deref().unwrap_or("*")
             ),
+            Self::ScheduledInvocation {
+                invocation_id,
+                target_kind,
+            } => format!("sched_invoke:{}:{}", target_kind, invocation_id),
             Self::AIToolCallExecution {
                 tool_call_path,
                 tool_call_workspace,
@@ -339,6 +343,7 @@ impl JobType {
             // Realtime: user-facing operations — triggers, functions, AI, flows
             Self::TriggerEvaluation { .. }
             | Self::FunctionExecution { .. }
+            | Self::ScheduledInvocation { .. }
             | Self::AIToolCallExecution { .. }
             | Self::AIToolResultAggregation { .. }
             | Self::AICall { .. }
@@ -413,6 +418,7 @@ impl JobType {
     pub fn default_priority(&self) -> JobPriority {
         match self {
             Self::FunctionExecution { .. }
+            | Self::ScheduledInvocation { .. }
             | Self::TriggerEvaluation { .. }
             | Self::FlowExecution { .. }
             | Self::FlowInstanceExecution { .. }

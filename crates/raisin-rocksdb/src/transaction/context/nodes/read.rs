@@ -216,6 +216,17 @@ pub async fn get_node(
         let (key, value) =
             item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
 
+        // CRITICAL: Verify the key actually starts with our prefix. RocksDB's
+        // prefix iterator seeks to the prefix but keeps iterating past it, so
+        // a lookup for a NONEXISTENT id would otherwise deserialize the next
+        // node in the keyspace and return a WRONG node (observed: put_node
+        // with a fresh id taking the UPDATE branch against an unrelated
+        // node). All matching keys are contiguous, so stop at the first
+        // non-matching key. Mirrors get_node_by_path / materialize_path.
+        if !key.starts_with(&prefix) {
+            break;
+        }
+
         // Debug: log key/value info for each entry
         tracing::debug!(
             node_id = %node_id,

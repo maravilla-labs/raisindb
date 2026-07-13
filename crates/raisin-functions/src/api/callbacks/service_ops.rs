@@ -293,6 +293,113 @@ pub type FlowRunCallback = Arc<
         + Sync,
 >;
 
+// ========== Branch Operation Callbacks ==========
+
+/// Callback for `raisin.branches.diff(branch, baseBranch)`.
+///
+/// Computes the per-node diff of `branch` relative to `baseBranch`'s
+/// merge-base — exactly which nodes were added / modified / deleted since
+/// the branches diverged (cost is O(commits since fork), not O(total nodes)).
+///
+/// Returns `{ "common_ancestor": "...", "added": [...], "modified": [...], "deleted": [...] }`.
+pub type BranchDiffCallback = Arc<
+    dyn Fn(
+            String, // branch (e.g., "feature/new-ui")
+            String, // base_branch (e.g., "main")
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback for `raisin.branches.compare(branch, baseBranch)`.
+///
+/// Calculates branch divergence (commits ahead/behind, like Git's
+/// divergence tracking) of `branch` relative to `baseBranch`.
+///
+/// Returns `{ "ahead": u64, "behind": u64, "common_ancestor": "..." }`.
+pub type BranchCompareCallback = Arc<
+    dyn Fn(
+            String, // branch
+            String, // base_branch
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback for `raisin.branches.copyNodes(sourceBranch, targetBranch, opts)`.
+///
+/// Copies a node set (optionally recursive) from one branch onto another,
+/// preserving node ids, in one atomic commit on the target branch. `opts`
+/// carries `{ workspace, roots, recursive?, deleteMissing? }`.
+///
+/// Returns `{ "copied": usize, "deleted": usize, "revision": "...", "changes": [...] }`.
+pub type BranchCopyNodesCallback = Arc<
+    dyn Fn(
+            String, // source_branch
+            String, // target_branch
+            Value,  // options: { workspace, roots, recursive?, deleteMissing? }
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+// ========== Scheduled Invocation Callbacks ==========
+
+/// Callback for `raisin.scheduler.schedule(request)`.
+///
+/// Registers a one-shot scheduled invocation of a function or flow. The
+/// request carries `{ targetKind, targetPath, input?, runAt, externalKey?,
+/// branch?, workspace?, maxRetries? }`; `runAt` is RFC3339 and a past time
+/// dispatches immediately.
+///
+/// Returns `{ "job_id": "...", "invocation_id": "...", "status": "scheduled", "run_at": "..." }`.
+pub type SchedulerScheduleCallback = Arc<
+    dyn Fn(
+            Value, // request
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback for `raisin.scheduler.cancel(jobIdOrKey)`.
+///
+/// Cancels a pending scheduled invocation, addressed by job id or by the
+/// caller-supplied external key.
+///
+/// Returns `{ "job_id": "...", "status": "cancelled" }`.
+pub type SchedulerCancelCallback = Arc<
+    dyn Fn(
+            String, // job_id or external key
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback for `raisin.scheduler.list(filter?)`.
+///
+/// Lists this repository's scheduled invocations; `filter` may carry
+/// `{ externalKey?, status? }`.
+///
+/// Returns `{ "invocations": [...] }`.
+pub type SchedulerListCallback = Arc<
+    dyn Fn(
+            Value, // filter
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback for `raisin.scheduler.get(jobIdOrKey)`.
+///
+/// Fetches a single scheduled invocation by job id or external key.
+pub type SchedulerGetCallback = Arc<
+    dyn Fn(
+            String, // job_id or external key
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 // ========== Integration / Mount Operation Callbacks ==========
 
 /// Callback for `raisin.integrations.sync_now(mountId, mode?)`.

@@ -163,6 +163,13 @@ impl RocksDBStorage {
             scheduled_trigger_finder,
         );
 
+        let scheduled_invocation_handler = flow_handlers::create_scheduled_invocation_handler(
+            self.clone(),
+            self.job_registry.clone(),
+            self.job_data_store.clone(),
+            dispatcher.clone(),
+        );
+
         let package_install_handler = package_handlers::create_package_install_handler(
             self.clone(),
             self.job_registry.clone(),
@@ -249,6 +256,7 @@ impl RocksDBStorage {
             flow_instance_execution_handler,
             trigger_evaluation_handler,
             scheduled_trigger_handler,
+            scheduled_invocation_handler,
             package_install_handler,
             package_process_handler,
             package_export_handler,

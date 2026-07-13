@@ -5,9 +5,14 @@
 
 //! JavaScript environment setup for the QuickJS runtime.
 //!
-//! Sets up the complete raisin API by registering internal Rust-backed
-//! functions and evaluating JavaScript wrapper code that provides
-//! the public API (raisin.nodes, raisin.sql, raisin.http, etc.).
+//! Sets up the complete raisin API:
+//! - `__raisin_call` — the registry gateway (see `gateway.rs`); every
+//!   `raisin.*` method dispatches through the shared bindings registry, the
+//!   same single-definition-per-method registry the Starlark runtime uses.
+//! - `__raisin_internal` — the few genuinely runtime-local host functions
+//!   (per-execution temp files, W3C fetch plumbing).
+//! - `api_wrapper.js` — the public `globalThis.raisin` surface (per-method
+//!   error conventions, `Resource` class, transactions, admin escalation).
 
 use rquickjs::{Ctx, Object, Value};
 use std::sync::{Arc, Mutex};
@@ -17,20 +22,10 @@ use crate::runtime::fetch::{AbortRegistry, StreamRegistry, FETCH_POLYFILL};
 use crate::runtime::timers::{TimerRegistry, TIMERS_POLYFILL};
 use crate::types::LogEntry;
 
-use super::api_admin::register_admin_internal;
 use super::api_fetch::register_fetch_internal;
-use super::api_imap::register_imap_internal;
-use super::api_integrations::register_integrations_internal;
-use super::api_locks::register_locks_internal;
-use super::api_misc::{
-    register_ai_internal, register_crypto_internal, register_events_internal,
-    register_flows_internal, register_functions_internal, register_http_internal,
-    register_sql_internal, register_tasks_internal,
-};
-use super::api_nodes::register_nodes_internal;
-use super::api_resources::register_resources_internal;
-use super::api_transaction::register_transaction_internal;
+use super::api_temp::register_temp_internal;
 use super::console::{create_console_api, setup_timers_api};
+use super::gateway::register_registry_gateway;
 
 /// Setup the JavaScript environment with the raisin API.
 ///
@@ -58,7 +53,7 @@ pub(super) fn setup_js_environment<'js>(
     // Create timer registry for setTimeout/setInterval
     let timer_registry = Arc::new(TimerRegistry::new());
 
-    // Setup the raisin API (nodes, sql, http, events)
+    // Setup the raisin API (registry gateway + runtime-local host fns + JS wrapper)
     setup_raisin_api(
         ctx,
         api.clone(),
@@ -94,8 +89,8 @@ pub(super) fn setup_js_environment<'js>(
     Ok(())
 }
 
-/// Register internal API functions that return JSON strings
-/// then evaluate JS wrapper code that creates the nice public API.
+/// Register the registry gateway plus the runtime-local internal functions,
+/// then evaluate the JS wrapper code that creates the public API.
 fn setup_raisin_api<'js>(
     ctx: &Ctx<'js>,
     api: Arc<dyn FunctionApi>,
@@ -104,29 +99,16 @@ fn setup_raisin_api<'js>(
 ) -> std::result::Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
-    // Create internal namespace for raw functions
+    // The single dispatch point for all raisin.* API methods: looks the
+    // method up in the shared bindings registry and runs its invoker.
+    register_registry_gateway(ctx, api.clone())?;
+
+    // Internal namespace for the runtime-local host functions that cannot be
+    // expressed as registry invokers (they bind per-execution state, not
+    // FunctionApi): temp files and the W3C fetch plumbing.
     let internal = Object::new(ctx.clone())?;
-
-    // Register all internal functions that return JSON strings
-    register_nodes_internal(ctx, &internal, api.clone())?;
-    register_sql_internal(ctx, &internal, api.clone())?;
-    register_http_internal(ctx, &internal, api.clone())?;
-    register_events_internal(ctx, &internal, api.clone())?;
-    register_ai_internal(ctx, &internal, api.clone())?;
-    register_resources_internal(ctx, &internal, api.clone())?;
-    register_functions_internal(ctx, &internal, api.clone())?;
-    register_flows_internal(ctx, &internal, api.clone())?;
-    register_tasks_internal(ctx, &internal, api.clone())?;
-    register_transaction_internal(ctx, &internal, api.clone())?;
-    register_admin_internal(ctx, &internal, api.clone())?;
-    register_locks_internal(ctx, &internal, api.clone())?;
-    register_integrations_internal(ctx, &internal, api.clone())?;
-    register_imap_internal(ctx, &internal, api.clone())?;
-    register_crypto_internal(ctx, &internal, api.clone())?;
-
-    // Register W3C Fetch API internal functions
-    register_fetch_internal(ctx, &internal, api.clone(), abort_registry, stream_registry)?;
-
+    register_temp_internal(ctx, &internal)?;
+    register_fetch_internal(ctx, &internal, api, abort_registry, stream_registry)?;
     globals.set("__raisin_internal", internal)?;
 
     // Evaluate JS code that creates the public API with JSON parsing
@@ -137,7 +119,7 @@ fn setup_raisin_api<'js>(
 
 /// JavaScript source that creates the public `globalThis.raisin` API.
 ///
-/// This wraps the internal `__raisin_internal.*` functions (which return
-/// JSON strings) into a developer-friendly API with parsed return values,
-/// Resource class, transaction support, and admin escalation.
+/// This wraps `__raisin_call` (registry dispatch, JSON-string results) into a
+/// developer-friendly API with parsed return values, per-method error
+/// conventions, the Resource class, transaction support, and admin escalation.
 const API_WRAPPER_JS: &str = include_str!("api_wrapper.js");

@@ -1,7 +1,18 @@
 name: raisin:InboxTask
 description: Task awaiting user action in human-in-the-loop workflows
 icon: inbox
-version: 1
+# v3: flow_instance_ref/step_id made optional (standalone raisin.tasks.create
+# tasks have no owning flow) + declared the assignee/flow_instance_id/due_at/
+# due_in_seconds/created_at/completed_by properties the writers actually set
+# (the type is strict). The version bump drives the startup global-NodeType
+# resync so existing repositories pick up the relaxed schema on upgrade.
+# (v3, not v2: some existing repos already registered a v2 InboxTask that still
+# had the OLD strict schema — jumping past it forces the relaxed schema to win.)
+# v4: added the `data` Object slot — an arbitrary structured payload the task UI
+# renders (e.g. the linked-site conflict change set the Inbox tree reads). Both
+# raisin.tasks.create and the human_task flow step persist it; without a declared
+# property the strict type silently dropped `data` on write. Bump forces resync.
+version: 4
 strict: true
 indexable: true
 index_types: [Property]
@@ -27,18 +38,42 @@ properties:
     title: Description
     description: Detailed description of the task
 
+  # Optional: a standalone task (raisin.tasks.create) has no owning flow, so
+  # neither this Reference nor step_id can be required. The flow human_task
+  # step links back via the String flow_instance_id below (the runtime reads
+  # that, not this Reference), so this stays as an optional forward-compat slot.
   - name: flow_instance_ref
     type: Reference
-    required: true
+    required: false
     title: Flow Instance Reference
     description: Reference to raisin:FlowInstance waiting for response
     index: [Property]
 
   - name: step_id
     type: String
-    required: true
+    required: false
     title: Step ID
-    description: ID of the flow step that created this task
+    description: ID of the flow step that created this task (flow tasks only)
+    index: [Property]
+
+  # Assignee HOME path (e.g. "/users/internal/admin-at-example-local"). Both the
+  # human_task step and raisin.tasks.create write this; complete_task /
+  # list_inbox_tasks authorize and filter on it.
+  - name: assignee
+    type: String
+    required: false
+    title: Assignee
+    description: Home path of the user/agent the task is assigned to
+    index: [Property]
+
+  # String id of the owning flow instance (flow human_task tasks only). The
+  # completion path reads this to resume the parked flow. Kept as a String (not
+  # the flow_instance_ref Reference) to match every actual writer/reader.
+  - name: flow_instance_id
+    type: String
+    required: false
+    title: Flow Instance ID
+    description: Id of the raisin:FlowInstance this task resumes on completion
     index: [Property]
 
   - name: options
@@ -82,6 +117,17 @@ properties:
     default: pending
     index: [Property]
 
+  - name: data
+    type: Object
+    required: false
+    title: Data
+    description: |
+      Arbitrary structured payload carried by the task for its UI to render
+      (e.g. the linked-site conflict change set the Inbox conflict tree reads:
+      { kind, copy_root, workspace, change_key, changes: [SyncEntry] }). Opaque
+      to the task framework; written by raisin.tasks.create and the human_task
+      flow step, read back verbatim via the inbox listing.
+
   - name: response
     type: Object
     required: false
@@ -93,6 +139,35 @@ properties:
     required: false
     title: Responded At
     description: When the user responded to the task
+    index: [Property]
+
+  # Absolute due/wait deadline, materialized from due_in_seconds by the
+  # human_task step and (when supplied) by raisin.tasks.create. Used for the
+  # inbox sort order and overdue display.
+  - name: due_at
+    type: Date
+    required: false
+    title: Due At
+    description: Absolute time the task is due (materialized from due_in_seconds)
+    index: [Property]
+
+  - name: due_in_seconds
+    type: Number
+    required: false
+    title: Due In Seconds
+    description: Relative deadline in seconds (source for due_at)
+
+  - name: created_at
+    type: Date
+    required: false
+    title: Created At
+    description: When the task was created
+
+  - name: completed_by
+    type: String
+    required: false
+    title: Completed By
+    description: Identifier of the principal (user/agent) who completed the task
     index: [Property]
 
 allowed_children: []

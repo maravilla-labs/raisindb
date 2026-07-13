@@ -3,13 +3,21 @@
 //! Creates a node at any path, automatically creating parent directories
 //! as needed. All nodes are created in a single atomic transaction.
 
-use super::super::super::NodeRepositoryImpl;
+use super::super::super::{NodeRepositoryImpl, PathReservationGuard};
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_models::nodes::Node;
 use raisin_storage::{NodeRepository, RevisionRepository};
 use rocksdb::WriteBatch;
 use std::collections::HashMap;
+
+/// How long a deep create waits for a CONCURRENT creator of the same missing
+/// INTERMEDIATE folder before giving up with `Conflict`. Intermediate-folder
+/// contention is convergence (ensure-folder semantics), so we wait for the
+/// other creator's reservation to clear and then converge on its committed
+/// row; the bound only exists so a reservation held by a long-running
+/// transaction (released at commit) cannot stall a deep create forever.
+const INTERMEDIATE_FOLDER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl NodeRepositoryImpl {
     /// Create a deep node with automatic parent directory creation
@@ -40,6 +48,13 @@ impl NodeRepositoryImpl {
         // STEP 1: Allocate SINGLE revision for all operations
         let revision = self.revision_repo.allocate_revision();
 
+        // STEP 0b: One reservation owner for EVERY path this deep create may
+        // materialize (missing parents + leaf). Reservations are taken
+        // top-down (ancestors before descendants — consistent lock order, no
+        // deadlock) and released by the guard only after the atomic
+        // WriteBatch below is durable (or on any error / cancellation).
+        let mut reservation_guard = PathReservationGuard::new(self);
+
         // STEP 2: Collect nodes that need to be created (with IDs and parent IDs)
         let mut nodes_to_create: Vec<(Node, String)> = Vec::new();
 
@@ -51,11 +66,32 @@ impl NodeRepositoryImpl {
         for i in 1..segments.len() {
             let parent_path = format!("/{}", segments[..i].join("/"));
 
+            // Reserve BEFORE the existence check (reserve-then-check closes
+            // the TOCTOU window). Intermediate folders use the WAITING
+            // variant: a concurrent creator of the same missing parent is
+            // ensure-folder convergence, not conflict — wait for its
+            // reservation to clear, win it ourselves, then re-check.
+            reservation_guard
+                .reserve_waiting(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &parent_path,
+                    INTERMEDIATE_FOLDER_WAIT,
+                )
+                .await?;
+
             let existing_parent = self
                 .get_by_path_impl(tenant_id, repo_id, branch, workspace, &parent_path, None)
                 .await?;
 
             if let Some(existing) = existing_parent {
+                // Converge on the already-committed folder (possibly written
+                // by the racer we just waited for). We will not create it, so
+                // release its reservation immediately — other deep creates
+                // converging on the same folder shouldn't have to wait on us.
+                reservation_guard.release_path(tenant_id, repo_id, branch, workspace, &parent_path);
                 path_to_id.insert(parent_path, existing.id);
             } else {
                 let parent_id = nanoid::nanoid!();
@@ -124,6 +160,14 @@ impl NodeRepositoryImpl {
         if node.id.is_empty() {
             node.id = nanoid::nanoid!();
         }
+
+        // Reserve the LEAF path. Unlike intermediate folders, contention on
+        // the leaf IS a genuine conflict (two creators racing to create the
+        // same target node) — fail immediately, no waiting/convergence. Must
+        // happen BEFORE the committed-storage path check inside
+        // validate_for_create, and after all parent reservations (top-down
+        // order).
+        reservation_guard.reserve(tenant_id, repo_id, branch, workspace, path)?;
 
         // Validate target node (but skip parent validation since we're creating parents)
         let validation_options = raisin_storage::CreateNodeOptions {
@@ -234,6 +278,12 @@ impl NodeRepositoryImpl {
         self.db
             .write(batch)
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        // The write is durable — release every path reservation now (the
+        // guard would also release on drop; doing it explicitly documents the
+        // release point and frees contended paths before the replication
+        // capture below).
+        drop(reservation_guard);
 
         // STEP 7: Capture replication events (after atomic write)
         self.branch_repo

@@ -36,14 +36,15 @@ pub use handlers::{
     RelationConsistencyHandler, ReplicationGCHandler, ReplicationSyncHandler,
     RestoreTreeExecutorCallback, RestoreTreeHandler, ResumableUploadHandler,
     RetargetReferencesHandler, RevisionHistoryCopyHandler, RocksDBFlowCallbacks,
-    RocksDBUserNodeCreator, ScheduledTriggerHandler, SnapshotHandler, SqlExecutorCallback,
+    RocksDBUserNodeCreator, ScheduledInvocationHandler, ScheduledTriggerHandler, SnapshotHandler,
+    SqlExecutorCallback,
     TranslationChangeInfo, TriggerEvaluationHandler, UploadSessionCleanupHandler,
     VirtualMountSyncHandler,
 };
 // Additional exports for external use (transport layer callbacks)
 pub use handlers::{
     create_trigger_matcher, cron_matches, token_refresh_dedup_key, FlowResumeCallback,
-    FunctionEnabledChecker, FunctionExecutionResult, FunctionExecutorCallback,
+    FlowStartCallback, FunctionEnabledChecker, FunctionExecutionResult, FunctionExecutorCallback,
     ScheduledTriggerFinderCallback, ScheduledTriggerMatch, TriggerMatch, TriggerMatcherCallback,
 };
 pub use index_lock::{IndexKey, IndexLockManager};

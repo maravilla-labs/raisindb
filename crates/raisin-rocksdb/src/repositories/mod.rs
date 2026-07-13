@@ -65,6 +65,7 @@ pub use versioning::VersioningRepositoryImpl;
 pub use workspaces::WorkspaceRepositoryImpl;
 
 // Re-export helpers for internal use
+pub(crate) use nodes::add_stale_property_tombstones;
 pub(crate) use nodes::hash_property_value;
 pub(crate) use nodes::StorageNode;
 

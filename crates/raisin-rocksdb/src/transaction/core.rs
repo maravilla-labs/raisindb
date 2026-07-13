@@ -107,6 +107,17 @@ pub struct RocksDBTransaction {
     /// When true, node operations are validated against their NodeType/Archetype/ElementType schemas
     /// Can be disabled via TransactionalContext::set_validate_schema(false) for bulk imports
     pub(super) validate_schema: Arc<Mutex<bool>>,
+
+    /// Owner token for CREATE path reservations held by this transaction.
+    ///
+    /// `add_node` reserves each created path in the shared registry on
+    /// `NodeRepositoryImpl` BEFORE checking committed storage, closing the
+    /// check-then-write race between concurrent transactions creating the same
+    /// path. Reservations are released after a successful commit, on rollback,
+    /// or on drop (abandoned transaction).
+    pub(super) path_reservation_owner: u64,
+    /// Reservation keys currently held by this transaction.
+    pub(super) reserved_create_paths: Arc<Mutex<Vec<String>>>,
 }
 
 impl RocksDBTransaction {
@@ -145,6 +156,7 @@ impl RocksDBTransaction {
         >,
         storage: Arc<RocksDBStorage>,
     ) -> Self {
+        let path_reservation_owner = node_repo.new_path_reservation_owner();
         Self {
             db,
             batch: Arc::new(Mutex::new(WriteBatch::default())),
@@ -166,6 +178,56 @@ impl RocksDBTransaction {
             replication_coordinator,
             storage,
             validate_schema: Arc::new(Mutex::new(true)), // Default: validation enabled
+            path_reservation_owner,
+            reserved_create_paths: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Reserve a CREATE path for this transaction.
+    ///
+    /// Fails with `Conflict` if another in-flight creator (transaction or
+    /// non-transactional create) already reserved the same scoped path.
+    /// Must be called BEFORE the committed-storage existence check so that a
+    /// concurrent winner's committed row is guaranteed visible to the loser.
+    pub(super) fn reserve_create_path(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        path: &str,
+    ) -> Result<()> {
+        let key = self.node_repo.try_reserve_create_path(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            path,
+            self.path_reservation_owner,
+        )?;
+        let mut reserved = self
+            .reserved_create_paths
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        if !reserved.contains(&key) {
+            reserved.push(key);
+        }
+        Ok(())
+    }
+
+    /// Release every CREATE path reservation held by this transaction.
+    ///
+    /// Idempotent: keys are drained, and the registry ignores keys no longer
+    /// owned by this transaction. Called after a successful commit, on
+    /// rollback, and on drop.
+    pub(super) fn release_create_path_reservations(&self) {
+        let keys: Vec<String> = match self.reserved_create_paths.lock() {
+            Ok(mut guard) => guard.drain(..).collect(),
+            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+        };
+        if !keys.is_empty() {
+            self.node_repo
+                .release_create_path_reservations(self.path_reservation_owner, &keys);
         }
     }
 
@@ -378,8 +440,19 @@ impl Transaction for RocksDBTransaction {
     #[allow(clippy::manual_async_fn)]
     fn rollback(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         async move {
-            // WriteBatch is dropped, no changes are applied
+            // WriteBatch is dropped, no changes are applied.
+            // Free any CREATE path reservations so other creators can proceed.
+            self.release_create_path_reservations();
             Ok(())
         }
+    }
+}
+
+impl Drop for RocksDBTransaction {
+    fn drop(&mut self) {
+        // Abandoned transactions (never committed nor rolled back) must not
+        // leak CREATE path reservations, or the paths would stay uncreatable
+        // for the process lifetime. Releasing is idempotent.
+        self.release_create_path_reservations();
     }
 }

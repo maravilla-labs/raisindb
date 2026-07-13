@@ -241,6 +241,13 @@ pub struct DesignerStepProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_schema: Option<serde_json::Value>,
 
+    /// Arbitrary structured payload for the task UI (raisin:InboxTask `data`
+    /// slot). Template expressions inside it are resolved when the human_task
+    /// step builds the task node, so a flow-created task can carry the same
+    /// renderable payload a standalone `raisin.tasks.create` task does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+
     /// Task due time in seconds from creation (wait deadline)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_in_seconds: Option<i64>,

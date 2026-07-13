@@ -78,3 +78,5 @@ webpki-roots = "1.0"
 # key material is ever committed to the repo (see runtime/crypto tests).
 rsa = { version = "0.9", features = ["pem"] }
 rand = "0.8"
+# Test-only: ephemeral RocksDB job stores for scheduler callback tests.
+tempfile = { workspace = true }

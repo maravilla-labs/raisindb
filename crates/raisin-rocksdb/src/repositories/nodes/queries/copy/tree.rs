@@ -61,6 +61,30 @@ impl NodeRepositoryImpl {
         let name = new_name.unwrap_or(&source.name);
         let new_path = format!("{}/{}", target_parent, name);
 
+        // Reserve the destination ROOT before the existence check below
+        // (reserve-then-check, same registry contract as create). The guard
+        // holds the reservation until this function's single WriteBatch is
+        // durable (or it errors / is cancelled).
+        //
+        // Why the ROOT only, not every descendant destination path:
+        // - All copied descendants land strictly under `new_path`, and the
+        //   whole tree is committed in ONE atomic WriteBatch — descendant
+        //   paths only become visible together with the reserved root, so
+        //   reserving the root owns the destination prefix for the duration
+        //   of the copy.
+        // - A competing creator cannot legitimately produce a descendant path
+        //   first: parent-validated creates fail with NotFound while the root
+        //   doesn't exist yet, and a competing copy/create AT the root
+        //   conflicts on this reservation.
+        // - Per-descendant reservation would take the registry mutex O(tree)
+        //   times for keys nobody else can contend, for no added safety.
+        //   (A parentless transactional `add_node` writing a descendant path
+        //   blind is already an orphan-tolerated escape hatch today; the
+        //   registry is not the layer that makes orphans impossible.)
+        let mut reservation_guard =
+            crate::repositories::nodes::PathReservationGuard::new(self);
+        reservation_guard.reserve(tenant_id, repo_id, branch, workspace, &new_path)?;
+
         if self
             .get_by_path_impl(tenant_id, repo_id, branch, workspace, &new_path, None)
             .await?
@@ -411,6 +435,9 @@ impl NodeRepositoryImpl {
         self.db
             .write(batch)
             .map_err(|e| raisin_error::Error::storage(format!("Atomic copy_tree failed: {}", e)))?;
+
+        // Destination tree is durable — release the root reservation.
+        drop(reservation_guard);
 
         tracing::info!(
             "copy_node_tree_impl: successfully copied {} nodes with single revision {}",

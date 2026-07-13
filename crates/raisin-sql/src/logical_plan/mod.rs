@@ -54,12 +54,14 @@
 pub mod builder;
 pub mod display;
 pub mod error;
+pub mod group_key;
 pub mod operators;
 pub mod visitor;
 
 // Re-export commonly used types
 pub use builder::PlanBuilder;
 pub use error::{PlanError, Result};
+pub use group_key::group_key_column_name;
 pub use operators::{
     AggregateExpr, AggregateFunction, DistinctSpec, FilterPredicate, LogicalPlan, ProjectionExpr,
     SchemaColumn, SortExpr, TableSchema, WindowExpr,

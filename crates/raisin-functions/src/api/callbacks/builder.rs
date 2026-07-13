@@ -43,7 +43,14 @@ pub struct RaisinFunctionApiCallbacks {
     pub function_execute: Option<FunctionExecuteCallback>,
     pub function_call: Option<FunctionCallCallback>,
     pub flow_run: Option<FlowRunCallback>,
+    pub branch_diff: Option<BranchDiffCallback>,
+    pub branch_compare: Option<BranchCompareCallback>,
+    pub branch_copy_nodes: Option<BranchCopyNodesCallback>,
     pub integrations_sync_now: Option<IntegrationsSyncNowCallback>,
+    pub scheduler_schedule: Option<SchedulerScheduleCallback>,
+    pub scheduler_cancel: Option<SchedulerCancelCallback>,
+    pub scheduler_list: Option<SchedulerListCallback>,
+    pub scheduler_get: Option<SchedulerGetCallback>,
     // Transaction callbacks
     pub tx_begin: Option<TxBeginCallback>,
     pub tx_commit: Option<TxCommitCallback>,
@@ -228,6 +235,41 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_flow_run(mut self, callback: FlowRunCallback) -> Self {
         self.flow_run = Some(callback);
+        self
+    }
+
+    pub fn with_branch_diff(mut self, callback: BranchDiffCallback) -> Self {
+        self.branch_diff = Some(callback);
+        self
+    }
+
+    pub fn with_branch_compare(mut self, callback: BranchCompareCallback) -> Self {
+        self.branch_compare = Some(callback);
+        self
+    }
+
+    pub fn with_scheduler_schedule(mut self, callback: SchedulerScheduleCallback) -> Self {
+        self.scheduler_schedule = Some(callback);
+        self
+    }
+
+    pub fn with_scheduler_cancel(mut self, callback: SchedulerCancelCallback) -> Self {
+        self.scheduler_cancel = Some(callback);
+        self
+    }
+
+    pub fn with_scheduler_list(mut self, callback: SchedulerListCallback) -> Self {
+        self.scheduler_list = Some(callback);
+        self
+    }
+
+    pub fn with_scheduler_get(mut self, callback: SchedulerGetCallback) -> Self {
+        self.scheduler_get = Some(callback);
+        self
+    }
+
+    pub fn with_branch_copy_nodes(mut self, callback: BranchCopyNodesCallback) -> Self {
+        self.branch_copy_nodes = Some(callback);
         self
     }
 

@@ -1333,3 +1333,635 @@ async fn test_crypto_verify_jwt_roundtrip() {
     assert_eq!(output["valid"], true);
     assert_eq!(output["hasClaims"], true);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_raisin_branches_bindings_registered() {
+    let runtime = QuickJsRuntime::new();
+
+    // The mock API uses the default trait implementations, which report the
+    // capability as unavailable — so the wrapper must (a) expose the
+    // raisin.branches namespace with diff/compare functions, and (b) surface
+    // the backend error as a thrown Error rather than returning it.
+    let code = r#"
+        function handler(input) {
+            const hasDiff = typeof raisin.branches.diff === "function";
+            const hasCompare = typeof raisin.branches.compare === "function";
+            const hasCopyNodes = typeof raisin.branches.copyNodes === "function";
+
+            let diffError = null;
+            try {
+                raisin.branches.diff("feature", "main");
+            } catch (e) {
+                diffError = String(e.message || e);
+            }
+
+            let compareError = null;
+            try {
+                raisin.branches.compare("feature", "main");
+            } catch (e) {
+                compareError = String(e.message || e);
+            }
+
+            let copyError = null;
+            try {
+                raisin.branches.copyNodes("feature", "main", { workspace: "default", roots: ["/page"] });
+            } catch (e) {
+                copyError = String(e.message || e);
+            }
+
+            return { hasDiff, hasCompare, hasCopyNodes, diffError, compareError, copyError };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+
+    let metadata = FunctionMetadata::javascript("branches_binding_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["hasDiff"], true);
+    assert_eq!(output["hasCompare"], true);
+    assert_eq!(output["hasCopyNodes"], true);
+    assert!(
+        output["diffError"]
+            .as_str()
+            .unwrap()
+            .contains("not available"),
+        "expected the default-trait error to be thrown, got {:?}",
+        output["diffError"]
+    );
+    assert!(
+        output["copyError"]
+            .as_str()
+            .unwrap()
+            .contains("not available"),
+        "expected the default-trait error to be thrown, got {:?}",
+        output["copyError"]
+    );
+    assert!(
+        output["compareError"]
+            .as_str()
+            .unwrap()
+            .contains("not available"),
+        "expected the default-trait error to be thrown, got {:?}",
+        output["compareError"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_raisin_scheduler_bindings_registered() {
+    let runtime = QuickJsRuntime::new();
+
+    // The mock API uses the default trait implementations, which report the
+    // capability as unavailable — so the wrapper must (a) expose the
+    // raisin.scheduler namespace with schedule/cancel/list/get functions,
+    // and (b) surface the backend error as a thrown Error.
+    let code = r#"
+        function handler(input) {
+            const hasSchedule = typeof raisin.scheduler.schedule === "function";
+            const hasCancel = typeof raisin.scheduler.cancel === "function";
+            const hasList = typeof raisin.scheduler.list === "function";
+            const hasGet = typeof raisin.scheduler.get === "function";
+
+            let scheduleError = null;
+            try {
+                raisin.scheduler.schedule({
+                    targetKind: "function",
+                    targetPath: "/lib/hello",
+                    runAt: "2030-01-01T00:00:00Z",
+                });
+            } catch (e) {
+                scheduleError = String(e.message || e);
+            }
+
+            let cancelError = null;
+            try {
+                raisin.scheduler.cancel("some-job-id");
+            } catch (e) {
+                cancelError = String(e.message || e);
+            }
+
+            let listError = null;
+            try {
+                raisin.scheduler.list();
+            } catch (e) {
+                listError = String(e.message || e);
+            }
+
+            let getError = null;
+            try {
+                raisin.scheduler.get("some-job-id");
+            } catch (e) {
+                getError = String(e.message || e);
+            }
+
+            return { hasSchedule, hasCancel, hasList, hasGet, scheduleError, cancelError, listError, getError };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+
+    let metadata = FunctionMetadata::javascript("scheduler_binding_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["hasSchedule"], true);
+    assert_eq!(output["hasCancel"], true);
+    assert_eq!(output["hasList"], true);
+    assert_eq!(output["hasGet"], true);
+    for key in ["scheduleError", "cancelError", "listError", "getError"] {
+        assert!(
+            output[key].as_str().unwrap().contains("not available"),
+            "expected the default-trait error to be thrown for {}, got {:?}",
+            key,
+            output[key]
+        );
+    }
+}
+
+/// A rejected node WRITE (permission denied, workspace allowlist, path
+/// conflict, ...) must surface in JS as a thrown exception — never as a
+/// success-shaped return value. This regression-tests the wrapper paths
+/// that used to swallow storage errors (create returned an {error} object
+/// wrapped as a node; delete/updateProperty returned a bare `false`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_node_write_errors_throw_in_js() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            const outcomes = {};
+
+            try {
+                const node = raisin.nodes.create("ws", "/parent", { name: "child", node_type: "raisin:Folder" });
+                outcomes.create = { threw: false, shape: node && typeof node === 'object' ? Object.keys(node) : node };
+            } catch (e) {
+                outcomes.create = { threw: true, message: String(e.message || e) };
+            }
+
+            try {
+                raisin.nodes.update("ws", "/parent/child", { properties: { title: "x" } });
+                outcomes.update = { threw: false };
+            } catch (e) {
+                outcomes.update = { threw: true, message: String(e.message || e) };
+            }
+
+            try {
+                raisin.nodes.delete("ws", "/parent/child");
+                outcomes.delete = { threw: false };
+            } catch (e) {
+                outcomes.delete = { threw: true, message: String(e.message || e) };
+            }
+
+            try {
+                raisin.nodes.updateProperty("ws", "/parent/child", "title", "x");
+                outcomes.updateProperty = { threw: false };
+            } catch (e) {
+                outcomes.updateProperty = { threw: true, message: String(e.message || e) };
+            }
+
+            try {
+                raisin.nodes.move("ws", "/parent/child", "/other");
+                outcomes.move = { threw: false };
+            } catch (e) {
+                outcomes.move = { threw: true, message: String(e.message || e) };
+            }
+
+            return outcomes;
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+
+    let metadata = FunctionMetadata::javascript("node_write_error_test");
+    let api = Arc::new(
+        MockFunctionApi::new(serde_json::json!({}))
+            .with_node_write_error("simulated rejection: not allowed"),
+    );
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+
+    for op in ["create", "update", "delete", "updateProperty", "move"] {
+        assert_eq!(
+            output[op]["threw"], true,
+            "raisin.nodes.{} must throw on a storage error, got {:?}",
+            op, output[op]
+        );
+        assert!(
+            output[op]["message"]
+                .as_str()
+                .unwrap()
+                .contains("simulated rejection"),
+            "raisin.nodes.{} must carry the storage error message, got {:?}",
+            op,
+            output[op]["message"]
+        );
+    }
+}
+
+/// An UNCAUGHT storage error from a node write must fail the whole function
+/// execution (success = false) instead of silently continuing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_uncaught_node_create_error_fails_function() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            const node = raisin.nodes.create("ws", "/parent", { name: "child" });
+            return { created: node.path };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+
+    let metadata = FunctionMetadata::javascript("uncaught_node_create_error_test");
+    let api = Arc::new(
+        MockFunctionApi::new(serde_json::json!({}))
+            .with_node_write_error("simulated rejection: not allowed"),
+    );
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(
+        !result.success,
+        "an uncaught node create error must fail the function, got output {:?}",
+        result.output
+    );
+    let err = result.error.expect("error must be reported");
+    assert!(
+        err.message.contains("simulated rejection"),
+        "function error must carry the storage error message, got: {}",
+        err.message
+    );
+}
+
+/// Successful writes keep their success shapes after the error-path rework:
+/// create returns the node, delete/updateProperty return true.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_node_write_success_shapes_unchanged() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            const node = raisin.nodes.create("ws", "/parent", { name: "child", node_type: "raisin:Folder" });
+            const deleted = raisin.nodes.delete("ws", "/parent/child");
+            const propSet = raisin.nodes.updateProperty("ws", "/parent/child", "title", "x");
+            return { path: node.path, deleted, propSet };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+
+    let metadata = FunctionMetadata::javascript("node_write_success_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["path"], "/parent/child");
+    assert_eq!(output["deleted"], true);
+    assert_eq!(output["propSet"], true);
+}
+
+/// Surface snapshot: the full raisin.* method inventory, per namespace.
+///
+/// The public JS surface is a FROZEN contract (the application ecosystem
+/// depends on it). This test enumerates `Object.keys` of every namespace —
+/// including the transaction object and the `asAdmin()` escalation object —
+/// and compares against the expected lists, so any accidental method loss,
+/// rename, or unreviewed addition fails loudly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_raisin_api_surface_snapshot() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            const names = (o) => Object.keys(o).sort();
+            const tx = raisin.nodes.beginTransaction();
+            const txKeys = names(tx);
+            tx.rollback();
+            const admin = raisin.asAdmin();
+            return {
+                root: names(raisin),
+                nodes: names(raisin.nodes),
+                sql: names(raisin.sql),
+                http: names(raisin.http),
+                events: names(raisin.events),
+                ai: names(raisin.ai),
+                functions: names(raisin.functions),
+                flows: names(raisin.flows),
+                branches: names(raisin.branches),
+                scheduler: names(raisin.scheduler),
+                tasks: names(raisin.tasks),
+                crypto: names(raisin.crypto),
+                locks: names(raisin.locks),
+                inventory: names(raisin.inventory),
+                integrations: names(raisin.integrations),
+                imap: names(raisin.imap),
+                pdf: names(raisin.pdf),
+                tx: txKeys,
+                admin: names(admin),
+                adminNodes: names(admin.nodes),
+                adminSql: names(admin.sql),
+                hasResourceClass: typeof globalThis.Resource === 'function',
+                contextIsObject: typeof raisin.context === 'object',
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("surface_snapshot_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({
+        "tenant_id": "tenant1",
+        "repo_id": "repo1",
+        "branch": "main"
+    })));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+
+    let expect = |key: &str, mut names: Vec<&str>| {
+        names.sort_unstable();
+        let expected = serde_json::json!(names);
+        assert_eq!(
+            output[key], expected,
+            "raisin API surface changed for '{}'.\n  expected: {}\n  actual:   {}",
+            key, expected, output[key]
+        );
+    };
+
+    expect(
+        "root",
+        vec![
+            "ai",
+            "asAdmin",
+            "branches",
+            "context",
+            "crypto",
+            "events",
+            "flows",
+            "functions",
+            "http",
+            "imap",
+            "integrations",
+            "inventory",
+            "locks",
+            "nodes",
+            "notify",
+            "pdf",
+            "scheduler",
+            "sql",
+            "tasks",
+        ],
+    );
+    expect(
+        "nodes",
+        vec![
+            "applyChildOrder",
+            "beginTransaction",
+            "create",
+            "createDeep",
+            "delete",
+            "get",
+            "getById",
+            "getChildren",
+            "history",
+            "move",
+            "query",
+            "update",
+            "updateProperty",
+            "upsertDeep",
+        ],
+    );
+    expect("sql", vec!["execute", "query"]);
+    expect("http", vec!["fetch"]);
+    expect("events", vec!["emit"]);
+    expect(
+        "ai",
+        vec!["completion", "embed", "getDefaultModel", "listModels"],
+    );
+    expect("functions", vec!["call", "execute"]);
+    expect("flows", vec!["run"]);
+    expect("branches", vec!["compare", "copyNodes", "diff"]);
+    expect("scheduler", vec!["cancel", "get", "list", "schedule"]);
+    expect("tasks", vec!["complete", "create"]);
+    expect("crypto", vec!["uuid", "verifyJwt"]);
+    expect("locks", vec!["acquire", "release", "renew"]);
+    expect("inventory", vec!["claim", "release"]);
+    expect("integrations", vec!["syncNow", "sync_now"]);
+    expect("imap", vec!["fetchMessage", "fetchSince", "listMailboxes"]);
+    expect(
+        "pdf",
+        vec!["extractText", "getPageCount", "ocr", "processFromStorage"],
+    );
+    // tx must NOT expose `move` (intentionally unsupported in transactions).
+    expect(
+        "tx",
+        vec![
+            "add",
+            "commit",
+            "create",
+            "createDeep",
+            "delete",
+            "deleteById",
+            "get",
+            "getByPath",
+            "listChildren",
+            "put",
+            "rollback",
+            "setActor",
+            "setMessage",
+            "update",
+            "updateProperty",
+            "upsert",
+            "upsertDeep",
+        ],
+    );
+    expect(
+        "admin",
+        vec![
+            "ai",
+            "context",
+            "events",
+            "functions",
+            "http",
+            "inventory",
+            "locks",
+            "nodes",
+            "notify",
+            "sql",
+            "tasks",
+        ],
+    );
+    expect(
+        "adminNodes",
+        vec![
+            "create",
+            "delete",
+            "get",
+            "getById",
+            "getChildren",
+            "query",
+            "update",
+            "updateProperty",
+        ],
+    );
+    expect("adminSql", vec!["execute", "query"]);
+
+    assert_eq!(output["hasResourceClass"], true);
+    assert_eq!(output["contextIsObject"], true);
+}
+
+/// The error conventions that must NOT throw: failed reads resolve to
+/// null / [] and the documented sentinel/error-object returns stay returns.
+/// (The throw-on-error conventions are covered by
+/// `test_node_write_errors_throw_in_js` and the branches/scheduler tests.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_swallowed_error_conventions_do_not_throw() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            return {
+                // failed reads resolve to null / []
+                get: raisin.nodes.get("ws", "/missing"),
+                getById: raisin.nodes.getById("ws", "missing"),
+                query: raisin.nodes.query("ws", {}),
+                children: raisin.nodes.getChildren("ws", "/missing"),
+                adminGet: raisin.asAdmin().nodes.get("ws", "/missing"),
+                adminQuery: raisin.asAdmin().nodes.query("ws", {}),
+                // failed sql resolves to {error, rows:[]} / -1
+                sqlQuery: raisin.sql.query("SELECT 1"),
+                sqlExecute: raisin.sql.execute("UPDATE x"),
+                // failed emit resolves to false
+                emit: raisin.events.emit("evt", {}),
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("swallowed_errors_test");
+    let api = Arc::new(
+        MockFunctionApi::new(serde_json::json!({})).with_all_errors("backend down"),
+    );
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["get"], serde_json::Value::Null);
+    assert_eq!(output["getById"], serde_json::Value::Null);
+    assert_eq!(output["query"], serde_json::json!([]));
+    assert_eq!(output["children"], serde_json::json!([]));
+    assert_eq!(output["adminGet"], serde_json::Value::Null);
+    assert_eq!(output["adminQuery"], serde_json::json!([]));
+    assert_eq!(output["sqlQuery"]["rows"], serde_json::json!([]));
+    assert!(
+        output["sqlQuery"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("backend down"),
+        "sql.query must return the error message, got {:?}",
+        output["sqlQuery"]
+    );
+    assert_eq!(output["sqlExecute"], serde_json::json!(-1));
+    assert_eq!(output["emit"], false);
+}
+
+/// Conventions that ride on the registry gateway's argument massaging:
+/// http.fetch(url, options) reshapes into the registry's request(method, url,
+/// options); functions.execute tolerates a missing context; nodes.history is
+/// callable (it used to be mapped in the wrapper but had no host function);
+/// crypto.uuid returns a UUID string; tasks.create returns the task payload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_gateway_argument_shapes() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            const get = raisin.http.fetch("https://example.org/x");
+            const post = raisin.http.fetch("https://example.org/y", { method: "POST", body: "b" });
+            const uuid = raisin.crypto.uuid();
+            const hist = raisin.nodes.history("ws", "some-id", 5);
+            const noCtx = raisin.functions.execute("/lib/fn", { a: 1 });
+            const task = raisin.tasks.create({ title: "t", assignee: "/users/u1" });
+            return {
+                getStatus: get.status,
+                getMethod: get.body.method,
+                getUrl: get.body.url,
+                postMethod: post.body.method,
+                postBody: post.body.options.body,
+                uuidType: typeof uuid,
+                uuidLen: uuid.length,
+                hist: hist,
+                noCtxSuccess: noCtx.success === true,
+                noCtxArgs: noCtx.arguments,
+                taskIsObject: !!task && typeof task === 'object' && !task.error,
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("gateway_shapes_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["getStatus"], 200);
+    assert_eq!(output["getMethod"], "GET");
+    assert_eq!(output["getUrl"], "https://example.org/x");
+    assert_eq!(output["postMethod"], "POST");
+    assert_eq!(output["postBody"], "b");
+    assert_eq!(output["uuidType"], "string");
+    assert_eq!(output["uuidLen"], 36);
+    assert_eq!(output["hist"], serde_json::json!([]));
+    assert_eq!(output["noCtxSuccess"], true);
+    assert_eq!(output["noCtxArgs"], serde_json::json!({ "a": 1 }));
+    assert_eq!(output["taskIsObject"], true);
+}

@@ -66,6 +66,7 @@ mod handlers {
     pub mod repo;
     pub mod repositories;
     pub mod revisions;
+    pub mod scheduler;
     #[cfg(feature = "storage-rocksdb")]
     pub mod sql;
     #[cfg(feature = "storage-rocksdb")]

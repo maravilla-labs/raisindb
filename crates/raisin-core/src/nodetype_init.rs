@@ -412,6 +412,60 @@ mod tests {
         }
     }
 
+    /// Guards the raisin:InboxTask schema so a STANDALONE task
+    /// (`raisin.tasks.create`, which has no owning flow) validates. Previously
+    /// flow_instance_ref + step_id were `required: true`, so every standalone
+    /// create failed schema validation with "Missing required property
+    /// 'flow_instance_ref'". Because the type is `strict: true`, it must also
+    /// declare every property the writers actually set.
+    #[test]
+    fn test_inbox_task_schema_allows_standalone_tasks() {
+        let nodetypes = load_global_nodetypes();
+        let inbox = nodetypes
+            .iter()
+            .find(|nt| nt.name == "raisin:InboxTask")
+            .expect("raisin_inbox_task.yaml should load");
+
+        let props = inbox
+            .properties
+            .as_ref()
+            .expect("InboxTask should declare properties");
+        let by_name = |n: &str| props.iter().find(|p| p.name.as_deref() == Some(n));
+        let is_required = |n: &str| by_name(n).and_then(|p| p.required).unwrap_or(false);
+
+        // Core identity fields stay required.
+        assert!(is_required("task_type"), "task_type must stay required");
+        assert!(is_required("title"), "title must stay required");
+        assert!(is_required("status"), "status must stay required");
+
+        // Flow linkage must be OPTIONAL — a standalone task has no flow.
+        assert!(
+            !is_required("flow_instance_ref"),
+            "flow_instance_ref must be optional so standalone tasks validate"
+        );
+        assert!(
+            !is_required("step_id"),
+            "step_id must be optional so standalone tasks validate"
+        );
+
+        // strict:true → every property any writer sets must be declared, else
+        // the write is rejected as an undefined property.
+        for name in [
+            "assignee",
+            "flow_instance_id",
+            "due_at",
+            "due_in_seconds",
+            "created_at",
+            "completed_by",
+        ] {
+            assert!(
+                by_name(name).is_some(),
+                "InboxTask must declare '{}' (a property its writers set under strict mode)",
+                name
+            );
+        }
+    }
+
     #[test]
     fn test_calculate_content_hash() {
         let hash = calculate_content_hash("test content");

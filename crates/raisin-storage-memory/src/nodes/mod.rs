@@ -7,8 +7,8 @@ use raisin_hlc::HLC;
 use raisin_models as models;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::{
-    BranchScope, CreateNodeOptions, DeleteNodeOptions, ListOptions, NodeRepository,
-    NodeWithPopulatedChildren, StorageScope, UpdateNodeOptions,
+    BranchScope, CreateNodeOptions, CrossBranchCopySummary, DeleteNodeOptions, ListOptions,
+    NodeRepository, NodeWithPopulatedChildren, StorageScope, UpdateNodeOptions,
 };
 
 use crate::property_index::InMemoryPropertyIndexRepo;
@@ -736,6 +736,28 @@ impl NodeRepository for InMemoryNodeRepo {
             new_name,
             operation_meta,
         )
+    }
+
+    fn copy_nodes_across_branches(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _source_branch: &str,
+        _target_branch: &str,
+        _workspace: &str,
+        _roots: &[String],
+        _recursive: bool,
+        _delete_missing: bool,
+        _operation_meta: Option<raisin_models::operations::OperationMeta>,
+    ) -> impl std::future::Future<Output = Result<CrossBranchCopySummary>> + Send {
+        // The in-memory backend has degraded branch semantics (no revision
+        // DAG); a branch-crossing copy cannot be represented faithfully.
+        async {
+            Err(raisin_error::Error::Validation(
+                "Cross-branch node copy is not supported by the in-memory storage backend"
+                    .to_string(),
+            ))
+        }
     }
 
     // --- Publish/unpublish ---

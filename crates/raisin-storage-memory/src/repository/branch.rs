@@ -1,7 +1,8 @@
 //! In-memory branch management implementation.
 
 use raisin_context::{
-    Branch, BranchDivergence, ConflictResolution, MergeConflict, MergeResult, MergeStrategy,
+    Branch, BranchDiff, BranchDivergence, ConflictResolution, MergeConflict, MergeResult,
+    MergeStrategy,
 };
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
@@ -361,6 +362,35 @@ impl BranchRepository for InMemoryBranchRepo {
             ahead: 0,
             behind: 0,
             common_ancestor: current.head,
+        })
+    }
+
+    async fn diff_branches(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        base_branch: &str,
+    ) -> Result<BranchDiff> {
+        // Get both branches (validates they exist)
+        let current = self
+            .get_branch(tenant_id, repo_id, branch)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("Branch '{}'", branch)))?;
+
+        let _base = self
+            .get_branch(tenant_id, repo_id, base_branch)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("Branch '{}'", base_branch)))?;
+
+        // In-memory storage doesn't track revision history, so per-node
+        // changes can't be enumerated. Mirror calculate_divergence's
+        // degradation: report no changes with the current HEAD as ancestor.
+        Ok(BranchDiff {
+            common_ancestor: current.head,
+            added: vec![],
+            modified: vec![],
+            deleted: vec![],
         })
     }
 

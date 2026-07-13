@@ -284,41 +284,42 @@ impl<'a> PlanBuilder<'a> {
                 },
             ) => Self::exprs_match(o1, o2) && Self::exprs_match(k1, k2),
 
-            // Add other expression types as needed
-            _ => false,
+            // Casts match if the target type and inner expression match.
+            // The analyzer produces `Cast { JsonExtractText { .. } }` for
+            // `properties ->> 'key'::Type`, so GROUP BY over a cast extraction
+            // must be recognized here or the SELECT expression is never
+            // rewritten to the aggregate's group-key column (and would silently
+            // re-evaluate to NULL above the aggregate).
+            (
+                Expr::Cast {
+                    expr: e1,
+                    target_type: t1,
+                },
+                Expr::Cast {
+                    expr: e2,
+                    target_type: t2,
+                },
+            ) => t1 == t2 && Self::exprs_match(e1, e2),
+
+            // Fallback: identical structure means identical expression. This
+            // catches shapes without a dedicated arm (CASE, IS NULL, nested
+            // JSON paths, …) so they still get wired to the group-key column
+            // instead of silently evaluating to NULL after aggregation.
+            (l, r) => {
+                std::mem::discriminant(l) == std::mem::discriminant(r)
+                    && format!("{:?}", l) == format!("{:?}", r)
+            }
         }
     }
 
-    /// Generate canonical column name for GROUP BY expression
-    /// Must match logic in hash_aggregate.rs extract_column_name()
+    /// Generate canonical column name for GROUP BY expression.
+    ///
+    /// Delegates to [`crate::logical_plan::group_key_column_name`], the single
+    /// source of truth shared with the hash aggregate executor: the aggregate
+    /// stores each group key under this name and the rewritten projection
+    /// reads it back by the same name.
     pub(crate) fn generate_groupby_column_name(expr: &crate::analyzer::TypedExpr) -> String {
-        use crate::analyzer::Expr;
-
-        match &expr.expr {
-            Expr::Column { table, column } => {
-                format!("{}.{}", table, column)
-            }
-            Expr::Function { name, args, .. } => {
-                let func_name_upper = name.to_uppercase();
-                if args.is_empty() {
-                    format!("{}()", func_name_upper)
-                } else if args.len() == 1 {
-                    let arg_name = Self::generate_groupby_column_name(&args[0]);
-                    format!("{}({})", func_name_upper, arg_name)
-                } else {
-                    format!("{}(...)", func_name_upper)
-                }
-            }
-            Expr::JsonExtractText { object, key } => {
-                if let Expr::Column { table, column } = &object.expr {
-                    if let Expr::Literal(crate::analyzer::Literal::Text(key_str)) = &key.expr {
-                        return format!("{}.{}_{}", table, column, key_str);
-                    }
-                }
-                "?column?".to_string()
-            }
-            _ => "?column?".to_string(),
-        }
+        crate::logical_plan::group_key_column_name(expr)
     }
 
     /// Rewrite expressions that match GROUP BY expressions to column references

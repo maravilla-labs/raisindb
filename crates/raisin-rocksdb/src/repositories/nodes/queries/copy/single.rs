@@ -53,8 +53,33 @@ impl NodeRepositoryImpl {
         )
         .await?;
 
-        // Validation 6: Check for duplicate names in target location
         let name = new_name.unwrap_or(&source.name);
+        let new_path = format!("{}/{}", target_parent, name);
+
+        // Validation 6: Destination path must be free — and stay free.
+        // copy bypasses dispatch_create (it calls add_impl directly), so it
+        // must take its own path reservation BEFORE the existence checks
+        // below; otherwise two concurrent copies (or a copy racing a create)
+        // to the same destination both pass the check and both write. The
+        // guard releases after add_impl's atomic write is durable (or on any
+        // error / cancellation).
+        let mut reservation_guard =
+            crate::repositories::nodes::PathReservationGuard::new(self);
+        reservation_guard.reserve(tenant_id, repo_id, branch, workspace, &new_path)?;
+
+        // Committed-storage occupancy check (after reserving): an existing
+        // node at the destination is a hard Conflict.
+        if let Some(occupant) = self
+            .get_by_path_impl(tenant_id, repo_id, branch, workspace, &new_path, None)
+            .await?
+        {
+            return Err(raisin_error::Error::Conflict(format!(
+                "Target path '{}' already exists (id={})",
+                new_path, occupant.id
+            )));
+        }
+
+        // Validation 6b: Check for duplicate names in target location
         self.validate_unique_child_name(
             tenant_id,
             repo_id,
@@ -64,8 +89,6 @@ impl NodeRepositoryImpl {
             name,
         )
         .await?;
-
-        let new_path = format!("{}/{}", target_parent, name);
 
         let mut new_node = source.clone();
         new_node.id = nanoid::nanoid!();

@@ -70,6 +70,17 @@ pub(crate) fn parse_function_variants(s: &str) -> Result<Option<JobType>, String
             }
         }
     }
+    if let Some(rest) = s.strip_prefix("ScheduledInvocation(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            let p: Vec<&str> = c.split('/').collect();
+            if p.len() == 2 {
+                return Ok(Some(JobType::ScheduledInvocation {
+                    target_kind: p[0].to_string(),
+                    invocation_id: p[1].to_string(),
+                }));
+            }
+        }
+    }
     Ok(None)
 }
 

@@ -109,6 +109,17 @@ impl NodeRepositoryImpl {
         node: Node,
         options: CreateNodeOptions,
     ) -> Result<()> {
+        // Reserve the path BEFORE the existence check inside validate_for_create.
+        // The check alone is a TOCTOU race: two concurrent creates for the same
+        // path can both observe "not found" and both write. Reserve-then-check
+        // ensures the loser either conflicts here or sees the winner's
+        // committed row. The guard releases the reservation once our own write
+        // is durable (add_impl performed the atomic batch write), on any error,
+        // and even if this future is cancelled mid-await.
+        let mut guard = crate::repositories::nodes::PathReservationGuard::new(self);
+        guard.reserve(tenant_id, repo_id, branch, workspace, &node.path)?;
+        let _guard = guard;
+
         self.validate_for_create(tenant_id, repo_id, branch, workspace, &node, &options)
             .await?;
         self.add_impl(tenant_id, repo_id, branch, workspace, node)

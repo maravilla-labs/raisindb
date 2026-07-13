@@ -10,28 +10,21 @@
 //!
 //! # Module Structure
 //!
-//! - `helpers` - JSON error formatting and async-to-sync bridging
+//! - `helpers` - Async-to-sync bridging
 //! - `module_loader` - ES6 module resolution and loading
 //! - `console` - Console API, timer setup, and JS error formatting
 //! - `environment` - JS environment and raisin API setup
-//! - `api_nodes` - Node CRUD API registration
-//! - `api_resources` - Resource, PDF, and temp file API registration
-//! - `api_transaction` - Transaction API registration
-//! - `api_admin` - Admin (RLS-bypass) API registration
-//! - `api_fetch` - W3C Fetch API registration
-//! - `api_misc` - SQL, HTTP, events, AI, functions, tasks, crypto API registration
+//! - `gateway` - `__raisin_call`: dispatch into the shared bindings registry
+//!   (`runtime/bindings/methods/*`) — every `raisin.*` method is defined ONCE
+//!   there and consumed by both the QuickJS and Starlark runtimes
+//! - `api_temp` - Per-execution temp-file host functions (runtime-local state)
+//! - `api_fetch` - W3C Fetch API registration (runtime-local state)
 
-mod api_admin;
 mod api_fetch;
-mod api_imap;
-mod api_integrations;
-mod api_locks;
-mod api_misc;
-mod api_nodes;
-mod api_resources;
-mod api_transaction;
+mod api_temp;
 mod console;
 mod environment;
+mod gateway;
 mod helpers;
 mod module_loader;
 

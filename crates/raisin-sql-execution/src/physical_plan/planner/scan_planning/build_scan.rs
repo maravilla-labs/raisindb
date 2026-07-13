@@ -132,7 +132,33 @@ impl PhysicalPlanner {
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
         if let Some((prop_name, prop_value)) = self.extract_property_predicate(canonical) {
-            let remaining = self.remove_property_predicate(canonical, &prop_name);
+            // JSON property equalities (JsonPropertyEq) stay in the residual
+            // filter even though they drive the scan: the property index keys
+            // hashed values (collisions possible) and pre-fix databases may
+            // carry stale old-value entries, so the fetched row is re-verified.
+            // (The nodes repository's own find_by_property does the same
+            // re-check.)
+            //
+            // Pseudo-property equalities (node_type, archetype, name, ... —
+            // prop_name is "__"-prefixed) ARE removed: their index keys embed
+            // the RAW value (no hash, no collisions) and value changes
+            // tombstone the old entry, so the scan is exact — keeping them
+            // filter-free preserves the COUNT(*) index pushdown.
+            let remaining: Vec<_> = if prop_name.starts_with("__") {
+                canonical
+                    .iter()
+                    .filter(|p| {
+                        !matches!(
+                            p,
+                            CanonicalPredicate::ColumnEq { column, .. }
+                                if format!("__{}", column.to_lowercase()) == prop_name
+                        )
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                canonical.to_vec()
+            };
             let remaining_filter = self.combine_canonical_predicates(&remaining);
 
             let mut scan = PhysicalPlan::PropertyIndexScan {
@@ -172,9 +198,13 @@ impl PhysicalPlanner {
         branch: &str,
         projection: Option<Vec<String>>,
     ) -> Result<PhysicalPlan, Error> {
+        // Remove only the ChildOf predicate this scan actually guarantees; a
+        // ChildOf over a DIFFERENT parent must stay a row-level filter.
         let remaining: Vec<_> = canonical
             .iter()
-            .filter(|p| !matches!(p, CanonicalPredicate::ChildOf { .. }))
+            .filter(|p| {
+                !matches!(p, CanonicalPredicate::ChildOf { parent_path: pp } if pp == parent_path)
+            })
             .cloned()
             .collect();
 
@@ -221,9 +251,19 @@ impl PhysicalPlanner {
         branch: &str,
         projection: Option<Vec<String>>,
     ) -> Result<PhysicalPlan, Error> {
+        // Remove only the DescendantOf predicate this scan guarantees (matching
+        // parent path AND depth; the depth bound is re-added as a filter below).
+        // A DescendantOf over a DIFFERENT parent/depth must stay a row-level
+        // filter.
         let remaining: Vec<_> = canonical
             .iter()
-            .filter(|p| !matches!(p, CanonicalPredicate::DescendantOf { .. }))
+            .filter(|p| {
+                !matches!(
+                    p,
+                    CanonicalPredicate::DescendantOf { parent_path: pp, max_depth: md }
+                        if pp == parent_path && *md == max_depth
+                )
+            })
             .cloned()
             .collect();
 
@@ -307,9 +347,17 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
+        // Remove only the References predicate this scan guarantees; a
+        // References over a DIFFERENT target must stay a row-level filter.
         let remaining: Vec<_> = canonical
             .iter()
-            .filter(|p| !matches!(p, CanonicalPredicate::References { .. }))
+            .filter(|p| {
+                !matches!(
+                    p,
+                    CanonicalPredicate::References { target_workspace: tw, target_path: tp }
+                        if tw == target_workspace && tp == target_path
+                )
+            })
             .cloned()
             .collect();
 
@@ -348,7 +396,15 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
     ) -> Result<PhysicalPlan, Error> {
         if let Some(prefix) = self.extract_prefix_predicate(canonical) {
-            let remaining = self.remove_prefix_predicate(canonical);
+            // Keep ALL PrefixRange predicates as row-level PATH_STARTS_WITH
+            // filters. The prefix may end in a NAME fragment (e.g. LIKE
+            // '/job/t-%'), for which the executor scans a superset (the
+            // containing directory / raw path-index prefix); the residual
+            // filter re-applies the exact string-prefix semantics, so any
+            // scan imprecision is filtered. It also excludes the parent row
+            // itself for '/parent/'-style prefixes, and applies additional
+            // PrefixRange predicates beyond the one driving the scan.
+            let remaining = canonical.to_vec();
 
             let has_depth_predicate = remaining
                 .iter()
@@ -548,12 +604,10 @@ impl PhysicalPlanner {
             chars.into_iter().collect::<String>()
         };
 
-        let remaining: Vec<_> = canonical
-            .iter()
-            .filter(|p| !matches!(p, CanonicalPredicate::PropertyPrefixRange { .. }))
-            .cloned()
-            .collect();
-
+        // Keep every predicate (including the driving PropertyPrefixRange) as a
+        // row-level residual filter — same reasoning as build_property_index_scan:
+        // the range scan is an access path, the filter is the source of truth.
+        let remaining = canonical.to_vec();
         let remaining_filter = self.combine_canonical_predicates(&remaining);
 
         let scan = PhysicalPlan::PropertyRangeScan {

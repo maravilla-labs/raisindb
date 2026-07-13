@@ -774,6 +774,9 @@ fn convert_step_node(
     if let Some(schema) = &properties.input_schema {
         props.insert("input_schema".to_string(), schema.clone());
     }
+    if let Some(data) = &properties.data {
+        props.insert("data".to_string(), data.clone());
+    }
     if let Some(due) = properties.due_in_seconds {
         props.insert("due_in_seconds".to_string(), Value::Number(due.into()));
     }

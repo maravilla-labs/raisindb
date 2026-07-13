@@ -11,12 +11,45 @@
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use raisin_models as models;
+use raisin_models::tree::ChangeOperation;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::node_operations::{
     CreateNodeOptions, DeleteNodeOptions, ListOptions, NodeWithPopulatedChildren, UpdateNodeOptions,
 };
 use crate::scope::{BranchScope, StorageScope};
+
+/// A single node touched by a cross-branch node-set copy.
+///
+/// Carries enough context (id, path, type, operation) for callers to emit
+/// per-node change notifications for the target branch without re-reading
+/// the affected nodes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CrossBranchNodeChange {
+    /// Id of the node (ids are preserved across branches)
+    pub node_id: String,
+    /// Path of the node on the target branch (for deletions: the pruned path)
+    pub path: String,
+    /// NodeType of the node
+    pub node_type: String,
+    /// What happened on the target branch (Added / Modified / Deleted)
+    pub operation: ChangeOperation,
+}
+
+/// Summary of a cross-branch node-set copy (see
+/// [`NodeRepository::copy_nodes_across_branches`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CrossBranchCopySummary {
+    /// Number of nodes written to the target branch (added + modified)
+    pub copied: usize,
+    /// Number of target-branch nodes pruned (`delete_missing` only)
+    pub deleted: usize,
+    /// The single revision all changes were committed under
+    pub revision: HLC,
+    /// Per-node change list (drives change notifications / audit)
+    pub changes: Vec<CrossBranchNodeChange>,
+}
 
 /// Repository interface for node storage operations.
 ///
@@ -519,6 +552,50 @@ pub trait NodeRepository: Send + Sync {
         new_name: Option<&str>,
         operation_meta: Option<models::operations::OperationMeta>,
     ) -> impl std::future::Future<Output = Result<models::nodes::Node>> + Send;
+
+    /// Copy a set of nodes from one branch onto another (branch promotion).
+    ///
+    /// Unlike [`copy_node_tree`](Self::copy_node_tree) (which mints new ids
+    /// within one branch), this copy **preserves node ids**: repeated
+    /// promotions update the same target-branch nodes, so the operation is
+    /// idempotent per source state. All writes — node blobs, every index
+    /// (path / property / reference / relation / ordered-children), carried
+    /// translations, and optional pruning — land in ONE atomic WriteBatch
+    /// under a single revision, and the target branch HEAD advances to it.
+    ///
+    /// # Arguments
+    /// * `source_branch` / `target_branch` - branches to read from / write to
+    /// * `workspace` - workspace the node set lives in
+    /// * `roots` - source-branch node paths to copy; each root's **parent
+    ///   path must already exist on the target branch** (validation error
+    ///   otherwise)
+    /// * `recursive` - also copy all descendants of each root
+    /// * `delete_missing` - tombstone target-branch nodes under the roots
+    ///   whose ids are absent from the copied source set (one-way sync)
+    /// * `operation_meta` - optional actor/message recorded in the revision
+    ///   metadata (defaults to a system commit)
+    ///
+    /// # Errors
+    /// - `Error::NotFound` - a branch or a source root doesn't exist
+    /// - `Error::Forbidden` - the target branch is protected
+    /// - `Error::Validation` - empty roots, identical branches, or a root's
+    ///   parent path missing on the target branch
+    ///
+    /// Backends without branch-crossing storage may return
+    /// `Error::Validation` (the in-memory backend does).
+    #[allow(clippy::too_many_arguments)]
+    fn copy_nodes_across_branches(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        source_branch: &str,
+        target_branch: &str,
+        workspace: &str,
+        roots: &[String],
+        recursive: bool,
+        delete_missing: bool,
+        operation_meta: Option<models::operations::OperationMeta>,
+    ) -> impl std::future::Future<Output = Result<CrossBranchCopySummary>> + Send;
 
     // Publish/unpublish methods
     fn publish(

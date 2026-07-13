@@ -13,7 +13,8 @@
 //! Branch management storage trait
 
 use raisin_context::{
-    Branch, BranchDivergence, ConflictResolution, MergeConflict, MergeResult, MergeStrategy,
+    Branch, BranchDiff, BranchDivergence, ConflictResolution, MergeConflict, MergeResult,
+    MergeStrategy,
 };
 use raisin_error::Result;
 use raisin_hlc::HLC;
@@ -209,6 +210,28 @@ pub trait BranchRepository: Send + Sync {
         current_branch: &str,
         base_branch: &str,
     ) -> impl std::future::Future<Output = Result<BranchDivergence>> + Send;
+
+    /// Compute the per-node diff of `branch` relative to `base_branch`'s merge-base
+    ///
+    /// Unlike `calculate_divergence` (which returns only ahead/behind counts),
+    /// this enumerates exactly which nodes changed since the two branches
+    /// diverged, classified into added / modified / deleted.
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier
+    /// * `repo_id` - Repository identifier
+    /// * `branch` - The branch whose changes are enumerated (e.g. "feature/new-ui")
+    /// * `base_branch` - The base branch to diff against (e.g. "main")
+    ///
+    /// # Returns
+    /// `BranchDiff` with the common ancestor and the added/modified/deleted node lists
+    fn diff_branches(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        base_branch: &str,
+    ) -> impl std::future::Future<Output = Result<BranchDiff>> + Send;
 
     /// Merge two branches using Git-like three-way merge
     ///

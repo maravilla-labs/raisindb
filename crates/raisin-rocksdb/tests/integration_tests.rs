@@ -1771,6 +1771,16 @@ mod nodetype_repository {
         let storage = fixture.storage();
         let node_types = storage.node_types();
 
+        // Baseline: setup_standard_nodetypes plus the built-in NodeTypes seeded
+        // during workspace bootstrap. Assert relative growth, not absolute counts.
+        let baseline_count = node_types
+            .list(
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
+                None,
+            )
+            .await?
+            .len();
+
         // Create a NodeType in repo1
         let repo1_nodetype = fixture.create_test_nodetype("Article");
         node_types
@@ -1781,7 +1791,7 @@ mod nodetype_repository {
             )
             .await?;
 
-        // Verify it exists in repo1 (3 from setup_standard_nodetypes + 1 Article = 4)
+        // Verify it exists in repo1 (baseline + Article)
         let repo1_types = node_types
             .list(
                 BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
@@ -1790,8 +1800,12 @@ mod nodetype_repository {
             .await?;
         assert_eq!(
             repo1_types.len(),
-            4,
-            "Repo1 should have 4 NodeTypes (Folder, Page, Document, Article)"
+            baseline_count + 1,
+            "Repo1 should have gained exactly the Article NodeType"
+        );
+        assert!(
+            repo1_types.iter().any(|nt| nt.name == "Article"),
+            "Repo1 should contain the Article NodeType"
         );
 
         // Create repo2
@@ -1860,8 +1874,8 @@ mod nodetype_repository {
             .await?;
         assert_eq!(
             repo1_types_final.len(),
-            4,
-            "Repo1 should still have its 4 NodeTypes"
+            baseline_count + 1,
+            "Repo1 should still have its NodeTypes"
         );
 
         Ok(())
@@ -3364,10 +3378,10 @@ mod tree_operations {
             )
             .await;
 
-        assert!(result.is_err(), "Should fail with Validation error");
+        assert!(result.is_err(), "Should fail when destination is occupied");
         assert!(
-            matches!(result.unwrap_err(), raisin_error::Error::Validation(_)),
-            "Should be Validation error for duplicate name"
+            matches!(result.unwrap_err(), raisin_error::Error::Conflict(_)),
+            "Occupied destination path is a Conflict (path-collision contract)"
         );
 
         Ok(())

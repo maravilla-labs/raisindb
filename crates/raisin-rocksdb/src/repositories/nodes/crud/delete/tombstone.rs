@@ -228,7 +228,7 @@ impl NodeRepositoryImpl {
 
     /// Add tombstone entries for common node field indexes.
     #[allow(clippy::too_many_arguments)]
-    fn add_field_tombstones_to_batch(
+    pub(in crate::repositories::nodes) fn add_field_tombstones_to_batch(
         &self,
         batch: &mut WriteBatch,
         cf_property: &rocksdb::ColumnFamily,
@@ -335,7 +335,7 @@ impl NodeRepositoryImpl {
 
     /// Add tombstone entries for reference indexes.
     #[allow(clippy::too_many_arguments)]
-    fn add_reference_tombstones_to_batch(
+    pub(in crate::repositories::nodes) fn add_reference_tombstones_to_batch(
         &self,
         batch: &mut WriteBatch,
         cf_reference: &rocksdb::ColumnFamily,
@@ -383,7 +383,7 @@ impl NodeRepositoryImpl {
 
     /// Add tombstone entries for outgoing and incoming relations.
     #[allow(clippy::too_many_arguments)]
-    fn add_relation_tombstones_to_batch(
+    pub(in crate::repositories::nodes) fn add_relation_tombstones_to_batch(
         &self,
         batch: &mut WriteBatch,
         cf_relation: &rocksdb::ColumnFamily,
@@ -458,7 +458,7 @@ impl NodeRepositoryImpl {
     }
 
     /// Add tombstone entries for translations.
-    fn add_translation_tombstones_to_batch(
+    pub(in crate::repositories::nodes) fn add_translation_tombstones_to_batch(
         &self,
         batch: &mut WriteBatch,
         tenant_id: &str,

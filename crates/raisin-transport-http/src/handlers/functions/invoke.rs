@@ -81,6 +81,7 @@ pub async fn invoke_function(
         &function_node.path,
         req.input.clone(),
         async_execution_id.clone(),
+        auth_context.as_ref(),
     )
     .await?;
 
@@ -216,12 +217,24 @@ async fn register_function_job(
     function_path: &str,
     input: serde_json::Value,
     execution_id: String,
+    auth_context: Option<&AuthContext>,
 ) -> Result<JobId, ApiError> {
     use raisin_hlc::HLC;
     use std::collections::HashMap;
 
     let mut metadata = HashMap::new();
     metadata.insert("input".to_string(), input);
+
+    // Persist the caller's auth context so the async job executes with the
+    // same permissions as the HTTP caller. Without this, async invocations
+    // run with no auth context and RLS-gated operations fail with
+    // "No auth context set" — unlike sync invocations (which thread auth
+    // directly) and WebSocket invokeSync (which builds auth from the token).
+    if let Some(auth) = auth_context {
+        if let Ok(serialized) = serde_json::to_value(auth) {
+            metadata.insert("auth_context".to_string(), serialized);
+        }
+    }
 
     let context = JobContext {
         tenant_id: tenant_id.to_string(),

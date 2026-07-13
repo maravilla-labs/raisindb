@@ -197,6 +197,45 @@ pub(super) fn index_node_properties(
     Ok(())
 }
 
+/// Tombstone stale property-index entries on update.
+///
+/// Every (name, value) entry of `old_node` that `new_node` no longer carries
+/// (value changed, property removed, or published tag flipped) gets a
+/// TOMBSTONE at the new revision — otherwise equality scans and index-backed
+/// COUNTs on the OLD value keep matching the node forever, and the orphaned
+/// entries survive restarts.
+pub(super) fn tombstone_stale_property_indexes(
+    tx: &RocksDBTransaction,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    old_node: &Node,
+    new_node: &Node,
+    revision: &HLC,
+) -> Result<()> {
+    let cf_property = cf_handle(&tx.db, cf::PROPERTY_INDEX)?;
+
+    let mut batch = tx
+        .batch
+        .lock()
+        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+
+    crate::repositories::add_stale_property_tombstones(
+        &mut batch,
+        cf_property,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        old_node,
+        new_node,
+        revision,
+    );
+
+    Ok(())
+}
+
 /// Tombstone old spatial index entries for a node's geometry properties.
 ///
 /// Called before re-indexing during updates to prevent stale geohash entries.

@@ -295,9 +295,16 @@ impl FunctionExecutionHandler {
             }) as LogEmitter
         });
 
-        // Execute via callback
-        // For trigger-invoked functions, use system context (None defaults to system in executor)
-        // AI tool calls use the dedicated AIToolCallExecutionHandler which passes appropriate auth
+        // Execute via callback.
+        // Async HTTP invocations persist the caller's auth context in job
+        // metadata (see the HTTP invoke handler) so the function runs with the
+        // caller's permissions. Trigger-invoked functions set no such key and
+        // fall back to system context (None). AI tool calls use the dedicated
+        // AIToolCallExecutionHandler which passes appropriate auth.
+        let auth_context: Option<AuthContext> = context
+            .metadata
+            .get("auth_context")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let start = std::time::Instant::now();
         let result = executor(
             function_path.clone(),
@@ -307,7 +314,7 @@ impl FunctionExecutionHandler {
             context.repo_id.clone(),
             context.branch.clone(),
             FUNCTIONS_WORKSPACE.to_string(),
-            None, // System context for trigger-invoked functions
+            auth_context,
             log_emitter,
         )
         .await?;

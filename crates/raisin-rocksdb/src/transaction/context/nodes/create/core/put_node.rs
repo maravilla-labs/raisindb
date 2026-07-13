@@ -87,6 +87,37 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
             node_type = %normalized_node.node_type,
             "TRANSACTION: Detected NEW NODE - will track create operation"
         );
+
+        // 5-pre. This put creates a NEW id at a path, so it is a CREATE for
+        // path-uniqueness purposes. Reserve the path against concurrent
+        // creators BEFORE the existence checks below (the committed-storage
+        // path check inside validate_create is a TOCTOU race on its own).
+        // A put that updates an EXISTING id (same path, or a path move) takes
+        // the `else` branch and is deliberately NOT blocked by reservations.
+        // The reservation is held until this transaction commits durably (or
+        // rolls back / is dropped).
+        tx.reserve_create_path(
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            &normalized_node.path,
+        )?;
+
+        // 5-pre-b. Path-conflict check (read-your-writes + committed storage,
+        // mirrors add_node): a DIFFERENT id already occupying this path is a
+        // hard Conflict, never a duplicate row. Same-id occupancy is
+        // impossible here (the by-id lookup above returned None).
+        if let Some(occupant) =
+            super::super::super::read::get_node_by_path(tx, workspace, &normalized_node.path)
+                .await?
+        {
+            return Err(raisin_error::Error::Conflict(format!(
+                "Node with path '{}' already exists (id={})",
+                normalized_node.path, occupant.id
+            )));
+        }
+
         validation::validate_create(
             tx,
             &tenant_id,
@@ -174,6 +205,22 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     if let Some(ref old_node) = existing_node {
         indexing::tombstone_spatial_properties(
             tx, &tenant_id, &repo_id, &branch, workspace, old_node, &revision,
+        )?;
+    }
+
+    // 9b. Tombstone stale property-index values on update (value changed /
+    // property removed / published tag flipped) — otherwise equality scans on
+    // the OLD value keep matching this node forever.
+    if let Some(ref old_node) = existing_node {
+        indexing::tombstone_stale_property_indexes(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            old_node,
+            &normalized_node,
+            &revision,
         )?;
     }
 

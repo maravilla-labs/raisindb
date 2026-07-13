@@ -14,10 +14,17 @@ use raisin_error::Result;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// Wall-clock timeout for external HTTP requests (2 minutes).
+///
+/// Applied inside the shared invoker so BOTH runtimes (QuickJS `http.fetch`,
+/// Starlark `http.request`) are protected against an unresponsive target
+/// blocking a function execution slot indefinitely.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Get all HTTP operation method descriptors
 pub fn methods() -> Vec<ApiMethodDescriptor> {
     vec![
-        // Internal: http.request(method, url, options) - used by wrapper to implement get/post/etc
+        // Internal: http.request(method, url, options) - used by wrapper to implement fetch/get/post/etc
         ApiMethodDescriptor {
             internal_name: "http_request",
             js_name: "request",
@@ -37,7 +44,15 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                     let method = parser.string()?;
                     let url = parser.string()?;
                     let options = parser.json()?;
-                    let result = api.http_request(&method, &url, options).await?;
+                    let result =
+                        tokio::time::timeout(FETCH_TIMEOUT, api.http_request(&method, &url, options))
+                            .await
+                            .map_err(|_| {
+                                raisin_error::Error::Internal(format!(
+                                    "HTTP request timed out after {}s",
+                                    FETCH_TIMEOUT.as_secs()
+                                ))
+                            })??;
                     Ok(InvokeResult::Json(result))
                 })
             },

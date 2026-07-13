@@ -7,9 +7,8 @@
 //!
 //! Exposes `raisin.imap.{fetchSince,listMailboxes,fetchMessage}` to server-side
 //! functions. Rust owns the IMAP protocol (TLS + LOGIN + UID FETCH); functions
-//! call these high-level ops. This drives the Starlark runtime (and the
-//! generated python/typescript wrappers); QuickJS registers the same calls by
-//! hand in `runtime/quickjs/api_imap.rs`.
+//! call these high-level ops. Both the Starlark and QuickJS runtimes consume
+//! this single definition through their registry gateways.
 //!
 //! Every operation authorizes the connection's `host:port` against the
 //! function's network policy before opening a socket (see

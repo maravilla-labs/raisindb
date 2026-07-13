@@ -229,6 +229,91 @@ pub trait FunctionApi: Send + Sync {
         )))
     }
 
+    // ========== Scheduled Invocation Operations ==========
+
+    /// Schedule a one-shot invocation of a function or flow at a fixed time.
+    ///
+    /// `request`: `{ targetKind, targetPath, input?, runAt (RFC3339),
+    /// externalKey?, branch?, workspace?, maxRetries? }`.
+    /// Returns `{ job_id, invocation_id, status: "scheduled", run_at }`.
+    async fn scheduler_schedule(&self, request: Value) -> Result<Value> {
+        let _ = request;
+        Err(raisin_error::Error::Validation(
+            "Scheduled invocations are not available in this runtime".to_string(),
+        ))
+    }
+
+    /// Cancel a pending scheduled invocation by job id or external key.
+    ///
+    /// Returns `{ job_id, status: "cancelled" }`.
+    async fn scheduler_cancel(&self, job_id_or_key: &str) -> Result<Value> {
+        Err(raisin_error::Error::Validation(format!(
+            "Scheduled invocations are not available in this runtime (id: {})",
+            job_id_or_key
+        )))
+    }
+
+    /// List this repository's scheduled invocations.
+    ///
+    /// `filter`: `{ externalKey?, status? }`. Returns `{ invocations: [...] }`.
+    async fn scheduler_list(&self, filter: Value) -> Result<Value> {
+        let _ = filter;
+        Err(raisin_error::Error::Validation(
+            "Scheduled invocations are not available in this runtime".to_string(),
+        ))
+    }
+
+    /// Fetch a single scheduled invocation by job id or external key.
+    async fn scheduler_get(&self, job_id_or_key: &str) -> Result<Value> {
+        Err(raisin_error::Error::Validation(format!(
+            "Scheduled invocations are not available in this runtime (id: {})",
+            job_id_or_key
+        )))
+    }
+
+    // ========== Branch Operations ==========
+
+    /// Per-node diff of `branch` relative to `base_branch`'s merge-base.
+    ///
+    /// Returns `{ common_ancestor, added: [...], modified: [...], deleted: [...] }`
+    /// where each entry is `{ node_id, workspace, path, operation, translation_locale? }`.
+    async fn branch_diff(&self, branch: &str, base_branch: &str) -> Result<Value> {
+        let _ = base_branch;
+        Err(raisin_error::Error::Validation(format!(
+            "Branch diff is not available in this runtime (branch: {})",
+            branch
+        )))
+    }
+
+    /// Branch divergence (ahead/behind counts) of `branch` relative to `base_branch`.
+    ///
+    /// Returns `{ ahead, behind, common_ancestor }`.
+    async fn branch_compare(&self, branch: &str, base_branch: &str) -> Result<Value> {
+        let _ = base_branch;
+        Err(raisin_error::Error::Validation(format!(
+            "Branch compare is not available in this runtime (branch: {})",
+            branch
+        )))
+    }
+
+    /// Copy a node set from `source_branch` onto `target_branch`, preserving
+    /// node ids, in one atomic commit (branch promotion).
+    ///
+    /// `opts`: `{ workspace, roots: [paths], recursive?, deleteMissing? }`.
+    /// Returns `{ copied, deleted, revision, changes: [...] }`.
+    async fn branch_copy_nodes(
+        &self,
+        source_branch: &str,
+        target_branch: &str,
+        opts: Value,
+    ) -> Result<Value> {
+        let _ = (target_branch, opts);
+        Err(raisin_error::Error::Validation(format!(
+            "Branch node copy is not available in this runtime (branch: {})",
+            source_branch
+        )))
+    }
+
     // ========== Transaction Operations ==========
 
     /// Begin a new transaction, returns transaction ID

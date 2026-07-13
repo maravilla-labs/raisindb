@@ -38,11 +38,15 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                     let arguments = parser.json()?;
                     let context_json = parser.json()?;
 
-                    // Parse context from JSON
+                    // Parse context from JSON. A missing or malformed context
+                    // degrades to an empty one (long-standing JS contract:
+                    // `raisin.functions.execute(path, args)` without a context
+                    // executes with no tool-call linkage instead of erroring).
                     let context: FunctionExecuteContext = serde_json::from_value(context_json)
-                        .map_err(|e| {
-                            raisin_error::Error::Validation(format!("Invalid context: {}", e))
-                        })?;
+                        .unwrap_or_else(|_| FunctionExecuteContext {
+                            tool_call_path: String::new(),
+                            tool_call_workspace: String::new(),
+                        });
 
                     let result = api
                         .function_execute(&function_path, arguments, context)

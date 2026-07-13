@@ -10,6 +10,7 @@ import { NodeTypes } from './node-types';
 import { Archetypes } from './archetypes';
 import { ElementTypes } from './element-types';
 import { Branches } from './branches';
+import { SchedulerApi } from './scheduler';
 import { Tags } from './tags';
 import { FlowsApi } from './flows';
 import { FunctionsApi } from './functions-api';
@@ -280,6 +281,14 @@ export class Database {
    */
   tags(): Tags {
     return new Tags(this._context, this.sendRequest);
+  }
+
+  /**
+   * Get SchedulerApi for one-shot scheduled invocations (time-based
+   * function/flow runs).
+   */
+  scheduler(): SchedulerApi {
+    return new SchedulerApi(this._context, this.sendRequest);
   }
 
   /**

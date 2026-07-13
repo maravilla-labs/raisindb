@@ -332,6 +332,7 @@ pub enum RequestType {
     BranchMerge,
     BranchCompare,
     BranchDiff,
+    BranchCopyNodes,
 
     // Tag operations
     TagCreate,
@@ -411,6 +412,12 @@ pub enum RequestType {
     // Function operations
     FunctionInvoke,
     FunctionInvokeSync,
+
+    // Scheduled invocation operations (one-shot, time-based function/flow runs)
+    ScheduledInvocationCreate,
+    ScheduledInvocationCancel,
+    ScheduledInvocationList,
+    ScheduledInvocationGet,
 
     // Lock / inventory operations
     LocksAcquire,

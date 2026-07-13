@@ -165,6 +165,11 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
 
     tracing::debug!("Atomic commit successful");
 
+    // The created rows are durable now, so the committed-storage existence
+    // check protects path uniqueness from here on; release the in-flight
+    // CREATE path reservations taken by add_node.
+    tx.release_create_path_reservations();
+
     // PHASE 5.3: Capture RevisionMeta and branch update operations for replication
     tx.capture_metadata_operations(
         (*tenant_id).clone(),

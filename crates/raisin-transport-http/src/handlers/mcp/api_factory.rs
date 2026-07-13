@@ -49,8 +49,10 @@ pub(super) fn build_mcp_function_api(
         hnsw_engine: state.hnsw_engine.clone(),
         http_client: reqwest::Client::new(),
         ai_config_store,
-        job_registry: None,
-        job_data_store: None,
+        // Same job-system deps as job-driven executions — keeps the callback
+        // surface (functions.execute / flows.run / scheduler.*) uniform.
+        job_registry: Some(state.storage.job_registry().clone()),
+        job_data_store: Some(state.storage.job_data_store().clone()),
         lock_manager: state.lock_manager.clone(),
     });
 

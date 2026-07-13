@@ -88,6 +88,8 @@ pub use jobs::{
     // Trigger registry exports
     CachedTrigger,
     CopyTreeExecutorCallback,
+    // Auto-dispatch monitor (routes registered jobs to category queues)
+    DispatchingMonitor,
     // Dry run types for package install preview
     DryRunActionCounts,
     DryRunLogEntry,
@@ -110,6 +112,8 @@ pub use jobs::{
     ResumableUploadHandler,
     // Flow runtime callbacks
     RocksDBFlowCallbacks,
+    // Worker pool (create_dispatcher for tests / embedders)
+    RocksDBWorkerPool,
     ScheduledTriggerFinderCallback,
     ScheduledTriggerMatch,
     SqlExecutorCallback,
@@ -140,6 +144,14 @@ pub use jobs::handlers::replication_sync::ReplicationSyncHandler;
 // Re-export the fulltext error counter so transport-http can render
 // it without needing access to the (private) `jobs` module.
 pub use jobs::handlers::{FulltextErrorCounter, FulltextErrorKind, FulltextErrorStats};
+
+// Re-export the scheduled-invocation JobContext metadata keys so transport
+// layers build and read invocation contexts with the same vocabulary as
+// the job handler.
+pub use jobs::handlers::scheduled_invocation::{
+    FlowStartCallback, ScheduledInvocationHandler, META_ACTOR, META_EXTERNAL_KEY, META_INPUT,
+    META_SCHEDULED_FOR, META_TARGET_PATH,
+};
 pub use storage::{RestoreStats, RocksDBStorage};
 pub use transaction::RocksDBTransaction;
 

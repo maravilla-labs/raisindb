@@ -21,6 +21,7 @@ mod oauth;
 mod operator;
 mod packages;
 mod repository;
+mod scheduler;
 
 #[cfg(feature = "storage-rocksdb")]
 pub use operator::operator_package_routes;
@@ -75,6 +76,9 @@ pub fn routes(state: AppState) -> Router {
 
     // Functions, flows, webhooks, triggers
     router = router.merge(functions::function_routes(&state));
+
+    // One-shot scheduled invocations (time-based function/flow runs)
+    router = router.merge(scheduler::scheduler_routes(&state));
 
     // MCP (Model Context Protocol) Streamable HTTP transport
     router = router.merge(mcp::mcp_routes(&state));

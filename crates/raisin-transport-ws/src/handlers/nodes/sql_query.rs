@@ -369,8 +369,19 @@ where
                     hnsw_engine: ws_state.hnsw_engine.clone(),
                     http_client: reqwest::Client::new(),
                     ai_config_store: None,
-                    job_registry: None,
-                    job_data_store: None,
+                    // Same job-system deps as job-driven executions — keeps the
+                    // callback surface (functions.execute / flows.run /
+                    // scheduler.*) uniform. The accessors live on the concrete
+                    // RocksDB storage, so wire them from the feature-gated
+                    // handle (same pattern as the HTTP transport).
+                    job_registry: ws_state
+                        .rocksdb_storage
+                        .as_ref()
+                        .map(|s| s.job_registry().clone()),
+                    job_data_store: ws_state
+                        .rocksdb_storage
+                        .as_ref()
+                        .map(|s| s.job_data_store().clone()),
                     lock_manager: ws_state.lock_manager.clone(),
                 });
 

@@ -255,6 +255,13 @@ async fn main() {
     #[cfg(feature = "storage-rocksdb")]
     startup::binary::register_builtin_package_handler(&storage, &bin).await;
 
+    // Propagate version-bumped global (raisin:*) NodeType schema changes into
+    // repositories created before this binary (e.g. the raisin:InboxTask relax
+    // that lets standalone raisin.tasks.create tasks validate). Version-gated,
+    // so a no-op unless an embedded NodeType version increased.
+    #[cfg(feature = "storage-rocksdb")]
+    startup::binary::resync_global_nodetypes(&storage).await;
+
     // ========================================================================
     // Locks / inventory subsystem
     // ========================================================================

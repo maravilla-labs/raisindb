@@ -22,6 +22,13 @@ pub struct MockFunctionApi {
     logs: std::sync::Mutex<Vec<(String, String)>>,
     /// Real in-process lock manager so lock/inventory mocks behave correctly.
     locks: raisin_locks::InProcessLockManager,
+    /// When set, node WRITE operations (create/update/delete/updateProperty/move)
+    /// fail with this message — used to test that storage errors propagate to
+    /// the function runtime as exceptions instead of success-shaped values.
+    node_write_error: Option<String>,
+    /// When set, reads/queries/sql/events fail with this message too — used to
+    /// test the runtimes' swallowed-error conventions (null / [] / sentinels).
+    all_errors: Option<String>,
 }
 
 impl MockFunctionApi {
@@ -31,6 +38,36 @@ impl MockFunctionApi {
             context,
             logs: std::sync::Mutex::new(Vec::new()),
             locks: raisin_locks::InProcessLockManager::new(),
+            node_write_error: None,
+            all_errors: None,
+        }
+    }
+
+    /// Make all node write operations fail with the given message.
+    pub fn with_node_write_error(mut self, message: impl Into<String>) -> Self {
+        self.node_write_error = Some(message.into());
+        self
+    }
+
+    /// Make reads, queries, SQL, and event emission fail too (in addition to
+    /// node writes) with the given message.
+    pub fn with_all_errors(mut self, message: impl Into<String>) -> Self {
+        self.node_write_error = Some(message.into());
+        self.all_errors = self.node_write_error.clone();
+        self
+    }
+
+    fn check_node_write_error(&self) -> Result<()> {
+        match &self.node_write_error {
+            Some(msg) => Err(raisin_error::Error::PermissionDenied(msg.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn check_all_errors(&self) -> Result<()> {
+        match &self.all_errors {
+            Some(msg) => Err(raisin_error::Error::Internal(msg.clone())),
+            None => Ok(()),
         }
     }
 
@@ -45,6 +82,7 @@ impl FunctionApi for MockFunctionApi {
     // ========== Node Operations ==========
 
     async fn node_get(&self, workspace: &str, path: &str) -> Result<Option<Value>> {
+        self.check_all_errors()?;
         Ok(Some(mock_node(
             workspace,
             path,
@@ -54,6 +92,7 @@ impl FunctionApi for MockFunctionApi {
     }
 
     async fn node_get_by_id(&self, workspace: &str, id: &str) -> Result<Option<Value>> {
+        self.check_all_errors()?;
         Ok(Some(mock_node(workspace, "/mock-path", id, "raisin:Page")))
     }
 
@@ -67,14 +106,17 @@ impl FunctionApi for MockFunctionApi {
     }
 
     async fn node_create(&self, workspace: &str, parent_path: &str, data: Value) -> Result<Value> {
+        self.check_node_write_error()?;
         Ok(mock_created_node(workspace, parent_path, &data))
     }
 
     async fn node_update(&self, workspace: &str, path: &str, data: Value) -> Result<Value> {
+        self.check_node_write_error()?;
         Ok(mock_updated_node(workspace, path, &data))
     }
 
     async fn node_delete(&self, _workspace: &str, _path: &str) -> Result<()> {
+        self.check_node_write_error()?;
         Ok(())
     }
 
@@ -85,6 +127,7 @@ impl FunctionApi for MockFunctionApi {
         property_path: &str,
         value: Value,
     ) -> Result<()> {
+        self.check_node_write_error()?;
         tracing::info!(property_path = %property_path, value = ?value, "Mock property update");
         Ok(())
     }
@@ -95,10 +138,12 @@ impl FunctionApi for MockFunctionApi {
         node_path: &str,
         new_parent_path: &str,
     ) -> Result<Value> {
+        self.check_node_write_error()?;
         Ok(mock_moved_node(workspace, node_path, new_parent_path))
     }
 
     async fn node_query(&self, workspace: &str, query: Value) -> Result<Vec<Value>> {
+        self.check_all_errors()?;
         let limit = query.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
         Ok(mock_query_results(workspace, &query, limit))
     }
@@ -109,6 +154,7 @@ impl FunctionApi for MockFunctionApi {
         parent_path: &str,
         limit: Option<u32>,
     ) -> Result<Vec<Value>> {
+        self.check_all_errors()?;
         let count = limit.unwrap_or(3) as usize;
         Ok(mock_children(workspace, parent_path, count))
     }
@@ -126,6 +172,7 @@ impl FunctionApi for MockFunctionApi {
     // ========== SQL Operations ==========
 
     async fn sql_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {
+        self.check_all_errors()?;
         Ok(serde_json::json!({
             "columns": ["id", "name"], "rows": [["1", "test"]], "row_count": 1,
             "_debug": { "sql": sql, "params": params }
@@ -133,6 +180,7 @@ impl FunctionApi for MockFunctionApi {
     }
 
     async fn sql_execute(&self, _sql: &str, _params: Vec<Value>) -> Result<i64> {
+        self.check_all_errors()?;
         Ok(1)
     }
 
@@ -146,6 +194,7 @@ impl FunctionApi for MockFunctionApi {
     }
 
     async fn emit_event(&self, event_type: &str, data: Value) -> Result<()> {
+        self.check_all_errors()?;
         tracing::info!(event_type = %event_type, data = ?data, "Mock event emitted");
         Ok(())
     }

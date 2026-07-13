@@ -12,9 +12,9 @@ use crate::{
     error::WsError,
     handler::WsState,
     protocol::{
-        BranchComparePayload, BranchCreatePayload, BranchDeletePayload, BranchDiffPayload,
-        BranchGetHeadPayload, BranchGetPayload, BranchListPayload, BranchMergePayload,
-        BranchUpdateHeadPayload, RequestEnvelope, ResponseEnvelope,
+        BranchComparePayload, BranchCopyNodesPayload, BranchCreatePayload, BranchDeletePayload,
+        BranchDiffPayload, BranchGetHeadPayload, BranchGetPayload, BranchListPayload,
+        BranchMergePayload, BranchUpdateHeadPayload, RequestEnvelope, ResponseEnvelope,
     },
 };
 
@@ -335,6 +335,78 @@ where
         request.request_id,
         "NOT_SUPPORTED".to_string(),
         "Branch diff requires RocksDB storage feature".to_string(),
+    )))
+}
+
+/// Handle cross-branch node-set copy (branch promotion).
+///
+/// Delegates to `NodeRepository::copy_nodes_across_branches` — one atomic
+/// commit on the target branch, node ids preserved — then publishes one node
+/// event per touched node on the TARGET branch so live subscribers see the
+/// promoted changes.
+pub async fn handle_branch_copy_nodes<S, B>(
+    state: &Arc<WsState<S, B>>,
+    _connection_state: &Arc<RwLock<ConnectionState>>,
+    request: RequestEnvelope,
+) -> Result<Option<ResponseEnvelope>, WsError>
+where
+    S: Storage + TransactionalStorage,
+    B: raisin_binary::BinaryStorage,
+{
+    use raisin_events::{Event, NodeEvent, NodeEventKind};
+    use raisin_models::tree::ChangeOperation;
+    use raisin_storage::NodeRepository;
+
+    let payload: BranchCopyNodesPayload = serde_json::from_value(request.payload.clone())?;
+
+    let tenant_id = &request.context.tenant_id;
+    let repo = request
+        .context
+        .repository
+        .as_ref()
+        .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))?;
+
+    let summary = state
+        .storage
+        .nodes()
+        .copy_nodes_across_branches(
+            tenant_id,
+            repo,
+            &payload.source_branch,
+            &payload.target_branch,
+            &payload.workspace,
+            &payload.roots,
+            payload.recursive,
+            payload.delete_missing,
+            None, // OperationMeta: actor attribution TODO (see other branch ops)
+        )
+        .await?;
+
+    // Emit node events for the target branch (storage emits none for this op).
+    let event_bus = state.storage.event_bus();
+    for change in &summary.changes {
+        let kind = match change.operation {
+            ChangeOperation::Added => NodeEventKind::Created,
+            ChangeOperation::Deleted => NodeEventKind::Deleted,
+            ChangeOperation::Modified | ChangeOperation::Reordered => NodeEventKind::Updated,
+        };
+        event_bus.publish(Event::Node(NodeEvent {
+            tenant_id: tenant_id.clone(),
+            repository_id: repo.clone(),
+            branch: payload.target_branch.clone(),
+            workspace_id: payload.workspace.clone(),
+            node_id: change.node_id.clone(),
+            node_type: Some(change.node_type.clone()),
+            revision: summary.revision,
+            kind,
+            path: Some(change.path.clone()),
+            metadata: None,
+        }));
+    }
+
+    Ok(Some(ResponseEnvelope::success(
+        request.request_id,
+        serde_json::to_value(summary)?,
     )))
 }
 

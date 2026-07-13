@@ -943,6 +943,40 @@ async fn test_authorship_and_revision_history() {
     // limit caps the result.
     let limited = svc_read.history(&id, Some(1)).await.unwrap();
     assert_eq!(limited.len(), 1, "limit caps the number of revisions");
+
+    // update_property_by_path goes through the non-transactional repository
+    // update path — it must still bump updated_at and preserve creation
+    // metadata (stamped at the repository level, not the transaction layer).
+    let before = svc_read.get(&id).await.unwrap().unwrap();
+    let prev_updated_at = before
+        .updated_at
+        .expect("updated_at set before property update");
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    svc_read
+        .update_property_by_path(
+            &created.path,
+            "title",
+            PropertyValue::String("v3".to_string()),
+        )
+        .await
+        .unwrap();
+    let after_prop = svc_read.get(&id).await.unwrap().unwrap();
+    assert!(
+        after_prop
+            .updated_at
+            .expect("updated_at set after property update")
+            > prev_updated_at,
+        "update_property_by_path bumps updated_at"
+    );
+    assert_eq!(
+        after_prop.created_at, created_at,
+        "created_at preserved across property update"
+    );
+    assert_eq!(
+        after_prop.created_by.as_deref(),
+        Some("user123"),
+        "created_by preserved across property update"
+    );
 }
 
 /// Event-bus audit: a node write produces an audit-log entry via the

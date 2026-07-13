@@ -17,6 +17,7 @@
 //! into its own submodule for maintainability.
 
 pub mod ai;
+pub mod branches;
 pub mod events;
 pub mod flows;
 pub mod functions;
@@ -26,6 +27,7 @@ pub mod locks;
 pub mod nodes;
 pub mod query_context;
 pub mod resources;
+pub mod scheduler;
 pub mod sql;
 pub mod sql_generator;
 pub mod tasks;
@@ -180,6 +182,64 @@ where
             _ => None,
         },
 
+        // Branch operations (raisin.branches.diff / compare) - read-only
+        // change-tracking views, scoped to this execution's tenant + repo
+        branch_diff: Some(branches::create_branch_diff(
+            deps.storage.clone(),
+            tenant_id.clone(),
+            repo_id.clone(),
+        )),
+        branch_compare: Some(branches::create_branch_compare(
+            deps.storage.clone(),
+            tenant_id.clone(),
+            repo_id.clone(),
+        )),
+        branch_copy_nodes: Some(branches::create_branch_copy_nodes(
+            deps.storage.clone(),
+            tenant_id.clone(),
+            repo_id.clone(),
+        )),
+
+        // Scheduled invocations (raisin.scheduler.*) - only available when
+        // the job system dependencies are provided.
+        scheduler_schedule: match (&deps.job_registry, &deps.job_data_store) {
+            (Some(registry), Some(data_store)) => Some(scheduler::create_scheduler_schedule(
+                registry.clone(),
+                data_store.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                auth_context.clone(),
+            )),
+            _ => None,
+        },
+        scheduler_cancel: match (&deps.job_registry, &deps.job_data_store) {
+            (Some(registry), Some(data_store)) => Some(scheduler::create_scheduler_cancel(
+                registry.clone(),
+                data_store.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+            )),
+            _ => None,
+        },
+        scheduler_list: match (&deps.job_registry, &deps.job_data_store) {
+            (Some(registry), Some(data_store)) => Some(scheduler::create_scheduler_list(
+                registry.clone(),
+                data_store.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+            )),
+            _ => None,
+        },
+        scheduler_get: match (&deps.job_registry, &deps.job_data_store) {
+            (Some(registry), Some(data_store)) => Some(scheduler::create_scheduler_get(
+                registry.clone(),
+                data_store.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+            )),
+            _ => None,
+        },
+
         // Integration / mount sync (raisin.integrations.sync_now) - only
         // available when the job system dependencies are provided.
         integrations_sync_now: match (&deps.job_registry, &deps.job_data_store) {
@@ -207,13 +267,18 @@ where
             branch.clone(),
             auth_context.clone(),
         )),
-        task_complete: Some(tasks::create_task_complete(
-            deps.storage.clone(),
-            tenant_id.clone(),
-            repo_id.clone(),
-            branch.clone(),
-            auth_context.clone(),
-        )),
+        // Task completion resumes the owning flow, so - like flow_run - it is
+        // only available when the job system dependencies are present.
+        task_complete: match (&deps.job_registry, &deps.job_data_store) {
+            (Some(registry), Some(data_store)) => Some(tasks::create_task_complete(
+                deps.storage.clone(),
+                registry.clone(),
+                data_store.clone(),
+                repo_id.clone(),
+                auth_context.clone(),
+            )),
+            _ => None,
+        },
         task_query: Some(tasks::create_task_query(
             deps.storage.clone(),
             tenant_id.clone(),

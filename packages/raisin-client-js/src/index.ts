@@ -74,7 +74,22 @@ export { NodeTypes } from './node-types';
 export { Archetypes } from './archetypes';
 export { ElementTypes } from './element-types';
 export { Branches } from './branches';
+export type {
+  BranchDiff,
+  BranchDivergence,
+  CrossBranchCopySummary,
+  CrossBranchNodeChange,
+  NodeDiffInfo
+} from './branches';
 export { Tags } from './tags';
+export { SchedulerApi } from './scheduler';
+export type {
+  ListInvocationsFilter,
+  ScheduleInvocationOptions,
+  ScheduledInvocation,
+  ScheduledInvocationRef,
+  ScheduledInvocationTargetKind
+} from './scheduler';
 
 // HTTP (SSR) schema management
 export { HttpNodeTypes, HttpArchetypes, HttpElementTypes } from './http-schema';
