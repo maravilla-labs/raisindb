@@ -430,8 +430,14 @@ mod tests {
     fn test_quickjs_wrapper_matches_registry() {
         // Registry methods deliberately NOT exposed on the JS surface.
         const NOT_EXPOSED_IN_JS: &[(&str, &str)] = &[
-            ("tx_move", "intentionally unsupported in JS transactions (see api_wrapper.js)"),
-            ("context_get", "raisin.context is injected as a data property by environment.rs"),
+            (
+                "tx_move",
+                "intentionally unsupported in JS transactions (see api_wrapper.js)",
+            ),
+            (
+                "context_get",
+                "raisin.context is injected as a data property by environment.rs",
+            ),
             ("log", "JS uses the console host functions"),
             ("date_now", "JS uses the native Date object"),
             ("date_timestamp", "JS uses the native Date object"),
@@ -440,8 +446,14 @@ mod tests {
             ("date_format", "JS uses the native Date object"),
             ("date_addDays", "JS uses the native Date object"),
             ("date_diffDays", "JS uses the native Date object"),
-            ("tasks_update", "not part of the frozen JS surface (create + complete only)"),
-            ("tasks_query", "not part of the frozen JS surface (create + complete only)"),
+            (
+                "tasks_update",
+                "not part of the frozen JS surface (create + complete only)",
+            ),
+            (
+                "tasks_query",
+                "not part of the frozen JS surface (create + complete only)",
+            ),
         ];
 
         let wrapper = include_str!("../../quickjs/api_wrapper.js");
@@ -527,7 +539,9 @@ mod tests {
         // And notify_send must be a real, registered binding.
         let reg = build_registry();
         assert!(
-            reg.methods().iter().any(|m| m.internal_name == "notify_send"),
+            reg.methods()
+                .iter()
+                .any(|m| m.internal_name == "notify_send"),
             "notify_send must exist in the bindings registry"
         );
 
@@ -545,7 +559,9 @@ mod tests {
             "api_wrapper.js must expose raisin.tasks.complete"
         );
         assert!(
-            reg.methods().iter().any(|m| m.internal_name == "tasks_complete"),
+            reg.methods()
+                .iter()
+                .any(|m| m.internal_name == "tasks_complete"),
             "tasks_complete must exist in the bindings registry"
         );
     }

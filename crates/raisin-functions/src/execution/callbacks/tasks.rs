@@ -46,11 +46,8 @@ use crate::api::{TaskCompleteCallback, TaskCreateCallback, TaskQueryCallback, Ta
 fn completer_from_auth(auth: &Option<AuthContext>) -> TaskCompleter {
     match auth {
         Some(a) => {
-            let is_admin = a.is_system
-                || a
-                    .roles
-                    .iter()
-                    .any(|r| r == "system_admin" || r == "admin");
+            let is_admin =
+                a.is_system || a.roles.iter().any(|r| r == "system_admin" || r == "admin");
             let id = a
                 .user_id
                 .clone()
@@ -418,7 +415,10 @@ where
             )
             .await
             .map_err(|e| {
-                raisin_error::Error::Backend(format!("Failed to complete task '{}': {}", task_id, e))
+                raisin_error::Error::Backend(format!(
+                    "Failed to complete task '{}': {}",
+                    task_id, e
+                ))
             })?;
 
             // `flow` is null for standalone (non-flow) tasks.
@@ -573,7 +573,10 @@ mod tests {
     #[test]
     fn task_data_null_is_skipped() {
         let data = Value::Null;
-        assert!(data.is_null(), "null data must be treated as absent by create_task_create");
+        assert!(
+            data.is_null(),
+            "null data must be treated as absent by create_task_create"
+        );
     }
 
     // -- completer_from_auth: assignee-validation preservation at the binding --
@@ -592,8 +595,14 @@ mod tests {
         a.home = Some("/users/internal/admin-at-example-local".to_string());
         let c = completer_from_auth(&Some(a));
         assert_eq!(c.id, "cdc46e95-425d-4816-9da1-9a61776bbcf3");
-        assert_eq!(c.home.as_deref(), Some("/users/internal/admin-at-example-local"));
-        assert!(!c.is_admin, "a regular user must NOT bypass assignee validation");
+        assert_eq!(
+            c.home.as_deref(),
+            Some("/users/internal/admin-at-example-local")
+        );
+        assert!(
+            !c.is_admin,
+            "a regular user must NOT bypass assignee validation"
+        );
     }
 
     /// The `admin` / `system_admin` roles (and `is_system`) grant admin bypass.

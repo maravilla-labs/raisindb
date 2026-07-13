@@ -63,8 +63,7 @@ impl NodeRepositoryImpl {
         // to the same destination both pass the check and both write. The
         // guard releases after add_impl's atomic write is durable (or on any
         // error / cancellation).
-        let mut reservation_guard =
-            crate::repositories::nodes::PathReservationGuard::new(self);
+        let mut reservation_guard = crate::repositories::nodes::PathReservationGuard::new(self);
         reservation_guard.reserve(tenant_id, repo_id, branch, workspace, &new_path)?;
 
         // Committed-storage occupancy check (after reserving): an existing

@@ -240,7 +240,11 @@ async fn path_like_name_prefix_matches_nodes() {
     let (_storage, _td, engine) = setup().await;
     seed_two_subtrees(&engine).await;
 
-    let paths = run_sql_paths(&engine, "SELECT path FROM items WHERE path LIKE '/joba/t-%'").await;
+    let paths = run_sql_paths(
+        &engine,
+        "SELECT path FROM items WHERE path LIKE '/joba/t-%'",
+    )
+    .await;
     assert_eq!(
         paths,
         vec!["/joba/t-000".to_string(), "/joba/t-001".to_string()],
@@ -421,7 +425,11 @@ async fn write_churn_never_produces_duplicate_rows() {
 
     for round in 0..5 {
         for i in 0..10 {
-            let status = if (round + i) % 2 == 0 { "held" } else { "confirmed" };
+            let status = if (round + i) % 2 == 0 {
+                "held"
+            } else {
+                "confirmed"
+            };
             run_sql_count(
                 &engine,
                 &format!(
@@ -449,7 +457,10 @@ async fn write_churn_never_produces_duplicate_rows() {
             .await;
             let mut deduped = by_type.clone();
             deduped.dedup();
-            assert_eq!(by_type, deduped, "duplicate rows in typed scan: {by_type:?}");
+            assert_eq!(
+                by_type, deduped,
+                "duplicate rows in typed scan: {by_type:?}"
+            );
             assert_eq!(by_type.len(), 10);
         }
     }
@@ -461,8 +472,7 @@ async fn write_churn_never_produces_duplicate_rows() {
             &format!("DELETE FROM items WHERE path = '/job/t-{i:03}'"),
         )
         .await;
-        let paths =
-            run_sql_paths(&engine, "SELECT path FROM items WHERE path LIKE '/job/%'").await;
+        let paths = run_sql_paths(&engine, "SELECT path FROM items WHERE path LIKE '/job/%'").await;
         assert!(
             !paths.contains(&format!("/job/t-{i:03}")),
             "deleted node still visible: {paths:?}"

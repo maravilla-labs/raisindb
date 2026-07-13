@@ -161,7 +161,11 @@ async fn seed_pending_task(
 async fn task_status(storage: &InMemoryStorage, task_id: &str) -> String {
     let node = storage
         .nodes()
-        .get(StorageScope::new(TENANT, REPO, BRANCH, INBOX_WS), task_id, None)
+        .get(
+            StorageScope::new(TENANT, REPO, BRANCH, INBOX_WS),
+            task_id,
+            None,
+        )
         .await
         .expect("get task")
         .expect("task exists");
@@ -208,7 +212,9 @@ async fn complete_resumes_parked_human_task_flow() {
 
     // 1. The result reports the task completed and a resumed flow.
     assert_eq!(result.status, "completed");
-    let flow = result.flow.expect("a flow-owned task must report its resume");
+    let flow = result
+        .flow
+        .expect("a flow-owned task must report its resume");
     assert_eq!(flow.instance_id, instance_id);
 
     // 2. The task NODE was actually updated to completed (the old
@@ -229,10 +235,17 @@ async fn complete_resumes_parked_human_task_flow() {
             assert_eq!(iid, instance_id);
             assert_eq!(execution_type, "resume");
         }
-        other => panic!("expected a FlowInstanceExecution resume job, got {:?}", other),
+        other => panic!(
+            "expected a FlowInstanceExecution resume job, got {:?}",
+            other
+        ),
     }
     let resume = &metadata["function_result"];
-    assert_eq!(resume["action"], json!("approve"), "response reaches the flow");
+    assert_eq!(
+        resume["action"],
+        json!("approve"),
+        "response reaches the flow"
+    );
     assert_eq!(resume["completed_by"], json!("manager"));
     assert_eq!(resume["task_path"], json!(task_path));
 }

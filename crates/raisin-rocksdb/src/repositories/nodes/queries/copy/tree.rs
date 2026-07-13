@@ -81,8 +81,7 @@ impl NodeRepositoryImpl {
         //   (A parentless transactional `add_node` writing a descendant path
         //   blind is already an orphan-tolerated escape hatch today; the
         //   registry is not the layer that makes orphans impossible.)
-        let mut reservation_guard =
-            crate::repositories::nodes::PathReservationGuard::new(self);
+        let mut reservation_guard = crate::repositories::nodes::PathReservationGuard::new(self);
         reservation_guard.reserve(tenant_id, repo_id, branch, workspace, &new_path)?;
 
         if self

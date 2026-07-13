@@ -555,8 +555,14 @@ async fn concurrent_deep_creates_sharing_parents_converge() -> Result<()> {
     );
 
     // Both leaves exist exactly once.
-    assert_eq!(count_rows_under(&storage, "/shared/a", "/shared/a/leaf1").await?, 1);
-    assert_eq!(count_rows_under(&storage, "/shared/a", "/shared/a/leaf2").await?, 1);
+    assert_eq!(
+        count_rows_under(&storage, "/shared/a", "/shared/a/leaf1").await?,
+        1
+    );
+    assert_eq!(
+        count_rows_under(&storage, "/shared/a", "/shared/a/leaf2").await?,
+        1
+    );
 
     Ok(())
 }
@@ -732,4 +738,3 @@ async fn concurrent_tree_copies_same_destination_yield_single_copy() -> Result<(
 
     Ok(())
 }
-

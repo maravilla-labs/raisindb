@@ -31,8 +31,7 @@ use raisin_storage::jobs::{JobContext, JobId, JobInfo, JobRegistry, JobStatus, J
 use serde_json::{json, Value};
 
 use crate::api::{
-    SchedulerCancelCallback, SchedulerGetCallback, SchedulerListCallback,
-    SchedulerScheduleCallback,
+    SchedulerCancelCallback, SchedulerGetCallback, SchedulerListCallback, SchedulerScheduleCallback,
 };
 
 const DEFAULT_BRANCH: &str = "main";
@@ -152,9 +151,7 @@ pub fn create_scheduler_schedule(
             let target_kind = request
                 .get("targetKind")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    Error::Validation("schedule: 'targetKind' is required".to_string())
-                })?
+                .ok_or_else(|| Error::Validation("schedule: 'targetKind' is required".to_string()))?
                 .to_string();
             if target_kind != "function" && target_kind != "flow" {
                 return Err(Error::Validation(format!(
@@ -165,9 +162,7 @@ pub fn create_scheduler_schedule(
             let target_path = request
                 .get("targetPath")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    Error::Validation("schedule: 'targetPath' is required".to_string())
-                })?
+                .ok_or_else(|| Error::Validation("schedule: 'targetPath' is required".to_string()))?
                 .to_string();
             let run_at_str = request
                 .get("runAt")
@@ -478,7 +473,9 @@ mod tests {
         let (schedule_a, _cancel_a, _list_a, _get_a) = callbacks(&registry, &data_store, "repo-a");
         let (_schedule_b, cancel_b, list_b, get_b) = callbacks(&registry, &data_store, "repo-b");
 
-        let created = schedule_a(schedule_request(Some("shared-key"))).await.unwrap();
+        let created = schedule_a(schedule_request(Some("shared-key")))
+            .await
+            .unwrap();
         let job_id = created["job_id"].as_str().unwrap().to_string();
 
         // Another repository sees nothing and cannot cancel across repos.

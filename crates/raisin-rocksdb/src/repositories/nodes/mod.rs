@@ -112,7 +112,8 @@ impl NodeRepositoryImpl {
     /// `create` call) gets its own token so reservations by the same owner are
     /// idempotent while different owners conflict.
     pub(crate) fn new_path_reservation_owner(&self) -> u64 {
-        self.reservation_owner_counter.fetch_add(1, Ordering::Relaxed)
+        self.reservation_owner_counter
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     /// Build the reservation key for a scoped path.
@@ -197,8 +198,7 @@ impl NodeRepositoryImpl {
     ) -> Result<String> {
         let start = std::time::Instant::now();
         loop {
-            match self.try_reserve_create_path(tenant_id, repo_id, branch, workspace, path, owner)
-            {
+            match self.try_reserve_create_path(tenant_id, repo_id, branch, workspace, path, owner) {
                 Ok(key) => return Ok(key),
                 Err(err @ raisin_error::Error::Conflict(_)) => {
                     if start.elapsed() >= timeout {
@@ -390,9 +390,8 @@ impl<'a> PathReservationGuard<'a> {
         workspace: &str,
         path: &str,
     ) {
-        let key = NodeRepositoryImpl::path_reservation_key(
-            tenant_id, repo_id, branch, workspace, path,
-        );
+        let key =
+            NodeRepositoryImpl::path_reservation_key(tenant_id, repo_id, branch, workspace, path);
         if let Some(pos) = self.keys.iter().position(|k| k == &key) {
             let key = self.keys.swap_remove(pos);
             self.repo

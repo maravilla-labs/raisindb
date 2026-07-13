@@ -88,7 +88,10 @@ fn engine(
         .with_auth(AuthContext::system())
 }
 
-async fn exec(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql: &str) -> Vec<HashMap<String, PropertyValue>> {
+async fn exec(
+    engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>,
+    sql: &str,
+) -> Vec<HashMap<String, PropertyValue>> {
     let mut stream = engine
         .execute(sql)
         .await

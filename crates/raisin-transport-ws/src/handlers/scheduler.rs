@@ -157,7 +157,10 @@ mod inner {
                 .get(TENANT_ID, &id)
                 .map_err(|e| WsError::InternalError(e.to_string()))?
                 .ok_or_else(|| {
-                    WsError::OperationError(format!("Scheduled invocation '{}' has no context", job_id))
+                    WsError::OperationError(format!(
+                        "Scheduled invocation '{}' has no context",
+                        job_id
+                    ))
                 })?;
             if context.repo_id != repo {
                 return Err(WsError::OperationError(format!(
@@ -243,9 +246,7 @@ mod inner {
         let context = JobContext {
             tenant_id: TENANT_ID.to_string(),
             repo_id: repo.clone(),
-            branch: payload
-                .branch
-                .unwrap_or_else(|| DEFAULT_BRANCH.to_string()),
+            branch: payload.branch.unwrap_or_else(|| DEFAULT_BRANCH.to_string()),
             workspace_id: payload
                 .workspace
                 .unwrap_or_else(|| FUNCTIONS_WORKSPACE.to_string()),

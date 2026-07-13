@@ -1878,9 +1878,7 @@ async fn test_swallowed_error_conventions_do_not_throw() {
     let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
         .with_input(serde_json::json!({}));
     let metadata = FunctionMetadata::javascript("swallowed_errors_test");
-    let api = Arc::new(
-        MockFunctionApi::new(serde_json::json!({})).with_all_errors("backend down"),
-    );
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})).with_all_errors("backend down"));
 
     let result = runtime
         .execute(code, "handler", context, &metadata, api, HashMap::new())

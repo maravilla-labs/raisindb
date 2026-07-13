@@ -98,7 +98,10 @@ mod tests {
 
     #[test]
     fn column_name_is_qualified() {
-        assert_eq!(group_key_column_name(&column("items", "path")), "items.path");
+        assert_eq!(
+            group_key_column_name(&column("items", "path")),
+            "items.path"
+        );
     }
 
     #[test]

@@ -37,9 +37,8 @@ pub use handlers::{
     RestoreTreeExecutorCallback, RestoreTreeHandler, ResumableUploadHandler,
     RetargetReferencesHandler, RevisionHistoryCopyHandler, RocksDBFlowCallbacks,
     RocksDBUserNodeCreator, ScheduledInvocationHandler, ScheduledTriggerHandler, SnapshotHandler,
-    SqlExecutorCallback,
-    TranslationChangeInfo, TriggerEvaluationHandler, UploadSessionCleanupHandler,
-    VirtualMountSyncHandler,
+    SqlExecutorCallback, TranslationChangeInfo, TriggerEvaluationHandler,
+    UploadSessionCleanupHandler, VirtualMountSyncHandler,
 };
 // Additional exports for external use (transport layer callbacks)
 pub use handlers::{

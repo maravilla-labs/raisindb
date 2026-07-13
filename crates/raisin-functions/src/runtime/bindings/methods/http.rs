@@ -44,15 +44,17 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                     let method = parser.string()?;
                     let url = parser.string()?;
                     let options = parser.json()?;
-                    let result =
-                        tokio::time::timeout(FETCH_TIMEOUT, api.http_request(&method, &url, options))
-                            .await
-                            .map_err(|_| {
-                                raisin_error::Error::Internal(format!(
-                                    "HTTP request timed out after {}s",
-                                    FETCH_TIMEOUT.as_secs()
-                                ))
-                            })??;
+                    let result = tokio::time::timeout(
+                        FETCH_TIMEOUT,
+                        api.http_request(&method, &url, options),
+                    )
+                    .await
+                    .map_err(|_| {
+                        raisin_error::Error::Internal(format!(
+                            "HTTP request timed out after {}s",
+                            FETCH_TIMEOUT.as_secs()
+                        ))
+                    })??;
                     Ok(InvokeResult::Json(result))
                 })
             },

@@ -60,9 +60,9 @@ pub type FlowStartCallback = Arc<
             String,            // flow_path
             serde_json::Value, // input
             String,            // actor
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<serde_json::Value>> + Send>,
-        > + Send
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -334,7 +334,10 @@ mod tests {
             ScheduledInvocationHandler::new(registry.clone(), data_store.clone(), dispatcher);
 
         let mut metadata = HashMap::new();
-        metadata.insert(META_TARGET_PATH.to_string(), serde_json::json!("/lib/hello"));
+        metadata.insert(
+            META_TARGET_PATH.to_string(),
+            serde_json::json!("/lib/hello"),
+        );
         metadata.insert(META_INPUT.to_string(), serde_json::json!({"name": "world"}));
         metadata.insert(META_ACTOR.to_string(), serde_json::json!("tester"));
         let context = invocation_context(metadata);
@@ -378,8 +381,8 @@ mod tests {
 
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_cb = calls.clone();
-        let starter: FlowStartCallback = Arc::new(
-            move |_tenant, repo, _branch, flow_path, input, actor| {
+        let starter: FlowStartCallback =
+            Arc::new(move |_tenant, repo, _branch, flow_path, input, actor| {
                 let calls = calls_for_cb.clone();
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -393,8 +396,7 @@ mod tests {
                         "status": "queued",
                     }))
                 })
-            },
-        );
+            });
 
         let handler = ScheduledInvocationHandler::new(registry, data_store, dispatcher)
             .with_flow_starter(starter);
