@@ -189,6 +189,59 @@ pub async fn optional_auth_middleware(
 
     let token = &auth_header[7..];
 
+    // Superadmin bearer token (`RAISIN_SUPERADMIN_TOKEN`, constant-time compare).
+    // Grants the same system-context elevation on this surface that
+    // `require_admin_auth_middleware` + `admin_system_auth_context` grant on the
+    // management surface: a synthetic per-tenant `AdminClaims` plus an
+    // RLS-bypassing `AuthContext::system()`. This keeps the two surfaces at
+    // parity for the operator/superadmin principal while leaving all normal
+    // user/admin JWTs to resolve their real, RLS-scoped context below.
+    if let Ok(expected) = std::env::var("RAISIN_SUPERADMIN_TOKEN") {
+        if !expected.is_empty() && token.len() == expected.len() {
+            let mut diff: u8 = 0;
+            for (a, b) in token.as_bytes().iter().zip(expected.as_bytes().iter()) {
+                diff |= a ^ b;
+            }
+            if diff == 0 {
+                let tenant_id = req
+                    .extensions()
+                    .get::<TenantInfo>()
+                    .map(|t| t.tenant_id.clone())
+                    .unwrap_or_else(|| "default".to_string());
+
+                let now = chrono::Utc::now().timestamp();
+                // ~10 years; this synthetic claim never leaves the request
+                // extensions, so the expiry is purely defensive.
+                let exp = now + 60 * 60 * 24 * 365 * 10;
+
+                let admin_claims = raisin_rocksdb::AdminClaims {
+                    sub: "superadmin-bearer".to_string(),
+                    username: "superadmin".to_string(),
+                    tenant_id: tenant_id.clone(),
+                    access_flags: raisin_models::admin_user::AdminAccessFlags {
+                        console_login: true,
+                        cli_access: true,
+                        api_access: true,
+                        pgwire_access: true,
+                        can_impersonate: true,
+                    },
+                    must_change_password: false,
+                    exp,
+                    iat: now,
+                };
+
+                tracing::debug!(
+                    tenant_id = %tenant_id,
+                    "Superadmin bearer authenticated for API endpoint (system context)"
+                );
+
+                req.extensions_mut().insert(admin_claims);
+                req.extensions_mut().insert(AuthContext::system());
+                return Ok(next.run(req).await);
+            }
+        }
+    }
+
     let auth_service = match state.auth_service() {
         Some(svc) => svc,
         None => return Ok(next.run(req).await),
