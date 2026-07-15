@@ -11,7 +11,7 @@ mod errors;
 mod fixes;
 mod validation;
 
-use errors::{FileType, ValidationError, ValidationResult};
+use errors::{codes, FileType, ValidationError, ValidationResult};
 use raisin_models::nodes::types::element::element_type::ElementType;
 use raisin_models::nodes::types::Archetype;
 use serde::Serialize;
@@ -179,6 +179,16 @@ pub fn validate_package(files: JsValue) -> JsValue {
         }
     }
 
+    let results = validate_package_files(files_map);
+
+    // Use serialize_maps_as_objects to convert HashMap to JS plain object
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    results.serialize(&serializer).unwrap_or(JsValue::NULL)
+}
+
+/// Core package validation logic, decoupled from WASM/JS interop so it can
+/// be unit tested directly with `cargo test`.
+fn validate_package_files(files_map: HashMap<String, String>) -> HashMap<String, ValidationResult> {
     // If no files were parsed, return error
     if files_map.is_empty() {
         let mut result: HashMap<String, ValidationResult> = HashMap::new();
@@ -190,8 +200,7 @@ pub fn validate_package(files: JsValue) -> JsValue {
             "No files found in input or failed to parse files object",
         ));
         result.insert("_error".to_string(), err_result);
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        return result.serialize(&serializer).unwrap_or(JsValue::NULL);
+        return result;
     }
 
     // First pass: collect all node types, workspaces, archetypes, and element types
@@ -200,12 +209,34 @@ pub fn validate_package(files: JsValue) -> JsValue {
     let mut package_workspaces = std::collections::HashSet::new();
     let mut package_archetypes: HashMap<String, Archetype> = HashMap::new();
     let mut package_element_types: HashMap<String, ElementType> = HashMap::new();
+    // Custom NodeType name -> names of its `unique: true` properties, merged
+    // with builtin_types::BUILTIN_UNIQUE_PROPERTIES below to drive the
+    // cross-file duplicate-value check.
+    let mut package_unique_properties: HashMap<String, Vec<String>> = HashMap::new();
 
     for (path, content) in &files_map {
         if is_nodetype_file(path) {
             if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(content) {
                 if let Some(name) = yaml.get("name").and_then(|n| n.as_str()) {
                     package_node_types.insert(name.to_string());
+                }
+                if let (Some(name), Some(properties)) = (
+                    yaml.get("name").and_then(|n| n.as_str()),
+                    yaml.get("properties").and_then(|p| p.as_sequence()),
+                ) {
+                    let unique_props: Vec<String> = properties
+                        .iter()
+                        .filter(|prop| {
+                            prop.get("unique")
+                                .and_then(|u| u.as_bool())
+                                .unwrap_or(false)
+                        })
+                        .filter_map(|prop| prop.get("name").and_then(|n| n.as_str()))
+                        .map(|s| s.to_string())
+                        .collect();
+                    if !unique_props.is_empty() {
+                        package_unique_properties.insert(name.to_string(), unique_props);
+                    }
                 }
             }
         } else if is_workspace_file(path) {
@@ -233,9 +264,51 @@ pub fn validate_package(files: JsValue) -> JsValue {
         if is_content_file(path) {
             if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(content) {
                 if let Some((ws, node_path)) = derive_content_node_path(path, &yaml) {
-                    content_node_paths
-                        .insert((ws, node_path.to_lowercase()), node_path);
+                    content_node_paths.insert((ws, node_path.to_lowercase()), node_path);
                 }
+            }
+        }
+    }
+
+    // Collect, for every content file, the values of any properties that are
+    // `unique: true` on that file's NodeType (builtin or package-defined).
+    // RaisinDB enforces this uniqueness across the WHOLE repo, independent
+    // of node type or path -- so two content files of DIFFERENT NodeTypes
+    // (e.g. a raisin:Flow and a raisin:Function both named "rollout-group")
+    // sharing a value is a real collision that reproduces as an install/save
+    // failure, even though each file validates fine on its own.
+    let mut unique_value_files: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (path, content) in &files_map {
+        if !is_content_file(path) {
+            continue;
+        }
+        let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+            continue;
+        };
+        let Some(node_type) = yaml.get("node_type").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        let Some(properties) = yaml.get("properties").and_then(|p| p.as_mapping()) else {
+            continue;
+        };
+
+        let unique_props = package_unique_properties
+            .get(node_type)
+            .or_else(|| builtin_types::builtin_unique_properties(node_type));
+
+        let Some(unique_props) = unique_props else {
+            continue;
+        };
+
+        for prop_name in unique_props {
+            if let Some(value) = properties
+                .get(&serde_yaml::Value::String(prop_name.clone()))
+                .and_then(|v| v.as_str())
+            {
+                unique_value_files
+                    .entry((prop_name.clone(), value.to_string()))
+                    .or_default()
+                    .push(path.clone());
             }
         }
     }
@@ -273,9 +346,36 @@ pub fn validate_package(files: JsValue) -> JsValue {
         results.insert(path.clone(), result);
     }
 
-    // Use serialize_maps_as_objects to convert HashMap to JS plain object
-    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-    results.serialize(&serializer).unwrap_or(JsValue::NULL)
+    // Third pass: flag cross-file duplicate unique-property values collected above.
+    for ((prop_name, value), paths) in &unique_value_files {
+        if paths.len() < 2 {
+            continue;
+        }
+        for path in paths {
+            let others: Vec<&str> = paths
+                .iter()
+                .filter(|p| *p != path)
+                .map(|p| p.as_str())
+                .collect();
+            let error = ValidationError::error(
+                path.clone(),
+                format!("properties.{}", prop_name),
+                codes::DUPLICATE_UNIQUE_PROPERTY_VALUE,
+                format!(
+                    "Property '{}' value '{}' must be unique across the whole package, but is also used in: {}. RaisinDB enforces this repo-wide regardless of node type or path -- this will fail on install/update.",
+                    prop_name,
+                    value,
+                    others.join(", ")
+                ),
+            );
+            results
+                .entry(path.clone())
+                .or_insert_with(|| ValidationResult::success(FileType::Content))
+                .add_error(error);
+        }
+    }
+
+    results
 }
 
 /// Apply a fix to YAML content
@@ -310,10 +410,10 @@ pub fn apply_fix(yaml: &str, error: JsValue, new_value: Option<String>) -> JsVal
 
 /// Build a ValidationContext from JsValue arrays
 fn build_context(package_node_types: JsValue, package_workspaces: JsValue) -> ValidationContext {
-    let node_types: Vec<String> = serde_wasm_bindgen::from_value(package_node_types)
-        .unwrap_or_default();
-    let workspaces: Vec<String> = serde_wasm_bindgen::from_value(package_workspaces)
-        .unwrap_or_default();
+    let node_types: Vec<String> =
+        serde_wasm_bindgen::from_value(package_node_types).unwrap_or_default();
+    let workspaces: Vec<String> =
+        serde_wasm_bindgen::from_value(package_workspaces).unwrap_or_default();
 
     ValidationContext {
         package_node_types: node_types.into_iter().collect(),
@@ -327,7 +427,10 @@ fn build_context(package_node_types: JsValue, package_workspaces: JsValue) -> Va
 /// Check if a path is a manifest file
 fn is_manifest_file(path: &str) -> bool {
     let lower = path.to_lowercase();
-    lower == "manifest.yaml" || lower == "manifest.yml" || lower.ends_with("/manifest.yaml") || lower.ends_with("/manifest.yml")
+    lower == "manifest.yaml"
+        || lower == "manifest.yml"
+        || lower.ends_with("/manifest.yaml")
+        || lower.ends_with("/manifest.yml")
 }
 
 /// Check if a path is a node type file
@@ -422,11 +525,7 @@ fn derive_content_node_path(file_path: &str, yaml: &serde_yaml::Value) -> Option
         if path_dirs.len() == 1 {
             format!("/{}", name)
         } else {
-            format!(
-                "/{}/{}",
-                path_dirs[..path_dirs.len() - 1].join("/"),
-                name
-            )
+            format!("/{}/{}", path_dirs[..path_dirs.len() - 1].join("/"), name)
         }
     } else {
         format!("/{}/{}", path_dirs.join("/"), name)
@@ -455,6 +554,110 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_package_flags_cross_type_duplicate_name() {
+        // Mirrors a real production incident: a raisin:Flow and a
+        // raisin:Function both declared `name: rollout-group`. Both are
+        // built-in types, `name` is `unique: true` on both, and RaisinDB
+        // enforces that uniqueness repo-wide -- this must be caught even
+        // though each file is independently well-formed.
+        let mut files: HashMap<String, String> = HashMap::new();
+        files.insert(
+            "manifest.yaml".to_string(),
+            "name: test-package\nversion: 0.1.0\n".to_string(),
+        );
+        files.insert(
+            "content/functions/flows/rollout-group/.node.yaml".to_string(),
+            r#"
+node_type: raisin:Flow
+properties:
+  name: rollout-group
+  title: Roll Out
+  workflow_data: {}
+"#
+            .to_string(),
+        );
+        files.insert(
+            "content/functions/lib/studio/rollout-group/.node.yaml".to_string(),
+            r#"
+node_type: raisin:Function
+properties:
+  name: rollout-group
+  title: Rollout Group
+  language: javascript
+"#
+            .to_string(),
+        );
+
+        let results = validate_package_files(files);
+
+        let flow_result = results
+            .get("content/functions/flows/rollout-group/.node.yaml")
+            .expect("flow file should have a result");
+        let func_result = results
+            .get("content/functions/lib/studio/rollout-group/.node.yaml")
+            .expect("function file should have a result");
+
+        assert!(
+            flow_result
+                .errors
+                .iter()
+                .any(|e| e.error_code == codes::DUPLICATE_UNIQUE_PROPERTY_VALUE),
+            "flow file should be flagged for the duplicate name"
+        );
+        assert!(
+            func_result
+                .errors
+                .iter()
+                .any(|e| e.error_code == codes::DUPLICATE_UNIQUE_PROPERTY_VALUE),
+            "function file should be flagged for the duplicate name"
+        );
+    }
+
+    #[test]
+    fn test_validate_package_allows_unique_names() {
+        let mut files: HashMap<String, String> = HashMap::new();
+        files.insert(
+            "manifest.yaml".to_string(),
+            "name: test-package\nversion: 0.1.0\n".to_string(),
+        );
+        files.insert(
+            "content/functions/flows/rollout-group-flow/.node.yaml".to_string(),
+            r#"
+node_type: raisin:Flow
+properties:
+  name: rollout-group-flow
+  title: Roll Out
+  workflow_data: {}
+"#
+            .to_string(),
+        );
+        files.insert(
+            "content/functions/lib/studio/rollout-group/.node.yaml".to_string(),
+            r#"
+node_type: raisin:Function
+properties:
+  name: rollout-group
+  title: Rollout Group
+  language: javascript
+"#
+            .to_string(),
+        );
+
+        let results = validate_package_files(files);
+
+        for (path, result) in &results {
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|e| e.error_code == codes::DUPLICATE_UNIQUE_PROPERTY_VALUE),
+                "unexpected duplicate-name error on {}",
+                path
+            );
+        }
+    }
+
+    #[test]
     fn test_geometry_property_type_accepted() {
         // Validate a nodetype with Geometry property — should not produce INVALID_PROPERTY_TYPE
         let yaml = r#"
@@ -466,29 +669,43 @@ properties:
 "#;
         let ctx = ValidationContext::default();
         let result = crate::validation::validate_nodetype(yaml, "nodetypes/geo.yaml", &ctx);
-        let has_type_error = result.errors.iter().any(|e| e.error_code == "INVALID_PROPERTY_TYPE");
+        let has_type_error = result
+            .errors
+            .iter()
+            .any(|e| e.error_code == "INVALID_PROPERTY_TYPE");
         assert!(!has_type_error, "Geometry should be a valid property type");
     }
 
     #[test]
     fn test_derive_content_node_path_folder_node() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("node_type: app:Child\nproperties:\n  name: Emma").unwrap();
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("node_type: app:Child\nproperties:\n  name: Emma").unwrap();
         let result = derive_content_node_path("content/myws/myws/children/Emma/.node.yaml", &yaml);
-        assert_eq!(result, Some(("myws".to_string(), "/myws/children/Emma".to_string())));
+        assert_eq!(
+            result,
+            Some(("myws".to_string(), "/myws/children/Emma".to_string()))
+        );
     }
 
     #[test]
     fn test_derive_content_node_path_explicit_name() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("node_type: app:Item\nname: MyItem").unwrap();
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("node_type: app:Item\nname: MyItem").unwrap();
         let result = derive_content_node_path("content/ws/ws/items/MyItem/.node.yaml", &yaml);
-        assert_eq!(result, Some(("ws".to_string(), "/ws/items/MyItem".to_string())));
+        assert_eq!(
+            result,
+            Some(("ws".to_string(), "/ws/items/MyItem".to_string()))
+        );
     }
 
     #[test]
     fn test_derive_content_node_path_flat_file() {
         let yaml: serde_yaml::Value = serde_yaml::from_str("node_type: app:Page").unwrap();
         let result = derive_content_node_path("content/ws/ws/pages/about.yaml", &yaml);
-        assert_eq!(result, Some(("ws".to_string(), "/ws/pages/about".to_string())));
+        assert_eq!(
+            result,
+            Some(("ws".to_string(), "/ws/pages/about".to_string()))
+        );
     }
 
     #[test]

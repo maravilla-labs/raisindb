@@ -5,7 +5,11 @@ use serde_yaml::Value;
 
 /// Apply a fix to YAML content
 /// Returns the modified YAML string or an error message
-pub fn apply_fix(yaml_str: &str, error: &ValidationError, new_value: Option<&str>) -> Result<String, String> {
+pub fn apply_fix(
+    yaml_str: &str,
+    error: &ValidationError,
+    new_value: Option<&str>,
+) -> Result<String, String> {
     match error.fix_type {
         FixType::AutoFixable => apply_auto_fix(yaml_str, error),
         FixType::NeedsInput => {
@@ -35,7 +39,11 @@ fn apply_auto_fix(yaml_str: &str, error: &ValidationError) -> Result<String, Str
 }
 
 /// Apply a fix by setting a value at the field path
-fn apply_value_fix(yaml_str: &str, error: &ValidationError, new_value: &str) -> Result<String, String> {
+fn apply_value_fix(
+    yaml_str: &str,
+    error: &ValidationError,
+    new_value: &str,
+) -> Result<String, String> {
     // Parse the YAML
     let mut yaml: Value =
         serde_yaml::from_str(yaml_str).map_err(|e| format!("Failed to parse YAML: {}", e))?;
@@ -120,7 +128,10 @@ fn set_value_at_path(yaml: &mut Value, path: &[PathPart], new_value: &str) -> Re
                 if is_last {
                     // Set the value
                     if let Value::Mapping(map) = current {
-                        map.insert(Value::String(key.clone()), Value::String(new_value.to_string()));
+                        map.insert(
+                            Value::String(key.clone()),
+                            Value::String(new_value.to_string()),
+                        );
                         return Ok(());
                     } else {
                         return Err(format!("Cannot set key '{}' on non-mapping value", key));
@@ -132,7 +143,10 @@ fn set_value_at_path(yaml: &mut Value, path: &[PathPart], new_value: &str) -> Re
                             .get_mut(&Value::String(key.clone()))
                             .ok_or_else(|| format!("Key '{}' not found", key))?;
                     } else {
-                        return Err(format!("Cannot navigate key '{}' on non-mapping value", key));
+                        return Err(format!(
+                            "Cannot navigate key '{}' on non-mapping value",
+                            key
+                        ));
                     }
                 }
             }
@@ -156,7 +170,10 @@ fn set_value_at_path(yaml: &mut Value, path: &[PathPart], new_value: &str) -> Re
                             .get_mut(*index)
                             .ok_or_else(|| format!("Index {} out of bounds", index))?;
                     } else {
-                        return Err(format!("Cannot navigate index {} on non-sequence value", index));
+                        return Err(format!(
+                            "Cannot navigate index {} on non-sequence value",
+                            index
+                        ));
                     }
                 }
             }

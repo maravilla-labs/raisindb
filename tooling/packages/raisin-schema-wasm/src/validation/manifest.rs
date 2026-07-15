@@ -45,11 +45,7 @@ pub fn validate_manifest(yaml_str: &str, file_path: &str) -> ValidationResult {
 }
 
 /// Validate the required 'name' field
-fn validate_name(
-    map: &serde_yaml::Mapping,
-    file_path: &str,
-    result: &mut ValidationResult,
-) {
+fn validate_name(map: &serde_yaml::Mapping, file_path: &str, result: &mut ValidationResult) {
     match map.get(&Value::String("name".to_string())) {
         Some(Value::String(name)) => {
             if !PACKAGE_NAME_REGEX.is_match(name) {
@@ -94,11 +90,7 @@ fn validate_name(
 }
 
 /// Validate the required 'version' field
-fn validate_version(
-    map: &serde_yaml::Mapping,
-    file_path: &str,
-    result: &mut ValidationResult,
-) {
+fn validate_version(map: &serde_yaml::Mapping, file_path: &str, result: &mut ValidationResult) {
     match map.get(&Value::String("version".to_string())) {
         Some(Value::String(_version)) => {
             // TODO: Validate semver format

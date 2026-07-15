@@ -1,15 +1,15 @@
 //! Tests for validation logic
 
 use super::context::ValidationContext;
+use super::context::NODE_TYPE_NAME_REGEX;
 use super::field_resolution::validate_element_content;
 use super::helpers::{suggest_node_type_name, to_pascal_case};
-use super::context::NODE_TYPE_NAME_REGEX;
+use super::validate_content;
 use crate::errors::{FileType, ValidationResult};
 use raisin_models::nodes::types::element::element_type::ElementType;
 use raisin_models::nodes::types::element::field_types::FieldSchemaBase;
 use raisin_models::nodes::types::Archetype;
 use raisin_validation::field_helpers::is_required as get_field_required;
-use super::{validate_content};
 
 #[test]
 fn test_flat_element_required_field_validation() {
@@ -37,7 +37,8 @@ fields:
     assert_eq!(element_type.fields.len(), 2);
 
     let mut ctx = ValidationContext::default();
-    ctx.package_element_types.insert("test:Hero".to_string(), element_type);
+    ctx.package_element_types
+        .insert("test:Hero".to_string(), element_type);
 
     let content_yaml = r#"
 element_type: test:Hero
@@ -53,7 +54,12 @@ headline: Test Headline
     let mut result = ValidationResult::success(FileType::Content);
     validate_element_content(&content, "test:Hero", &ctx, "test.yaml", &mut result);
 
-    assert_eq!(result.errors.len(), 1, "Expected 1 error for missing required_field, got: {:?}", result.errors);
+    assert_eq!(
+        result.errors.len(),
+        1,
+        "Expected 1 error for missing required_field, got: {:?}",
+        result.errors
+    );
     assert!(result.errors[0].message.contains("required_field"));
 }
 
@@ -76,8 +82,8 @@ fields:
     title: Test Required Field
     required: true
 "##;
-    let element_type: ElementType = serde_yaml::from_str(element_type_yaml)
-        .expect("Failed to parse element type");
+    let element_type: ElementType =
+        serde_yaml::from_str(element_type_yaml).expect("Failed to parse element type");
     assert_eq!(element_type.name, "launchpad:Hero");
 
     let archetype_yaml = r##"
@@ -99,14 +105,16 @@ fields:
     allowed_element_types:
       - launchpad:Hero
 "##;
-    let archetype: Archetype = serde_yaml::from_str(archetype_yaml)
-        .expect("Failed to parse archetype");
+    let archetype: Archetype =
+        serde_yaml::from_str(archetype_yaml).expect("Failed to parse archetype");
     assert_eq!(archetype.name, "launchpad:LandingPage");
 
     let mut ctx = ValidationContext::default();
     ctx.package_node_types.insert("launchpad:Page".to_string());
-    ctx.package_archetypes.insert("launchpad:LandingPage".to_string(), archetype);
-    ctx.package_element_types.insert("launchpad:Hero".to_string(), element_type);
+    ctx.package_archetypes
+        .insert("launchpad:LandingPage".to_string(), archetype);
+    ctx.package_element_types
+        .insert("launchpad:Hero".to_string(), element_type);
 
     let content_yaml = r##"
 node_type: launchpad:Page
@@ -121,11 +129,16 @@ properties:
 
     let result = validate_content(content_yaml, "home/.node.yaml", &ctx);
 
-    let has_required_field_error = result.errors.iter()
+    let has_required_field_error = result
+        .errors
+        .iter()
         .any(|e| e.message.contains("test_required_field"));
 
-    assert!(has_required_field_error,
-        "Expected error for missing test_required_field in Hero element. Errors: {:?}", result.errors);
+    assert!(
+        has_required_field_error,
+        "Expected error for missing test_required_field in Hero element. Errors: {:?}",
+        result.errors
+    );
 }
 
 #[test]
@@ -166,13 +179,16 @@ fields:
 
 publishable: true
 "##;
-    let archetype: Archetype = serde_yaml::from_str(archetype_yaml)
-        .expect("Failed to parse archetype");
+    let archetype: Archetype =
+        serde_yaml::from_str(archetype_yaml).expect("Failed to parse archetype");
 
     assert!(archetype.fields.is_some());
     let fields = archetype.fields.as_ref().unwrap();
     let content_field = fields.iter().find(|f| f.base_name() == "content");
-    assert!(content_field.is_some(), "Archetype should have 'content' SectionField");
+    assert!(
+        content_field.is_some(),
+        "Archetype should have 'content' SectionField"
+    );
 
     let hero_yaml = r##"
 name: launchpad:Hero
@@ -193,13 +209,15 @@ fields:
     title: Test Required Field
     required: true
 "##;
-    let element_type: ElementType = serde_yaml::from_str(hero_yaml)
-        .expect("Failed to parse element type");
+    let element_type: ElementType =
+        serde_yaml::from_str(hero_yaml).expect("Failed to parse element type");
 
     let mut ctx = ValidationContext::default();
     ctx.package_node_types.insert("launchpad:Page".to_string());
-    ctx.package_archetypes.insert("launchpad:LandingPage".to_string(), archetype);
-    ctx.package_element_types.insert("launchpad:Hero".to_string(), element_type);
+    ctx.package_archetypes
+        .insert("launchpad:LandingPage".to_string(), archetype);
+    ctx.package_element_types
+        .insert("launchpad:Hero".to_string(), element_type);
 
     let home_yaml = r##"
 node_type: launchpad:Page
@@ -219,10 +237,15 @@ properties:
 
     let result = validate_content(home_yaml, "home/.node.yaml", &ctx);
 
-    let has_error = result.errors.iter()
+    let has_error = result
+        .errors
+        .iter()
         .any(|e| e.message.contains("test_required_field"));
-    assert!(has_error,
-        "Should have error for missing test_required_field. Errors: {:?}", result.errors);
+    assert!(
+        has_error,
+        "Should have error for missing test_required_field. Errors: {:?}",
+        result.errors
+    );
 }
 
 #[test]
@@ -280,10 +303,15 @@ fields:
     assert_eq!(element_type.name, "launchpad:Hero");
     assert_eq!(element_type.fields.len(), 7);
 
-    let test_field = element_type.fields.iter()
+    let test_field = element_type
+        .fields
+        .iter()
         .find(|f| f.base_name() == "test_required_field");
     assert!(test_field.is_some(), "test_required_field should exist");
-    assert!(get_field_required(test_field.unwrap()), "test_required_field should be required");
+    assert!(
+        get_field_required(test_field.unwrap()),
+        "test_required_field should be required"
+    );
 }
 
 #[test]

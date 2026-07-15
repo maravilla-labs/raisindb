@@ -8,7 +8,11 @@ use super::context::{ValidationContext, NODE_TYPE_NAME_REGEX, VALID_PROPERTY_TYP
 use super::helpers::suggest_node_type_name;
 
 /// Validate a node type YAML file
-pub fn validate_nodetype(yaml_str: &str, file_path: &str, ctx: &ValidationContext) -> ValidationResult {
+pub fn validate_nodetype(
+    yaml_str: &str,
+    file_path: &str,
+    ctx: &ValidationContext,
+) -> ValidationResult {
     let mut result = ValidationResult::success(FileType::NodeType);
 
     // Parse YAML
@@ -53,11 +57,7 @@ pub fn validate_nodetype(yaml_str: &str, file_path: &str, ctx: &ValidationContex
 }
 
 /// Validate the required 'name' field
-fn validate_name(
-    map: &serde_yaml::Mapping,
-    file_path: &str,
-    result: &mut ValidationResult,
-) {
+fn validate_name(map: &serde_yaml::Mapping, file_path: &str, result: &mut ValidationResult) {
     match map.get(&Value::String("name".to_string())) {
         Some(Value::String(name)) => {
             if !NODE_TYPE_NAME_REGEX.is_match(name) {
@@ -109,7 +109,10 @@ fn validate_extends(
                     file_path,
                     "extends",
                     codes::INVALID_EXTENDS,
-                    format!("Invalid extends value '{}'. Must be a valid NodeType name", extends_name),
+                    format!(
+                        "Invalid extends value '{}'. Must be a valid NodeType name",
+                        extends_name
+                    ),
                 ));
             } else if !ctx.is_valid_node_type_ref(extends_name) {
                 result.add_warning(ValidationError::warning(
@@ -142,7 +145,10 @@ fn validate_mixins(
                             file_path,
                             &format!("mixins[{}]", i),
                             codes::INVALID_MIXIN,
-                            format!("Invalid mixin '{}'. Must be a valid NodeType name", mixin_name),
+                            format!(
+                                "Invalid mixin '{}'. Must be a valid NodeType name",
+                                mixin_name
+                            ),
                         ));
                     } else if !ctx.is_valid_node_type_ref(mixin_name) {
                         result.add_warning(ValidationError::warning(
@@ -268,7 +274,10 @@ fn validate_property_type(
                         file_path,
                         &format!("{}.type", prop_path),
                         codes::INVALID_PROPERTY_TYPE,
-                        format!("Invalid property type '{}'. Valid types: {:?}", type_str, valid_types),
+                        format!(
+                            "Invalid property type '{}'. Valid types: {:?}",
+                            type_str, valid_types
+                        ),
                     )
                     .with_options("Select valid property type".to_string(), valid_types),
                 );

@@ -7,7 +7,11 @@ use super::context::{ValidationContext, NODE_TYPE_NAME_REGEX};
 use super::field_resolution::{validate_archetype_content, validate_element_content};
 
 /// Validate a content YAML file
-pub fn validate_content(yaml_str: &str, file_path: &str, ctx: &ValidationContext) -> ValidationResult {
+pub fn validate_content(
+    yaml_str: &str,
+    file_path: &str,
+    ctx: &ValidationContext,
+) -> ValidationResult {
     let mut result = ValidationResult::success(FileType::Content);
 
     // Parse YAML
@@ -62,7 +66,10 @@ fn validate_node_type(
                     file_path,
                     "node_type",
                     codes::INVALID_CONTENT_NODE_TYPE,
-                    format!("Invalid node_type '{}'. Must be in format 'namespace:PascalCase'", type_name),
+                    format!(
+                        "Invalid node_type '{}'. Must be in format 'namespace:PascalCase'",
+                        type_name
+                    ),
                 ));
             } else if !ctx.is_valid_node_type_ref(type_name) {
                 result.add_warning(ValidationError::warning(
@@ -204,8 +211,7 @@ fn validate_raisin_reference(
             codes::UNRESOLVABLE_CONTENT_REFERENCE,
             "RaisinReference must have 'raisin:workspace' field",
         ));
-    } else if let Some(Value::String(ws)) =
-        map.get(&Value::String("raisin:workspace".to_string()))
+    } else if let Some(Value::String(ws)) = map.get(&Value::String("raisin:workspace".to_string()))
     {
         if !ctx.is_valid_workspace_ref(ws) {
             result.add_warning(ValidationError::warning(

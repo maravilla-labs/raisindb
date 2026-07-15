@@ -2,7 +2,9 @@
 
 use crate::errors::{codes, ValidationError, ValidationResult};
 use raisin_models::nodes::types::element::field_types::{FieldSchema, FieldSchemaBase};
-use raisin_validation::field_helpers::{composite_requires_uuid, is_required as get_field_required};
+use raisin_validation::field_helpers::{
+    composite_requires_uuid, is_required as get_field_required,
+};
 use serde_yaml::Value;
 use std::collections::HashSet;
 
@@ -90,7 +92,14 @@ pub(crate) fn validate_element_content(
     let mut visited = HashSet::new();
     let resolved_fields = resolve_element_type_fields(element_type_name, ctx, &mut visited);
 
-    validate_fields_against_content(&resolved_fields, content, element_type_name, ctx, file_path, result);
+    validate_fields_against_content(
+        &resolved_fields,
+        content,
+        element_type_name,
+        ctx,
+        file_path,
+        result,
+    );
 }
 
 /// Recursively validate fields against content
@@ -187,7 +196,12 @@ fn validate_nested_field(
                         if let Value::Mapping(item_map) = item {
                             let item_context = format!("{}[{}]", field_name, i);
                             validate_fields_against_content(
-                                fields, item_map, &item_context, ctx, file_path, result
+                                fields,
+                                item_map,
+                                &item_context,
+                                ctx,
+                                file_path,
+                                result,
                             );
                         }
                     }
@@ -195,7 +209,7 @@ fn validate_nested_field(
                 Value::Mapping(item_map) => {
                     // Single item
                     validate_fields_against_content(
-                        fields, item_map, field_name, ctx, file_path, result
+                        fields, item_map, field_name, ctx, file_path, result,
                     );
                 }
                 _ => {}
@@ -203,8 +217,19 @@ fn validate_nested_field(
         }
 
         // SectionField: validate each element against its element type
-        FieldSchema::SectionField { base, allowed_element_types, .. } => {
-            validate_section_field(&base.name, allowed_element_types, value, ctx, file_path, result);
+        FieldSchema::SectionField {
+            base,
+            allowed_element_types,
+            ..
+        } => {
+            validate_section_field(
+                &base.name,
+                allowed_element_types,
+                value,
+                ctx,
+                file_path,
+                result,
+            );
         }
 
         // ElementField: validate inline element against referenced type
@@ -230,7 +255,6 @@ fn validate_section_field(
     file_path: &str,
     result: &mut ValidationResult,
 ) {
-
     let Value::Sequence(elements) = value else {
         return;
     };
@@ -243,19 +267,35 @@ fn validate_section_field(
         // Elements can use $type for inline format
         if let Some(Value::String(elem_type)) = elem_map.get(&Value::String("$type".to_string())) {
             validate_section_element_type(
-                elem_type, allowed_element_types, field_name, i,
-                elem_map, None, ctx, file_path, result,
+                elem_type,
+                allowed_element_types,
+                field_name,
+                i,
+                elem_map,
+                None,
+                ctx,
+                file_path,
+                result,
             );
         }
         // Or element_type format (with nested content OR flat format)
-        else if let Some(Value::String(elem_type)) = elem_map.get(&Value::String("element_type".to_string())) {
+        else if let Some(Value::String(elem_type)) =
+            elem_map.get(&Value::String("element_type".to_string()))
+        {
             let nested_content = elem_map
                 .get(&Value::String("content".to_string()))
                 .and_then(|v| v.as_mapping());
 
             validate_section_element_type(
-                elem_type, allowed_element_types, field_name, i,
-                elem_map, nested_content, ctx, file_path, result,
+                elem_type,
+                allowed_element_types,
+                field_name,
+                i,
+                elem_map,
+                nested_content,
+                ctx,
+                file_path,
+                result,
             );
         }
     }
@@ -274,7 +314,9 @@ fn validate_section_element_type(
     file_path: &str,
     result: &mut ValidationResult,
 ) {
-    let type_field = if nested_content.is_some() || elem_map.contains_key(&Value::String("element_type".to_string())) {
+    let type_field = if nested_content.is_some()
+        || elem_map.contains_key(&Value::String("element_type".to_string()))
+    {
         "element_type"
     } else {
         "$type"
@@ -282,7 +324,10 @@ fn validate_section_element_type(
 
     // Validate against allowed types if specified
     if let Some(allowed) = allowed_element_types {
-        if !allowed.is_empty() && !allowed.contains(&elem_type.to_string()) && !allowed.contains(&"*".to_string()) {
+        if !allowed.is_empty()
+            && !allowed.contains(&elem_type.to_string())
+            && !allowed.contains(&"*".to_string())
+        {
             result.add_warning(ValidationError::warning(
                 file_path,
                 &format!("{}[{}].{}", field_name, index, type_field),
@@ -329,7 +374,14 @@ pub(crate) fn validate_archetype_content(
     let resolved_fields = resolve_archetype_fields(archetype_name, ctx, &mut visited);
 
     if let Some(props) = properties {
-        validate_fields_against_content(&resolved_fields, props, archetype_name, ctx, file_path, result);
+        validate_fields_against_content(
+            &resolved_fields,
+            props,
+            archetype_name,
+            ctx,
+            file_path,
+            result,
+        );
     } else {
         // No properties but have required fields
         for field in &resolved_fields {

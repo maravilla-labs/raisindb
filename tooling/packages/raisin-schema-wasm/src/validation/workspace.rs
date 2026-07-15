@@ -6,7 +6,11 @@ use serde_yaml::Value;
 use super::context::{ValidationContext, NODE_TYPE_NAME_REGEX};
 
 /// Validate a workspace YAML file
-pub fn validate_workspace(yaml_str: &str, file_path: &str, ctx: &ValidationContext) -> ValidationResult {
+pub fn validate_workspace(
+    yaml_str: &str,
+    file_path: &str,
+    ctx: &ValidationContext,
+) -> ValidationResult {
     let mut result = ValidationResult::success(FileType::Workspace);
 
     // Parse YAML
@@ -50,11 +54,7 @@ pub fn validate_workspace(yaml_str: &str, file_path: &str, ctx: &ValidationConte
 }
 
 /// Validate the required 'name' field
-fn validate_name(
-    map: &serde_yaml::Mapping,
-    file_path: &str,
-    result: &mut ValidationResult,
-) {
+fn validate_name(map: &serde_yaml::Mapping, file_path: &str, result: &mut ValidationResult) {
     match map.get(&Value::String("name".to_string())) {
         Some(Value::String(name)) => {
             // Workspace names can be simple identifiers or namespaced (raisin:access_control)

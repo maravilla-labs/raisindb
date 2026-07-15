@@ -115,7 +115,11 @@ impl ValidationError {
     }
 
     /// Set as auto-fixable with suggested new value
-    pub fn with_auto_fix(mut self, description: impl Into<String>, new_value: impl Into<String>) -> Self {
+    pub fn with_auto_fix(
+        mut self,
+        description: impl Into<String>,
+        new_value: impl Into<String>,
+    ) -> Self {
         self.fix_type = FixType::AutoFixable;
         self.suggested_fix = Some(SuggestedFix {
             description: description.into(),
@@ -247,6 +251,12 @@ pub mod codes {
     pub const INVALID_CONTENT_NODE_TYPE: &str = "INVALID_CONTENT_NODE_TYPE";
     pub const MISSING_REQUIRED_PROPERTY: &str = "MISSING_REQUIRED_PROPERTY";
     pub const INVALID_PROPERTY_VALUE: &str = "INVALID_PROPERTY_VALUE";
+    /// Two content files declare the same value for a property that's
+    /// `unique: true` on their NodeType. RaisinDB enforces this uniqueness
+    /// across the WHOLE repo, independent of node type or path, so this
+    /// reproduces as a real install/save failure even when the two files
+    /// are different NodeTypes in different folders.
+    pub const DUPLICATE_UNIQUE_PROPERTY_VALUE: &str = "DUPLICATE_UNIQUE_PROPERTY_VALUE";
 
     // Reference warnings
     pub const UNKNOWN_NODE_TYPE_REFERENCE: &str = "UNKNOWN_NODE_TYPE_REFERENCE";

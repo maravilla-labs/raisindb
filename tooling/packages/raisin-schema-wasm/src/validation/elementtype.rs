@@ -10,7 +10,11 @@ use super::helpers::format_serde_error;
 ///
 /// This is the single source of truth - if serde can parse it into the
 /// ElementType struct, it's valid. No duplicate validation logic.
-pub fn validate_elementtype(yaml_str: &str, file_path: &str, _ctx: &ValidationContext) -> ValidationResult {
+pub fn validate_elementtype(
+    yaml_str: &str,
+    file_path: &str,
+    _ctx: &ValidationContext,
+) -> ValidationResult {
     match serde_yaml::from_str::<ElementType>(yaml_str) {
         Ok(_) => ValidationResult::success(FileType::ElementType),
         Err(e) => {

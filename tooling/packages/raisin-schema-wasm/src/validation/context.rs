@@ -2,9 +2,9 @@
 
 use crate::builtin_types::{is_builtin_node_type, is_builtin_workspace};
 use lazy_static::lazy_static;
-use regex::Regex;
 use raisin_models::nodes::types::element::element_type::ElementType;
 use raisin_models::nodes::types::Archetype;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
 lazy_static! {
