@@ -392,9 +392,10 @@ async fn test_unique_property_unchanged_on_update_is_not_reverified() {
     // Update node2 with an unrelated field change; "email" stays the same
     // value it already has in storage. This must succeed even though
     // node1 still has the identical "email" value.
-    node2
-        .properties
-        .insert("name".to_string(), PropertyValue::String("User 2 renamed".to_string()));
+    node2.properties.insert(
+        "name".to_string(),
+        PropertyValue::String("User 2 renamed".to_string()),
+    );
     assert!(validator.validate_node("ws1", &node2).await.is_ok());
 
     // But updating an EXISTING node's unique value to something new that
