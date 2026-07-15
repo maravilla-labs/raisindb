@@ -75,6 +75,15 @@ impl<S: Storage> NodeValidator<S> {
     ) -> Result<()> {
         let node_repo = self.storage.nodes();
 
+        // Lazily-loaded previously-stored revision of this node (only fetched
+        // if a unique property actually needs comparing). On update, a
+        // unique property whose value is unchanged from the stored revision
+        // is skipped: two nodes that already share a unique value (an
+        // existing authoring collision, pre-dating this write) must not
+        // block every future save of a completely unrelated field on either
+        // node forever. Genuinely new/changed values are still checked.
+        let mut previous: Option<Option<Node>> = None;
+
         for schema in &resolved.resolved_properties {
             if schema.unique.unwrap_or(false) {
                 let prop_name = match &schema.name {
@@ -84,6 +93,24 @@ impl<S: Storage> NodeValidator<S> {
 
                 // Check if this property has a value in the node
                 if let Some(property_value) = node.properties.get(prop_name) {
+                    if previous.is_none() {
+                        let scope = StorageScope::new(
+                            &self.tenant_id,
+                            &self.repo_id,
+                            &self.branch,
+                            workspace,
+                        );
+                        previous = Some(node_repo.get(scope, &node.id, None).await?);
+                    }
+
+                    if let Some(Some(prev_node)) = &previous {
+                        if let Some(prev_value) = prev_node.properties.get(prop_name) {
+                            if Self::property_values_equal(property_value, prev_value) {
+                                continue;
+                            }
+                        }
+                    }
+
                     // Query for conflicting nodes
                     if let Some(conflicting) = self
                         .find_conflicting_node(

@@ -319,6 +319,132 @@ async fn test_unique_property_validation() {
     assert!(validator.validate_node("ws1", &node3).await.is_ok());
 }
 
+/// Regression test: two nodes that already share a unique property value
+/// (a pre-existing authoring collision, stored directly without going
+/// through the validator) must not block an update to either node that
+/// leaves that property's value unchanged. Only a genuine change to the
+/// unique value should be re-checked against other nodes.
+#[tokio::test]
+async fn test_unique_property_unchanged_on_update_is_not_reverified() {
+    let storage = setup_test_storage().await;
+    let validator = NodeValidator::new(
+        storage.clone(),
+        "default".to_string(),
+        "default".to_string(),
+        "main".to_string(),
+    );
+
+    create_node_type(
+        &storage,
+        "test:User",
+        vec![
+            create_property_schema("email", PropertyType::String, true, true), // unique
+            create_property_schema("name", PropertyType::String, false, false),
+        ],
+        false,
+    )
+    .await;
+
+    // Store two nodes that already share the same unique "email" value,
+    // bypassing the validator -- this mirrors a pre-existing authoring
+    // collision already live in storage before this check ever ran.
+    let mut props1 = HashMap::new();
+    props1.insert(
+        "email".to_string(),
+        PropertyValue::String("shared@example.com".to_string()),
+    );
+    props1.insert(
+        "name".to_string(),
+        PropertyValue::String("User 1".to_string()),
+    );
+    let node1 = create_test_node("test:User", props1);
+    storage
+        .nodes()
+        .create(
+            StorageScope::new("default", "default", "main", "ws1"),
+            node1,
+            raisin_storage::CreateNodeOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut props2 = HashMap::new();
+    props2.insert(
+        "email".to_string(),
+        PropertyValue::String("shared@example.com".to_string()), // same as node1
+    );
+    props2.insert(
+        "name".to_string(),
+        PropertyValue::String("User 2".to_string()),
+    );
+    let mut node2 = create_test_node("test:User", props2);
+    node2.id = "test-node-2".to_string();
+    storage
+        .nodes()
+        .create(
+            StorageScope::new("default", "default", "main", "ws1"),
+            node2.clone(),
+            raisin_storage::CreateNodeOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    // Update node2 with an unrelated field change; "email" stays the same
+    // value it already has in storage. This must succeed even though
+    // node1 still has the identical "email" value.
+    node2
+        .properties
+        .insert("name".to_string(), PropertyValue::String("User 2 renamed".to_string()));
+    assert!(validator.validate_node("ws1", &node2).await.is_ok());
+
+    // But updating an EXISTING node's unique value to something new that
+    // collides with a different node must still fail -- store node2's
+    // unrelated "name" change first (an update with email unchanged, as
+    // above), then attempt to change node2's own email to a THIRD value
+    // that collides with a freshly-created node4.
+    storage
+        .nodes()
+        .update(
+            StorageScope::new("default", "default", "main", "ws1"),
+            node2.clone(),
+            raisin_storage::UpdateNodeOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut props4 = HashMap::new();
+    props4.insert(
+        "email".to_string(),
+        PropertyValue::String("distinct@example.com".to_string()),
+    );
+    props4.insert(
+        "name".to_string(),
+        PropertyValue::String("User 4".to_string()),
+    );
+    let mut node4 = create_test_node("test:User", props4);
+    node4.id = "test-node-4".to_string();
+    storage
+        .nodes()
+        .create(
+            StorageScope::new("default", "default", "main", "ws1"),
+            node4,
+            raisin_storage::CreateNodeOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    node2.properties.insert(
+        "email".to_string(),
+        PropertyValue::String("distinct@example.com".to_string()), // now collides with node4
+    );
+    let result = validator.validate_node("ws1", &node2).await;
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Property 'email' must be unique"));
+}
+
 #[tokio::test]
 async fn test_archetype_required_field_validation() {
     let storage = setup_test_storage().await;
