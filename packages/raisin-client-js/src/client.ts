@@ -1066,46 +1066,25 @@ export class RaisinClient extends EventEmitter {
       if (payload.exp * 1000 < Date.now()) {
         logger.info('[initSession] Token expired, attempting refresh...');
 
-        // Try to refresh the token
-        const refreshToken = this.authManager.storage.getRefreshToken();
-        if (refreshToken) {
-          try {
-            const url = this._repository
-              ? `${this._httpBaseUrl}/auth/${this._repository}/refresh`
-              : `${this._httpBaseUrl}/auth/refresh`;
-            const response = await this._fetchWithTimeout(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ refresh_token: refreshToken }),
-            });
-
-            if (response.ok) {
-              const tokens: IdentityAuthResponse = await response.json();
-              this.authManager.storage.setAccessToken(tokens.access_token);
-              this.authManager.storage.setRefreshToken(tokens.refresh_token);
-
-              // Schedule next auto-refresh (expires_at minus 5 minutes)
-              const expiresInMs = RaisinClient.expiresAtToMs(tokens.expires_at) - Date.now() - (5 * 60 * 1000);
-              if (expiresInMs > 0) {
-                this.scheduleAutoRefresh(expiresInMs);
-              }
-
-              logger.info('[initSession] Token refreshed successfully');
-            } else {
-              logger.warn('[initSession] Token refresh failed, clearing session');
-              this.authManager.clear();
-              return null;
-            }
-          } catch (err) {
-            logger.warn('[initSession] Token refresh error:', err);
-            this.authManager.clear();
-            return null;
-          }
-        } else {
+        // Delegate to refreshToken() rather than issuing our own refresh POST.
+        // Refresh tokens are single-use (the server rotates them and revokes the
+        // session on reuse), and connect() above can already have started a
+        // refresh via autoReauthenticate(). Two refreshes racing on the same
+        // stored token trip the server's reuse detection and kill the session.
+        // refreshToken() is single-flighted, so both callers share one request.
+        if (!this.authManager.storage.getRefreshToken()) {
           logger.warn('[initSession] No refresh token, clearing session');
           this.authManager.clear();
           return null;
         }
+
+        const refreshed = await this.refreshToken();
+        if (!refreshed) {
+          logger.warn('[initSession] Token refresh failed, clearing session');
+          this.authManager.clear();
+          return null;
+        }
+        logger.info('[initSession] Token refreshed successfully');
       }
     }
 
@@ -1219,6 +1198,27 @@ export class RaisinClient extends EventEmitter {
    * @throws Error if no refresh token is stored or refresh fails
    */
   async refreshToken(): Promise<IdentityUser | null> {
+    // Single-flight: refresh tokens are single-use. The server rotates the
+    // token on every refresh and revokes the whole session if it ever sees a
+    // stale generation (TOKEN_REUSE_DETECTED), since that is indistinguishable
+    // from a stolen token being replayed. Several call sites can want a refresh
+    // at once on startup — initSession(), connect() -> autoReauthenticate(),
+    // the auto-refresh timer, and any 401 retry — so without this guard they
+    // each POST the same stored token and we revoke our own session.
+    if (this._refreshInFlight) {
+      logger.debug('[refreshToken] Refresh already in flight, awaiting it');
+      return this._refreshInFlight;
+    }
+    this._refreshInFlight = this._refreshToken().finally(() => {
+      this._refreshInFlight = null;
+    });
+    return this._refreshInFlight;
+  }
+
+  /** In-flight refresh shared by concurrent refreshToken() callers. */
+  private _refreshInFlight: Promise<IdentityUser | null> | null = null;
+
+  private async _refreshToken(): Promise<IdentityUser | null> {
     const refreshToken = this.authManager.storage.getRefreshToken();
     if (!refreshToken) {
       logger.warn('[refreshToken] No refresh token available');
@@ -1239,6 +1239,17 @@ export class RaisinClient extends EventEmitter {
       if (!response.ok) {
         const errorText = await response.text();
         logger.error('[refreshToken] Refresh failed:', response.status, errorText);
+
+        // A revoked-for-security response means the token was presented twice.
+        // With single-flighting in place that should no longer be us, so treat
+        // it as a real signal (either a genuine replay, or a second client
+        // instance sharing this storage) rather than a routine expiry.
+        if (/TOKEN_REUSE_DETECTED|TOKEN_FAMILY_MISMATCH/.test(errorText)) {
+          logger.error(
+            '[refreshToken] Session revoked by the server as a suspected token replay. ' +
+              'If this happened on a normal page load, two refreshes raced on the same token.',
+          );
+        }
 
         // Clear tokens on auth failure (401/403)
         if (response.status === 401 || response.status === 403) {

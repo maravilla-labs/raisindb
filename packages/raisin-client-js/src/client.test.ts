@@ -376,6 +376,61 @@ describe('RaisinClient auth fetch hardening', () => {
     // refreshToken catches errors and returns null instead of hanging
     await expect(client.refreshToken()).resolves.toBeNull();
   });
+
+  it('single-flights concurrent refreshes onto one request', async () => {
+    // Refresh tokens are single-use: the server rotates them and revokes the
+    // session if it sees a stale generation. Concurrent callers (initSession,
+    // autoReauthenticate, the refresh timer, 401 retries) must therefore share
+    // one in-flight request rather than each POSTing the stored token.
+    let resolveFetch: (r: Response) => void = () => {};
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const storage = new MemoryTokenStorage();
+    storage.setRefreshToken('refresh-token-generation-1');
+    const { client } = makeClient({ tokenStorage: storage });
+
+    const all = Promise.all([
+      client.refreshToken(),
+      client.refreshToken(),
+      client.refreshToken(),
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch(
+      new Response(
+        JSON.stringify({
+          access_token: fakeJwt({ sub: 'u1', exp: Math.floor(Date.now() / 1000) + 3600 }),
+          refresh_token: 'refresh-token-generation-2',
+          expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          identity: {
+            id: 'u1',
+            email: 'a@b.c',
+            display_name: 'A',
+            avatar_url: null,
+            email_verified: true,
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const results = await all;
+    // One request, one rotation — every caller gets the same result.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(results.every((r) => r?.id === 'u1')).toBe(true);
+    expect(storage.getRefreshToken()).toBe('refresh-token-generation-2');
+
+    // The guard clears afterwards, so a later refresh issues a fresh request.
+    void client.refreshToken();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

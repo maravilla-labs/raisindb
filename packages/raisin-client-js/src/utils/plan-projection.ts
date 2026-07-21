@@ -58,6 +58,24 @@ export function parsePlanTasks(rawTasks: unknown): PlanProjectionTask[] {
     .filter((task): task is PlanProjectionTask => task !== null);
 }
 
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'cancelled']);
+const TERMINAL_PLAN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+
+/**
+ * Same race as upsertTask: an ai_task_update message carrying a stale
+ * plan_status (e.g. "in_progress", computed before the final task's
+ * completion count caught up) can be persisted and thus replayed here after
+ * the message that actually reflects the terminal plan status. Guard it the
+ * same way - never regress out of a terminal plan status.
+ */
+function setPlanStatus(plan: PlanProjection, nextStatus: string | undefined): void {
+  if (!nextStatus) return;
+  if (TERMINAL_PLAN_STATUSES.has(plan.status) && !TERMINAL_PLAN_STATUSES.has(nextStatus)) {
+    return;
+  }
+  plan.status = nextStatus;
+}
+
 export function upsertTask(plan: PlanProjection, nextTask: PlanProjectionTask): void {
   const existingIndex = plan.tasks.findIndex((task) =>
     (nextTask.taskId && task.taskId === nextTask.taskId) ||
@@ -67,8 +85,17 @@ export function upsertTask(plan: PlanProjection, nextTask: PlanProjectionTask): 
     plan.tasks.push(nextTask);
     return;
   }
+  const existing = plan.tasks[existingIndex];
+  // Mirrors the server-side monotonic guard in update-task/index.js: tool
+  // calls from one model turn can execute in parallel, so an ai_task_update
+  // message for an earlier "in_progress" transition can be persisted (and
+  // thus replayed here) after the "completed" message for the same task.
+  // Never let that regress an already-terminal status.
+  if (TERMINAL_TASK_STATUSES.has(existing.status) && !TERMINAL_TASK_STATUSES.has(nextTask.status)) {
+    return;
+  }
   plan.tasks[existingIndex] = {
-    ...plan.tasks[existingIndex],
+    ...existing,
     ...nextTask,
   };
 }
@@ -127,7 +154,7 @@ export function projectPlansFromMessages(messages: ChatMessage[]): PlanProjectio
       plan.planPath = planPath ?? plan.planPath;
       plan.planId = planId ?? plan.planId;
       plan.title = asString(data.title) || plan.title;
-      plan.status = asString(data.status) || plan.status;
+      setPlanStatus(plan, asString(data.status));
       plan.requiresApproval = Boolean(data.requires_approval) || plan.status === 'pending_approval';
       plan.sourceMessagePath = message.path ?? plan.sourceMessagePath;
 
@@ -146,7 +173,7 @@ export function projectPlansFromMessages(messages: ChatMessage[]): PlanProjectio
       const plan = ensurePlan(plans, key, 'Plan', timestamp);
       plan.planPath = planPath ?? plan.planPath;
       plan.planId = planId ?? plan.planId;
-      plan.status = asString(data.plan_status) || plan.status;
+      setPlanStatus(plan, asString(data.plan_status));
       plan.requiresApproval = plan.status === 'pending_approval';
 
       const taskUpdate: PlanProjectionTask = {
@@ -173,6 +200,22 @@ export function projectPlansFromMessages(messages: ChatMessage[]): PlanProjectio
           }));
         }
       }
+    }
+  }
+
+  // Belt-and-suspenders: if every task landed in a terminal state but the
+  // plan's own status field is stuck non-terminal (the same message-race
+  // that setPlanStatus guards against can also leave it simply never
+  // updated), derive completion from the tasks - mirrors the server's
+  // auto-complete check in update-task/index.js's updatePlanProgress.
+  for (const plan of plans.values()) {
+    if (
+      !TERMINAL_PLAN_STATUSES.has(plan.status) &&
+      plan.tasks.length > 0 &&
+      plan.tasks.every((task) => TERMINAL_TASK_STATUSES.has(task.status))
+    ) {
+      plan.status = 'completed';
+      plan.requiresApproval = false;
     }
   }
 
