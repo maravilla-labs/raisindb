@@ -245,7 +245,8 @@ pub fn start_background_tasks(
         storage.job_metadata_store.clone(),
         24, // retention hours
         cleanup_shutdown.clone(),
-    );
+    )
+    .with_registry(storage.job_registry.clone());
     tokio::spawn(async move {
         cleanup.run().await;
     });

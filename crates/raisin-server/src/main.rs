@@ -5,6 +5,13 @@
 #![allow(unused_variables)]
 #![allow(unexpected_cfgs)]
 
+/// jemalloc global allocator (Unix). glibc malloc never returns arena memory
+/// to the OS under the function-runtime's churny multi-threaded allocation
+/// pattern, growing RSS unboundedly; jemalloc purges freed pages on decay.
+#[cfg(unix)]
+#[global_allocator]
+static GLOBAL_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod admin_ui;
 mod admin_user_init_handler;
 #[cfg(feature = "storage-rocksdb")]

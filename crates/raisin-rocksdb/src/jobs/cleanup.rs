@@ -10,12 +10,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::jobs::JobMetadataStore;
 
+/// In-memory registry retention. Much shorter than the persisted retention:
+/// the registry only needs to serve live status/SSE queries, while history
+/// reads go to the metadata store. Without this bound the registry map holds
+/// every job since boot (~50k/day on a busy scheduler) and its long-lived
+/// entries pin allocator arenas, bloating RSS indefinitely.
+const IN_MEMORY_RETENTION_HOURS: i64 = 1;
+
 /// Background task that periodically cleans up old jobs
 ///
 /// Runs every hour and deletes jobs older than the configured retention period.
-/// Only terminal jobs (Completed, Failed, Cancelled) are cleaned up.
+/// Only terminal jobs (Completed, Failed, Cancelled) are cleaned up. Also
+/// prunes terminal entries from the in-memory `JobRegistry` (shorter
+/// retention), which is never cleaned anywhere else.
 pub struct JobCleanupTask {
     metadata_store: Arc<JobMetadataStore>,
+    registry: Option<Arc<raisin_storage::jobs::JobRegistry>>,
     retention_hours: i64,
     shutdown: CancellationToken,
 }
@@ -35,9 +45,16 @@ impl JobCleanupTask {
     ) -> Self {
         Self {
             metadata_store,
+            registry: None,
             retention_hours,
             shutdown,
         }
+    }
+
+    /// Also prune terminal entries from the in-memory job registry each pass.
+    pub fn with_registry(mut self, registry: Arc<raisin_storage::jobs::JobRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
     }
 
     /// Run the cleanup loop (runs every hour)
@@ -58,6 +75,11 @@ impl JobCleanupTask {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
                     if let Err(e) = self.cleanup_old_jobs().await {
                         tracing::error!(error = %e, "Job cleanup failed");
+                    }
+                    if let Some(registry) = &self.registry {
+                        registry
+                            .cleanup_old_jobs(Duration::hours(IN_MEMORY_RETENTION_HOURS))
+                            .await;
                     }
                 }
             }

@@ -5,6 +5,17 @@ edition = "2021"
 description = "RaisinDB server binary"
 license = "BSL-1.1"
 
+# jemalloc as the global allocator on Unix: returns freed pages to the OS
+# (dirty-page decay + background purge threads on Linux) and resists the
+# arena fragmentation that glibc malloc accumulates under the per-execution
+# allocation churn of the function runtime (19GB RSS on prod, 2026-07).
+# background_threads is Linux-only in tikv-jemallocator.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
+
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [dependencies]
 tokio = { workspace = true }
 tokio-util = "0.7"

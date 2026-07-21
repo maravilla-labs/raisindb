@@ -50,6 +50,23 @@ impl RocksDBConfig {
         // Merge operator for atomic counter increments (used for revision allocation)
         opts.set_merge_operator_associative("uint64_add", Self::merge_uint64_add);
 
+        // Disk-growth bounds (2026-07 prod incident: 1.3G of pinned WALs,
+        // 266M of rotated info logs, no age-based compaction — all snapshotted
+        // into every nightly backup).
+        //
+        // With 40+ column families and tiny write volume, memtables never fill,
+        // so the oldest WAL stays pinned by some un-flushed CF and WALs
+        // accumulate (default max_total_wal_size=0 derives a ~40G cap from the
+        // summed memtable budgets). A 256MB cap forces the pinning CFs to
+        // flush so old WALs can be deleted.
+        opts.set_max_total_wal_size(256 * 1024 * 1024);
+        // Bound rotated info logs (defaults keep up to 1000 files).
+        opts.set_keep_log_file_num(10);
+        opts.set_max_log_file_size(64 * 1024 * 1024);
+        // Age-based compaction so obsolete revisions/tombstones are reclaimed
+        // even when write volume never triggers size-based compaction.
+        opts.set_periodic_compaction_seconds(24 * 60 * 60);
+
         // Additional production settings
         opts.set_use_fsync(true); // Ensure data durability
         opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime);

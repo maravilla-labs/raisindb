@@ -1963,3 +1963,368 @@ async fn test_gateway_argument_shapes() {
     assert_eq!(output["noCtxArgs"], serde_json::json!({ "a": 1 }));
     assert_eq!(output["taskIsObject"], true);
 }
+
+// ============= Pooled-runtime tenant isolation =============
+
+use super::pool::QuickJsPool;
+
+/// Build a runtime backed by a dedicated pool (independent of the global one)
+/// so per-test isolation / recycle / poison assertions are deterministic.
+fn pooled_runtime(capacity: usize, recycle_threshold: usize) -> (QuickJsRuntime, Arc<QuickJsPool>) {
+    let pool = Arc::new(QuickJsPool::new(capacity, recycle_threshold));
+    (QuickJsRuntime::with_pool(pool.clone()), pool)
+}
+
+fn plain_metadata(name: &str) -> FunctionMetadata {
+    FunctionMetadata::javascript(name)
+}
+
+/// Globals set by one tenant must never be visible to the next execution that
+/// reuses the same pooled runtime. Capacity 1 forces reuse of a single runtime
+/// across the two sequential executions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pool_global_state_does_not_leak_between_tenants() {
+    let (runtime, _pool) = pooled_runtime(1, 500);
+
+    // Tenant 1 stows a secret on globalThis.
+    let set_code = r#"
+        function handler(input) {
+            globalThis.SECRET = "t1";
+            return { secret: globalThis.SECRET };
+        }
+    "#;
+    let context =
+        ExecutionContext::new("tenant1", "repo1", "main", "u1").with_input(serde_json::json!({}));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let r1 = runtime
+        .execute(
+            set_code,
+            "handler",
+            context,
+            &plain_metadata("t1"),
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(r1.success);
+    assert_eq!(r1.output.unwrap()["secret"], "t1");
+
+    // Tenant 2 reuses the same pooled runtime and must NOT see the secret.
+    let read_code = r#"
+        function handler(input) {
+            return { leaked: typeof globalThis.SECRET !== "undefined" };
+        }
+    "#;
+    let context =
+        ExecutionContext::new("tenant2", "repo1", "main", "u2").with_input(serde_json::json!({}));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let r2 = runtime
+        .execute(
+            read_code,
+            "handler",
+            context,
+            &plain_metadata("t2"),
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(r2.success, "second execution errored: {:?}", r2.error);
+    assert_eq!(
+        r2.output.unwrap()["leaked"],
+        false,
+        "globalThis leaked across pooled executions"
+    );
+}
+
+/// A module file supplied by one tenant must not be resolvable by the next
+/// execution (which ships no files). The loader is replaced every execution,
+/// so the stale path can no longer resolve. Capacity 1 forces runtime reuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pool_module_loader_does_not_leak_between_tenants() {
+    let (runtime, _pool) = pooled_runtime(1, 500);
+
+    // Tenant 1 runs with a module file.
+    let mod_code = r#"
+        import { secret } from './util.js';
+        export function handler(input) { return { secret }; }
+    "#;
+    let mut files = HashMap::new();
+    files.insert(
+        "util.js".to_string(),
+        "export const secret = 42;".to_string(),
+    );
+    let context =
+        ExecutionContext::new("tenant1", "repo1", "main", "u1").with_input(serde_json::json!({}));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let r1 = runtime
+        .execute(
+            mod_code,
+            "handler",
+            context,
+            &plain_metadata("t1"),
+            api,
+            files,
+        )
+        .await
+        .unwrap();
+    assert!(r1.success, "module execution errored: {:?}", r1.error);
+    assert_eq!(r1.output.unwrap()["secret"], 42);
+
+    // Tenant 2 imports the SAME path but ships no files: it must fail because
+    // the loader was replaced with an empty one.
+    let steal_code = r#"
+        import { secret } from './util.js';
+        export function handler(input) { return { secret }; }
+    "#;
+    let context =
+        ExecutionContext::new("tenant2", "repo1", "main", "u2").with_input(serde_json::json!({}));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let r2 = runtime
+        .execute(
+            steal_code,
+            "handler",
+            context,
+            &plain_metadata("t2"),
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !r2.success,
+        "a stale module path from a previous tenant must not resolve, got {:?}",
+        r2.output
+    );
+}
+
+/// A pooled runtime is dropped and rebuilt after `recycle_threshold`
+/// executions. With capacity 1 and threshold 2, five executions build three
+/// runtimes (uses 1,2 | 1,2 | 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pool_recycles_runtime_after_threshold() {
+    let (runtime, pool) = pooled_runtime(1, 2);
+
+    let code = r#"function handler(input) { return { ok: true }; }"#;
+    for _ in 0..5 {
+        let context = ExecutionContext::new("tenant1", "repo1", "main", "u1")
+            .with_input(serde_json::json!({}));
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+        let r = runtime
+            .execute(
+                code,
+                "handler",
+                context,
+                &plain_metadata("recycle"),
+                api,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.success);
+    }
+
+    assert_eq!(
+        pool.created_count(),
+        3,
+        "5 executions with recycle threshold 2 should have built 3 runtimes"
+    );
+}
+
+/// An execution that throws poisons its runtime: it is dropped rather than
+/// returned to the pool, so the next execution must build a fresh one (the
+/// created-runtime counter increases). The same drop-on-return path covers
+/// timeouts and interrupts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pool_poisons_runtime_on_error() {
+    let (runtime, pool) = pooled_runtime(1, 500);
+
+    // First clean execution builds runtime #1 and returns it to the pool.
+    let ok_code = r#"function handler(input) { return { ok: true }; }"#;
+    let context =
+        ExecutionContext::new("t", "repo1", "main", "u").with_input(serde_json::json!({}));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let r1 = runtime
+        .execute(
+            ok_code,
+            "handler",
+            context,
+            &plain_metadata("ok"),
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(r1.success);
+    assert_eq!(pool.created_count(), 1);
+
+    // A throwing execution must NOT return its runtime to the pool.
+    let throw_code = r#"function handler(input) { throw new Error("boom"); }"#;
+    let context =
+        ExecutionContext::new("t", "repo1", "main", "u").with_input(serde_json::json!({}));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let r2 = runtime
+        .execute(
+            throw_code,
+            "handler",
+            context,
+            &plain_metadata("throw"),
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!r2.success, "throwing function must fail");
+    // Still 1 created: the poisoned runtime was dropped, none created yet.
+    assert_eq!(pool.created_count(), 1);
+
+    // The next execution has no idle runtime (the poisoned one was discarded),
+    // so it must build a fresh one.
+    let context =
+        ExecutionContext::new("t", "repo1", "main", "u").with_input(serde_json::json!({}));
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+    let r3 = runtime
+        .execute(
+            ok_code,
+            "handler",
+            context,
+            &plain_metadata("ok2"),
+            api,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(r3.success);
+    assert_eq!(
+        pool.created_count(),
+        2,
+        "a fresh runtime must be built after the previous one was poisoned"
+    );
+}
+
+/// Many tenants executing concurrently must all succeed and never observe
+/// another tenant's data — exclusive checkout guarantees no runtime is shared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_pool_concurrent_tenants_do_not_cross() {
+    // Shared runtime facade backed by the global pool; each execution gets an
+    // exclusive runtime for its duration.
+    let runtime = Arc::new(QuickJsRuntime::new());
+
+    let code = r#"
+        function handler(input) {
+            // Echo the caller's tenant id back after some busy work.
+            let acc = 0;
+            for (let i = 0; i < 5000; i++) { acc = (acc + i) % 7; }
+            return { tenant: input.tenant, acc };
+        }
+    "#;
+
+    let mut handles = Vec::new();
+    for i in 0..16u32 {
+        let runtime = runtime.clone();
+        handles.push(tokio::spawn(async move {
+            let tenant = format!("tenant-{}", i);
+            let context = ExecutionContext::new(&tenant, "repo1", "main", "u")
+                .with_input(serde_json::json!({ "tenant": tenant }));
+            let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+            let r = runtime
+                .execute(
+                    code,
+                    "handler",
+                    context,
+                    &plain_metadata("conc"),
+                    api,
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+            (tenant, r)
+        }));
+    }
+
+    for handle in handles {
+        let (tenant, r) = handle.await.unwrap();
+        assert!(r.success, "tenant {} errored: {:?}", tenant, r.error);
+        assert_eq!(
+            r.output.unwrap()["tenant"],
+            tenant,
+            "a concurrent execution returned another tenant's id"
+        );
+    }
+}
+
+fn rss_kb() -> u64 {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+}
+
+/// Repro for the production memory leak: a fresh QuickJsRuntime per
+/// execution (exactly what `FunctionExecutor::new()` per job does).
+#[tokio::test]
+#[ignore]
+async fn leak_fresh_runtime_per_execution() {
+    let code = r#"
+        function handler(input) {
+            let s = JSON.stringify(input);
+            return { ok: true, len: s.length };
+        }
+    "#;
+    let base = rss_kb();
+    for i in 0..2001u32 {
+        let runtime = QuickJsRuntime::new();
+        let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+            .with_input(serde_json::json!({"i": i, "msg": "hello world"}));
+        let metadata = FunctionMetadata::javascript("leaktest");
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+        let result = runtime
+            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .await
+            .unwrap();
+        assert!(result.success);
+        if i % 200 == 0 {
+            println!(
+                "fresh-runtime iter={} rss={} kB (delta {} kB)",
+                i,
+                rss_kb(),
+                rss_kb() as i64 - base as i64
+            );
+        }
+    }
+}
+
+/// Control: one shared runtime, fresh context per execution.
+#[tokio::test]
+#[ignore]
+async fn leak_shared_runtime_per_execution() {
+    let code = r#"
+        function handler(input) {
+            let s = JSON.stringify(input);
+            return { ok: true, len: s.length };
+        }
+    "#;
+    let runtime = QuickJsRuntime::new();
+    let base = rss_kb();
+    for i in 0..2001u32 {
+        let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+            .with_input(serde_json::json!({"i": i, "msg": "hello world"}));
+        let metadata = FunctionMetadata::javascript("leaktest");
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+        let result = runtime
+            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .await
+            .unwrap();
+        assert!(result.success);
+        if i % 200 == 0 {
+            println!(
+                "shared-runtime iter={} rss={} kB (delta {} kB)",
+                i,
+                rss_kb(),
+                rss_kb() as i64 - base as i64
+            );
+        }
+    }
+}

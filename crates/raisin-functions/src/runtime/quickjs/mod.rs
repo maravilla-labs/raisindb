@@ -27,6 +27,7 @@ mod environment;
 mod gateway;
 mod helpers;
 mod module_loader;
+mod pool;
 
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,7 @@ use std::time::Instant;
 use tracing::debug;
 
 use super::FUNCTION_EXECUTION_SEMAPHORE;
+use pool::{QuickJsPool, GLOBAL_QUICKJS_POOL};
 
 use crate::api::FunctionApi;
 use crate::types::{
@@ -55,23 +57,43 @@ use module_loader::{has_es6_modules, FunctionModuleLoader, FunctionModuleResolve
 
 /// QuickJS-based JavaScript runtime.
 ///
-/// Uses the rquickjs crate to execute JavaScript code in a sandboxed environment.
+/// Uses the rquickjs crate to execute JavaScript code in a sandboxed
+/// environment. This is a cheap, cloneable facade: it owns no interpreter
+/// itself. Each [`Self::execute`] checks an `AsyncRuntime` out of a shared
+/// [`QuickJsPool`] for the exclusive duration of the call, so the ~9
+/// `FunctionExecutor::new()` call sites no longer allocate a QuickJS runtime
+/// per invocation (the production RSS-leak root cause). The pool guarantees
+/// tenant isolation across reused runtimes — see the invariants documented on
+/// [`QuickJsPool`].
 pub struct QuickJsRuntime {
-    /// Shared async runtime
-    runtime: AsyncRuntime,
+    /// Pool the runtime is checked out from at execute() time.
+    pool: Arc<QuickJsPool>,
 }
 
 impl QuickJsRuntime {
-    /// Create a new QuickJS runtime.
+    /// Create a new QuickJS runtime facade backed by the process-wide pool.
+    ///
+    /// Cheap: allocates no `AsyncRuntime` (they are created lazily inside the
+    /// pool and kept warm), so constructing one per invocation is fine.
     pub fn new() -> Self {
-        let runtime = AsyncRuntime::new().expect("Failed to create QuickJS runtime");
-        Self { runtime }
+        Self {
+            pool: GLOBAL_QUICKJS_POOL.clone(),
+        }
     }
 
-    /// Set runtime limits (async).
-    async fn configure_limits(&self, memory_bytes: usize, stack_bytes: usize) {
-        self.runtime.set_memory_limit(memory_bytes).await;
-        self.runtime.set_max_stack_size(stack_bytes).await;
+    /// Construct a runtime backed by a caller-supplied pool. Test-only, so
+    /// isolation / recycle / poisoning can be asserted against a dedicated
+    /// pool with a known capacity and recycle threshold without interfering
+    /// with the shared global pool.
+    #[cfg(test)]
+    pub(crate) fn with_pool(pool: Arc<QuickJsPool>) -> Self {
+        Self { pool }
+    }
+
+    /// Set runtime limits (async) on the checked-out runtime.
+    async fn configure_limits(runtime: &AsyncRuntime, memory_bytes: usize, stack_bytes: usize) {
+        runtime.set_memory_limit(memory_bytes).await;
+        runtime.set_max_stack_size(stack_bytes).await;
     }
 }
 
@@ -111,8 +133,18 @@ impl FunctionRuntime for QuickJsRuntime {
         })?
         .map_err(|_| Error::Internal("Function execution semaphore closed".to_string()))?;
 
-        // Set memory and stack limits from metadata
-        self.configure_limits(
+        // Check a runtime out of the pool for the EXCLUSIVE duration of this
+        // execution. `checkout` returns the runtime to the pool on drop only
+        // if we mark it healthy below; a runtime is never shared concurrently.
+        // (See QuickJsPool for the full tenant-isolation invariants.)
+        let mut checkout = self.pool.checkout().await?;
+        let runtime = checkout.runtime();
+
+        // Set memory and stack limits from metadata. Always re-set per
+        // execution so a reused runtime never inherits the previous tenant's
+        // limits.
+        Self::configure_limits(
+            &runtime,
             metadata.resource_limits.max_memory_bytes as usize,
             metadata.resource_limits.max_stack_bytes as usize,
         )
@@ -137,7 +169,7 @@ impl FunctionRuntime for QuickJsRuntime {
         let interrupted = Arc::new(AtomicBool::new(false));
         {
             let interrupted = interrupted.clone();
-            self.runtime
+            runtime
                 .set_interrupt_handler(Some(Box::new(move || {
                     if Instant::now() >= interrupt_deadline {
                         interrupted.store(true, Ordering::Relaxed);
@@ -163,18 +195,22 @@ impl FunctionRuntime for QuickJsRuntime {
             "Executing JavaScript function"
         );
 
-        // Set up module loader if we have files or code uses imports
-        if uses_modules || !files_arc.is_empty() {
+        // Replace the module loader on EVERY execution — even when this
+        // function ships no files — so a pooled runtime that previously served
+        // another tenant's modules cannot resolve a stale path. With an empty
+        // file map the resolver rejects every import (tenant isolation).
+        {
             let resolver = FunctionModuleResolver::new(files_arc.clone());
             let loader = FunctionModuleLoader::new(files_arc.clone());
-            self.runtime.set_loader(resolver, loader).await;
+            runtime.set_loader(resolver, loader).await;
         }
 
         // Create log collector
         let logs = Arc::new(Mutex::new(Vec::<LogEntry>::new()));
 
-        // Create context for this execution
-        let ctx = AsyncContext::full(&self.runtime)
+        // Create a FRESH context for this execution; it is dropped before the
+        // runtime returns to the pool, so no globals leak to the next tenant.
+        let ctx = AsyncContext::full(&runtime)
             .await
             .map_err(|e| Error::Internal(format!("Failed to create JS context: {}", e)))?;
 
@@ -400,8 +436,12 @@ impl FunctionRuntime for QuickJsRuntime {
         .await;
 
         // Remove the per-execution interrupt handler so a stale deadline
-        // cannot interrupt a later execution on a shared runtime instance.
-        self.runtime.set_interrupt_handler(None).await;
+        // cannot interrupt a later execution on a reused runtime instance.
+        runtime.set_interrupt_handler(None).await;
+
+        // Drop the context before the runtime returns to the pool so its
+        // globals cannot leak to the next tenant.
+        drop(ctx);
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -419,6 +459,11 @@ impl FunctionRuntime for QuickJsRuntime {
 
         match result {
             Ok(Ok(output)) => {
+                // Clean success: the runtime is in a well-defined state and may
+                // be returned to the pool. Every other arm (JS/Rust error,
+                // timeout, wall-clock interrupt) leaves the checkout un-healthy,
+                // so its runtime is dropped rather than reused (poisoning).
+                checkout.mark_healthy();
                 tracing::debug!(
                     execution_id = %execution_id,
                     output_is_null = output.is_null(),

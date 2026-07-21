@@ -513,11 +513,22 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 id
             }
             None => {
-                tracing::error!(
-                    "[lookup_user_node] No nodes found with user_id={} in workspace={}",
-                    user_id,
-                    workspace
-                );
+                // Expected for internal actors ("system", jobs) that have no
+                // user node — don't spam ERROR for those (~50k/day on a busy
+                // scheduler); a real user missing their node is still notable.
+                if user_id == "system" {
+                    tracing::debug!(
+                        "[lookup_user_node] No nodes found with user_id={} in workspace={}",
+                        user_id,
+                        workspace
+                    );
+                } else {
+                    tracing::warn!(
+                        "[lookup_user_node] No nodes found with user_id={} in workspace={}",
+                        user_id,
+                        workspace
+                    );
+                }
                 return None;
             }
         };
