@@ -6,14 +6,55 @@
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::HLC;
+use rocksdb::DB;
+use std::sync::Arc;
 
 use super::BranchRepositoryImpl;
 
+/// Entries buffered per RocksDB write. Batching turns one WAL append per copied
+/// entry into one per batch, which is the bulk of a fork's cost on a populated
+/// workspace.
+const COPY_BATCH_ENTRIES: usize = 1000;
+
 impl BranchRepositoryImpl {
     /// Physically copy all revision-aware indexes from source branch to target branch
-    /// Keeps the same revisions, only changes the branch name in the key
+    /// Keeps the same revisions, only changes the branch name in the key.
+    ///
+    /// The work is a long, fully synchronous RocksDB scan-and-write over twelve
+    /// column families, so it runs on a BLOCKING thread. Run directly on a Tokio
+    /// worker it parks that worker for the whole fork, and on a populated
+    /// workspace that starves unrelated requests on the same runtime — including
+    /// the cheap `get_branch` point read the fork's own caller does next, which
+    /// is how a fork could make an unrelated `branches().get("main")` hang until
+    /// the client's 30s timeout.
     pub(crate) async fn copy_branch_indexes(
         &self,
+        tenant_id: &str,
+        repo_id: &str,
+        source_branch: &str,
+        target_branch: &str,
+        max_revision: &HLC,
+    ) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let (tenant_id, repo_id) = (tenant_id.to_string(), repo_id.to_string());
+        let (source_branch, target_branch) = (source_branch.to_string(), target_branch.to_string());
+        let max_revision = *max_revision;
+        tokio::task::spawn_blocking(move || {
+            Self::copy_branch_indexes_blocking(
+                &db,
+                &tenant_id,
+                &repo_id,
+                &source_branch,
+                &target_branch,
+                &max_revision,
+            )
+        })
+        .await
+        .map_err(|e| raisin_error::Error::storage(format!("branch index copy panicked: {e}")))?
+    }
+
+    fn copy_branch_indexes_blocking(
+        db: &DB,
         tenant_id: &str,
         repo_id: &str,
         source_branch: &str,
@@ -46,16 +87,15 @@ impl BranchRepositoryImpl {
         ];
 
         for (cf_name, display_name) in cfs_to_copy {
-            let copied = self
-                .copy_cf_entries(
-                    tenant_id,
-                    repo_id,
-                    source_branch,
-                    target_branch,
-                    max_revision,
-                    cf_name,
-                )
-                .await?;
+            let copied = Self::copy_cf_entries(
+                db,
+                tenant_id,
+                repo_id,
+                source_branch,
+                target_branch,
+                max_revision,
+                cf_name,
+            )?;
 
             tracing::info!(
                 "Copied {} entries from {} CF (branch: {} -> {})",
@@ -69,9 +109,10 @@ impl BranchRepositoryImpl {
         Ok(())
     }
 
-    /// Copy entries from a specific column family, preserving revisions
-    async fn copy_cf_entries(
-        &self,
+    /// Copy entries from a specific column family, preserving revisions.
+    /// Synchronous by design — see `copy_branch_indexes`.
+    fn copy_cf_entries(
+        db: &DB,
         tenant_id: &str,
         repo_id: &str,
         source_branch: &str,
@@ -79,7 +120,7 @@ impl BranchRepositoryImpl {
         max_revision: &HLC,
         cf_name: &str,
     ) -> Result<usize> {
-        let cf = cf_handle(&self.db, cf_name)?;
+        let cf = cf_handle(db, cf_name)?;
 
         // Build prefix for source branch: {tenant}\0{repo}\0{source_branch}\0
         let source_prefix = keys::KeyBuilder::new()
@@ -94,15 +135,18 @@ impl BranchRepositoryImpl {
         // because the CF has a custom prefix extractor configured
         use rocksdb::IteratorMode;
         let iter = if cf_name == cf::ORDERED_CHILDREN {
-            self.db.iterator_cf(
+            db.iterator_cf(
                 &cf,
                 IteratorMode::From(&source_prefix_clone, rocksdb::Direction::Forward),
             )
         } else {
-            self.db.prefix_iterator_cf(&cf, source_prefix)
+            db.prefix_iterator_cf(&cf, source_prefix)
         };
 
         let mut copied_count = 0;
+        let mut skipped_unparseable = 0usize;
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut pending = 0usize;
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -136,35 +180,97 @@ impl BranchRepositoryImpl {
             let revision_opt = if cf_name == cf::ORDERED_CHILDREN {
                 Self::extract_ordered_children_revision(&key)
             } else {
-                self.extract_revision_from_key_parts(&parts, cf_name, &value)?
-            };
+                Self::extract_revision_from_key_parts(&parts, cf_name, &value, &key)?
+            }
+            // Last resort for the CFs whose revision sits in the MIDDLE of the
+            // key (a node id follows it), where the null-split arms above still
+            // mis-index when the ~HLC contains a null. Strictly additive: it only
+            // runs where the entry would otherwise have been dropped outright.
+            .or_else(|| Self::positional_revision_fallback(cf_name, &key));
+
+            // An entry whose revision we cannot read is DROPPED from the fork.
+            // That is data loss disguised as a successful copy — the forked
+            // branch simply doesn't contain that node, which downstream looks
+            // like "the page doesn't exist" rather than "the copy was lossy".
+            // Count them so a lossy fork is at least loud.
+            if revision_opt.is_none() {
+                skipped_unparseable += 1;
+            }
 
             // Only copy if revision <= max_revision
             if let Some(revision) = revision_opt {
                 if &revision <= max_revision {
                     // Create new key with target branch instead of source branch
                     // Replace the branch component (index 2) with target_branch
-                    let new_key = self.build_key_with_branch(&parts, target_branch);
+                    let new_key = Self::build_key_with_branch(&parts, target_branch);
 
                     // Write to target branch with same value (preserving revision)
-                    self.db
-                        .put_cf(&cf, new_key, &*value)
-                        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
-
+                    batch.put_cf(&cf, new_key, &*value);
+                    pending += 1;
                     copied_count += 1;
+
+                    if pending >= COPY_BATCH_ENTRIES {
+                        db.write(std::mem::take(&mut batch))
+                            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+                        pending = 0;
+                    }
                 }
             }
+        }
+
+        if pending > 0 {
+            db.write(batch)
+                .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+        }
+
+        if skipped_unparseable > 0 {
+            tracing::warn!(
+                cf = cf_name,
+                skipped = skipped_unparseable,
+                copied = copied_count,
+                source_branch,
+                target_branch,
+                "Branch fork DROPPED entries whose revision could not be parsed — \
+                 the forked branch is missing this content"
+            );
         }
 
         Ok(copied_count)
     }
 
-    /// Extract revision from key parts based on column family structure
+    /// Recover a revision from a key whose null-split parsing failed.
+    ///
+    /// Both shapes are located WITHOUT splitting, so a null byte inside the
+    /// 16-byte `~HLC` cannot shift them:
+    ///  - PROPERTY_INDEX / RELATION_INDEX / ORDERED_CHILDREN end with
+    ///    `…\0{~revision}\0{node_id}`. The trailing id is a uuid and contains no
+    ///    nulls, so the LAST null in the key is exactly the separator after the
+    ///    revision — take the 16 bytes before it.
+    ///  - Everything else ends with the revision, so take the last 16 bytes.
+    ///
+    /// Returns None rather than a guess when the key is too short to hold one.
+    fn positional_revision_fallback(cf_name: &str, key: &[u8]) -> Option<HLC> {
+        let id_follows_revision = cf_name == cf::PROPERTY_INDEX
+            || cf_name == cf::RELATION_INDEX
+            || cf_name == cf::ORDERED_CHILDREN;
+        if id_follows_revision {
+            let last_null = key.iter().rposition(|&b| b == 0)?;
+            let start = last_null.checked_sub(16)?;
+            return keys::decode_descending_revision(&key[start..last_null]).ok();
+        }
+        keys::extract_revision_from_key(key).ok()
+    }
+
+    /// Extract revision from key parts based on column family structure.
+    ///
+    /// `key` is the raw, unsplit key. It is needed because a `~HLC` is 16 raw
+    /// bytes that MAY CONTAIN NULLS, so `key.split(0)` can shred it into several
+    /// "parts" and shift every index after it — see `extract_trailing_revision`.
     fn extract_revision_from_key_parts(
-        &self,
         parts: &[&[u8]],
         cf_name: &str,
         value: &[u8],
+        key: &[u8],
     ) -> Result<Option<HLC>> {
         let revision_opt = if cf_name == cf::NODE_TYPES {
             match parts.get(3).copied() {
@@ -286,13 +392,21 @@ impl BranchRepositoryImpl {
                 None
             }
         } else if parts.len() >= 7 {
-            // NODES and PATH_INDEX: revision is at index 6
-            // (0=tenant, 1=repo, 2=branch, 3=workspace, 4=type, 5=id/path, 6=revision)
-            if parts[6].len() == 16 {
-                keys::decode_descending_revision(parts[6]).ok()
-            } else {
-                None
-            }
+            // NODES, PATH_INDEX, NODE_PATH (and node adjacency) all END with the
+            // revision — `node_key_versioned`/`path_index_key_versioned`/
+            // `node_path_key_versioned` all `push_revision(...)` last. So read it
+            // from the TAIL of the raw key, not from `parts[6]`.
+            //
+            // This is the same trap already documented for ORDERED_CHILDREN, and
+            // `keys::extract_revision_from_key` exists precisely for it: the
+            // 16-byte ~HLC is a bitwise-NOT encoding that CAN contain null bytes,
+            // so `split(0)` shreds the revision itself and `parts[6]` is a
+            // fragment of the wrong length. The old code then returned None and
+            // the entry was SILENTLY SKIPPED — so every fork randomly lost
+            // whichever nodes happened to have a null byte in their revision
+            // (~0.8% of them measured), and those pages were simply absent from
+            // the branch, which reads downstream as "that page doesn't exist".
+            keys::extract_revision_from_key(key).ok()
         } else {
             None
         };
@@ -334,7 +448,7 @@ impl BranchRepositoryImpl {
     }
 
     /// Build a new key with a different branch name
-    fn build_key_with_branch(&self, parts: &[&[u8]], target_branch: &str) -> Vec<u8> {
+    fn build_key_with_branch(parts: &[&[u8]], target_branch: &str) -> Vec<u8> {
         let mut new_key_parts = parts.iter().map(|p| p.to_vec()).collect::<Vec<_>>();
         new_key_parts[2] = target_branch.as_bytes().to_vec();
 
@@ -348,5 +462,81 @@ impl BranchRepositoryImpl {
         }
 
         new_key
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raisin_hlc::HLC;
+
+    /// Find an HLC whose descending encoding contains a null byte. These are
+    /// common — the encoding is a bitwise NOT, so any 0xFF byte in the source
+    /// becomes 0x00 — which is why they cannot be located by splitting on nulls.
+    fn hlc_with_null_in_encoding() -> HLC {
+        for counter in 0..4096u64 {
+            let hlc = HLC::new(0x0000_00FF_0000_0000, counter);
+            if hlc.encode_descending().contains(&0) {
+                return hlc;
+            }
+        }
+        panic!("no HLC with a null byte in its encoding found");
+    }
+
+    /// A fork must copy EVERY node, including those whose revision encoding
+    /// happens to contain a null byte.
+    ///
+    /// Regression: the NODES/PATH_INDEX arm read the revision from
+    /// `key.split(0)[6]`. When the 16-byte ~HLC contained a null, the split cut
+    /// the revision in half, that index held a short fragment, extraction
+    /// returned None — and the copy loop skipped the entry WITHOUT error. Every
+    /// forked branch silently lost ~0.8% of its nodes, so random pages 404'd in
+    /// the SSR preview while the fork reported success.
+    #[test]
+    fn revision_is_read_from_keys_whose_hlc_contains_a_null_byte() {
+        let hlc = hlc_with_null_in_encoding();
+        let key = keys::node_key_versioned("t", "r", "main", "ws", "node-1", &hlc);
+
+        assert!(
+            key.split(|&b| b == 0).count() > 7,
+            "this key must actually exercise the split hazard",
+        );
+
+        let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+        let got =
+            BranchRepositoryImpl::extract_revision_from_key_parts(&parts, cf::NODES, &[], &key)
+                .expect("extraction must not error");
+
+        assert_eq!(got, Some(hlc), "the entry would otherwise be dropped");
+    }
+
+    /// The ordinary case must keep working.
+    #[test]
+    fn revision_is_read_from_a_plain_node_key() {
+        let hlc = HLC::new(12_345, 7);
+        let key = keys::node_key_versioned("t", "r", "main", "ws", "node-1", &hlc);
+        let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+        let got =
+            BranchRepositoryImpl::extract_revision_from_key_parts(&parts, cf::NODES, &[], &key)
+                .unwrap();
+        assert_eq!(got, Some(hlc));
+    }
+
+    /// Rebuilding the key must preserve a null-containing revision byte-for-byte,
+    /// or the copied entry lands under a corrupted key.
+    #[test]
+    fn rebuilt_key_only_swaps_the_branch_segment() {
+        let hlc = hlc_with_null_in_encoding();
+        let key = keys::node_key_versioned("t", "r", "main", "ws", "node-1", &hlc);
+        let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+        let rebuilt = BranchRepositoryImpl::build_key_with_branch(&parts, "edit-x");
+
+        let expected = keys::node_key_versioned("t", "r", "edit-x", "ws", "node-1", &hlc);
+        assert_eq!(rebuilt, expected);
+        assert_eq!(
+            keys::extract_revision_from_key(&rebuilt).unwrap(),
+            hlc,
+            "the revision must survive the rebuild",
+        );
     }
 }

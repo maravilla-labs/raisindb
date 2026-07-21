@@ -32,6 +32,15 @@ pub struct Branch {
     /// Human-readable description of the branch
     #[serde(default)]
     pub description: Option<String>,
+    //
+    // NOTE — do not add fields here casually. Branch records are persisted with
+    // `rmp_serde::to_vec`, which encodes a struct as a positional ARRAY, so an
+    // extra field changes the arity and a server running the PREVIOUS build can
+    // no longer read records written by this one ("array had incorrect length").
+    // `#[serde(default)]` only buys the other direction (new code, old records).
+    // A `ready: bool` flag was prototyped here and removed for exactly that
+    // reason: it made the on-disk format one-way. Adding a field safely means
+    // switching these records to a named/map encoding first.
 }
 
 /// Branch divergence information (similar to "N commits ahead/behind")
