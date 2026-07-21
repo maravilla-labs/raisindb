@@ -600,16 +600,19 @@ async function createNodeFromYaml(
   if (parsed.properties) {
     properties = parsed.properties;
   } else {
-    const { node_type: _, ...rest } = parsed;
+    const { node_type: _, archetype: __, ...rest } = parsed;
     properties = rest;
   }
 
-  const postBody = {
+  const postBody: Record<string, unknown> = {
     name: nodeName,
     node_type: nodeType,
     path: `/${nodePath}`,
     properties,
   };
+  if (parsed.archetype) {
+    postBody.archetype = parsed.archetype;
+  }
 
   try {
     const response = await fetch(parentUrl, {
@@ -702,9 +705,12 @@ function buildPushBody(
     if (parsed.properties) {
       body.properties = parsed.properties;
     } else {
-      // The whole file is properties (minus node_type)
-      const { node_type, ...rest } = parsed;
+      // The whole file is properties (minus node_type/archetype)
+      const { node_type, archetype, ...rest } = parsed;
       body.properties = rest;
+    }
+    if (parsed.archetype) {
+      body.archetype = parsed.archetype;
     }
     return body;
   }
