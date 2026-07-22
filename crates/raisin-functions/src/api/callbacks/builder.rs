@@ -5,6 +5,8 @@
 
 //! Builder for assembling all RaisinFunctionApi callbacks
 
+use std::collections::HashMap;
+
 use super::lock_ops::*;
 use super::node_ops::*;
 use super::service_ops::*;
@@ -14,6 +16,10 @@ use super::transaction_ops::*;
 /// Builder for RaisinFunctionApi callbacks
 #[derive(Default)]
 pub struct RaisinFunctionApiCallbacks {
+    /// Function-binding plugin handlers, keyed by logical method name
+    /// (`"<ns>.<method>"`). Dispatched by `RaisinFunctionApi::plugin_call`.
+    /// Empty in a plain public build (no plugins registered).
+    pub plugin_callbacks: HashMap<String, PluginCallback>,
     pub node_get: Option<NodeGetCallback>,
     pub node_get_by_id: Option<NodeGetByIdCallback>,
     pub node_history: Option<NodeHistoryCallback>,

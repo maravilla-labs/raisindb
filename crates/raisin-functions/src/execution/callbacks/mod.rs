@@ -80,6 +80,9 @@ where
     let tx_store = Arc::new(transaction::TransactionStore::new());
 
     RaisinFunctionApiCallbacks {
+        // Function-binding plugin handlers registered at startup (empty in a
+        // plain public build — see crate::plugin). Wires raisin.<ns>.* bindings.
+        plugin_callbacks: crate::plugin::all_plugin_handlers(),
         // Node operations - all routed through SQL for consistent auto-commit
         node_get: Some(nodes::create_node_get(query_ctx.clone())),
         node_get_by_id: Some(nodes::create_node_get_by_id(query_ctx.clone())),

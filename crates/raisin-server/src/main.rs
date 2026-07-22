@@ -68,6 +68,17 @@ async fn main() {
     tracing::info!("  HTTP Port: {}", server_config.port);
     tracing::info!("  Data Directory: {}", server_config.data_dir);
 
+    // Load C-ABI function-binding plugins (`.so`/`.dylib`/`.dll`) from the plugin
+    // directory — `RAISIN_PLUGIN_DIR`, else `<data_dir>/plugins`. A distribution
+    // drops a per-platform plugin lib here to add `raisin.<ns>.*` bindings to the
+    // stock binary with no custom build. Must run before any function executes.
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        let plugin_dir = std::env::var("RAISIN_PLUGIN_DIR")
+            .unwrap_or_else(|_| format!("{}/plugins", server_config.data_dir));
+        raisin_functions::load_plugins_from_dir(&plugin_dir);
+    }
+
     // ========================================================================
     // Dev-mode banner & production secret validation
     // ========================================================================

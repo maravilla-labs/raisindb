@@ -149,6 +149,20 @@ pub trait FunctionApi: Send + Sync {
     /// Make an HTTP request to an allowlisted URL
     async fn http_request(&self, method: &str, url: &str, options: Value) -> Result<Value>;
 
+    // ========== Plugin Bindings ==========
+
+    /// Dispatch a `raisin.<ns>.<method>` call contributed by a registered
+    /// [`crate::plugin::FunctionBindingPlugin`]. `method` is the logical
+    /// `"<ns>.<method>"` name and `args` is the guest's positional-args JSON
+    /// array. Default: no plugin bound → error. Runs in trusted core and is NOT
+    /// subject to the tenant `network_policy`.
+    async fn plugin_call(&self, method: &str, _args: Value) -> Result<Value> {
+        Err(raisin_error::Error::Validation(format!(
+            "No plugin binding registered for '{}'",
+            method
+        )))
+    }
+
     // ========== Event Operations ==========
 
     /// Emit a custom event

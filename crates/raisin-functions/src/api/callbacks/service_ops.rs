@@ -25,6 +25,41 @@ pub type HttpRequestCallback = Arc<
         + Sync,
 >;
 
+// ========== Plugin Binding Callbacks ==========
+
+/// The trusted execution context handed to a [`PluginCallback`] — the identity
+/// the calling function runs under, bound SERVER-side (never from guest script).
+/// A plugin uses it to scope its outbound call (e.g. the `x-tenant-id` header on
+/// a Delivery request), so a tenant can never act as another tenant.
+#[derive(Debug, Clone)]
+pub struct PluginCallContext {
+    pub tenant_id: String,
+    pub repo_id: String,
+    pub branch: String,
+    pub workspace_id: Option<String>,
+}
+
+/// Callback servicing one method of a [`crate::plugin::FunctionBindingPlugin`].
+///
+/// Receives the trusted [`PluginCallContext`] and the positional-args JSON array
+/// the guest passed to the binding (e.g. `[request]` for
+/// `raisin.media.screenshot(request)`), and returns the method's JSON result.
+/// Registered in [`RaisinFunctionApiCallbacks::plugin_callbacks`], keyed by the
+/// logical method name (`"<namespace>.<method>"`), and dispatched by
+/// `RaisinFunctionApi::plugin_call`. The callback runs in trusted core — plugin
+/// bindings are NOT subject to the tenant `network_policy`, so a plugin (e.g.
+/// the Maravilla Delivery-media plugin) is the ONLY sanctioned way for a tenant
+/// function to reach an internal service.
+pub type PluginCallback = Arc<
+    dyn Fn(
+            PluginCallContext,
+            Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
 // ========== Event Operation Callbacks ==========
 
 /// Callback for event emission

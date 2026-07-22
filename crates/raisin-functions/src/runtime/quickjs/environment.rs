@@ -25,7 +25,7 @@ use crate::types::LogEntry;
 use super::api_fetch::register_fetch_internal;
 use super::api_temp::register_temp_internal;
 use super::console::{create_console_api, setup_timers_api};
-use super::gateway::register_registry_gateway;
+use super::gateway::{register_plugin_gateway, register_registry_gateway};
 
 /// Setup the JavaScript environment with the raisin API.
 ///
@@ -103,6 +103,11 @@ fn setup_raisin_api<'js>(
     // method up in the shared bindings registry and runs its invoker.
     register_registry_gateway(ctx, api.clone())?;
 
+    // Gateway for function-binding plugin methods (raisin.<ns>.*). Routes to
+    // FunctionApi::plugin_call, bypassing the registry. A no-op at the JS level
+    // when no plugins are registered (nothing calls it).
+    register_plugin_gateway(ctx, api.clone())?;
+
     // Internal namespace for the runtime-local host functions that cannot be
     // expressed as registry invokers (they bind per-execution state, not
     // FunctionApi): temp files and the W3C fetch plumbing.
@@ -111,8 +116,11 @@ fn setup_raisin_api<'js>(
     register_fetch_internal(ctx, &internal, api, abort_registry, stream_registry)?;
     globals.set("__raisin_internal", internal)?;
 
-    // Evaluate JS code that creates the public API with JSON parsing
-    ctx.eval::<(), _>(API_WRAPPER_JS.as_bytes().to_vec())?;
+    // Evaluate JS code that creates the public API with JSON parsing, then the
+    // registered function-binding plugins' snippets (empty in public builds).
+    let mut wrapper_src = String::from(API_WRAPPER_JS);
+    wrapper_src.push_str(&crate::plugin::assemble_plugin_js());
+    ctx.eval::<(), _>(wrapper_src.into_bytes())?;
 
     Ok(())
 }

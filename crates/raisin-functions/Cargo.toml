@@ -71,6 +71,9 @@ tokio-rustls = "0.26"
 # Native JWT/OIDC verification binding (raisin.crypto.verifyJwt). Pinned to the
 # same 9.3 line the rest of the workspace already uses.
 jsonwebtoken = "9.3"
+
+# Dynamic loading of C-ABI function-binding plugins (see `plugin_loader`).
+libloading = "0.8"
 webpki-roots = "1.0"
 
 [dev-dependencies]
