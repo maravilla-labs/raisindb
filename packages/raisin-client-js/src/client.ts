@@ -73,6 +73,14 @@ export interface AuthStateChange {
     user: IdentityUser | null;
     /** Current access token or null if signed out */
     accessToken: string | null;
+    /**
+     * Current EFFECTIVE roles (direct + group + inherited) for the connected
+     * user, or null/undefined when signed out. Populated from the WS auth
+     * handshake so role-gated consumers can read roles from the event without a
+     * separate call. Updated on SIGNED_IN, USER_UPDATED (incl. after a
+     * server-pushed permission change), and reconnect.
+     */
+    roles?: string[] | null;
   };
 }
 
@@ -166,6 +174,8 @@ export class RaisinClient extends EventEmitter {
   private _context: RequestContext;
   private options: Required<Omit<ClientOptions, 'connection' | 'tokenStorage' | 'mode' | 'logLevel' | 'httpBaseUrl' | 'repository'>>;
   private _currentUser: CurrentUser | null = null;
+  /** In-flight role re-resolve, used to coalesce concurrent refreshCurrentUser() calls. */
+  #refreshingUser: Promise<void> | null = null;
   private _httpBaseUrl: string;
   private _repository: string;
 
@@ -427,9 +437,19 @@ export class RaisinClient extends EventEmitter {
         // Handle connected message from server
         this.handleConnectedMessage(message);
       } else if (isEventMessage(message)) {
-        // Handle event message
-        logger.debug(`Routing to event handler`);
-        this.eventHandler.handleEvent(message);
+        // Out-of-band "your permissions may have changed" push (reserved
+        // subscription id / event type, sent by the server after an
+        // access-control write). Re-resolve roles instead of routing it to a
+        // normal subscription callback. Keep in sync with the server
+        // (raisin-transport-ws event_handler PERMISSIONS_EVENT_TYPE).
+        if ((message as { event_type?: string }).event_type === 'permissions:changed') {
+          logger.info('[permissions:changed] server signaled a role/permission change; re-resolving');
+          void this.refreshCurrentUser();
+        } else {
+          // Handle event message
+          logger.debug(`Routing to event handler`);
+          this.eventHandler.handleEvent(message);
+        }
       } else if (isResponseEnvelope(message)) {
         // Handle response message
         logger.debug(`Routing to response handler - request_id: ${(message as any).request_id}, status: ${(message as any).status}`);
@@ -837,10 +857,14 @@ export class RaisinClient extends EventEmitter {
       this.authManager.storage.setUser(user);
     }
 
-    // 8. Update current user
+    // 8. Update current user.
+    // Preserve the roles that authenticate({type:'jwt'}) just resolved from the
+    // server (client.ts authenticate() sets _currentUser.roles = response.roles).
+    // This overwrite exists to attach the fetched user node; it must NOT discard
+    // the effective roles, or getCurrentUser().roles would always be [].
     this._currentUser = {
       userId: user.id,
-      roles: [],
+      roles: this._currentUser?.roles ?? [],
       anonymous: false,
       node: userNode ?? undefined,
     };
@@ -936,10 +960,14 @@ export class RaisinClient extends EventEmitter {
       this.authManager.storage.setUser(user);
     }
 
-    // 8. Update current user
+    // 8. Update current user.
+    // Preserve the roles that authenticate({type:'jwt'}) just resolved from the
+    // server (client.ts authenticate() sets _currentUser.roles = response.roles).
+    // This overwrite exists to attach the fetched user node; it must NOT discard
+    // the effective roles, or getCurrentUser().roles would always be [].
     this._currentUser = {
       userId: user.id,
-      roles: [],
+      roles: this._currentUser?.roles ?? [],
       anonymous: false,
       node: userNode ?? undefined,
     };
@@ -1131,9 +1159,12 @@ export class RaisinClient extends EventEmitter {
           this.authManager.storage.setUser(user);
         }
 
+        // Preserve roles resolved by authenticate({type:'jwt'}) above — do not
+        // clobber them with [] (that made getCurrentUser().roles empty after a
+        // localStorage session restore).
         this._currentUser = {
           userId: user.id,
-          roles: [],
+          roles: this._currentUser?.roles ?? [],
           anonymous: false,
           node: userNode ?? undefined,
         };
@@ -1612,6 +1643,52 @@ export class RaisinClient extends EventEmitter {
   }
 
   /**
+   * Re-resolve the current user's EFFECTIVE roles from the server and refresh
+   * `getCurrentUser()`.
+   *
+   * Roles are deliberately not embedded in the JWT (they are resolved live
+   * server-side), so when an admin changes a user's roles/groups the token does
+   * not change — the client must re-ask. This re-runs the WS JWT auth handshake
+   * (which returns freshly resolved effective roles), updates `_currentUser`, and
+   * emits `USER_UPDATED` so role-gated UI can react without a reload.
+   *
+   * Called automatically when the server pushes `permissions:changed` after an
+   * access-control write, and exposed for on-demand refresh. Safe no-op when not
+   * authenticated.
+   */
+  async refreshCurrentUser(): Promise<void> {
+    // Coalesce concurrent re-resolves: a burst of `permissions:changed` pushes
+    // (e.g. during package/role seeding) collapses into a single in-flight
+    // handshake instead of a storm.
+    if (this.#refreshingUser) return this.#refreshingUser;
+    const token = this.authManager.storage.getAccessToken();
+    if (!token) return;
+    this.#refreshingUser = (async () => {
+      const before = JSON.stringify(this._currentUser?.roles ?? null);
+      const prevNode = this._currentUser?.node;
+      try {
+        // authenticate({type:'jwt'}) re-resolves roles and rebuilds _currentUser
+        // (without the node); preserve the previously-fetched node.
+        await this.authenticate({ type: 'jwt', token });
+        if (this._currentUser && prevNode && !this._currentUser.node) {
+          this._currentUser.node = prevNode;
+        }
+        // Only notify when the effective roles actually changed — avoids
+        // redundant USER_UPDATED churn when a push carried no role change.
+        const after = JSON.stringify(this._currentUser?.roles ?? null);
+        if (after !== before) {
+          this._emitAuthEvent('USER_UPDATED');
+        }
+      } catch (err) {
+        logger.warn('[refreshCurrentUser] role re-resolve failed:', err);
+      } finally {
+        this.#refreshingUser = null;
+      }
+    })();
+    return this.#refreshingUser;
+  }
+
+  /**
    * Get current user ID
    *
    * @returns User ID or null if not connected/authenticated
@@ -1835,6 +1912,9 @@ export class RaisinClient extends EventEmitter {
     const session = {
       user: this.getStoredUser(),
       accessToken: this.authManager.storage.getAccessToken(),
+      // Surface effective roles so role-gated consumers can react to
+      // SIGNED_IN / USER_UPDATED without calling getCurrentUser() themselves.
+      roles: this._currentUser?.roles ?? null,
     };
     const change: AuthStateChange = { event, session };
 

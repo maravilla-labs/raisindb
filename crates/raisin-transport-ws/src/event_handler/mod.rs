@@ -9,11 +9,29 @@
 mod event_types;
 mod forwarding;
 
-use raisin_events::{Event, EventHandler};
+use raisin_events::{Event, EventHandler, NodeEvent};
 use raisin_storage::Storage;
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use crate::protocol::EventMessage;
 use crate::registry::ConnectionRegistry;
+
+/// Workspace that stores access-control nodes (users/roles/groups). A write here
+/// can change some connected user's effective roles.
+const ACCESS_CONTROL_WORKSPACE: &str = "raisin:access_control";
+
+/// Node types within the access-control workspace whose writes can actually
+/// change a user's effective roles. Other node types in that workspace (relation
+/// types, config, seed data, …) are ignored so package/seed writes don't trigger
+/// a re-resolve storm.
+const ROLE_BEARING_NODE_TYPES: [&str; 3] = ["raisin:User", "raisin:Role", "raisin:Group"];
+
+/// Reserved subscription id + event type for the out-of-band "your permissions
+/// may have changed, re-resolve" push. The client recognizes these and re-runs
+/// its JWT auth to refresh `getCurrentUser().roles` — it is NOT a normal
+/// subscription event. Keep in sync with the SDK (`client.ts` handleMessage).
+const PERMISSIONS_SUBSCRIPTION: &str = "__permissions__";
+const PERMISSIONS_EVENT_TYPE: &str = "permissions:changed";
 
 /// Event handler that forwards RaisinDB events to WebSocket connections
 ///
@@ -39,8 +57,64 @@ impl<S: Storage> WsEventHandler<S> {
         Self { registry, storage }
     }
 
+    /// Broadcast a "permissions changed" signal to every authenticated
+    /// connection after any write to the access-control workspace.
+    ///
+    /// This is deliberately coarse: ACL writes are rare (admin actions), and each
+    /// client re-resolves its own roles cheaply, so we notify all authenticated
+    /// connections rather than maintain a user→connection index and fan out
+    /// role/group membership. Anonymous connections are skipped. The push reuses
+    /// the existing `EventMessage` channel with a reserved subscription id so no
+    /// new protocol envelope is needed.
+    fn broadcast_permissions_changed(&self, node_event: &NodeEvent) {
+        let connections = self.registry.get_all();
+        if connections.is_empty() {
+            return;
+        }
+        let payload = serde_json::json!({
+            "workspace": node_event.workspace_id,
+            "path": node_event.path,
+            "kind": format!("{:?}", node_event.kind),
+        });
+        let mut notified = 0usize;
+        for connection in &connections {
+            let conn = connection.read();
+            if !conn.is_authenticated() {
+                continue; // anonymous — nothing to refresh
+            }
+            let msg = EventMessage::new(
+                PERMISSIONS_SUBSCRIPTION.to_string(),
+                PERMISSIONS_EVENT_TYPE.to_string(),
+                payload.clone(),
+            );
+            if conn.send_event(msg).is_ok() {
+                notified += 1;
+            }
+        }
+        tracing::debug!(
+            "Access-control write on {} — notified {} authenticated connection(s) to re-resolve roles",
+            node_event.path.as_deref().unwrap_or("<unknown>"),
+            notified
+        );
+    }
+
     /// Extract event information and forward to matching connections
     async fn forward_event(&self, event: &Event) {
+        // Writes to role-bearing access-control nodes may change a connected
+        // user's effective roles. Fire the coarse "re-resolve your roles" push in
+        // addition to normal subscription forwarding below. Gated on node type so
+        // package/seed writes to other access-control nodes don't cause a storm.
+        if let Event::Node(node_event) = event {
+            let is_role_bearing = node_event
+                .node_type
+                .as_deref()
+                .map(|t| ROLE_BEARING_NODE_TYPES.contains(&t))
+                .unwrap_or(false);
+            if node_event.workspace_id == ACCESS_CONTROL_WORKSPACE && is_role_bearing {
+                self.broadcast_permissions_changed(node_event);
+            }
+        }
+
         // Use workspace-indexed lookup for node events (most common case)
         // Falls back to get_all() for other event types
         let connections = match event {

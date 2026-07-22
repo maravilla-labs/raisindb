@@ -16,7 +16,7 @@ use crate::state::AppState;
 /// identity users, and user profile/API key management.
 #[cfg(feature = "storage-rocksdb")]
 pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
-    use crate::middleware::require_auth_middleware;
+    use crate::middleware::{optional_auth_middleware, require_auth_middleware};
     use axum::middleware::from_fn_with_state;
     use axum::routing::{get, post};
 
@@ -86,8 +86,15 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
             "/auth/sessions/{session_id}",
             axum::routing::delete(crate::handlers::identity_auth::revoke_session),
         )
-        // Current identity info (requires auth)
-        .route("/auth/me", get(crate::handlers::identity_auth::get_me))
+        // Current identity info. Uses OPTIONAL auth so the handler can populate
+        // AuthContext (and thus real roles) for authenticated callers while still
+        // returning an anonymous body for unauthenticated ones. Without this layer
+        // the route sees no AuthContext and always reports anonymous/empty roles.
+        .route(
+            "/auth/me",
+            get(crate::handlers::identity_auth::get_me)
+                .layer(from_fn_with_state(state.clone(), optional_auth_middleware)),
+        )
         // ----------------------------------------------------------------
         // Repository-Scoped Authentication
         // ----------------------------------------------------------------
@@ -111,9 +118,13 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
             "/auth/{repo}/providers",
             get(crate::handlers::identity_auth::get_providers_for_repo),
         )
+        // Repo-scoped identity info. Same optional-auth layer as `/auth/me`:
+        // required so `get_me_for_repo` receives an AuthContext and can return the
+        // caller's resolved roles instead of always reporting anonymous.
         .route(
             "/auth/{repo}/me",
-            get(crate::handlers::identity_auth::get_me_for_repo),
+            get(crate::handlers::identity_auth::get_me_for_repo)
+                .layer(from_fn_with_state(state.clone(), optional_auth_middleware)),
         )
         // ----------------------------------------------------------------
         // Workspace Access Control
