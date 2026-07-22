@@ -18,6 +18,7 @@
 
 use serde_json::{json, Value};
 
+use crate::data_tools::nodes::{resolve_workspace, workspace_arg_schema, AllowedWorkspaces};
 use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
 use crate::registry::{Tool, ToolDescriptor, ToolKind};
@@ -29,15 +30,16 @@ const DEFAULT_LIMIT: usize = 20;
 /// Largest number of hits a single `search_nodes` call returns.
 const MAX_LIMIT: usize = 200;
 
-/// `search_nodes` — full-text or vector search over the active workspace.
+/// `search_nodes` — full-text or vector search over a workspace.
 pub struct SearchNodesTool {
     search: SharedSearchProvider,
+    allowed: AllowedWorkspaces,
 }
 
 impl SearchNodesTool {
     /// Wrap a search provider as the `search_nodes` tool.
-    pub fn new(search: SharedSearchProvider) -> Self {
-        Self { search }
+    pub fn new(search: SharedSearchProvider, allowed: AllowedWorkspaces) -> Self {
+        Self { search, allowed }
     }
 }
 
@@ -49,7 +51,7 @@ impl Tool for SearchNodesTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor::new(
             "search_nodes",
-            "Search nodes in the active workspace by full-text or vector similarity.",
+            "Search nodes in a workspace by full-text or vector similarity.",
             json!({
                 "type": "object",
                 "properties": {
@@ -60,7 +62,8 @@ impl Tool for SearchNodesTool {
                         "description": "Search mode: lexical (default) or semantic."
                     },
                     "node_type": { "type": "string", "description": "Restrict to an exact node type." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": "Maximum hits to return." }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": "Maximum hits to return." },
+                    "workspace": workspace_arg_schema()
                 },
                 "required": ["query"]
             }),
@@ -69,6 +72,7 @@ impl Tool for SearchNodesTool {
     }
 
     async fn call(&self, identity: &McpIdentity, args: Value) -> Result<Value> {
+        let workspace = resolve_workspace(&args, identity, &self.allowed)?;
         let query_text = args
             .get("query")
             .and_then(Value::as_str)
@@ -96,7 +100,7 @@ impl Tool for SearchNodesTool {
             .map(str::to_string);
 
         let query = SearchQuery {
-            workspace: identity.workspace.clone(),
+            workspace: workspace.into_owned(),
             branch: identity.branch.clone(),
             query: query_text.to_string(),
             mode,

@@ -36,6 +36,7 @@ mod property_index_scan;
 mod property_order_scan;
 mod property_range_scan;
 mod reference_scan;
+mod schema_table_scan;
 mod spatial_scan;
 mod table_scan;
 mod vector_scan;

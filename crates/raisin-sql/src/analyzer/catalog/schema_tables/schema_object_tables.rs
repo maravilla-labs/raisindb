@@ -229,6 +229,14 @@ pub(crate) fn archetypes_table() -> TableDef {
                 nullable: true,
                 generated: None,
             },
+            // Read-side exposure of the archetype's `meta` bag (meta.editor etc.).
+            // Populated by the schema-table read path; the write path ignores it.
+            ColumnDef {
+                name: "meta".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
             ColumnDef {
                 name: "version".into(),
                 data_type: DataType::Int,
@@ -303,6 +311,14 @@ pub(crate) fn element_types_table() -> TableDef {
                 nullable: false,
                 generated: None,
             },
+            // Read-side exposure of the element type's `extends` (e.g. studio:Component)
+            // so callers can resolve inherited fields. Write path ignores it.
+            ColumnDef {
+                name: "extends".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: None,
+            },
             ColumnDef {
                 name: "icon".into(),
                 data_type: DataType::Text,
@@ -319,6 +335,14 @@ pub(crate) fn element_types_table() -> TableDef {
                 name: "fields".into(),
                 data_type: DataType::JsonB,
                 nullable: false,
+                generated: None,
+            },
+            // Read-side exposure of the element type's `meta` bag (meta.hidden,
+            // meta.policies, meta.editor). Write path ignores it.
+            ColumnDef {
+                name: "meta".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
                 generated: None,
             },
             ColumnDef {

@@ -235,20 +235,26 @@ pub struct CallToolResult {
 }
 
 impl CallToolResult {
-    /// A successful result carrying a single JSON content block.
+    /// A successful result carrying a single JSON value.
+    ///
+    /// Per the MCP spec, `content` items must be one of the standard block types
+    /// (`text`/`image`/`audio`/`resource`) — a `json` block is rejected by strict
+    /// clients (e.g. Claude Desktop). So the value is serialized into a `text`
+    /// block; machine-readable callers use `structuredContent` where present.
     pub fn json(value: Value) -> Self {
         Self {
-            content: vec![ContentBlock::json(value)],
+            content: vec![ContentBlock::json_text(&value)],
             is_error: false,
             structured_content: None,
         }
     }
 
     /// A successful result whose JSON value also satisfies the tool's
-    /// `outputSchema` — carried both as a content block and as `structuredContent`.
+    /// `outputSchema` — carried as a spec-compliant `text` content block AND as
+    /// `structuredContent`.
     pub fn json_structured(value: Value) -> Self {
         Self {
-            content: vec![ContentBlock::json(value.clone())],
+            content: vec![ContentBlock::json_text(&value)],
             is_error: false,
             structured_content: Some(value),
         }
@@ -289,6 +295,15 @@ impl ContentBlock {
     /// Build a JSON content block.
     pub fn json(json: Value) -> Self {
         Self::Json { json }
+    }
+
+    /// Build a spec-compliant `text` content block holding a serialized JSON
+    /// value (pretty-printed for readability; compact on serialize failure).
+    pub fn json_text(value: &Value) -> Self {
+        Self::Text {
+            text: serde_json::to_string_pretty(value)
+                .unwrap_or_else(|_| value.to_string()),
+        }
     }
 }
 

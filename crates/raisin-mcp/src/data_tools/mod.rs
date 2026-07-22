@@ -55,6 +55,9 @@ pub fn build_data_tools(
 ) -> Vec<Arc<dyn DynTool>> {
     let mut tools: Vec<Arc<dyn DynTool>> = Vec::new();
     let workspaces = policy.workspaces.clone();
+    // Shared, immutable set of workspaces the caller may target via a tool's
+    // optional `workspace` argument (defaults to the active workspace).
+    let allowed: Arc<Vec<String>> = Arc::new(workspaces.clone());
 
     for op in DataOperation::ALL {
         if !policy.allows(op) {
@@ -62,24 +65,24 @@ pub fn build_data_tools(
         }
         match op {
             DataOperation::QueryNodes => {
-                tools.push(Arc::new(QueryNodesTool::new(backend.clone())));
+                tools.push(Arc::new(QueryNodesTool::new(backend.clone(), allowed.clone())));
             }
             DataOperation::GetNode => {
-                tools.push(Arc::new(GetNodeTool::new(backend.clone())));
+                tools.push(Arc::new(GetNodeTool::new(backend.clone(), allowed.clone())));
             }
             DataOperation::SearchNodes => {
                 if let Some(search) = &search {
-                    tools.push(Arc::new(SearchNodesTool::new(search.clone())));
+                    tools.push(Arc::new(SearchNodesTool::new(search.clone(), allowed.clone())));
                 }
             }
             DataOperation::CreateNode => {
-                tools.push(Arc::new(CreateNodeTool::new(backend.clone())));
+                tools.push(Arc::new(CreateNodeTool::new(backend.clone(), allowed.clone())));
             }
             DataOperation::UpdateNode => {
-                tools.push(Arc::new(UpdateNodeTool::new(backend.clone())));
+                tools.push(Arc::new(UpdateNodeTool::new(backend.clone(), allowed.clone())));
             }
             DataOperation::DeleteNode => {
-                tools.push(Arc::new(DeleteNodeTool::new(backend.clone())));
+                tools.push(Arc::new(DeleteNodeTool::new(backend.clone(), allowed.clone())));
             }
             DataOperation::ListWorkspaces => {
                 tools.push(Arc::new(ListWorkspacesTool::new(workspaces.clone())));

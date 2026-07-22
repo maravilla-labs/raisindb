@@ -69,6 +69,16 @@ pub async fn execute_table_scan<S: Storage + 'static>(
         .await;
     }
 
+    // Intercept the reserved schema tables (NodeTypes / Archetypes / ElementTypes):
+    // a SELECT reads the type registry instead of the content-node tree.
+    if let Some(kind) = raisin_sql::analyzer::catalog::SchemaTableKind::from_table_name(&table) {
+        let qualifier = alias.clone().unwrap_or_else(|| table.clone());
+        return super::schema_table_scan::execute_schema_table_scan(
+            kind, ctx, qualifier, filter, projection, limit,
+        )
+        .await;
+    }
+
     let storage = ctx.storage.clone();
     let max_revision = ctx.max_revision;
     let qualifier = alias.clone().unwrap_or_else(|| table.clone());
