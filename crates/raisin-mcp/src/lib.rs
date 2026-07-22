@@ -104,9 +104,10 @@ pub use resources::{
     parse_resource_uri, resource_uri, NodeResourceProvider, ResourceContents, ResourceDescriptor,
     RESOURCE_SCHEME,
 };
-pub use server::{CustomTool, DataOperation, DataPolicy, McpServerDescriptor};
+pub use server::{CustomTool, DataOperation, DataPolicy, McpServerDescriptor, UiBinding, UiMode};
 pub use services::{
-    EventSource, FunctionInvoker, NodeChange, NodeChangeStream, SearchHit, SearchMode,
-    SearchProvider, SearchQuery, SharedEventSource, SharedFunctionInvoker, SharedSearchProvider,
+    AssetBytes, AssetReader, EventSource, FunctionInvoker, NodeChange, NodeChangeStream, SearchHit,
+    SearchMode, SearchProvider, SearchQuery, SharedAssetReader, SharedEventSource,
+    SharedFunctionInvoker, SharedSearchProvider,
 };
 pub use transport::McpEndpoint;

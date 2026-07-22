@@ -102,6 +102,13 @@ pub(crate) fn repository_routes(state: &AppState) -> Router<AppState> {
             "/api/repository/{repo}/{branch}/rev/{revision}/{ws}/{*node_path}",
             get(crate::handlers::repo::repo_get_at_revision),
         )
+        // ----------------------------------------------------------------
+        // Generic static-content endpoint (serve a folder/asset subtree)
+        // ----------------------------------------------------------------
+        .route(
+            "/resources/{repo}/{branch}/{ws}/{*path}",
+            get(crate::handlers::static_site::serve_static),
+        )
         .layer(from_fn(raisin_parsing_middleware));
 
     // Apply optional auth middleware (RocksDB only)

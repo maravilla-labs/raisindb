@@ -131,7 +131,7 @@ async fn dispatch(
 
     use api_factory::build_mcp_function_api;
     use identity::mcp_identity_from_auth;
-    use services::{BusEventSource, HttpFunctionInvoker, HttpSearchProvider};
+    use services::{BusEventSource, HttpAssetReader, HttpFunctionInvoker, HttpSearchProvider};
 
     // Caller-scoped backend: data tools read/write as the authenticated identity
     // (or anonymous), so RLS governs what their calls can touch.
@@ -204,9 +204,18 @@ async fn dispatch(
         tenant_id,
         repo,
     ));
-    let resources = NodeResourceProvider::new(backend).with_events(events);
+    // Asset reader: serves raw `raisin:Asset` bytes (RLS-scoped) for blob
+    // resource reads and `mode: html` MCP-UI widgets.
+    let assets: Arc<dyn raisin_mcp::AssetReader> =
+        Arc::new(HttpAssetReader::new(state.clone(), tenant_id, repo));
 
-    let dispatcher = Dispatcher::new(descriptor, registry).with_resources(resources);
+    let resources = NodeResourceProvider::new(backend)
+        .with_events(events)
+        .with_asset_reader(assets.clone());
+
+    let dispatcher = Dispatcher::new(descriptor, registry)
+        .with_resources(resources)
+        .with_asset_reader(assets);
 
     // `resources/subscribe` upgrades to an SSE stream of update notifications.
     if request.method == "resources/subscribe" && request.id.is_some() {

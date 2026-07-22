@@ -24,6 +24,9 @@
 //!   by the Tantivy / HNSW engines.
 //! - [`EventSource`] — a live stream of node-change events, bridged from the
 //!   in-process event bus, used to back `resources/subscribe`.
+//! - [`AssetReader`] — raw asset bytes + mime for a `(workspace, path)`, used to
+//!   serve `raisin:Asset` content byte-for-byte over `resources/read` and to
+//!   back `mode: html` MCP-UI widget resources.
 //!
 //! The node read / write / query / SQL data path is *not* abstracted here: it
 //! uses [`raisin_functions::FunctionApi`] directly (see [`crate::data_tools`]),
@@ -178,3 +181,40 @@ pub trait EventSource: Send + Sync {
 
 /// Shared handle to an [`EventSource`].
 pub type SharedEventSource = Arc<dyn EventSource>;
+
+// ---------------------------------------------------------------------------
+// Asset bytes
+// ---------------------------------------------------------------------------
+
+/// Raw bytes of a `raisin:Asset` plus its resolved MIME type.
+///
+/// The owned result an [`AssetReader`] hands back: the file's bytes and the
+/// content type to serve them with (stored `mime_type`, else guessed from the
+/// path).
+#[derive(Debug, Clone)]
+pub struct AssetBytes {
+    /// The asset's raw file bytes.
+    pub bytes: Vec<u8>,
+    /// MIME type to serve `bytes` with.
+    pub mime_type: String,
+}
+
+/// Reads raw `raisin:Asset` bytes on behalf of the MCP engine.
+///
+/// Implementors resolve the node at `(workspace, path)` through the RLS-scoped
+/// node service — so the read is denied when the caller may not see it — and
+/// only then fetch the underlying bytes from binary storage. The repository and
+/// branch come from the calling [`McpIdentity`]. This keeps the engine's "never
+/// touches storage directly" rule: the hosting transport owns the byte fetch.
+pub trait AssetReader: Send + Sync {
+    /// Read the asset at `workspace`/`path` as `identity`.
+    fn read_asset<'a>(
+        &'a self,
+        identity: &'a McpIdentity,
+        workspace: &'a str,
+        path: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<AssetBytes>> + Send + 'a>>;
+}
+
+/// Shared handle to an [`AssetReader`].
+pub type SharedAssetReader = Arc<dyn AssetReader>;

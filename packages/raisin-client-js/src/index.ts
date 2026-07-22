@@ -286,6 +286,21 @@ export type {
   FunctionInvokeSyncResponse
 } from './functions-api';
 
+// MCP client (talk to a raisin:McpServer over JSON-RPC)
+export { McpClient } from './mcp';
+export type {
+  McpTransport,
+  McpFrameStream,
+  McpJsonRpcFrame,
+  McpToolDescriptor,
+  McpContentBlock,
+  McpCallToolResult,
+  McpResourceContents,
+  McpReadResourceResult,
+  McpResourceUpdate,
+  McpResourceSubscription,
+} from './mcp';
+
 // Flow execution (WebSocket)
 export { FlowsApi } from './flows';
 export type {

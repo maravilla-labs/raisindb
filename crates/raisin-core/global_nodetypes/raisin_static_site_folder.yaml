@@ -1,0 +1,27 @@
+name: raisin:StaticSiteFolder
+description: >
+  A folder whose subtree is served as a static site through the static-content
+  endpoint (GET /resources/{repo}/{branch}/{ws}/{path}). Carries an optional
+  serving_config that drives the HTTP response headers (CSP frame-ancestors,
+  CORS, cache-control) and the index document for everything beneath it.
+icon: globe
+version: 1
+extends: raisin:Folder
+indexable: true
+index_types: [Fulltext]
+properties:
+  - name: serving_config
+    type: Object
+    title: Serving Config
+    required: false
+    description: >
+      Static-serving overrides applied to this folder's subtree. Recognized
+      fields - frame_ancestors (array of origins allowed to iframe these pages;
+      omitted means not embeddable), cors_allowed_origins (array of origins
+      allowed to make cross-origin requests), cache_control (Cache-Control
+      header value for assets), index_document (folder index filename, default
+      "index.html").
+allowed_children: []
+versionable: true
+publishable: true
+auditable: true

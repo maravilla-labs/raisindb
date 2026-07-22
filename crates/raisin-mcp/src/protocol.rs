@@ -284,6 +284,12 @@ pub enum ContentBlock {
         /// The JSON value.
         json: Value,
     },
+    /// An embedded resource (e.g. an MCP-UI widget delivered inline as
+    /// `text/html`, or a `text/uri-list` pointer to an iframable page).
+    Resource {
+        /// The embedded resource contents.
+        resource: crate::resources::ResourceContents,
+    },
 }
 
 impl ContentBlock {
@@ -297,12 +303,16 @@ impl ContentBlock {
         Self::Json { json }
     }
 
+    /// Build an embedded-resource content block.
+    pub fn resource(resource: crate::resources::ResourceContents) -> Self {
+        Self::Resource { resource }
+    }
+
     /// Build a spec-compliant `text` content block holding a serialized JSON
     /// value (pretty-printed for readability; compact on serialize failure).
     pub fn json_text(value: &Value) -> Self {
         Self::Text {
-            text: serde_json::to_string_pretty(value)
-                .unwrap_or_else(|_| value.to_string()),
+            text: serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
         }
     }
 }

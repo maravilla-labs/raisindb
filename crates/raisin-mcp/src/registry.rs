@@ -31,7 +31,7 @@ use raisin_functions::FunctionApi;
 use crate::data_tools::build_data_tools;
 use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
-use crate::server::{CustomTool, FunctionMeta, McpServerDescriptor};
+use crate::server::{CustomTool, FunctionMeta, McpServerDescriptor, UiBinding};
 use crate::services::{SharedFunctionInvoker, SharedSearchProvider};
 
 /// NodeType name of an MCP server declaration node.
@@ -82,6 +82,9 @@ pub struct ToolDescriptor {
     pub scopes: Vec<String>,
     /// Whether the tool is a data operation or a function.
     pub kind: ToolKind,
+    /// Optional MCP-UI binding the dispatcher uses to shape the call result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiBinding>,
 }
 
 impl ToolDescriptor {
@@ -99,6 +102,7 @@ impl ToolDescriptor {
             output_schema: None,
             scopes: Vec::new(),
             kind,
+            ui: None,
         }
     }
 
@@ -114,6 +118,12 @@ impl ToolDescriptor {
         self
     }
 
+    /// Attach an MCP-UI binding.
+    pub fn with_ui(mut self, ui: Option<UiBinding>) -> Self {
+        self.ui = ui;
+        self
+    }
+
     /// Build a no-argument data-tool descriptor.
     pub fn no_args(
         name: impl Into<String>,
@@ -126,6 +136,11 @@ impl ToolDescriptor {
             json!({ "type": "object", "properties": {} }),
             kind,
         )
+    }
+
+    /// Whether this tool carries an MCP-UI binding.
+    pub fn has_ui(&self) -> bool {
+        self.ui.is_some()
     }
 }
 

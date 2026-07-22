@@ -65,24 +65,39 @@ pub fn build_data_tools(
         }
         match op {
             DataOperation::QueryNodes => {
-                tools.push(Arc::new(QueryNodesTool::new(backend.clone(), allowed.clone())));
+                tools.push(Arc::new(QueryNodesTool::new(
+                    backend.clone(),
+                    allowed.clone(),
+                )));
             }
             DataOperation::GetNode => {
                 tools.push(Arc::new(GetNodeTool::new(backend.clone(), allowed.clone())));
             }
             DataOperation::SearchNodes => {
                 if let Some(search) = &search {
-                    tools.push(Arc::new(SearchNodesTool::new(search.clone(), allowed.clone())));
+                    tools.push(Arc::new(SearchNodesTool::new(
+                        search.clone(),
+                        allowed.clone(),
+                    )));
                 }
             }
             DataOperation::CreateNode => {
-                tools.push(Arc::new(CreateNodeTool::new(backend.clone(), allowed.clone())));
+                tools.push(Arc::new(CreateNodeTool::new(
+                    backend.clone(),
+                    allowed.clone(),
+                )));
             }
             DataOperation::UpdateNode => {
-                tools.push(Arc::new(UpdateNodeTool::new(backend.clone(), allowed.clone())));
+                tools.push(Arc::new(UpdateNodeTool::new(
+                    backend.clone(),
+                    allowed.clone(),
+                )));
             }
             DataOperation::DeleteNode => {
-                tools.push(Arc::new(DeleteNodeTool::new(backend.clone(), allowed.clone())));
+                tools.push(Arc::new(DeleteNodeTool::new(
+                    backend.clone(),
+                    allowed.clone(),
+                )));
             }
             DataOperation::ListWorkspaces => {
                 tools.push(Arc::new(ListWorkspacesTool::new(workspaces.clone())));

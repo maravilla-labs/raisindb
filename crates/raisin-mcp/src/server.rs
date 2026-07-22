@@ -109,6 +109,51 @@ impl DataPolicy {
     }
 }
 
+/// How an MCP host should render a tool's bound UI widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiMode {
+    /// Single-file widget: the engine reads the entry asset's bytes and returns
+    /// them as an inline `text/html` resource the host renders via `srcdoc`. No
+    /// cross-origin iframe, so folder serving config never applies.
+    Html,
+    /// Multi-file widget: the returned resource is a `text/uri-list` pointing at
+    /// the static endpoint, which the host iframes with a real `src=`. This is
+    /// the only mode where `raisin:StaticSiteFolder.serving_config` matters.
+    UriList,
+}
+
+/// A tool's optional MCP-UI binding: a delivery mode plus a workspace-relative
+/// path (with an optional `#fragment`) to the widget's entry document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiBinding {
+    /// How the host should render the widget.
+    pub mode: UiMode,
+    /// Workspace-relative path to the entry document, optionally suffixed with a
+    /// `#fragment` naming an in-app SPA route (`site/widgets/order/index.html#/card`).
+    pub entry: String,
+}
+
+impl UiBinding {
+    /// Split [`entry`](Self::entry) into its file path and optional fragment.
+    ///
+    /// The fragment is everything after the *first* `#` (passed through verbatim,
+    /// including the `#`-less remainder); the path is everything before it. A
+    /// fragment never affects which file is read — only which in-app route the
+    /// widget boots into.
+    pub fn split_entry(&self) -> (&str, Option<&str>) {
+        split_entry(&self.entry)
+    }
+}
+
+/// Split a widget `entry` string into `(path, fragment)` on the first `#`.
+pub fn split_entry(entry: &str) -> (&str, Option<&str>) {
+    match entry.split_once('#') {
+        Some((path, fragment)) => (path, Some(fragment)),
+        None => (entry, None),
+    }
+}
+
 /// A custom tool a server author declares, mapping to a `raisin:Function`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomTool {
@@ -133,6 +178,9 @@ pub struct CustomTool {
     /// Scopes a caller must hold to invoke this tool.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Optional MCP-UI binding: renders a widget alongside the tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiBinding>,
 }
 
 fn default_object_schema() -> Value {
@@ -242,6 +290,11 @@ impl CustomTool {
             })
             .unwrap_or_default();
 
+        let ui = mcp
+            .get("ui")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<UiBinding>(v).ok());
+
         Some(Self {
             name,
             description,
@@ -249,6 +302,7 @@ impl CustomTool {
             input_schema,
             output_schema,
             scopes,
+            ui,
         })
     }
 
@@ -478,6 +532,7 @@ mod tests {
             input_schema: default_object_schema(),
             output_schema: None,
             scopes: vec![],
+            ui: None,
         };
         let meta = FunctionMeta::from_props(&json!({
             "name": "recommend",
@@ -503,6 +558,7 @@ mod tests {
             input_schema: explicit_input.clone(),
             output_schema: Some(json!({ "type": "string" })),
             scopes: vec![],
+            ui: None,
         };
         let meta = FunctionMeta::from_props(&json!({
             "name": "f", "description": "fn desc",

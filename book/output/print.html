@@ -94,10 +94,10 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-cdeb316a.js";
+            window.path_to_searchindex_js = "searchindex-7003d3a4.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-7d500c97.js"></script>
+        <script src="toc-a8ca80cc.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -7158,6 +7158,250 @@ SHOW SECURITY CONFIG FOR 'content';
 <li><a href="#sql-reference">SQL Reference</a> – complete SQL reference including other custom extensions</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="mcp-servers-as-content"><a class="header" href="#mcp-servers-as-content">MCP Servers as Content</a></h1>
+<p>RaisinDB ships a complete Model Context Protocol (MCP) JSON-RPC engine in the <code>raisin-mcp</code> crate, exposed over HTTP by <code>raisin-transport-http</code>. This chapter documents how that engine is put together, because the newer <a href="#native-mcp-ui-support">Native MCP-UI Support</a> feature builds directly on the pieces described here and only makes sense against them.</p>
+<p>The one design decision that colors everything else: <strong>an MCP server is content, not configuration.</strong> There is no server registry, no config file, no restart-to-reload. A server is a <code>raisin:McpServer</code> node living in a workspace, resolved by slug at request time. Everything that follows – multi-tenancy, RLS, versioning, replication, live subscriptions – falls out of that choice for free, because a server descriptor is subject to exactly the same machinery as any other node.</p>
+<h2 id="the-transport-agnostic-core"><a class="header" href="#the-transport-agnostic-core">The transport-agnostic core</a></h2>
+<p><code>raisin-mcp</code> never touches RocksDB, <code>AppState</code>, or the index engines directly. It is a pure protocol engine that depends on a small set of narrow traits, which the HTTP layer implements against the real services. This is the same separation used elsewhere in the codebase (the storage traits, the audit sink), and it is what lets the MCP tests run without a full server.</p>
+<p>The service seams are declared in <code>crates/raisin-mcp/src/services.rs</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Trait</th><th>Responsibility</th><th>HTTP-side implementation</th></tr>
+</thead>
+<tbody>
+<tr><td><code>FunctionInvoker</code></td><td>Resolve + execute a <code>raisin:Function</code> by name, as the calling identity</td><td><code>HttpFunctionInvoker</code> (<code>handlers/mcp/services/invoker.rs</code>)</td></tr>
+<tr><td><code>SearchProvider</code></td><td>Full-text (Tantivy) and vector (HNSW) search over a workspace</td><td><code>HttpSearchProvider</code> (<code>handlers/mcp/services/search.rs</code>)</td></tr>
+<tr><td><code>EventSource</code></td><td>Live node-change stream, bridged from the in-process event bus</td><td><code>BusEventSource</code> (<code>handlers/mcp/services/events.rs</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Note the deliberate exception documented in <code>services.rs:29</code>: the node read/write/query/SQL data path is <strong>not</strong> abstracted behind one of these traits. It uses <code>raisin_functions::FunctionApi</code> directly (see <code>crate::data_tools</code>), which is the same RLS-scoped backend that server-side functions run against. That matters for the MCP-UI work, because it establishes the rule the new <code>AssetReader</code> trait has to respect – the engine reaches storage only through a declared seam, never <code>AppState</code> directly.</p>
+<h2 id="the-server-descriptor"><a class="header" href="#the-server-descriptor">The server descriptor</a></h2>
+<p><code>McpServerDescriptor</code> (<code>crates/raisin-mcp/src/server.rs:276</code>) is the parsed, validated shape of a <code>raisin:McpServer</code> node. It is read off the node’s properties by <code>from_node</code> / <code>from_properties</code> (<code>server.rs:315</code>), tolerating absent optional keys, and the same parser serves both the typed-<code>Node</code> path and SQL-row resolution.</p>
+<p>A descriptor carries:</p>
+<ul>
+<li><code>name</code>, <code>version</code>, <code>slug</code> – identity; <code>slug</code> is the routing key and the only strictly required field (<code>server.rs:332</code>).</li>
+<li><code>instructions</code> – natural-language usage guidance surfaced to the agent.</li>
+<li><code>public</code> – whether the server is reachable without authentication.</li>
+<li><code>scopes</code> – scopes a caller must hold to open the server at all.</li>
+<li><code>data_policy</code> – a <code>DataPolicy</code> (<code>server.rs:88</code>) declaring which <code>workspaces</code>, which <code>operations</code>, and whether <code>raisin://</code> <code>resources</code> are exposed by the auto-generated data tools.</li>
+<li><code>custom_tools</code> – a list of <code>CustomTool</code> (<code>server.rs:113</code>), each mapping a tool name to a <code>raisin:Function</code> node.</li>
+</ul>
+<h3 id="two-kinds-of-tools"><a class="header" href="#two-kinds-of-tools">Two kinds of tools</a></h3>
+<p>There are two ways a tool comes to exist on a server, and both resolve to the same <code>CustomTool</code> shape:</p>
+<ol>
+<li><strong>Server-side declaration.</strong> The <code>raisin:McpServer</code> node lists a tool in its <code>tools[]</code> array (<code>{ function, name, description, inputSchema, scopes }</code>), parsed by <code>parse_custom_tools</code> (<code>server.rs:422</code>). Omitted fields are backfilled from the referenced function’s own metadata via <code>fill_defaults_from</code> (<code>server.rs:258</code>).</li>
+<li><strong>Function-side opt-in.</strong> A <code>raisin:Function</code> node carries an <code>mcp</code> block (<code>mcp: { enabled: true, ... }</code>), and <code>CustomTool::from_function_properties</code> (<code>server.rs:194</code>) turns it into a tool, defaulting <code>name</code>/<code>description</code>/<code>inputSchema</code> to the function’s own <code>name</code>/<code>description</code>/<code>input_schema</code>.</li>
+</ol>
+<p>Either way, a tool is ultimately a <code>raisin:Function</code> invoked as the caller. This is the anchor point for the MCP-UI feature: a widget is bound to a tool, and the tool is already an RLS-scoped function call.</p>
+<h2 id="the-dataoperation-set"><a class="header" href="#the-dataoperation-set">The DataOperation set</a></h2>
+<p><code>DataOperation</code> (<code>server.rs:34</code>) enumerates the seven data operations a server may auto-expose as tools: <code>query_nodes</code>, <code>get_node</code>, <code>search_nodes</code>, <code>create_node</code>, <code>update_node</code>, <code>delete_node</code>, <code>list_workspaces</code>. <code>is_write()</code> (<code>server.rs:64</code>) flags the three mutating ones. The <code>DataPolicy</code> gates which of these are actually turned on, per server.</p>
+<h2 id="dispatch"><a class="header" href="#dispatch">Dispatch</a></h2>
+<p>The <code>Dispatcher</code> (<code>crates/raisin-mcp/src/dispatch.rs:36</code>) is the transport-agnostic router. Given an <code>McpIdentity</code> and a decoded <code>JsonRpcRequest</code>, it:</p>
+<ol>
+<li><strong>Enforces the session scope gate</strong> (<code>authorize_session</code>, <code>dispatch.rs:114</code>). A <code>public</code> server is open; otherwise the caller must be non-anonymous and hold every scope the server declares. Note <code>public: false</code> means “not anonymous” even when the server lists no scopes.</li>
+<li><strong>Routes one of six MCP methods</strong> (<code>dispatch.rs:98</code>): <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>, <code>resources/list</code>, <code>resources/read</code>, <code>resources/subscribe</code>.</li>
+<li><strong>Enforces the per-tool scope gate</strong> inside <code>tools/call</code> (<code>dispatch.rs:164</code>) before invoking anything.</li>
+</ol>
+<p>A function-level failure (<code>McpError::FunctionFailed</code>) is mapped onto an MCP <code>isError</code> result rather than a JSON-RPC protocol error (<code>dispatch.rs:188</code>) – the model sees the failure and can react, rather than the transport aborting.</p>
+<h3 id="tool-results-and-structuredcontent"><a class="header" href="#tool-results-and-structuredcontent">Tool results and <code>structuredContent</code></a></h3>
+<p>When a tool declares an <code>outputSchema</code>, its result is surfaced as <code>structuredContent</code> alongside the plain content block (<code>dispatch.rs:180</code>). This is the exact channel the MCP-UI feature reuses to deliver a widget’s initial <code>data</code>: no new result type is needed, because a tool bound to a widget already returns structured content the host can hand to the renderer.</p>
+<h2 id="resources-json-today"><a class="header" href="#resources-json-today">Resources: JSON today</a></h2>
+<p>Resources are read-only, addressable content under a <code>raisin://{workspace}/{node/path}</code> URI (<code>crates/raisin-mcp/src/resources.rs</code>). <code>NodeResourceProvider::read</code> (<code>resources.rs:133</code>) resolves the node through <code>FunctionApi</code> (RLS-scoped) and returns its properties as a JSON <code>text</code> block. <code>subscribe</code> (<code>resources.rs:154</code>) bridges the <code>EventSource</code> into a filtered stream of <code>resources/updated</code> notifications, driving live updates over Server-Sent Events.</p>
+<p>The load-bearing limitation for MCP-UI is visible in the wire type: <code>ResourceContents</code> (<code>resources.rs:57</code>) has a <code>text: String</code> field and <strong>no <code>blob</code> field</strong>. Nothing can be served byte-for-byte over the MCP channel today – every resource read is JSON text. Serving an HTML widget or an image through <code>resources/read</code> is exactly what the MCP-UI work has to unlock, and it does so by adding <code>ResourceContents.blob</code> plus a byte-reading service seam. See <a href="#native-mcp-ui-support">Native MCP-UI Support</a>.</p>
+<h2 id="the-http-binding"><a class="header" href="#the-http-binding">The HTTP binding</a></h2>
+<p>A single route, <code>POST /mcp/{repo}/{branch}/{slug}</code>, carries one JSON-RPC 2.0 message per request over the MCP Streamable HTTP binding (<code>crates/raisin-transport-http/src/handlers/mcp/mod.rs</code>). The handler:</p>
+<ul>
+<li>authenticates through the existing auth middleware (the resolved <code>AuthContext</code> arrives in request extensions),</li>
+<li>projects that onto an <code>McpIdentity</code>,</li>
+<li>resolves the <code>{slug}</code> against the <code>mcp</code> workspace (<code>MCP_DISCOVERY_WORKSPACE</code>, <code>mod.rs:58</code>) – note the server <em>declarations</em> live in <code>mcp</code>, while each server’s <code>dataPolicy.workspaces</code> govern which <em>content</em> workspaces its tools may touch,</li>
+<li>assembles the live tool set and dispatches the method against the real services in <code>AppState</code>.</li>
+</ul>
+<p>A JSON-RPC notification (no <code>id</code>) gets an empty <code>202</code>; <code>resources/subscribe</code> upgrades to an SSE stream.</p>
+<h2 id="why-this-shape-matters-for-mcp-ui"><a class="header" href="#why-this-shape-matters-for-mcp-ui">Why this shape matters for MCP-UI</a></h2>
+<p>Everything the MCP-UI feature needs is a small extension of a seam that already exists here:</p>
+<ul>
+<li>Widgets are bound to <strong>tools</strong>, which are already RLS-scoped <code>raisin:Function</code> calls.</li>
+<li>A widget’s initial data rides the existing <strong><code>structuredContent</code></strong> channel.</li>
+<li>Serving widget bytes needs one new field on <strong><code>ResourceContents</code></strong> and one new <strong>service trait</strong> (<code>AssetReader</code>) that honors the “engine never touches storage directly” rule.</li>
+<li>Live widget updates get <strong><code>resources/subscribe</code></strong> for free.</li>
+</ul>
+<p>The next chapter works through those extensions and the decisions behind them.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="native-mcp-ui-support"><a class="header" href="#native-mcp-ui-support">Native MCP-UI Support</a></h1>
+<p>MCP-UI lets a tool call return not just JSON but an HTML “mini-app” that the MCP host (an AI client such as a desktop assistant, ChatGPT, or Goose) renders inline. The tool runs server-side as the real signed-in user, returns structured <code>data</code> plus a reference to a UI resource, the host fetches the widget once (and caches it), and delivers the <code>data</code> to it. The widget itself carries no cookies and no auth – it is a dumb renderer of whatever the tool handed it.</p>
+<p>This chapter documents how that capability maps onto RaisinDB’s existing content model, and – more importantly for a maintainer – <strong>the decision points and why each went the way it did.</strong> The short version: RaisinDB already had almost everything MCP-UI needs, so the design reuses the content model, the asset tree, RLS, and the MCP engine rather than bolting on a parallel system. The one genuinely new server-side primitive (a static-content endpoint) turns out to be useful on its own.</p>
+<p>Read <a href="#mcp-servers-as-content">MCP Servers as Content</a> first; this chapter assumes the server descriptor, the tool/function binding, the <code>structuredContent</code> channel, and the <code>resources/read</code> limitation described there.</p>
+<h2 id="the-mapping-onto-raisindbs-content-model"><a class="header" href="#the-mapping-onto-raisindbs-content-model">The mapping onto RaisinDB’s content model</a></h2>
+<p>Nothing here introduces a new storage concept. Every moving part is an existing one:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>MCP-UI concept</th><th>RaisinDB primitive it reuses</th></tr>
+</thead>
+<tbody>
+<tr><td>The widget (HTML/CSS/JS bundle)</td><td>Ordinary <code>raisin:Asset</code> nodes in a <code>raisin:Folder</code> tree – uploaded through the existing multipart/chunked upload pipeline</td></tr>
+<tr><td>Serving the widget’s files to a browser</td><td>A new static-content HTTP endpoint over <code>NodeService</code> (RLS-enforced)</td></tr>
+<tr><td>Which widget a tool renders</td><td>A <code>ui: { mode, entry }</code> field on the tool – a <strong>path reference</strong>, not a new node type</td></tr>
+<tr><td>The widget’s initial data</td><td>The tool’s existing <code>structuredContent</code> (see <a href="#mcp-servers-as-content">MCP Servers as Content</a>)</td></tr>
+<tr><td>A widget button re-invoking the server</td><td>An ordinary <code>tools/call</code> on the same MCP session – no new wire protocol</td></tr>
+<tr><td>Serving widget bytes over the MCP channel</td><td>A new <code>blob</code> field on <code>ResourceContents</code> + an <code>AssetReader</code> service seam</td></tr>
+<tr><td>Whether a subtree is servable at all (deny-by-default)</td><td>The <em>presence</em> of a <code>raisin:StaticSiteFolder</code> ancestor — a package-shippable content node</td></tr>
+<tr><td>Per-subtree embedding/CORS policy</td><td>An optional <code>serving_config</code> on that same <code>raisin:StaticSiteFolder</code> subtype</td></tr>
+</tbody>
+</table>
+</div>
+<p>The rest of the chapter is the reasoning behind the non-obvious cells in that table.</p>
+<h2 id="decision-widgets-are-files-not-a-raisinmcpuiwidget-node-type"><a class="header" href="#decision-widgets-are-files-not-a-raisinmcpuiwidget-node-type">Decision: widgets are files, not a <code>raisin:McpUiWidget</code> node type</a></h2>
+<p>An earlier draft proposed a dedicated <code>raisin:McpUiWidget</code> node type. <strong>It was dropped.</strong> A widget is just files, and RaisinDB already has a first-class file model: <code>raisin:Asset</code> (<code>crates/raisin-core/global_nodetypes/raisin_asset.yaml</code>) carries a <code>file: Resource</code> plus <code>file_type</code>/<code>file_size</code>/<code>content_hash</code>, and <code>raisin:Folder</code> (<code>raisin_folder.yaml</code>) nests arbitrarily.</p>
+<p>Two facts make “just use the asset tree” cheap rather than aspirational:</p>
+<ul>
+<li><strong>Deep folder/asset trees already work anywhere the workspace allows both types.</strong> Type-level <code>allowed_children</code> exists on <code>NodeType</code> but is not enforced in <code>raisin-core</code>’s validation path – every core type declares it as <code>[]</code>. What actually governs “can an Asset live under a Folder here” is the <em>workspace’s</em> <code>allowed_node_types</code> / <code>allowed_root_node_types</code>. So a widget bundle is a normal upload into any workspace that permits folders and assets.</li>
+<li><strong>Path lookup is a materialized full-path string, not a recursive parent-walk.</strong> <code>NodeRepository::get_by_path</code> (<code>raisin-rocksdb/.../lookup.rs</code>) keys on the <em>entire</em> path as one opaque string in a dedicated path index, prefix-scanned for the newest revision. <code>/site/widgets/order/img/logo.png</code> costs no more than a top-level lookup. This is why serving a relative reference (<code>./style.css</code>) from inside a widget is free – it is just another path lookup, no segment-by-segment resolution.</li>
+</ul>
+<p>So a widget becomes an ordinary <code>raisin:Folder</code> (or a lone <code>raisin:Asset</code> for a single-file widget), and the only thing a tool declares is a <em>path reference</em> to it. Dropping the node type also means no new package, no new workspace allowlist entry, and no schema migration.</p>
+<h2 id="decision-the-static-endpoint-must-route-through-nodeservice-fail-closed-rls"><a class="header" href="#decision-the-static-endpoint-must-route-through-nodeservice-fail-closed-rls">Decision: the static endpoint MUST route through NodeService (fail-closed RLS)</a></h2>
+<p>The new route is <code>GET /resources/{repo}/{branch}/{ws}/{*path}</code> – a top-level route, deliberately <em>not</em> under <code>/api</code>. It resolves <code>{ws}/{path}</code> via <code>get_by_path</code>; if the node is a <code>raisin:Asset</code> it streams the <code>file</code> bytes with the stored/guessed MIME type; if it is a <code>raisin:Folder</code> (or the path is empty/trailing-slash) it serves the folder’s index document (default <code>index.html</code>) instead. That index fallback is the <em>only</em> genuinely new serving logic – everything else is existing byte-serving reachable via a cleaner, path-shaped URL.</p>
+<blockquote>
+<p><strong>Naming caution.</strong> The HTTP <code>/resources/...</code> route serves raw file bytes to a browser and is unrelated to the MCP JSON-RPC <code>resources/read</code> method (see <a href="#mcp-servers-as-content">MCP Servers as Content</a>), which returns <code>ResourceContents</code> over the MCP channel. They share the word “resources” but are different transports, different callers, and different code: the browser hits <code>/resources/...</code> directly for a <code>mode: uri-list</code> widget’s files, whereas the MCP engine serves widget bytes for <code>mode: html</code> through <code>resources/read</code>. Do not conflate them.</p>
+</blockquote>
+<p>The critical constraint is <strong>which of two existing byte-serving code paths it is built on.</strong> They have opposite trust models, and only one is correct here:</p>
+<ul>
+<li><strong>The RLS-enforced path (copy this).</strong> <code>handlers/repo/helpers.rs::get_property</code> (<code>helpers.rs:68</code>) and <code>handle_file_download</code> (<code>helpers.rs:173</code>) build on <code>state.node_service_for_context(...)</code> → <code>NodeService::get_property_by_path</code> / <code>get_by_path</code>. Every read passes through <code>NodeService::apply_rls_filter</code>, which <strong>fails closed</strong> – it denies when no permission resolves. The byte fetch from <code>state.bin</code> (<code>helpers.rs:117</code>) happens only <em>after</em> <code>NodeService</code> has confirmed the caller may see that node/property.</li>
+<li><strong>The raw-storage signed-URL path (do NOT copy this).</strong> <code>handlers/repo/assets.rs</code> serves <code>.../raisin:download|display?sig=&amp;exp=</code> and calls <code>state.storage().nodes().get_by_path(...)</code> directly (<code>assets.rs:107</code>) – raw repository access that bypasses <code>NodeService</code>/RLS entirely – substituting its own HMAC signature check (<code>verify_asset_signature</code>, <code>assets.rs:87</code>). That is a deliberately different model: a short-lived, shareable capability URL, not a session. It stays, orthogonal to everything here, for expiring/shareable links.</li>
+</ul>
+<p><strong>Why fail-closed RLS and not the signed-URL model?</strong> The whole point of MCP-UI is that a widget shows the signed-in user their own data. If the static endpoint bypassed RLS, a folder made public by an HMAC URL would leak content the caller’s role can’t see, and there would be no per-user filtering at all. Routing through <code>NodeService</code> means a folder is public <em>precisely when the anonymous role already has read access to it</em> via <code>raisin:access_control</code> – no new auth concept, no new “public flag,” just the <a href="#access-control--authorization">access-control system</a> already in place.</p>
+<p>Concretely: the route sits behind the same <code>optional_auth_middleware</code> as <code>/api/repository/...</code>. That middleware always resolves an <code>AuthContext</code> – either a real anonymous principal (via <code>PermissionService::resolve_anonymous_user</code>, the same way every other route does it) or an explicit deny-all when anonymous access is off for that repo/tenant – never “absent.” The node is then resolved through <code>node_service_for_context</code>, and <code>state.bin</code> is reached only for the final byte fetch after RLS has cleared it.</p>
+<blockquote>
+<p>This is recorded as a hard build constraint: the static endpoint must never use the raw <code>state.storage().nodes()</code> pattern from <code>assets.rs</code>. A future maintainer optimizing “just skip the service layer for a fast static path” would be silently disabling row-level security.</p>
+</blockquote>
+<p>RLS is necessary but, as of the serving gate below, <strong>no longer sufficient</strong>: an earlier draft of this endpoint served <em>anything RLS allowed</em>, so any readable asset tree was reachable at <code>/resources</code>. That is no longer true — a coarse deny-by-default gate now runs <strong>ahead of</strong> the RLS read (next-but-one decision), and only a subtree explicitly published as a <code>raisin:StaticSiteFolder</code> is reachable at all.</p>
+<h2 id="decision-raisinstaticsitefolder-as-a-subtype-not-a-mutation-of-raisinfolder"><a class="header" href="#decision-raisinstaticsitefolder-as-a-subtype-not-a-mutation-of-raisinfolder">Decision: <code>raisin:StaticSiteFolder</code> as a subtype, not a mutation of <code>raisin:Folder</code></a></h2>
+<p>Folder-level serving policy (embedding, CORS, caching, index document) lives on a <strong>new subtype</strong>, <code>raisin:StaticSiteFolder extends raisin:Folder</code>, with an optional <code>serving_config: Object</code> property:</p>
+<pre><code class="language-yaml">serving_config:
+  frame_ancestors: ["https://host.example"]   # who may iframe this subtree
+  cors_allowed_origins: ["https://host.example"]  # who may XHR back to RaisinDB
+  cache_control: "public, max-age=3600"
+  index_document: "index.html"
+</code></pre>
+<p><strong>Why a subtype and not a flag on <code>raisin:Folder</code>?</strong> <code>raisin:Folder</code> is a core global type every repo shares. Adding a <code>serving_config</code> there would put a latent HTTP-header-injection capability on <em>every</em> folder in the system, visible or not. A subtype makes the capability an explicit, visible opt-in per subtree: you create or retype a folder as <code>raisin:StaticSiteFolder</code> to give it serving behavior, and a plain <code>raisin:Folder</code> never emits any of these headers. This mirrors the established “specialized folder” pattern already in the codebase – <code>raisin:AclFolder extends raisin:Folder</code> (<code>raisin_acl_folder.yaml</code>) and <code>raisin:VirtualMount</code> both add engine configuration onto a folder subtype rather than onto the base.</p>
+<p>The precedent for “config-driven HTTP response headers resolved per request from a content node” is also already here: <code>middleware/cors.rs</code> resolves <code>cors_allowed_origins</code> hierarchically (repo → tenant → global) from a <code>raisin:RepoAuthConfig</code> node (<code>cors.rs:274</code>, <code>cors.rs:356</code>). <code>StaticSiteFolder.serving_config</code> is that same idea, one level deeper: per-folder-subtree.</p>
+<p>The static endpoint resolves the <strong>nearest ancestor folder</strong> for a path. If it is a plain <code>raisin:Folder</code>, no header overrides apply (the safe default). If it is a <code>raisin:StaticSiteFolder</code>, its <code>serving_config</code> drives the response headers for everything beneath it. Walking up the materialized path index (or resolving the immediate parent) is cheap for the same reason lookups are.</p>
+<h2 id="decision-raisinstaticsitefolder-presence-is-a-deny-by-default-serving-gate"><a class="header" href="#decision-raisinstaticsitefolder-presence-is-a-deny-by-default-serving-gate">Decision: <code>raisin:StaticSiteFolder</code> <em>presence</em> is a deny-by-default serving gate</a></h2>
+<p>The static endpoint does not serve everything RLS would allow. A path is servable through <code>/resources</code> <strong>only when a <code>raisin:StaticSiteFolder</code> covers it</strong> (the folder is the path itself or a <code>/</code>-boundary ancestor); if no folder in the workspace covers the path, the request is <code>404</code> (<code>resolve_serving_policy</code> → <code>ServingPolicy::Denied</code> → <code>NOT_FOUND</code> in <code>resolve_and_serve</code>, <code>static_site.rs</code>). The folder’s <em>presence</em> is the allowlist — there is no <code>enabled</code>/<code>servable</code> flag and no path-glob list. This is the same content node introduced above (<code>serving_config</code> for headers); its second job is to gate serving at all.</p>
+<p><strong>Why gate on <code>raisin:StaticSiteFolder</code> presence, and not on a repo-level config?</strong> The gate has to be <strong>package-shippable</strong>. A <code>raisin:StaticSiteFolder</code> is ordinary content, so a package authors it at a fixed content path (<code>content/&lt;encoded-ws&gt;/&lt;folder&gt;/.node.yaml</code>) exactly like the imap-adapter package ships its <code>raisin:Integration</code> — install the package and the subtree becomes servable, no server TOML and no admin API. The repo-level CORS precedent (<code>raisin:RepoAuthConfig</code>, <code>cors.rs:274</code>) can’t play this role: it lives at the <strong>dynamic</strong> <code>/config/repos/{repo_id}</code> path, keyed by a repo id a package can’t know at authoring time, so a package could never ship one at a fixed target. Presence-of-a-content-node is the one allowlist a package <em>can</em> express.</p>
+<p><strong>Why deny-by-default (and layered over RLS, not instead of it).</strong> The gate is a <strong>coarse</strong> “is this subtree published as a static site?” check that runs <strong>first</strong>; RLS then decides “may <em>this caller</em> read <em>this specific node</em>?” when the bytes are served. The two are independent: a <code>StaticSiteFolder</code> over a subtree does not widen RLS (a caller still only sees nodes their role grants), and RLS never substitutes for the gate (a readable-but-unpublished asset tree still 404s). Failing closed means neither adding a package nor an RLS grant alone accidentally exposes a tree — publishing is a deliberate, visible act (create/retype the folder). A <code>StaticSiteFolder</code> whose path is the bare workspace root (<code>/</code>) covers the whole workspace (<code>covers</code> treats a root/empty folder path as covering everything); scope a subtree by publishing at a named path (<code>/site</code>).</p>
+<p><strong>Why the gate is resolved with system auth — and why that makes the cache correct.</strong> <code>resolve_serving_policy</code> enumerates the workspace’s <code>raisin:StaticSiteFolder</code> set with <code>AuthContext::system()</code> (<code>NodeService::list_by_type</code>), so the decision is <strong>principal-independent</strong>: “is there a covering <code>StaticSiteFolder</code>?” has one answer for anonymous and authenticated callers alike. That is precisely what lets the result be cached in a <strong>shared, not per-caller</strong> cache without leaking one caller’s view to another — the gate decision carries no principal-specific information. It would be a security bug to key this cache by caller <em>or</em> to let the gate stand in for RLS: RLS still runs per-request, per-principal, on the actual byte read (<code>node_service_for_context</code> with the real <code>AuthContext</code>), on top of the shared gate decision. The <code>ServingConfig</code> the gate caches is likewise principal-independent (header policy, not content).</p>
+<p><strong>Why the cache is keyed by workspace, not by request path (a DoS boundary).</strong> <code>AppState::static_site_cache</code> is keyed <code>{tenant}\0{repo}\0{branch}\0{ws}</code> and stores the <em>set</em> of <code>StaticSiteFolder</code>s in that workspace (<code>Arc&lt;Vec&lt;StaticSiteEntry&gt;&gt;</code>); the nearest-cover match (<code>nearest_covering</code>/<code>covers</code>) is then a pure in-memory scan. This is deliberate: <code>TtlCache</code> is an unbounded <code>DashMap</code> with only lazy per-key TTL checks (no capacity cap, no background eviction), so an earlier design that keyed by the full request path would let unauthenticated traffic to <code>/resources/{repo}/{branch}/{ws}/{unbounded-distinct-paths}</code> grow the map without limit — a memory-exhaustion DoS, and one this codebase has been bitten by before. A workspace-bounded key (the same shape <code>cors.rs</code> uses, and for the same reason) caps the keyspace at the number of real workspaces regardless of request-path cardinality. It also does <em>fewer</em> storage ops: one <code>list_by_type</code> per workspace per TTL instead of an ancestor walk per distinct path.</p>
+<p><strong>Bounded staleness.</strong> The gate cache uses the same ~60s TTL as the CORS resolver (<code>middleware/cors.rs</code>), so creating, deleting, or retyping a <code>raisin:StaticSiteFolder</code> takes effect within ~60s — the same bounded-staleness contract operators already accept for repo-level CORS config. Enumeration errors fail closed to <code>Denied</code> and are deliberately <strong>not</strong> cached, so a transient storage error can’t poison an entry into a sticky 404.</p>
+<h2 id="decision-mode-html-srcdoc-is-the-safe-default-mode-uri-list-is-the-only-path-needing-folder-security"><a class="header" href="#decision-mode-html-srcdoc-is-the-safe-default-mode-uri-list-is-the-only-path-needing-folder-security">Decision: <code>mode: html</code> (srcdoc) is the safe default; <code>mode: uri-list</code> is the only path needing folder security</a></h2>
+<p>A tool’s UI binding is <code>ui: { mode, entry }</code> (added to <code>CustomTool</code> in <code>server.rs</code> and to <code>tools[]</code> in the server’s node schema). <code>entry</code> is a workspace-relative path, optionally with a <code>#fragment</code> (split on the first <code>#</code>). There are two delivery modes, matching the two ways real hosts render a widget:</p>
+<ul>
+<li><strong><code>mode: html</code> (default).</strong> The single-file case. The MCP engine reads the asset’s bytes itself and returns them as a <code>text/html</code> MCP resource over <code>resources/read</code>; the host renders it via <code>srcdoc</code> in its own sandbox. <strong>No cross-origin iframe is involved, so none of the folder security config applies.</strong> This is the simplest, safest option and the right default for small widgets.</li>
+<li><strong><code>mode: uri-list</code>.</strong> The multi-file case the folder tree unlocks. The MCP resource returned is a <code>text/uri-list</code> pointing at the static endpoint’s URL for that path; the host iframes it with a real <code>src=</code>. The browser then makes ordinary relative HTTP requests for CSS/JS/images back to RaisinDB. <strong>This is the only place <code>StaticSiteFolder.serving_config</code> matters</strong> – <code>frame_ancestors</code> decides whether the host origin may embed the page at all, and <code>cors_allowed_origins</code> decides whether the page’s JS may call back into RaisinDB.</li>
+</ul>
+<p>The two modes solve the same problem with different exposure. <code>mode: html</code> never gives the widget an origin or a live connection – it is inert HTML text in the host’s sandbox, so there is nothing to configure and nothing to get wrong. <code>mode: uri-list</code> gives the widget a real origin and real network access, which is more powerful and is exactly why it (and only it) requires the security config to be set deliberately.</p>
+<h3 id="frame_ancestors-defaults-to-deny"><a class="header" href="#frame_ancestors-defaults-to-deny"><code>frame_ancestors</code> defaults to DENY</a></h3>
+<p>If a <code>StaticSiteFolder</code> has no <code>serving_config</code> (or none listing <code>frame_ancestors</code>), the endpoint emits <strong>no</strong> <code>Content-Security-Policy: frame-ancestors</code> header, and the effect is <strong>not embeddable</strong> by default. Cross-origin framing requires explicitly listing origins.</p>
+<p><strong>Why deny-by-default?</strong> An embeddable-by-default page is a clickjacking and data-exfiltration surface: any site could iframe a widget that renders the signed-in user’s content. Requiring explicit opt-in per origin means a widget is only embeddable where its author said so. The endpoint uses CSP <code>frame-ancestors</code> (and deliberately omits <code>X-Frame-Options</code>, so CSP alone governs) because <code>frame-ancestors</code> takes an origin allowlist, whereas <code>X-Frame-Options</code> cannot express “these specific hosts.”</p>
+<p>Note that <code>frame-ancestors</code> (embeddability) and CORS (cross-origin script calls back to the API) are two different browser mechanisms solving two different problems. A real “iframe a widget hosted under RaisinDB from an external host” story needs <em>both</em> configured, which is why <code>serving_config</code> carries both.</p>
+<h3 id="cors_allowed_origins--and-credentials-are-mutually-exclusive"><a class="header" href="#cors_allowed_origins--and-credentials-are-mutually-exclusive"><code>cors_allowed_origins</code>: <code>"*"</code> and credentials are mutually exclusive</a></h3>
+<p>Per-folder CORS is resolved inside <code>serve_asset</code> (<code>static_site.rs</code>), <strong>not</strong> in <code>middleware/cors.rs</code> — deliberately, so a subtree-scoped policy can never affect any other route; the global unified CORS middleware still runs and is purely additive. The header logic makes wildcard and credentials mutually exclusive:</p>
+<ul>
+<li>An <strong>explicitly-listed</strong> origin ⇒ the response reflects that origin, plus <code>Access-Control-Allow-Credentials: true</code> and <code>Vary: Origin</code>. This is the credentialed path: the widget’s JS may make cookie/session reads back into RaisinDB.</li>
+<li><code>"*"</code> ⇒ <code>Access-Control-Allow-Origin: *</code> <strong>without</strong> <code>Access-Control-Allow-Credentials</code>.</li>
+</ul>
+<p><strong>Why the split.</strong> Browsers reject <code>*</code> + credentials outright, so the only way a wildcard is useful is credential-less (genuinely public assets). More importantly, <em>reflecting an arbitrary <code>Origin</code> alongside <code>Allow-Credentials: true</code> would let any site make credentialed cross-origin reads against RLS-gated content</em> — a confused-deputy hole. Restricting credentials to explicitly-listed origins closes it: an author must name the origin they trust with the signed-in user’s session, and <code>"*"</code> degrades safely to non-credentialed. (An earlier formulation that reflected the origin with credentials regardless of whether it was <code>"*"</code> or explicit is the behavior this corrects.)</p>
+<h2 id="decision-the-fragment-spa-route-mechanism-and-its-two-plumbing-paths"><a class="header" href="#decision-the-fragment-spa-route-mechanism-and-its-two-plumbing-paths">Decision: the <code>#fragment</code> SPA-route mechanism, and its two plumbing paths</a></h2>
+<p>One single-file SPA build (<code>index.html</code> with a client-side hash router) can back several tools, each bound to a different in-app view, by giving each tool a different <code>#fragment</code>:</p>
+<pre><code class="language-yaml">tools:
+  - name: order_card
+    ui: { mode: uri-list, entry: "site/widgets/order/index.html#/order-card" }
+  - name: inventory_panel
+    ui: { mode: uri-list, entry: "site/widgets/order/index.html#/inventory" }
+</code></pre>
+<p><code>entry</code> is parsed as <code>path</code> + optional <code>#fragment</code>. The fragment never affects <em>which file</em> to read (fragments are not part of file resolution); it only tells the SPA which route to show. The two modes need different plumbing to get that fragment to the widget, because only one produces a navigable URL:</p>
+<ul>
+<li>
+<p><strong><code>uri-list</code> mode – nothing extra to build.</strong> A URL fragment is never sent to the server (the browser strips it before the HTTP request), so the static endpoint just serves <code>index.html</code> normally. The fragment rides along on the iframe’s <code>src=</code> URL, and the SPA’s own hash router reads <code>location.hash</code> on mount, exactly as on a normal website. Two tools pointing at the same file with different fragments are correctly two distinct resource URIs / cache keys from the host’s perspective, even though the underlying document is byte-identical.</p>
+</li>
+<li>
+<p><strong><code>mode: html</code> – the fragment travels out-of-band.</strong> There is no navigable URL here (the host gets raw HTML text via <code>srcdoc</code>, whose location has no meaningful hash), so when <code>raisin-mcp</code> reads the asset’s bytes for this mode, it strips the <code>#fragment</code> for file resolution and injects a small bootstrap global into the returned HTML before handing it to the host, right after <code>&lt;head&gt;</code>:</p>
+<pre><code class="language-html">&lt;script&gt;window.__RAISIN_INITIAL_ROUTE__="/order-card";&lt;/script&gt;
+</code></pre>
+</li>
+</ul>
+<p>Widget authors write their router bootstrap once as <code>const route = window.__RAISIN_INITIAL_ROUTE__ ?? location.hash</code>, and it works unmodified under both modes. <strong>This injection is the only place any server-side HTML transformation happens in the entire feature</strong> – everything else is pure byte passthrough. The global name <code>window.__RAISIN_INITIAL_ROUTE__</code> is kept as an internal convention (checked against common framework globals for collision).</p>
+<h2 id="decision-widget-initiated-actions-need-no-new-wire-protocol"><a class="header" href="#decision-widget-initiated-actions-need-no-new-wire-protocol">Decision: widget-initiated actions need NO new wire protocol</a></h2>
+<p>A widget with “two buttons, click one” does not need anything new on the wire between RaisinDB and the host. A button click becomes an ordinary <code>tools/call</code> against the same MCP session – RaisinDB’s existing dispatch (see <a href="#mcp-servers-as-content">MCP Servers as Content</a>) already handles it, running the same <code>raisin:Function</code>, RLS-scoped to the same caller, exactly like any other tool invocation. The whole round trip (button → <code>postMessage</code> → host decides → maybe re-invokes <code>tools/call</code> → result → widget re-renders) lives in the widget’s JS and the host’s bridge, not in RaisinDB.</p>
+<p>Two host-side conventions exist in the wild and have <strong>not</strong> converged, so a widget author should not have to pick one:</p>
+<ul>
+<li><strong>MCP Apps</strong> – the official extension. JSON-RPC over <code>postMessage</code>: a widget calls <code>app.callServerTool({ name, arguments })</code>, receives results via <code>app.ontoolresult</code>, and can push structured content back into the conversation via <code>app.updateModelContext(...)</code>. Hosts <em>may</em> require explicit user approval before executing a UI-initiated tool call – host policy, not something RaisinDB configures.</li>
+<li><strong>MCP-UI</strong> (community project) – a simpler fire-and-forget <code>postMessage({ type, payload }, '*')</code> with action kinds <code>tool</code>, <code>intent</code>, <code>prompt</code>, <code>notify</code>, <code>link</code>.</li>
+</ul>
+<p>The resolution: <strong>support both</strong>, in the client helper, not the server. The widget helper prefers <code>ext-apps</code> (<code>callServerTool</code> present on <code>window</code>) and falls back to the raw <code>postMessage({type:'tool', ...})</code> convention. RaisinDB’s server job is a good client-side helper and a good skill, not a new server mechanism.</p>
+<p>There is no server-side gate for “safe vs. destructive one-click tools.” Because hosts may or may not prompt for approval, the guidance – keep destructive operations out of the set a widget can trigger without a second confirmation – is <strong>documented in the skill only</strong>, using the existing <code>CustomTool.scopes</code> field. It is deliberately not enforced in server code, because the host, not RaisinDB, owns the approval UX.</p>
+<h2 id="raw-byte-mcp-resource-reads-mode-html"><a class="header" href="#raw-byte-mcp-resource-reads-mode-html">Raw-byte MCP resource reads (<code>mode: html</code>)</a></h2>
+<p><code>mode: html</code> requires serving widget bytes over the MCP channel, which today’s JSON-only <code>resources/read</code> cannot do (see <a href="#mcp-servers-as-content">MCP Servers as Content</a> – <code>ResourceContents</code> has only <code>text</code>). Two additions close that gap:</p>
+<ul>
+<li><code>ResourceContents</code> (<code>crates/raisin-mcp/src/resources.rs:57</code>) gains <code>blob: Option&lt;String&gt;</code> (base64), so a resource read can return raw bytes instead of JSON text.</li>
+<li>A new <code>AssetReader</code> service trait (plus <code>SharedAssetReader</code>) joins <code>FunctionInvoker</code> / <code>SearchProvider</code> / <code>EventSource</code> in <code>crates/raisin-mcp/src/services.rs</code>, so the engine keeps its “never touches storage directly” rule (<code>services.rs:29</code>). The HTTP side implements it as <code>HttpAssetReader</code> in <code>handlers/mcp/services/</code>, backed by <code>state.bin</code> – which is already threaded into the MCP handler’s dependency graph via <code>handlers/mcp/api_factory.rs</code>.</li>
+</ul>
+<p>A useful side effect: any uploaded asset (not just widgets) becomes readable byte-for-byte over <code>resources/read</code>, which is generally desirable.</p>
+<h2 id="etag-and-caching"><a class="header" href="#etag-and-caching">ETag and caching</a></h2>
+<p>Static assets benefit from real HTTP caching that a JSON CRUD route would not bother with, so the static endpoint gets <strong>its own</strong> cache story:</p>
+<ul>
+<li><strong>ETag</strong> is derived from the asset’s <code>content_hash</code> (already stored on <code>raisin:Asset</code>, <code>raisin_asset.yaml</code>), giving cheap conditional requests.</li>
+<li><strong><code>Cache-Control</code></strong> defaults so that ordinary assets (CSS/JS/images) are cacheable, but the <strong>index document defaults to <code>no-cache</code></strong> unless <code>serving_config.cache_control</code> overrides it.</li>
+</ul>
+<p><strong>Why the index-document exception?</strong> A <code>mode: uri-list</code> SPA’s <code>index.html</code> carries the client-side route table. If an over-broad <code>cache_control</code> let a stale <code>index.html</code> be cached, the host would keep serving an old route table after the widget was updated, and fragments would resolve against routes that no longer exist. Keeping <code>index.html</code> at <code>no-cache</code> by default (while other assets cache freely) avoids that specific footgun; an author who knows their index is stable can opt into caching it via <code>serving_config.cache_control</code>.</p>
+<h2 id="rls-applies-at-two-different-surfaces"><a class="header" href="#rls-applies-at-two-different-surfaces">RLS applies at two different surfaces</a></h2>
+<p>A subtle but important point for widget authors, worth being explicit about in the design:</p>
+<ul>
+<li><strong><code>mode: html</code></strong> – the widget’s <code>data</code> comes from the tool call’s <code>structuredContent</code>, which is already RLS-scoped to the caller because <code>raisin:Function</code> execution is. Nothing new; the widget only ever sees what the caller may see.</li>
+<li><strong><code>mode: uri-list</code></strong> – there are now <em>two</em> access-control surfaces. The tool call’s <code>structuredContent</code> is one (RLS-scoped as above). But the iframed page can also make its <em>own</em> HTTP calls back into RaisinDB, and those are governed by the static endpoint’s own auth/RLS – a separate surface. A widget author must not assume “RLS on the tool call” implies “RLS on the iframe’s direct API calls”; both are enforced, but they are different code paths clearing different requests.</li>
+</ul>
+<h2 id="decision-the-widget-helper-is-a-separate-package"><a class="header" href="#decision-the-widget-helper-is-a-separate-package">Decision: the widget helper is a separate package</a></h2>
+<p>The widget-side runtime helper ships as its own browser-only package, <code>@raisindb/mcp-ui-client</code>, not folded into <code>packages/raisin-client-js</code>. It provides:</p>
+<ul>
+<li><code>getInitialRoute()</code> – reads <code>window.__RAISIN_INITIAL_ROUTE__</code> (the <code>mode: html</code> injection) falling back to <code>location.hash</code> (<code>mode: uri-list</code>), so widget code never needs to know which mode served it.</li>
+<li><code>getInitialData()</code> – normalizes however the host delivered the tool’s <code>structuredContent</code> on load.</li>
+<li><code>callTool(name, args)</code> / <code>onToolResult(cb)</code> – the both-conventions abstraction: tries <code>ext-apps</code> first, falls back to raw <code>postMessage</code>.</li>
+<li><code>updateModelContext(content)</code> – passthrough to <code>ext-apps</code> when present, a documented no-op otherwise.</li>
+</ul>
+<p><strong>Why a separate package and not part of the SDK?</strong> <code>raisin-client-js</code> runs inside a RaisinDB-<em>connected</em> backend – it holds credentials, talks to the HTTP/WS APIs, and knows about nodes, queries, and functions. The widget helper runs <em>inside the widget iframe</em>: no credentials, no direct RaisinDB connection, its entire world is <code>postMessage</code> to a host bridge. That is a fundamentally different runtime and audience; bundling it into the SDK would drag connection code into a sandbox that must never have it. A sibling, <code>McpClient</code> (a thin typed wrapper over the <code>/mcp/{repo}/{branch}/{slug}</code> JSON-RPC methods, mirroring the existing <code>FunctionsApi</code> shape) <em>does</em> belong in <code>raisin-client-js</code>, because that one runs in a connected backend.</p>
+<h2 id="component-map--touch-list"><a class="header" href="#component-map--touch-list">Component map / touch list</a></h2>
+<p>For a maintainer navigating the implementation, the components and where they live:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Component</th><th>Location</th><th>Change</th></tr>
+</thead>
+<tbody>
+<tr><td>MCP resource blob field</td><td><code>crates/raisin-mcp/src/protocol.rs</code> / <code>resources.rs:57</code></td><td>Add <code>ResourceContents.blob: Option&lt;String&gt;</code> (base64)</td></tr>
+<tr><td>Byte-read path for <code>mode: html</code></td><td><code>crates/raisin-mcp/src/resources.rs</code></td><td>Raw-bytes read via the new <code>AssetReader</code></td></tr>
+<tr><td>Asset-reader service seam</td><td><code>crates/raisin-mcp/src/services.rs</code></td><td>New <code>AssetReader</code> trait + <code>SharedAssetReader</code></td></tr>
+<tr><td>Tool UI binding</td><td><code>crates/raisin-mcp/src/server.rs</code> (<code>CustomTool</code>, <code>server.rs:113</code>)</td><td><code>ui: Option&lt;UiBinding&gt;</code> where <code>UiBinding { mode, entry }</code>; parse <code>entry</code> into <code>(path, fragment)</code> on first <code>#</code></td></tr>
+<tr><td>Result shaping + HTML injection</td><td><code>crates/raisin-mcp/src/dispatch.rs</code></td><td>Shape <code>CallToolResult</code> per mode; inject <code>window.__RAISIN_INITIAL_ROUTE__</code> for <code>mode: html</code> with a fragment</td></tr>
+<tr><td>HTTP asset reader</td><td><code>crates/raisin-transport-http/src/handlers/mcp/services/</code></td><td>New <code>HttpAssetReader</code> backed by <code>state.bin</code></td></tr>
+<tr><td>Static-content route</td><td>new: <code>crates/raisin-transport-http/src/handlers/static_site.rs</code> (name TBD)</td><td><code>GET /resources/{repo}/{branch}/{ws}/{*path}</code> (top-level, not under <code>/api</code>); path → Asset/Folder → bytes, index fallback. <strong>Must</strong> use <code>node_service_for_context</code> (like <code>helpers.rs</code>), never raw <code>state.storage().nodes()</code> (like <code>assets.rs</code>)</td></tr>
+<tr><td>Per-folder header resolution</td><td><code>crates/raisin-transport-http/src/middleware/cors.rs</code></td><td>Extend the hierarchical resolver one level deeper for <code>StaticSiteFolder.serving_config</code></td></tr>
+<tr><td>New nodetype</td><td>new: <code>crates/raisin-core/global_nodetypes/raisin_static_site_folder.yaml</code></td><td><code>raisin:StaticSiteFolder extends raisin:Folder</code>, <code>serving_config: Object</code></td></tr>
+<tr><td>Server schema</td><td><code>builtin-packages/raisin-mcp/nodetypes/mcp_server.yaml</code></td><td><code>tools[].ui</code> → <code>{ mode, entry }</code></td></tr>
+<tr><td>SDK MCP client</td><td><code>packages/raisin-client-js</code></td><td>New <code>McpClient</code> (<code>listTools</code>/<code>callTool</code>/<code>readResource</code>/<code>subscribeResource</code>), mirroring <code>FunctionsApi</code></td></tr>
+<tr><td>Widget runtime helper</td><td>new package: <code>@raisindb/mcp-ui-client</code></td><td><code>getInitialRoute</code>/<code>getInitialData</code>/<code>callTool</code>/<code>onToolResult</code>/<code>updateModelContext</code>, auto-detecting ext-apps vs. MCP-UI</td></tr>
+<tr><td>Skill topic</td><td>new: <code>packages/raisindb-skills/skills/raisindb-mcp-ui-widgets/SKILL.md</code></td><td>Authoring guide; cross-linked from <code>raisindb-mcp-servers</code></td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Reused unchanged:</strong> the entire upload pipeline (multipart + chunked), <code>BinaryStorage</code>, the <code>Resource</code>/<code>Asset</code> model, RLS/<code>DataPolicy</code> gating, <code>get_by_path</code>, and the existing signed-URL asset endpoint (kept for expiring/shareable links, orthogonal to all of the above).</p>
+<p><strong>Explicitly not built:</strong> an out-of-band YAML/config file holding relative URLs into RaisinDB. Everything above stays addressable by ordinary node paths, so it keeps RLS scoping, MVCC history, replication, and <code>resources/subscribe</code> live-update behavior for free – an external file would get none of that.</p>
+<h2 id="what-is-deferred"><a class="header" href="#what-is-deferred">What is deferred</a></h2>
+<ul>
+<li><strong>Dynamic per-result UI.</strong> Today <code>ui</code> is static per tool (one tool always renders the same widget/route). Letting a tool’s <em>result</em> choose the widget/route (a function returning a dynamic <code>_ui: { entry, mode }</code> that <code>dispatch.rs</code> reads in preference to the static binding) is cheap to add later and not needed for the “two tools, two views” case, which already works.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="embedding-guide"><a class="header" href="#embedding-guide">Embedding Guide</a></h1>
 <p>Learn how to embed RaisinDB into your Rust application.</p>
 <h2 id="basic-embedding"><a class="header" href="#basic-embedding">Basic Embedding</a></h2>
@@ -12267,7 +12511,7 @@ match tx.commit("Bulk create", "system").await {
 <tr><td>Azure OpenAI</td><td>Azure-hosted OpenAI</td><td>Enterprise deployments</td></tr>
 <tr><td>Groq</td><td>Open-source models</td><td>Fast inference</td></tr>
 <tr><td>OpenRouter</td><td>Multi-provider router</td><td>Unified API</td></tr>
-<tr><td>AWS Bedrock</td><td>Claude, Nova, Llama</td><td>Via AWS credentials</td></tr>
+<tr><td>AWS Bedrock</td><td>Claude, Nova, Llama</td><td>Fully implemented, default provider</td></tr>
 <tr><td>Ollama</td><td>Local models</td><td>Self-hosted</td></tr>
 <tr><td>Custom</td><td>Any OpenAI-compatible</td><td>Custom endpoint</td></tr>
 </tbody>
@@ -12317,6 +12561,24 @@ let config = TenantAIConfig {
 </div>
 <h3 id="api-key-security"><a class="header" href="#api-key-security">API Key Security</a></h3>
 <p>API keys are encrypted using AES-256-GCM before storage. The master encryption key should be stored securely (environment variables, secrets manager). Encrypted keys are never returned to clients.</p>
+<h3 id="sql-configuration"><a class="header" href="#sql-configuration">SQL Configuration</a></h3>
+<p>All AI and embedding configuration can also be managed via SQL (see <a href="#ai--embedding-configuration">SQL Reference</a>):</p>
+<pre><code class="language-sql">-- Configure embedding provider via SQL
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'OpenAI'
+  SET MODEL = 'text-embedding-3-small'
+  SET API_KEY = 'sk-...'
+  SET ENABLED = true;
+
+-- View configuration
+SHOW EMBEDDING CONFIG;
+
+-- Test connection
+TEST EMBEDDING CONNECTION;
+
+-- View AI providers
+SHOW AI PROVIDERS;
+</code></pre>
 <h2 id="completions"><a class="header" href="#completions">Completions</a></h2>
 <p>The <code>AIProviderTrait</code> provides a unified interface for completions across all providers.</p>
 <h3 id="completion-request"><a class="header" href="#completion-request">Completion Request</a></h3>
@@ -12458,6 +12720,15 @@ let chunker = TextChunker::new(config);
 let chunks: Vec&lt;TextChunk&gt; = chunker.chunk("Long document text...");
 <span class="boring">}</span></code></pre>
 <p>Chunking is token-aware (uses tiktoken) and supports configurable overlap between chunks.</p>
+<h3 id="automatic-document-chunking-in-the-embedding-pipeline"><a class="header" href="#automatic-document-chunking-in-the-embedding-pipeline">Automatic Document Chunking in the Embedding Pipeline</a></h3>
+<p>When chunking configuration is set on the embedding config, the embedding pipeline automatically chunks long documents before generating embeddings. Each chunk is stored as a separate vector in the HNSW index, linked back to the source document. This enables accurate retrieval for documents that exceed the embedding model’s context window.</p>
+<p>Configure chunking via SQL:</p>
+<pre><code class="language-sql">ALTER EMBEDDING CONFIG
+  SET CHUNKING_ENABLED = true
+  SET CHUNK_SIZE = 512
+  SET CHUNK_OVERLAP = 50;
+</code></pre>
+<p>Use <code>SearchMode::Chunks</code> in vector search to return individual chunks, or <code>SearchMode::Documents</code> (default) to deduplicate results by source document.</p>
 <h2 id="pdf-processing"><a class="header" href="#pdf-processing">PDF Processing</a></h2>
 <p>With the <code>pdf</code> or <code>pdf-markdown</code> feature flags, documents can be extracted from PDF files:</p>
 <pre><code class="language-toml">[dependencies]
@@ -12484,16 +12755,127 @@ raisin-ai = { path = "../raisin-ai", features = ["candle"] }
 <p>Models are downloaded from HuggingFace on first use and cached locally. No external API calls required.</p>
 <h2 id="embeddings"><a class="header" href="#embeddings">Embeddings</a></h2>
 <p>The <code>raisin-embeddings</code> crate manages vector embedding storage and generation.</p>
+<h3 id="embedding-providers"><a class="header" href="#embedding-providers">Embedding Providers</a></h3>
+<p>RaisinDB supports multiple embedding providers out of the box:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Provider</th><th>Models</th><th>Dimensions</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>OpenAI</strong></td><td>text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002</td><td>1536, 3072, 1536</td><td>Default, most popular</td></tr>
+<tr><td><strong>Voyage AI</strong> (Claude)</td><td>voyage-large-2-instruct, voyage-code-2, voyage-3, voyage-3-lite</td><td>1024, 1536, 1024, 512</td><td>Optimized for code and semantic search</td></tr>
+<tr><td><strong>Ollama</strong></td><td>nomic-embed-text, all-minilm, mxbai-embed-large, snowflake-arctic-embed</td><td>768, 384, 1024, 1024</td><td>Local or remote, no API key required for local</td></tr>
+<tr><td><strong>HuggingFace</strong></td><td>Local candle models</td><td>Varies</td><td>Coming soon (CLIP image embeddings available)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="configuration-via-admin-console"><a class="header" href="#configuration-via-admin-console">Configuration via Admin Console</a></h3>
+<p>The easiest way to configure embeddings is through the admin console:</p>
+<ol>
+<li>Navigate to <strong>Tenant Settings &gt; Embeddings</strong></li>
+<li>Select a provider (OpenAI, Voyage AI, or Ollama)</li>
+<li>Enter your API key (optional for local Ollama)</li>
+<li>For Ollama: optionally set a <strong>Base URL</strong> for remote instances (default: <code>http://localhost:11434</code>)</li>
+<li>Select a model – dimensions are set automatically</li>
+<li>Click <strong>Test Connection</strong> to verify the provider is reachable</li>
+<li>Enable embeddings and save</li>
+</ol>
+<h3 id="configuration-via-api"><a class="header" href="#configuration-via-api">Configuration via API</a></h3>
+<pre><code class="language-bash"># Set embedding config
+curl -X POST /api/tenants/{tenant}/embeddings/config \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": true,
+    "provider": "OpenAI",
+    "model": "text-embedding-3-small",
+    "dimensions": 1536,
+    "api_key_plain": "sk-...",
+    "include_name": true,
+    "include_path": true,
+    "max_embeddings_per_repo": null
+  }'
+
+# For Ollama (local, no API key needed)
+curl -X POST /api/tenants/{tenant}/embeddings/config \
+  -d '{
+    "enabled": true,
+    "provider": "Ollama",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "include_name": true,
+    "include_path": true
+  }'
+
+# For remote Ollama (with optional base URL and API key)
+curl -X POST /api/tenants/{tenant}/embeddings/config \
+  -d '{
+    "enabled": true,
+    "provider": "Ollama",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "base_url": "https://ollama.mycompany.com",
+    "api_key_plain": "optional-auth-token",
+    "include_name": true,
+    "include_path": true
+  }'
+
+# Test connection
+curl -X POST /api/tenants/{tenant}/embeddings/config/test
+</code></pre>
+<h3 id="schema-driven-indexing"><a class="header" href="#schema-driven-indexing">Schema-Driven Indexing</a></h3>
+<p>Control which node types and properties are embedded via NodeType schemas:</p>
+<pre><code class="language-yaml">name: myapp:Article
+indexable: true
+index_types: [Fulltext, Vector]
+properties:
+  - name: title
+    type: String
+    index: [Fulltext, Vector]   # Included in embeddings
+  - name: body
+    type: String
+    index: [Fulltext, Vector]   # Included in embeddings
+  - name: author
+    type: String
+    index: [Property]           # Property index only, not embedded
+  - name: thumbnail
+    type: Resource              # Resources are not embeddable
+</code></pre>
+<p>Properties with <code>index: [Vector]</code> are included in the text sent to the embedding provider. The <code>include_name</code> and <code>include_path</code> config options control whether the node’s name and path are prepended to the embedding text.</p>
+<h3 id="provider-abstraction"><a class="header" href="#provider-abstraction">Provider Abstraction</a></h3>
+<p>The <code>EmbeddingProvider</code> trait abstracts over different embedding APIs:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_embeddings::{create_provider, config::EmbeddingProvider};
+
+// Create OpenAI provider
+let provider = create_provider(
+    &amp;EmbeddingProvider::OpenAI,
+    "sk-your-api-key",
+    "text-embedding-3-small",
+)?;
+let vector = provider.generate_embedding("Hello world").await?;
+
+// Create Ollama provider (no API key)
+let provider = create_provider(
+    &amp;EmbeddingProvider::Ollama,
+    "",
+    "nomic-embed-text",
+)?;
+
+// Test connection (calls provider with "test" input)
+let dims = provider.test_connection().await?;
+println!("Connected! Dimensions: {}", dims);
+<span class="boring">}</span></code></pre>
 <h3 id="embedding-storage"><a class="header" href="#embedding-storage">Embedding Storage</a></h3>
-<p>Embeddings are stored per-node and can be generated by different providers:</p>
+<p>Embeddings are stored per-node with multi-model support:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use raisin_embeddings::{EmbeddingStorage, EmbeddingData};
 
-// Store an embedding for a node
 let embedding = EmbeddingData {
     node_id: "node-123".to_string(),
-    vector: vec![0.1, 0.2, 0.3, /* ... 1536 dimensions for OpenAI */],
+    vector: vec![0.1, 0.2, 0.3, /* ... */],
     model: "text-embedding-3-small".to_string(),
     // ...
 };
@@ -12512,36 +12894,48 @@ let key = id.to_key_hash(); // e.g., "a1B2c3D4e5F"
 <span class="boring">}</span></code></pre>
 <p>When you switch embedding models, old and new embeddings coexist without conflicts.</p>
 <h3 id="embedding-jobs"><a class="header" href="#embedding-jobs">Embedding Jobs</a></h3>
-<p>Embedding generation runs asynchronously through the job system:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>use raisin_embeddings::{EmbeddingJob, EmbeddingJobKind};
+<p>Embedding generation runs asynchronously through the job system. When a node is created or updated, an <code>EmbeddingGenerate</code> job is enqueued automatically (if the node type is configured for vector indexing). The background worker processes these jobs, calling the configured embedding provider and storing the result in both RocksDB and the HNSW index.</p>
+<p>The embedding worker retries transient failures (network errors, rate limits, provider timeouts) with exponential backoff. Failed jobs are retried up to a configurable maximum before being marked as permanently failed.</p>
+<h3 id="vector-index-management"><a class="header" href="#vector-index-management">Vector Index Management</a></h3>
+<p>Administrative endpoints for managing the HNSW vector index:</p>
+<pre><code class="language-bash"># Rebuild HNSW index from stored embeddings
+POST /api/admin/management/database/{tenant}/{repo}/vector/rebuild
 
-let job = EmbeddingJob {
-    node_id: "node-123".to_string(),
-    kind: EmbeddingJobKind::Generate,
-    // ...
-};
-<span class="boring">}</span></code></pre>
-<h3 id="provider-abstraction"><a class="header" href="#provider-abstraction">Provider Abstraction</a></h3>
-<p>The <code>EmbeddingProvider</code> trait abstracts over different embedding APIs:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>use raisin_embeddings::create_provider;
+# Regenerate all embeddings (re-calls provider API)
+POST /api/admin/management/database/{tenant}/{repo}/vector/regenerate
 
-let provider = create_provider(&amp;tenant_config).await?;
-let vectors = provider.embed(vec!["Hello world".to_string()]).await?;
-<span class="boring">}</span></code></pre>
+# Verify index integrity
+POST /api/admin/management/database/{tenant}/{repo}/vector/verify
+
+# Check index health
+GET /api/admin/management/database/{tenant}/{repo}/vector/health
+
+# Restore vector index from stored data (disaster recovery)
+POST /api/admin/management/database/{tenant}/{repo}/vector/restore
+
+# Vector metrics (monitoring)
+GET /management/metrics/vector
+</code></pre>
+<p>These operations are also available via SQL:</p>
+<pre><code class="language-sql">REBUILD VECTOR INDEX;
+VERIFY VECTOR INDEX;
+SHOW VECTOR INDEX HEALTH;
+REGENERATE EMBEDDINGS;
+</code></pre>
+<h3 id="vector-metrics"><a class="header" href="#vector-metrics">Vector Metrics</a></h3>
+<p>The <code>/management/metrics/vector</code> endpoint exposes monitoring data for the HNSW vector index, including index size, cache hit rates, query latencies, and embedding job queue depth.</p>
 <h2 id="hnsw-vector-search"><a class="header" href="#hnsw-vector-search">HNSW Vector Search</a></h2>
 <p>The <code>raisin-hnsw</code> crate provides fast approximate nearest neighbor (ANN) search using the Hierarchical Navigable Small World (HNSW) algorithm.</p>
 <h3 id="key-properties"><a class="header" href="#key-properties">Key Properties</a></h3>
 <ul>
-<li><strong>Cosine distance</strong> – optimized for normalized embeddings (OpenAI embeddings are pre-normalized)</li>
+<li><strong>Multiple distance metrics</strong> – Cosine, L2, InnerProduct, and Hamming</li>
 <li><strong>O(log n) search</strong> – approximate nearest neighbor in logarithmic time</li>
 <li><strong>Memory-bounded</strong> – uses Moka LRU cache to limit memory usage</li>
 <li><strong>Multi-tenant</strong> – separate indexes per tenant/repo/branch</li>
 <li><strong>Persistent</strong> – periodic snapshots to disk with dirty tracking</li>
 <li><strong>Crash-safe</strong> – graceful shutdown ensures all dirty indexes are saved</li>
+<li><strong>Configurable HNSW parameters</strong> – tune connectivity, build quality, and search accuracy</li>
+<li><strong>Vector quantization</strong> – F32, F16, and Int8 storage types for memory/accuracy trade-offs</li>
 </ul>
 <h3 id="usage-10"><a class="header" href="#usage-10">Usage</a></h3>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -12596,8 +12990,60 @@ let request = SearchRequest {
 <li><code>SearchMode::Chunks</code> – returns all matching chunks ranked by similarity</li>
 </ul>
 <p>The <code>ScoringConfig</code> controls chunk-aware ranking with <code>position_decay</code> (earlier chunks score higher) and <code>first_chunk_boost</code>.</p>
+<h3 id="hnsw-parameter-tuning"><a class="header" href="#hnsw-parameter-tuning">HNSW Parameter Tuning</a></h3>
+<p>The HNSW index supports three tuning parameters that control the trade-off between index quality, build speed, and search accuracy:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Parameter</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>connectivity</code> (M)</td><td>16</td><td>Max edges per node. Higher values improve recall but increase memory usage</td></tr>
+<tr><td><code>expansion_add</code> (ef_construction)</td><td>200</td><td>Search width during index construction. Higher values improve index quality but slow down inserts</td></tr>
+<tr><td><code>expansion_search</code> (ef_search)</td><td>100</td><td>Search width during queries. Higher values improve recall at the cost of query latency</td></tr>
+</tbody>
+</table>
+</div>
+<p>Configure via the embedding config:</p>
+<pre><code class="language-sql">ALTER EMBEDDING CONFIG
+  SET HNSW_CONNECTIVITY = 32
+  SET HNSW_EXPANSION_ADD = 400
+  SET HNSW_EXPANSION_SEARCH = 200;
+</code></pre>
+<h3 id="vector-quantization"><a class="header" href="#vector-quantization">Vector Quantization</a></h3>
+<p>Vector quantization reduces memory usage by storing vectors in lower-precision formats:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Bytes per Dimension</th><th>Memory Savings</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>F32</code></td><td>4</td><td>Baseline (default)</td><td>Full precision</td></tr>
+<tr><td><code>F16</code></td><td>2</td><td>50%</td><td>Minimal accuracy loss for most use cases</td></tr>
+<tr><td><code>Int8</code></td><td>1</td><td>75%</td><td>Best for large indexes where memory is constrained</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="distance-metrics"><a class="header" href="#distance-metrics">Distance Metrics</a></h3>
+<p>RaisinDB supports four distance metrics for vector search:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Metric</th><th>SQL Operator</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td>Cosine</td><td><code>&lt;=&gt;</code></td><td>Best for normalized embeddings (default)</td></tr>
+<tr><td>L2 (Euclidean)</td><td><code>&lt;-&gt;</code></td><td>Euclidean distance</td></tr>
+<tr><td>InnerProduct</td><td><code>&lt;#&gt;</code></td><td>Negative dot product</td></tr>
+<tr><td>Hamming</td><td>–</td><td>Bitwise distance for binary vectors</td></tr>
+</tbody>
+</table>
+</div>
+<p>Configure the distance metric per tenant:</p>
+<pre><code class="language-sql">ALTER EMBEDDING CONFIG SET DISTANCE_METRIC = 'Cosine';
+</code></pre>
 <h3 id="distance-interpretation"><a class="header" href="#distance-interpretation">Distance Interpretation</a></h3>
-<p>Since HNSW uses cosine distance (1 - cosine similarity):</p>
+<p>For cosine distance (1 - cosine similarity):</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -12611,12 +13057,74 @@ let request = SearchRequest {
 </tbody>
 </table>
 </div>
-<h3 id="vector-search-via-sql"><a class="header" href="#vector-search-via-sql">Vector Search via SQL</a></h3>
-<p>Vector search is integrated into the SQL engine. You can search for similar content using SQL:</p>
-<pre><code class="language-sql">SELECT id, name, __distance
+<h3 id="configurable-max-distance"><a class="header" href="#configurable-max-distance">Configurable Max Distance</a></h3>
+<p>By default, vector search results are filtered to exclude vectors beyond a maximum distance threshold. This threshold is configurable per tenant:</p>
+<pre><code class="language-sql">-- Set the default max distance threshold (default: 0.6)
+ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE = '0.5';
+</code></pre>
+<p>You can also filter by distance directly in SQL WHERE clauses:</p>
+<pre><code class="language-sql">-- Only return results within a specific distance
+SELECT id, name, embedding &lt;=&gt; EMBEDDING('query') AS distance
 FROM 'default'
-WHERE VECTOR_SEARCH(embedding, $1, 10)
-ORDER BY __distance ASC
+WHERE embedding &lt;=&gt; EMBEDDING('query') &lt; 0.3
+ORDER BY distance
+LIMIT 10
+</code></pre>
+<h3 id="vector-search-via-sql"><a class="header" href="#vector-search-via-sql">Vector Search via SQL</a></h3>
+<p>Vector search is fully integrated into the SQL engine. The query planner automatically detects <code>ORDER BY vector_distance LIMIT k</code> patterns and uses the HNSW index for efficient approximate nearest neighbor search.</p>
+<p><strong>Using the EMBEDDING() function</strong> (generates a query vector from text at runtime):</p>
+<pre><code class="language-sql">-- Find 10 most similar articles to a text query
+SELECT id, name, properties,
+       embedding &lt;=&gt; EMBEDDING('machine learning tutorials') AS similarity
+FROM 'default'
+ORDER BY similarity
+LIMIT 10
+</code></pre>
+<p><strong>Vector distance operators:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Function</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>&lt;=&gt;</code></td><td><code>VECTOR_COSINE_DISTANCE()</code></td><td>Cosine distance (best for normalized embeddings)</td></tr>
+<tr><td><code>&lt;-&gt;</code></td><td><code>VECTOR_L2_DISTANCE()</code></td><td>Euclidean (L2) distance</td></tr>
+<tr><td><code>&lt;#&gt;</code></td><td><code>VECTOR_INNER_PRODUCT()</code></td><td>Inner product distance</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Combined with other filters:</strong></p>
+<pre><code class="language-sql">-- Semantic search within a specific path
+SELECT id, name, embedding &lt;=&gt; EMBEDDING('rust database') AS sim
+FROM 'default'
+WHERE DESCENDANT_OF('/blog')
+ORDER BY sim
+LIMIT 10
+
+-- Full-text search with vector re-ranking
+SELECT id, name
+FROM 'default'
+WHERE FULLTEXT_MATCH('database engine', 'english')
+ORDER BY embedding &lt;=&gt; EMBEDDING('database engine')
+LIMIT 5
+</code></pre>
+<h3 id="hybrid-search-hybrid_search-table-function"><a class="header" href="#hybrid-search-hybrid_search-table-function">Hybrid Search (HYBRID_SEARCH Table Function)</a></h3>
+<p>The <code>HYBRID_SEARCH</code> table function combines full-text search and vector search using Reciprocal Rank Fusion (RRF) to produce a single ranked result set:</p>
+<pre><code class="language-sql">-- Hybrid search combining fulltext + vector with RRF ranking
+SELECT * FROM HYBRID_SEARCH('machine learning tutorials', 10)
+
+-- With additional filtering
+SELECT id, name, properties, score
+FROM HYBRID_SEARCH('database optimization', 20)
+WHERE node_type = 'myapp:Article'
+</code></pre>
+<p>Hybrid search runs both a full-text Tantivy query and a vector similarity search in parallel, then merges the results using RRF scoring. This typically produces better results than either search method alone, especially for queries where keyword matching and semantic similarity complement each other.</p>
+<h3 id="explain-for-vector-queries"><a class="header" href="#explain-for-vector-queries">EXPLAIN for Vector Queries</a></h3>
+<p>Use <code>EXPLAIN</code> to inspect vector query execution plans. The output shows <code>VectorScan</code> details including the distance metric, index parameters, and number of candidates:</p>
+<pre><code class="language-sql">EXPLAIN SELECT id, name, embedding &lt;=&gt; EMBEDDING('query') AS distance
+FROM 'default'
+ORDER BY distance
+LIMIT 10
 </code></pre>
 <h3 id="branch-operations"><a class="header" href="#branch-operations">Branch Operations</a></h3>
 <p>HNSW indexes support Git-like branch semantics – when you create a new branch, the vector index can be copied efficiently for the new branch context.</p>
@@ -12903,41 +13411,50 @@ const rows = await raisin.sql.query(sql, params?);
 // INSERT/UPDATE/DELETE -- returns affected row count
 const count = await raisin.sql.execute(sql, params?);
 </code></pre>
-<h4 id="transaction-operations--raisintx"><a class="header" href="#transaction-operations--raisintx">Transaction Operations – <code>raisin.tx.*</code></a></h4>
-<p>Functions can group multiple operations into atomic transactions:</p>
-<pre><code class="language-javascript">const txId = await raisin.tx.begin();
+<h4 id="transaction-operations--raisinnodesbegintransaction"><a class="header" href="#transaction-operations--raisinnodesbegintransaction">Transaction Operations – <code>raisin.nodes.beginTransaction()</code></a></h4>
+<p>Functions can group multiple operations into atomic transactions. Start one with
+<code>raisin.nodes.beginTransaction()</code> and call operations on the returned <code>tx</code> object (there is
+no <code>raisin.tx</code> namespace):</p>
+<pre><code class="language-javascript">const tx = raisin.nodes.beginTransaction();
 
 try {
-    await raisin.tx.create(txId, workspace, parentPath, nodeData);
-    await raisin.tx.update(txId, workspace, path, updateData);
-    await raisin.tx.delete(txId, workspace, path);
+    tx.create(workspace, parentPath, nodeData);
+    tx.update(workspace, path, updateData);
+    tx.delete(workspace, path);
 
     // Read within transaction (sees uncommitted changes)
-    const node = await raisin.tx.get(txId, workspace, id);
-    const node = await raisin.tx.getByPath(txId, workspace, path);
-    const children = await raisin.tx.listChildren(txId, workspace, parentPath);
+    const node = tx.get(workspace, id);
+    const byPath = tx.getByPath(workspace, path);
+    const children = tx.listChildren(workspace, parentPath);
 
     // Bulk operations
-    await raisin.tx.add(txId, workspace, data);
-    await raisin.tx.put(txId, workspace, data);
-    await raisin.tx.upsert(txId, workspace, data);
-    await raisin.tx.createDeep(txId, workspace, parentPath, data, parentNodeType);
-    await raisin.tx.upsertDeep(txId, workspace, data, parentNodeType);
+    tx.add(workspace, data);
+    tx.put(workspace, data);
+    tx.upsert(workspace, data);
+    tx.createDeep(workspace, parentPath, data, parentNodeType);
+    tx.upsertDeep(workspace, data, parentNodeType);
 
-    // Move and property updates
-    await raisin.tx.move(txId, workspace, path, newParentPath);
-    await raisin.tx.updateProperty(txId, workspace, path, propertyPath, value);
-    await raisin.tx.deleteById(txId, workspace, id);
+    // Property updates (tx.move is not supported -- see api notes)
+    tx.updateProperty(workspace, path, propertyPath, value);
+    tx.deleteById(workspace, id);
 
     // Set transaction metadata
-    await raisin.tx.setActor(txId, "user-123");
-    await raisin.tx.setMessage(txId, "Batch import completed");
+    tx.setActor("user-123");
+    tx.setMessage("Batch import completed");
 
-    await raisin.tx.commit(txId);
+    tx.commit();
 } catch (e) {
-    await raisin.tx.rollback(txId);
+    tx.rollback();
     throw e;
 }
+</code></pre>
+<p>For the common case of “create a node and any missing ancestor folders” you don’t need a
+transaction – call the top-level helper directly, which manages its own transaction:</p>
+<pre><code class="language-javascript">// Creates /reports and /reports/2026 as raisin:Folder if absent, then the node.
+const node = raisin.nodes.createDeep(workspace, "/reports/2026", data);
+
+// Create-or-update by path, auto-creating ancestors:
+raisin.nodes.upsertDeep(workspace, { path: "/reports/2026/q2", node_type: "...", ... });
 </code></pre>
 <h4 id="http-operations--raisinhttp-and-fetch"><a class="header" href="#http-operations--raisinhttp-and-fetch">HTTP Operations – <code>raisin.http.*</code> and <code>fetch</code></a></h4>
 <p>Functions have access to the W3C Fetch API and a convenience wrapper:</p>
@@ -18203,24 +18720,169 @@ SELECT *, embedding &lt;-&gt; EMBEDDING('search query') AS distance
 FROM 'workspace'
 ORDER BY embedding &lt;-&gt; EMBEDDING('search query')
 LIMIT 10
+
+-- Filter by max distance in WHERE clause
+SELECT id, name, embedding &lt;=&gt; EMBEDDING('query') AS distance
+FROM 'workspace'
+WHERE embedding &lt;=&gt; EMBEDDING('query') &lt; 0.3
+ORDER BY distance
+LIMIT 10
+</code></pre>
+<h4 id="hybrid_search-table-function"><a class="header" href="#hybrid_search-table-function">HYBRID_SEARCH Table Function</a></h4>
+<p>Combines full-text search and vector search using Reciprocal Rank Fusion (RRF):</p>
+<pre><code class="language-sql">-- Hybrid search: fulltext + vector with RRF ranking
+SELECT * FROM HYBRID_SEARCH('search query', 10)
+
+-- With additional filters
+SELECT id, name, score
+FROM HYBRID_SEARCH('database optimization', 20)
+WHERE node_type = 'myapp:Article'
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>query</code></td><td>TEXT</td><td>Search query text</td></tr>
+<tr><td><code>k</code></td><td>INT</td><td>Number of results to return</td></tr>
+</tbody>
+</table>
+</div>
+<h4 id="explain-for-vector-queries-1"><a class="header" href="#explain-for-vector-queries-1">EXPLAIN for Vector Queries</a></h4>
+<p><code>EXPLAIN</code> shows <code>VectorScan</code> details for vector queries, including distance metric, HNSW parameters, and candidate count:</p>
+<pre><code class="language-sql">EXPLAIN SELECT id, name, embedding &lt;=&gt; EMBEDDING('query') AS distance
+FROM 'workspace'
+ORDER BY distance
+LIMIT 10
 </code></pre>
 <h3 id="geospatial-functions-postgis-compatible"><a class="header" href="#geospatial-functions-postgis-compatible">Geospatial Functions (PostGIS-Compatible)</a></h3>
+<p><strong>Constructors:</strong></p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Function</th><th>Signature</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>ST_POINT(lon, lat)</code></td><td>DOUBLE, DOUBLE -&gt; GEOMETRY</td><td>Create a point</td></tr>
-<tr><td><code>ST_GEOMFROMGEOJSON(json)</code></td><td>TEXT -&gt; GEOMETRY</td><td>Parse GeoJSON</td></tr>
-<tr><td><code>ST_ASGEOJSON(geom)</code></td><td>GEOMETRY -&gt; TEXT</td><td>Convert to GeoJSON</td></tr>
-<tr><td><code>ST_DISTANCE(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; DOUBLE</td><td>Distance between geometries</td></tr>
-<tr><td><code>ST_DWITHIN(g1, g2, dist)</code></td><td>GEOMETRY, GEOMETRY, DOUBLE -&gt; BOOLEAN</td><td>Within distance</td></tr>
-<tr><td><code>ST_CONTAINS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; BOOLEAN</td><td>Contains check</td></tr>
-<tr><td><code>ST_WITHIN(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; BOOLEAN</td><td>Within check</td></tr>
-<tr><td><code>ST_INTERSECTS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY -&gt; BOOLEAN</td><td>Intersection check</td></tr>
-<tr><td><code>ST_X(geom)</code></td><td>GEOMETRY -&gt; DOUBLE?</td><td>Get X coordinate (longitude)</td></tr>
-<tr><td><code>ST_Y(geom)</code></td><td>GEOMETRY -&gt; DOUBLE?</td><td>Get Y coordinate (latitude)</td></tr>
+<tr><td><code>ST_POINT(lon, lat)</code></td><td>DOUBLE, DOUBLE → GEOMETRY</td><td>Create a point</td></tr>
+<tr><td><code>ST_MAKEPOINT(x, y)</code></td><td>DOUBLE, DOUBLE → GEOMETRY</td><td>Create a point (alias)</td></tr>
+<tr><td><code>ST_GEOMFROMGEOJSON(json)</code></td><td>TEXT → GEOMETRY</td><td>Parse GeoJSON</td></tr>
+<tr><td><code>ST_MAKELINE(p1, p2)</code></td><td>GEOMETRY, GEOMETRY → GEOMETRY</td><td>Create LineString from two points</td></tr>
+<tr><td><code>ST_MAKEPOLYGON(ring)</code></td><td>GEOMETRY → GEOMETRY</td><td>Create Polygon from closed LineString</td></tr>
+<tr><td><code>ST_MAKEENVELOPE(xmin, ymin, xmax, ymax)</code></td><td>DOUBLE×4 → GEOMETRY</td><td>Create bounding box Polygon</td></tr>
+<tr><td><code>ST_COLLECT(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → GEOMETRY</td><td>Collect into GeometryCollection</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Output:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_ASGEOJSON(geom)</code></td><td>GEOMETRY → TEXT</td><td>Convert to GeoJSON string</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Measurement:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_DISTANCE(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → DOUBLE</td><td>Distance in meters</td></tr>
+<tr><td><code>ST_AREA(geom)</code></td><td>GEOMETRY → DOUBLE</td><td>Area in square meters</td></tr>
+<tr><td><code>ST_LENGTH(geom)</code></td><td>GEOMETRY → DOUBLE</td><td>Length in meters</td></tr>
+<tr><td><code>ST_PERIMETER(geom)</code></td><td>GEOMETRY → DOUBLE</td><td>Perimeter in meters</td></tr>
+<tr><td><code>ST_AZIMUTH(p1, p2)</code></td><td>GEOMETRY, GEOMETRY → DOUBLE</td><td>Bearing in radians</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Spatial Predicates:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_DWITHIN(g1, g2, dist)</code></td><td>GEOMETRY, GEOMETRY, DOUBLE → BOOLEAN</td><td>Within distance (indexed)</td></tr>
+<tr><td><code>ST_CONTAINS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>A contains B</td></tr>
+<tr><td><code>ST_WITHIN(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>A within B</td></tr>
+<tr><td><code>ST_INTERSECTS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>Geometries intersect</td></tr>
+<tr><td><code>ST_DISJOINT(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>Geometries don’t intersect</td></tr>
+<tr><td><code>ST_EQUALS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>Topologically equal</td></tr>
+<tr><td><code>ST_TOUCHES(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>Boundaries touch</td></tr>
+<tr><td><code>ST_CROSSES(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>Geometry crosses another</td></tr>
+<tr><td><code>ST_OVERLAPS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>Same-dimension overlap</td></tr>
+<tr><td><code>ST_COVERS(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>A covers B</td></tr>
+<tr><td><code>ST_COVEREDBY(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → BOOLEAN</td><td>A covered by B</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Processing:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_BUFFER(geom, dist)</code></td><td>GEOMETRY, DOUBLE → GEOMETRY</td><td>Buffer zone</td></tr>
+<tr><td><code>ST_CENTROID(geom)</code></td><td>GEOMETRY → GEOMETRY</td><td>Center point</td></tr>
+<tr><td><code>ST_ENVELOPE(geom)</code></td><td>GEOMETRY → GEOMETRY</td><td>Bounding box</td></tr>
+<tr><td><code>ST_CONVEXHULL(geom)</code></td><td>GEOMETRY → GEOMETRY</td><td>Convex hull</td></tr>
+<tr><td><code>ST_SIMPLIFY(geom, tol)</code></td><td>GEOMETRY, DOUBLE → GEOMETRY</td><td>Simplify (Douglas-Peucker)</td></tr>
+<tr><td><code>ST_REVERSE(geom)</code></td><td>GEOMETRY → GEOMETRY</td><td>Reverse coordinates</td></tr>
+<tr><td><code>ST_BOUNDARY(geom)</code></td><td>GEOMETRY → GEOMETRY</td><td>Geometry boundary</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Set Operations:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_UNION(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → GEOMETRY</td><td>Union</td></tr>
+<tr><td><code>ST_INTERSECTION(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → GEOMETRY</td><td>Intersection</td></tr>
+<tr><td><code>ST_DIFFERENCE(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → GEOMETRY</td><td>Difference (A - B)</td></tr>
+<tr><td><code>ST_SYMDIFFERENCE(g1, g2)</code></td><td>GEOMETRY, GEOMETRY → GEOMETRY</td><td>Symmetric difference</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Accessors:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_X(geom)</code></td><td>GEOMETRY → DOUBLE?</td><td>Longitude of point</td></tr>
+<tr><td><code>ST_Y(geom)</code></td><td>GEOMETRY → DOUBLE?</td><td>Latitude of point</td></tr>
+<tr><td><code>ST_GEOMETRYTYPE(geom)</code></td><td>GEOMETRY → TEXT</td><td>Type name (“ST_Point”, etc.)</td></tr>
+<tr><td><code>ST_NUMPOINTS(geom)</code></td><td>GEOMETRY → INT</td><td>Number of coordinates</td></tr>
+<tr><td><code>ST_NUMGEOMETRIES(geom)</code></td><td>GEOMETRY → INT</td><td>Number of sub-geometries</td></tr>
+<tr><td><code>ST_SRID(geom)</code></td><td>GEOMETRY → INT</td><td>SRID (always 4326)</td></tr>
+<tr><td><code>ST_ISVALID(geom)</code></td><td>GEOMETRY → BOOLEAN</td><td>Is geometry valid</td></tr>
+<tr><td><code>ST_ISEMPTY(geom)</code></td><td>GEOMETRY → BOOLEAN</td><td>Has no coordinates</td></tr>
+<tr><td><code>ST_ISCLOSED(geom)</code></td><td>GEOMETRY → BOOLEAN</td><td>Is ring closed</td></tr>
+<tr><td><code>ST_ISSIMPLE(geom)</code></td><td>GEOMETRY → BOOLEAN</td><td>No self-intersections</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Line Functions:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ST_STARTPOINT(geom)</code></td><td>GEOMETRY → GEOMETRY</td><td>First point of LineString</td></tr>
+<tr><td><code>ST_ENDPOINT(geom)</code></td><td>GEOMETRY → GEOMETRY</td><td>Last point of LineString</td></tr>
+<tr><td><code>ST_POINTN(geom, n)</code></td><td>GEOMETRY, INT → GEOMETRY</td><td>Nth point (1-based)</td></tr>
+<tr><td><code>ST_LINEINTERPOLATEPOINT(geom, frac)</code></td><td>GEOMETRY, DOUBLE → GEOMETRY</td><td>Point at fraction along line</td></tr>
 </tbody>
 </table>
 </div>
@@ -18800,6 +19462,106 @@ SELECT * FROM 'workspace' WHERE node_type = $1 AND version &gt; $2 LIMIT $3
   AND properties-&gt;&gt;'status'::String = 'published'
   ORDER BY created_at DESC
   LIMIT 10
+</code></pre>
+<h2 id="ai--embedding-configuration"><a class="header" href="#ai--embedding-configuration">AI &amp; Embedding Configuration</a></h2>
+<p>Manage AI providers, embedding configuration, and vector indexes directly via SQL.</p>
+<h3 id="embedding-configuration"><a class="header" href="#embedding-configuration">Embedding Configuration</a></h3>
+<pre><code class="language-sql">-- View current embedding configuration
+SHOW EMBEDDING CONFIG;
+
+-- Configure embedding provider
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'OpenAI'
+  SET MODEL = 'text-embedding-3-small'
+  SET API_KEY = 'sk-...'
+  SET ENABLED = true;
+
+-- Configure Ollama (local)
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'Ollama'
+  SET MODEL = 'nomic-embed-text'
+  SET ENABLED = true;
+
+-- Configure Ollama (remote with optional auth)
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'Ollama'
+  SET MODEL = 'nomic-embed-text'
+  SET BASE_URL = 'https://ollama.mycompany.com'
+  SET API_KEY = 'optional-auth-token'
+  SET ENABLED = true;
+
+-- Configure Voyage AI
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'Claude'
+  SET MODEL = 'voyage-3'
+  SET API_KEY = 'pa-...'
+  SET ENABLED = true;
+
+-- Disable embeddings
+ALTER EMBEDDING CONFIG SET ENABLED = false;
+
+-- Configure max distance threshold for search results
+ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE = '0.5';
+
+-- Test connection to configured provider
+TEST EMBEDDING CONNECTION;
+</code></pre>
+<p><strong>Supported settings for ALTER EMBEDDING CONFIG:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Setting</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>PROVIDER</code></td><td>String</td><td><code>OpenAI</code>, <code>Claude</code> (Voyage AI), <code>Ollama</code>, <code>HuggingFace</code></td></tr>
+<tr><td><code>MODEL</code></td><td>String</td><td>Model identifier (e.g., <code>text-embedding-3-small</code>)</td></tr>
+<tr><td><code>API_KEY</code></td><td>String</td><td>Provider API key (encrypted at rest)</td></tr>
+<tr><td><code>BASE_URL</code></td><td>String</td><td>Custom endpoint URL (for remote Ollama)</td></tr>
+<tr><td><code>DIMENSIONS</code></td><td>Integer</td><td>Vector dimensions (auto-set by model)</td></tr>
+<tr><td><code>ENABLED</code></td><td>Boolean</td><td><code>true</code> or <code>false</code></td></tr>
+<tr><td><code>INCLUDE_NAME</code></td><td>Boolean</td><td>Include node name in embedding text</td></tr>
+<tr><td><code>INCLUDE_PATH</code></td><td>Boolean</td><td>Include node path in embedding text</td></tr>
+<tr><td><code>DISTANCE_METRIC</code></td><td>String</td><td><code>Cosine</code>, <code>L2</code>, <code>InnerProduct</code>, <code>Hamming</code></td></tr>
+<tr><td><code>DEFAULT_MAX_DISTANCE</code></td><td>String</td><td>Maximum distance threshold for search results (default: <code>0.6</code>)</td></tr>
+<tr><td><code>MAX_EMBEDDINGS_PER_REPO</code></td><td>Integer</td><td>Limit per repository (empty = unlimited)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="ai-provider-management-1"><a class="header" href="#ai-provider-management-1">AI Provider Management</a></h3>
+<pre><code class="language-sql">-- View configured AI providers
+SHOW AI PROVIDERS;
+
+-- View full AI configuration
+SHOW AI CONFIG;
+
+-- Add/update a provider
+ALTER AI CONFIG ADD PROVIDER 'OpenAI'
+  SET API_KEY = 'sk-...'
+  SET ENABLED = true;
+
+-- Add Ollama with custom endpoint
+ALTER AI CONFIG ADD PROVIDER 'Ollama'
+  SET ENDPOINT = 'http://gpu-server:11434'
+  SET ENABLED = true;
+
+-- Remove a provider
+ALTER AI CONFIG DROP PROVIDER 'Ollama';
+
+-- Test a specific provider
+TEST AI PROVIDER 'OpenAI';
+</code></pre>
+<h3 id="vector-index-management-1"><a class="header" href="#vector-index-management-1">Vector Index Management</a></h3>
+<pre><code class="language-sql">-- Check vector index health and statistics
+SHOW VECTOR INDEX HEALTH;
+
+-- Rebuild HNSW index from stored embeddings
+REBUILD VECTOR INDEX;
+
+-- Regenerate all embeddings (re-calls provider API)
+REGENERATE EMBEDDINGS;
+
+-- Verify vector index integrity
+VERIFY VECTOR INDEX;
 </code></pre>
 <h2 id="limitations"><a class="header" href="#limitations">Limitations</a></h2>
 <p>The following standard SQL features are <strong>not</strong> supported:</p>

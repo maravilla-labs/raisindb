@@ -52,9 +52,7 @@ pub(crate) fn resolve_workspace<'a>(
     allowed: &[String],
 ) -> Result<std::borrow::Cow<'a, str>> {
     match args.get("workspace").and_then(Value::as_str) {
-        Some(ws) if allowed.iter().any(|w| w == ws) => {
-            Ok(std::borrow::Cow::Owned(ws.to_string()))
-        }
+        Some(ws) if allowed.iter().any(|w| w == ws) => Ok(std::borrow::Cow::Owned(ws.to_string())),
         Some(ws) => Err(McpError::invalid_params(format!(
             "workspace `{ws}` is not exposed by this MCP server (allowed: {})",
             allowed.join(", ")
@@ -283,10 +281,7 @@ impl Tool for UpdateNodeTool {
             })?;
 
         let data = json!({ "properties": properties });
-        let updated = self
-            .backend
-            .node_update(&workspace, path, data)
-            .await?;
+        let updated = self.backend.node_update(&workspace, path, data).await?;
         Ok(updated)
     }
 }

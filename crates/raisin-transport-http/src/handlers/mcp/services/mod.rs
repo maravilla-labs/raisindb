@@ -18,12 +18,16 @@
 //!   [`NodeChange`](raisin_mcp::NodeChange) stream for `resources/subscribe`.
 
 #[cfg(feature = "storage-rocksdb")]
+mod assets;
+#[cfg(feature = "storage-rocksdb")]
 mod events;
 #[cfg(feature = "storage-rocksdb")]
 mod invoker;
 #[cfg(feature = "storage-rocksdb")]
 mod search;
 
+#[cfg(feature = "storage-rocksdb")]
+pub(super) use assets::HttpAssetReader;
 #[cfg(feature = "storage-rocksdb")]
 pub(super) use events::BusEventSource;
 #[cfg(feature = "storage-rocksdb")]

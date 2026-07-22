@@ -53,6 +53,7 @@ impl Tool for FunctionTool {
         )
         .with_scopes(self.spec.scopes.clone())
         .with_output_schema(self.spec.output_schema.clone())
+        .with_ui(self.spec.ui.clone())
     }
 
     async fn call(&self, identity: &McpIdentity, args: Value) -> Result<Value> {
