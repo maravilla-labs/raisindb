@@ -41,6 +41,8 @@ pub use callbacks::{
     FunctionExecuteContext,
     HttpRequestCallback,
     IntegrationsSyncNowCallback,
+    PluginCallContext,
+    PluginCallback,
     InventoryClaimCallback,
     InventoryReleaseCallback,
     LockAcquireCallback,

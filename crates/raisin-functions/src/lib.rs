@@ -45,10 +45,14 @@ pub mod api;
 pub mod execution;
 pub mod executor;
 pub mod loader;
+pub mod plugin;
+pub mod plugin_loader;
 pub mod runtime;
 pub mod types;
 
 // Re-exports
+pub use plugin::{register_function_plugin, FunctionBindingPlugin};
+pub use plugin_loader::{load_plugins_from_dir, RAISIN_PLUGIN_ABI_VERSION};
 pub use api::{
     // Callback types for building RaisinFunctionApi
     EmitEventCallback,

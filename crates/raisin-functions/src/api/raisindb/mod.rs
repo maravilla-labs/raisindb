@@ -205,6 +205,29 @@ impl FunctionApi for RaisinFunctionApi {
         self.impl_http_request(method, url, options).await
     }
 
+    // ========== Plugin Bindings ==========
+
+    async fn plugin_call(&self, method: &str, args: Value) -> Result<Value> {
+        // Trusted-core dispatch: look the method up in the registered plugin
+        // handlers. NO network_policy gate — plugin bindings are the sanctioned
+        // path to internal services (the callback holds the endpoint/creds).
+        match self.callbacks.plugin_callbacks.get(method) {
+            Some(cb) => {
+                let ctx = crate::api::PluginCallContext {
+                    tenant_id: self.context.tenant_id.clone(),
+                    repo_id: self.context.repo_id.clone(),
+                    branch: self.context.branch.clone(),
+                    workspace_id: self.context.workspace_id.clone(),
+                };
+                cb(ctx, args).await
+            }
+            None => Err(raisin_error::Error::Validation(format!(
+                "No plugin binding registered for '{}'",
+                method
+            ))),
+        }
+    }
+
     // ========== Event Operations ==========
 
     async fn emit_event(&self, event_type: &str, data: Value) -> Result<()> {

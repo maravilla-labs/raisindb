@@ -81,3 +81,44 @@ pub(super) fn register_registry_gateway<'js>(
     ctx.globals().set("__raisin_call", call_fn)?;
     Ok(())
 }
+
+/// Register the `__raisin_plugin_call(method, argsJson)` global used by
+/// function-binding plugin snippets (see `crate::plugin`). Unlike
+/// `__raisin_call`, this does NOT go through the bindings registry — it routes
+/// straight to `FunctionApi::plugin_call`, which looks the method up in the
+/// registered plugin handlers. Same JSON-string envelope contract as
+/// `__raisin_call` (`{"error":true,"message":...}` on failure).
+pub(super) fn register_plugin_gateway<'js>(
+    ctx: &Ctx<'js>,
+    api: Arc<dyn FunctionApi>,
+) -> std::result::Result<(), rquickjs::Error> {
+    let call_fn = Function::new(
+        ctx.clone(),
+        move |method: String, args_json: String| -> String {
+            let api = api.clone();
+
+            let args: serde_json::Value = match serde_json::from_str(&args_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(method = %method, error = %e, "__raisin_plugin_call: invalid arguments JSON");
+                    return error_envelope(format!("Invalid arguments for {}: {}", method, e));
+                }
+            };
+
+            let result =
+                run_async_blocking(async move { api.plugin_call(&method, args).await });
+
+            match result {
+                Ok(value) => serde_json::to_string(&value)
+                    .unwrap_or_else(|e| error_envelope(format!("plugin result not serializable: {}", e))),
+                Err(e) => {
+                    tracing::error!(error = %e, "plugin API call failed");
+                    error_envelope(e)
+                }
+            }
+        },
+    )?;
+
+    ctx.globals().set("__raisin_plugin_call", call_fn)?;
+    Ok(())
+}
