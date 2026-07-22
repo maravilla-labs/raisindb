@@ -1,0 +1,475 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Native MCP-UI Support - RaisinDB Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        <link rel="icon" href="../favicon.ico" type="image/x-icon">
+        <meta name="logo-root" content="../">
+        <style>
+        .sidebar-logo {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px 12px;
+            background: rgba(var(--sidebar-bg-rgb, 36, 41, 51), 0.75);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            transition: padding 0.3s ease, height 0.3s ease;
+        }
+        .sidebar-logo img {
+            height: 64px;
+            transition: height 0.3s ease;
+            object-fit: contain;
+        }
+        .sidebar-logo.shrink {
+            padding: 8px 12px;
+        }
+        .sidebar-logo.shrink img {
+            height: 36px;
+        }
+        
+        .sidebar-scrollbox { position: relative; }
+        
+        /* Theme-specific glassmorphism backgrounds */
+        :root .sidebar-logo { background: rgba(255, 255, 255, 0.75); }
+        .rust .sidebar-logo { background: rgba(255, 255, 255, 0.75); }
+        .coal .sidebar-logo { background: rgba(20, 20, 28, 0.75); }
+        .navy .sidebar-logo { background: rgba(22, 25, 35, 0.75); }
+        .ayu .sidebar-logo { background: rgba(20, 25, 31, 0.75); }
+        </style>
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var scrollbox = document.querySelector('.sidebar-scrollbox');
+            if (!scrollbox) return;
+        
+            var root = document.querySelector('meta[name="logo-root"]').getAttribute('content');
+            var logo = document.createElement('div');
+            logo.className = 'sidebar-logo';
+            logo.innerHTML = '<img src="' + root + 'logo.webp" alt="RaisinDB">';
+            scrollbox.parentNode.insertBefore(logo, scrollbox);
+        
+            scrollbox.addEventListener('scroll', function() {
+                if (scrollbox.scrollTop > 30) {
+                    logo.classList.add('shrink');
+                } else {
+                    logo.classList.remove('shrink');
+                }
+            });
+        });
+        </script>
+
+        <meta name="description" content="A flexible, multi-tenant content database built with Rust">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-7003d3a4.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-a8ca80cc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RaisinDB Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/architecture/mcp-ui.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="native-mcp-ui-support"><a class="header" href="#native-mcp-ui-support">Native MCP-UI Support</a></h1>
+<p>MCP-UI lets a tool call return not just JSON but an HTML “mini-app” that the MCP host (an AI client such as a desktop assistant, ChatGPT, or Goose) renders inline. The tool runs server-side as the real signed-in user, returns structured <code>data</code> plus a reference to a UI resource, the host fetches the widget once (and caches it), and delivers the <code>data</code> to it. The widget itself carries no cookies and no auth – it is a dumb renderer of whatever the tool handed it.</p>
+<p>This chapter documents how that capability maps onto RaisinDB’s existing content model, and – more importantly for a maintainer – <strong>the decision points and why each went the way it did.</strong> The short version: RaisinDB already had almost everything MCP-UI needs, so the design reuses the content model, the asset tree, RLS, and the MCP engine rather than bolting on a parallel system. The one genuinely new server-side primitive (a static-content endpoint) turns out to be useful on its own.</p>
+<p>Read <a href="./mcp.html">MCP Servers as Content</a> first; this chapter assumes the server descriptor, the tool/function binding, the <code>structuredContent</code> channel, and the <code>resources/read</code> limitation described there.</p>
+<h2 id="the-mapping-onto-raisindbs-content-model"><a class="header" href="#the-mapping-onto-raisindbs-content-model">The mapping onto RaisinDB’s content model</a></h2>
+<p>Nothing here introduces a new storage concept. Every moving part is an existing one:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>MCP-UI concept</th><th>RaisinDB primitive it reuses</th></tr>
+</thead>
+<tbody>
+<tr><td>The widget (HTML/CSS/JS bundle)</td><td>Ordinary <code>raisin:Asset</code> nodes in a <code>raisin:Folder</code> tree – uploaded through the existing multipart/chunked upload pipeline</td></tr>
+<tr><td>Serving the widget’s files to a browser</td><td>A new static-content HTTP endpoint over <code>NodeService</code> (RLS-enforced)</td></tr>
+<tr><td>Which widget a tool renders</td><td>A <code>ui: { mode, entry }</code> field on the tool – a <strong>path reference</strong>, not a new node type</td></tr>
+<tr><td>The widget’s initial data</td><td>The tool’s existing <code>structuredContent</code> (see <a href="./mcp.html">MCP Servers as Content</a>)</td></tr>
+<tr><td>A widget button re-invoking the server</td><td>An ordinary <code>tools/call</code> on the same MCP session – no new wire protocol</td></tr>
+<tr><td>Serving widget bytes over the MCP channel</td><td>A new <code>blob</code> field on <code>ResourceContents</code> + an <code>AssetReader</code> service seam</td></tr>
+<tr><td>Whether a subtree is servable at all (deny-by-default)</td><td>The <em>presence</em> of a <code>raisin:StaticSiteFolder</code> ancestor — a package-shippable content node</td></tr>
+<tr><td>Per-subtree embedding/CORS policy</td><td>An optional <code>serving_config</code> on that same <code>raisin:StaticSiteFolder</code> subtype</td></tr>
+</tbody>
+</table>
+</div>
+<p>The rest of the chapter is the reasoning behind the non-obvious cells in that table.</p>
+<h2 id="decision-widgets-are-files-not-a-raisinmcpuiwidget-node-type"><a class="header" href="#decision-widgets-are-files-not-a-raisinmcpuiwidget-node-type">Decision: widgets are files, not a <code>raisin:McpUiWidget</code> node type</a></h2>
+<p>An earlier draft proposed a dedicated <code>raisin:McpUiWidget</code> node type. <strong>It was dropped.</strong> A widget is just files, and RaisinDB already has a first-class file model: <code>raisin:Asset</code> (<code>crates/raisin-core/global_nodetypes/raisin_asset.yaml</code>) carries a <code>file: Resource</code> plus <code>file_type</code>/<code>file_size</code>/<code>content_hash</code>, and <code>raisin:Folder</code> (<code>raisin_folder.yaml</code>) nests arbitrarily.</p>
+<p>Two facts make “just use the asset tree” cheap rather than aspirational:</p>
+<ul>
+<li><strong>Deep folder/asset trees already work anywhere the workspace allows both types.</strong> Type-level <code>allowed_children</code> exists on <code>NodeType</code> but is not enforced in <code>raisin-core</code>’s validation path – every core type declares it as <code>[]</code>. What actually governs “can an Asset live under a Folder here” is the <em>workspace’s</em> <code>allowed_node_types</code> / <code>allowed_root_node_types</code>. So a widget bundle is a normal upload into any workspace that permits folders and assets.</li>
+<li><strong>Path lookup is a materialized full-path string, not a recursive parent-walk.</strong> <code>NodeRepository::get_by_path</code> (<code>raisin-rocksdb/.../lookup.rs</code>) keys on the <em>entire</em> path as one opaque string in a dedicated path index, prefix-scanned for the newest revision. <code>/site/widgets/order/img/logo.png</code> costs no more than a top-level lookup. This is why serving a relative reference (<code>./style.css</code>) from inside a widget is free – it is just another path lookup, no segment-by-segment resolution.</li>
+</ul>
+<p>So a widget becomes an ordinary <code>raisin:Folder</code> (or a lone <code>raisin:Asset</code> for a single-file widget), and the only thing a tool declares is a <em>path reference</em> to it. Dropping the node type also means no new package, no new workspace allowlist entry, and no schema migration.</p>
+<h2 id="decision-the-static-endpoint-must-route-through-nodeservice-fail-closed-rls"><a class="header" href="#decision-the-static-endpoint-must-route-through-nodeservice-fail-closed-rls">Decision: the static endpoint MUST route through NodeService (fail-closed RLS)</a></h2>
+<p>The new route is <code>GET /resources/{repo}/{branch}/{ws}/{*path}</code> – a top-level route, deliberately <em>not</em> under <code>/api</code>. It resolves <code>{ws}/{path}</code> via <code>get_by_path</code>; if the node is a <code>raisin:Asset</code> it streams the <code>file</code> bytes with the stored/guessed MIME type; if it is a <code>raisin:Folder</code> (or the path is empty/trailing-slash) it serves the folder’s index document (default <code>index.html</code>) instead. That index fallback is the <em>only</em> genuinely new serving logic – everything else is existing byte-serving reachable via a cleaner, path-shaped URL.</p>
+<blockquote>
+<p><strong>Naming caution.</strong> The HTTP <code>/resources/...</code> route serves raw file bytes to a browser and is unrelated to the MCP JSON-RPC <code>resources/read</code> method (see <a href="./mcp.html">MCP Servers as Content</a>), which returns <code>ResourceContents</code> over the MCP channel. They share the word “resources” but are different transports, different callers, and different code: the browser hits <code>/resources/...</code> directly for a <code>mode: uri-list</code> widget’s files, whereas the MCP engine serves widget bytes for <code>mode: html</code> through <code>resources/read</code>. Do not conflate them.</p>
+</blockquote>
+<p>The critical constraint is <strong>which of two existing byte-serving code paths it is built on.</strong> They have opposite trust models, and only one is correct here:</p>
+<ul>
+<li><strong>The RLS-enforced path (copy this).</strong> <code>handlers/repo/helpers.rs::get_property</code> (<code>helpers.rs:68</code>) and <code>handle_file_download</code> (<code>helpers.rs:173</code>) build on <code>state.node_service_for_context(...)</code> → <code>NodeService::get_property_by_path</code> / <code>get_by_path</code>. Every read passes through <code>NodeService::apply_rls_filter</code>, which <strong>fails closed</strong> – it denies when no permission resolves. The byte fetch from <code>state.bin</code> (<code>helpers.rs:117</code>) happens only <em>after</em> <code>NodeService</code> has confirmed the caller may see that node/property.</li>
+<li><strong>The raw-storage signed-URL path (do NOT copy this).</strong> <code>handlers/repo/assets.rs</code> serves <code>.../raisin:download|display?sig=&amp;exp=</code> and calls <code>state.storage().nodes().get_by_path(...)</code> directly (<code>assets.rs:107</code>) – raw repository access that bypasses <code>NodeService</code>/RLS entirely – substituting its own HMAC signature check (<code>verify_asset_signature</code>, <code>assets.rs:87</code>). That is a deliberately different model: a short-lived, shareable capability URL, not a session. It stays, orthogonal to everything here, for expiring/shareable links.</li>
+</ul>
+<p><strong>Why fail-closed RLS and not the signed-URL model?</strong> The whole point of MCP-UI is that a widget shows the signed-in user their own data. If the static endpoint bypassed RLS, a folder made public by an HMAC URL would leak content the caller’s role can’t see, and there would be no per-user filtering at all. Routing through <code>NodeService</code> means a folder is public <em>precisely when the anonymous role already has read access to it</em> via <code>raisin:access_control</code> – no new auth concept, no new “public flag,” just the <a href="./access-control.html">access-control system</a> already in place.</p>
+<p>Concretely: the route sits behind the same <code>optional_auth_middleware</code> as <code>/api/repository/...</code>. That middleware always resolves an <code>AuthContext</code> – either a real anonymous principal (via <code>PermissionService::resolve_anonymous_user</code>, the same way every other route does it) or an explicit deny-all when anonymous access is off for that repo/tenant – never “absent.” The node is then resolved through <code>node_service_for_context</code>, and <code>state.bin</code> is reached only for the final byte fetch after RLS has cleared it.</p>
+<blockquote>
+<p>This is recorded as a hard build constraint: the static endpoint must never use the raw <code>state.storage().nodes()</code> pattern from <code>assets.rs</code>. A future maintainer optimizing “just skip the service layer for a fast static path” would be silently disabling row-level security.</p>
+</blockquote>
+<p>RLS is necessary but, as of the serving gate below, <strong>no longer sufficient</strong>: an earlier draft of this endpoint served <em>anything RLS allowed</em>, so any readable asset tree was reachable at <code>/resources</code>. That is no longer true — a coarse deny-by-default gate now runs <strong>ahead of</strong> the RLS read (next-but-one decision), and only a subtree explicitly published as a <code>raisin:StaticSiteFolder</code> is reachable at all.</p>
+<h2 id="decision-raisinstaticsitefolder-as-a-subtype-not-a-mutation-of-raisinfolder"><a class="header" href="#decision-raisinstaticsitefolder-as-a-subtype-not-a-mutation-of-raisinfolder">Decision: <code>raisin:StaticSiteFolder</code> as a subtype, not a mutation of <code>raisin:Folder</code></a></h2>
+<p>Folder-level serving policy (embedding, CORS, caching, index document) lives on a <strong>new subtype</strong>, <code>raisin:StaticSiteFolder extends raisin:Folder</code>, with an optional <code>serving_config: Object</code> property:</p>
+<pre><code class="language-yaml">serving_config:
+  frame_ancestors: ["https://host.example"]   # who may iframe this subtree
+  cors_allowed_origins: ["https://host.example"]  # who may XHR back to RaisinDB
+  cache_control: "public, max-age=3600"
+  index_document: "index.html"
+</code></pre>
+<p><strong>Why a subtype and not a flag on <code>raisin:Folder</code>?</strong> <code>raisin:Folder</code> is a core global type every repo shares. Adding a <code>serving_config</code> there would put a latent HTTP-header-injection capability on <em>every</em> folder in the system, visible or not. A subtype makes the capability an explicit, visible opt-in per subtree: you create or retype a folder as <code>raisin:StaticSiteFolder</code> to give it serving behavior, and a plain <code>raisin:Folder</code> never emits any of these headers. This mirrors the established “specialized folder” pattern already in the codebase – <code>raisin:AclFolder extends raisin:Folder</code> (<code>raisin_acl_folder.yaml</code>) and <code>raisin:VirtualMount</code> both add engine configuration onto a folder subtype rather than onto the base.</p>
+<p>The precedent for “config-driven HTTP response headers resolved per request from a content node” is also already here: <code>middleware/cors.rs</code> resolves <code>cors_allowed_origins</code> hierarchically (repo → tenant → global) from a <code>raisin:RepoAuthConfig</code> node (<code>cors.rs:274</code>, <code>cors.rs:356</code>). <code>StaticSiteFolder.serving_config</code> is that same idea, one level deeper: per-folder-subtree.</p>
+<p>The static endpoint resolves the <strong>nearest ancestor folder</strong> for a path. If it is a plain <code>raisin:Folder</code>, no header overrides apply (the safe default). If it is a <code>raisin:StaticSiteFolder</code>, its <code>serving_config</code> drives the response headers for everything beneath it. Walking up the materialized path index (or resolving the immediate parent) is cheap for the same reason lookups are.</p>
+<h2 id="decision-raisinstaticsitefolder-presence-is-a-deny-by-default-serving-gate"><a class="header" href="#decision-raisinstaticsitefolder-presence-is-a-deny-by-default-serving-gate">Decision: <code>raisin:StaticSiteFolder</code> <em>presence</em> is a deny-by-default serving gate</a></h2>
+<p>The static endpoint does not serve everything RLS would allow. A path is servable through <code>/resources</code> <strong>only when a <code>raisin:StaticSiteFolder</code> covers it</strong> (the folder is the path itself or a <code>/</code>-boundary ancestor); if no folder in the workspace covers the path, the request is <code>404</code> (<code>resolve_serving_policy</code> → <code>ServingPolicy::Denied</code> → <code>NOT_FOUND</code> in <code>resolve_and_serve</code>, <code>static_site.rs</code>). The folder’s <em>presence</em> is the allowlist — there is no <code>enabled</code>/<code>servable</code> flag and no path-glob list. This is the same content node introduced above (<code>serving_config</code> for headers); its second job is to gate serving at all.</p>
+<p><strong>Why gate on <code>raisin:StaticSiteFolder</code> presence, and not on a repo-level config?</strong> The gate has to be <strong>package-shippable</strong>. A <code>raisin:StaticSiteFolder</code> is ordinary content, so a package authors it at a fixed content path (<code>content/&lt;encoded-ws&gt;/&lt;folder&gt;/.node.yaml</code>) exactly like the imap-adapter package ships its <code>raisin:Integration</code> — install the package and the subtree becomes servable, no server TOML and no admin API. The repo-level CORS precedent (<code>raisin:RepoAuthConfig</code>, <code>cors.rs:274</code>) can’t play this role: it lives at the <strong>dynamic</strong> <code>/config/repos/{repo_id}</code> path, keyed by a repo id a package can’t know at authoring time, so a package could never ship one at a fixed target. Presence-of-a-content-node is the one allowlist a package <em>can</em> express.</p>
+<p><strong>Why deny-by-default (and layered over RLS, not instead of it).</strong> The gate is a <strong>coarse</strong> “is this subtree published as a static site?” check that runs <strong>first</strong>; RLS then decides “may <em>this caller</em> read <em>this specific node</em>?” when the bytes are served. The two are independent: a <code>StaticSiteFolder</code> over a subtree does not widen RLS (a caller still only sees nodes their role grants), and RLS never substitutes for the gate (a readable-but-unpublished asset tree still 404s). Failing closed means neither adding a package nor an RLS grant alone accidentally exposes a tree — publishing is a deliberate, visible act (create/retype the folder). A <code>StaticSiteFolder</code> whose path is the bare workspace root (<code>/</code>) covers the whole workspace (<code>covers</code> treats a root/empty folder path as covering everything); scope a subtree by publishing at a named path (<code>/site</code>).</p>
+<p><strong>Why the gate is resolved with system auth — and why that makes the cache correct.</strong> <code>resolve_serving_policy</code> enumerates the workspace’s <code>raisin:StaticSiteFolder</code> set with <code>AuthContext::system()</code> (<code>NodeService::list_by_type</code>), so the decision is <strong>principal-independent</strong>: “is there a covering <code>StaticSiteFolder</code>?” has one answer for anonymous and authenticated callers alike. That is precisely what lets the result be cached in a <strong>shared, not per-caller</strong> cache without leaking one caller’s view to another — the gate decision carries no principal-specific information. It would be a security bug to key this cache by caller <em>or</em> to let the gate stand in for RLS: RLS still runs per-request, per-principal, on the actual byte read (<code>node_service_for_context</code> with the real <code>AuthContext</code>), on top of the shared gate decision. The <code>ServingConfig</code> the gate caches is likewise principal-independent (header policy, not content).</p>
+<p><strong>Why the cache is keyed by workspace, not by request path (a DoS boundary).</strong> <code>AppState::static_site_cache</code> is keyed <code>{tenant}\0{repo}\0{branch}\0{ws}</code> and stores the <em>set</em> of <code>StaticSiteFolder</code>s in that workspace (<code>Arc&lt;Vec&lt;StaticSiteEntry&gt;&gt;</code>); the nearest-cover match (<code>nearest_covering</code>/<code>covers</code>) is then a pure in-memory scan. This is deliberate: <code>TtlCache</code> is an unbounded <code>DashMap</code> with only lazy per-key TTL checks (no capacity cap, no background eviction), so an earlier design that keyed by the full request path would let unauthenticated traffic to <code>/resources/{repo}/{branch}/{ws}/{unbounded-distinct-paths}</code> grow the map without limit — a memory-exhaustion DoS, and one this codebase has been bitten by before. A workspace-bounded key (the same shape <code>cors.rs</code> uses, and for the same reason) caps the keyspace at the number of real workspaces regardless of request-path cardinality. It also does <em>fewer</em> storage ops: one <code>list_by_type</code> per workspace per TTL instead of an ancestor walk per distinct path.</p>
+<p><strong>Bounded staleness.</strong> The gate cache uses the same ~60s TTL as the CORS resolver (<code>middleware/cors.rs</code>), so creating, deleting, or retyping a <code>raisin:StaticSiteFolder</code> takes effect within ~60s — the same bounded-staleness contract operators already accept for repo-level CORS config. Enumeration errors fail closed to <code>Denied</code> and are deliberately <strong>not</strong> cached, so a transient storage error can’t poison an entry into a sticky 404.</p>
+<h2 id="decision-mode-html-srcdoc-is-the-safe-default-mode-uri-list-is-the-only-path-needing-folder-security"><a class="header" href="#decision-mode-html-srcdoc-is-the-safe-default-mode-uri-list-is-the-only-path-needing-folder-security">Decision: <code>mode: html</code> (srcdoc) is the safe default; <code>mode: uri-list</code> is the only path needing folder security</a></h2>
+<p>A tool’s UI binding is <code>ui: { mode, entry }</code> (added to <code>CustomTool</code> in <code>server.rs</code> and to <code>tools[]</code> in the server’s node schema). <code>entry</code> is a workspace-relative path, optionally with a <code>#fragment</code> (split on the first <code>#</code>). There are two delivery modes, matching the two ways real hosts render a widget:</p>
+<ul>
+<li><strong><code>mode: html</code> (default).</strong> The single-file case. The MCP engine reads the asset’s bytes itself and returns them as a <code>text/html</code> MCP resource over <code>resources/read</code>; the host renders it via <code>srcdoc</code> in its own sandbox. <strong>No cross-origin iframe is involved, so none of the folder security config applies.</strong> This is the simplest, safest option and the right default for small widgets.</li>
+<li><strong><code>mode: uri-list</code>.</strong> The multi-file case the folder tree unlocks. The MCP resource returned is a <code>text/uri-list</code> pointing at the static endpoint’s URL for that path; the host iframes it with a real <code>src=</code>. The browser then makes ordinary relative HTTP requests for CSS/JS/images back to RaisinDB. <strong>This is the only place <code>StaticSiteFolder.serving_config</code> matters</strong> – <code>frame_ancestors</code> decides whether the host origin may embed the page at all, and <code>cors_allowed_origins</code> decides whether the page’s JS may call back into RaisinDB.</li>
+</ul>
+<p>The two modes solve the same problem with different exposure. <code>mode: html</code> never gives the widget an origin or a live connection – it is inert HTML text in the host’s sandbox, so there is nothing to configure and nothing to get wrong. <code>mode: uri-list</code> gives the widget a real origin and real network access, which is more powerful and is exactly why it (and only it) requires the security config to be set deliberately.</p>
+<h3 id="frame_ancestors-defaults-to-deny"><a class="header" href="#frame_ancestors-defaults-to-deny"><code>frame_ancestors</code> defaults to DENY</a></h3>
+<p>If a <code>StaticSiteFolder</code> has no <code>serving_config</code> (or none listing <code>frame_ancestors</code>), the endpoint emits <strong>no</strong> <code>Content-Security-Policy: frame-ancestors</code> header, and the effect is <strong>not embeddable</strong> by default. Cross-origin framing requires explicitly listing origins.</p>
+<p><strong>Why deny-by-default?</strong> An embeddable-by-default page is a clickjacking and data-exfiltration surface: any site could iframe a widget that renders the signed-in user’s content. Requiring explicit opt-in per origin means a widget is only embeddable where its author said so. The endpoint uses CSP <code>frame-ancestors</code> (and deliberately omits <code>X-Frame-Options</code>, so CSP alone governs) because <code>frame-ancestors</code> takes an origin allowlist, whereas <code>X-Frame-Options</code> cannot express “these specific hosts.”</p>
+<p>Note that <code>frame-ancestors</code> (embeddability) and CORS (cross-origin script calls back to the API) are two different browser mechanisms solving two different problems. A real “iframe a widget hosted under RaisinDB from an external host” story needs <em>both</em> configured, which is why <code>serving_config</code> carries both.</p>
+<h3 id="cors_allowed_origins--and-credentials-are-mutually-exclusive"><a class="header" href="#cors_allowed_origins--and-credentials-are-mutually-exclusive"><code>cors_allowed_origins</code>: <code>"*"</code> and credentials are mutually exclusive</a></h3>
+<p>Per-folder CORS is resolved inside <code>serve_asset</code> (<code>static_site.rs</code>), <strong>not</strong> in <code>middleware/cors.rs</code> — deliberately, so a subtree-scoped policy can never affect any other route; the global unified CORS middleware still runs and is purely additive. The header logic makes wildcard and credentials mutually exclusive:</p>
+<ul>
+<li>An <strong>explicitly-listed</strong> origin ⇒ the response reflects that origin, plus <code>Access-Control-Allow-Credentials: true</code> and <code>Vary: Origin</code>. This is the credentialed path: the widget’s JS may make cookie/session reads back into RaisinDB.</li>
+<li><code>"*"</code> ⇒ <code>Access-Control-Allow-Origin: *</code> <strong>without</strong> <code>Access-Control-Allow-Credentials</code>.</li>
+</ul>
+<p><strong>Why the split.</strong> Browsers reject <code>*</code> + credentials outright, so the only way a wildcard is useful is credential-less (genuinely public assets). More importantly, <em>reflecting an arbitrary <code>Origin</code> alongside <code>Allow-Credentials: true</code> would let any site make credentialed cross-origin reads against RLS-gated content</em> — a confused-deputy hole. Restricting credentials to explicitly-listed origins closes it: an author must name the origin they trust with the signed-in user’s session, and <code>"*"</code> degrades safely to non-credentialed. (An earlier formulation that reflected the origin with credentials regardless of whether it was <code>"*"</code> or explicit is the behavior this corrects.)</p>
+<h2 id="decision-the-fragment-spa-route-mechanism-and-its-two-plumbing-paths"><a class="header" href="#decision-the-fragment-spa-route-mechanism-and-its-two-plumbing-paths">Decision: the <code>#fragment</code> SPA-route mechanism, and its two plumbing paths</a></h2>
+<p>One single-file SPA build (<code>index.html</code> with a client-side hash router) can back several tools, each bound to a different in-app view, by giving each tool a different <code>#fragment</code>:</p>
+<pre><code class="language-yaml">tools:
+  - name: order_card
+    ui: { mode: uri-list, entry: "site/widgets/order/index.html#/order-card" }
+  - name: inventory_panel
+    ui: { mode: uri-list, entry: "site/widgets/order/index.html#/inventory" }
+</code></pre>
+<p><code>entry</code> is parsed as <code>path</code> + optional <code>#fragment</code>. The fragment never affects <em>which file</em> to read (fragments are not part of file resolution); it only tells the SPA which route to show. The two modes need different plumbing to get that fragment to the widget, because only one produces a navigable URL:</p>
+<ul>
+<li>
+<p><strong><code>uri-list</code> mode – nothing extra to build.</strong> A URL fragment is never sent to the server (the browser strips it before the HTTP request), so the static endpoint just serves <code>index.html</code> normally. The fragment rides along on the iframe’s <code>src=</code> URL, and the SPA’s own hash router reads <code>location.hash</code> on mount, exactly as on a normal website. Two tools pointing at the same file with different fragments are correctly two distinct resource URIs / cache keys from the host’s perspective, even though the underlying document is byte-identical.</p>
+</li>
+<li>
+<p><strong><code>mode: html</code> – the fragment travels out-of-band.</strong> There is no navigable URL here (the host gets raw HTML text via <code>srcdoc</code>, whose location has no meaningful hash), so when <code>raisin-mcp</code> reads the asset’s bytes for this mode, it strips the <code>#fragment</code> for file resolution and injects a small bootstrap global into the returned HTML before handing it to the host, right after <code>&lt;head&gt;</code>:</p>
+<pre><code class="language-html">&lt;script&gt;window.__RAISIN_INITIAL_ROUTE__="/order-card";&lt;/script&gt;
+</code></pre>
+</li>
+</ul>
+<p>Widget authors write their router bootstrap once as <code>const route = window.__RAISIN_INITIAL_ROUTE__ ?? location.hash</code>, and it works unmodified under both modes. <strong>This injection is the only place any server-side HTML transformation happens in the entire feature</strong> – everything else is pure byte passthrough. The global name <code>window.__RAISIN_INITIAL_ROUTE__</code> is kept as an internal convention (checked against common framework globals for collision).</p>
+<h2 id="decision-widget-initiated-actions-need-no-new-wire-protocol"><a class="header" href="#decision-widget-initiated-actions-need-no-new-wire-protocol">Decision: widget-initiated actions need NO new wire protocol</a></h2>
+<p>A widget with “two buttons, click one” does not need anything new on the wire between RaisinDB and the host. A button click becomes an ordinary <code>tools/call</code> against the same MCP session – RaisinDB’s existing dispatch (see <a href="./mcp.html">MCP Servers as Content</a>) already handles it, running the same <code>raisin:Function</code>, RLS-scoped to the same caller, exactly like any other tool invocation. The whole round trip (button → <code>postMessage</code> → host decides → maybe re-invokes <code>tools/call</code> → result → widget re-renders) lives in the widget’s JS and the host’s bridge, not in RaisinDB.</p>
+<p>Two host-side conventions exist in the wild and have <strong>not</strong> converged, so a widget author should not have to pick one:</p>
+<ul>
+<li><strong>MCP Apps</strong> – the official extension. JSON-RPC over <code>postMessage</code>: a widget calls <code>app.callServerTool({ name, arguments })</code>, receives results via <code>app.ontoolresult</code>, and can push structured content back into the conversation via <code>app.updateModelContext(...)</code>. Hosts <em>may</em> require explicit user approval before executing a UI-initiated tool call – host policy, not something RaisinDB configures.</li>
+<li><strong>MCP-UI</strong> (community project) – a simpler fire-and-forget <code>postMessage({ type, payload }, '*')</code> with action kinds <code>tool</code>, <code>intent</code>, <code>prompt</code>, <code>notify</code>, <code>link</code>.</li>
+</ul>
+<p>The resolution: <strong>support both</strong>, in the client helper, not the server. The widget helper prefers <code>ext-apps</code> (<code>callServerTool</code> present on <code>window</code>) and falls back to the raw <code>postMessage({type:'tool', ...})</code> convention. RaisinDB’s server job is a good client-side helper and a good skill, not a new server mechanism.</p>
+<p>There is no server-side gate for “safe vs. destructive one-click tools.” Because hosts may or may not prompt for approval, the guidance – keep destructive operations out of the set a widget can trigger without a second confirmation – is <strong>documented in the skill only</strong>, using the existing <code>CustomTool.scopes</code> field. It is deliberately not enforced in server code, because the host, not RaisinDB, owns the approval UX.</p>
+<h2 id="raw-byte-mcp-resource-reads-mode-html"><a class="header" href="#raw-byte-mcp-resource-reads-mode-html">Raw-byte MCP resource reads (<code>mode: html</code>)</a></h2>
+<p><code>mode: html</code> requires serving widget bytes over the MCP channel, which today’s JSON-only <code>resources/read</code> cannot do (see <a href="./mcp.html">MCP Servers as Content</a> – <code>ResourceContents</code> has only <code>text</code>). Two additions close that gap:</p>
+<ul>
+<li><code>ResourceContents</code> (<code>crates/raisin-mcp/src/resources.rs:57</code>) gains <code>blob: Option&lt;String&gt;</code> (base64), so a resource read can return raw bytes instead of JSON text.</li>
+<li>A new <code>AssetReader</code> service trait (plus <code>SharedAssetReader</code>) joins <code>FunctionInvoker</code> / <code>SearchProvider</code> / <code>EventSource</code> in <code>crates/raisin-mcp/src/services.rs</code>, so the engine keeps its “never touches storage directly” rule (<code>services.rs:29</code>). The HTTP side implements it as <code>HttpAssetReader</code> in <code>handlers/mcp/services/</code>, backed by <code>state.bin</code> – which is already threaded into the MCP handler’s dependency graph via <code>handlers/mcp/api_factory.rs</code>.</li>
+</ul>
+<p>A useful side effect: any uploaded asset (not just widgets) becomes readable byte-for-byte over <code>resources/read</code>, which is generally desirable.</p>
+<h2 id="etag-and-caching"><a class="header" href="#etag-and-caching">ETag and caching</a></h2>
+<p>Static assets benefit from real HTTP caching that a JSON CRUD route would not bother with, so the static endpoint gets <strong>its own</strong> cache story:</p>
+<ul>
+<li><strong>ETag</strong> is derived from the asset’s <code>content_hash</code> (already stored on <code>raisin:Asset</code>, <code>raisin_asset.yaml</code>), giving cheap conditional requests.</li>
+<li><strong><code>Cache-Control</code></strong> defaults so that ordinary assets (CSS/JS/images) are cacheable, but the <strong>index document defaults to <code>no-cache</code></strong> unless <code>serving_config.cache_control</code> overrides it.</li>
+</ul>
+<p><strong>Why the index-document exception?</strong> A <code>mode: uri-list</code> SPA’s <code>index.html</code> carries the client-side route table. If an over-broad <code>cache_control</code> let a stale <code>index.html</code> be cached, the host would keep serving an old route table after the widget was updated, and fragments would resolve against routes that no longer exist. Keeping <code>index.html</code> at <code>no-cache</code> by default (while other assets cache freely) avoids that specific footgun; an author who knows their index is stable can opt into caching it via <code>serving_config.cache_control</code>.</p>
+<h2 id="rls-applies-at-two-different-surfaces"><a class="header" href="#rls-applies-at-two-different-surfaces">RLS applies at two different surfaces</a></h2>
+<p>A subtle but important point for widget authors, worth being explicit about in the design:</p>
+<ul>
+<li><strong><code>mode: html</code></strong> – the widget’s <code>data</code> comes from the tool call’s <code>structuredContent</code>, which is already RLS-scoped to the caller because <code>raisin:Function</code> execution is. Nothing new; the widget only ever sees what the caller may see.</li>
+<li><strong><code>mode: uri-list</code></strong> – there are now <em>two</em> access-control surfaces. The tool call’s <code>structuredContent</code> is one (RLS-scoped as above). But the iframed page can also make its <em>own</em> HTTP calls back into RaisinDB, and those are governed by the static endpoint’s own auth/RLS – a separate surface. A widget author must not assume “RLS on the tool call” implies “RLS on the iframe’s direct API calls”; both are enforced, but they are different code paths clearing different requests.</li>
+</ul>
+<h2 id="decision-the-widget-helper-is-a-separate-package"><a class="header" href="#decision-the-widget-helper-is-a-separate-package">Decision: the widget helper is a separate package</a></h2>
+<p>The widget-side runtime helper ships as its own browser-only package, <code>@raisindb/mcp-ui-client</code>, not folded into <code>packages/raisin-client-js</code>. It provides:</p>
+<ul>
+<li><code>getInitialRoute()</code> – reads <code>window.__RAISIN_INITIAL_ROUTE__</code> (the <code>mode: html</code> injection) falling back to <code>location.hash</code> (<code>mode: uri-list</code>), so widget code never needs to know which mode served it.</li>
+<li><code>getInitialData()</code> – normalizes however the host delivered the tool’s <code>structuredContent</code> on load.</li>
+<li><code>callTool(name, args)</code> / <code>onToolResult(cb)</code> – the both-conventions abstraction: tries <code>ext-apps</code> first, falls back to raw <code>postMessage</code>.</li>
+<li><code>updateModelContext(content)</code> – passthrough to <code>ext-apps</code> when present, a documented no-op otherwise.</li>
+</ul>
+<p><strong>Why a separate package and not part of the SDK?</strong> <code>raisin-client-js</code> runs inside a RaisinDB-<em>connected</em> backend – it holds credentials, talks to the HTTP/WS APIs, and knows about nodes, queries, and functions. The widget helper runs <em>inside the widget iframe</em>: no credentials, no direct RaisinDB connection, its entire world is <code>postMessage</code> to a host bridge. That is a fundamentally different runtime and audience; bundling it into the SDK would drag connection code into a sandbox that must never have it. A sibling, <code>McpClient</code> (a thin typed wrapper over the <code>/mcp/{repo}/{branch}/{slug}</code> JSON-RPC methods, mirroring the existing <code>FunctionsApi</code> shape) <em>does</em> belong in <code>raisin-client-js</code>, because that one runs in a connected backend.</p>
+<h2 id="component-map--touch-list"><a class="header" href="#component-map--touch-list">Component map / touch list</a></h2>
+<p>For a maintainer navigating the implementation, the components and where they live:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Component</th><th>Location</th><th>Change</th></tr>
+</thead>
+<tbody>
+<tr><td>MCP resource blob field</td><td><code>crates/raisin-mcp/src/protocol.rs</code> / <code>resources.rs:57</code></td><td>Add <code>ResourceContents.blob: Option&lt;String&gt;</code> (base64)</td></tr>
+<tr><td>Byte-read path for <code>mode: html</code></td><td><code>crates/raisin-mcp/src/resources.rs</code></td><td>Raw-bytes read via the new <code>AssetReader</code></td></tr>
+<tr><td>Asset-reader service seam</td><td><code>crates/raisin-mcp/src/services.rs</code></td><td>New <code>AssetReader</code> trait + <code>SharedAssetReader</code></td></tr>
+<tr><td>Tool UI binding</td><td><code>crates/raisin-mcp/src/server.rs</code> (<code>CustomTool</code>, <code>server.rs:113</code>)</td><td><code>ui: Option&lt;UiBinding&gt;</code> where <code>UiBinding { mode, entry }</code>; parse <code>entry</code> into <code>(path, fragment)</code> on first <code>#</code></td></tr>
+<tr><td>Result shaping + HTML injection</td><td><code>crates/raisin-mcp/src/dispatch.rs</code></td><td>Shape <code>CallToolResult</code> per mode; inject <code>window.__RAISIN_INITIAL_ROUTE__</code> for <code>mode: html</code> with a fragment</td></tr>
+<tr><td>HTTP asset reader</td><td><code>crates/raisin-transport-http/src/handlers/mcp/services/</code></td><td>New <code>HttpAssetReader</code> backed by <code>state.bin</code></td></tr>
+<tr><td>Static-content route</td><td>new: <code>crates/raisin-transport-http/src/handlers/static_site.rs</code> (name TBD)</td><td><code>GET /resources/{repo}/{branch}/{ws}/{*path}</code> (top-level, not under <code>/api</code>); path → Asset/Folder → bytes, index fallback. <strong>Must</strong> use <code>node_service_for_context</code> (like <code>helpers.rs</code>), never raw <code>state.storage().nodes()</code> (like <code>assets.rs</code>)</td></tr>
+<tr><td>Per-folder header resolution</td><td><code>crates/raisin-transport-http/src/middleware/cors.rs</code></td><td>Extend the hierarchical resolver one level deeper for <code>StaticSiteFolder.serving_config</code></td></tr>
+<tr><td>New nodetype</td><td>new: <code>crates/raisin-core/global_nodetypes/raisin_static_site_folder.yaml</code></td><td><code>raisin:StaticSiteFolder extends raisin:Folder</code>, <code>serving_config: Object</code></td></tr>
+<tr><td>Server schema</td><td><code>builtin-packages/raisin-mcp/nodetypes/mcp_server.yaml</code></td><td><code>tools[].ui</code> → <code>{ mode, entry }</code></td></tr>
+<tr><td>SDK MCP client</td><td><code>packages/raisin-client-js</code></td><td>New <code>McpClient</code> (<code>listTools</code>/<code>callTool</code>/<code>readResource</code>/<code>subscribeResource</code>), mirroring <code>FunctionsApi</code></td></tr>
+<tr><td>Widget runtime helper</td><td>new package: <code>@raisindb/mcp-ui-client</code></td><td><code>getInitialRoute</code>/<code>getInitialData</code>/<code>callTool</code>/<code>onToolResult</code>/<code>updateModelContext</code>, auto-detecting ext-apps vs. MCP-UI</td></tr>
+<tr><td>Skill topic</td><td>new: <code>packages/raisindb-skills/skills/raisindb-mcp-ui-widgets/SKILL.md</code></td><td>Authoring guide; cross-linked from <code>raisindb-mcp-servers</code></td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Reused unchanged:</strong> the entire upload pipeline (multipart + chunked), <code>BinaryStorage</code>, the <code>Resource</code>/<code>Asset</code> model, RLS/<code>DataPolicy</code> gating, <code>get_by_path</code>, and the existing signed-URL asset endpoint (kept for expiring/shareable links, orthogonal to all of the above).</p>
+<p><strong>Explicitly not built:</strong> an out-of-band YAML/config file holding relative URLs into RaisinDB. Everything above stays addressable by ordinary node paths, so it keeps RLS scoping, MVCC history, replication, and <code>resources/subscribe</code> live-update behavior for free – an external file would get none of that.</p>
+<h2 id="what-is-deferred"><a class="header" href="#what-is-deferred">What is deferred</a></h2>
+<ul>
+<li><strong>Dynamic per-result UI.</strong> Today <code>ui</code> is static per tool (one tool always renders the same widget/route). Letting a tool’s <em>result</em> choose the widget/route (a function returning a dynamic <code>_ui: { entry, mode }</code> that <code>dispatch.rs</code> reads in preference to the static binding) is cheap to add later and not needed for the “two tools, two views” case, which already works.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/mcp.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/embedding-guide.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/mcp.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/embedding-guide.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace-2a3cd908.js"></script>
+        <script src="../mode-rust-2c9d5c9a.js"></script>
+        <script src="../editor-16ca416c.js"></script>
+        <script src="../theme-dawn-4493f9c8.js"></script>
+        <script src="../theme-tomorrow_night-9dbe62a9.js"></script>
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

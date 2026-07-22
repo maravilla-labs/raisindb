@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
+base64 = { workspace = true }
 
 # Internal RaisinDB crates (referenced by path)
 raisin-error = { path = "../raisin-error" }

@@ -6133,6 +6133,7 @@ dependencies = [
  "serde",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -6444,6 +6445,7 @@ dependencies = [
 name = "raisin-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "raisin-error",
  "raisin-functions",

@@ -73,6 +73,14 @@ pub struct AppState {
     /// Keyed by `{tenant}/{repo}` or `{tenant}/__all__` for repo-less routes.
     #[cfg(feature = "storage-rocksdb")]
     pub(crate) cors_cache: Arc<TtlCache<Vec<String>>>,
+    /// Per-workspace `raisin:StaticSiteFolder` set for the `/resources` gate
+    /// (60s TTL). Keyed by `{tenant}\0{repo}\0{branch}\0{ws}` — a bounded key
+    /// (like `cors_cache`), NOT the request path, so adversarial/unbounded path
+    /// traffic cannot grow it. Resolved with system auth so the decision is
+    /// principal-independent and safe to share across callers; the asset bytes
+    /// themselves are still served RLS-scoped.
+    pub(crate) static_site_cache:
+        Arc<TtlCache<Arc<Vec<crate::handlers::static_site::StaticSiteEntry>>>>,
     #[cfg(feature = "storage-rocksdb")]
     pub(crate) indexing_engine: Option<Arc<TantivyIndexingEngine>>,
     #[cfg(feature = "storage-rocksdb")]
@@ -350,6 +358,7 @@ pub fn router_with_bin_and_audit(
         server_version,
         superadmin_token,
         cors_allowed_origins: cors_allowed_origins.to_vec(),
+        static_site_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(60))),
         #[cfg(feature = "storage-rocksdb")]
         cors_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(60))),
         #[cfg(feature = "storage-rocksdb")]

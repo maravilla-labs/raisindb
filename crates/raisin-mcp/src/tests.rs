@@ -135,6 +135,7 @@ fn assembly_skips_custom_tools_without_invoker() {
         input_schema: json!({ "type": "object" }),
         output_schema: None,
         scopes: vec!["greet".to_string()],
+        ui: None,
     };
     let descriptor = descriptor_with(vec![], vec![custom], vec![]);
     let services = AssemblyServices {

@@ -33,7 +33,7 @@ use raisin_functions::FunctionApi;
 use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
 use crate::protocol::ResourceUpdatedNotification;
-use crate::services::{NodeChange, SharedEventSource};
+use crate::services::{NodeChange, SharedAssetReader, SharedEventSource};
 
 /// URI scheme used to address RaisinDB content as MCP resources.
 pub const RESOURCE_SCHEME: &str = "raisin";
@@ -54,15 +54,24 @@ pub struct ResourceDescriptor {
 }
 
 /// The decoded contents of a resource, returned by `resources/read`.
+///
+/// Mirrors MCP's `TextResourceContents` / `BlobResourceContents`: `text` carries
+/// UTF-8 payloads (JSON node contents, an HTML widget, a `text/uri-list`), and
+/// `blob` carries base64-encoded binary payloads (an image, a PDF). Exactly one
+/// is populated for a given read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceContents {
     /// URI the contents were read from.
     pub uri: String,
-    /// MIME type of `text`.
+    /// MIME type of `text` / `blob`.
     #[serde(rename = "mimeType")]
     pub mime_type: String,
-    /// Resource body, serialized as text (JSON for node contents).
-    pub text: String,
+    /// Text body (JSON for node contents, HTML/uri-list for widget resources).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Base64-encoded binary body, for byte-for-byte asset reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
 }
 
 /// Build a `raisin://` resource URI from a workspace and node path.
@@ -105,6 +114,7 @@ pub fn parse_resource_uri(uri: &str) -> Result<(String, String)> {
 pub struct NodeResourceProvider {
     backend: Arc<dyn FunctionApi>,
     events: Option<SharedEventSource>,
+    assets: Option<SharedAssetReader>,
 }
 
 impl NodeResourceProvider {
@@ -113,6 +123,7 @@ impl NodeResourceProvider {
         Self {
             backend,
             events: None,
+            assets: None,
         }
     }
 
@@ -120,6 +131,43 @@ impl NodeResourceProvider {
     pub fn with_events(mut self, events: SharedEventSource) -> Self {
         self.events = Some(events);
         self
+    }
+
+    /// Attach an asset reader, enabling raw-byte
+    /// [`read_asset`](Self::read_asset) blob reads.
+    pub fn with_asset_reader(mut self, assets: SharedAssetReader) -> Self {
+        self.assets = Some(assets);
+        self
+    }
+
+    /// Read a `raisin:Asset`'s raw bytes as a base64 `blob` resource.
+    ///
+    /// Unlike [`read`](Self::read) (which returns a node's properties as JSON
+    /// `text`), this serves the asset byte-for-byte — the read the MCP-UI
+    /// `mode: html` path and any client fetching an uploaded image/PDF need. The
+    /// read is RLS-scoped by the [`AssetReader`](crate::services::AssetReader)
+    /// implementation before any bytes are fetched.
+    pub async fn read_asset(
+        &self,
+        identity: &McpIdentity,
+        workspace: &str,
+        path: &str,
+    ) -> Result<ResourceContents> {
+        use base64::Engine as _;
+
+        let assets = self
+            .assets
+            .as_ref()
+            .ok_or_else(|| McpError::not_found("asset reads are not enabled"))?;
+        self.check_workspace(identity, workspace)?;
+
+        let asset = assets.read_asset(identity, workspace, path).await?;
+        Ok(ResourceContents {
+            uri: resource_uri(workspace, path),
+            mime_type: asset.mime_type,
+            text: None,
+            blob: Some(base64::engine::general_purpose::STANDARD.encode(asset.bytes)),
+        })
     }
 
     /// Whether this provider can serve `resources/subscribe`.
@@ -141,7 +189,8 @@ impl NodeResourceProvider {
         Ok(ResourceContents {
             uri: uri.to_string(),
             mime_type: "application/json".to_string(),
-            text: serde_json::to_string(&value)?,
+            text: Some(serde_json::to_string(&value)?),
+            blob: None,
         })
     }
 

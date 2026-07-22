@@ -69,6 +69,7 @@ mod handlers {
     pub mod scheduler;
     #[cfg(feature = "storage-rocksdb")]
     pub mod sql;
+    pub mod static_site;
     #[cfg(feature = "storage-rocksdb")]
     pub mod system_updates;
     pub mod tags;

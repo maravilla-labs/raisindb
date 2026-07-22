@@ -1,0 +1,47 @@
+{
+  "name": "@raisindb/mcp-ui-client",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tiny, dependency-free, browser-only runtime helper for RaisinDB MCP-UI widgets. Runs inside the widget iframe and abstracts over the ext-apps and MCP-UI host bridges.",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "raisindb",
+    "mcp",
+    "mcp-ui",
+    "widget",
+    "browser",
+    "iframe"
+  ],
+  "author": "SOLUTAS GmbH",
+  "license": "BSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maravilla-labs/raisindb.git",
+    "directory": "packages/mcp-ui-client"
+  },
+  "bugs": {
+    "url": "https://github.com/maravilla-labs/raisindb/issues"
+  },
+  "homepage": "https://raisindb.com",
+  "devDependencies": {
+    "typescript": "^5.3.2"
+  }
+}

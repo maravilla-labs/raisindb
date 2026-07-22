@@ -24,6 +24,8 @@
 - [Authentication](./architecture/authentication.md)
 - [Access Control & Authorization](./architecture/access-control.md)
 - [SQL Access Control Extensions](./architecture/sql-access-control.md)
+- [MCP Servers as Content](./architecture/mcp.md)
+  - [Native MCP-UI Support](./architecture/mcp-ui.md)
 
 # Guides
 

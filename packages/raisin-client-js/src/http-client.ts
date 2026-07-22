@@ -29,6 +29,8 @@ import type { Upload, UploadOptions, BatchUpload, BatchUploadOptions } from './u
 import { createFileSource } from './upload/file-source';
 import { UploadManager } from './upload/uploader';
 import { HttpNodeTypes, HttpArchetypes, HttpElementTypes } from './http-schema';
+import { McpClient, type McpTransport, type McpFrameStream, type McpJsonRpcFrame } from './mcp';
+import { SSEClient } from './streaming/sse-client';
 
 /**
  * Current user info
@@ -137,6 +139,8 @@ export class RaisinHttpClient extends EventEmitter {
   private _context: RequestContext;
   private options: Required<Omit<HttpClientOptions, 'tokenStorage' | 'fetch'>>;
   private fetchImpl: typeof fetch;
+  /** Monotonic JSON-RPC id counter for MCP requests. */
+  private _mcpRequestId = 0;
   private _currentUser: CurrentUser | null = null;
   private _uploadManager: UploadManager | null = null;
 
@@ -1019,6 +1023,111 @@ export class RaisinHttpClient extends EventEmitter {
   }
 
   /**
+   * Send one JSON-RPC request to an MCP server endpoint and return its
+   * unwrapped `result`.
+   *
+   * Calls `POST /mcp/{repo}/{branch}/{slug}` carrying a single JSON-RPC 2.0
+   * message. MCP errors are returned in the JSON-RPC envelope (HTTP `200`), so
+   * this method inspects the body's `error` member and throws on failure.
+   *
+   * @internal Used by {@link McpClient} via the transport built in `mcp()`.
+   */
+  async mcpRpc(
+    repository: string,
+    branch: string,
+    slug: string,
+    method: string,
+    params?: unknown,
+  ): Promise<unknown> {
+    const id = ++this._mcpRequestId;
+    const response = await this.request<McpJsonRpcFrame>({
+      method: 'POST',
+      path: `/mcp/${repository}/${branch}/${slug}`,
+      body: {
+        jsonrpc: '2.0',
+        id,
+        method,
+        ...(params !== undefined ? { params } : {}),
+      },
+    });
+    const frame = response.data;
+    if (frame?.error) {
+      const err = new Error(frame.error.message || `MCP error ${frame.error.code}`);
+      (err as any).code = frame.error.code;
+      (err as any).data = frame.error.data;
+      throw err;
+    }
+    return frame?.result;
+  }
+
+  /**
+   * Open the `resources/subscribe` SSE stream for an MCP server endpoint.
+   *
+   * Streams JSON-RPC frames (the subscription ack followed by
+   * `notifications/resources/updated` frames) from
+   * `POST /mcp/{repo}/{branch}/{slug}`.
+   *
+   * @internal Used by {@link McpClient} via the transport built in `mcp()`.
+   */
+  mcpSubscribe(
+    repository: string,
+    branch: string,
+    slug: string,
+    method: string,
+    params: unknown,
+  ): McpFrameStream {
+    const headers: Record<string, string> = {};
+    if (this.authManager.isAuthenticated()) {
+      const token = this.authManager.getAccessToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+    }
+    const sse = new SSEClient<McpJsonRpcFrame>(
+      `${this.baseUrl}/mcp/${repository}/${branch}/${slug}`,
+      {
+        method: 'POST',
+        body: {
+          jsonrpc: '2.0',
+          id: ++this._mcpRequestId,
+          method,
+          params,
+        },
+        headers,
+        fetch: this.fetchImpl,
+        reconnect: { enabled: false },
+      },
+    );
+    return {
+      close: () => sse.close(),
+      async *[Symbol.asyncIterator](): AsyncIterator<McpJsonRpcFrame> {
+        for await (const event of sse) {
+          yield event.data;
+        }
+      },
+    };
+  }
+
+  /**
+   * Get an {@link McpClient} for a content-declared MCP server.
+   *
+   * @param slug - The `raisin:McpServer` slug (resolved in the `mcp` workspace).
+   * @param branch - Branch to address; defaults to the client's current branch.
+   */
+  mcp(slug: string, branch?: string): McpClient {
+    const repository = this._context.repository;
+    if (!repository) {
+      throw new Error('mcp() requires a repository; call database(name) first');
+    }
+    const effectiveBranch = branch ?? this.getBranch();
+    const transport: McpTransport = {
+      rpc: (m, p) => this.mcpRpc(repository, effectiveBranch, slug, m, p),
+      subscribe: (m, p) => this.mcpSubscribe(repository, effectiveBranch, slug, m, p),
+    };
+    return new McpClient(transport);
+  }
+
+  /**
    * Make a management REST request and return the parsed body.
    *
    * @internal Used by the HTTP schema-management helpers
@@ -1137,6 +1246,23 @@ export class HttpDatabase {
       (repo, name, input, options) => this.client.invokeFunction(repo, name, input, options),
       (repo, name, input) => this.client.invokeFunctionSync(repo, name, input),
     );
+  }
+
+  /**
+   * Get an {@link McpClient} for a content-declared MCP server on this database.
+   *
+   * @param slug - The `raisin:McpServer` slug (resolved in the `mcp` workspace).
+   * @returns A client scoped to `{repo}/{branch}/{slug}`, using this database's
+   *   branch (falling back to the HTTP client's current branch).
+   */
+  mcp(slug: string): McpClient {
+    const transport: McpTransport = {
+      rpc: (m, p) =>
+        this.client.mcpRpc(this.repository, this.schemaBranch(), slug, m, p),
+      subscribe: (m, p) =>
+        this.client.mcpSubscribe(this.repository, this.schemaBranch(), slug, m, p),
+    };
+    return new McpClient(transport);
   }
 
   /** Effective branch for management calls. */

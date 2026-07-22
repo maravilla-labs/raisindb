@@ -111,3 +111,22 @@ properties:
           items:
             type: string
           description: Scopes a caller must hold to invoke this tool.
+        ui:
+          type: object
+          description: >
+            Optional MCP-UI binding. When set, the host renders a widget
+            alongside the tool result.
+          properties:
+            mode:
+              type: string
+              description: >
+                How the host renders the widget. "html" delivers the entry file
+                inline as a text/html resource (srcdoc); "uri-list" returns a
+                text/uri-list pointing at the static endpoint for iframe src.
+                Allowed values - html, uri-list.
+            entry:
+              type: string
+              description: >
+                Workspace-relative path to the widget's entry document, with an
+                optional #fragment naming an in-app SPA route
+                (e.g. site/widgets/order/index.html#/card).

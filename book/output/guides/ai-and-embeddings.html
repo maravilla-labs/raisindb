@@ -93,10 +93,10 @@
             const path_to_root = "../";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-cdeb316a.js";
+            window.path_to_searchindex_js = "../searchindex-7003d3a4.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-7d500c97.js"></script>
+        <script src="../toc-a8ca80cc.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -255,7 +255,7 @@
 <tr><td>Azure OpenAI</td><td>Azure-hosted OpenAI</td><td>Enterprise deployments</td></tr>
 <tr><td>Groq</td><td>Open-source models</td><td>Fast inference</td></tr>
 <tr><td>OpenRouter</td><td>Multi-provider router</td><td>Unified API</td></tr>
-<tr><td>AWS Bedrock</td><td>Claude, Nova, Llama</td><td>Via AWS credentials</td></tr>
+<tr><td>AWS Bedrock</td><td>Claude, Nova, Llama</td><td>Fully implemented, default provider</td></tr>
 <tr><td>Ollama</td><td>Local models</td><td>Self-hosted</td></tr>
 <tr><td>Custom</td><td>Any OpenAI-compatible</td><td>Custom endpoint</td></tr>
 </tbody>
@@ -305,6 +305,24 @@ let config = TenantAIConfig {
 </div>
 <h3 id="api-key-security"><a class="header" href="#api-key-security">API Key Security</a></h3>
 <p>API keys are encrypted using AES-256-GCM before storage. The master encryption key should be stored securely (environment variables, secrets manager). Encrypted keys are never returned to clients.</p>
+<h3 id="sql-configuration"><a class="header" href="#sql-configuration">SQL Configuration</a></h3>
+<p>All AI and embedding configuration can also be managed via SQL (see <a href="../api/sql-reference.html#ai--embedding-configuration">SQL Reference</a>):</p>
+<pre><code class="language-sql">-- Configure embedding provider via SQL
+ALTER EMBEDDING CONFIG
+  SET PROVIDER = 'OpenAI'
+  SET MODEL = 'text-embedding-3-small'
+  SET API_KEY = 'sk-...'
+  SET ENABLED = true;
+
+-- View configuration
+SHOW EMBEDDING CONFIG;
+
+-- Test connection
+TEST EMBEDDING CONNECTION;
+
+-- View AI providers
+SHOW AI PROVIDERS;
+</code></pre>
 <h2 id="completions"><a class="header" href="#completions">Completions</a></h2>
 <p>The <code>AIProviderTrait</code> provides a unified interface for completions across all providers.</p>
 <h3 id="completion-request"><a class="header" href="#completion-request">Completion Request</a></h3>
@@ -446,6 +464,15 @@ let chunker = TextChunker::new(config);
 let chunks: Vec&lt;TextChunk&gt; = chunker.chunk("Long document text...");
 <span class="boring">}</span></code></pre>
 <p>Chunking is token-aware (uses tiktoken) and supports configurable overlap between chunks.</p>
+<h3 id="automatic-document-chunking-in-the-embedding-pipeline"><a class="header" href="#automatic-document-chunking-in-the-embedding-pipeline">Automatic Document Chunking in the Embedding Pipeline</a></h3>
+<p>When chunking configuration is set on the embedding config, the embedding pipeline automatically chunks long documents before generating embeddings. Each chunk is stored as a separate vector in the HNSW index, linked back to the source document. This enables accurate retrieval for documents that exceed the embedding model’s context window.</p>
+<p>Configure chunking via SQL:</p>
+<pre><code class="language-sql">ALTER EMBEDDING CONFIG
+  SET CHUNKING_ENABLED = true
+  SET CHUNK_SIZE = 512
+  SET CHUNK_OVERLAP = 50;
+</code></pre>
+<p>Use <code>SearchMode::Chunks</code> in vector search to return individual chunks, or <code>SearchMode::Documents</code> (default) to deduplicate results by source document.</p>
 <h2 id="pdf-processing"><a class="header" href="#pdf-processing">PDF Processing</a></h2>
 <p>With the <code>pdf</code> or <code>pdf-markdown</code> feature flags, documents can be extracted from PDF files:</p>
 <pre><code class="language-toml">[dependencies]
@@ -472,16 +499,127 @@ raisin-ai = { path = "../raisin-ai", features = ["candle"] }
 <p>Models are downloaded from HuggingFace on first use and cached locally. No external API calls required.</p>
 <h2 id="embeddings"><a class="header" href="#embeddings">Embeddings</a></h2>
 <p>The <code>raisin-embeddings</code> crate manages vector embedding storage and generation.</p>
+<h3 id="embedding-providers"><a class="header" href="#embedding-providers">Embedding Providers</a></h3>
+<p>RaisinDB supports multiple embedding providers out of the box:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Provider</th><th>Models</th><th>Dimensions</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>OpenAI</strong></td><td>text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002</td><td>1536, 3072, 1536</td><td>Default, most popular</td></tr>
+<tr><td><strong>Voyage AI</strong> (Claude)</td><td>voyage-large-2-instruct, voyage-code-2, voyage-3, voyage-3-lite</td><td>1024, 1536, 1024, 512</td><td>Optimized for code and semantic search</td></tr>
+<tr><td><strong>Ollama</strong></td><td>nomic-embed-text, all-minilm, mxbai-embed-large, snowflake-arctic-embed</td><td>768, 384, 1024, 1024</td><td>Local or remote, no API key required for local</td></tr>
+<tr><td><strong>HuggingFace</strong></td><td>Local candle models</td><td>Varies</td><td>Coming soon (CLIP image embeddings available)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="configuration-via-admin-console"><a class="header" href="#configuration-via-admin-console">Configuration via Admin Console</a></h3>
+<p>The easiest way to configure embeddings is through the admin console:</p>
+<ol>
+<li>Navigate to <strong>Tenant Settings &gt; Embeddings</strong></li>
+<li>Select a provider (OpenAI, Voyage AI, or Ollama)</li>
+<li>Enter your API key (optional for local Ollama)</li>
+<li>For Ollama: optionally set a <strong>Base URL</strong> for remote instances (default: <code>http://localhost:11434</code>)</li>
+<li>Select a model – dimensions are set automatically</li>
+<li>Click <strong>Test Connection</strong> to verify the provider is reachable</li>
+<li>Enable embeddings and save</li>
+</ol>
+<h3 id="configuration-via-api"><a class="header" href="#configuration-via-api">Configuration via API</a></h3>
+<pre><code class="language-bash"># Set embedding config
+curl -X POST /api/tenants/{tenant}/embeddings/config \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": true,
+    "provider": "OpenAI",
+    "model": "text-embedding-3-small",
+    "dimensions": 1536,
+    "api_key_plain": "sk-...",
+    "include_name": true,
+    "include_path": true,
+    "max_embeddings_per_repo": null
+  }'
+
+# For Ollama (local, no API key needed)
+curl -X POST /api/tenants/{tenant}/embeddings/config \
+  -d '{
+    "enabled": true,
+    "provider": "Ollama",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "include_name": true,
+    "include_path": true
+  }'
+
+# For remote Ollama (with optional base URL and API key)
+curl -X POST /api/tenants/{tenant}/embeddings/config \
+  -d '{
+    "enabled": true,
+    "provider": "Ollama",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "base_url": "https://ollama.mycompany.com",
+    "api_key_plain": "optional-auth-token",
+    "include_name": true,
+    "include_path": true
+  }'
+
+# Test connection
+curl -X POST /api/tenants/{tenant}/embeddings/config/test
+</code></pre>
+<h3 id="schema-driven-indexing"><a class="header" href="#schema-driven-indexing">Schema-Driven Indexing</a></h3>
+<p>Control which node types and properties are embedded via NodeType schemas:</p>
+<pre><code class="language-yaml">name: myapp:Article
+indexable: true
+index_types: [Fulltext, Vector]
+properties:
+  - name: title
+    type: String
+    index: [Fulltext, Vector]   # Included in embeddings
+  - name: body
+    type: String
+    index: [Fulltext, Vector]   # Included in embeddings
+  - name: author
+    type: String
+    index: [Property]           # Property index only, not embedded
+  - name: thumbnail
+    type: Resource              # Resources are not embeddable
+</code></pre>
+<p>Properties with <code>index: [Vector]</code> are included in the text sent to the embedding provider. The <code>include_name</code> and <code>include_path</code> config options control whether the node’s name and path are prepended to the embedding text.</p>
+<h3 id="provider-abstraction"><a class="header" href="#provider-abstraction">Provider Abstraction</a></h3>
+<p>The <code>EmbeddingProvider</code> trait abstracts over different embedding APIs:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use raisin_embeddings::{create_provider, config::EmbeddingProvider};
+
+// Create OpenAI provider
+let provider = create_provider(
+    &amp;EmbeddingProvider::OpenAI,
+    "sk-your-api-key",
+    "text-embedding-3-small",
+)?;
+let vector = provider.generate_embedding("Hello world").await?;
+
+// Create Ollama provider (no API key)
+let provider = create_provider(
+    &amp;EmbeddingProvider::Ollama,
+    "",
+    "nomic-embed-text",
+)?;
+
+// Test connection (calls provider with "test" input)
+let dims = provider.test_connection().await?;
+println!("Connected! Dimensions: {}", dims);
+<span class="boring">}</span></code></pre>
 <h3 id="embedding-storage"><a class="header" href="#embedding-storage">Embedding Storage</a></h3>
-<p>Embeddings are stored per-node and can be generated by different providers:</p>
+<p>Embeddings are stored per-node with multi-model support:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use raisin_embeddings::{EmbeddingStorage, EmbeddingData};
 
-// Store an embedding for a node
 let embedding = EmbeddingData {
     node_id: "node-123".to_string(),
-    vector: vec![0.1, 0.2, 0.3, /* ... 1536 dimensions for OpenAI */],
+    vector: vec![0.1, 0.2, 0.3, /* ... */],
     model: "text-embedding-3-small".to_string(),
     // ...
 };
@@ -500,36 +638,48 @@ let key = id.to_key_hash(); // e.g., "a1B2c3D4e5F"
 <span class="boring">}</span></code></pre>
 <p>When you switch embedding models, old and new embeddings coexist without conflicts.</p>
 <h3 id="embedding-jobs"><a class="header" href="#embedding-jobs">Embedding Jobs</a></h3>
-<p>Embedding generation runs asynchronously through the job system:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>use raisin_embeddings::{EmbeddingJob, EmbeddingJobKind};
+<p>Embedding generation runs asynchronously through the job system. When a node is created or updated, an <code>EmbeddingGenerate</code> job is enqueued automatically (if the node type is configured for vector indexing). The background worker processes these jobs, calling the configured embedding provider and storing the result in both RocksDB and the HNSW index.</p>
+<p>The embedding worker retries transient failures (network errors, rate limits, provider timeouts) with exponential backoff. Failed jobs are retried up to a configurable maximum before being marked as permanently failed.</p>
+<h3 id="vector-index-management"><a class="header" href="#vector-index-management">Vector Index Management</a></h3>
+<p>Administrative endpoints for managing the HNSW vector index:</p>
+<pre><code class="language-bash"># Rebuild HNSW index from stored embeddings
+POST /api/admin/management/database/{tenant}/{repo}/vector/rebuild
 
-let job = EmbeddingJob {
-    node_id: "node-123".to_string(),
-    kind: EmbeddingJobKind::Generate,
-    // ...
-};
-<span class="boring">}</span></code></pre>
-<h3 id="provider-abstraction"><a class="header" href="#provider-abstraction">Provider Abstraction</a></h3>
-<p>The <code>EmbeddingProvider</code> trait abstracts over different embedding APIs:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>use raisin_embeddings::create_provider;
+# Regenerate all embeddings (re-calls provider API)
+POST /api/admin/management/database/{tenant}/{repo}/vector/regenerate
 
-let provider = create_provider(&amp;tenant_config).await?;
-let vectors = provider.embed(vec!["Hello world".to_string()]).await?;
-<span class="boring">}</span></code></pre>
+# Verify index integrity
+POST /api/admin/management/database/{tenant}/{repo}/vector/verify
+
+# Check index health
+GET /api/admin/management/database/{tenant}/{repo}/vector/health
+
+# Restore vector index from stored data (disaster recovery)
+POST /api/admin/management/database/{tenant}/{repo}/vector/restore
+
+# Vector metrics (monitoring)
+GET /management/metrics/vector
+</code></pre>
+<p>These operations are also available via SQL:</p>
+<pre><code class="language-sql">REBUILD VECTOR INDEX;
+VERIFY VECTOR INDEX;
+SHOW VECTOR INDEX HEALTH;
+REGENERATE EMBEDDINGS;
+</code></pre>
+<h3 id="vector-metrics"><a class="header" href="#vector-metrics">Vector Metrics</a></h3>
+<p>The <code>/management/metrics/vector</code> endpoint exposes monitoring data for the HNSW vector index, including index size, cache hit rates, query latencies, and embedding job queue depth.</p>
 <h2 id="hnsw-vector-search"><a class="header" href="#hnsw-vector-search">HNSW Vector Search</a></h2>
 <p>The <code>raisin-hnsw</code> crate provides fast approximate nearest neighbor (ANN) search using the Hierarchical Navigable Small World (HNSW) algorithm.</p>
 <h3 id="key-properties"><a class="header" href="#key-properties">Key Properties</a></h3>
 <ul>
-<li><strong>Cosine distance</strong> – optimized for normalized embeddings (OpenAI embeddings are pre-normalized)</li>
+<li><strong>Multiple distance metrics</strong> – Cosine, L2, InnerProduct, and Hamming</li>
 <li><strong>O(log n) search</strong> – approximate nearest neighbor in logarithmic time</li>
 <li><strong>Memory-bounded</strong> – uses Moka LRU cache to limit memory usage</li>
 <li><strong>Multi-tenant</strong> – separate indexes per tenant/repo/branch</li>
 <li><strong>Persistent</strong> – periodic snapshots to disk with dirty tracking</li>
 <li><strong>Crash-safe</strong> – graceful shutdown ensures all dirty indexes are saved</li>
+<li><strong>Configurable HNSW parameters</strong> – tune connectivity, build quality, and search accuracy</li>
+<li><strong>Vector quantization</strong> – F32, F16, and Int8 storage types for memory/accuracy trade-offs</li>
 </ul>
 <h3 id="usage"><a class="header" href="#usage">Usage</a></h3>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -584,8 +734,60 @@ let request = SearchRequest {
 <li><code>SearchMode::Chunks</code> – returns all matching chunks ranked by similarity</li>
 </ul>
 <p>The <code>ScoringConfig</code> controls chunk-aware ranking with <code>position_decay</code> (earlier chunks score higher) and <code>first_chunk_boost</code>.</p>
+<h3 id="hnsw-parameter-tuning"><a class="header" href="#hnsw-parameter-tuning">HNSW Parameter Tuning</a></h3>
+<p>The HNSW index supports three tuning parameters that control the trade-off between index quality, build speed, and search accuracy:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Parameter</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>connectivity</code> (M)</td><td>16</td><td>Max edges per node. Higher values improve recall but increase memory usage</td></tr>
+<tr><td><code>expansion_add</code> (ef_construction)</td><td>200</td><td>Search width during index construction. Higher values improve index quality but slow down inserts</td></tr>
+<tr><td><code>expansion_search</code> (ef_search)</td><td>100</td><td>Search width during queries. Higher values improve recall at the cost of query latency</td></tr>
+</tbody>
+</table>
+</div>
+<p>Configure via the embedding config:</p>
+<pre><code class="language-sql">ALTER EMBEDDING CONFIG
+  SET HNSW_CONNECTIVITY = 32
+  SET HNSW_EXPANSION_ADD = 400
+  SET HNSW_EXPANSION_SEARCH = 200;
+</code></pre>
+<h3 id="vector-quantization"><a class="header" href="#vector-quantization">Vector Quantization</a></h3>
+<p>Vector quantization reduces memory usage by storing vectors in lower-precision formats:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Bytes per Dimension</th><th>Memory Savings</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>F32</code></td><td>4</td><td>Baseline (default)</td><td>Full precision</td></tr>
+<tr><td><code>F16</code></td><td>2</td><td>50%</td><td>Minimal accuracy loss for most use cases</td></tr>
+<tr><td><code>Int8</code></td><td>1</td><td>75%</td><td>Best for large indexes where memory is constrained</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="distance-metrics"><a class="header" href="#distance-metrics">Distance Metrics</a></h3>
+<p>RaisinDB supports four distance metrics for vector search:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Metric</th><th>SQL Operator</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td>Cosine</td><td><code>&lt;=&gt;</code></td><td>Best for normalized embeddings (default)</td></tr>
+<tr><td>L2 (Euclidean)</td><td><code>&lt;-&gt;</code></td><td>Euclidean distance</td></tr>
+<tr><td>InnerProduct</td><td><code>&lt;#&gt;</code></td><td>Negative dot product</td></tr>
+<tr><td>Hamming</td><td>–</td><td>Bitwise distance for binary vectors</td></tr>
+</tbody>
+</table>
+</div>
+<p>Configure the distance metric per tenant:</p>
+<pre><code class="language-sql">ALTER EMBEDDING CONFIG SET DISTANCE_METRIC = 'Cosine';
+</code></pre>
 <h3 id="distance-interpretation"><a class="header" href="#distance-interpretation">Distance Interpretation</a></h3>
-<p>Since HNSW uses cosine distance (1 - cosine similarity):</p>
+<p>For cosine distance (1 - cosine similarity):</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -599,12 +801,74 @@ let request = SearchRequest {
 </tbody>
 </table>
 </div>
-<h3 id="vector-search-via-sql"><a class="header" href="#vector-search-via-sql">Vector Search via SQL</a></h3>
-<p>Vector search is integrated into the SQL engine. You can search for similar content using SQL:</p>
-<pre><code class="language-sql">SELECT id, name, __distance
+<h3 id="configurable-max-distance"><a class="header" href="#configurable-max-distance">Configurable Max Distance</a></h3>
+<p>By default, vector search results are filtered to exclude vectors beyond a maximum distance threshold. This threshold is configurable per tenant:</p>
+<pre><code class="language-sql">-- Set the default max distance threshold (default: 0.6)
+ALTER EMBEDDING CONFIG SET DEFAULT_MAX_DISTANCE = '0.5';
+</code></pre>
+<p>You can also filter by distance directly in SQL WHERE clauses:</p>
+<pre><code class="language-sql">-- Only return results within a specific distance
+SELECT id, name, embedding &lt;=&gt; EMBEDDING('query') AS distance
 FROM 'default'
-WHERE VECTOR_SEARCH(embedding, $1, 10)
-ORDER BY __distance ASC
+WHERE embedding &lt;=&gt; EMBEDDING('query') &lt; 0.3
+ORDER BY distance
+LIMIT 10
+</code></pre>
+<h3 id="vector-search-via-sql"><a class="header" href="#vector-search-via-sql">Vector Search via SQL</a></h3>
+<p>Vector search is fully integrated into the SQL engine. The query planner automatically detects <code>ORDER BY vector_distance LIMIT k</code> patterns and uses the HNSW index for efficient approximate nearest neighbor search.</p>
+<p><strong>Using the EMBEDDING() function</strong> (generates a query vector from text at runtime):</p>
+<pre><code class="language-sql">-- Find 10 most similar articles to a text query
+SELECT id, name, properties,
+       embedding &lt;=&gt; EMBEDDING('machine learning tutorials') AS similarity
+FROM 'default'
+ORDER BY similarity
+LIMIT 10
+</code></pre>
+<p><strong>Vector distance operators:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Function</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>&lt;=&gt;</code></td><td><code>VECTOR_COSINE_DISTANCE()</code></td><td>Cosine distance (best for normalized embeddings)</td></tr>
+<tr><td><code>&lt;-&gt;</code></td><td><code>VECTOR_L2_DISTANCE()</code></td><td>Euclidean (L2) distance</td></tr>
+<tr><td><code>&lt;#&gt;</code></td><td><code>VECTOR_INNER_PRODUCT()</code></td><td>Inner product distance</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Combined with other filters:</strong></p>
+<pre><code class="language-sql">-- Semantic search within a specific path
+SELECT id, name, embedding &lt;=&gt; EMBEDDING('rust database') AS sim
+FROM 'default'
+WHERE DESCENDANT_OF('/blog')
+ORDER BY sim
+LIMIT 10
+
+-- Full-text search with vector re-ranking
+SELECT id, name
+FROM 'default'
+WHERE FULLTEXT_MATCH('database engine', 'english')
+ORDER BY embedding &lt;=&gt; EMBEDDING('database engine')
+LIMIT 5
+</code></pre>
+<h3 id="hybrid-search-hybrid_search-table-function"><a class="header" href="#hybrid-search-hybrid_search-table-function">Hybrid Search (HYBRID_SEARCH Table Function)</a></h3>
+<p>The <code>HYBRID_SEARCH</code> table function combines full-text search and vector search using Reciprocal Rank Fusion (RRF) to produce a single ranked result set:</p>
+<pre><code class="language-sql">-- Hybrid search combining fulltext + vector with RRF ranking
+SELECT * FROM HYBRID_SEARCH('machine learning tutorials', 10)
+
+-- With additional filtering
+SELECT id, name, properties, score
+FROM HYBRID_SEARCH('database optimization', 20)
+WHERE node_type = 'myapp:Article'
+</code></pre>
+<p>Hybrid search runs both a full-text Tantivy query and a vector similarity search in parallel, then merges the results using RRF scoring. This typically produces better results than either search method alone, especially for queries where keyword matching and semantic similarity complement each other.</p>
+<h3 id="explain-for-vector-queries"><a class="header" href="#explain-for-vector-queries">EXPLAIN for Vector Queries</a></h3>
+<p>Use <code>EXPLAIN</code> to inspect vector query execution plans. The output shows <code>VectorScan</code> details including the distance metric, index parameters, and number of candidates:</p>
+<pre><code class="language-sql">EXPLAIN SELECT id, name, embedding &lt;=&gt; EMBEDDING('query') AS distance
+FROM 'default'
+ORDER BY distance
+LIMIT 10
 </code></pre>
 <h3 id="branch-operations"><a class="header" href="#branch-operations">Branch Operations</a></h3>
 <p>HNSW indexes support Git-like branch semantics – when you create a new branch, the vector index can be copied efficiently for the new branch context.</p>

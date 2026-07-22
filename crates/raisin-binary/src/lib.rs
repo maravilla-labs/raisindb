@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    pin::Pin,
 };
+
+/// A boxed byte stream returned by [`BinaryStorage::get_stream`].
+pub type ByteReadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>;
 
 /// Validate a storage key to prevent path traversal attacks
 ///
@@ -124,6 +128,21 @@ pub trait BinaryStorage: Send + Sync {
     /// # Security
     /// The key is validated to prevent path traversal attacks
     fn get(&self, key: &str) -> impl std::future::Future<Output = anyhow::Result<Bytes>> + Send;
+
+    /// Stream binary data by storage key without buffering it all in memory.
+    ///
+    /// Returns the total byte length (for a `Content-Length` header) and a
+    /// stream of chunks. Prefer this over [`get`](Self::get) when serving bytes
+    /// straight to a client — the filesystem backend streams from disk and the
+    /// S3 backend streams the object body, so neither holds the whole asset in
+    /// process memory.
+    ///
+    /// # Security
+    /// The key is validated to prevent path traversal attacks.
+    fn get_stream(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<(u64, ByteReadStream)>> + Send;
 
     /// Delete binary data by storage key
     ///
@@ -265,6 +284,21 @@ impl BinaryStorage for FilesystemBinaryStorage {
             validation_result?;
             let data = tokio::fs::read(path).await?;
             Ok(Bytes::from(data))
+        }
+    }
+
+    fn get_stream(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<(u64, ByteReadStream)>> + Send {
+        let validation_result = validate_key(key);
+        let path = self.base_dir.join(key);
+        async move {
+            validation_result?;
+            let file = tokio::fs::File::open(&path).await?;
+            let len = file.metadata().await?.len();
+            let stream = tokio_util::io::ReaderStream::new(file);
+            Ok((len, Box::pin(stream) as ByteReadStream))
         }
     }
 
@@ -417,6 +451,26 @@ impl BinaryStorage for S3BinaryStorage {
             let response = client.get_object().bucket(&bucket).key(&key).send().await?;
             let data = response.body.collect().await?;
             Ok(data.into_bytes())
+        }
+    }
+
+    fn get_stream(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<(u64, ByteReadStream)>> + Send {
+        let validation_result = validate_key(key);
+        let bucket = self.bucket.clone();
+        let client = self.client.clone();
+        let key = key.to_string();
+        async move {
+            validation_result?;
+            let response = client.get_object().bucket(&bucket).key(&key).send().await?;
+            let len = response.content_length().unwrap_or(0).max(0) as u64;
+            // Stream the object body straight through — no `collect()`, so the
+            // whole object is never buffered in process memory.
+            let reader = response.body.into_async_read();
+            let stream = tokio_util::io::ReaderStream::new(reader);
+            Ok((len, Box::pin(stream) as ByteReadStream))
         }
     }
 

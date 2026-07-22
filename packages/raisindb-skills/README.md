@@ -26,6 +26,7 @@ npx skills add maravilla-labs/raisindb/packages/raisindb-skills
 | **raisindb-workflows** | Durable workflows: designer format, loops, human approval tasks, saga compensation |
 | **raisindb-messaging-agents** | AI agents with tools, chat pipeline, proactive user coordination, token safeguards |
 | **raisindb-mcp-servers** | Expose data and functions as Model Context Protocol (MCP) servers: `raisin:McpServer`, auto data tools, custom function tools, auth, connecting a client |
+| **raisindb-mcp-ui-widgets** | Attach interactive HTML widgets (MCP-UI) to MCP tools: `raisin:StaticSiteFolder`, `ui: { mode, entry }`, html vs uri-list, `#fragment` SPA routes, `@raisindb/mcp-ui-client`, widget-initiated tool calls |
 
 ## Learning Path
 
