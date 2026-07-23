@@ -45,7 +45,6 @@ mod inner {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    const TENANT_ID: &str = "default";
     const DEFAULT_BRANCH: &str = "main";
     const FUNCTIONS_WORKSPACE: &str = "functions";
 
@@ -58,13 +57,21 @@ mod inner {
             .ok_or_else(|| WsError::InvalidRequest("Repository required".to_string()))
     }
 
+    /// The connection's tenant — established at upgrade time from the /sys
+    /// path or x-tenant-id header (never from message content). Function
+    /// invocation must resolve/execute in the caller's actual tenant, not a
+    /// hardcoded one, or every prod invoke silently runs against "default".
+    fn connection_tenant(connection_state: &Arc<RwLock<ConnectionState>>) -> String {
+        connection_state.read().tenant_id.clone()
+    }
+
     // -----------------------------------------------------------------------
     // Async invoke (background job)
     // -----------------------------------------------------------------------
 
     pub async fn handle_function_invoke<S, B>(
         state: &Arc<WsState<S, B>>,
-        _connection_state: &Arc<RwLock<ConnectionState>>,
+        connection_state: &Arc<RwLock<ConnectionState>>,
         request: RequestEnvelope,
     ) -> Result<Option<ResponseEnvelope>, WsError>
     where
@@ -73,6 +80,7 @@ mod inner {
     {
         let payload: FunctionInvokePayload = serde_json::from_value(request.payload.clone())?;
         let repo = require_repo(&request)?;
+        let tenant_id = connection_tenant(connection_state);
 
         let rocksdb = state
             .rocksdb_storage
@@ -82,7 +90,7 @@ mod inner {
 
         let function_node = raisin_functions::execution::code_loader::find_function(
             &*state.storage,
-            TENANT_ID,
+            &tenant_id,
             &repo,
             DEFAULT_BRANCH,
             FUNCTIONS_WORKSPACE,
@@ -103,7 +111,7 @@ mod inner {
         metadata.insert("input".to_string(), payload.input);
 
         let context = raisin_storage::jobs::JobContext {
-            tenant_id: TENANT_ID.to_string(),
+            tenant_id: tenant_id.clone(),
             repo_id: repo.clone(),
             branch: DEFAULT_BRANCH.into(),
             workspace_id: FUNCTIONS_WORKSPACE.into(),
@@ -124,7 +132,7 @@ mod inner {
             .register_job_with_id(
                 job_id.clone(),
                 job_type,
-                TENANT_ID.to_string(),
+                tenant_id.clone(),
                 None,
                 None,
                 None,
@@ -286,7 +294,7 @@ mod inner {
 
     pub async fn handle_function_invoke_sync<S, B>(
         state: &Arc<WsState<S, B>>,
-        _connection_state: &Arc<RwLock<ConnectionState>>,
+        connection_state: &Arc<RwLock<ConnectionState>>,
         request: RequestEnvelope,
     ) -> Result<Option<ResponseEnvelope>, WsError>
     where
@@ -300,12 +308,13 @@ mod inner {
 
         let payload: FunctionInvokePayload = serde_json::from_value(request.payload.clone())?;
         let repo = require_repo(&request)?;
+        let tenant_id = connection_tenant(connection_state);
         let request_id = request.request_id.clone();
 
         // Find function via canonical code_loader
         let function_node = raisin_functions::execution::code_loader::find_function(
             &*state.storage,
-            TENANT_ID,
+            &tenant_id,
             &repo,
             DEFAULT_BRANCH,
             FUNCTIONS_WORKSPACE,
@@ -318,7 +327,7 @@ mod inner {
         let (code, metadata) = raisin_functions::execution::code_loader::load_function_code(
             &*state.storage,
             &*state.bin,
-            TENANT_ID,
+            &tenant_id,
             &repo,
             DEFAULT_BRANCH,
             FUNCTIONS_WORKSPACE,
@@ -365,20 +374,20 @@ mod inner {
         // Build callbacks via canonical create_production_callbacks
         let callbacks = create_production_callbacks(
             deps,
-            TENANT_ID.to_string(),
+            tenant_id.clone(),
             repo.clone(),
             DEFAULT_BRANCH.to_string(),
             None, // no auth context from WS for now
         );
 
         let api = Arc::new(RaisinFunctionApi::new(
-            ExecutionContext::new(TENANT_ID, &repo, DEFAULT_BRANCH, "system")
+            ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
                 .with_workspace(FUNCTIONS_WORKSPACE),
             metadata.network_policy.clone(),
             callbacks,
         ));
 
-        let context = ExecutionContext::new(TENANT_ID, &repo, DEFAULT_BRANCH, "system")
+        let context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
             .with_workspace(FUNCTIONS_WORKSPACE)
             .with_input(payload.input);
 

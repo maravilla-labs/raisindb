@@ -51,8 +51,6 @@ pub mod runtime;
 pub mod types;
 
 // Re-exports
-pub use plugin::{register_function_plugin, FunctionBindingPlugin};
-pub use plugin_loader::{load_plugins_from_dir, RAISIN_PLUGIN_ABI_VERSION};
 pub use api::{
     // Callback types for building RaisinFunctionApi
     EmitEventCallback,
@@ -72,5 +70,7 @@ pub use api::{
 };
 pub use executor::{ExecutionHandle, FunctionExecutor};
 pub use loader::FunctionLoader;
+pub use plugin::{register_function_plugin, FunctionBindingPlugin};
+pub use plugin_loader::{load_plugins_from_dir, RAISIN_PLUGIN_ABI_VERSION};
 pub use runtime::{FunctionRuntime, RuntimeRegistry};
 pub use types::*;

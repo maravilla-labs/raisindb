@@ -48,14 +48,13 @@ pub struct PluginCallContext {
 /// logical method name (`"<namespace>.<method>"`), and dispatched by
 /// `RaisinFunctionApi::plugin_call`. The callback runs in trusted core — plugin
 /// bindings are NOT subject to the tenant `network_policy`, so a plugin (e.g.
-/// the Maravilla Delivery-media plugin) is the ONLY sanctioned way for a tenant
-/// function to reach an internal service.
+/// a media-processing plugin proxying an internal service) is the ONLY
+/// sanctioned way for a tenant function to reach an internal service.
 pub type PluginCallback = Arc<
     dyn Fn(
             PluginCallContext,
             Value,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
         + Send
         + Sync,
 >;

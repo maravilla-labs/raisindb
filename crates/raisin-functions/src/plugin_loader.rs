@@ -5,7 +5,7 @@
 
 //! Dynamic loading of function-binding plugins from shared libraries.
 //!
-//! A distribution (e.g. Maravilla) can drop a per-platform `.so`/`.dylib`/`.dll`
+//! A downstream distribution can drop a per-platform `.so`/`.dylib`/`.dll`
 //! into the server's plugin directory; at startup the stock public raisindb
 //! binary loads each one and registers its bindings — no custom server build,
 //! no recompiling core. `load_plugins_from_dir` is called once during startup.
@@ -92,7 +92,8 @@ impl FunctionBindingPlugin for CDylibPlugin {
                         "workspace_id": ctx.workspace_id,
                     }))
                     .unwrap_or_else(|_| "{}".to_string());
-                    let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string());
+                    let args_json =
+                        serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string());
                     // The plugin's C `call` is synchronous (blocking HTTP inside);
                     // run it off the async worker.
                     let joined = tokio::task::spawn_blocking(move || {
@@ -171,7 +172,9 @@ pub fn load_plugins_from_dir(dir: impl AsRef<Path>) {
         // SAFETY: loading arbitrary native code — the plugin dir is a trusted,
         // operator-controlled location (same trust level as the server binary).
         match unsafe { load_one(&path) } {
-            Ok(name) => tracing::info!(plugin = %name, path = %path.display(), "loaded function plugin"),
+            Ok(name) => {
+                tracing::info!(plugin = %name, path = %path.display(), "loaded function plugin")
+            }
             Err(e) => tracing::error!(path = %path.display(), error = %e, "skipping plugin"),
         }
     }

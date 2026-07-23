@@ -105,12 +105,12 @@ pub(super) fn register_plugin_gateway<'js>(
                 }
             };
 
-            let result =
-                run_async_blocking(async move { api.plugin_call(&method, args).await });
+            let result = run_async_blocking(async move { api.plugin_call(&method, args).await });
 
             match result {
-                Ok(value) => serde_json::to_string(&value)
-                    .unwrap_or_else(|e| error_envelope(format!("plugin result not serializable: {}", e))),
+                Ok(value) => serde_json::to_string(&value).unwrap_or_else(|e| {
+                    error_envelope(format!("plugin result not serializable: {}", e))
+                }),
                 Err(e) => {
                     tracing::error!(error = %e, "plugin API call failed");
                     error_envelope(e)

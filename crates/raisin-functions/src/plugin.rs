@@ -18,7 +18,7 @@
 //! trusted core, so it is the sanctioned way to expose an internal service (e.g.
 //! a media/screenshot service) to tenant functions — the callback holds the
 //! endpoint/credentials, the guest only sees a logical method. And because a
-//! host binary registers plugins at startup, a distribution (e.g. Maravilla) can
+//! host binary registers plugins at startup, a downstream distribution can
 //! ship its own bindings on its own release cadence without forking core.
 //!
 //! DISPATCH (deliberately bypasses the bindings registry): plugin methods do NOT
@@ -69,7 +69,10 @@ fn slot() -> &'static RwLock<Vec<Arc<dyn FunctionBindingPlugin>>> {
 /// Registering the same plugin name twice simply stacks both (last-writer wins
 /// per method in [`all_plugin_handlers`]).
 pub fn register_function_plugin(plugin: Arc<dyn FunctionBindingPlugin>) {
-    slot().write().expect("plugin registry poisoned").push(plugin);
+    slot()
+        .write()
+        .expect("plugin registry poisoned")
+        .push(plugin);
 }
 
 /// Snapshot of the currently registered plugins.

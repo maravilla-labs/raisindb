@@ -38,7 +38,6 @@ mod inner {
     use raisin_storage::Storage;
     use std::collections::HashMap;
 
-    const TENANT_ID: &str = "default";
     const DEFAULT_BRANCH: &str = "main";
     const FUNCTIONS_WORKSPACE: &str = "functions";
 
@@ -59,6 +58,14 @@ mod inner {
         auth.as_ref()
             .and_then(|a| a.user_id.clone())
             .unwrap_or_else(|| "ws_api".to_string())
+    }
+
+    /// The connection's tenant — established at upgrade time from the /sys
+    /// path or x-tenant-id header (never from message content). Scheduled
+    /// invocations must be registered/looked up in the caller's actual
+    /// tenant, not a hardcoded one.
+    fn connection_tenant(connection_state: &Arc<RwLock<ConnectionState>>) -> String {
+        connection_state.read().tenant_id.clone()
     }
 
     fn rocksdb_handle<S, B>(
@@ -112,15 +119,16 @@ mod inner {
     /// Collect this repository's scheduled invocations (job info + context).
     async fn list_repo_invocations(
         rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+        tenant_id: &str,
         repo: &str,
     ) -> Vec<(JobInfo, JobContext)> {
-        let jobs = rocksdb.job_registry().list_jobs_by_tenant(TENANT_ID).await;
+        let jobs = rocksdb.job_registry().list_jobs_by_tenant(tenant_id).await;
         let mut out = Vec::new();
         for job in jobs {
             if !matches!(job.job_type, JobType::ScheduledInvocation { .. }) {
                 continue;
             }
-            let Ok(Some(context)) = rocksdb.job_data_store().get(TENANT_ID, &job.id) else {
+            let Ok(Some(context)) = rocksdb.job_data_store().get(tenant_id, &job.id) else {
                 continue;
             };
             if context.repo_id != repo {
@@ -135,6 +143,7 @@ mod inner {
     /// it belongs to this repository (prevents cross-repo cancellation).
     async fn resolve_invocation(
         rocksdb: &Arc<raisin_rocksdb::RocksDBStorage>,
+        tenant_id: &str,
         repo: &str,
         job_id: Option<&str>,
         external_key: Option<&str>,
@@ -154,7 +163,7 @@ mod inner {
             }
             let context = rocksdb
                 .job_data_store()
-                .get(TENANT_ID, &id)
+                .get(tenant_id, &id)
                 .map_err(|e| WsError::InternalError(e.to_string()))?
                 .ok_or_else(|| {
                     WsError::OperationError(format!(
@@ -172,7 +181,7 @@ mod inner {
         }
 
         if let Some(key) = external_key {
-            let matches = list_repo_invocations(rocksdb, repo).await;
+            let matches = list_repo_invocations(rocksdb, tenant_id, repo).await;
             return matches
                 .into_iter()
                 .find(|(_, ctx)| {
@@ -204,6 +213,7 @@ mod inner {
             serde_json::from_value(request.payload.clone())?;
         let repo = require_repo(&request)?;
         let actor = extract_actor(connection_state);
+        let tenant_id = connection_tenant(connection_state);
         let rocksdb = rocksdb_handle(state)?;
 
         if payload.target_kind != "function" && payload.target_kind != "flow" {
@@ -244,7 +254,7 @@ mod inner {
         );
 
         let context = JobContext {
-            tenant_id: TENANT_ID.to_string(),
+            tenant_id: tenant_id.clone(),
             repo_id: repo.clone(),
             branch: payload.branch.unwrap_or_else(|| DEFAULT_BRANCH.to_string()),
             workspace_id: payload
@@ -269,7 +279,7 @@ mod inner {
             .register_job_at_with_id(
                 job_id.clone(),
                 job_type,
-                TENANT_ID.to_string(),
+                tenant_id.clone(),
                 run_at,
                 Some(payload.max_retries.unwrap_or(0)),
             )
@@ -298,7 +308,7 @@ mod inner {
 
     pub async fn handle_scheduled_invocation_cancel<S, B>(
         state: &Arc<WsState<S, B>>,
-        _connection_state: &Arc<RwLock<ConnectionState>>,
+        connection_state: &Arc<RwLock<ConnectionState>>,
         request: RequestEnvelope,
     ) -> Result<Option<ResponseEnvelope>, WsError>
     where
@@ -308,10 +318,12 @@ mod inner {
         let payload: ScheduledInvocationRefPayload =
             serde_json::from_value(request.payload.clone())?;
         let repo = require_repo(&request)?;
+        let tenant_id = connection_tenant(connection_state);
         let rocksdb = rocksdb_handle(state)?;
 
         let (info, _context) = resolve_invocation(
             &rocksdb,
+            &tenant_id,
             &repo,
             payload.job_id.as_deref(),
             payload.external_key.as_deref(),
@@ -335,7 +347,7 @@ mod inner {
 
     pub async fn handle_scheduled_invocation_get<S, B>(
         state: &Arc<WsState<S, B>>,
-        _connection_state: &Arc<RwLock<ConnectionState>>,
+        connection_state: &Arc<RwLock<ConnectionState>>,
         request: RequestEnvelope,
     ) -> Result<Option<ResponseEnvelope>, WsError>
     where
@@ -345,10 +357,12 @@ mod inner {
         let payload: ScheduledInvocationRefPayload =
             serde_json::from_value(request.payload.clone())?;
         let repo = require_repo(&request)?;
+        let tenant_id = connection_tenant(connection_state);
         let rocksdb = rocksdb_handle(state)?;
 
         let (info, context) = resolve_invocation(
             &rocksdb,
+            &tenant_id,
             &repo,
             payload.job_id.as_deref(),
             payload.external_key.as_deref(),
@@ -363,7 +377,7 @@ mod inner {
 
     pub async fn handle_scheduled_invocation_list<S, B>(
         state: &Arc<WsState<S, B>>,
-        _connection_state: &Arc<RwLock<ConnectionState>>,
+        connection_state: &Arc<RwLock<ConnectionState>>,
         request: RequestEnvelope,
     ) -> Result<Option<ResponseEnvelope>, WsError>
     where
@@ -376,9 +390,10 @@ mod inner {
             serde_json::from_value(request.payload.clone())?
         };
         let repo = require_repo(&request)?;
+        let tenant_id = connection_tenant(connection_state);
         let rocksdb = rocksdb_handle(state)?;
 
-        let invocations = list_repo_invocations(&rocksdb, &repo).await;
+        let invocations = list_repo_invocations(&rocksdb, &tenant_id, &repo).await;
         let items: Vec<serde_json::Value> = invocations
             .iter()
             .filter(|(info, ctx)| {
