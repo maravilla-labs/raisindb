@@ -156,6 +156,151 @@ impl JobMetadataStore {
         Ok((total, orphaned))
     }
 
+    /// List the `limit` most recent jobs (by `started_at`) for a tenant,
+    /// streaming the prefix scan so the full backlog is never materialized.
+    ///
+    /// Result payloads larger than `max_inline_result_bytes` are replaced by
+    /// a `{"$truncated": true, "size": n}` marker — the full result stays in
+    /// storage and is served by single-job lookups. Serving surfaces MUST use
+    /// this instead of `list_for_tenant`: after a runaway burst the persisted
+    /// backlog can hold hundreds of thousands of entries with multi-KB result
+    /// payloads, and one unbounded listing request (admin console jobs page,
+    /// jobs SSE initial dump) then allocates gigabytes — the observed
+    /// "RSS explodes the moment the jobs page is opened" failure.
+    pub fn list_recent_for_tenant(
+        &self,
+        tenant: &str,
+        limit: usize,
+        max_inline_result_bytes: usize,
+    ) -> Result<Vec<(JobId, PersistedJobEntry)>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let cf = cf_handle(&self.db, cf::JOB_METADATA)?;
+        let prefix = job_tenant_prefix(tenant);
+
+        // Min-heap of the newest `limit` entries, keyed by started_at.
+        let mut newest: BinaryHeap<Reverse<(chrono::DateTime<chrono::Utc>, Vec<u8>)>> =
+            BinaryHeap::new();
+
+        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        for item in iter {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
+            })?;
+            if !key_bytes.starts_with(&prefix) {
+                break;
+            }
+            // Cheap pre-parse: only started_at + tenant are needed to rank;
+            // decode fully only for entries that make the cut, keyed by the
+            // raw key so we can re-read the value lazily. To keep this in one
+            // pass we decode here but drop losers immediately.
+            let entry: PersistedJobEntry = match rmp_serde::from_slice(&value_bytes) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if entry.tenant != tenant {
+                continue;
+            }
+            newest.push(Reverse((entry.started_at, key_bytes.to_vec())));
+            if newest.len() > limit {
+                newest.pop();
+            }
+        }
+
+        let mut results = Vec::with_capacity(newest.len());
+        for Reverse((_, key_bytes)) in newest.into_sorted_vec() {
+            let Some(value_bytes) = self.db.get_cf(cf, &key_bytes).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to read job metadata: {}", e))
+            })?
+            else {
+                continue;
+            };
+            let mut entry: PersistedJobEntry = match rmp_serde::from_slice(&value_bytes) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if let Some(result) = &entry.result {
+                let size = serde_json::to_vec(result).map(|v| v.len()).unwrap_or(0);
+                if size > max_inline_result_bytes {
+                    entry.result = Some(serde_json::json!({
+                        "$truncated": true,
+                        "size": size,
+                    }));
+                }
+            }
+            let job_id = match split_key(&key_bytes) {
+                Some((_, jid)) => jid,
+                None => JobId::from_string(entry.id.clone()),
+            };
+            results.push((job_id, entry));
+        }
+        Ok(results)
+    }
+
+    /// Cross-tenant variant of [`list_recent_for_tenant`]: the `limit` most
+    /// recent jobs across ALL tenants, streaming, with oversized results
+    /// truncated. For operator/superadmin listing surfaces — the unbounded
+    /// `list_all_unscoped` must never back an HTTP endpoint (the deploy
+    /// health check hitting `/management/admin/jobs` against a runaway
+    /// backlog was enough to OOM the server).
+    pub fn list_recent_unscoped(
+        &self,
+        limit: usize,
+        max_inline_result_bytes: usize,
+    ) -> Result<Vec<(JobId, PersistedJobEntry)>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let cf = cf_handle(&self.db, cf::JOB_METADATA)?;
+        let mut newest: BinaryHeap<Reverse<(chrono::DateTime<chrono::Utc>, Vec<u8>)>> =
+            BinaryHeap::new();
+
+        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
+            })?;
+            let entry: PersistedJobEntry = match rmp_serde::from_slice(&value_bytes) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            newest.push(Reverse((entry.started_at, key_bytes.to_vec())));
+            if newest.len() > limit {
+                newest.pop();
+            }
+        }
+
+        let mut results = Vec::with_capacity(newest.len());
+        for Reverse((_, key_bytes)) in newest.into_sorted_vec() {
+            let Some(value_bytes) = self.db.get_cf(cf, &key_bytes).map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to read job metadata: {}", e))
+            })?
+            else {
+                continue;
+            };
+            let mut entry: PersistedJobEntry = match rmp_serde::from_slice(&value_bytes) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if let Some(result) = &entry.result {
+                let size = serde_json::to_vec(result).map(|v| v.len()).unwrap_or(0);
+                if size > max_inline_result_bytes {
+                    entry.result = Some(serde_json::json!({
+                        "$truncated": true,
+                        "size": size,
+                    }));
+                }
+            }
+            let job_id = match split_key(&key_bytes) {
+                Some((_, jid)) => jid,
+                None => JobId::from_string(entry.id.clone()),
+            };
+            results.push((job_id, entry));
+        }
+        Ok(results)
+    }
+
     /// Stream every job matching `statuses` to `visit`, one entry at a time,
     /// without materializing the full result set.
     ///

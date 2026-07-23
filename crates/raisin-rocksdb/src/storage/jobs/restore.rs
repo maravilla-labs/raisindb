@@ -85,7 +85,11 @@ impl RocksDBStorage {
                     );
                     entry.status = JobStatus::Failed(msg.clone());
                     entry.error = Some(msg);
-                    entry.completed_at = Some(chrono::Utc::now());
+                    // Backdate completion to the (stale) start time so the
+                    // retention cleanup purges the abandoned backlog on its
+                    // next pass instead of keeping it around another full
+                    // retention window.
+                    entry.completed_at = Some(entry.started_at);
                     self.job_metadata_store.update(&job_id, &entry)?;
                     abandoned_stale += 1;
                     return Ok(());
@@ -99,7 +103,7 @@ impl RocksDBStorage {
                     );
                     entry.status = JobStatus::Failed(msg.clone());
                     entry.error = Some(msg);
-                    entry.completed_at = Some(chrono::Utc::now());
+                    entry.completed_at = Some(entry.started_at.max(stale_cutoff));
                     self.job_metadata_store.update(&job_id, &entry)?;
                     abandoned_over_cap += 1;
                     return Ok(());

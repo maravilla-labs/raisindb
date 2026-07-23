@@ -15,6 +15,15 @@ use raisin_storage::{
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Most recent persisted jobs a single listing surface will serve. Anything
+/// older is reachable only via retention-window history in storage; listing
+/// surfaces must stay bounded no matter how large a runaway backlog grows.
+const MAX_LISTED_JOBS: usize = 1_000;
+
+/// Result payloads above this size are replaced by a truncation marker in
+/// LIST responses (single-job lookups still serve the full payload).
+const MAX_INLINE_RESULT_BYTES: usize = 64 * 1024;
+
 impl RocksDBStorage {
     /// List a tenant's jobs by merging the persisted metadata store with the
     /// in-memory registry.
@@ -30,7 +39,15 @@ impl RocksDBStorage {
         &self,
         tenant: &str,
     ) -> Result<Vec<raisin_storage::JobInfo>> {
-        let persisted = self.job_metadata_store().list_for_tenant(tenant)?;
+        // Bounded: newest MAX_LISTED_JOBS with oversized results truncated.
+        // An unbounded scan here detonated production RSS the moment the
+        // admin-console jobs page (or its SSE stream) was opened against a
+        // runaway backlog.
+        let persisted = self.job_metadata_store().list_recent_for_tenant(
+            tenant,
+            MAX_LISTED_JOBS,
+            MAX_INLINE_RESULT_BYTES,
+        )?;
 
         let mut merged: std::collections::HashMap<JobId, raisin_storage::JobInfo> = persisted
             .into_iter()
@@ -74,7 +91,12 @@ impl RocksDBStorage {
             }
         }
 
-        Ok(merged.into_values().collect())
+        // Registry overlay can re-grow the set; keep the final list bounded
+        // and deterministic (newest first).
+        let mut out: Vec<raisin_storage::JobInfo> = merged.into_values().collect();
+        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        out.truncate(MAX_LISTED_JOBS);
+        Ok(out)
     }
 }
 
@@ -451,7 +473,11 @@ impl BackgroundJobs for RocksDBStorage {
 #[async_trait]
 impl BackgroundJobsInternal for RocksDBStorage {
     async fn list_all_jobs(&self) -> Result<Vec<raisin_storage::JobInfo>> {
-        let persisted = self.job_metadata_store().list_all_unscoped()?;
+        // Bounded for the same reason as `list_tenant_jobs_merged`: this
+        // backs the operator endpoint the deploy health check polls.
+        let persisted = self
+            .job_metadata_store()
+            .list_recent_unscoped(MAX_LISTED_JOBS, MAX_INLINE_RESULT_BYTES)?;
         Ok(persisted
             .into_iter()
             .map(|(job_id, entry)| raisin_storage::JobInfo {
