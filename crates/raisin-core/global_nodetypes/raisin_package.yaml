@@ -164,6 +164,17 @@ properties:
     description: Whether the package is a builtin sytem package
     default: false
     index: [Property]
+
+  - name: sync_policy
+    type: Object
+    required: false
+    title: Sync Policy
+    description: |
+      Summary of the package's optional .raisin-sync.yaml per-path
+      install/reconciliation policy, if it ships one at its root. Set at
+      upload time so the admin console can show a "Custom Sync Policy"
+      badge without running a dry run.
+      Structure: { default_mode: string, filters: [{ root: string, mode?: string }] }
 allowed_children:
   - raisin:Asset
   - raisin:Folder

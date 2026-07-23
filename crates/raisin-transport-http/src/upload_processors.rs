@@ -460,4 +460,69 @@ mod tests {
         let processed = processor.process(&without_sync, None, "/").unwrap();
         assert!(!processed.properties.contains_key("sync_policy"));
     }
+
+    /// `raisin:Package` is a `strict: true` NodeType — a real upload 400s if
+    /// `PackageUploadProcessor` writes any property the schema doesn't declare
+    /// (this is exactly how `sync_policy` slipped past unit tests once before:
+    /// they exercised `process()` in isolation without checking the property
+    /// actually round-trips through the strict schema). Guard against it
+    /// recurring by asserting every key `process()` can produce is declared
+    /// on the real, embedded `raisin:Package` NodeType.
+    #[test]
+    fn processed_properties_are_all_declared_on_strict_raisin_package_schema() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let package_node_type = raisin_core::nodetype_init::load_global_nodetypes()
+            .into_iter()
+            .find(|nt| nt.name == "raisin:Package")
+            .expect("raisin:Package global NodeType should be embedded");
+        assert_eq!(
+            package_node_type.strict,
+            Some(true),
+            "test assumes raisin:Package is strict; update this test if that changes"
+        );
+        let declared: std::collections::HashSet<&str> = package_node_type
+            .properties
+            .as_ref()
+            .expect("raisin:Package should declare properties")
+            .iter()
+            .filter_map(|p| p.name.as_deref())
+            .collect();
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zip = ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+
+            zip.start_file("manifest.yaml", options).unwrap();
+            zip.write_all(
+                b"name: schema-check\nversion: 1.0.0\ntitle: t\ndescription: d\nauthor: a\nlicense: MIT\nkeywords: [x]\ncategory: c\n",
+            )
+            .unwrap();
+
+            zip.start_file(".raisin-sync.yaml", options).unwrap();
+            zip.write_all(b"defaults:\n  mode: skip\nfilters:\n  - root: /functions\n    mode: replace\n")
+                .unwrap();
+
+            zip.start_file("static/teaser_background.png", options)
+                .unwrap();
+            zip.write_all(b"not-a-real-png").unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        let processed = PackageUploadProcessor.process(&buf, None, "/").unwrap();
+
+        for key in processed.properties.keys() {
+            assert!(
+                declared.contains(key.as_str()),
+                "PackageUploadProcessor writes property '{}' but raisin:Package (strict) doesn't declare it — \
+                 a real upload will 400 with VALIDATION_FAILED. Add it to crates/raisin-core/global_nodetypes/raisin_package.yaml.",
+                key
+            );
+        }
+    }
 }
