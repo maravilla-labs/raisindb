@@ -372,3 +372,36 @@ pub(super) fn job_status_label(status: &raisin_storage::jobs::JobStatus) -> Stri
     }
     .to_string()
 }
+
+// ============================================================================
+// Execution history (persisted + live registry merge)
+// ============================================================================
+
+/// List a tenant's jobs by merging the persisted metadata store with the
+/// in-memory registry (see `RocksDBStorage::list_tenant_jobs_merged`).
+#[cfg(feature = "storage-rocksdb")]
+pub(super) async fn merged_function_jobs(
+    rocksdb: &raisin_rocksdb::RocksDBStorage,
+    tenant_id: &str,
+) -> Result<Vec<raisin_storage::JobInfo>, ApiError> {
+    rocksdb
+        .list_tenant_jobs_merged(tenant_id)
+        .await
+        .map_err(map_storage_error)
+}
+
+/// True when the job's persisted context records the given repository — or
+/// when no context exists (legacy jobs), preserving the old path-only match.
+#[cfg(feature = "storage-rocksdb")]
+pub(super) fn job_belongs_to_repo(
+    rocksdb: &raisin_rocksdb::RocksDBStorage,
+    tenant_id: &str,
+    job_id: &raisin_storage::JobId,
+    repo: &str,
+) -> bool {
+    match rocksdb.job_data_store().get(tenant_id, job_id) {
+        Ok(Some(ctx)) => ctx.repo_id == repo,
+        Ok(None) => true,
+        Err(_) => true,
+    }
+}

@@ -53,6 +53,32 @@ pub struct JobInfo {
     pub executing_since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// A job's execution scope, extracted from its persisted [`JobContext`].
+///
+/// Lets read surfaces (admin console, management API) attribute a job to the
+/// repository/branch/workspace it ran against without exposing the full
+/// context payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobScope {
+    pub repo: String,
+    pub branch: String,
+    pub workspace: String,
+}
+
+/// A [`JobInfo`] together with its optional execution scope.
+///
+/// `scope` is `None` for jobs without a persisted context (system jobs,
+/// legacy entries) and on backends that do not store job contexts. The
+/// wire shape is backward compatible: `info` is flattened and `scope` is
+/// omitted when absent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedJobInfo {
+    #[serde(flatten)]
+    pub info: JobInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<JobScope>,
+}
+
 /// Handle to background job system
 #[derive(Debug)]
 pub enum JobHandle {

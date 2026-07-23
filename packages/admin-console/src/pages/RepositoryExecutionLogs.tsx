@@ -41,7 +41,7 @@ type FilterType = 'all' | 'function' | 'flow'
 type FilterStatus = 'all' | 'running' | 'completed' | 'failed'
 
 export default function RepositoryExecutionLogs() {
-  const { repo: _repo } = useParams<{ repo: string }>() // Will be used for filtering when backend supports it
+  const { repo } = useParams<{ repo: string }>()
   const [jobs, setJobs] = useState<JobInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -57,17 +57,19 @@ export default function RepositoryExecutionLogs() {
   const [searchFilter, setSearchFilter] = useState('')
   const [showFilters, setShowFilters] = useState(false)
 
-  // Filter to only show FunctionExecution and FlowExecution jobs for this repo
+  // Filter to only show FunctionExecution and FlowExecution jobs for this repo.
+  // The server already filters by ?repo= on the initial fetch; the scope
+  // check here re-applies the same rule to rows added live via SSE (jobs
+  // without a recorded scope are kept, matching the server's behavior).
   const executionJobs = useMemo(() => {
     return jobs.filter(job => {
       const jobTypeStr = typeof job.job_type === 'string' ? job.job_type : JSON.stringify(job.job_type)
       const isExecution = jobTypeStr.startsWith('FunctionExecution') || jobTypeStr.startsWith('FlowExecution')
-
-      // TODO: Filter by repository when job context includes repo info
-      // For now show all executions
-      return isExecution
+      if (!isExecution) return false
+      if (repo && job.scope && job.scope.repo !== repo) return false
+      return true
     })
-  }, [jobs])
+  }, [jobs, repo])
 
   // Apply additional filters
   const filteredJobs = useMemo(() => {
@@ -116,7 +118,7 @@ export default function RepositoryExecutionLogs() {
   useEffect(() => {
     const fetchJobs = async () => {
       try {
-        const response = await managementApi.listJobs()
+        const response = await managementApi.listJobs(repo)
         if (response.success && response.data) {
           setJobs(response.data)
         } else {
@@ -129,7 +131,7 @@ export default function RepositoryExecutionLogs() {
       }
     }
     fetchJobs()
-  }, [])
+  }, [repo])
 
   // SSE connection
   useEffect(() => {
@@ -151,6 +153,7 @@ export default function RepositoryExecutionLogs() {
               timeout_seconds: event.timeout_seconds ?? updated[existingIndex].timeout_seconds,
               next_retry_at: event.next_retry_at ?? updated[existingIndex].next_retry_at,
               result: event.function_result ?? updated[existingIndex].result,
+              scope: event.scope ?? updated[existingIndex].scope,
             }
             return updated
           } else {
@@ -169,6 +172,7 @@ export default function RepositoryExecutionLogs() {
               last_heartbeat: event.last_heartbeat ?? null,
               timeout_seconds: event.timeout_seconds ?? 300,
               next_retry_at: event.next_retry_at ?? null,
+              scope: event.scope ?? null,
             }
             return [newJob, ...prevJobs]
           }

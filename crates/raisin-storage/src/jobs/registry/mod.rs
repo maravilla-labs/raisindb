@@ -300,6 +300,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capacity_eviction_removes_oldest_terminal_only() {
+        let registry = JobRegistry::new();
+
+        // Two terminal jobs (completed in registration order) + one active.
+        let old_terminal = registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+        registry.mark_completed(&old_terminal).await.unwrap();
+
+        let new_terminal = registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+        registry.mark_completed(&new_terminal).await.unwrap();
+
+        let active = registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+
+        // Cap of 2 → evict exactly the oldest terminal entry.
+        let evicted = registry.enforce_registry_capacity(2).await;
+        assert_eq!(evicted, 1);
+        assert!(registry.get_status(&old_terminal).await.is_err());
+        assert!(registry.get_status(&new_terminal).await.is_ok());
+        assert!(registry.get_status(&active).await.is_ok());
+
+        // Cap of 0 with only active jobs left over the cap → active survives.
+        let evicted = registry.enforce_registry_capacity(0).await;
+        assert_eq!(evicted, 1); // the remaining terminal entry
+        assert!(registry.get_status(&active).await.is_ok());
+
+        // Under cap → no-op.
+        assert_eq!(registry.enforce_registry_capacity(10).await, 0);
+    }
+
+    #[tokio::test]
+    async fn trim_drops_results_only_from_aged_terminal_jobs() {
+        let registry = JobRegistry::new();
+
+        let done = registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+        registry
+            .set_result(&done, serde_json::json!({"big": "payload"}))
+            .await
+            .unwrap();
+        registry.mark_completed(&done).await.unwrap();
+
+        let active = registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+        registry
+            .set_result(&active, serde_json::json!({"partial": true}))
+            .await
+            .unwrap();
+
+        // Inside the grace window: nothing is trimmed.
+        assert_eq!(
+            registry
+                .trim_terminal_results(chrono::Duration::minutes(10))
+                .await,
+            0
+        );
+        assert!(registry.get_job_info(&done).await.unwrap().result.is_some());
+
+        // Past the grace window (negative grace puts the cutoff in the
+        // future): only the terminal job's result is dropped.
+        assert_eq!(
+            registry
+                .trim_terminal_results(chrono::Duration::seconds(-1))
+                .await,
+            1
+        );
+        assert!(registry.get_job_info(&done).await.unwrap().result.is_none());
+        assert!(registry
+            .get_job_info(&active)
+            .await
+            .unwrap()
+            .result
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn restore_counts_non_terminal_jobs_against_tenant_cap() {
+        use crate::jobs::JobInfo;
+        use chrono::Utc;
+
+        let registry = JobRegistry::new().with_tenant_job_cap(Some(1));
+
+        let restored = JobInfo {
+            id: crate::jobs::JobId::new(),
+            job_type: JobType::IntegrityScan,
+            status: JobStatus::Scheduled,
+            tenant: "t".to_string(),
+            started_at: Utc::now(),
+            completed_at: None,
+            progress: None,
+            error: None,
+            result: None,
+            retry_count: 0,
+            max_retries: 3,
+            last_heartbeat: None,
+            timeout_seconds: 300,
+            next_retry_at: None,
+            executing_since: None,
+        };
+        let restored_id = restored.id.clone();
+        registry.restore_job(restored).await.unwrap();
+        assert_eq!(registry.active_job_count("t").await, 1);
+
+        // Cap is 1 → a fresh registration must be refused.
+        registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap_err();
+
+        // Terminal transition frees the slot exactly once.
+        registry.mark_completed(&restored_id).await.unwrap();
+        assert_eq!(registry.active_job_count("t").await, 0);
+    }
+
+    #[tokio::test]
     async fn tenant_job_cap_disabled_by_default() {
         let registry = JobRegistry::new();
         for _ in 0..10 {

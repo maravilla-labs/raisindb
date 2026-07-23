@@ -76,7 +76,9 @@ pub use management::{
 };
 
 // Re-export job types from the new jobs module
-pub use jobs::{JobHandle, JobId, JobInfo, JobLogEntry, JobStatus, JobType, LogEmitter};
+pub use jobs::{
+    JobHandle, JobId, JobInfo, JobLogEntry, JobScope, JobStatus, JobType, LogEmitter, ScopedJobInfo,
+};
 
 // Re-export fulltext types
 pub use fulltext::{

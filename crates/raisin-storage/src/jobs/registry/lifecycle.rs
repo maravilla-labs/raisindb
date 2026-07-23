@@ -191,8 +191,24 @@ impl JobRegistry {
             executing_since: job_info.executing_since,
         };
 
-        let mut jobs = self.jobs.write().await;
-        jobs.insert(job_info.id.clone(), entry);
+        let is_terminal = matches!(
+            job_info.status,
+            JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
+        );
+
+        {
+            let mut jobs = self.jobs.write().await;
+            jobs.insert(job_info.id.clone(), entry);
+        }
+
+        // Restored non-terminal jobs must count against the tenant cap like
+        // freshly registered ones, or the cap undercounts after a restart
+        // (their later terminal transition still decrements the counter,
+        // which saturates at zero — so without this the cap erodes instead).
+        if !is_terminal {
+            let mut counts = self.tenant_active_counts.write().await;
+            *counts.entry(job_info.tenant.clone()).or_insert(0) += 1;
+        }
 
         tracing::debug!(
             job_id = %job_info.id,
@@ -223,9 +239,101 @@ impl JobRegistry {
             .map(|(id, _)| id.clone())
             .collect();
 
+        let removed = old_jobs.len();
         for job_id in old_jobs {
             jobs.remove(&job_id);
             handles.remove(&job_id);
         }
+
+        // HashMap never returns capacity on its own; after a large prune the
+        // empty buckets themselves keep allocator arenas pinned.
+        if removed > 1024 {
+            jobs.shrink_to_fit();
+            handles.shrink_to_fit();
+        }
+    }
+
+    /// Drop `result` payloads from terminal entries that completed more than
+    /// `grace` ago. The full result was already persisted to the metadata
+    /// store on the terminal transition (workers call `set_result` BEFORE
+    /// `mark_completed`/`mark_failed`, and the terminal `update_status`
+    /// persists the complete `JobInfo`), so reads that arrive after the grace
+    /// window are served from storage. Result JSON is the dominant per-entry
+    /// cost — a function returning a large payload otherwise pins it in the
+    /// map for the whole in-memory retention.
+    pub async fn trim_terminal_results(&self, grace: chrono::Duration) -> usize {
+        let cutoff = Utc::now() - grace;
+        let mut jobs = self.jobs.write().await;
+        let mut trimmed = 0;
+        for job in jobs.values_mut() {
+            if job.result.is_some()
+                && matches!(
+                    job.status,
+                    JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
+                )
+                && job.completed_at.is_some_and(|c| c < cutoff)
+            {
+                job.result = None;
+                trimmed += 1;
+            }
+        }
+        trimmed
+    }
+
+    /// Evict the oldest terminal entries until the registry holds at most
+    /// `max_entries` jobs. Non-terminal (Scheduled/Running/Executing) jobs are
+    /// never evicted, so during a runaway burst the map can still exceed the
+    /// cap by the number of genuinely active jobs — but terminal entries (the
+    /// ones that carry completed result payloads and serve no purpose beyond
+    /// short-lived status reads) can no longer accumulate between sweeps.
+    /// History/status reads for evicted jobs are served from the persisted
+    /// metadata store.
+    pub async fn enforce_registry_capacity(&self, max_entries: usize) -> usize {
+        {
+            let jobs = self.jobs.read().await;
+            if jobs.len() <= max_entries {
+                return 0;
+            }
+        }
+
+        let mut jobs = self.jobs.write().await;
+        let excess = jobs.len().saturating_sub(max_entries);
+        if excess == 0 {
+            return 0;
+        }
+
+        let mut terminal: Vec<(JobId, chrono::DateTime<Utc>)> = jobs
+            .iter()
+            .filter(|(_, job)| {
+                matches!(
+                    job.status,
+                    JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
+                )
+            })
+            .map(|(id, job)| (id.clone(), job.completed_at.unwrap_or(job.started_at)))
+            .collect();
+        terminal.sort_by_key(|(_, completed)| *completed);
+        terminal.truncate(excess);
+
+        let mut handles = self.handles.write().await;
+        let evicted = terminal.len();
+        for (job_id, _) in terminal {
+            jobs.remove(&job_id);
+            handles.remove(&job_id);
+        }
+        if evicted > 1024 {
+            jobs.shrink_to_fit();
+            handles.shrink_to_fit();
+        }
+
+        if evicted > 0 {
+            tracing::warn!(
+                evicted,
+                max_entries,
+                remaining = jobs.len(),
+                "Job registry over capacity; evicted oldest terminal entries"
+            );
+        }
+        evicted
     }
 }

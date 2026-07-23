@@ -302,3 +302,96 @@ async fn job_context_round_trips_through_data_store() {
         Some(&serde_json::json!("k-1"))
     );
 }
+
+/// Stale pending jobs (older than the restore age limit, no future
+/// schedule) are abandoned at restart — marked Failed in persistent
+/// storage and NOT restored/re-dispatched. A future-scheduled sibling is
+/// unaffected. Guards the startup RSS-explosion failure mode: a runaway
+/// backlog of Scheduled jobs must not be re-loaded en masse at every boot.
+#[tokio::test]
+async fn stale_pending_jobs_are_abandoned_at_restart() {
+    use raisin_rocksdb::PersistedJobEntry;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let (stale_id, fresh_id) = {
+        let storage = RocksDBStorage::new(temp_dir.path()).unwrap();
+
+        // Stale: Scheduled 48h ago, no future schedule.
+        let stale_id = JobId::new();
+        let stale_entry = PersistedJobEntry {
+            id: stale_id.0.clone(),
+            job_type: JobType::IntegrityScan,
+            status: JobStatus::Scheduled,
+            tenant: TENANT.to_string(),
+            started_at: chrono::Utc::now() - chrono::Duration::hours(48),
+            completed_at: None,
+            error: None,
+            progress: None,
+            result: Some(serde_json::json!({"stale": "payload"})),
+            retry_count: 0,
+            max_retries: 3,
+            last_heartbeat: None,
+            timeout_seconds: 300,
+            next_retry_at: None,
+            executing_since: None,
+        };
+        let ctx = invocation_context("/functions/stale", serde_json::json!({}), None);
+        storage
+            .job_metadata_store()
+            .put_with_context(&stale_id, &stale_entry, &ctx)
+            .unwrap();
+        storage.job_data_store().put(&stale_id, &ctx).unwrap();
+
+        // Fresh: registered just now, must be restored.
+        let fresh_id = JobId::new();
+        let fresh_entry = PersistedJobEntry {
+            id: fresh_id.0.clone(),
+            started_at: chrono::Utc::now(),
+            result: None,
+            ..stale_entry.clone()
+        };
+        storage
+            .job_metadata_store()
+            .put_with_context(&fresh_id, &fresh_entry, &ctx)
+            .unwrap();
+        storage.job_data_store().put(&fresh_id, &ctx).unwrap();
+
+        (stale_id, fresh_id)
+    };
+
+    // "Restart": reopen and restore.
+    let storage = RocksDBStorage::new(temp_dir.path()).unwrap();
+    let stats = storage.restore_pending_jobs().await.unwrap();
+    assert_eq!(
+        stats.restored, 1,
+        "only the fresh job restores: {:?}",
+        stats
+    );
+
+    // Stale job: not in the registry, marked Failed in persistence.
+    assert!(storage
+        .job_registry()
+        .get_job_info(&stale_id)
+        .await
+        .is_err());
+    let persisted = storage
+        .job_metadata_store()
+        .get(TENANT, &stale_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(persisted.status, JobStatus::Failed(_)),
+        "stale pending job must be marked Failed, got {:?}",
+        persisted.status
+    );
+
+    // Fresh job restored, without the stale result payload.
+    let info = storage
+        .job_registry()
+        .get_job_info(&fresh_id)
+        .await
+        .unwrap();
+    assert!(matches!(info.status, JobStatus::Scheduled));
+    assert!(info.result.is_none());
+}

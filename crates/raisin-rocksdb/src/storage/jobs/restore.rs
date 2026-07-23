@@ -6,12 +6,35 @@
 use crate::storage::{RestoreStats, RocksDBStorage};
 use raisin_error::Result;
 
+/// Non-terminal jobs older than this are abandoned (marked Failed) at
+/// restart instead of restored, unless they are explicitly scheduled for a
+/// future time (`next_retry_at` in the future). Without this, a runaway
+/// registration burst leaves an ever-growing backlog of stale Scheduled
+/// entries that every restart re-loads into memory and re-dispatches at
+/// once — the observed "RSS explodes within seconds of startup" failure.
+const MAX_RESTORE_AGE_HOURS: i64 = 24;
+
+/// Hard per-tenant ceiling on jobs restored at startup when no
+/// `max_active_jobs_per_tenant` is configured. Jobs beyond the cap
+/// (oldest-last scan order) are abandoned rather than restored.
+const DEFAULT_RESTORE_CAP_PER_TENANT: usize = 5_000;
+
 impl RocksDBStorage {
     /// Restore pending jobs from persistent storage after crash/restart
     ///
-    /// Scans JOB_METADATA CF for Scheduled/Running jobs, loads their contexts
-    /// from JOB_DATA CF, and restores them to the in-memory JobRegistry.
-    /// Running jobs are reset to Scheduled.
+    /// Streams JOB_METADATA for Scheduled/Running/Executing jobs, loads
+    /// their contexts from JOB_DATA, and restores them to the in-memory
+    /// JobRegistry. Running jobs are reset to Scheduled.
+    ///
+    /// Safety valves (all abandoned jobs are marked Failed in persistent
+    /// storage, never silently dropped):
+    /// - the scan is streaming — the backlog is never materialized in one Vec
+    /// - non-terminal jobs older than [`MAX_RESTORE_AGE_HOURS`] with no
+    ///   future schedule are abandoned instead of re-dispatched
+    /// - per-tenant restore cap (the configured tenant job cap, else
+    ///   [`DEFAULT_RESTORE_CAP_PER_TENANT`])
+    /// - stale `result` payloads from prior attempts are not carried into
+    ///   the registry (the persisted copy is untouched)
     ///
     /// # Returns
     ///
@@ -22,19 +45,74 @@ impl RocksDBStorage {
     /// Returns an error if database operations fail
     pub async fn restore_pending_jobs(&self) -> Result<RestoreStats> {
         use crate::jobs::PersistedJobEntry;
+        use raisin_storage::jobs::JobStatus;
+        use std::collections::HashMap;
 
         tracing::info!("Restoring pending jobs from RocksDB");
 
-        let mut restored = 0;
-        let mut failed_to_restore = 0;
-        let mut reset_running = 0;
+        let restore_cap = self
+            .config()
+            .max_active_jobs_per_tenant
+            .unwrap_or(DEFAULT_RESTORE_CAP_PER_TENANT);
+        let stale_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_RESTORE_AGE_HOURS);
 
-        // List pending jobs from metadata store
-        let pending = self.job_metadata_store.list_by_status(&[
-            raisin_storage::jobs::JobStatus::Scheduled,
-            raisin_storage::jobs::JobStatus::Running,
-            raisin_storage::jobs::JobStatus::Executing,
-        ])?;
+        let mut restored = 0usize;
+        let mut failed_to_restore = 0usize;
+        let mut reset_running = 0usize;
+        let mut abandoned_stale = 0usize;
+        let mut abandoned_over_cap = 0usize;
+        let mut per_tenant: HashMap<String, usize> = HashMap::new();
+
+        // Collect only (JobId, PersistedJobEntry) pairs that pass the valves,
+        // one at a time; heavy processing happens per entry inside the visit.
+        let mut pending: Vec<(raisin_storage::jobs::JobId, PersistedJobEntry)> = Vec::new();
+        self.job_metadata_store.for_each_by_status(
+            &[
+                JobStatus::Scheduled,
+                JobStatus::Running,
+                JobStatus::Executing,
+            ],
+            |job_id, mut entry| {
+                let future_scheduled = entry
+                    .next_retry_at
+                    .map(|t| t > chrono::Utc::now())
+                    .unwrap_or(false);
+
+                if entry.started_at < stale_cutoff && !future_scheduled {
+                    let msg = format!(
+                        "Abandoned at restart: pending for more than {} hours",
+                        MAX_RESTORE_AGE_HOURS
+                    );
+                    entry.status = JobStatus::Failed(msg.clone());
+                    entry.error = Some(msg);
+                    entry.completed_at = Some(chrono::Utc::now());
+                    self.job_metadata_store.update(&job_id, &entry)?;
+                    abandoned_stale += 1;
+                    return Ok(());
+                }
+
+                let count = per_tenant.entry(entry.tenant.clone()).or_insert(0);
+                if *count >= restore_cap {
+                    let msg = format!(
+                        "Abandoned at restart: tenant exceeded the restore cap of {} pending jobs",
+                        restore_cap
+                    );
+                    entry.status = JobStatus::Failed(msg.clone());
+                    entry.error = Some(msg);
+                    entry.completed_at = Some(chrono::Utc::now());
+                    self.job_metadata_store.update(&job_id, &entry)?;
+                    abandoned_over_cap += 1;
+                    return Ok(());
+                }
+                *count += 1;
+
+                // A pending job's `result` is detritus from a prior attempt;
+                // don't pin it in the registry (persisted copy stays as-is).
+                entry.result = None;
+                pending.push((job_id, entry));
+                Ok(())
+            },
+        )?;
 
         for (job_id, persisted_entry) in pending {
             // Load JobContext from job_data CF
@@ -50,7 +128,7 @@ impl RocksDBStorage {
                         completed_at: persisted_entry.completed_at,
                         progress: persisted_entry.progress,
                         error: persisted_entry.error.clone(),
-                        result: persisted_entry.result.clone(),
+                        result: None,
                         retry_count: persisted_entry.retry_count,
                         max_retries: persisted_entry.max_retries,
                         last_heartbeat: persisted_entry.last_heartbeat,
@@ -104,6 +182,16 @@ impl RocksDBStorage {
                         .delete(&persisted_entry.tenant, &job_id)?;
                 }
             }
+        }
+
+        if abandoned_stale > 0 || abandoned_over_cap > 0 {
+            tracing::warn!(
+                abandoned_stale,
+                abandoned_over_cap,
+                restore_cap,
+                max_restore_age_hours = MAX_RESTORE_AGE_HOURS,
+                "Abandoned pending jobs at restart instead of restoring them"
+            );
         }
 
         tracing::info!(

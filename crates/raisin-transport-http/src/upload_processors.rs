@@ -504,8 +504,10 @@ mod tests {
             .unwrap();
 
             zip.start_file(".raisin-sync.yaml", options).unwrap();
-            zip.write_all(b"defaults:\n  mode: skip\nfilters:\n  - root: /functions\n    mode: replace\n")
-                .unwrap();
+            zip.write_all(
+                b"defaults:\n  mode: skip\nfilters:\n  - root: /functions\n    mode: replace\n",
+            )
+            .unwrap();
 
             zip.start_file("static/teaser_background.png", options)
                 .unwrap();

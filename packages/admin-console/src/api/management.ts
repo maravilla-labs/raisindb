@@ -89,6 +89,13 @@ export interface RepairResult {
   errors: string[]
 }
 
+/** A job's execution scope (repo/branch/workspace) from its persisted context. */
+export interface JobScope {
+  repo: string
+  branch: string
+  workspace: string
+}
+
 export interface JobInfo {
   id: string
   job_type: JobType
@@ -104,6 +111,8 @@ export interface JobInfo {
   last_heartbeat: string | null  // Last heartbeat timestamp (for timeout detection)
   timeout_seconds: number  // Timeout in seconds (default 300 = 5 minutes)
   next_retry_at: string | null  // When the job should be retried (null = process immediately)
+  /** Execution scope (repo/branch/workspace); absent for system/legacy jobs */
+  scope?: JobScope | null
 }
 
 export type JobType =
@@ -166,6 +175,8 @@ export interface JobEvent {
   trigger_path?: string
   /** Workspace ID */
   workspace?: string
+  /** Execution scope (repo/branch/workspace); absent for system/legacy jobs */
+  scope?: JobScope | null
 }
 
 /** Real-time job log event from SSE */
@@ -351,8 +362,10 @@ export const managementApi = {
     ),
 
   // Job management endpoints
-  listJobs: () =>
-    api.get<ApiResponse<JobInfo[]>>('/management/jobs'),
+  listJobs: (repo?: string) =>
+    api.get<ApiResponse<JobInfo[]>>(
+      repo ? `/management/jobs?repo=${encodeURIComponent(repo)}` : '/management/jobs'
+    ),
 
   getJobStatus: (id: string) =>
     api.get<ApiResponse<JobStatus>>(`/management/jobs/${id}`),

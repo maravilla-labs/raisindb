@@ -15,6 +15,69 @@ use raisin_storage::{
 use std::sync::Arc;
 use std::time::Duration;
 
+impl RocksDBStorage {
+    /// List a tenant's jobs by merging the persisted metadata store with the
+    /// in-memory registry.
+    ///
+    /// Persisted entries survive restarts and registry eviction (24h
+    /// retention); registry entries are authoritative for still-running jobs
+    /// and carry the freshest status/progress. When both exist, the registry
+    /// entry wins — except a trimmed (None) in-memory result never masks the
+    /// persisted one. All execution-history surfaces (HTTP functions,
+    /// scheduler, WS) should use this instead of the registry alone, so
+    /// history does not silently end at the in-memory retention horizon.
+    pub async fn list_tenant_jobs_merged(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<raisin_storage::JobInfo>> {
+        let persisted = self.job_metadata_store().list_for_tenant(tenant)?;
+
+        let mut merged: std::collections::HashMap<JobId, raisin_storage::JobInfo> = persisted
+            .into_iter()
+            .map(|(job_id, entry)| {
+                (
+                    job_id.clone(),
+                    raisin_storage::JobInfo {
+                        id: job_id,
+                        job_type: entry.job_type,
+                        status: entry.status,
+                        tenant: entry.tenant,
+                        started_at: entry.started_at,
+                        completed_at: entry.completed_at,
+                        progress: entry.progress,
+                        error: entry.error,
+                        result: entry.result,
+                        retry_count: entry.retry_count,
+                        max_retries: entry.max_retries,
+                        last_heartbeat: entry.last_heartbeat,
+                        timeout_seconds: entry.timeout_seconds,
+                        next_retry_at: entry.next_retry_at,
+                        executing_since: entry.executing_since,
+                    },
+                )
+            })
+            .collect();
+
+        let live = self.job_registry().list_jobs_by_tenant(tenant).await;
+        for info in live {
+            match merged.get_mut(&info.id) {
+                Some(existing) => {
+                    let persisted_result = existing.result.take();
+                    *existing = info;
+                    if existing.result.is_none() {
+                        existing.result = persisted_result;
+                    }
+                }
+                None => {
+                    merged.insert(info.id.clone(), info);
+                }
+            }
+        }
+
+        Ok(merged.into_values().collect())
+    }
+}
+
 #[async_trait]
 impl BackgroundJobs for RocksDBStorage {
     fn start_background_jobs(&self) -> Result<JobHandle> {
@@ -90,35 +153,40 @@ impl BackgroundJobs for RocksDBStorage {
         Ok(JobId(job_id))
     }
 
-    /// List all jobs from persistent storage for a tenant.
-    ///
-    /// Returns all jobs (running, completed, failed) from RocksDB scoped to
-    /// the `{tenant}\0` key prefix.
+    /// List all jobs for a tenant: persisted history merged with the live
+    /// registry (so scheduled-but-unclaimed jobs are visible too).
     async fn list_jobs(&self, tenant: &str) -> Result<Vec<raisin_storage::JobInfo>> {
-        let persisted_jobs = self.job_metadata_store().list_for_tenant(tenant)?;
+        self.list_tenant_jobs_merged(tenant).await
+    }
 
-        let job_infos: Vec<raisin_storage::JobInfo> = persisted_jobs
-            .into_iter()
-            .map(|(job_id, entry)| raisin_storage::JobInfo {
-                id: job_id,
-                job_type: entry.job_type,
-                status: entry.status,
-                tenant: entry.tenant,
-                started_at: entry.started_at,
-                completed_at: entry.completed_at,
-                progress: entry.progress,
-                error: entry.error,
-                result: entry.result,
-                retry_count: entry.retry_count,
-                max_retries: entry.max_retries,
-                last_heartbeat: entry.last_heartbeat,
-                timeout_seconds: entry.timeout_seconds,
-                next_retry_at: entry.next_retry_at,
-                executing_since: entry.executing_since,
-            })
-            .collect();
-
-        Ok(job_infos)
+    /// List jobs with their execution scope from the persisted job context,
+    /// optionally filtered to a repository (unknown scopes pass the filter).
+    async fn list_jobs_with_scope(
+        &self,
+        tenant: &str,
+        repo: Option<&str>,
+    ) -> Result<Vec<raisin_storage::ScopedJobInfo>> {
+        let jobs = self.list_tenant_jobs_merged(tenant).await?;
+        let mut out = Vec::with_capacity(jobs.len());
+        for info in jobs {
+            let scope = self
+                .job_data_store()
+                .get(tenant, &info.id)
+                .ok()
+                .flatten()
+                .map(|ctx| raisin_storage::JobScope {
+                    repo: ctx.repo_id,
+                    branch: ctx.branch,
+                    workspace: ctx.workspace_id,
+                });
+            if let (Some(want), Some(s)) = (repo, scope.as_ref()) {
+                if s.repo != want {
+                    continue;
+                }
+            }
+            out.push(raisin_storage::ScopedJobInfo { info, scope });
+        }
+        Ok(out)
     }
 
     /// Get status of a specific job within the given tenant.
@@ -187,7 +255,24 @@ impl BackgroundJobs for RocksDBStorage {
     ) -> Result<raisin_storage::JobInfo> {
         // Prefer the in-memory registry, fall back to persistent storage.
         let info = match self.job_registry().get_job_info(job_id).await {
-            Ok(info) => info,
+            Ok(mut info) => {
+                // Terminal results are trimmed from the registry after a
+                // grace window to bound memory; the persisted copy is
+                // authoritative. Re-hydrate so callers still see the result.
+                if info.result.is_none()
+                    && matches!(
+                        info.status,
+                        raisin_storage::JobStatus::Completed
+                            | raisin_storage::JobStatus::Failed(_)
+                            | raisin_storage::JobStatus::Cancelled
+                    )
+                {
+                    if let Ok(Some(entry)) = self.job_metadata_store().get(tenant, job_id) {
+                        info.result = entry.result;
+                    }
+                }
+                info
+            }
             Err(_) => {
                 let entry = self
                     .job_metadata_store()

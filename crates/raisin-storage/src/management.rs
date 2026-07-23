@@ -123,6 +123,28 @@ pub trait BackgroundJobs: Send + Sync {
             .await)
     }
 
+    /// List jobs together with each job's execution scope (repository /
+    /// branch / workspace from its persisted job context), optionally
+    /// filtered to a repository.
+    ///
+    /// Jobs whose scope is unknown (no persisted context — system jobs,
+    /// legacy entries) are always included, even when a `repo` filter is
+    /// given, so a repository view never silently hides work it may own.
+    /// Backends without context storage return every job unscoped.
+    async fn list_jobs_with_scope(
+        &self,
+        tenant: &str,
+        repo: Option<&str>,
+    ) -> Result<Vec<crate::ScopedJobInfo>> {
+        let _ = repo;
+        Ok(self
+            .list_jobs(tenant)
+            .await?
+            .into_iter()
+            .map(|info| crate::ScopedJobInfo { info, scope: None })
+            .collect())
+    }
+
     /// Wait for a job to complete within the given tenant.
     async fn wait_for_job(&self, tenant: &str, job_id: &crate::JobId) -> Result<crate::JobStatus> {
         let _ = self.get_job_info(tenant, job_id).await?;

@@ -122,7 +122,12 @@ mod inner {
         tenant_id: &str,
         repo: &str,
     ) -> Vec<(JobInfo, JobContext)> {
-        let jobs = rocksdb.job_registry().list_jobs_by_tenant(tenant_id).await;
+        // Merge persisted + live jobs so fired/completed invocations remain
+        // listable after the in-memory registry evicts them or a restart.
+        let jobs = rocksdb
+            .list_tenant_jobs_merged(tenant_id)
+            .await
+            .unwrap_or_default();
         let mut out = Vec::new();
         for job in jobs {
             if !matches!(job.job_type, JobType::ScheduledInvocation { .. }) {
@@ -150,11 +155,12 @@ mod inner {
     ) -> Result<(JobInfo, JobContext), WsError> {
         if let Some(job_id) = job_id {
             let id = raisin_storage::jobs::JobId::from_string(job_id.to_string());
-            let info = rocksdb
-                .job_registry()
-                .get_job_info(&id)
-                .await
-                .map_err(|e| WsError::OperationError(e.to_string()))?;
+            // Falls back to the persisted store and re-hydrates trimmed
+            // results, so fired invocations stay resolvable.
+            let info =
+                raisin_storage::BackgroundJobs::get_job_info(rocksdb.as_ref(), tenant_id, &id)
+                    .await
+                    .map_err(|e| WsError::OperationError(e.to_string()))?;
             if !matches!(info.job_type, JobType::ScheduledInvocation { .. }) {
                 return Err(WsError::InvalidRequest(format!(
                     "Job '{}' is not a scheduled invocation",

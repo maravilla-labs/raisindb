@@ -150,7 +150,10 @@ pub async fn list_executions(
         .as_ref()
         .ok_or_else(|| ApiError::internal("RocksDB storage not available"))?;
 
-    let jobs = rocksdb.job_registry().list_jobs_by_tenant(tenant_id).await;
+    // Merge persisted job history (survives restarts and in-memory registry
+    // eviction, 24h retention) with the live registry (authoritative for
+    // running jobs and freshly completed results).
+    let jobs = super::helpers::merged_function_jobs(rocksdb, tenant_id).await?;
     let mut records = Vec::new();
 
     for job in jobs {
@@ -161,6 +164,14 @@ pub async fn list_executions(
         } = &job.job_type
         {
             if function_path != &function_node.path {
+                continue;
+            }
+
+            // Two repositories can host a function at the same path; the job
+            // itself only carries the path, so scope by the repo recorded in
+            // the persisted job context. Jobs without a context (legacy) keep
+            // the old path-only behavior.
+            if !super::helpers::job_belongs_to_repo(rocksdb, tenant_id, &job.id, &repo) {
                 continue;
             }
 
@@ -202,6 +213,10 @@ pub async fn list_executions(
         }
     }
 
+    // Newest first; HashMap iteration order would otherwise make pagination
+    // non-deterministic.
+    records.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
     let paginated = records.into_iter().skip(offset).take(limit).collect();
@@ -227,17 +242,14 @@ pub async fn list_executions(
 pub async fn get_execution(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
-    Path((_repo, _name, execution_id)): Path<(String, String, String)>,
+    Path((repo, _name, execution_id)): Path<(String, String, String)>,
 ) -> Result<Json<ExecutionRecord>, ApiError> {
     let rocksdb = state
         .rocksdb_storage
         .as_ref()
         .ok_or_else(|| ApiError::internal("RocksDB storage not available"))?;
 
-    let jobs = rocksdb
-        .job_registry()
-        .list_jobs_by_tenant(&tenant_info.tenant_id)
-        .await;
+    let jobs = super::helpers::merged_function_jobs(rocksdb, &tenant_info.tenant_id).await?;
     for job in jobs {
         if let JobType::FunctionExecution {
             function_path,
@@ -246,6 +258,13 @@ pub async fn get_execution(
         } = &job.job_type
         {
             if exec_id != &execution_id {
+                continue;
+            }
+
+            // Don't serve an execution that belongs to a different repository
+            // than the one in the URL (execution ids are tenant-wide).
+            if !super::helpers::job_belongs_to_repo(rocksdb, &tenant_info.tenant_id, &job.id, &repo)
+            {
                 continue;
             }
 

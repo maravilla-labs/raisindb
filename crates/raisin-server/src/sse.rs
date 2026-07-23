@@ -150,6 +150,7 @@ pub async fn job_events_stream_rocksdb(
     });
 
     // Convert channel receiver to SSE stream with tenant filtering
+    let scope_storage = storage.clone();
     let stream = ReceiverStream::new(rx)
         .filter(move |sse_event| {
             // SECURITY: Only stream events for the authenticated tenant
@@ -164,10 +165,24 @@ pub async fn job_events_stream_rocksdb(
                 }
             }
         })
-        .map(|sse_event| match sse_event {
+        .map(move |sse_event| match sse_event {
             SseEvent::JobUpdate(event) => {
-                let data = serde_json::to_string(&SseEventData::from(*event))
-                    .unwrap_or_else(|_| "{}".to_string());
+                let tenant = event.job_info.tenant.clone();
+                let job_id = event.job_id.clone();
+                let mut data = SseEventData::from(*event);
+                // Attach the job's execution scope (repo/branch/workspace)
+                // from its persisted context — a cheap synchronous RocksDB
+                // point read — so repo-scoped admin views can filter live
+                // events instead of showing every repository's executions.
+                if let Ok(Some(ctx)) = scope_storage.job_data_store().get(&tenant, &job_id) {
+                    data.workspace = Some(ctx.workspace_id.clone());
+                    data.scope = Some(raisin_storage::JobScope {
+                        repo: ctx.repo_id,
+                        branch: ctx.branch,
+                        workspace: ctx.workspace_id,
+                    });
+                }
+                let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
                 Ok(Event::default().event("job-update").data(data))
             }
             SseEvent::JobLog(entry) => {
@@ -305,6 +320,10 @@ struct SseEventData {
     /// Flow instance ID (for FlowInstanceExecution jobs)
     #[serde(skip_serializing_if = "Option::is_none")]
     flow_instance_id: Option<String>,
+    /// Execution scope (repo/branch/workspace) from the persisted job
+    /// context, when available. Lets repo-scoped views filter live events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<raisin_storage::JobScope>,
 }
 
 impl From<JobEvent> for SseEventData {
@@ -434,8 +453,9 @@ impl From<JobEvent> for SseEventData {
             function_result,
             function_path,
             trigger_path,
-            workspace: None, // TODO: Could be extracted from JobContext if needed
+            workspace: None, // enriched from the job context by the stream
             flow_instance_id,
+            scope: None, // enriched from the job context by the stream
         }
     }
 }

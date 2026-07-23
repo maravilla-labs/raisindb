@@ -156,6 +156,49 @@ impl JobMetadataStore {
         Ok((total, orphaned))
     }
 
+    /// Stream every job matching `statuses` to `visit`, one entry at a time,
+    /// without materializing the full result set.
+    ///
+    /// Crash-recovery scans use this instead of `list_by_status`: after a
+    /// runaway registration burst the persisted backlog can hold hundreds of
+    /// thousands of pending entries (each carrying result payloads), and
+    /// collecting them into a `Vec` at startup multiplies that into gigabytes
+    /// of RSS before the first job even runs.
+    pub fn for_each_by_status<F>(&self, statuses: &[JobStatus], mut visit: F) -> Result<()>
+    where
+        F: FnMut(JobId, PersistedJobEntry) -> Result<()>,
+    {
+        let cf = cf_handle(&self.db, cf::JOB_METADATA)?;
+        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
+                raisin_error::Error::storage(format!("Failed to iterate job metadata: {}", e))
+            })?;
+
+            let entry: PersistedJobEntry = match rmp_serde::from_slice(&value_bytes) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    let key_str = String::from_utf8_lossy(&key_bytes);
+                    tracing::warn!(
+                        key = %key_str,
+                        error = %e,
+                        "Failed to deserialize job metadata (likely unknown job type), skipping"
+                    );
+                    continue;
+                }
+            };
+            if !status_in_filter(&entry.status, statuses) {
+                continue;
+            }
+            let job_id = match split_key(&key_bytes) {
+                Some((_, jid)) => jid,
+                None => JobId::from_string(entry.id.clone()),
+            };
+            visit(job_id, entry)?;
+        }
+        Ok(())
+    }
+
     /// Shared iteration helper.
     fn collect_matching<F>(
         &self,

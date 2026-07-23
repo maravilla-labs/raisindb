@@ -4,7 +4,7 @@
 //! scheduling background jobs, as well as queue maintenance operations.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     Extension,
@@ -36,15 +36,31 @@ fn job_lookup_status(err: &raisin_error::Error) -> StatusCode {
 // CRUD operations
 // ---------------------------------------------------------------------------
 
-/// List all background jobs for the request's tenant.
+/// Query filters for listing jobs.
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct ListJobsQuery {
+    /// Restrict to jobs whose persisted context records this repository.
+    /// Jobs without a recorded scope are always included.
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+/// List all background jobs for the request's tenant, each with its
+/// execution scope (repo/branch/workspace) when known. Pass `?repo=` to
+/// filter to one repository.
 pub async fn list_jobs<S>(
     State(state): State<ManagementState<S>>,
     Extension(tenant_info): Extension<TenantInfo>,
-) -> Result<Json<ApiResponse<Vec<raisin_storage::JobInfo>>>, StatusCode>
+    Query(query): Query<ListJobsQuery>,
+) -> Result<Json<ApiResponse<Vec<raisin_storage::ScopedJobInfo>>>, StatusCode>
 where
     S: BackgroundJobs + Send + Sync,
 {
-    match state.storage.list_jobs(&tenant_info.tenant_id).await {
+    match state
+        .storage
+        .list_jobs_with_scope(&tenant_info.tenant_id, query.repo.as_deref())
+        .await
+    {
         Ok(jobs) => Ok(Json(ApiResponse::ok(jobs))),
         Err(e) => {
             tracing::error!("Failed to list jobs: {}", e);
