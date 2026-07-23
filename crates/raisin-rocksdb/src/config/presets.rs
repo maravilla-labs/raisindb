@@ -45,6 +45,8 @@ impl RocksDBConfig {
             oplog_compaction_min_age_secs: 3600, // 1 hour
             oplog_merge_property_updates: true,
             oplog_compaction_batch_size: 100_000,
+            trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
+            max_active_jobs_per_tenant: Some(5000),
         }
     }
 
@@ -87,6 +89,8 @@ impl RocksDBConfig {
             oplog_compaction_min_age_secs: 3600, // 1 hour
             oplog_merge_property_updates: true,
             oplog_compaction_batch_size: 100_000,
+            trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
+            max_active_jobs_per_tenant: Some(5000),
         }
     }
 
@@ -129,6 +133,8 @@ impl RocksDBConfig {
             oplog_compaction_min_age_secs: 1800, // 30 minutes (shorter for high-volume)
             oplog_merge_property_updates: true,
             oplog_compaction_batch_size: 500_000, // Larger batch for high-performance
+            trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
+            max_active_jobs_per_tenant: Some(5000),
         }
     }
 }

@@ -90,6 +90,28 @@ pub(super) fn track_update(
     new_node: &Node,
     revision: HLC,
 ) -> Result<()> {
+    // A write whose properties are byte-for-byte identical to the previous
+    // revision is still persisted (new revision, updated_at/updated_by
+    // stamped — versioning semantics are untouched), but it produces no
+    // observable change, so it must not enter changed_nodes: that map is
+    // what drives both the async snapshot job AND emit_node_events (which
+    // in turn drives trigger evaluation). Without this guard, a function
+    // whose failure handler rewrites a node to the SAME error state on
+    // every retry re-fires its own trigger forever — a genuine production
+    // incident (a self-write loop that grew the job registry to 50k+
+    // entries). Skipping the no-op here starves that class of loop at the
+    // source, independent of the trigger circuit breaker in
+    // `jobs::TriggerBreaker` (defense in depth, not a substitute for it).
+    if old_node.properties == new_node.properties {
+        tracing::debug!(
+            node_id = %new_node.id,
+            workspace = workspace,
+            revision = %revision,
+            "Skipping change tracking for no-op update (properties unchanged)"
+        );
+        return Ok(());
+    }
+
     // Track in changed_nodes
     {
         let mut changed = tx

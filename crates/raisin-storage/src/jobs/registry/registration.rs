@@ -25,6 +25,45 @@ use crate::jobs::{JobId, JobStatus, JobType};
 use raisin_error::Result;
 
 impl JobRegistry {
+    /// Enforce `max_active_jobs_per_tenant` (if configured). Call before
+    /// inserting a new, non-terminal `JobEntry` from ANY registration
+    /// entry point — `register_job_inner` and both dedup/idempotent paths
+    /// construct their own `JobEntry` directly rather than funneling
+    /// through a single insert function, so each must call this itself.
+    async fn check_tenant_job_cap(&self, tenant: &str, job_type: &JobType) -> Result<()> {
+        let Some(max_active) = self.max_active_jobs_per_tenant else {
+            return Ok(());
+        };
+        let current = self
+            .tenant_active_counts
+            .read()
+            .await
+            .get(tenant)
+            .copied()
+            .unwrap_or(0);
+        if current >= max_active {
+            tracing::warn!(
+                tenant,
+                current,
+                max_active,
+                job_type = %job_type,
+                "Tenant job quota exceeded, refusing to register job"
+            );
+            return Err(raisin_error::Error::Validation(format!(
+                "Tenant '{}' has {} non-terminal jobs registered, at the configured cap of {}",
+                tenant, current, max_active
+            )));
+        }
+        Ok(())
+    }
+
+    /// Record a newly-registered (always non-terminal) job against its
+    /// tenant's active count. Pair with `check_tenant_job_cap`.
+    async fn record_tenant_job(&self, tenant: &str) {
+        let mut counts = self.tenant_active_counts.write().await;
+        *counts.entry(tenant.to_string()).or_insert(0) += 1;
+    }
+
     /// Register a new job
     ///
     /// # Arguments
@@ -149,12 +188,14 @@ impl JobRegistry {
         max_retries: Option<u32>,
         scheduled_at: Option<chrono::DateTime<Utc>>,
     ) -> Result<JobId> {
+        self.check_tenant_job_cap(&tenant, &job_type).await?;
+
         let timeout_seconds = job_type.default_timeout_seconds();
         let entry = JobEntry {
             id: job_id.clone(),
             job_type,
             status: JobStatus::Scheduled,
-            tenant,
+            tenant: tenant.clone(),
             started_at: Utc::now(),
             completed_at: None,
             error: None,
@@ -180,6 +221,9 @@ impl JobRegistry {
             let mut jobs = self.jobs.write().await;
             jobs.insert(job_id.clone(), entry);
         }
+
+        // New jobs always start Scheduled (non-terminal) — always count.
+        self.record_tenant_job(&tenant).await;
 
         if let Some(h) = handle {
             let mut handles = self.handles.write().await;
@@ -267,13 +311,15 @@ impl JobRegistry {
         }
 
         // No active job with this key - register a new one
+        self.check_tenant_job_cap(&tenant, &job_type).await?;
+
         let job_id = JobId::new();
         let timeout_seconds = job_type.default_timeout_seconds();
         let entry = JobEntry {
             id: job_id.clone(),
             job_type,
             status: JobStatus::Scheduled,
-            tenant,
+            tenant: tenant.clone(),
             started_at: Utc::now(),
             completed_at: None,
             error: None,
@@ -315,6 +361,9 @@ impl JobRegistry {
             jobs.insert(job_id.clone(), entry);
             dedup_keys.insert(dedup_key.clone(), job_id.clone());
         }
+
+        // New jobs always start Scheduled (non-terminal) — always count.
+        self.record_tenant_job(&tenant).await;
 
         tracing::debug!(
             job_id = %job_id,
@@ -379,12 +428,14 @@ impl JobRegistry {
             }
         }
 
+        self.check_tenant_job_cap(&tenant, &job_type).await?;
+
         let timeout_seconds = job_type.default_timeout_seconds();
         let entry = JobEntry {
             id: job_id.clone(),
             job_type,
             status: JobStatus::Scheduled,
-            tenant,
+            tenant: tenant.clone(),
             started_at: Utc::now(),
             completed_at: None,
             error: None,
@@ -426,6 +477,9 @@ impl JobRegistry {
             jobs.insert(job_id.clone(), entry);
             dedup_keys.insert(dedup_key.clone(), job_id.clone());
         }
+
+        // New jobs always start Scheduled (non-terminal) — always count.
+        self.record_tenant_job(&tenant).await;
 
         tracing::debug!(
             job_id = %job_id,

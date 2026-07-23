@@ -17,9 +17,11 @@
 //! triggers (both inline on raisin:Function nodes and standalone raisin:Trigger nodes)
 //! and enqueues FunctionExecution jobs for each match.
 
+mod breaker;
 mod handler;
 mod types;
 
+pub use breaker::{BreakerTripReason, TriggerBreaker, TriggerBreakerStats, TriggerSafetyConfig};
 pub use handler::TriggerEvaluationHandler;
 pub use types::{
     FilterCheckResult, NodeFetcherCallback, TriggerEvaluationReport, TriggerEvaluationResult,

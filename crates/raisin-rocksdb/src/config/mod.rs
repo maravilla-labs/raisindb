@@ -123,6 +123,19 @@ pub struct RocksDBConfig {
     pub oplog_merge_property_updates: bool,
     /// Maximum operations to process per compaction run
     pub oplog_compaction_batch_size: usize,
+
+    /// Trigger circuit breaker configuration — guards against a single
+    /// tenant's runaway trigger/function loop growing the job registry
+    /// without bound. See `jobs::TriggerBreaker`.
+    pub trigger_safety: crate::jobs::TriggerSafetyConfig,
+    /// Physical backstop behind `trigger_safety`: maximum non-terminal
+    /// (Scheduled/Running/Executing) jobs one tenant may have registered at
+    /// once, across ALL job types (not just triggers). `None` disables the
+    /// check. This is the direct answer to "the dispatch queue's capacity
+    /// doesn't actually bound anything" — registration into the job
+    /// registry, not dispatch, is what grows without bound, so the cap has
+    /// to live there. See `raisin_storage::jobs::JobRegistry::with_tenant_job_cap`.
+    pub max_active_jobs_per_tenant: Option<usize>,
 }
 
 /// Compression types supported by RocksDB
@@ -294,6 +307,18 @@ impl RocksDBConfig {
     /// Get tenant-specific resource limits
     pub fn get_tenant_limit(&self, tenant: &str) -> Option<&TenantLimits> {
         self.tenant_resource_limits.get(tenant)
+    }
+
+    /// Override the trigger circuit breaker configuration
+    pub fn with_trigger_safety(mut self, trigger_safety: crate::jobs::TriggerSafetyConfig) -> Self {
+        self.trigger_safety = trigger_safety;
+        self
+    }
+
+    /// Override the per-tenant active-job registry cap
+    pub fn with_max_active_jobs_per_tenant(mut self, max: Option<usize>) -> Self {
+        self.max_active_jobs_per_tenant = max;
+        self
     }
 }
 

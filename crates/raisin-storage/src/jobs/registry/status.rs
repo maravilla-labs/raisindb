@@ -72,6 +72,17 @@ impl JobRegistry {
             dedup_keys.retain(|_, v| v != job_id);
         }
 
+        // Decrement the tenant's active-job count exactly once: the
+        // early-return above guarantees `old_status` was never already
+        // terminal when we get here, so every terminal transition reaches
+        // this point at most once per job.
+        if is_terminal {
+            let mut counts = self.tenant_active_counts.write().await;
+            if let Some(count) = counts.get_mut(&job_info.tenant) {
+                *count = count.saturating_sub(1);
+            }
+        }
+
         // Persist after updating in-memory state
         if let Some(persistence) = &self.persistence {
             if let Err(e) = persistence.persist_job(job_id, &job_info).await {

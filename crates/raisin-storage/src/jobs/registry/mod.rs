@@ -38,6 +38,20 @@ pub struct JobRegistry {
     persistence: Option<Arc<dyn crate::jobs::JobPersistence>>,
     /// Deduplication keys mapped to job IDs for idempotent job registration
     dedup_keys: Arc<RwLock<HashMap<String, JobId>>>,
+    /// Count of non-terminal (Scheduled/Running/Executing) jobs per tenant.
+    /// Incremented in `register_job_inner`, decremented in `update_status`
+    /// on the (exactly-once, guarded by the existing terminal-transition
+    /// check) transition into a terminal status. This is the physical
+    /// backstop behind `max_active_jobs_per_tenant`: registration —
+    /// not dispatch-queue capacity — is what a runaway trigger/function
+    /// loop actually grows without bound (dispatch just logs a warning
+    /// and leaves the already-registered job in place when its queue is
+    /// full), so the cap has to be enforced here.
+    tenant_active_counts: Arc<RwLock<HashMap<String, usize>>>,
+    /// Maximum non-terminal jobs one tenant may have registered at once.
+    /// `None` disables the check (default — opt-in via
+    /// `with_tenant_job_cap`).
+    max_active_jobs_per_tenant: Option<usize>,
 }
 
 impl Default for JobRegistry {
@@ -55,7 +69,29 @@ impl JobRegistry {
             monitors: Arc::new(JobMonitorHub::new()),
             persistence: None,
             dedup_keys: Arc::new(RwLock::new(HashMap::new())),
+            tenant_active_counts: Arc::new(RwLock::new(HashMap::new())),
+            max_active_jobs_per_tenant: None,
         }
+    }
+
+    /// Cap the number of non-terminal (Scheduled/Running/Executing) jobs a
+    /// single tenant may have registered at once. Once a tenant is at the
+    /// cap, further registrations fail with a validation error until some
+    /// of its jobs complete/fail/are cancelled. `None` (the default)
+    /// disables the check entirely.
+    pub fn with_tenant_job_cap(mut self, max_active_jobs_per_tenant: Option<usize>) -> Self {
+        self.max_active_jobs_per_tenant = max_active_jobs_per_tenant;
+        self
+    }
+
+    /// Current count of non-terminal jobs for a tenant.
+    pub async fn active_job_count(&self, tenant: &str) -> usize {
+        self.tenant_active_counts
+            .read()
+            .await
+            .get(tenant)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Set the persistence backend for this registry
@@ -205,5 +241,73 @@ mod tests {
             registry.get_status(&job_id).await.unwrap(),
             JobStatus::Failed(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn tenant_job_cap_rejects_once_at_the_limit() {
+        let registry = JobRegistry::new().with_tenant_job_cap(Some(2));
+
+        registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+        registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+
+        let err = registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(format!("{}", err).contains("at the configured cap"));
+
+        // A different tenant is unaffected.
+        registry
+            .register_job(
+                JobType::IntegrityScan,
+                "other".to_string(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tenant_job_cap_frees_up_after_a_job_completes() {
+        let registry = JobRegistry::new().with_tenant_job_cap(Some(1));
+
+        let job_id = registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(registry.active_job_count("t").await, 1);
+
+        registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap_err();
+
+        registry.mark_completed(&job_id).await.unwrap();
+        assert_eq!(registry.active_job_count("t").await, 0);
+
+        registry
+            .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tenant_job_cap_disabled_by_default() {
+        let registry = JobRegistry::new();
+        for _ in 0..10 {
+            registry
+                .register_job(JobType::IntegrityScan, "t".to_string(), None, None, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(registry.active_job_count("t").await, 10);
     }
 }

@@ -15,7 +15,19 @@ use super::MergedConfig;
 pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
     use raisin_rocksdb::RocksDBConfig;
 
-    let mut config = RocksDBConfig::production().with_path(&server_config.data_dir);
+    let mut config = RocksDBConfig::production()
+        .with_path(&server_config.data_dir)
+        .with_trigger_safety(raisin_rocksdb::TriggerSafetyConfig {
+            enabled: server_config.trigger_safety.enabled,
+            rate_limit_per_window: server_config.trigger_safety.rate_limit_per_window,
+            rate_limit_hard_ceiling: server_config.trigger_safety.rate_limit_hard_ceiling,
+            node_fire_budget: server_config.trigger_safety.node_fire_budget,
+            window_secs: server_config.trigger_safety.window_secs,
+        });
+
+    if let Some(max_active) = server_config.max_active_jobs_per_tenant {
+        config = config.with_max_active_jobs_per_tenant(Some(max_active));
+    }
 
     if server_config.replication_enabled {
         if let Some(ref node_id) = server_config.cluster_node_id {

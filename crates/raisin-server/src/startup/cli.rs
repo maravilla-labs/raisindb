@@ -102,6 +102,10 @@ pub struct MergedConfig {
     pub dev_mode: bool,
     /// Atomic locks / inventory subsystem configuration
     pub locks: raisin_locks::LocksConfig,
+    /// Trigger circuit breaker configuration
+    pub trigger_safety: config::TriggerSafetyConfig,
+    /// Physical backstop behind `trigger_safety` (see `MergedConfig` doc)
+    pub max_active_jobs_per_tenant: Option<usize>,
 }
 
 impl ServerConfig {
@@ -239,6 +243,16 @@ impl ServerConfig {
             .map(|c| c.locks.clone())
             .unwrap_or_default();
 
+        // Trigger circuit breaker config from TOML (no CLI override for now)
+        let trigger_safety = toml_config
+            .as_ref()
+            .map(|c| c.trigger_safety.clone())
+            .unwrap_or_default();
+
+        let max_active_jobs_per_tenant = toml_config
+            .as_ref()
+            .and_then(|c| c.max_active_jobs_per_tenant);
+
         Ok(MergedConfig {
             port,
             data_dir,
@@ -259,6 +273,8 @@ impl ServerConfig {
             cors_allowed_origins,
             dev_mode: self.dev_mode,
             locks,
+            trigger_safety,
+            max_active_jobs_per_tenant,
         })
     }
 }

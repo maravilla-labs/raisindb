@@ -97,8 +97,9 @@ pub use scheduled_trigger::{
 };
 pub use snapshot::{NodeChangeInfo, SnapshotHandler, TranslationChangeInfo};
 pub use trigger_evaluation::{
-    FilterCheckResult, TriggerEvaluationHandler, TriggerEvaluationReport, TriggerEvaluationResult,
-    TriggerEventInfo, TriggerMatch, TriggerMatcherCallback,
+    BreakerTripReason, FilterCheckResult, TriggerBreaker, TriggerBreakerStats,
+    TriggerEvaluationHandler, TriggerEvaluationReport, TriggerEvaluationResult, TriggerEventInfo,
+    TriggerMatch, TriggerMatcherCallback, TriggerSafetyConfig,
 };
 pub use trigger_matcher::create_trigger_matcher;
 pub use virtual_mount_sync::{

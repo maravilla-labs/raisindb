@@ -183,10 +183,12 @@ pub fn create_trigger_evaluation_handler(
     job_data_store: Arc<JobDataStore>,
     dispatcher: Arc<JobDispatcher>,
 ) -> Arc<crate::jobs::TriggerEvaluationHandler> {
-    let trigger_matcher = crate::jobs::create_trigger_matcher(storage);
+    let trigger_matcher = crate::jobs::create_trigger_matcher(storage.clone());
+    let breaker = crate::jobs::TriggerBreaker::new(storage.config.trigger_safety.clone());
     Arc::new(
         crate::jobs::TriggerEvaluationHandler::new(job_registry, job_data_store, dispatcher)
-            .with_trigger_matcher(trigger_matcher),
+            .with_trigger_matcher(trigger_matcher)
+            .with_trigger_breaker(breaker),
     )
 }
 

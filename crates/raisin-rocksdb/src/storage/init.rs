@@ -69,9 +69,13 @@ impl RocksDBStorage {
 
         // Initialize unified job system components
         let job_metadata_store = Arc::new(JobMetadataStore::new(db.clone()));
-        let job_registry = Arc::new(JobRegistry::new().with_persistence(
-            job_metadata_store.clone() as Arc<dyn raisin_storage::jobs::JobPersistence>,
-        ));
+        let job_registry = Arc::new(
+            JobRegistry::new()
+                .with_persistence(
+                    job_metadata_store.clone() as Arc<dyn raisin_storage::jobs::JobPersistence>
+                )
+                .with_tenant_job_cap(config.max_active_jobs_per_tenant),
+        );
         let job_data_store = Arc::new(JobDataStore::new(db.clone()));
 
         // Initialize replication components

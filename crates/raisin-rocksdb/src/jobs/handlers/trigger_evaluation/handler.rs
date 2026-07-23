@@ -1,5 +1,6 @@
 //! Trigger evaluation handler implementation.
 
+use super::breaker::TriggerBreaker;
 use super::types::{
     NodeFetcherCallback, TriggerEvaluationReport, TriggerEvaluationResult, TriggerEventInfo,
     TriggerMatch, TriggerMatcherCallback,
@@ -26,6 +27,11 @@ pub struct TriggerEvaluationHandler {
     trigger_matcher: Option<TriggerMatcherCallback>,
     /// Optional node fetcher callback (set by transport layer)
     node_fetcher: Option<NodeFetcherCallback>,
+    /// Circuit breaker guarding against runaway trigger loops. `None` only
+    /// in tests/callers that construct the handler directly without going
+    /// through `create_trigger_evaluation_handler` — in that case fires are
+    /// never throttled.
+    trigger_breaker: Option<TriggerBreaker>,
 }
 
 impl TriggerEvaluationHandler {
@@ -41,6 +47,7 @@ impl TriggerEvaluationHandler {
             dispatcher,
             trigger_matcher: None,
             node_fetcher: None,
+            trigger_breaker: None,
         }
     }
 
@@ -59,6 +66,12 @@ impl TriggerEvaluationHandler {
     /// to provide the callback that fetches node data for function context.
     pub fn with_node_fetcher(mut self, fetcher: NodeFetcherCallback) -> Self {
         self.node_fetcher = Some(fetcher);
+        self
+    }
+
+    /// Set the trigger circuit breaker guarding against runaway loops.
+    pub fn with_trigger_breaker(mut self, breaker: TriggerBreaker) -> Self {
+        self.trigger_breaker = Some(breaker);
         self
     }
 
@@ -250,6 +263,27 @@ impl TriggerEvaluationHandler {
         node_path: &str,
         context: &JobContext,
     ) -> Result<Option<String>> {
+        if let Some(breaker) = self.trigger_breaker.as_ref() {
+            if let Some(reason) = breaker
+                .check_and_record(
+                    &context.tenant_id,
+                    &context.repo_id,
+                    &trigger_match.trigger_name,
+                    node_id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    trigger_name = %trigger_match.trigger_name,
+                    node_id = %node_id,
+                    tenant_id = %context.tenant_id,
+                    reason = ?reason,
+                    "Trigger circuit breaker tripped, skipping enqueue"
+                );
+                return Ok(None);
+            }
+        }
+
         let execution_id = nanoid::nanoid!();
 
         // Build execution context with event data

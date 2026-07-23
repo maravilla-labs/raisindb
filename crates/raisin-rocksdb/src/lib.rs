@@ -145,6 +145,13 @@ pub use jobs::handlers::replication_sync::ReplicationSyncHandler;
 // it without needing access to the (private) `jobs` module.
 pub use jobs::handlers::{FulltextErrorCounter, FulltextErrorKind, FulltextErrorStats};
 
+// Re-export the trigger circuit breaker types so raisin-server can build
+// `TriggerSafetyConfig` from parsed TOML without needing access to the
+// (private) `jobs` module.
+pub use jobs::handlers::{
+    BreakerTripReason, TriggerBreaker, TriggerBreakerStats, TriggerSafetyConfig,
+};
+
 // Re-export the scheduled-invocation JobContext metadata keys so transport
 // layers build and read invocation contexts with the same vocabulary as
 // the job handler.

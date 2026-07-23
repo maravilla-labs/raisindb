@@ -133,6 +133,74 @@ pub struct ServerConfigFile {
     /// Atomic locks / inventory subsystem configuration
     #[serde(default)]
     pub locks: raisin_locks::LocksConfig,
+    /// Trigger circuit breaker configuration — guards against a single
+    /// tenant's runaway trigger/function loop growing the job registry
+    /// without bound. Defined locally (rather than reusing
+    /// `raisin_rocksdb::TriggerSafetyConfig` directly) because that
+    /// crate is optional (`storage-rocksdb` feature) while this config type
+    /// is always compiled.
+    #[serde(default)]
+    pub trigger_safety: TriggerSafetyConfig,
+    /// Physical backstop behind `trigger_safety`: max non-terminal jobs one
+    /// tenant may have registered at once, across all job types. `None`
+    /// (the default here) keeps the storage backend's own built-in default
+    /// (5000 for the RocksDB backend); set explicitly to override or to
+    /// disable the check with an unbounded value.
+    #[serde(default)]
+    pub max_active_jobs_per_tenant: Option<usize>,
+}
+
+/// Trigger circuit breaker configuration (TOML `[trigger_safety]` section).
+/// Mirrors `raisin_rocksdb::TriggerSafetyConfig` field-for-field; kept
+/// in sync manually since the two crates can't share the type across the
+/// optional `storage-rocksdb` feature boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerSafetyConfig {
+    /// Master switch. When false, a trigger can fire without limit.
+    #[serde(default = "default_trigger_safety_enabled")]
+    pub enabled: bool,
+    /// Max fires of one (tenant, repo, trigger, node) within `window_secs`.
+    #[serde(default = "default_trigger_rate_limit")]
+    pub rate_limit_per_window: usize,
+    /// Absolute ceiling on `rate_limit_per_window` — a config value above
+    /// this is clamped down, never up.
+    #[serde(default = "default_trigger_rate_hard_ceiling")]
+    pub rate_limit_hard_ceiling: usize,
+    /// Max total trigger fires (any trigger) for one (tenant, repo, node)
+    /// within `window_secs`.
+    #[serde(default = "default_trigger_node_fire_budget")]
+    pub node_fire_budget: usize,
+    /// Sliding window, in seconds, for both checks.
+    #[serde(default = "default_trigger_window_secs")]
+    pub window_secs: u64,
+}
+
+fn default_trigger_safety_enabled() -> bool {
+    true
+}
+fn default_trigger_rate_limit() -> usize {
+    500
+}
+fn default_trigger_rate_hard_ceiling() -> usize {
+    1000
+}
+fn default_trigger_node_fire_budget() -> usize {
+    1000
+}
+fn default_trigger_window_secs() -> u64 {
+    1
+}
+
+impl Default for TriggerSafetyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_trigger_safety_enabled(),
+            rate_limit_per_window: default_trigger_rate_limit(),
+            rate_limit_hard_ceiling: default_trigger_rate_hard_ceiling(),
+            node_fire_budget: default_trigger_node_fire_budget(),
+            window_secs: default_trigger_window_secs(),
+        }
+    }
 }
 
 /// HTTP server configuration
