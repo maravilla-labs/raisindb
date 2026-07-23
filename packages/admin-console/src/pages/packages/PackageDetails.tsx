@@ -20,6 +20,7 @@ import {
   GitBranch,
   FileArchive,
   GitCompare,
+  ShieldCheck,
 } from 'lucide-react'
 import GlassCard from '../../components/GlassCard'
 import ConfirmDialog from '../../components/ConfirmDialog'
@@ -28,7 +29,7 @@ import MarkdownRenderer from '../../components/MarkdownRenderer'
 import SplitButton, { type SplitButtonOption } from '../../components/SplitButton'
 import ExportPackageDialog from '../../components/ExportPackageDialog'
 import DryRunDialog from '../../components/DryRunDialog'
-import { packagesApi, type PackageDetails as PackageDetailsType, type InstallMode } from '../../api/packages'
+import { packagesApi, type PackageDetails as PackageDetailsType, type InstallMode, type SyncPolicySummary } from '../../api/packages'
 import { jobsApi, type JobEventData } from '../../api/jobs'
 import { branchesApi, type Branch } from '../../api/branches'
 
@@ -49,6 +50,17 @@ const iconNameToPascalCase = (name: string): string => {
 const getIconComponent = (name: string): any => {
   const pascalName = iconNameToPascalCase(name)
   return (LucideIcons as any)[pascalName] || Package
+}
+
+// Short human-readable summary of a package's sync policy, for a tooltip
+function describeSyncPolicy(policy: SyncPolicySummary): string {
+  const parts = [`default: ${policy.default_mode || 'skip'}`]
+  for (const filter of policy.filters || []) {
+    if (filter.root) {
+      parts.push(`${filter.root}: ${filter.mode || 'skip'}`)
+    }
+  }
+  return parts.join(', ')
 }
 
 // Install mode options for the split button (Install button - not yet installed)
@@ -496,12 +508,23 @@ export default function PackageDetails() {
               <p className="text-sm text-zinc-400 mb-2">by {pkg.author}</p>
             )}
 
-            {pkg.installed && (
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/20 text-green-400 rounded-lg inline-flex">
-                <CheckCircle className="w-4 h-4" />
-                <span className="text-sm font-medium">Installed</span>
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              {pkg.installed && (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/20 text-green-400 rounded-lg inline-flex">
+                  <CheckCircle className="w-4 h-4" />
+                  <span className="text-sm font-medium">Installed</span>
+                </div>
+              )}
+              {pkg.sync_policy && (
+                <div
+                  title={`Custom sync policy — ${describeSyncPolicy(pkg.sync_policy)}`}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-primary-500/20 text-primary-300 rounded-lg inline-flex"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span className="text-sm font-medium">Custom Sync Policy</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -640,6 +663,39 @@ export default function PackageDetails() {
                       {dep.optional && (
                         <span className="ml-2 text-zinc-500">(optional)</span>
                       )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </GlassCard>
+          )}
+
+          {/* Sync Policy */}
+          {pkg.sync_policy && (
+            <GlassCard>
+              <div className="flex items-center gap-2 mb-4">
+                <ShieldCheck className="w-5 h-5 text-primary-400" />
+                <h3 className="text-lg font-semibold text-white">Sync Policy</h3>
+              </div>
+              <p className="text-xs text-zinc-500 mb-3">
+                Controls per-path behavior on install/reinstall, overriding the
+                chosen install mode unless it's forced to OVERWRITE.
+              </p>
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center justify-between p-2 bg-white/5 rounded">
+                  <span className="text-zinc-400">Default</span>
+                  <span className="text-white font-mono text-xs uppercase">
+                    {pkg.sync_policy.default_mode || 'skip'}
+                  </span>
+                </div>
+                {(pkg.sync_policy.filters || []).map((filter, idx) => (
+                  <div
+                    key={`${filter.root}-${idx}`}
+                    className="flex items-center justify-between p-2 bg-white/5 rounded"
+                  >
+                    <span className="text-white font-mono text-xs truncate">{filter.root}</span>
+                    <span className="text-primary-300 font-mono text-xs uppercase flex-shrink-0 ml-2">
+                      {filter.mode || 'skip'}
                     </span>
                   </div>
                 ))}

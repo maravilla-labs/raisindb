@@ -139,6 +139,55 @@ provides:
     - myapp
 ```
 
+### Reconciling updates — `.raisin-sync.yaml`
+
+`raisindb deploy --install` / `raisindb package install` **create** new content
+nodes the first time, but on every *re*-install they deliberately **skip**
+content nodes that already exist — install never clobbers content a user has
+since edited (seed pages, an admin's data). That's the right default, but it
+also means a shipped fix to a function/trigger, or a new seed node you added,
+silently never reaches an already-installed repo. Two ways to push it there:
+
+1. **Manually**, once: `raisindb sync ./package --push --force --yes` (verify
+   the change actually landed on the server — don't trust "success" output).
+2. **Declaratively**, for every future install/update automatically: ship a
+   **`.raisin-sync.yaml`** file at the package root, next to `manifest.yaml`. It
+   rides along inside the built `.rap` (the packager includes any file not
+   matched by `.gitignore`/`.rapignore` — **don't gitignore this one**, see
+   below) and tells the server's install job, **per path**, how to reconcile
+   content on every install/reinstall — no manual push required, which matters
+   once your package ships to users who run their own installs/updates.
+
+   ```yaml
+   # .raisin-sync.yaml  (package root, beside manifest.yaml)
+   defaults:
+     mode: skip               # preserve user content by default — never clobber
+   filters:
+     - root: /functions        # platform code the user never hand-edits
+       mode: replace            # always overwrite on update, so fixes/new fns land
+   ```
+
+   - **Modes:** `skip` (never touch existing content at this path — create
+     only if missing; the safe default for user-owned trees) and `replace`
+     (package is source of truth — always overwrite). `merge`/`update` also
+     parse but aren't specially handled yet — they just fall through to
+     whichever top-level install mode the CLI/server used (`skip` by default;
+     `raisindb deploy --install` and `raisindb package install` don't
+     currently expose a flag to change it), so use `skip`/`replace` in this
+     file for an actual per-path guarantee.
+   - **Resolution:** the **last** matching `filters` entry wins by path prefix
+     (`/{workspace}{node_path}`, e.g. `/functions/lib/foo`); otherwise
+     `defaults.mode` applies. Keep `defaults` conservative and carve out only
+     the platform-owned paths (functions, config you own) as `replace`.
+   - **Override:** installing with an explicit force/overwrite mode always wins
+     and ignores this file entirely — the escape hatch for a clean reset.
+   - This file is unrelated to the *other* `.raisin-sync.yaml` the `sync`
+     command reads from your **local checkout** (connection config: server
+     URL, repo, branch — see `raisindb sync --help`); that one is always
+     excluded from what gets pushed. Same filename, different location and
+     purpose — the install-policy one lives at the package root and ships
+     *inside* the `.rap`.
+
 ## SDK Connection
 
 Install: `npm install @raisindb/client`

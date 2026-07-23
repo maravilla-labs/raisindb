@@ -102,6 +102,9 @@ impl Default for SyncDefaults {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncMode {
+    /// Never overwrite existing content at this path; only create if missing.
+    /// Used by `raisin:install` to preserve tenant-owned content across updates.
+    Skip,
     /// Full replacement of target with source
     #[default]
     Replace,

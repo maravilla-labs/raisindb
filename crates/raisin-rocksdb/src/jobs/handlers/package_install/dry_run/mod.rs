@@ -37,12 +37,21 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         // Parse manifest
         let manifest = self.extract_manifest(zip_data)?;
 
+        // Parse the optional `.raisin-sync.yaml` per-path sync/install policy.
+        let sync_config = self.extract_sync_config(zip_data)?;
+
         logs.push(DryRunLogEntry {
             level: "info".to_string(),
             category: "manifest".to_string(),
             path: "manifest.yaml".to_string(),
             message: format!("Package: {} v{}", manifest.name, manifest.version),
             action: "info".to_string(),
+            policy: sync_config.as_ref().map(|_| {
+                format!(
+                    "package ships a {} policy — see per-path entries below",
+                    raisin_packages::SYNC_CONFIG_FILENAME
+                )
+            }),
         });
 
         // Clone the data for each phase since we can't hold ZipArchive across await points
@@ -110,6 +119,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             repo_id,
             branch,
             install_mode,
+            sync_config.as_ref(),
             &mut logs,
             &mut summary.content_nodes,
             &mut summary.binary_files,

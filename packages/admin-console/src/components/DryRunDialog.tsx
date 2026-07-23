@@ -16,6 +16,7 @@ import {
   ChevronDown,
   ChevronRight,
   PlayCircle,
+  ShieldCheck,
 } from 'lucide-react'
 import { packagesApi, type DryRunResponse, type DryRunSummary, type InstallMode } from '../api/packages'
 
@@ -259,6 +260,19 @@ export default function DryRunDialog({
 
           {loadingState === 'success' && result && (
             <div className="space-y-6">
+              {/* Sync policy banner */}
+              {result.logs.some((log) => log.category === 'manifest' && log.policy) && (
+                <div className="flex items-start gap-2 p-3 bg-primary-500/10 border border-primary-500/20 rounded-lg">
+                  <ShieldCheck className="w-4 h-4 text-primary-400 mt-0.5 flex-shrink-0" />
+                  <p className="text-sm text-primary-200">
+                    This package ships a <code className="font-mono">sync:</code> policy in its
+                    manifest — some paths below may create/update/skip differently than plain{' '}
+                    <span className="font-medium">{mode.toUpperCase()}</span> mode would suggest.
+                    Look for the policy note under each affected item.
+                  </p>
+                </div>
+              )}
+
               {/* Total Summary */}
               <div className="bg-white/5 rounded-lg p-4 border border-white/10">
                 <h3 className="text-sm font-medium text-zinc-400 mb-3">Summary</h3>
@@ -365,6 +379,12 @@ export default function DryRunDialog({
                                         {log.path}
                                       </p>
                                       <p className="text-xs text-zinc-500">{log.message}</p>
+                                      {log.policy && (
+                                        <p className="flex items-center gap-1 text-xs text-primary-300 mt-0.5">
+                                          <ShieldCheck className="w-3 h-3 flex-shrink-0" />
+                                          {log.policy}
+                                        </p>
+                                      )}
                                     </div>
                                   </div>
                                 )

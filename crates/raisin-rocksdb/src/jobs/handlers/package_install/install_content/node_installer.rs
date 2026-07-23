@@ -33,7 +33,7 @@ use crate::jobs::handlers::package_install::content_types::{
 use crate::jobs::handlers::package_install::handler::PackageInstallHandler;
 use crate::jobs::handlers::package_install::install_content::reference_sort::strip_path_references;
 use crate::jobs::handlers::package_install::translation::derive_node_name_from_base_path;
-use crate::jobs::handlers::package_install::types::InstallMode;
+use crate::jobs::handlers::package_install::types::{effective_install_mode_for_path, InstallMode};
 
 use super::resolve_folder_type;
 
@@ -54,6 +54,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         branch: &str,
         job_id: &JobId,
         install_mode: InstallMode,
+        sync_config: Option<&raisin_packages::SyncConfig>,
         folder_type_map: &HashMap<String, String>,
         binary_store: Option<&super::super::types::BinaryStorageCallback>,
         stats: &mut InstallStats,
@@ -121,6 +122,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                                 &skeleton,
                                 job_id,
                                 install_mode,
+                                sync_config,
                                 folder_type,
                                 stats,
                             )
@@ -141,6 +143,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                                 node,
                                 job_id,
                                 install_mode,
+                                sync_config,
                                 folder_type,
                                 stats,
                             )
@@ -168,6 +171,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                             content_hash,
                             job_id,
                             install_mode,
+                            sync_config,
                             folder_type,
                             binary_store,
                             stats,
@@ -249,10 +253,13 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         node: &Node,
         job_id: &JobId,
         install_mode: InstallMode,
+        sync_config: Option<&raisin_packages::SyncConfig>,
         folder_type: &str,
         stats: &mut InstallStats,
     ) -> Result<()> {
         let node_path = node.path.clone();
+        let install_mode =
+            effective_install_mode_for_path(install_mode, sync_config, workspace, &node_path);
 
         // Check if node exists at this path
         let existing = tx.get_node_by_path(workspace, &node_path).await?;
@@ -323,6 +330,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         content_hash: &str,
         job_id: &JobId,
         install_mode: InstallMode,
+        sync_config: Option<&raisin_packages::SyncConfig>,
         folder_type: &str,
         binary_store: Option<&super::super::types::BinaryStorageCallback>,
         stats: &mut InstallStats,
@@ -343,6 +351,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         } else {
             format!("/{}/{}", parent_path, filename)
         };
+
+        let install_mode =
+            effective_install_mode_for_path(install_mode, sync_config, workspace, &asset_path);
 
         // Check if asset already exists
         let existing = tx.get_node_by_path(workspace, &asset_path).await?;

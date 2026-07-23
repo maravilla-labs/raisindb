@@ -6618,6 +6618,7 @@ dependencies = [
  "raisin-indexer",
  "raisin-locks",
  "raisin-models",
+ "raisin-packages",
  "raisin-rel",
  "raisin-replication",
  "raisin-storage",

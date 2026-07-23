@@ -7,15 +7,22 @@ use super::{ConflictStrategy, SyncConfig, SyncDirection, SyncMode};
 impl SyncConfig {
     /// Get the effective sync mode for a path
     pub fn get_mode_for_path(&self, path: &str) -> SyncMode {
+        self.get_mode_and_source_for_path(path).0
+    }
+
+    /// Get the effective sync mode for a path, plus the root of the filter
+    /// that determined it. Returns `None` for the source when no filter
+    /// matched and the top-level `defaults.mode` applied instead.
+    pub fn get_mode_and_source_for_path(&self, path: &str) -> (SyncMode, Option<&str>) {
         // Find last matching filter (last match wins)
         for filter in self.filters.iter().rev() {
             if path.starts_with(&filter.root) {
                 if let Some(mode) = filter.mode {
-                    return mode;
+                    return (mode, Some(filter.root.as_str()));
                 }
             }
         }
-        self.defaults.mode
+        (self.defaults.mode, None)
     }
 
     /// Get the effective sync direction for a path

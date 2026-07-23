@@ -35,7 +35,7 @@ mod patcher;
 pub mod sync;
 pub mod sync_config;
 
-pub use browser::{EntryType, PackageBrowser, ZipEntry};
+pub use browser::{EntryType, PackageBrowser, ZipEntry, SYNC_CONFIG_FILENAME};
 pub use dependency_graph::{
     AvailableTypes, ContentValidationResult, ContentValidationWarning, ContentValidator,
     DependencyGraph, DependencyGraphError, PackageNode,

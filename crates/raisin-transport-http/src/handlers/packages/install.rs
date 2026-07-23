@@ -364,6 +364,7 @@ pub(super) async fn dry_run_impl(
                 path: log.path,
                 message: log.message,
                 action: log.action,
+                policy: log.policy,
             })
             .collect();
 

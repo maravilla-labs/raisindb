@@ -42,6 +42,17 @@ export interface PackageDetails {
   readme?: string
   created_at?: string
   updated_at?: string
+  /** Summary of the package's `sync:` policy from manifest.yaml, if any. */
+  sync_policy?: SyncPolicySummary
+}
+
+/**
+ * Summary of a package's per-path sync/install policy (from `manifest.yaml`'s
+ * `sync:` block), captured at upload time so it can be shown without a dry run.
+ */
+export interface SyncPolicySummary {
+  default_mode?: string
+  filters?: Array<{ root?: string; mode?: string }>
 }
 
 export interface PackageDependency {
@@ -136,6 +147,14 @@ export interface DryRunLogEntry {
   message: string
   /** Action that would be taken: "info", "create", "update", "skip" */
   action: 'info' | 'create' | 'update' | 'skip'
+  /**
+   * When the package's own `sync:` policy (in manifest.yaml) determined or
+   * overrode this action, a human-readable explanation of which rule
+   * applied (e.g. "package sync policy: skip (default)" or "... (filter
+   * '/functions')"). Absent when the operator's chosen install mode applied
+   * as-is (no sync policy shipped, or an explicit overwrite was forced).
+   */
+  policy?: string
 }
 
 /** Counts of create/update/skip actions */
@@ -224,6 +243,7 @@ export async function getPackage(
     readme: props.readme as string,
     created_at: props.created_at as string,
     updated_at: props.updated_at as string,
+    sync_policy: props.sync_policy as SyncPolicySummary | undefined,
   }
 }
 

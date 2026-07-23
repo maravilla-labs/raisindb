@@ -73,6 +73,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         branch: &str,
         job_id: &JobId,
         install_mode: InstallMode,
+        sync_config: Option<&raisin_packages::SyncConfig>,
         workspace_patches: &Option<HashMap<String, WorkspacePatch>>,
         stats: &mut InstallStats,
     ) -> Result<()> {
@@ -113,6 +114,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             branch,
             job_id,
             install_mode,
+            sync_config,
             &folder_type_map,
             binary_store,
             stats,

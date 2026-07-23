@@ -7,13 +7,53 @@
 //! extract manifest.yaml from the ZIP to get the package name and metadata.
 
 use raisin_models::nodes::properties::value::PropertyValue;
-use raisin_packages::Manifest;
+use raisin_packages::{Manifest, SyncConfig};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use zip::ZipArchive;
 
 use crate::error::ApiError;
+
+/// Serialize a package's `sync:` policy into a compact property value for
+/// display in the package list/details UI: the top-level default mode plus
+/// each root filter's mode, so a "custom sync policy" badge can be shown
+/// without running a dry run.
+fn sync_policy_summary(sync: &SyncConfig) -> PropertyValue {
+    let mode_str = |mode: raisin_packages::SyncMode| {
+        serde_json::to_value(mode)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+
+    let mut summary = HashMap::new();
+    summary.insert(
+        "default_mode".to_string(),
+        PropertyValue::String(mode_str(sync.defaults.mode)),
+    );
+    summary.insert(
+        "filters".to_string(),
+        PropertyValue::Array(
+            sync.filters
+                .iter()
+                .map(|filter| {
+                    let mut entry = HashMap::new();
+                    entry.insert(
+                        "root".to_string(),
+                        PropertyValue::String(filter.root.clone()),
+                    );
+                    if let Some(mode) = filter.mode {
+                        entry.insert("mode".to_string(), PropertyValue::String(mode_str(mode)));
+                    }
+                    PropertyValue::Object(entry)
+                })
+                .collect(),
+        ),
+    );
+
+    PropertyValue::Object(summary)
+}
 
 /// Result of processing an uploaded file for a specific node type
 #[derive(Debug, Clone)]
@@ -158,6 +198,10 @@ impl UploadProcessor for PackageUploadProcessor {
         // Check for teaser background in static/
         let teaser_background_url = find_teaser_background(&mut archive);
 
+        // Read the package's optional `.raisin-sync.yaml` per-path sync/install
+        // policy, if it ships one at its root (beside `manifest.yaml`).
+        let sync_config = read_sync_config(&mut archive)?;
+
         // Build properties from manifest
         let mut properties = HashMap::new();
 
@@ -204,6 +248,13 @@ impl UploadProcessor for PackageUploadProcessor {
                         .collect(),
                 ),
             );
+        }
+
+        // Sync policy summary, for surfacing "this package has a custom
+        // install/sync policy" in the package list/details UI without
+        // needing a dry run.
+        if let Some(sync) = &sync_config {
+            properties.insert("sync_policy".to_string(), sync_policy_summary(sync));
         }
 
         // Status tracking
@@ -261,6 +312,37 @@ fn find_teaser_background<R: std::io::Read + std::io::Seek>(
     None
 }
 
+/// Read and parse the package's optional `.raisin-sync.yaml` per-path
+/// sync/install policy. Returns `Ok(None)` when the file is absent — most
+/// packages don't ship one.
+fn read_sync_config<R: std::io::Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Option<SyncConfig>, ApiError> {
+    let mut file = match archive.by_name(raisin_packages::SYNC_CONFIG_FILENAME) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+
+    let mut content = String::new();
+    std::io::Read::read_to_string(&mut file, &mut content).map_err(|e| {
+        ApiError::validation_failed(format!(
+            "Failed to read {}: {}",
+            raisin_packages::SYNC_CONFIG_FILENAME,
+            e
+        ))
+    })?;
+
+    let config = serde_yaml::from_str(&content).map_err(|e| {
+        ApiError::validation_failed(format!(
+            "Invalid {} format: {}",
+            raisin_packages::SYNC_CONFIG_FILENAME,
+            e
+        ))
+    })?;
+
+    Ok(Some(config))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +360,104 @@ mod tests {
         let processor = PackageUploadProcessor;
         assert!(processor.handles("raisin:Package"));
         assert!(!processor.handles("raisin:Asset"));
+    }
+
+    #[test]
+    fn sync_policy_summary_reports_default_and_filter_modes() {
+        use raisin_packages::{SyncDefaults, SyncFilter, SyncMode};
+
+        let sync = SyncConfig {
+            defaults: SyncDefaults {
+                mode: SyncMode::Skip,
+                ..SyncDefaults::default()
+            },
+            filters: vec![SyncFilter {
+                root: "/functions".to_string(),
+                mode: Some(SyncMode::Replace),
+                direction: None,
+                filter_type: Default::default(),
+                include: Vec::new(),
+                exclude: Vec::new(),
+                on_conflict: None,
+                properties: None,
+            }],
+            ..SyncConfig::default()
+        };
+
+        let PropertyValue::Object(summary) = sync_policy_summary(&sync) else {
+            panic!("expected an Object PropertyValue");
+        };
+        assert_eq!(
+            summary.get("default_mode"),
+            Some(&PropertyValue::String("skip".to_string()))
+        );
+        let PropertyValue::Array(filters) = summary.get("filters").unwrap() else {
+            panic!("expected filters to be an Array");
+        };
+        assert_eq!(filters.len(), 1);
+        let PropertyValue::Object(filter) = &filters[0] else {
+            panic!("expected filter entry to be an Object");
+        };
+        assert_eq!(
+            filter.get("root"),
+            Some(&PropertyValue::String("/functions".to_string()))
+        );
+        assert_eq!(
+            filter.get("mode"),
+            Some(&PropertyValue::String("replace".to_string()))
+        );
+    }
+
+    /// End-to-end: a `.rap` shipping `.raisin-sync.yaml` at its root gets a
+    /// `sync_policy` property on upload; one without the file gets none.
+    #[test]
+    fn process_reads_raisin_sync_yaml_from_package_root() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        fn build_package(sync_yaml: Option<&str>) -> Vec<u8> {
+            let mut buf = Vec::new();
+            {
+                let cursor = Cursor::new(&mut buf);
+                let mut zip = ZipWriter::new(cursor);
+                let options = SimpleFileOptions::default();
+
+                zip.start_file("manifest.yaml", options).unwrap();
+                zip.write_all(b"name: sync-test\nversion: 1.0.0\n").unwrap();
+
+                if let Some(yaml) = sync_yaml {
+                    zip.start_file(".raisin-sync.yaml", options).unwrap();
+                    zip.write_all(yaml.as_bytes()).unwrap();
+                }
+
+                zip.finish().unwrap();
+            }
+            buf
+        }
+
+        let processor = PackageUploadProcessor;
+
+        // With .raisin-sync.yaml
+        let with_sync = build_package(Some(
+            "defaults:\n  mode: skip\nfilters:\n  - root: /functions\n    mode: replace\n",
+        ));
+        let processed = processor.process(&with_sync, None, "/").unwrap();
+        let PropertyValue::Object(summary) = processed
+            .properties
+            .get("sync_policy")
+            .expect("sync_policy property should be set")
+        else {
+            panic!("expected an Object PropertyValue");
+        };
+        assert_eq!(
+            summary.get("default_mode"),
+            Some(&PropertyValue::String("skip".to_string()))
+        );
+
+        // Without .raisin-sync.yaml — no sync_policy property at all
+        let without_sync = build_package(None);
+        let processed = processor.process(&without_sync, None, "/").unwrap();
+        assert!(!processed.properties.contains_key("sync_policy"));
     }
 }

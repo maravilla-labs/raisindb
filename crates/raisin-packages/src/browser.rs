@@ -7,6 +7,11 @@ use zip::ZipArchive;
 
 use crate::error::{PackageError, PackageResult};
 use crate::manifest::Manifest;
+use crate::sync_config::SyncConfig;
+
+/// Filename of the optional per-path sync/install policy, at the package root
+/// beside `manifest.yaml`.
+pub const SYNC_CONFIG_FILENAME: &str = ".raisin-sync.yaml";
 
 /// Entry type in the ZIP archive
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +62,18 @@ impl PackageBrowser {
         let cursor = Cursor::new(&self.data);
         let mut archive = ZipArchive::new(cursor)?;
         Manifest::from_zip(&mut archive)
+    }
+
+    /// Get the package's optional `.raisin-sync.yaml` per-path sync/install
+    /// policy, if the package ships one at its root (beside `manifest.yaml`).
+    /// Returns `Ok(None)` when the file is absent — most packages don't need it.
+    pub fn sync_config(&self) -> PackageResult<Option<SyncConfig>> {
+        if !self.exists(SYNC_CONFIG_FILENAME)? {
+            return Ok(None);
+        }
+        let content = self.read_file_string(SYNC_CONFIG_FILENAME)?;
+        let config: SyncConfig = serde_yaml::from_str(&content).map_err(PackageError::YamlError)?;
+        Ok(Some(config))
     }
 
     /// List all entries in the package
@@ -268,5 +285,46 @@ title: Test Package
         assert!(content.contains("test-package"));
 
         assert!(browser.read_file("nonexistent.txt").is_err());
+    }
+
+    #[test]
+    fn sync_config_absent_returns_none() {
+        let data = create_test_package();
+        let browser = PackageBrowser::new(data);
+        assert!(browser.sync_config().unwrap().is_none());
+    }
+
+    #[test]
+    fn sync_config_parses_when_present() {
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zip = ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+
+            zip.start_file("manifest.yaml", options).unwrap();
+            zip.write_all(b"name: test-package\nversion: 1.0.0\n")
+                .unwrap();
+
+            zip.start_file(".raisin-sync.yaml", options).unwrap();
+            zip.write_all(
+                br#"
+defaults:
+  mode: skip
+filters:
+  - root: /functions
+    mode: replace
+"#,
+            )
+            .unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        let browser = PackageBrowser::new(buf);
+        let sync = browser.sync_config().unwrap().expect("should parse");
+        assert_eq!(sync.defaults.mode, crate::sync_config::SyncMode::Skip);
+        assert_eq!(sync.filters.len(), 1);
+        assert_eq!(sync.filters[0].root, "/functions");
     }
 }

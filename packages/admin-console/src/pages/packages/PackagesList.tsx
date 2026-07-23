@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import * as LucideIcons from 'lucide-react'
-import { Package, Upload, Search, Filter, CheckCircle, XCircle, Download, Sparkles, RefreshCw, FolderPlus } from 'lucide-react'
+import { Package, Upload, Search, Filter, CheckCircle, XCircle, Download, Sparkles, RefreshCw, FolderPlus, ShieldCheck } from 'lucide-react'
 import GlassCard from '../../components/GlassCard'
 import Breadcrumb from '../../components/Breadcrumb'
 import FolderCard from '../../components/FolderCard'
@@ -29,6 +29,13 @@ interface PackageNode {
   color?: string
   upload_state?: 'new' | 'updated'
   teaser_background_url?: string
+  syncPolicy?: SyncPolicySummary
+}
+
+/** Summary of a package's `sync:` policy, set at upload time from manifest.yaml. */
+interface SyncPolicySummary {
+  default_mode?: string
+  filters?: Array<{ root?: string; mode?: string }>
 }
 
 // Helper to check if icon is a URL
@@ -86,7 +93,19 @@ function nodeToPackage(node: Node): PackageNode {
     color: node.properties?.color as string,
     upload_state: node.properties?.upload_state as 'new' | 'updated',
     teaser_background_url: node.properties?.teaser_background_url as string,
+    syncPolicy: node.properties?.sync_policy as SyncPolicySummary | undefined,
   }
+}
+
+/** Short human-readable tooltip describing a package's sync policy. */
+function describeSyncPolicy(policy: SyncPolicySummary): string {
+  const parts = [`default: ${policy.default_mode || 'skip'}`]
+  for (const filter of policy.filters || []) {
+    if (filter.root) {
+      parts.push(`${filter.root}: ${filter.mode || 'skip'}`)
+    }
+  }
+  return `Custom sync policy — ${parts.join(', ')}`
 }
 
 type FilterType = 'all' | 'installed' | 'not-installed'
@@ -496,6 +515,16 @@ export default function PackagesList() {
                                   <span className="flex items-center gap-1 px-2 py-0.5 bg-gray-500/20 text-zinc-400 text-xs rounded-full">
                                     <XCircle className="w-3 h-3" />
                                     Not Installed
+                                  </span>
+                                )}
+                                {/* Custom sync policy badge */}
+                                {pkg.syncPolicy && (
+                                  <span
+                                    title={describeSyncPolicy(pkg.syncPolicy)}
+                                    className="flex items-center gap-1 px-2 py-0.5 bg-primary-500/20 text-primary-300 text-xs rounded-full"
+                                  >
+                                    <ShieldCheck className="w-3 h-3" />
+                                    Sync Policy
                                   </span>
                                 )}
                               </div>

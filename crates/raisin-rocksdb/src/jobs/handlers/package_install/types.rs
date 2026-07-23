@@ -29,6 +29,174 @@ pub enum InstallMode {
     Sync,
 }
 
+/// Resolve the effective [`InstallMode`] for a single content path, honoring
+/// the package's `manifest.yaml` `sync:` policy (defaults + root filters).
+///
+/// An explicit operator choice of [`InstallMode::Overwrite`] always wins —
+/// it is the "force" override and bypasses the package's own policy entirely.
+/// Otherwise, if the package ships a `sync` config, its per-path
+/// [`raisin_packages::SyncMode`] is consulted: `Skip` never touches existing
+/// content, `Replace` always overwrites, and `Merge`/`Update` (not meaningful
+/// for a one-shot install) fall back to the operator's chosen mode. With no
+/// `sync` config at all, the operator's mode applies unchanged everywhere.
+pub(super) fn effective_install_mode_for_path(
+    install_mode: InstallMode,
+    sync_config: Option<&raisin_packages::SyncConfig>,
+    workspace: &str,
+    node_path: &str,
+) -> InstallMode {
+    resolve_install_policy_for_path(install_mode, sync_config, workspace, node_path).mode
+}
+
+/// The effective mode for a path, plus (when the package's own `sync:`
+/// policy determined or overrode it) a human-readable explanation for
+/// display in dry-run previews.
+pub(super) struct PathInstallPolicy {
+    pub mode: InstallMode,
+    /// `None` when the operator's chosen install mode applied unchanged —
+    /// either because the package ships no `sync:` config, or because the
+    /// operator forced [`InstallMode::Overwrite`], which always bypasses
+    /// the package's policy.
+    pub reason: Option<String>,
+}
+
+/// Same resolution as [`effective_install_mode_for_path`], but also reports
+/// *why* — which `sync:` filter (or the top-level default) applied, for
+/// surfacing in dry-run output.
+pub(super) fn resolve_install_policy_for_path(
+    install_mode: InstallMode,
+    sync_config: Option<&raisin_packages::SyncConfig>,
+    workspace: &str,
+    node_path: &str,
+) -> PathInstallPolicy {
+    if install_mode == InstallMode::Overwrite {
+        return PathInstallPolicy {
+            mode: install_mode,
+            reason: None,
+        };
+    }
+
+    let Some(sync_config) = sync_config else {
+        return PathInstallPolicy {
+            mode: install_mode,
+            reason: None,
+        };
+    };
+
+    let full_path = format!("/{}{}", workspace, node_path);
+    let (sync_mode, source) = sync_config.get_mode_and_source_for_path(&full_path);
+    let mode = match sync_mode {
+        raisin_packages::SyncMode::Skip => InstallMode::Skip,
+        raisin_packages::SyncMode::Replace => InstallMode::Overwrite,
+        raisin_packages::SyncMode::Merge | raisin_packages::SyncMode::Update => install_mode,
+    };
+    let mode_label = match sync_mode {
+        raisin_packages::SyncMode::Skip => "skip",
+        raisin_packages::SyncMode::Replace => "replace",
+        raisin_packages::SyncMode::Merge => "merge",
+        raisin_packages::SyncMode::Update => "update",
+    };
+    let reason = Some(match source {
+        Some(root) => format!("package sync policy: {} (filter '{}')", mode_label, root),
+        None => format!("package sync policy: {} (default)", mode_label),
+    });
+
+    PathInstallPolicy { mode, reason }
+}
+
+#[cfg(test)]
+mod effective_install_mode_tests {
+    use super::*;
+    use raisin_packages::{SyncConfig, SyncDefaults, SyncFilter, SyncMode};
+
+    fn sync_config() -> SyncConfig {
+        SyncConfig {
+            defaults: SyncDefaults {
+                mode: SyncMode::Skip,
+                ..SyncDefaults::default()
+            },
+            filters: vec![
+                SyncFilter {
+                    root: "/functions".to_string(),
+                    mode: Some(SyncMode::Replace),
+                    direction: None,
+                    filter_type: Default::default(),
+                    include: Vec::new(),
+                    exclude: Vec::new(),
+                    on_conflict: None,
+                    properties: None,
+                },
+                SyncFilter {
+                    root: "/apps".to_string(),
+                    mode: Some(SyncMode::Replace),
+                    direction: None,
+                    filter_type: Default::default(),
+                    include: Vec::new(),
+                    exclude: Vec::new(),
+                    on_conflict: None,
+                    properties: None,
+                },
+            ],
+            ..SyncConfig::default()
+        }
+    }
+
+    #[test]
+    fn no_sync_config_leaves_operator_mode_unchanged() {
+        for mode in [InstallMode::Skip, InstallMode::Sync, InstallMode::Overwrite] {
+            assert_eq!(
+                effective_install_mode_for_path(mode, None, "stories", "/hello"),
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn default_skip_preserves_tenant_content_outside_filters() {
+        let cfg = sync_config();
+        assert_eq!(
+            effective_install_mode_for_path(InstallMode::Sync, Some(&cfg), "stories", "/hello"),
+            InstallMode::Skip
+        );
+        assert_eq!(
+            effective_install_mode_for_path(InstallMode::Skip, Some(&cfg), "audiences", "/vip"),
+            InstallMode::Skip
+        );
+    }
+
+    #[test]
+    fn filter_root_forces_replace_for_platform_paths() {
+        let cfg = sync_config();
+        assert_eq!(
+            effective_install_mode_for_path(
+                InstallMode::Skip,
+                Some(&cfg),
+                "functions",
+                "/lib/handler"
+            ),
+            InstallMode::Overwrite
+        );
+        assert_eq!(
+            effective_install_mode_for_path(InstallMode::Sync, Some(&cfg), "apps", "/dashboard"),
+            InstallMode::Overwrite
+        );
+    }
+
+    #[test]
+    fn operator_overwrite_always_wins_over_manifest_policy() {
+        let cfg = sync_config();
+        assert_eq!(
+            effective_install_mode_for_path(
+                InstallMode::Overwrite,
+                Some(&cfg),
+                "stories",
+                "/hello"
+            ),
+            InstallMode::Overwrite
+        );
+    }
+}
+
 /// Callback type for binary retrieval
 ///
 /// This callback is provided by the transport layer which has access to BinaryStorage.
@@ -126,6 +294,11 @@ pub struct DryRunLogEntry {
     pub message: String,
     /// Action that would be taken: "create", "update", "skip"
     pub action: String,
+    /// When the package's own `sync:` policy determined or overrode the
+    /// action (rather than the operator's chosen install mode applying
+    /// unchanged), a human-readable explanation of which rule applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
 }
 
 /// Summary of actions that would be taken

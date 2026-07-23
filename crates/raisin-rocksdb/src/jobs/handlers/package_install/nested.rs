@@ -44,6 +44,42 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             .map_err(|e| Error::Validation(format!("Invalid manifest.yaml format: {}", e)))
     }
 
+    /// Extract the package's optional `.raisin-sync.yaml` per-path sync/install
+    /// policy from the ZIP, if it ships one at its root (beside `manifest.yaml`).
+    /// Returns `Ok(None)` when the file is absent — most packages don't need it.
+    pub(super) fn extract_sync_config(
+        &self,
+        zip_data: &[u8],
+    ) -> Result<Option<raisin_packages::SyncConfig>> {
+        let cursor = Cursor::new(zip_data);
+        let mut archive = ZipArchive::new(cursor)
+            .map_err(|e| Error::Validation(format!("Invalid ZIP file: {}", e)))?;
+
+        let mut sync_file = match archive.by_name(raisin_packages::SYNC_CONFIG_FILENAME) {
+            Ok(file) => file,
+            Err(_) => return Ok(None),
+        };
+
+        let mut content = String::new();
+        sync_file.read_to_string(&mut content).map_err(|e| {
+            Error::Validation(format!(
+                "Failed to read {}: {}",
+                raisin_packages::SYNC_CONFIG_FILENAME,
+                e
+            ))
+        })?;
+
+        let config = serde_yaml::from_str(&content).map_err(|e| {
+            Error::Validation(format!(
+                "Invalid {} format: {}",
+                raisin_packages::SYNC_CONFIG_FILENAME,
+                e
+            ))
+        })?;
+
+        Ok(Some(config))
+    }
+
     /// Install nested .rap packages (dependencies) before the outer package
     ///
     /// Nested .rap files within a package are treated as dependencies and
@@ -200,7 +236,9 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             self.apply_workspace_patches(&manifest, tenant_id, repo_id, job_id, stats)
                 .await?;
 
-            // Install content nodes from nested package
+            // Install content nodes from nested package, honoring its own
+            // `.raisin-sync.yaml` if it ships one.
+            let nested_sync_config = self.extract_sync_config(&nested_data)?;
             let cursor = Cursor::new(&nested_data);
             let mut nested_archive = ZipArchive::new(cursor).map_err(|e| {
                 Error::Validation(format!("Invalid nested ZIP file '{}': {}", name, e))
@@ -213,6 +251,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 branch,
                 job_id,
                 install_mode,
+                nested_sync_config.as_ref(),
                 &manifest.workspace_patches,
                 stats,
             )

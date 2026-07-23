@@ -222,6 +222,10 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         // Parse manifest
         let manifest = self.extract_manifest(&zip_data)?;
 
+        // Parse the optional `.raisin-sync.yaml` per-path sync/install policy,
+        // if this package ships one at its root.
+        let sync_config = self.extract_sync_config(&zip_data)?;
+
         // Report progress: validating
         self.report_progress(&job.id, 0.12, "Validating manifest")
             .await;
@@ -352,6 +356,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             &context.branch,
             &job.id,
             install_mode,
+            sync_config.as_ref(),
             &manifest.workspace_patches,
             &mut stats,
         )

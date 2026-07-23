@@ -119,6 +119,11 @@ pub struct DryRunLogEntry {
     pub path: String,
     pub message: String,
     pub action: String,
+    /// When the package's own `sync:` policy (in `manifest.yaml`) determined
+    /// or overrode the action, a human-readable explanation of which rule
+    /// applied. `None` when the operator's chosen install mode applied as-is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
 }
 
 /// Summary of actions that would be taken

@@ -24,6 +24,7 @@ raisin-indexer = { path = "../raisin-indexer" }
 raisin-hnsw = { path = "../raisin-hnsw" }
 raisin-replication = { path = "../raisin-replication" }
 raisin-binary = { path = "../raisin-binary" }
+raisin-packages = { path = "../raisin-packages" }
 
 # RocksDB
 rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }

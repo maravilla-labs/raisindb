@@ -84,6 +84,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 path: type_name,
                 message,
                 action: action.to_string(),
+                policy: None,
             });
         }
 
@@ -153,6 +154,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 path: type_name,
                 message,
                 action: action.to_string(),
+                policy: None,
             });
         }
 
@@ -222,6 +224,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 path: archetype_name,
                 message,
                 action: action.to_string(),
+                policy: None,
             });
         }
 
@@ -295,6 +298,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 path: type_name,
                 message,
                 action: action.to_string(),
+                policy: None,
             });
         }
 
@@ -360,6 +364,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 path: ws_name,
                 message,
                 action: action.to_string(),
+                policy: None,
             });
         }
 

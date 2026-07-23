@@ -15,7 +15,9 @@ use zip::ZipArchive;
 
 use super::super::content_types::{derive_content_path, resource_ref_filename, ContentNodeDef};
 use super::super::handler::PackageInstallHandler;
-use super::super::types::{DryRunActionCounts, DryRunLogEntry, InstallMode};
+use super::super::types::{
+    resolve_install_policy_for_path, DryRunActionCounts, DryRunLogEntry, InstallMode,
+};
 
 impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Dry run simulation for content nodes
@@ -26,6 +28,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         repo_id: &str,
         branch: &str,
         install_mode: InstallMode,
+        sync_config: Option<&raisin_packages::SyncConfig>,
         logs: &mut Vec<DryRunLogEntry>,
         content_counts: &mut DryRunActionCounts,
         binary_counts: &mut DryRunActionCounts,
@@ -172,6 +175,13 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     derived_path,
                 } => {
                     let existing = tx.get_node_by_path(&workspace, &derived_path).await?;
+                    let policy = resolve_install_policy_for_path(
+                        install_mode,
+                        sync_config,
+                        &workspace,
+                        &derived_path,
+                    );
+                    let install_mode = policy.mode;
 
                     let (action, message) = match (existing.is_some(), install_mode) {
                         (true, InstallMode::Skip) => {
@@ -209,6 +219,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         path: derived_path,
                         message,
                         action: action.to_string(),
+                        policy: policy.reason,
                     });
                 }
                 ContentItem::BinaryAsset {
@@ -218,6 +229,13 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                     size,
                 } => {
                     let existing = tx.get_node_by_path(&workspace, &asset_path).await?;
+                    let policy = resolve_install_policy_for_path(
+                        install_mode,
+                        sync_config,
+                        &workspace,
+                        &asset_path,
+                    );
+                    let install_mode = policy.mode;
 
                     let (action, message) = match (existing.is_some(), install_mode) {
                         (true, InstallMode::Skip) => {
@@ -255,6 +273,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                         path: format!("{}{}", workspace, asset_path),
                         message,
                         action: action.to_string(),
+                        policy: policy.reason,
                     });
                 }
             }
@@ -347,6 +366,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
                 path: asset_path,
                 message,
                 action: action.to_string(),
+                policy: None,
             });
         }
 
