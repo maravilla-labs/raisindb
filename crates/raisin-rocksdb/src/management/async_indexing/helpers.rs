@@ -23,17 +23,28 @@ pub(crate) async fn scan_nodes(
     let mut nodes = Vec::new();
     let iter = storage.db().prefix_iterator_cf(cf_nodes, &prefix);
 
+    // Node keys are `…\0nodes\0{node_id}\0{~revision}` with the revision
+    // encoded DESCENDING, so the FIRST key per node id is the newest. Keep
+    // only that one: rebuilding indexes from every historical revision would
+    // resurrect entries for property values (references, tags, …) the node
+    // no longer carries — permanent false positives right after a rebuild.
+    let mut seen_node_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for item in iter {
         let (key, value) =
             item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
 
         // Only process keys with "nodes" component
         let key_str = String::from_utf8_lossy(&key);
-        if !key_str.contains("\0nodes\0") {
+        let Some((_, after_nodes)) = key_str.split_once("\0nodes\0") else {
             continue;
+        };
+        let node_id = after_nodes.split('\0').next().unwrap_or(after_nodes);
+        if !seen_node_ids.insert(node_id.to_string()) {
+            continue; // older revision of a node we already took
         }
 
-        // Skip empty values and tombstones (single byte 'T' = 84)
+        // Newest entry is a tombstone -> node is deleted; skip entirely.
         if value.is_empty() || value.as_ref() == b"T" {
             continue;
         }

@@ -84,12 +84,24 @@ fn extract_references_recursive(
         }
         PropertyValue::Array(arr) => {
             for (i, item) in arr.iter().enumerate() {
-                let item_path = format!("{}[{}]", path, i);
+                // Dot format (`tags.0`) — MUST match the property-path format
+                // the live index writers use (see repositories
+                // `walk_references`), or these tombstones target keys that
+                // don't exist and the live entries are never shadowed.
+                let item_path = format!("{}.{}", path, i);
                 extract_references_recursive(&item_path, item, refs);
             }
         }
         PropertyValue::Object(obj) => {
             for (key, val) in obj {
+                let nested_path = format!("{}.{}", path, key);
+                extract_references_recursive(&nested_path, val, refs);
+            }
+        }
+        PropertyValue::Element(element) => {
+            // Element blocks carry their fields (incl. references) in
+            // `content` — the writers index them, so deletes must too.
+            for (key, val) in &element.content {
                 let nested_path = format!("{}.{}", path, key);
                 extract_references_recursive(&nested_path, val, refs);
             }

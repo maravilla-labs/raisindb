@@ -18,6 +18,7 @@ mod mvcc;
 mod ordering;
 mod publishing;
 mod queries;
+mod replication_capture;
 mod storage_node;
 mod trait_impl;
 mod validation;
@@ -31,6 +32,9 @@ pub(crate) use helpers::hash_property_value;
 // Re-export the stale property-index tombstone helper for the transactional
 // write path (both write paths must keep the property index hygienic).
 pub(crate) use crud::indexing::property_indexes::add_stale_property_tombstones;
+pub(crate) use crud::indexing::reference_indexes::{
+    add_reference_index_entries, add_stale_reference_tombstones, walk_references,
+};
 
 use raisin_error::Result;
 use raisin_events::EventBus;

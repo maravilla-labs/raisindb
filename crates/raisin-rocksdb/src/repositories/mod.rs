@@ -68,6 +68,9 @@ pub use workspaces::WorkspaceRepositoryImpl;
 pub(crate) use nodes::add_stale_property_tombstones;
 pub(crate) use nodes::hash_property_value;
 pub(crate) use nodes::StorageNode;
+pub(crate) use nodes::{
+    add_reference_index_entries, add_stale_reference_tombstones, walk_references,
+};
 
 // Re-export relation helpers for job handlers
 pub(crate) use relations::collect_incoming_relations;

@@ -9,7 +9,6 @@ use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 
 use crate::repositories::hash_property_value;
-use crate::transaction::types::extract_references;
 use crate::transaction::RocksDBTransaction;
 use crate::{cf, cf_handle, keys};
 
@@ -577,45 +576,57 @@ pub(super) fn index_node_references(
     revision: &HLC,
 ) -> Result<()> {
     let cf_reference = cf_handle(&tx.db, cf::REFERENCE_INDEX)?;
-    let is_published = node.published_at.is_some();
-    let refs = extract_references(&node.properties);
 
     let mut batch = tx
         .batch
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-    for (property_path, reference) in refs {
-        // Forward index
-        let forward_key = keys::reference_forward_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &node.id,
-            &property_path,
-            revision,
-            is_published,
-        );
-        let ref_value = rmp_serde::to_vec(&reference)
-            .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-        batch.put_cf(cf_reference, forward_key, ref_value);
+    crate::repositories::add_reference_index_entries(
+        &mut batch,
+        cf_reference,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node,
+        revision,
+    )
+}
 
-        // Reverse index
-        let reverse_key = keys::reference_reverse_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            &reference.workspace,
-            &reference.id,
-            &node.id,
-            &property_path,
-            revision,
-            is_published,
-        );
-        batch.put_cf(cf_reference, reverse_key, b"");
-    }
+/// Tombstone stale reference-index entries on update.
+///
+/// Every reference of `old_node` that `new_node` no longer carries gets a
+/// TOMBSTONE (forward + reverse, both publish variants) at the new revision —
+/// otherwise `REFERENCES()`/backlinks keep matching the node forever.
+pub(super) fn tombstone_stale_reference_indexes(
+    tx: &RocksDBTransaction,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    old_node: &Node,
+    new_node: &Node,
+    revision: &HLC,
+) -> Result<()> {
+    let cf_reference = cf_handle(&tx.db, cf::REFERENCE_INDEX)?;
+
+    let mut batch = tx
+        .batch
+        .lock()
+        .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+
+    crate::repositories::add_stale_reference_tombstones(
+        &mut batch,
+        cf_reference,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        old_node,
+        new_node,
+        revision,
+    );
 
     Ok(())
 }

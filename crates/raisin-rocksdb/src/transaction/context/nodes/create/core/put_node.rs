@@ -237,6 +237,22 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         &revision,
     )?;
 
+    // 10b. Tombstone stale reference-index entries on update (reference
+    // removed / retargeted) — otherwise REFERENCES()/backlinks keep matching
+    // this node against the OLD target forever.
+    if let Some(ref old_node) = existing_node {
+        indexing::tombstone_stale_reference_indexes(
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            old_node,
+            &normalized_node,
+            &revision,
+        )?;
+    }
+
     // 11. Index references
     indexing::index_node_references(
         tx,

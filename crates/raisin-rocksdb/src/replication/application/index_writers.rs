@@ -120,38 +120,24 @@ pub fn write_reference_indexes(
     node: &Node,
     revision: &HLC,
 ) {
-    let is_published = node.published_at.is_some();
-
-    for (prop_path, prop_value) in &node.properties {
-        if let PropertyValue::Reference(ref_data) = prop_value {
-            // Forward reference: node -> referenced node
-            let fwd_key = keys::reference_forward_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.id,
-                prop_path,
-                revision,
-                is_published,
-            );
-            batch.put_cf(cf_reference, fwd_key, ref_data.id.as_bytes());
-
-            // Reverse reference: referenced node -> this node
-            let rev_key = keys::reference_reverse_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &ref_data.workspace,
-                &ref_data.id,
-                &node.id,
-                prop_path,
-                revision,
-                is_published,
-            );
-            batch.put_cf(cf_reference, rev_key, node.id.as_bytes());
-        }
+    // Shared writer: nested references (arrays/objects/element content) with
+    // the canonical dot-format property path — key format MUST match the
+    // local write paths or replicated entries can never be tombstoned.
+    if let Err(e) = crate::repositories::add_reference_index_entries(
+        batch,
+        cf_reference,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node,
+        revision,
+    ) {
+        tracing::warn!(
+            node_id = %node.id,
+            error = %e,
+            "Failed to write reference indexes for replicated node"
+        );
     }
 }
 

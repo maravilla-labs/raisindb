@@ -226,10 +226,21 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
         let prefix_clone = prefix.clone();
         let iter = self.db.prefix_iterator_cf(cf, prefix);
 
+        // Reverse keys are `…\0{source_id}\0{property_path}\0{~revision}` with
+        // the revision encoded DESCENDING, so within one (source, property)
+        // pair the NEWEST entry sorts first. Only that newest entry decides:
+        // a live value means the reference exists, a tombstone means it was
+        // removed. Counting every key (as this scan previously did) returned
+        // every historical revision AND treated tombstones as matches — any
+        // reference ever removed kept producing REFERENCES() false positives
+        // forever.
+        const TOMBSTONE: &[u8] = b"T";
         let mut results = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
 
         for item in iter {
-            let (key, _) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
             // Verify key actually starts with our prefix
             if !key.starts_with(&prefix_clone) {
@@ -242,6 +253,16 @@ impl ReferenceIndexRepository for ReferenceIndexRepositoryImpl {
             if parts.len() >= 9 {
                 let source_node_id = parts[7].to_string();
                 let property_path = parts[8].to_string();
+
+                // Only the newest revision per (source, property) counts.
+                if !seen.insert((source_node_id.clone(), property_path.clone())) {
+                    continue;
+                }
+                // Newest entry is a tombstone -> reference was removed.
+                if value.as_ref() == TOMBSTONE {
+                    continue;
+                }
+
                 results.push((source_node_id, property_path));
             }
         }
