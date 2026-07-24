@@ -128,6 +128,38 @@ pub(super) fn tombstone_property_indexes(
             batch.put_cf(cfs.property_index, updated_by_key, TOMBSTONE);
         }
     }
+
+    // Tombstone __created_at / __updated_at timestamp indexes (if present) —
+    // without these, deleted nodes keep surfacing in `ORDER BY created_at`
+    // PropertyOrderScans.
+    if let Some(created_at) = node.created_at {
+        let created_at_key = keys::property_index_key_versioned_timestamp(
+            ctx.tenant_id,
+            ctx.repo_id,
+            ctx.branch,
+            ctx.workspace,
+            "__created_at",
+            created_at.timestamp_micros(),
+            revision,
+            &node.id,
+            is_published,
+        );
+        batch.put_cf(cfs.property_index, created_at_key, TOMBSTONE);
+    }
+    if let Some(updated_at) = node.updated_at {
+        let updated_at_key = keys::property_index_key_versioned_timestamp(
+            ctx.tenant_id,
+            ctx.repo_id,
+            ctx.branch,
+            ctx.workspace,
+            "__updated_at",
+            updated_at.timestamp_micros(),
+            revision,
+            &node.id,
+            is_published,
+        );
+        batch.put_cf(cfs.property_index, updated_at_key, TOMBSTONE);
+    }
 }
 
 /// Tombstone reference indexes (REFERENCE_INDEX CF)
@@ -259,12 +291,10 @@ pub(super) fn tombstone_relation_indexes(
         }
     }
 
-    // ALSO clear the PACKED adjacency lists (see
-    // relations::helpers::packed_adjacency_cleanup_puts) — same batch, so the
-    // packed rewrite stays atomic with the tombstones above. Incoming sources
-    // are enumerated via the shared collector, which reads the SOURCE
-    // workspace from the reverse value (the key's workspace segment is the
-    // target's).
+    // INCOMING edges (source -> deleted node): tombstone the legacy per-edge
+    // keys from both sides. Sources are enumerated via the shared collector,
+    // which reads the SOURCE workspace from the reverse value (the key's
+    // workspace segment is the target's).
     let incoming = crate::repositories::collect_incoming_relations(
         db,
         ctx.tenant_id,
@@ -273,6 +303,35 @@ pub(super) fn tombstone_relation_indexes(
         ctx.workspace,
         &node.id,
     )?;
+    for (relation_type, source_workspace, source_id) in &incoming {
+        let fwd_key = keys::relation_forward_key_versioned(
+            ctx.tenant_id,
+            ctx.repo_id,
+            ctx.branch,
+            source_workspace,
+            source_id,
+            relation_type,
+            revision,
+            &node.id,
+        );
+        batch.put_cf(cfs.relation_index, fwd_key, TOMBSTONE);
+
+        let rev_key = keys::relation_reverse_key_versioned(
+            ctx.tenant_id,
+            ctx.repo_id,
+            ctx.branch,
+            ctx.workspace,
+            &node.id,
+            relation_type,
+            revision,
+            source_id,
+        );
+        batch.put_cf(cfs.relation_index, rev_key, TOMBSTONE);
+    }
+
+    // ALSO clear the PACKED adjacency lists (see
+    // relations::helpers::packed_adjacency_cleanup_puts) — same batch, so the
+    // packed rewrite stays atomic with the tombstones above.
     let puts = crate::repositories::packed_adjacency_cleanup_puts(
         db,
         revision,

@@ -8635,6 +8635,7 @@ mod delete_operations {
 
         ctx.set_tenant_repo(constants::TENANT, constants::REPO)?;
         ctx.set_actor("test-user")?;
+        ctx.set_auth_context(raisin_models::auth::AuthContext::system())?;
         ctx.set_message("Test async snapshot creation")?;
         ctx.set_branch(constants::BRANCH)?;
 
@@ -8706,6 +8707,7 @@ mod delete_operations {
 
             ctx.set_tenant_repo(constants::TENANT, constants::REPO)?;
             ctx.set_actor("test-user")?;
+            ctx.set_auth_context(raisin_models::auth::AuthContext::system())?;
             ctx.set_message(&format!("Test concurrent fulltext indexing {}", i))?;
             ctx.set_branch(constants::BRANCH)?;
 

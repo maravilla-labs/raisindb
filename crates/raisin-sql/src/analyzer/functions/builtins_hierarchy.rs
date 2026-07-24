@@ -2,6 +2,21 @@ use crate::analyzer::types::DataType;
 
 use super::types::{FunctionCategory, FunctionRegistry, FunctionSignature};
 
+/// Row columns a function reads IMPLICITLY (they never appear in its
+/// argument list — the arguments are literals). Projection pruning must keep
+/// these columns whenever the function can be evaluated row-level, or the
+/// evaluation silently sees nothing.
+///
+/// Lives next to the registrations below so a new hierarchy/graph function
+/// gets its row dependencies declared in the same file it's registered in.
+pub fn implicit_row_columns(func_name_upper: &str) -> &'static [&'static str] {
+    match func_name_upper {
+        "REFERENCES" | "RESOLVE" => &["properties"],
+        "CHILD_OF" | "DESCENDANT_OF" | "PATH_STARTS_WITH" | "DEPTH" => &["path"],
+        _ => &[],
+    }
+}
+
 /// Register hierarchy and graph built-in functions.
 pub(super) fn register(registry: &mut FunctionRegistry) {
     registry.register(FunctionSignature {

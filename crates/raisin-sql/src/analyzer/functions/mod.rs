@@ -12,6 +12,7 @@ mod builtins_type_check;
 mod registry;
 mod types;
 
+pub use self::builtins_hierarchy::implicit_row_columns;
 pub use self::types::{FunctionCategory, FunctionRegistry, FunctionSignature};
 
 #[cfg(test)]

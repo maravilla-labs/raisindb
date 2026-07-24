@@ -45,117 +45,36 @@ impl NodeRepositoryImpl {
         // Prepare WriteBatch for atomic multi-operation delete
         let mut batch = WriteBatch::default();
 
-        // Get column family handles
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
-        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
-        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
-        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+        // All per-CF tombstones come from the shared tombstones module — the
+        // SINGLE SOURCE OF TRUTH also used by the cascade and transaction
+        // delete paths. (This path used to maintain a parallel hand-built
+        // list, which drifted: it never tombstoned NODE_PATH, COMPOUND_INDEX,
+        // or SPATIAL_INDEX entries.)
+        let ctx = crate::tombstones::TombstoneContext::new(tenant_id, repo_id, branch, workspace);
+        let cfs = crate::tombstones::TombstoneColumnFamilies::from_db(&self.db)?;
+        crate::tombstones::add_node_tombstones(&mut batch, &self.db, &ctx, &cfs, &node, &revision)?;
 
-        // Write tombstone marker at new revision
-        let node_key =
-            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, id, &revision);
-        batch.put_cf(cf_nodes, node_key, TOMBSTONE);
-
-        // Tombstone path index at new revision (preserve history)
-        let path_key = keys::path_index_key_versioned(
-            tenant_id, repo_id, branch, workspace, &node.path, &revision,
-        );
-        batch.put_cf(cf_path, path_key, TOMBSTONE);
-
-        // Tombstone property indexes at new revision (preserve history)
-        let is_published = node.published_at.is_some();
-        for (prop_name, prop_value) in &node.properties {
-            let value_hash = hash_property_value(prop_value);
-            let prop_key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                prop_name,
-                &value_hash,
-                &revision,
-                id,
-                is_published,
-            );
-            batch.put_cf(cf_property, prop_key, TOMBSTONE);
-        }
-
-        // Tombstone node_type index
-        let node_type_key = keys::property_index_key_versioned(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            "__node_type",
-            &node.node_type,
-            &revision,
-            id,
-            is_published,
-        );
-        batch.put_cf(cf_property, node_type_key, TOMBSTONE);
-
-        // Tombstone common node field indexes
-        self.add_field_tombstones_to_batch(
-            &mut batch,
-            cf_property,
-            &node,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            id,
-            &revision,
-            is_published,
-        );
-
-        // Tombstone unique index entries (release unique values)
+        // Unique index tombstones (async — needs NodeType lookup to find the
+        // unique properties), not covered by the shared module.
         self.add_unique_tombstones_to_batch(
             &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
         )
         .await?;
 
-        // Tombstone reference indexes at new revision (preserve history)
-        self.add_reference_tombstones_to_batch(
-            &mut batch,
-            cf_reference,
-            &node,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            id,
-            &revision,
-            is_published,
-        );
-
-        // Tombstone ALL outgoing and incoming relations
-        self.add_relation_tombstones_to_batch(
-            &mut batch,
-            cf_relation,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            id,
-            &revision,
-        )?;
-
-        // Tombstone all translations for this node
-        self.add_translation_tombstones_to_batch(
-            &mut batch, tenant_id, repo_id, branch, workspace, id, &revision,
-        )?;
-
-        // Tombstone ordered children entry at new revision (preserve ordering history)
+        // Ordered-children insurance: the shared module tombstones the entry
+        // under `node.order_key`, but the STORED label can differ (e.g. after
+        // rebalance/copy). Tombstone the looked-up label too when it differs.
         if let Some(ref parent_id) = node.parent {
             if let Some(label) = self
                 .get_order_label_for_child(tenant_id, repo_id, branch, workspace, parent_id, id)?
             {
-                let ordered_key = keys::ordered_child_key_versioned(
-                    tenant_id, repo_id, branch, workspace, parent_id, &label, &revision, id,
-                );
-                batch.put_cf(cf_ordered, ordered_key, TOMBSTONE);
+                if label != node.order_key {
+                    let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+                    let ordered_key = keys::ordered_child_key_versioned(
+                        tenant_id, repo_id, branch, workspace, parent_id, &label, &revision, id,
+                    );
+                    batch.put_cf(cf_ordered, ordered_key, TOMBSTONE);
+                }
             }
         }
 
