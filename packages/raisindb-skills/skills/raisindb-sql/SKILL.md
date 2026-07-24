@@ -260,13 +260,29 @@ Directions: `'OUT'` (outgoing), `'IN'` (incoming), `'BOTH'`.
 
 ### REFERENCES (reverse lookup)
 
-Find all nodes that reference a target path:
+Find all nodes that reference a target path. The argument MUST be
+`'workspace:/path'` — a bare path errors (paths are only unique per
+workspace). Backed by the reverse reference index (keyed by the target's
+stable id, so it survives target moves), and it works cross-workspace.
 
 ```sql
 SELECT * FROM social
 WHERE REFERENCES('social:/tags/tech-stack/rust')
   AND node_type = 'news:Article'
+
+-- Composes with hierarchy scoping, ordering, limits, and bound parameters:
+-- $1 = 'tags:/university/data'
+SELECT id, path, name FROM stories
+WHERE REFERENCES($1)
+  AND DESCENDANT_OF('/university')
+  AND node_type = 'studio:Page'
+ORDER BY properties->>'published_at'::String DESC
+LIMIT 20
 ```
+
+REFERENCES drives the scan (only the referrers are read); the other
+predicates filter that small set. `COUNT(*)` over a REFERENCES filter works
+for per-tag facet counts.
 
 ## 11. GRAPH_TABLE (SQL/PGQ -- ISO SQL:2023)
 
@@ -480,6 +496,42 @@ SELECT ST_GEOMETRYTYPE(location),  -- 'ST_Point'
        ST_SRID(location)           -- 4326
 FROM regions LIMIT 1
 ```
+
+## 15. Pagination & Prev/Next Navigation
+
+Offset paging works, but prefer keyset (cursor) queries — they stay fast at
+any depth and give you prev/next navigation for free:
+
+```sql
+-- Offset paging (simple)
+SELECT * FROM blog WHERE node_type = 'blog:Article'
+ORDER BY created_at DESC LIMIT 20 OFFSET 40
+
+-- Keyset paging by path (hierarchical listings; sibling paths sort naturally)
+SELECT * FROM blog
+WHERE CHILD_OF('/posts') AND path > $1   -- $1 = last path of previous page
+ORDER BY path LIMIT 20
+
+-- Next / previous sibling of a node (path order)
+SELECT * FROM blog WHERE CHILD_OF('/posts') AND path > $1 ORDER BY path ASC  LIMIT 1
+SELECT * FROM blog WHERE CHILD_OF('/posts') AND path < $1 ORDER BY path DESC LIMIT 1
+
+-- Older / newer article links (property cursor; ->> yields text, so keep
+-- cursor values lexicographically sortable, e.g. ISO dates)
+SELECT * FROM blog
+WHERE DESCENDANT_OF('/posts') AND properties->>'published_at'::String < $1
+ORDER BY properties->>'published_at'::String DESC LIMIT 1
+```
+
+Notes:
+- `CHILD_OF('/parent')` with NO `ORDER BY` returns children in the maintained
+  ordered-children (editorial/drag-and-drop) order. That order is not exposed
+  as a SQL column, so keyset cursors over it aren't possible — cursor on
+  `path` / `created_at` / a property, or slice the ordered list client-side.
+- Every node carries `created_at`/`updated_at` (stamped at the storage layer
+  on every write path), so `ORDER BY created_at` is always meaningful. Nodes
+  written before this guarantee may have NULL `created_at`; prefer an explicit
+  property (e.g. `published_at`) when your data predates it.
 
 ## Quick Reference: Statement Summary
 

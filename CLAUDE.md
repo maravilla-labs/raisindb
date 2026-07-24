@@ -108,6 +108,19 @@ UPDATE 'workspace' SET properties = $1::jsonb
 SELECT * FROM 'workspace' WHERE properties->>'seq'::String = '0'
 ```
 
+### REFERENCES / hierarchy predicate composition
+
+`REFERENCES('workspace:/path')` (workspace prefix REQUIRED) composes with
+`DESCENDANT_OF` / `CHILD_OF` / `node_type` / property predicates, `ORDER BY`,
+`LIMIT`, `COUNT(*)`, and bound parameters. The planner prioritizes the
+ReferenceIndexScan and applies the rest as residual filters. Two guards keep
+this safe (regression: `REFERENCES(...) AND DESCENDANT_OF(...)` used to
+silently return zero rows): projection pruning keeps `properties` for any
+row-eval REFERENCES/RESOLVE (`raisin-sql/.../projection/column_refs.rs`), and
+the row-eval REFERENCES errors loudly if `properties` was pruned. Tests:
+`raisin-sql-execution/tests/references_compose_tests.rs`,
+`pagination_navigation_tests.rs`.
+
 Notes:
 - `->>` always yields **text**; compare against a string literal even for
   number/bool-valued properties (`properties->>'seq'::String = '0'`).
@@ -121,14 +134,18 @@ Notes:
 
 ## Node Revision History & Authorship
 
-**Authorship is stamped at the transaction layer.** `created_by` / `updated_by`
-(and `updated_at`) are filled in the two low-level write functions every path
-funnels through: `add_node.rs` (the optimized CREATE path) and `put_node.rs`
-(create-or-update), both under `raisin-rocksdb/.../create/core/`. They resolve
-the actor from the transaction's auth context (`actor_id()`) → raw actor →
-`"anonymous"`. `put_node` preserves the original `created_by`/`created_at` on
-update. Don't re-stamp these in higher layers — and if you add a new low-level
-write path, stamp it there too.
+**Authorship AND timestamps are stamped at the low-level write layer.**
+`created_by` / `updated_by` / `created_at` / `updated_at` are filled in the
+low-level write functions every path funnels through: `add_node.rs` (the
+optimized CREATE path) and `put_node.rs` (create-or-update), both under
+`raisin-rocksdb/.../create/core/`, plus the direct repository path
+`repositories/nodes/crud/create/add.rs` (`add_impl`) and `crud/update.rs`.
+They resolve the actor from the transaction's auth context (`actor_id()`) →
+raw actor → `"anonymous"`. `put_node`/`update` preserve the original
+`created_by`/`created_at` on update. Don't re-stamp these in higher layers —
+and if you add a new low-level write path, stamp it there too. A missing
+`created_at` cascades: no `__created_at` property-index entry → `ORDER BY
+created_at LIMIT k` (PropertyOrderScan) silently returns nothing.
 
 **Revision history (git-style "file history")** lists a node's MVCC revisions,
 newest first, via `NodeService::history(id, limit)` →
