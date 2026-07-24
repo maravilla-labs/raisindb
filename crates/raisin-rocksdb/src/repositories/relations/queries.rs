@@ -160,12 +160,12 @@ pub(super) async fn get_incoming_relations(
         // so the workspace in RelationRef is the target workspace, which is the current node's workspace)
         let relation = deserialize_relation_ref(&value)?;
 
-        // For incoming relations, we need to return the source workspace and source ID
-        // The source workspace is not in the RelationRef (which stores target info),
-        // so we need to infer it. Since we're querying from a specific workspace/branch,
-        // the source must be in the same workspace context.
-        // TODO: This might need revision if cross-workspace relations are supported
-        let source_workspace = workspace.to_string();
+        // For incoming relations, return the SOURCE workspace and source ID.
+        // The reverse value is a RelationRef built from the source's
+        // perspective (see crud::add_relation), so `relation.workspace` IS the
+        // source's workspace — using the query workspace here broke
+        // cross-workspace incoming lookups.
+        let source_workspace = relation.workspace.clone();
 
         relations.push((source_workspace, components.source_id, relation));
         seen_sources.insert(source_key);
@@ -197,10 +197,12 @@ pub(super) async fn get_relations_by_type(
     )
     .await?;
 
-    // Filter by target node type
+    // Filter by TARGET NODE TYPE (per the trait contract), not relation_type —
+    // the old relation_type comparison dates from when relation_type held the
+    // target's node type and silently returned nothing for real node types.
     let filtered = all_relations
         .into_iter()
-        .filter(|rel| rel.relation_type == target_node_type)
+        .filter(|rel| rel.target_node_type == target_node_type)
         .collect();
 
     Ok(filtered)

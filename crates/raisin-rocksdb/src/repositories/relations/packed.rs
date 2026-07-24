@@ -147,42 +147,15 @@ impl PackedRelationRepository {
         workspace: &str,
         node_id: &str,
     ) -> Result<Option<Vec<CompactRelation>>> {
-        let cf = get_relation_cf(&self.db)?;
-
-        // We scan for the first key for this node that has revision <= max_revision
-        // Newer revisions sort first (smaller key due to ~rev encoding)
-        // So we seek to the key constructed with max_revision.
-        // If we find a key, it will have ~rev >= ~max_rev (so rev <= max_rev).
-
-        let key = node_adjacency_key_versioned(
+        super::helpers::read_packed_relations_at(
+            &self.db,
+            max_revision,
             tenant_id,
             repo_id,
             branch,
             workspace,
             node_id,
-            max_revision,
-        );
-
-        let mut iter = self.db.raw_iterator_cf(cf);
-        iter.seek(&key);
-
-        if iter.valid() {
-            if let Some(k) = iter.key() {
-                // Check if it's still for the same node
-                // The prefix up to "adj" should match.
-                // The revision is the last 16 bytes.
-                let prefix_len = key.len() - 16;
-
-                if k.len() >= prefix_len && k[..prefix_len] == key[..prefix_len] {
-                    if let Some(v) = iter.value() {
-                        let relations = deserialize_compact_relations(v)?;
-                        return Ok(Some(relations));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        )
     }
 }
 

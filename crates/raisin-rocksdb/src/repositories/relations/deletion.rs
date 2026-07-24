@@ -51,19 +51,65 @@ pub(super) async fn remove_all_relations_for_node(
         collect_incoming_relations(db, tenant_id, repo_id, branch, workspace, node_id)?;
 
     // Create tombstones for incoming relations and their forward indexes
-    for (relation_type, source_workspace, source_id) in incoming_to_remove {
+    for (relation_type, source_workspace, source_id) in &incoming_to_remove {
         write_relation_tombstones(
             db,
             revision,
             tenant_id,
             repo_id,
             branch,
-            &source_workspace,
-            &source_id,
+            source_workspace,
+            source_id,
             workspace,
             node_id,
-            &relation_type,
+            relation_type,
         )?;
+    }
+
+    // Step 3: Clear the PACKED adjacency lists (new format). Reads prefer the
+    // packed list, so legacy tombstones alone leave the edges visible.
+    let cf_relation = get_relation_cf(db)?;
+
+    // Outgoing: empty adjacency list for this node at the new revision.
+    let empty = super::helpers::serialize_compact_relations(&[])?;
+    let adj_key = crate::keys::node_adjacency_key_versioned(
+        tenant_id, repo_id, branch, workspace, node_id, revision,
+    );
+    db.put_cf(cf_relation, adj_key, empty)
+        .map_err(|e| Error::storage(format!("Failed to clear packed relations: {}", e)))?;
+
+    // Incoming: rewrite each source's packed list without edges to this node.
+    let mut seen_sources = std::collections::HashSet::new();
+    for (_relation_type, source_workspace, source_id) in &incoming_to_remove {
+        if !seen_sources.insert((source_workspace.clone(), source_id.clone())) {
+            continue;
+        }
+        if let Some(mut packed) = super::helpers::read_packed_relations_at(
+            db,
+            revision,
+            tenant_id,
+            repo_id,
+            branch,
+            source_workspace,
+            source_id,
+        )? {
+            let before = packed.len();
+            packed.retain(|r| !(r.target_id == node_id && r.target_workspace == workspace));
+            if packed.len() != before {
+                let bytes = super::helpers::serialize_compact_relations(&packed)?;
+                let key = crate::keys::node_adjacency_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    source_workspace,
+                    source_id,
+                    revision,
+                );
+                db.put_cf(cf_relation, key, bytes).map_err(|e| {
+                    Error::storage(format!("Failed to rewrite packed relations: {}", e))
+                })?;
+            }
+        }
     }
 
     Ok(())
@@ -147,9 +193,14 @@ fn collect_incoming_relations(
             let relation_type = String::from_utf8_lossy(key_parts[6]).to_string();
             let source_id = String::from_utf8_lossy(key_parts[8]).to_string();
 
-            // For incoming relations, source_workspace is the same as current workspace
-            // (assuming relations are within same workspace - cross-workspace is TODO)
-            incoming_to_remove.push((relation_type, workspace.to_string(), source_id));
+            // The SOURCE workspace lives in the reverse value (a RelationRef
+            // written from the source's perspective) — the key's workspace
+            // segment is the target's. Fall back to the query workspace if
+            // the value doesn't deserialize.
+            let source_workspace = deserialize_relation_ref(&value)
+                .map(|r| r.workspace)
+                .unwrap_or_else(|_| workspace.to_string());
+            incoming_to_remove.push((relation_type, source_workspace, source_id));
         }
     }
 

@@ -241,16 +241,23 @@ impl NodeRepositoryImpl {
             // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0rel_rev\0{target_node_id}\0{relation_type}\0{~revision-16bytes}\0{source_node_id}
             let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
             if parts.len() >= 9 {
-                let source_workspace = String::from_utf8_lossy(parts[3]).to_string();
                 let relation_type = String::from_utf8_lossy(parts[6]).to_string();
                 let source_node_id = String::from_utf8_lossy(parts[8]).to_string();
+                // The key's workspace segment is the TARGET's workspace; the
+                // SOURCE workspace lives in the reverse value (a RelationRef
+                // written from the source's perspective). Fall back to the
+                // key segment for legacy tombstoned entries with no value.
+                let source_workspace = crate::repositories::deserialize_relation_ref(&value)
+                    .map(|r| r.workspace)
+                    .unwrap_or_else(|_| String::from_utf8_lossy(parts[3]).to_string());
 
-                // Since keys are sorted by ~revision (newest first), we only want the first occurrence
-                let triple_key = (
-                    source_node_id.clone(),
-                    relation_type.clone(),
-                    source_workspace.clone(),
-                );
+                // Since keys are sorted by ~revision (newest first), we only
+                // want the first occurrence. Dedupe on (source, type) WITHOUT
+                // the workspace: tombstone values carry no source workspace
+                // (they fall back to the key's target-workspace segment), so a
+                // workspace-qualified triple would let a cross-workspace
+                // tombstone fail to suppress the older live entry.
+                let triple_key = (source_node_id.clone(), relation_type.clone(), String::new());
                 if !seen.contains(&triple_key) {
                     // Mark as seen BEFORE checking tombstone - this ensures we don't
                     // return older versions if the latest is a tombstone

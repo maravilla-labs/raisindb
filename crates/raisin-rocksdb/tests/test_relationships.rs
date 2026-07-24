@@ -78,7 +78,8 @@ async fn test_add_and_get_relationships() {
     assert_eq!(outgoing.len(), 1);
     assert_eq!(outgoing[0].target, "node2");
     assert_eq!(outgoing[0].workspace, workspace);
-    assert_eq!(outgoing[0].relation_type, "raisin:Page");
+    assert_eq!(outgoing[0].relation_type, "related_to");
+    assert_eq!(outgoing[0].target_node_type, "raisin:Page");
     assert_eq!(outgoing[0].weight, Some(1.5));
 
     // Get incoming relationships to node2
@@ -230,7 +231,7 @@ async fn test_filter_by_type() {
         .unwrap();
 
     assert_eq!(assets.len(), 2);
-    assert!(assets.iter().all(|r| r.relation_type == "raisin:Asset"));
+    assert!(assets.iter().all(|r| r.target_node_type == "raisin:Asset"));
 
     // Get only page relationships
     let pages = storage
@@ -245,7 +246,7 @@ async fn test_filter_by_type() {
         .unwrap();
 
     assert_eq!(pages.len(), 1);
-    assert_eq!(pages[0].relation_type, "raisin:Page");
+    assert_eq!(pages[0].target_node_type, "raisin:Page");
 
     println!("✅ Test passed: filter_by_type");
 }
@@ -480,7 +481,7 @@ async fn test_branch_isolation() {
         .unwrap();
     assert_eq!(branch1_rels.len(), 1);
     assert_eq!(branch1_rels[0].target, "node2");
-    assert_eq!(branch1_rels[0].relation_type, "raisin:Page");
+    assert_eq!(branch1_rels[0].target_node_type, "raisin:Page");
 
     // Verify branch2 only sees its relationship
     let branch2_rels = storage
@@ -494,7 +495,7 @@ async fn test_branch_isolation() {
         .unwrap();
     assert_eq!(branch2_rels.len(), 1);
     assert_eq!(branch2_rels[0].target, "node3");
-    assert_eq!(branch2_rels[0].relation_type, "raisin:Asset");
+    assert_eq!(branch2_rels[0].target_node_type, "raisin:Asset");
 
     println!("✅ Test passed: branch_isolation");
 }

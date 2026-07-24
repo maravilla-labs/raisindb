@@ -210,10 +210,16 @@ pub(super) fn tombstone_relation_indexes(
             continue;
         }
 
-        // Parse relation details from key to write reverse tombstone
-        if let Some((relation_type, target_workspace, target_id)) =
-            parse_relation_from_forward_key(&key, &relation_prefix)
-        {
+        // Parse relation details to write the reverse tombstone. The forward
+        // VALUE is a serialized RelationRef carrying the target's workspace —
+        // the key alone doesn't contain it (the old key-parse helper returned
+        // an empty workspace, so reverse tombstones never matched the real
+        // reverse keys and incoming edges survived deletion).
+        let parsed = crate::repositories::deserialize_relation_ref(&value)
+            .ok()
+            .map(|r| (r.relation_type, r.workspace, r.target))
+            .or_else(|| parse_relation_from_forward_key(&key, &relation_prefix));
+        if let Some((relation_type, target_workspace, target_id)) = parsed {
             // Tombstone forward relation
             let fwd_key = keys::relation_forward_key_versioned(
                 ctx.tenant_id,
@@ -239,6 +245,80 @@ pub(super) fn tombstone_relation_indexes(
                 &node.id,
             );
             batch.put_cf(cfs.relation_index, rev_key, TOMBSTONE);
+        }
+    }
+
+    // ALSO clear the PACKED adjacency list (new format). Reads prefer the
+    // packed list over the legacy per-edge keys, so tombstoning only the
+    // legacy keys above left deleted nodes with dangling graph edges
+    // (NEIGHBORS / GRAPH_TABLE kept returning them). Write an empty list at
+    // the delete revision; older revisions stay intact for MVCC reads.
+    let empty = crate::repositories::serialize_compact_relations(&[])?;
+    let adj_key = keys::node_adjacency_key_versioned(
+        ctx.tenant_id,
+        ctx.repo_id,
+        ctx.branch,
+        ctx.workspace,
+        &node.id,
+        revision,
+    );
+    batch.put_cf(cfs.relation_index, adj_key, empty);
+
+    // Incoming edges: rewrite each source node's packed list without edges
+    // targeting the deleted node. (Repository deletes normally refuse nodes
+    // with incoming relations, but cascade/transaction deletes can remove
+    // whole trees with intra-tree edges, and the safety check can be bypassed.)
+    let reverse_prefix = keys::relation_reverse_prefix(
+        ctx.tenant_id,
+        ctx.repo_id,
+        ctx.branch,
+        ctx.workspace,
+        &node.id,
+    );
+    let mut seen_sources = std::collections::HashSet::new();
+    let iter = db.prefix_iterator_cf(cfs.relation_index, &reverse_prefix);
+    for item in iter {
+        let (key, value) = item.map_err(|e| {
+            raisin_error::Error::storage(format!("Failed to iterate reverse relations: {}", e))
+        })?;
+        if !key.starts_with(&reverse_prefix) {
+            break;
+        }
+        if value.as_ref() == TOMBSTONE {
+            continue;
+        }
+        // Key format: {tenant}\0{repo}\0{branch}\0{src_workspace}\0rel_rev\0{target}\0{type}\0{~rev}\0{source_id}
+        let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
+        if parts.len() >= 9 {
+            let source_workspace = String::from_utf8_lossy(parts[3]).to_string();
+            let source_node_id = String::from_utf8_lossy(parts[8]).to_string();
+            if !seen_sources.insert((source_workspace.clone(), source_node_id.clone())) {
+                continue;
+            }
+            if let Some(mut packed) = crate::repositories::read_packed_relations_at(
+                db,
+                revision,
+                ctx.tenant_id,
+                ctx.repo_id,
+                ctx.branch,
+                &source_workspace,
+                &source_node_id,
+            )? {
+                let before = packed.len();
+                packed.retain(|r| !(r.target_id == node.id && r.target_workspace == ctx.workspace));
+                if packed.len() != before {
+                    let bytes = crate::repositories::serialize_compact_relations(&packed)?;
+                    let src_key = keys::node_adjacency_key_versioned(
+                        ctx.tenant_id,
+                        ctx.repo_id,
+                        ctx.branch,
+                        &source_workspace,
+                        &source_node_id,
+                        revision,
+                    );
+                    batch.put_cf(cfs.relation_index, src_key, bytes);
+                }
+            }
         }
     }
 

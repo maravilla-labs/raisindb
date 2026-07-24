@@ -61,15 +61,59 @@ pub fn deserialize_full_relation(bytes: &[u8]) -> Result<FullRelation> {
 }
 
 /// Serialize a list of CompactRelations to MessagePack bytes
-pub(super) fn serialize_compact_relations(relations: &[CompactRelation]) -> Result<Vec<u8>> {
+pub(crate) fn serialize_compact_relations(relations: &[CompactRelation]) -> Result<Vec<u8>> {
     rmp_serde::to_vec(relations)
         .map_err(|e| Error::storage(format!("Failed to serialize compact relations: {}", e)))
 }
 
 /// Deserialize a list of CompactRelations from MessagePack bytes
-pub(super) fn deserialize_compact_relations(bytes: &[u8]) -> Result<Vec<CompactRelation>> {
+pub(crate) fn deserialize_compact_relations(bytes: &[u8]) -> Result<Vec<CompactRelation>> {
     rmp_serde::from_slice(bytes)
         .map_err(|e| Error::storage(format!("Failed to deserialize compact relations: {}", e)))
+}
+
+/// Read the packed adjacency list for a node at (or before) `max_revision`.
+///
+/// Sync so it can be used while building a `WriteBatch` (e.g. node deletion
+/// must rewrite packed lists in the same atomic batch as its tombstones).
+pub(crate) fn read_packed_relations_at(
+    db: &DB,
+    max_revision: &HLC,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_id: &str,
+) -> Result<Option<Vec<CompactRelation>>> {
+    let cf = get_relation_cf(db)?;
+
+    // Newest revisions sort first (~rev encoding), so seeking at max_revision
+    // lands on the newest version with revision <= max_revision.
+    let key = crate::keys::node_adjacency_key_versioned(
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node_id,
+        max_revision,
+    );
+
+    let mut iter = db.raw_iterator_cf(cf);
+    iter.seek(&key);
+
+    if iter.valid() {
+        if let Some(k) = iter.key() {
+            // Same node if everything before the 16-byte revision suffix matches.
+            let prefix_len = key.len() - 16;
+            if k.len() >= prefix_len && k[..prefix_len] == key[..prefix_len] {
+                if let Some(v) = iter.value() {
+                    return Ok(Some(deserialize_compact_relations(v)?));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// Get the RELATION_INDEX column family handle
