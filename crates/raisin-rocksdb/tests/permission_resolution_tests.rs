@@ -388,7 +388,8 @@ async fn test_group_role_aggregation() {
         .expect("Failed to create role");
 
     // Create a group with the editor role
-    // Note: groups are looked up by "name" property, so use the group name
+    // Note: groups are looked up by their "group_id" property, so users must
+    // reference groups by ID (not name).
     let group = create_group_node("editors-group", "editors", vec!["editor"]);
     storage
         .nodes_impl()
@@ -397,7 +398,7 @@ async fn test_group_role_aggregation() {
         .expect("Failed to create group");
 
     // Create a user in the editors group (no direct roles)
-    let user = create_user_node("user2", "user2@test.com", vec![], vec!["editors"]);
+    let user = create_user_node("user2", "user2@test.com", vec![], vec!["editors-group"]);
     storage
         .nodes_impl()
         .add(TENANT, REPO, BRANCH, ACCESS_CONTROL_WS, user)
@@ -416,7 +417,7 @@ async fn test_group_role_aggregation() {
 
     assert_eq!(resolved.user_id, "user2");
     assert!(resolved.direct_roles.is_empty(), "No direct roles");
-    assert_eq!(resolved.groups, vec!["editors"]);
+    assert_eq!(resolved.groups, vec!["editors-group"]);
     assert_eq!(resolved.group_roles, vec!["editor"]);
     assert!(resolved.effective_roles.contains(&"editor".to_string()));
     assert_eq!(resolved.permissions.len(), 1);
@@ -608,7 +609,7 @@ async fn test_role_deduplication() {
         "user5",
         "user5@test.com",
         vec!["role1"],
-        vec!["group1", "group2"],
+        vec!["group1-id", "group2-id"],
     );
     storage
         .nodes_impl()

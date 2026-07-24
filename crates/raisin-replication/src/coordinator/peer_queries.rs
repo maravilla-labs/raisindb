@@ -79,6 +79,20 @@ impl ReplicationCoordinator {
             }
         }
 
+        // Every tenant in scope also syncs its pseudo-repositories:
+        // "_registry" (tenant-level ops) and "system" (admin-user ops).
+        // Without these, admin users and tenant metadata silently never
+        // replicate when the discovery source only lists real repositories.
+        let tenants: Vec<String> = pairs
+            .iter()
+            .map(|(tenant_id, _)| tenant_id.clone())
+            .collect();
+        for tenant_id in tenants {
+            for pseudo in ["_registry", "system"] {
+                push_unique(&mut seen, &mut pairs, tenant_id.clone(), pseudo.to_string());
+            }
+        }
+
         pairs
     }
 

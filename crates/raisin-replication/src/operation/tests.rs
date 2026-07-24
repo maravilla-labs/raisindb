@@ -239,29 +239,23 @@ fn test_update_nodetype_serialization() {
     eprintln!("NodeType name: {}", node_type.name);
     eprintln!("NodeType description: {:?}", node_type.description);
 
-    // Test 1: Serialize using unnamed format (default)
+    // Test 1: Unnamed (compact) format CANNOT round-trip NodeType.
+    // NodeType uses `skip_serializing_if`, so positional (unnamed) msgpack
+    // shifts fields on deserialize. All persistence/network paths must use
+    // to_vec_named - this assertion documents the constraint.
     eprintln!(
         "
---- Test 1: Unnamed serialization ---"
+--- Test 1: Unnamed serialization (expected to NOT round-trip) ---"
     );
     let bytes_unnamed = rmp_serde::to_vec(&op_type).unwrap();
     eprintln!("Serialized size (unnamed): {} bytes", bytes_unnamed.len());
 
-    let roundtrip_unnamed: OpType = rmp_serde::from_slice(&bytes_unnamed).unwrap();
-    if let OpType::UpdateNodeType {
-        node_type: rt_nodetype,
-        ..
-    } = roundtrip_unnamed
-    {
-        assert_eq!(rt_nodetype.name, "media_asset");
-        assert_eq!(
-            rt_nodetype.description,
-            Some("Media asset (image, video, document, etc.)".to_string())
-        );
-        eprintln!("Unnamed format: Deserialization successful");
-    } else {
-        panic!("Expected UpdateNodeType variant after unnamed deserialization");
-    }
+    let roundtrip_unnamed: Result<OpType, _> = rmp_serde::from_slice(&bytes_unnamed);
+    assert!(
+        roundtrip_unnamed.is_err(),
+        "compact msgpack unexpectedly round-tripped NodeType - if skip_serializing_if \
+         was removed, compact encoding may be usable again"
+    );
 
     // Test 2: Serialize using named format (used in network protocol)
     eprintln!(

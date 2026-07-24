@@ -16,6 +16,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::config::{ClusterConfig, SyncConfig};
+use crate::operation::Operation;
 use crate::peer_manager::PeerManager;
 use crate::replay::ReplayEngine;
 
@@ -42,8 +43,21 @@ pub struct ReplicationCoordinator {
     /// CRDT replay engine for applying operations
     pub(crate) replay_engine: Arc<RwLock<ReplayEngine>>,
 
-    /// Causal delivery buffer - ensures operations are delivered in causal order
-    pub(crate) causal_buffer: Arc<RwLock<crate::causal_delivery::CausalDeliveryBuffer>>,
+    /// Causal delivery buffers, one per (tenant, repo).
+    ///
+    /// Operation sequence numbers and vector clocks are scoped per
+    /// (tenant, repo), so causal ordering MUST be tracked per pair. A single
+    /// global buffer merges clocks across repos and then treats the first
+    /// operation of every other repo as "out of sequence", buffering it
+    /// forever (ops silently never apply).
+    pub(crate) causal_buffers: Arc<
+        RwLock<
+            std::collections::HashMap<
+                (String, String),
+                crate::causal_delivery::CausalDeliveryBuffer,
+            >,
+        >,
+    >,
 
     /// Sync configuration
     pub(crate) sync_config: SyncConfig,
@@ -75,21 +89,12 @@ impl ReplicationCoordinator {
             cluster_config.sync.retry.clone(),
         ));
 
-        // Initialize causal delivery buffer with empty vector clock
-        // It will be updated with the actual vector clock during first sync
-        let causal_buffer = Arc::new(RwLock::new(
-            crate::causal_delivery::CausalDeliveryBuffer::new(
-                crate::vector_clock::VectorClock::new(),
-                Some(10_000), // Buffer up to 10,000 operations
-            ),
-        ));
-
         Ok(Self {
             cluster_node_id: cluster_config.node_id,
             peer_manager,
             storage,
             replay_engine: Arc::new(RwLock::new(ReplayEngine::new())),
-            causal_buffer,
+            causal_buffers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             sync_config: cluster_config.sync,
             checkpoint_provider: None,
             sync_tenants: cluster_config.sync_tenants,
@@ -117,20 +122,12 @@ impl ReplicationCoordinator {
             cluster_config.sync.retry.clone(),
         ));
 
-        // Initialize causal delivery buffer with empty vector clock
-        let causal_buffer = Arc::new(RwLock::new(
-            crate::causal_delivery::CausalDeliveryBuffer::new(
-                crate::vector_clock::VectorClock::new(),
-                Some(10_000),
-            ),
-        ));
-
         Ok(Self {
             cluster_node_id: cluster_config.node_id,
             peer_manager,
             storage,
             replay_engine: Arc::new(RwLock::new(ReplayEngine::with_tracker(idempotency_tracker))),
-            causal_buffer,
+            causal_buffers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             sync_config: cluster_config.sync,
             checkpoint_provider: None,
             sync_tenants: cluster_config.sync_tenants,
@@ -145,6 +142,60 @@ impl ReplicationCoordinator {
     pub fn set_checkpoint_provider(&mut self, checkpoint_provider: Arc<dyn CheckpointProvider>) {
         self.checkpoint_provider = Some(checkpoint_provider);
     }
+
+    /// Route operations through the causal delivery buffer of their
+    /// (tenant, repo) pair and return the operations that are now deliverable
+    /// in causal order.
+    ///
+    /// Buffers are created lazily, seeded with the pair's persisted vector
+    /// clock so redelivered history is recognized after a restart.
+    pub(crate) async fn deliver_through_causal_buffers(
+        &self,
+        operations: Vec<Operation>,
+    ) -> Vec<Operation> {
+        let mut deliverable = Vec::new();
+
+        for op in operations {
+            let key = (op.tenant_id.clone(), op.repo_id.clone());
+
+            // Seed value fetched outside the map lock; only used when the
+            // buffer doesn't exist yet.
+            let initial_vc = if self.causal_buffers.read().await.contains_key(&key) {
+                None
+            } else {
+                Some(
+                    self.storage
+                        .get_vector_clock(&key.0, &key.1)
+                        .await
+                        .unwrap_or_else(|_| crate::vector_clock::VectorClock::new()),
+                )
+            };
+
+            let mut buffers = self.causal_buffers.write().await;
+            let buffer = buffers.entry(key).or_insert_with(|| {
+                crate::causal_delivery::CausalDeliveryBuffer::new(
+                    initial_vc.unwrap_or_default(),
+                    Some(10_000),
+                )
+            });
+            deliverable.append(&mut buffer.deliver(op));
+        }
+
+        deliverable
+    }
+
+    /// Snapshot the causal buffer stats for a (tenant, repo) pair, if any.
+    pub(crate) async fn causal_buffer_stats(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+    ) -> Option<crate::causal_delivery::BufferStats> {
+        self.causal_buffers
+            .read()
+            .await
+            .get(&(tenant_id.to_string(), repo_id.to_string()))
+            .map(|b| b.stats().clone())
+    }
 }
 
 // Need Clone for spawning tasks
@@ -155,7 +206,7 @@ impl Clone for ReplicationCoordinator {
             peer_manager: self.peer_manager.clone(),
             storage: self.storage.clone(),
             replay_engine: self.replay_engine.clone(),
-            causal_buffer: self.causal_buffer.clone(),
+            causal_buffers: self.causal_buffers.clone(),
             sync_config: self.sync_config.clone(),
             checkpoint_provider: self.checkpoint_provider.clone(),
             sync_tenants: self.sync_tenants.clone(),

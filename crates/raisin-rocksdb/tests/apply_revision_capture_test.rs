@@ -354,7 +354,8 @@ async fn apply_revision_captures_transaction_mutations() -> Result<()> {
         REPO.to_string(),
         BRANCH.to_string(),
         WORKSPACE.to_string(),
-    );
+    )
+    .with_auth(raisin_models::auth::AuthContext::system());
 
     let mut create_tx = node_service.transaction();
     create_tx.create(article.clone());

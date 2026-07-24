@@ -159,8 +159,17 @@ impl GarbageCollector {
             self.config.max_log_size_bytes / operations.len() as u64
         };
 
-        let bytes_to_reclaim = self.config.max_log_size_bytes - self.config.target_log_size_bytes;
-        let ops_to_delete = (bytes_to_reclaim / avg_op_size) as usize;
+        // Saturate: a config with target >= max (e.g. max lowered without
+        // adjusting target) must not panic the GC thread with an underflow.
+        let bytes_to_reclaim = self
+            .config
+            .max_log_size_bytes
+            .saturating_sub(self.config.target_log_size_bytes);
+        let ops_to_delete = if avg_op_size == 0 {
+            0
+        } else {
+            (bytes_to_reclaim / avg_op_size) as usize
+        };
 
         for op in sorted_ops.iter().take(ops_to_delete) {
             to_delete.push(op.op_id);

@@ -46,6 +46,11 @@ async fn enumerate_all_tenant_repos(
         // which are captured during server initialization.
         tenant_repos.push((tenant_id.clone(), "_registry".to_string()));
 
+        // CRITICAL: Also include the "system" pseudo-repository - admin user
+        // operations (UpdateUser/DeleteUser) are captured under it, and
+        // skipping it means admin users never replicate across the cluster.
+        tenant_repos.push((tenant_id.clone(), "system".to_string()));
+
         // Then enumerate all real repositories for this tenant
         match crate::management::list_repositories(db, tenant_id).await {
             Ok(repos) => {
@@ -63,10 +68,29 @@ async fn enumerate_all_tenant_repos(
         }
     }
 
+    // Union in pairs that exist only in the operation log. Ops can arrive
+    // (or be captured) for tenants/repos that aren't in the local registry
+    // yet - e.g. a tenant created on a peer whose registry op hasn't applied,
+    // or the "system"/"_registry" pseudo-repos. Skipping them strands those
+    // ops: a missed realtime push would never be recovered by pull-sync.
+    let oplog_repo = crate::repositories::OpLogRepository::new(db.db().clone());
+    match oplog_repo.list_tenant_repos() {
+        Ok(pairs) => {
+            for pair in pairs {
+                if !tenant_repos.contains(&pair) {
+                    tenant_repos.push(pair);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to enumerate oplog tenant/repo pairs");
+        }
+    }
+
     tracing::debug!(
         count = tenant_repos.len(),
         num_tenants = num_tenants,
-        "Enumerated tenant/repo pairs from database (includes _registry for each tenant)"
+        "Enumerated tenant/repo pairs from database (registry + oplog union)"
     );
 
     Ok(tenant_repos)

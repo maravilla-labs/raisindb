@@ -141,34 +141,21 @@ impl NodeRepositoryImpl {
             .await;
 
         // ========== STEP 7: Capture operation for replication ==========
-        if self.operation_capture.is_enabled() {
-            let op_type = raisin_replication::OpType::CreateNode {
-                node_id: node.id.clone(),
-                name: node.name.clone(),
-                node_type: node.node_type.clone(),
-                archetype: node.archetype.clone(),
-                parent_id: node.parent.clone(),
-                order_key: node.order_key.clone(),
-                properties: node.properties.clone(),
-                owner_id: node.owner_id.clone(),
-                workspace: Some(workspace.to_string()),
-                path: node.path.clone(),
-            };
-
-            let _ = self
-                .operation_capture
-                .capture_operation_with_revision(
-                    tenant_id.to_string(),
-                    repo_id.to_string(),
-                    branch.to_string(),
-                    op_type,
-                    "system".to_string(),
-                    None,
-                    true,
-                    Some(revision),
-                )
-                .await;
-        }
+        // Full-snapshot ApplyRevision, same shape as the transaction commit
+        // path, so peers apply an identical node state (including timestamps
+        // and CF order key) instead of reconstructing it from granular ops.
+        self.capture_apply_revision_snapshot(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            vec![(
+                node.clone(),
+                raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
+            )],
+            revision,
+        )
+        .await;
 
         let total_time = add_start.elapsed().as_micros();
 

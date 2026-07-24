@@ -101,7 +101,9 @@ impl Operation {
             OpType::UpdateRepository { repo_id, .. } | OpType::DeleteRepository { repo_id, .. } => {
                 OperationTarget::Repository(repo_id.clone())
             }
-            OpType::ApplyRevision { .. } => OperationTarget::Branch(self.branch.clone()),
+            OpType::ApplyRevision { branch_head, .. } => {
+                OperationTarget::Revision(format!("{}@{}", self.branch, branch_head))
+            }
             OpType::GrantPermission {
                 subject_id,
                 resource_id,

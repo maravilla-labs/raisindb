@@ -22,30 +22,12 @@ impl ReplicationCoordinator {
             "Starting replication coordinator"
         );
 
-        // CRITICAL FIX: Initialize causal buffer with current storage vector clock
-        // This ensures operations can be delivered after node restart
-        // Without this, the buffer starts with empty VC and buffers all incoming operations
-        let stats = self
-            .storage
-            .get_cluster_stats()
-            .await
-            .map_err(|e| CoordinatorError::Storage(e.to_string()))?;
-
-        if !stats.max_vector_clock.is_empty() {
-            let mut buffer = self.causal_buffer.write().await;
-            *buffer = crate::causal_delivery::CausalDeliveryBuffer::new(
-                stats.max_vector_clock.clone(),
-                Some(10_000),
-            );
-            info!(
-                vc_size = stats.max_vector_clock.as_map().len(),
-                num_tenants = stats.num_tenants,
-                num_repos = stats.num_repos,
-                "Initialized causal buffer with aggregated vector clock from storage"
-            );
-        } else {
-            info!("Causal buffer initialized with empty vector clock (fresh node)");
-        }
+        // Causal buffers are created lazily per (tenant, repo), each seeded
+        // with that pair's persisted vector clock (see
+        // deliver_through_causal_buffers). Vector clocks are scoped per pair,
+        // so a single aggregated clock here would mis-sequence every repo
+        // after the first.
+        info!("Per-repo causal delivery buffers will be seeded lazily from storage");
 
         // Set up sync-on-connect callback
         let coordinator = self.clone();

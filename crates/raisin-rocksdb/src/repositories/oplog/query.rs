@@ -12,6 +12,42 @@ use raisin_replication::{Operation, VectorClock};
 use rocksdb::{Direction, IteratorMode};
 
 impl OpLogRepository {
+    /// List all distinct (tenant, repo) pairs present in the operation log.
+    ///
+    /// Uses a skip-scan: after reading one key of a pair, seeks directly past
+    /// that pair's prefix, so cost is proportional to the number of distinct
+    /// pairs, not the number of operations.
+    pub fn list_tenant_repos(&self) -> Result<Vec<(String, String)>> {
+        let cf = get_oplog_cf(&self.db)?;
+        let mut pairs = Vec::new();
+
+        let mut iter = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&[], Direction::Forward));
+
+        while let Some(entry) = iter.next() {
+            let (key, _) = entry.map_err(|e| Error::storage(e.to_string()))?;
+            let mut parts = key.split(|&b| b == 0);
+            let (Some(tenant), Some(repo)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let tenant = String::from_utf8_lossy(tenant).into_owned();
+            let repo = String::from_utf8_lossy(repo).into_owned();
+
+            // Seek past this (tenant, repo) prefix: append 0xFF, which sorts
+            // after any \0-delimited continuation.
+            let mut seek_past = oplog_tenant_repo_prefix(&tenant, &repo);
+            seek_past.push(0xFF);
+            pairs.push((tenant, repo));
+
+            iter = self
+                .db
+                .iterator_cf(cf, IteratorMode::From(&seek_past, Direction::Forward));
+        }
+
+        Ok(pairs)
+    }
+
     /// Get all operations from a specific node starting from a sequence number
     ///
     /// Returns operations in ascending order (oldest first)

@@ -54,6 +54,35 @@ impl OperationApplicator {
             }
         }
 
+        // A fresh node may receive revisions before (or without) an
+        // UpdateBranch op for this branch - create it on demand instead of
+        // failing the whole revision (mirrors git fetch creating refs).
+        if self
+            .branch_repo
+            .get_branch(tenant_id, repo_id, branch)
+            .await?
+            .is_none()
+        {
+            tracing::info!(
+                tenant_id = %tenant_id,
+                repo_id = %repo_id,
+                branch = %branch,
+                "Branch missing on replica - creating it from replicated revision"
+            );
+            self.branch_repo
+                .create_branch(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    "replication",
+                    None,
+                    None,
+                    false,
+                    false,
+                )
+                .await?;
+        }
+
         self.branch_repo
             .update_head(tenant_id, repo_id, branch, *branch_head)
             .await?;
@@ -98,10 +127,73 @@ impl OperationApplicator {
         let mut batch = WriteBatch::default();
         let cf_nodes = cf_handle(&self.db, cf::NODES)?;
         let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
+        let cf_node_path = cf_handle(&self.db, cf::NODE_PATH)?;
         let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
         let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
         let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+
+        // Diff against the locally-stored previous version and tombstone
+        // stale index entries the snapshot supersedes. Without this a
+        // replicated update/move leaves the peer's old path and old property
+        // values live forever (reads by old path/value still match).
+        if let Some(old_node) =
+            self.load_latest_node(tenant_id, repo_id, branch, &normalized_node.id)?
+        {
+            crate::repositories::add_stale_property_tombstones(
+                &mut batch,
+                cf_property,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &old_node,
+                &normalized_node,
+                revision,
+            );
+
+            crate::repositories::add_stale_reference_tombstones(
+                &mut batch,
+                cf_reference,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &old_node,
+                &normalized_node,
+                revision,
+            );
+
+            if old_node.path != normalized_node.path {
+                let old_path_key = keys::path_index_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &old_node.path,
+                    revision,
+                );
+                batch.put_cf(cf_path, old_path_key, TOMBSTONE);
+
+                // Old ordered-children entry (old parent / old label) must go
+                // too, or the old parent still lists this node as a child.
+                if let Ok(Some(old_parent_id)) = self.resolve_parent_id_for_snapshot(
+                    tenant_id, repo_id, branch, workspace, &old_node,
+                ) {
+                    let old_ordered_key = keys::ordered_child_key_versioned(
+                        tenant_id,
+                        repo_id,
+                        branch,
+                        workspace,
+                        &old_parent_id,
+                        &old_node.order_key,
+                        revision,
+                        &old_node.id,
+                    );
+                    batch.put_cf(cf_ordered, old_ordered_key, TOMBSTONE);
+                }
+            }
+        }
 
         let node_value = rmp_serde::to_vec_named(&normalized_node)
             .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
@@ -125,6 +217,16 @@ impl OperationApplicator {
             revision,
         );
         batch.put_cf(cf_path, path_key, normalized_node.id.as_bytes());
+
+        let node_path_key = keys::node_path_key_versioned(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &normalized_node.id,
+            revision,
+        );
+        batch.put_cf(cf_node_path, node_path_key, normalized_node.path.as_bytes());
 
         // Use index writer helpers to write all indexes
         write_all_node_indexes(
@@ -198,6 +300,11 @@ impl OperationApplicator {
     }
 
     /// Apply a single replicated node delete
+    ///
+    /// Delegates to the shared `crate::tombstones` module (single source of
+    /// truth for deletion tombstones), so replicated deletes clean up the same
+    /// families as local deletes — including packed adjacency lists,
+    /// compound/spatial indexes, and NODE_PATH.
     pub(in crate::replication::application) fn apply_replicated_delete(
         &self,
         tenant_id: &str,
@@ -209,210 +316,24 @@ impl OperationApplicator {
         revision: &HLC,
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
-        let cf_nodes = cf_handle(&self.db, cf::NODES)?;
-        let cf_path = cf_handle(&self.db, cf::PATH_INDEX)?;
-        let cf_property = cf_handle(&self.db, cf::PROPERTY_INDEX)?;
-        let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
-        let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
-        let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
-        let cf_translation = cf_handle(&self.db, cf::TRANSLATION_DATA)?;
 
-        let node_key =
-            keys::node_key_versioned(tenant_id, repo_id, branch, workspace, &node.id, revision);
-        batch.put_cf(cf_nodes, node_key, TOMBSTONE);
-
-        let path_key = keys::path_index_key_versioned(
-            tenant_id, repo_id, branch, workspace, &node.path, revision,
-        );
-        batch.put_cf(cf_path, path_key, TOMBSTONE);
-
-        let is_published = node.published_at.is_some();
-        for (prop_name, prop_value) in &node.properties {
-            let value_hash = hash_property_value(prop_value);
-            let prop_key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                prop_name,
-                &value_hash,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, prop_key, TOMBSTONE);
+        // The shared tombstone path derives the ORDERED_CHILDREN key from
+        // node.parent; replicated changes carry the parent separately.
+        let mut node_for_tombstones = node.clone();
+        if node_for_tombstones.parent.is_none() {
+            node_for_tombstones.parent = parent_id.map(|p| p.to_string());
         }
 
-        let mut tombstone_field = |field: &str, value: &str| {
-            if value.is_empty() {
-                return;
-            }
-            let key = keys::property_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                field,
-                value,
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, key, TOMBSTONE);
-        };
-
-        tombstone_field("__node_type", &node.node_type);
-        tombstone_field("__name", &node.name);
-        if let Some(ref archetype) = node.archetype {
-            tombstone_field("__archetype", archetype);
-        }
-        if let Some(ref created_by) = node.created_by {
-            tombstone_field("__created_by", created_by);
-        }
-        if let Some(ref updated_by) = node.updated_by {
-            tombstone_field("__updated_by", updated_by);
-        }
-        // Write timestamp tombstones using microsecond precision
-        if let Some(created_at) = node.created_at {
-            let key = keys::property_index_key_versioned_timestamp(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                "__created_at",
-                created_at.timestamp_micros(),
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, key, TOMBSTONE);
-        }
-        if let Some(updated_at) = node.updated_at {
-            let key = keys::property_index_key_versioned_timestamp(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                "__updated_at",
-                updated_at.timestamp_micros(),
-                revision,
-                &node.id,
-                is_published,
-            );
-            batch.put_cf(cf_property, key, TOMBSTONE);
-        }
-
-        for (prop_path, prop_value) in &node.properties {
-            if let PropertyValue::Reference(ref_data) = prop_value {
-                let fwd_key = keys::reference_forward_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &node.id,
-                    prop_path,
-                    revision,
-                    is_published,
-                );
-                batch.put_cf(cf_reference, fwd_key, TOMBSTONE);
-
-                let rev_key = keys::reference_reverse_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &ref_data.workspace,
-                    &ref_data.id,
-                    &node.id,
-                    prop_path,
-                    revision,
-                    is_published,
-                );
-                batch.put_cf(cf_reference, rev_key, TOMBSTONE);
-            }
-        }
-
-        let outgoing_relations =
-            self.collect_outgoing_relations(tenant_id, repo_id, branch, workspace, &node.id)?;
-        for relation in outgoing_relations {
-            let fwd_key = keys::relation_forward_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.id,
-                &relation.relation_type,
-                revision,
-                &relation.target,
-            );
-            batch.put_cf(cf_relation, fwd_key, TOMBSTONE);
-
-            let rev_key = keys::relation_reverse_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                &relation.workspace,
-                &relation.target,
-                &relation.relation_type,
-                revision,
-                &node.id,
-            );
-            batch.put_cf(cf_relation, rev_key, TOMBSTONE);
-        }
-
-        let incoming_relations =
-            self.collect_incoming_relations(tenant_id, repo_id, branch, workspace, &node.id)?;
-        for (source_node_id, relation_type, source_workspace) in incoming_relations {
-            let fwd_key = keys::relation_forward_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                &source_workspace,
-                &source_node_id,
-                &relation_type,
-                revision,
-                &node.id,
-            );
-            batch.put_cf(cf_relation, fwd_key, TOMBSTONE);
-
-            let rev_key = keys::relation_reverse_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &node.id,
-                &relation_type,
-                revision,
-                &source_node_id,
-            );
-            batch.put_cf(cf_relation, rev_key, TOMBSTONE);
-        }
-
-        if let Some(pid) = parent_id {
-            let ordered_key = keys::ordered_child_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                pid,
-                &node.order_key,
-                revision,
-                &node.id,
-            );
-            batch.put_cf(cf_ordered, ordered_key, TOMBSTONE);
-        }
-
-        let translation_locales =
-            self.list_translation_locales(tenant_id, repo_id, branch, workspace, &node.id)?;
-        for locale in translation_locales {
-            let mut translation_key = format!(
-                "{}\0{}\0{}\0{}\0translations\0{}\0{}\0",
-                tenant_id, repo_id, branch, workspace, node.id, locale
-            )
-            .into_bytes();
-            translation_key.extend_from_slice(&keys::encode_descending_revision(revision));
-            batch.put_cf(cf_translation, translation_key, TOMBSTONE);
-        }
+        let ctx = crate::tombstones::TombstoneContext::new(tenant_id, repo_id, branch, workspace);
+        let cfs = crate::tombstones::TombstoneColumnFamilies::from_arc_db(&self.db)?;
+        crate::tombstones::add_node_tombstones(
+            &mut batch,
+            self.db.as_ref(),
+            &ctx,
+            &cfs,
+            &node_for_tombstones,
+            revision,
+        )?;
 
         self.db.write(batch).map_err(|e| {
             raisin_error::Error::storage(format!("Failed to apply replicated delete: {}", e))

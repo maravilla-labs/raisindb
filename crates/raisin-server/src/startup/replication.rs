@@ -126,6 +126,12 @@ pub async fn discover_sync_tenants(
             pairs.push(registry_pair);
         }
 
+        // Admin user operations replicate under the "system" pseudo-repository.
+        let system_pair = (tenant_id.clone(), "system".to_string());
+        if seen.insert(system_pair.clone()) {
+            pairs.push(system_pair);
+        }
+
         match raisin_rocksdb::management::list_repositories(storage, &tenant_id).await {
             Ok(repos) => {
                 for repo_id in repos {

@@ -451,7 +451,7 @@ impl NodeRepositoryImpl {
                 .await?;
         }
 
-        // STEP 7.5: Capture CreateNode operations for replication
+        // STEP 7.5: Capture one ApplyRevision snapshot for replication
         self.capture_tree_copy_operations(
             tenant_id,
             repo_id,
@@ -459,6 +459,7 @@ impl NodeRepositoryImpl {
             workspace,
             &operation_meta,
             &nodes_for_replication,
+            revision,
         )
         .await;
 
@@ -520,7 +521,11 @@ impl NodeRepositoryImpl {
             .ok_or_else(|| raisin_error::Error::storage("Failed to retrieve copied root node"))
     }
 
-    /// Capture CreateNode operations for replication during tree copy.
+    /// Capture one ApplyRevision snapshot covering all copied nodes.
+    ///
+    /// Full node snapshots (same shape as transaction commits) instead of
+    /// granular CreateNode ops, so peers apply identical state.
+    #[allow(clippy::too_many_arguments)]
     async fn capture_tree_copy_operations(
         &self,
         tenant_id: &str,
@@ -529,37 +534,39 @@ impl NodeRepositoryImpl {
         workspace: &str,
         operation_meta: &Option<raisin_models::operations::OperationMeta>,
         nodes_for_replication: &[(Node, Option<String>, Option<String>)],
+        revision: raisin_hlc::HLC,
     ) {
-        if self.operation_capture.is_enabled() {
-            let actor = operation_meta
-                .as_ref()
-                .map(|m| m.actor.clone())
-                .unwrap_or_else(|| "system".to_string());
+        use raisin_replication::operation::{ReplicatedNodeChange, ReplicatedNodeChangeKind};
 
-            for (node, parent_id, order_label) in nodes_for_replication {
-                let properties_json =
-                    serde_json::to_value(&node.properties).unwrap_or(serde_json::json!({}));
+        let actor = operation_meta
+            .as_ref()
+            .map(|m| m.actor.clone())
+            .unwrap_or_else(|| "system".to_string());
 
-                let _ = self
-                    .operation_capture
-                    .capture_create_node(
-                        tenant_id.to_string(),
-                        repo_id.to_string(),
-                        branch.to_string(),
-                        node.id.clone(),
-                        node.name.clone(),
-                        node.node_type.clone(),
-                        node.archetype.clone(),
-                        parent_id.clone(),
-                        order_label.clone().unwrap_or_else(|| "a0".to_string()),
-                        properties_json,
-                        node.owner_id.clone(),
-                        Some(workspace.to_string()),
-                        node.path.clone(),
-                        actor.clone(),
-                    )
-                    .await;
-            }
-        }
+        let node_changes = nodes_for_replication
+            .iter()
+            .map(|(node, parent_id, order_label)| {
+                let mut node = node.clone();
+                if node.workspace.is_none() {
+                    node.workspace = Some(workspace.to_string());
+                }
+                ReplicatedNodeChange {
+                    node,
+                    parent_id: parent_id.clone(),
+                    kind: ReplicatedNodeChangeKind::Upsert,
+                    cf_order_key: order_label.clone().unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        self.capture_apply_revision_prepared(
+            tenant_id,
+            repo_id,
+            branch,
+            node_changes,
+            revision,
+            &actor,
+        )
+        .await;
     }
 }

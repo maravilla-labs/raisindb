@@ -96,10 +96,14 @@ impl ReplicationCoordinator {
             "Received push from peer"
         );
 
-        // Apply operations using CRDT replay engine
+        // Route through the per-(tenant, repo) causal buffers first so a push
+        // that arrives ahead of its predecessors is held until the gap fills,
+        // then apply the deliverable ops with the CRDT replay engine.
+        let deliverable = self.deliver_through_causal_buffers(operations).await;
+
         let result = {
             let mut engine = self.replay_engine.write().await;
-            engine.replay(operations)
+            engine.replay(deliverable)
         };
 
         if !result.applied.is_empty() {

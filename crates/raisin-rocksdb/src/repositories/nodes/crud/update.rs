@@ -130,6 +130,13 @@ impl NodeRepositoryImpl {
             );
         }
 
+        // Reference index: tombstone stale OLD entries (reference removed /
+        // retargeted) — otherwise REFERENCES()/backlinks keep matching this
+        // node against the old target forever.
+        self.add_stale_reference_tombstones_to_batch(
+            &mut batch, &old_node, &node, tenant_id, repo_id, branch, workspace, &revision,
+        )?;
+
         // Use shared indexing helper (DRY)
         self.add_node_indexes_to_batch(
             &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
@@ -214,31 +221,21 @@ impl NodeRepositoryImpl {
             .await;
 
         // ========== STEP 7: Capture operation for replication ==========
-        // update_impl is always an update (SetProperty operations for each changed property)
-        if self.operation_capture.is_enabled() {
-            // Capture property changes as SetProperty operations
-            for (prop_name, prop_value) in &node.properties {
-                let op_type = raisin_replication::OpType::SetProperty {
-                    node_id: node.id.clone(),
-                    property_name: prop_name.clone(),
-                    value: prop_value.clone(),
-                };
-
-                let _ = self
-                    .operation_capture
-                    .capture_operation_with_revision(
-                        tenant_id.to_string(),
-                        repo_id.to_string(),
-                        branch.to_string(),
-                        op_type,
-                        "system".to_string(),
-                        None,
-                        true,
-                        Some(revision),
-                    )
-                    .await;
-            }
-        }
+        // Full-snapshot ApplyRevision (like the transaction commit path).
+        // Per-property SetProperty ops cannot express removed properties or
+        // path/name/type changes, so peers would drift.
+        self.capture_apply_revision_snapshot(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            vec![(
+                node.clone(),
+                raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
+            )],
+            revision,
+        )
+        .await;
 
         let total_time = update_start.elapsed().as_micros();
 

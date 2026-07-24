@@ -138,9 +138,6 @@ impl NodeRepositoryImpl {
         let cf_node_path = cf_handle(&self.db, cf::NODE_PATH)?;
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
 
-        // Track old parent for replication
-        let mut old_parent_id: Option<String> = None;
-
         // Process root node's ORDERED_CHILDREN (parent changes)
         if let Some(old_parent_path) =
             old_root_path
@@ -151,8 +148,6 @@ impl NodeRepositoryImpl {
                 .get_by_path_impl(tenant_id, repo_id, branch, workspace, old_parent_path, None)
                 .await?
             {
-                old_parent_id = Some(old_parent_node.id.clone());
-
                 // Tombstone old ordered children entry
                 if let Some(old_label) = self.get_order_label_for_child(
                     tenant_id,
@@ -188,7 +183,6 @@ impl NodeRepositoryImpl {
         }
 
         // Add root node to new parent's ORDERED_CHILDREN
-        let mut new_position: Option<String> = None;
         let new_parent_id = target_parent_node.id.clone();
 
         let order_label = {
@@ -228,8 +222,6 @@ impl NodeRepositoryImpl {
                 }
             }
         };
-        new_position = Some(order_label.clone());
-
         let ordered_key = keys::ordered_child_key_versioned(
             tenant_id,
             repo_id,
@@ -305,25 +297,40 @@ impl NodeRepositoryImpl {
             .update_head(tenant_id, repo_id, branch, revision)
             .await?;
 
-        // Capture move operation for replication
+        // Capture move for replication as an ApplyRevision snapshot covering
+        // every moved node (root + descendants) at its NEW path. A granular
+        // MoveNode op only names the root, so peers never learned about
+        // descendant path changes.
         if self.operation_capture.is_enabled() {
-            let actor = operation_meta
-                .as_ref()
-                .map(|m| m.actor.clone())
-                .unwrap_or_else(|| "system".to_string());
-
-            self.operation_capture
-                .capture_move_node(
-                    tenant_id.to_string(),
-                    repo_id.to_string(),
-                    branch.to_string(),
-                    id.to_string(),
-                    old_parent_id,
-                    Some(new_parent_id),
-                    new_position,
-                    actor,
-                )
-                .await?;
+            let mut changes = Vec::with_capacity(moved_node_ids.len());
+            for node_id in &moved_node_ids {
+                match self
+                    .get(
+                        raisin_storage::StorageScope::new(tenant_id, repo_id, branch, workspace),
+                        node_id,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(Some(moved)) => changes.push((
+                        moved,
+                        raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
+                    )),
+                    Ok(None) => tracing::warn!(
+                        node_id = %node_id,
+                        "Moved node missing when capturing replication snapshot"
+                    ),
+                    Err(e) => tracing::warn!(
+                        node_id = %node_id,
+                        error = %e,
+                        "Failed to load moved node for replication snapshot"
+                    ),
+                }
+            }
+            self.capture_apply_revision_snapshot(
+                tenant_id, repo_id, branch, workspace, changes, revision,
+            )
+            .await;
         }
 
         // Index node changes for revision tracking

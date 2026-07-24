@@ -104,26 +104,21 @@ impl NodeRepositoryImpl {
             )
             .await;
 
-        // Capture DeleteNode operation for replication (non-transaction path)
-        if self.operation_capture.is_enabled() {
-            let op_type = raisin_replication::OpType::DeleteNode {
-                node_id: id.to_string(),
-            };
-
-            let _ = self
-                .operation_capture
-                .capture_operation_with_revision(
-                    tenant_id.to_string(),
-                    repo_id.to_string(),
-                    branch.to_string(),
-                    op_type,
-                    "system".to_string(),
-                    None,
-                    true,
-                    Some(revision),
-                )
-                .await;
-        }
+        // Capture ApplyRevision delete snapshot for replication
+        // (non-transaction path). The full pre-delete node lets peers
+        // tombstone every index family without a local lookup.
+        self.capture_apply_revision_snapshot(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            vec![(
+                node.clone(),
+                raisin_replication::operation::ReplicatedNodeChangeKind::Delete,
+            )],
+            revision,
+        )
+        .await;
 
         // Emit node deletion event to trigger background cleanup job
         let node_event = NodeEvent {

@@ -115,15 +115,9 @@ impl ReplicationCoordinator {
                         "Received operations from peer"
                     );
 
-                    // Deliver operations through causal buffer to ensure causal order
-                    let mut deliverable_ops = Vec::new();
-                    {
-                        let mut buffer = self.causal_buffer.write().await;
-                        for op in operations {
-                            let mut delivered = buffer.deliver(op);
-                            deliverable_ops.append(&mut delivered);
-                        }
-                    }
+                    // Deliver operations through the per-(tenant, repo) causal
+                    // buffer to ensure causal order
+                    let mut deliverable_ops = self.deliver_through_causal_buffers(operations).await;
 
                     // Sort deliverable operations by priority (admin users first!)
                     crate::priority::sort_operations_by_priority(&mut deliverable_ops);
@@ -162,10 +156,10 @@ impl ReplicationCoordinator {
                             .map_err(|e| CoordinatorError::Network(e.to_string()))?;
 
                         // Log buffer stats for monitoring
-                        let buffer_stats = {
-                            let buffer = self.causal_buffer.read().await;
-                            buffer.stats().clone()
-                        };
+                        let buffer_stats = self
+                            .causal_buffer_stats(tenant_id, repo_id)
+                            .await
+                            .unwrap_or_default();
                         info!(
                             peer_id = %peer_id,
                             tenant_id = %tenant_id,

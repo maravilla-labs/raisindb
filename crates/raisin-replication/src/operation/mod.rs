@@ -107,6 +107,11 @@ pub enum OperationTarget {
     Permission(String),
     Identity(String),
     Session(String),
+    /// A single committed revision (branch + head HLC). Revisions are
+    /// cumulative deltas, NOT convergent register states: every distinct
+    /// ApplyRevision must be applied, so each gets its own target and is
+    /// never LWW-merged with sibling revisions of the same branch.
+    Revision(String),
 }
 
 impl std::fmt::Display for OperationTarget {
@@ -126,6 +131,7 @@ impl std::fmt::Display for OperationTarget {
             Self::Permission(id) => write!(f, "permission:{}", id),
             Self::Identity(id) => write!(f, "identity:{}", id),
             Self::Session(id) => write!(f, "session:{}", id),
+            Self::Revision(id) => write!(f, "revision:{}", id),
         }
     }
 }

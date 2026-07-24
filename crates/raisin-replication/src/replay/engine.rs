@@ -65,14 +65,18 @@ impl ReplayEngine {
         // Step 2: Sort by causal order
         let sorted_ops = Self::causal_sort(new_ops);
 
-        // Step 3: Group by target entity
-        let grouped_ops = Self::group_by_target(sorted_ops);
+        // Step 3: Group by conflict register (NOT whole entity - see
+        // conflict_group_key). Grouping every op on a node together would
+        // CRDT-merge a CreateNode with unrelated SetProperty/SetOwner ops and
+        // silently drop all but one mutation.
+        let grouped_ops = Self::group_by_conflict_key(sorted_ops);
 
         // Step 4: Apply CRDT merge rules
         let mut applied = Vec::new();
         let mut conflicts = Vec::new();
 
-        for (target, ops) in grouped_ops {
+        for (_key, ops) in grouped_ops {
+            let target = ops[0].target();
             match CrdtMerge::merge_operations(ops.clone()) {
                 MergeResult::Winner(op) => {
                     applied.push(op);
@@ -168,6 +172,66 @@ impl ReplayEngine {
                 a.cluster_node_id.cmp(&b.cluster_node_id)
             }
         }
+    }
+
+    /// Compute the conflict-register key for an operation.
+    ///
+    /// Only operations that are competing writes of the SAME register may be
+    /// CRDT-merged (one winner). Grouping by whole entity is wrong: a
+    /// CreateNode plus unrelated SetProperty/SetOwner/SetArchetype ops on one
+    /// node would collapse to a single winner and silently drop mutations.
+    /// Unknown / cumulative op types get a unique key (never merged) - the
+    /// safe direction is to apply, not to drop.
+    fn conflict_group_key(op: &Operation) -> String {
+        use crate::operation::OpType;
+        let target = op.target().to_string();
+        match &op.op_type {
+            OpType::SetProperty { property_name, .. }
+            | OpType::DeleteProperty { property_name, .. } => {
+                format!("{target}#prop:{property_name}")
+            }
+            OpType::AddRelation {
+                relation_type,
+                target_id,
+                ..
+            }
+            | OpType::RemoveRelation {
+                relation_type,
+                target_id,
+                ..
+            } => format!("{target}#rel:{relation_type}:{target_id}"),
+            OpType::MoveNode { .. } => format!("{target}#move"),
+            OpType::DeleteNode { .. } | OpType::DeleteNodeSnapshot { .. } => {
+                format!("{target}#delete")
+            }
+            OpType::CreateNode { .. } | OpType::UpsertNodeSnapshot { .. } => {
+                format!("{target}#snapshot")
+            }
+            // Whole-entity register updates: same-target LWW is correct.
+            OpType::UpdateBranch { .. }
+            | OpType::UpdateUser { .. }
+            | OpType::UpdateTenant { .. }
+            | OpType::UpdateRepository { .. }
+            | OpType::UpdateNodeType { .. }
+            | OpType::UpdateArchetype { .. }
+            | OpType::UpdateElementType { .. }
+            | OpType::UpdateWorkspace { .. } => format!("{target}#update"),
+            // Everything else (ApplyRevision, list ops, deletes of schema
+            // entities, permissions, ...) applies individually.
+            _ => format!("{target}#op:{}", op.op_id),
+        }
+    }
+
+    /// Group operations by conflict register (see `conflict_group_key`).
+    pub fn group_by_conflict_key(operations: Vec<Operation>) -> HashMap<String, Vec<Operation>> {
+        let mut grouped: HashMap<String, Vec<Operation>> = HashMap::new();
+
+        for op in operations {
+            let key = Self::conflict_group_key(&op);
+            grouped.entry(key).or_default().push(op);
+        }
+
+        grouped
     }
 
     /// Group operations by their target entity

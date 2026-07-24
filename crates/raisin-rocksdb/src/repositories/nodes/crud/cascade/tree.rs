@@ -161,36 +161,24 @@ impl NodeRepositoryImpl {
             )
             .await;
 
-        // Capture DeleteNode operations for replication
-        if self.operation_capture.is_enabled() {
-            let actor = "system".to_string(); // Cascade deletes are system operations
-
-            // Capture delete for root node
-            let _ = self
-                .operation_capture
-                .capture_delete_node(
-                    tenant_id.to_string(),
-                    repo_id.to_string(),
-                    branch.to_string(),
-                    node_id.to_string(),
-                    actor.clone(),
-                )
-                .await;
-
-            // Capture delete for each descendant
-            for deleted_node in &deleted_descendants {
-                let _ = self
-                    .operation_capture
-                    .capture_delete_node(
-                        tenant_id.to_string(),
-                        repo_id.to_string(),
-                        branch.to_string(),
-                        deleted_node.id.clone(),
-                        actor.clone(),
-                    )
-                    .await;
-            }
+        // Capture one ApplyRevision snapshot covering the whole deleted tree
+        // (root + descendants), so peers tombstone every index family from the
+        // full pre-delete node state instead of a bare node id.
+        let mut changes = Vec::with_capacity(1 + deleted_descendants.len());
+        changes.push((
+            node.clone(),
+            raisin_replication::operation::ReplicatedNodeChangeKind::Delete,
+        ));
+        for deleted_node in &deleted_descendants {
+            changes.push((
+                deleted_node.clone(),
+                raisin_replication::operation::ReplicatedNodeChangeKind::Delete,
+            ));
         }
+        self.capture_apply_revision_snapshot(
+            tenant_id, repo_id, branch, workspace, changes, revision,
+        )
+        .await;
 
         Ok(true)
     }

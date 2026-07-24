@@ -132,6 +132,43 @@ async fn wait_for_total_operations(
     }
 }
 
+/// Wait until `expected_count` ApplyRevision operations from `node_id` are
+/// visible in the op log (ignores bootstrap ops like UpdateBranch/UpdateRepository).
+async fn wait_for_apply_revision_operations(
+    storage: &Arc<RocksDBStorage>,
+    tenant_id: &str,
+    repo_id: &str,
+    node_id: &str,
+    expected_count: usize,
+) -> Result<Duration, String> {
+    use raisin_replication::OpType;
+    let timeout = Duration::from_secs(10);
+    let start = Instant::now();
+
+    loop {
+        let oplog = OpLogRepository::new(storage.db().clone());
+        let count = oplog
+            .get_operations_from_node(tenant_id, repo_id, node_id)
+            .map(|ops| {
+                ops.iter()
+                    .filter(|op| matches!(op.op_type, OpType::ApplyRevision { .. }))
+                    .count()
+            })
+            .unwrap_or(0);
+
+        if count >= expected_count {
+            return Ok(start.elapsed());
+        }
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout after {:?}: expected {} ApplyRevision ops from {}, got {}",
+                timeout, expected_count, node_id, count
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_move_node_replication() {
     init_tracing();
@@ -422,103 +459,136 @@ async fn test_move_tree_replication() {
     //     /Grandchild A1
     //   /Child B
 
+    // Bootstrap tenant/repo/branch/workspace on both nodes so real writes
+    // (and replicated applies) have a branch head to update.
+    // Node2 learns tenant/repo/branch via replicated registry/branch ops.
+    for storage in [&storage1] {
+        use raisin_storage::{
+            BranchRepository, RegistryRepository, RepositoryManagementRepository, Storage as _,
+        };
+        storage
+            .registry()
+            .register_tenant(tenant_id, std::collections::HashMap::new())
+            .await
+            .unwrap();
+        storage
+            .repository_management()
+            .create_repository(
+                tenant_id,
+                repo_id,
+                raisin_context::RepositoryConfig {
+                    default_language: "en".to_string(),
+                    supported_languages: vec!["en".to_string()],
+                    locale_fallback_chains: std::collections::HashMap::new(),
+                    default_branch: branch.to_string(),
+                    description: None,
+                    tags: std::collections::HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .branches()
+            .create_branch(
+                tenant_id, repo_id, branch, "system", None, None, false, false,
+            )
+            .await
+            .unwrap();
+
+        let mut ws = raisin_models::workspace::Workspace::new(workspace.to_string());
+        ws.config.default_branch = branch.to_string();
+        raisin_core::services::workspace_service::WorkspaceService::new(storage.clone())
+            .put(tenant_id, repo_id, ws)
+            .await
+            .unwrap();
+    }
+
     eprintln!("\n📝 Creating tree structure on node1");
-    eprintln!("   Creating /Source Folder");
 
-    storage1
-        .operation_capture()
-        .capture_create_node(
-            tenant_id.to_string(),
-            repo_id.to_string(),
-            branch.to_string(),
-            "source_folder".to_string(),
-            "Source Folder".to_string(),
-            "Folder".to_string(),
-            None,
-            None,
-            "a0".to_string(),
-            serde_json::json!({}),
-            None,
-            Some(workspace.to_string()),
-            "/Source Folder".to_string(),
-            "admin".to_string(),
-        )
+    let build_node = |id: &str, name: &str, path: &str, node_type: &str, parent: &str| {
+        raisin_models::nodes::Node {
+            id: id.to_string(),
+            name: name.to_string(),
+            path: path.to_string(),
+            node_type: node_type.to_string(),
+            archetype: None,
+            properties: std::collections::HashMap::new(),
+            children: Vec::new(),
+            order_key: raisin_rocksdb::fractional_index::first(),
+            has_children: Some(false),
+            parent: Some(parent.to_string()),
+            version: 1,
+            created_at: Some(chrono::Utc::now()),
+            updated_at: None,
+            published_at: None,
+            published_by: None,
+            updated_by: Some("admin".to_string()),
+            created_by: Some("admin".to_string()),
+            translations: None,
+            tenant_id: Some(tenant_id.to_string()),
+            workspace: Some(workspace.to_string()),
+            owner_id: None,
+            relations: Vec::new(),
+        }
+    };
+    let relaxed = || raisin_storage::CreateNodeOptions {
+        validate_schema: false,
+        validate_parent_allows_child: false,
+        validate_workspace_allows_type: false,
+        operation_meta: None,
+    };
+
+    {
+        use raisin_storage::scope::StorageScope;
+        use raisin_storage::{NodeRepository, Storage as _};
+
+        for (id, name, path, node_type, parent) in [
+            (
+                "source_folder",
+                "Source Folder",
+                "/Source Folder",
+                "Folder",
+                "/",
+            ),
+            (
+                "child_a",
+                "Child A",
+                "/Source Folder/Child A",
+                "Page",
+                "Source Folder",
+            ),
+            (
+                "grandchild_a1",
+                "Grandchild A1",
+                "/Source Folder/Child A/Grandchild A1",
+                "Page",
+                "Child A",
+            ),
+            (
+                "child_b",
+                "Child B",
+                "/Source Folder/Child B",
+                "Page",
+                "Source Folder",
+            ),
+        ] {
+            eprintln!("   Creating {}", path);
+            storage1
+                .nodes()
+                .create(
+                    StorageScope::new(tenant_id, repo_id, branch, workspace),
+                    build_node(id, name, path, node_type, parent),
+                    relaxed(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("create {} failed: {}", path, e));
+        }
+    }
+
+    // Wait for tree creation to replicate (4 ApplyRevision snapshots)
+    wait_for_apply_revision_operations(&storage2, tenant_id, repo_id, "node1", 4)
         .await
-        .unwrap();
-
-    eprintln!("   Creating /Source Folder/Child A");
-
-    storage1
-        .operation_capture()
-        .capture_create_node(
-            tenant_id.to_string(),
-            repo_id.to_string(),
-            branch.to_string(),
-            "child_a".to_string(),
-            "Child A".to_string(),
-            "Page".to_string(),
-            None,
-            Some("source_folder".to_string()),
-            "a0".to_string(),
-            serde_json::json!({}),
-            None,
-            Some(workspace.to_string()),
-            "/Source Folder/Child A".to_string(),
-            "admin".to_string(),
-        )
-        .await
-        .unwrap();
-
-    eprintln!("   Creating /Source Folder/Child A/Grandchild A1");
-
-    storage1
-        .operation_capture()
-        .capture_create_node(
-            tenant_id.to_string(),
-            repo_id.to_string(),
-            branch.to_string(),
-            "grandchild_a1".to_string(),
-            "Grandchild A1".to_string(),
-            "Page".to_string(),
-            None,
-            Some("child_a".to_string()),
-            "a0".to_string(),
-            serde_json::json!({}),
-            None,
-            Some(workspace.to_string()),
-            "/Source Folder/Child A/Grandchild A1".to_string(),
-            "admin".to_string(),
-        )
-        .await
-        .unwrap();
-
-    eprintln!("   Creating /Source Folder/Child B");
-
-    storage1
-        .operation_capture()
-        .capture_create_node(
-            tenant_id.to_string(),
-            repo_id.to_string(),
-            branch.to_string(),
-            "child_b".to_string(),
-            "Child B".to_string(),
-            "Page".to_string(),
-            None,
-            Some("source_folder".to_string()),
-            "a1".to_string(),
-            serde_json::json!({}),
-            None,
-            Some(workspace.to_string()),
-            "/Source Folder/Child B".to_string(),
-            "admin".to_string(),
-        )
-        .await
-        .unwrap();
-
-    // Wait for tree creation to replicate
-    wait_for_total_operations(&storage2, tenant_id, repo_id, 4, Duration::from_secs(5))
-        .await
-        .expect("Node2 should have 4 operations (tree creation)");
+        .expect("Node2 should have 4 ApplyRevision operations (tree creation)");
 
     eprintln!("✅ Tree structure created and replicated");
 
@@ -546,9 +616,30 @@ async fn test_move_tree_replication() {
 
     // Wait for ApplyRevision operation to replicate to node2
     // Should be 4 (initial) + 1 (ApplyRevision) = 5 operations total
-    wait_for_total_operations(&storage2, tenant_id, repo_id, 5, Duration::from_secs(10))
-        .await
-        .expect("Node2 should have 5 operations (4 creates + 1 ApplyRevision)");
+    // Wait until the moved tree is visible on node2 (poll actual state; op
+    // counts are fragile because bootstrap also emits ApplyRevision ops).
+    {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let moved = storage2
+                .nodes()
+                .get_by_path(
+                    StorageScope::new(tenant_id, repo_id, branch, workspace),
+                    "/Destination Folder",
+                    None,
+                )
+                .await
+                .unwrap_or(None);
+            if moved.is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Timed out waiting for move to replicate to node2"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 
     eprintln!("✅ ApplyRevision operation replicated to node2");
 
