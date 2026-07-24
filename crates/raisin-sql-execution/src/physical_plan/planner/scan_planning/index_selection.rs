@@ -56,16 +56,13 @@ impl PhysicalPlanner {
             .iter()
             .any(|(pred, _)| matches!(pred, CanonicalPredicate::SpatialDWithin { .. }));
 
-        if has_descendant_of && !has_spatial {
-            tracing::debug!(
-                "Prioritizing DESCENDANT_OF scan over other indexes (uses efficient path prefix scan)"
-            );
-            return index_options
-                .iter()
-                .find(|(p, _)| matches!(p, CanonicalPredicate::DescendantOf { .. }))
-                .map(|(p, _)| *p);
-        }
-
+        // REFERENCES beats DESCENDANT_OF: the reverse reference index returns
+        // only the (few) referrers, and the residual DESCENDANT_OF filter needs
+        // just `path` (always materialized). The other way around leaves
+        // REFERENCES as a row-eval post-filter that depends on `properties`
+        // being projected and on the stored reference path being current —
+        // both silent zero-row traps (`REFERENCES(...) AND DESCENDANT_OF(...)`
+        // used to return nothing).
         if has_references {
             tracing::debug!(
                 "Prioritizing REFERENCES scan (uses reverse reference index for efficient lookup)"
@@ -73,6 +70,16 @@ impl PhysicalPlanner {
             return index_options
                 .iter()
                 .find(|(p, _)| matches!(p, CanonicalPredicate::References { .. }))
+                .map(|(p, _)| *p);
+        }
+
+        if has_descendant_of && !has_spatial {
+            tracing::debug!(
+                "Prioritizing DESCENDANT_OF scan over other indexes (uses efficient path prefix scan)"
+            );
+            return index_options
+                .iter()
+                .find(|(p, _)| matches!(p, CanonicalPredicate::DescendantOf { .. }))
                 .map(|(p, _)| *p);
         }
 

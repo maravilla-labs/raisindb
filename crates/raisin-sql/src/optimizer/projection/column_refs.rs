@@ -124,6 +124,22 @@ fn extract_function_column_refs(name: &str, args: &[TypedExpr]) -> HashSet<Strin
     let mut cols = HashSet::new();
 
     let func_name = name.to_uppercase();
+
+    // Hierarchy/reference functions read row columns that never appear in
+    // their argument lists (the arguments are literals). If projection
+    // pruning drops those columns, the row-level evaluation of these
+    // functions silently fails (REFERENCES used to match zero rows whenever
+    // it survived as a post-filter with `properties` pruned away).
+    match func_name.as_str() {
+        "REFERENCES" | "RESOLVE" => {
+            cols.insert("properties".to_string());
+        }
+        "CHILD_OF" | "DESCENDANT_OF" | "PATH_STARTS_WITH" | "DEPTH" => {
+            cols.insert("path".to_string());
+        }
+        _ => {}
+    }
+
     if (func_name == "TO_JSON" || func_name == "TO_JSONB") && args.len() == 1 {
         if let Expr::Column { table, column } = &args[0].expr {
             if table == column {

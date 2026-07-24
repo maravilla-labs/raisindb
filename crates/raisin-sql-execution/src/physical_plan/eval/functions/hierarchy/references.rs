@@ -101,15 +101,18 @@ impl SqlFunction for ReferencesFunction {
             }
         };
 
-        // Get the properties from the row
-        let properties = row.get_by_unqualified("properties");
-
-        if properties.is_none() {
-            // No properties column, cannot have references
-            return Ok(Literal::Boolean(false));
-        }
-
-        let properties = properties.unwrap();
+        // Get the properties from the row. Scans always materialize a
+        // `properties` column (an empty object for property-less nodes) when
+        // it is in the projection, so its ABSENCE means projection pruning
+        // dropped a column this filter depends on — a planner bug. Returning
+        // `false` here silently filtered every row out; error loudly instead.
+        let properties = row.get_by_unqualified("properties").ok_or_else(|| {
+            Error::Validation(
+                "REFERENCES row filter requires the 'properties' column to be materialized \
+                 in the row (projection pruning dropped it)"
+                    .to_string(),
+            )
+        })?;
 
         // Check if any reference in properties matches the target
         let has_reference = check_for_reference(properties, target_workspace, target_path);

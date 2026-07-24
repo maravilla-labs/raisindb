@@ -116,6 +116,19 @@ impl PhysicalPlanner {
                     );
                     return Ok(None);
                 }
+
+                // REFERENCES('ws:/path') filters are driven by the reverse
+                // reference index (few rows, then TopN sort). PropertyOrderScan
+                // would instead walk the property-order index re-checking
+                // REFERENCES per row — slower AND dependent on `properties`
+                // being materialized for the row-eval.
+                if Self::contains_references(filter) {
+                    tracing::info!(
+                        "⚡ Skipping PropertyOrderScan for '{}' ordering with REFERENCES filter - using ReferenceIndexScan + TopN",
+                        property_name
+                    );
+                    return Ok(None);
+                }
             }
         }
 
@@ -298,6 +311,24 @@ impl PhysicalPlanner {
                 Self::contains_descendant_of(left) || Self::contains_descendant_of(right)
             }
             Expr::UnaryOp { expr, .. } => Self::contains_descendant_of(expr),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression contains a REFERENCES function call
+    pub(super) fn contains_references(expr: &TypedExpr) -> bool {
+        match &expr.expr {
+            Expr::Function { name, args, .. } => {
+                if name.to_uppercase() == "REFERENCES" {
+                    return true;
+                }
+                // Recursively check arguments
+                args.iter().any(Self::contains_references)
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::contains_references(left) || Self::contains_references(right)
+            }
+            Expr::UnaryOp { expr, .. } => Self::contains_references(expr),
             _ => false,
         }
     }

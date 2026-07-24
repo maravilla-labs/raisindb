@@ -24,12 +24,14 @@
 //!
 //! # Usage
 //!
-//! ```
+//! ```no_run
 //! use raisin_sql::optimizer::Optimizer;
 //! use raisin_sql::logical_plan::LogicalPlan;
 //!
+//! # fn example(original_plan: LogicalPlan) {
 //! let optimizer = Optimizer::new();
 //! let optimized_plan = optimizer.optimize(original_plan);
+//! # }
 //! ```
 //!
 //! # Future Enhancements
