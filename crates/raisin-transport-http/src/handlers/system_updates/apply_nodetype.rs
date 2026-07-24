@@ -1,11 +1,12 @@
 //! NodeType update application logic.
+//!
+//! The write itself lives in `raisin_core::system_updates::apply_nodetype` so the
+//! admin-triggered apply and the startup resync share one implementation. This
+//! module only resolves the definition for the pending update and maps errors.
 
-use chrono::Utc;
 use raisin_models::nodes::NodeType;
-use raisin_storage::system_updates::{AppliedDefinition, PendingUpdate, ResourceType};
-use raisin_storage::{
-    scope::BranchScope, CommitMetadata, NodeTypeRepository, Storage, SystemUpdateRepository,
-};
+use raisin_storage::system_updates::PendingUpdate;
+use raisin_storage::SystemUpdateRepository;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -13,10 +14,6 @@ use crate::state::AppState;
 use super::map_storage_err;
 
 /// Apply a single NodeType system update.
-///
-/// Looks up the nodetype from the provided global definitions, preserves any
-/// existing ID and created_at timestamp, then writes the updated definition
-/// to storage and records the applied hash.
 pub(super) async fn apply_nodetype_update(
     state: &AppState,
     system_update_repo: &impl SystemUpdateRepository,
@@ -26,72 +23,22 @@ pub(super) async fn apply_nodetype_update(
     update: &PendingUpdate,
     nodetypes: &[(NodeType, String)],
 ) -> Result<bool, ApiError> {
-    let Some((mut nodetype, hash)) = nodetypes
-        .iter()
-        .find(|(nt, _)| nt.name == update.name)
-        .cloned()
-    else {
+    let Some((nodetype, hash)) = nodetypes.iter().find(|(nt, _)| nt.name == update.name) else {
         return Ok(false);
     };
 
-    // Generate ID if not present
-    if nodetype.id.is_none() {
-        nodetype.id = Some(nanoid::nanoid!());
-    }
-
-    // Check if it exists and preserve ID
-    if let Some(existing) = state
-        .storage()
-        .node_types()
-        .get(
-            BranchScope::new(tenant_id, repo_id, branch),
-            &nodetype.name,
-            None,
-        )
-        .await
-        .map_err(|e| map_storage_err("Failed to get existing NodeType", e))?
-    {
-        nodetype.id = existing.id;
-        nodetype.created_at = existing.created_at;
-    }
-
-    nodetype.updated_at = Some(Utc::now());
-
-    // Apply the update
-    state
-        .storage()
-        .node_types()
-        .put(
-            BranchScope::new(tenant_id, repo_id, branch),
-            nodetype.clone(),
-            CommitMetadata::system(format!("System update: {}", nodetype.name)),
-        )
-        .await
-        .map_err(|e| map_storage_err("Failed to apply NodeType update", e))?;
-
-    // Record the applied hash
-    system_update_repo
-        .set_applied(
-            tenant_id,
-            repo_id,
-            ResourceType::NodeType,
-            &nodetype.name,
-            AppliedDefinition {
-                content_hash: hash,
-                applied_version: nodetype.version,
-                applied_at: Utc::now(),
-                applied_by: "admin".to_string(), // TODO: Get from auth context
-            },
-        )
-        .await
-        .map_err(|e| map_storage_err("Failed to record applied hash", e))?;
-
-    tracing::info!(
-        tenant_id = %tenant_id,
-        repo_id = %repo_id,
-        nodetype = %update.name,
-        "Applied NodeType system update"
-    );
+    raisin_core::system_updates::apply_nodetype(
+        state.storage().clone(),
+        system_update_repo,
+        tenant_id,
+        repo_id,
+        branch,
+        nodetype,
+        hash,
+        "admin", // TODO: Get from auth context
+    )
+    .await
+    .map_err(|e| map_storage_err("Failed to apply NodeType update", e))?;
 
     Ok(true)
 }

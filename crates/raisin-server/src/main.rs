@@ -270,15 +270,36 @@ async fn main() {
     #[cfg(not(feature = "s3"))]
     let bin = startup::binary::init_binary_storage(&server_config.data_dir);
 
-    #[cfg(feature = "storage-rocksdb")]
-    startup::binary::register_builtin_package_handler(&storage, &bin).await;
+    // ========================================================================
+    // System definitions (built-in NodeTypes / Workspaces / packages)
+    // ========================================================================
+    //
+    // Embedded definitions are the baseline; an optional on-disk overlay
+    // (`[system_definitions] overlay_dir`) can override any of them by name so
+    // a schema fix ships without rebuilding the binary.
+    // `build_and_install_resolver` also makes this the process-wide stack, so
+    // the older init paths (RepositoryCreated NodeType handler, package install,
+    // workspace self-heal) serve overlay definitions instead of reverting to the
+    // embedded ones.
+    let definitions = Arc::new(raisin_core::definitions::build_and_install_resolver(
+        &server_config.system_definitions,
+        &server_config.data_dir,
+    ));
 
-    // Propagate version-bumped global (raisin:*) NodeType schema changes into
-    // repositories created before this binary (e.g. the raisin:InboxTask relax
-    // that lets standalone raisin.tasks.create tasks validate). Version-gated,
-    // so a no-op unless an embedded NodeType version increased.
     #[cfg(feature = "storage-rocksdb")]
-    startup::binary::resync_global_nodetypes(&storage).await;
+    startup::binary::register_builtin_package_handler(&storage, &bin, &definitions).await;
+
+    // Propagate built-in NodeType/Workspace schema changes into repositories
+    // created before this binary. Gated on CONTENT HASH (not the YAML `version:`
+    // field), so an edit propagates whether or not anyone bumped the version;
+    // breaking changes are withheld for an explicit admin apply.
+    #[cfg(feature = "storage-rocksdb")]
+    startup::binary::resync_system_definitions(
+        &storage,
+        &definitions,
+        server_config.system_definitions.auto_apply,
+    )
+    .await;
 
     // ========================================================================
     // Locks / inventory subsystem
@@ -948,6 +969,16 @@ async fn main() {
         Some(schema_stats_cache.clone()),
         lock_manager.clone(),
     );
+
+    // Hand the HTTP layer the same definition stack the startup resync used, so
+    // the pending/apply endpoints and the overlay-reload endpoint all operate on
+    // one view of what this server offers.
+    app_state
+        .configure_system_definitions(
+            server_config.system_definitions.clone(),
+            server_config.data_dir.clone(),
+        )
+        .await;
 
     let admin_router = Router::new()
         .route("/admin", get(admin_ui::serve_admin_ui))

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use raisin_binary::BinaryStorage;
+use raisin_core::definitions::PackageDefinition;
 use raisin_core::package_init::BuiltinPackageInfo;
 use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_rocksdb::RocksDBStorage;
@@ -17,8 +18,8 @@ use super::map_storage_err;
 
 /// Apply a single Package system update.
 ///
-/// Creates a ZIP from the embedded package files, stores the binary,
-/// creates or updates the package node, and queues an installation job.
+/// Creates a ZIP from the package's files (embedded or overlay), stores the
+/// binary, creates or updates the package node, and queues an installation job.
 pub(super) async fn apply_package_update(
     state: &AppState,
     system_update_repo: &impl SystemUpdateRepository,
@@ -27,25 +28,19 @@ pub(super) async fn apply_package_update(
     repo_id: &str,
     branch: &str,
     update: &PendingUpdate,
-    packages: &[BuiltinPackageInfo],
+    packages: &[PackageDefinition],
 ) -> Result<bool, ApiError> {
-    let Some(package_info) = packages.iter().find(|p| p.manifest.name == update.name) else {
+    let Some(package) = packages
+        .iter()
+        .find(|p| p.info.manifest.name == update.name)
+    else {
         return Ok(false);
     };
+    let package_info = &package.info;
 
-    // Get the embedded directory for this package
-    let Some(package_dir) = raisin_core::package_init::get_builtin_package_dir(&update.name) else {
-        tracing::warn!(
-            tenant_id = %tenant_id,
-            repo_id = %repo_id,
-            package = %update.name,
-            "Could not find embedded directory for builtin package"
-        );
-        return Ok(false);
-    };
-
-    // Create ZIP from embedded files
-    let zip_data = raisin_core::package_init::create_package_zip(package_dir)
+    let zip_data = package
+        .source
+        .to_zip()
         .map_err(|e| ApiError::internal(format!("Failed to create package ZIP: {}", e)))?;
 
     // Store the binary

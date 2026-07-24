@@ -15,14 +15,16 @@
 //! This handler subscribes to `RepositoryCreated` events and automatically
 //! installs builtin packages (like raisin-auth) for new repositories.
 //!
-//! Builtin packages are embedded at compile time and installed as if they
-//! were manually uploaded, making them visible in the packages workspace.
+//! Builtin packages come from the resolved definition stack
+//! (`raisin_core::definitions`): embedded in the binary by default, or from the
+//! filesystem overlay when one shadows an embedded package by name. Either way
+//! they are installed as if manually uploaded, making them visible in the
+//! packages workspace.
 
 use anyhow::Result;
 use chrono::Utc;
-use include_dir::Dir;
 use raisin_binary::BinaryStorage;
-use raisin_core::package_init::load_builtin_packages_with_hashes;
+use raisin_core::definitions::{DefinitionResolver, PackageSource};
 use raisin_events::{Event, EventHandler, RepositoryEventKind};
 use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
@@ -49,6 +51,8 @@ where
     job_registry: Arc<JobRegistry>,
     job_data_store: Arc<JobDataStore>,
     system_update_repo: SystemUpdateRepositoryImpl,
+    /// Resolved definition stack the builtin packages are read from.
+    definitions: Arc<DefinitionResolver>,
 }
 
 impl<S, B> BuiltinPackageInitHandler<S, B>
@@ -63,6 +67,7 @@ where
         job_registry: Arc<JobRegistry>,
         job_data_store: Arc<JobDataStore>,
         system_update_repo: SystemUpdateRepositoryImpl,
+        definitions: Arc<DefinitionResolver>,
     ) -> Self {
         info!("BuiltinPackageInitHandler created and ready to handle events");
         Self {
@@ -71,6 +76,7 @@ where
             job_registry,
             job_data_store,
             system_update_repo,
+            definitions,
         }
     }
 
@@ -122,10 +128,12 @@ where
             "Installing builtin packages"
         );
 
-        // Get all builtin packages with their content hashes
-        let builtin_packages = load_builtin_packages_with_hashes();
+        // Resolved builtin packages with their content hashes — an overlay copy
+        // of a package shadows the embedded one by name.
+        let builtin_packages = self.definitions.packages();
 
-        for package_info in builtin_packages {
+        for package in builtin_packages {
+            let package_info = package.info;
             // Opt-out packages (e.g. the heavy provider connector adapters) are
             // still REGISTERED on boot — so they appear in the Integrations
             // gallery and can be installed on demand — but their content is NOT
@@ -138,13 +146,10 @@ where
             // this loop, so it cannot stampede.
             let install_content = package_info.manifest.auto_install;
 
-            // Get the embedded directory for this package
-            if let Some(package_dir) =
-                raisin_core::package_init::get_builtin_package_dir(&package_info.manifest.name)
             {
                 match self
                     .install_package(
-                        package_dir,
+                        &package.source,
                         tenant_id,
                         repo_id,
                         &package_info.content_hash,
@@ -205,20 +210,14 @@ where
                         // Don't fail the entire operation - log and continue
                     }
                 }
-            } else {
-                error!(
-                    tenant_id = tenant_id,
-                    repo_id = repo_id,
-                    package = %package_info.manifest.name,
-                    "Could not find embedded directory for builtin package"
-                );
             }
         }
 
         Ok(())
     }
 
-    /// Register (and optionally install) a single embedded package.
+    /// Register (and optionally install) a single builtin package, from
+    /// whichever definition layer supplied it.
     ///
     /// Both modes create/update the `raisin:Package` node and store the package
     /// `.rap` bytes so the package is listable and installable on demand. When
@@ -229,27 +228,13 @@ where
     /// registration creates.
     async fn install_package(
         &self,
-        package_dir: &Dir<'static>,
+        package_source: &PackageSource,
         tenant_id: &str,
         repo_id: &str,
         content_hash: &str,
         install_content: bool,
     ) -> Result<()> {
-        // Parse manifest (with fallback for include_dir path resolution issues)
-        let manifest_file = package_dir
-            .get_file("manifest.yaml")
-            .or_else(|| {
-                // Fallback: search through all files by filename
-                package_dir.files().find(|f| {
-                    f.path()
-                        .file_name()
-                        .map(|n| n == "manifest.yaml")
-                        .unwrap_or(false)
-                })
-            })
-            .ok_or_else(|| anyhow::anyhow!("Missing manifest.yaml in package"))?;
-
-        let manifest: Manifest = Manifest::from_bytes(manifest_file.contents())?;
+        let manifest: Manifest = Manifest::from_bytes(&package_source.manifest_bytes()?)?;
 
         info!(
             package_name = %manifest.name,
@@ -386,7 +371,7 @@ where
         };
 
         // Create ZIP from embedded files using shared function
-        let zip_data = raisin_core::package_init::create_package_zip(package_dir)?;
+        let zip_data = package_source.to_zip()?;
 
         // Store the binary
         let filename = format!("{}-{}.rap", manifest.name, manifest.version);
@@ -650,6 +635,9 @@ mod tests {
             storage.job_registry().clone(),
             storage.job_data_store().clone(),
             system_update_repo.clone(),
+            // Embedded-only stack: these tests assert on the packages compiled
+            // into the binary, independent of any overlay on the test machine.
+            Arc::new(raisin_core::definitions::DefinitionResolver::embedded_only()),
         );
 
         storage
@@ -779,7 +767,7 @@ mod tests {
     fn embedded_index_js_len() -> i64 {
         let dir = raisin_core::package_init::get_builtin_package_dir("ai-tools")
             .expect("ai-tools builtin package must be embedded");
-        let mut stack: Vec<&Dir<'static>> = vec![dir];
+        let mut stack: Vec<&include_dir::Dir<'static>> = vec![dir];
         while let Some(d) = stack.pop() {
             for f in d.files() {
                 if f.path().ends_with("agent-handler/index.js") {

@@ -69,9 +69,11 @@ pub async fn apply_updates(
     let branch = "main";
 
     // First, check for pending updates to identify what needs to be applied
+    let definitions = state.definitions().await;
     let summary = check_pending_updates(
         state.storage().clone(),
         &system_update_repo,
+        &definitions,
         &tenant_id,
         &repo_id,
         branch,
@@ -103,10 +105,11 @@ pub async fn apply_updates(
     let mut applied_count = 0;
     let mut skipped_count = 0;
 
-    // Load all global definitions with hashes
-    let nodetypes = load_global_nodetypes_with_hashes();
-    let workspaces = load_global_workspaces_with_hashes();
-    let packages = load_builtin_packages_with_hashes();
+    // Resolved definitions — the same stack the pending check was computed
+    // against, so an overlay definition applies exactly like an embedded one.
+    let nodetypes = definitions.nodetypes();
+    let workspaces = definitions.workspaces();
+    let packages = definitions.packages();
 
     // Apply each update
     for update in updates_to_apply {

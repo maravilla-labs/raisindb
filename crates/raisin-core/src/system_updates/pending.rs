@@ -13,15 +13,13 @@
 //! Pending updates detection
 //!
 //! This module provides functionality to check for pending system updates
-//! by comparing the embedded definitions with what has been applied to
-//! a repository.
+//! by comparing the resolved definition stack (embedded, plus any overlay or
+//! registry layer above it) with what has been applied to a repository.
 
 use super::breaking_changes::{
     detect_nodetype_breaking_changes, detect_workspace_breaking_changes,
 };
-use crate::nodetype_init::load_global_nodetypes_with_hashes;
-use crate::package_init::load_builtin_packages_with_hashes;
-use crate::workspace_init::load_global_workspaces_with_hashes;
+use crate::definitions::DefinitionResolver;
 use raisin_error::Result;
 use raisin_storage::system_updates::{
     PendingUpdate, PendingUpdatesSummary, ResourceType, SystemUpdateRepository,
@@ -54,13 +52,17 @@ impl<S: Storage> PendingUpdatesChecker<S> {
 
 /// Check for pending updates in a repository
 ///
-/// This function compares the embedded NodeType and Workspace definitions
-/// with what has been recorded as applied in the repository. Any definitions
-/// with different content hashes are returned as pending updates.
+/// Compares the **resolved** NodeType, Workspace and Package definitions — the
+/// binary's embedded set plus anything a higher layer (filesystem overlay,
+/// registry cache) overrides — with what has been recorded as applied in the
+/// repository. Any definition whose content hash differs is a pending update.
+/// Because a resolved definition carries its winning layer's hash, an overlay
+/// edit shows up here exactly like a definition shipped in a new binary.
 ///
 /// # Arguments
 /// * `storage` - Storage instance
 /// * `system_update_repo` - Repository for tracking applied hashes
+/// * `definitions` - Resolved definition stack
 /// * `tenant_id` - Tenant identifier
 /// * `repo_id` - Repository identifier
 /// * `branch` - Branch name (for looking up current NodeTypes)
@@ -70,6 +72,7 @@ impl<S: Storage> PendingUpdatesChecker<S> {
 pub async fn check_pending_updates<S: Storage, R: SystemUpdateRepository>(
     storage: Arc<S>,
     system_update_repo: &R,
+    definitions: &DefinitionResolver,
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
@@ -85,8 +88,8 @@ pub async fn check_pending_updates<S: Storage, R: SystemUpdateRepository>(
     let mut breaking_count = 0;
 
     // Check NodeTypes
-    let global_nodetypes = load_global_nodetypes_with_hashes();
-    tracing::debug!(count = global_nodetypes.len(), "Loaded global NodeTypes");
+    let global_nodetypes = definitions.nodetypes();
+    tracing::debug!(count = global_nodetypes.len(), "Resolved global NodeTypes");
     for (nodetype, new_hash) in global_nodetypes {
         let applied = system_update_repo
             .get_applied(tenant_id, repo_id, ResourceType::NodeType, &nodetype.name)
@@ -143,8 +146,11 @@ pub async fn check_pending_updates<S: Storage, R: SystemUpdateRepository>(
     }
 
     // Check Workspaces
-    let global_workspaces = load_global_workspaces_with_hashes();
-    tracing::debug!(count = global_workspaces.len(), "Loaded global Workspaces");
+    let global_workspaces = definitions.workspaces();
+    tracing::debug!(
+        count = global_workspaces.len(),
+        "Resolved global Workspaces"
+    );
     for (workspace, new_hash) in global_workspaces {
         let applied = system_update_repo
             .get_applied(tenant_id, repo_id, ResourceType::Workspace, &workspace.name)
@@ -198,9 +204,9 @@ pub async fn check_pending_updates<S: Storage, R: SystemUpdateRepository>(
     }
 
     // Check Builtin Packages
-    let builtin_packages = load_builtin_packages_with_hashes();
-    tracing::debug!(count = builtin_packages.len(), "Loaded builtin Packages");
-    for package_info in builtin_packages {
+    let builtin_packages = definitions.packages();
+    tracing::debug!(count = builtin_packages.len(), "Resolved builtin Packages");
+    for package_info in builtin_packages.into_iter().map(|p| p.info) {
         tracing::debug!(
             package = %package_info.manifest.name,
             new_hash = %&package_info.content_hash[..8],
@@ -275,6 +281,8 @@ pub async fn check_pending_updates<S: Storage, R: SystemUpdateRepository>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nodetype_init::load_global_nodetypes_with_hashes;
+    use crate::workspace_init::load_global_workspaces_with_hashes;
 
     #[test]
     fn test_load_global_nodetypes_with_hashes() {

@@ -41,7 +41,10 @@ pub fn calculate_workspace_version() -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Load global Workspace definitions from embedded YAML
+/// Load the effective global Workspace definitions.
+///
+/// Resolved through the process-wide definition stack, so an overlay definition
+/// is what every caller sees.
 pub fn load_global_workspaces() -> Vec<Workspace> {
     load_global_workspaces_with_hashes()
         .into_iter()
@@ -49,15 +52,23 @@ pub fn load_global_workspaces() -> Vec<Workspace> {
         .collect()
 }
 
-/// Load global Workspace definitions with their content hashes
+/// Load the effective global Workspace definitions with their content hashes.
 ///
-/// This function loads all embedded Workspace YAML files and returns them
-/// along with their SHA256 content hashes. The hash can be used to track
-/// which version of each Workspace has been applied to a repository.
+/// Resolved through the process-wide definition stack (see
+/// [`crate::definitions`]). Use [`load_embedded_workspaces_with_hashes`] when
+/// you specifically need the binary's own copies.
+pub fn load_global_workspaces_with_hashes() -> Vec<(Workspace, String)> {
+    crate::definitions::global_resolver().workspaces()
+}
+
+/// Load Workspace definitions straight from the embedded YAML.
+///
+/// The raw baseline layer — must not consult the resolver, which is built from
+/// it.
 ///
 /// # Returns
 /// A vector of tuples containing (Workspace, content_hash)
-pub fn load_global_workspaces_with_hashes() -> Vec<(Workspace, String)> {
+pub fn load_embedded_workspaces_with_hashes() -> Vec<(Workspace, String)> {
     let mut workspaces = Vec::new();
 
     // Iterate over all .yaml files in the embedded directory

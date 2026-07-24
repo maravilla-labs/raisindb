@@ -241,4 +241,29 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             "/api/management/repositories/{tenant_id}/{repo_id}/system-updates/apply",
             post(crate::handlers::system_updates::apply_updates),
         )
+        // ----------------------------------------------------------------
+        // System Definitions (which layer built-ins come from; overlay reload;
+        // optional remote registries). These change what the server OFFERS;
+        // the system-updates routes above are what applies it to a repository.
+        // ----------------------------------------------------------------
+        .route(
+            "/api/management/system-definitions",
+            get(crate::handlers::system_definitions::get_system_definitions),
+        )
+        .route(
+            "/api/management/system-definitions/reload",
+            post(crate::handlers::system_definitions::reload_system_definitions),
+        )
+        .route(
+            "/api/management/system-definitions/registries",
+            get(crate::handlers::system_definitions::list_registries),
+        )
+        .route(
+            "/api/management/system-definitions/registries/{name}",
+            get(crate::handlers::system_definitions::get_registry_catalog),
+        )
+        .route(
+            "/api/management/system-definitions/registries/{name}/fetch",
+            post(crate::handlers::system_definitions::fetch_from_registry),
+        )
 }

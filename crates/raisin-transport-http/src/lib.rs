@@ -70,6 +70,7 @@ mod handlers {
     #[cfg(feature = "storage-rocksdb")]
     pub mod sql;
     pub mod static_site;
+    pub mod system_definitions;
     #[cfg(feature = "storage-rocksdb")]
     pub mod system_updates;
     pub mod tags;

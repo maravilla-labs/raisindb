@@ -34,10 +34,13 @@ pub async fn get_pending_updates(
     // Get the default branch for this repository
     let branch = "main"; // TODO: Get from repository config
 
-    // Check for pending updates
+    // Check for pending updates against the live definition stack (embedded +
+    // any overlay/registry layer above it).
+    let definitions = state.definitions().await;
     let summary = check_pending_updates(
         state.storage().clone(),
         &system_update_repo,
+        &definitions,
         &tenant_id,
         &repo_id,
         branch,

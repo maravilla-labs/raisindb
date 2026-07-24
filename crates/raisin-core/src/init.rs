@@ -4,7 +4,6 @@
 //! on server startup or per-tenant. These NodeTypes are embedded from YAML files
 //! and automatically registered in the repository.
 
-use include_dir::{include_dir, Dir};
 use raisin_error::Result;
 use raisin_models::nodes::types::NodeType;
 use raisin_storage::{
@@ -12,30 +11,17 @@ use raisin_storage::{
 };
 use std::sync::Arc;
 
-/// Embedded directory containing global nodetype YAML files
-static GLOBAL_NODETYPES_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/global_nodetypes");
-
 /// Calculate version hash for global NodeTypes
 ///
-/// This function computes an MD5 hash of all embedded global NodeType YAML files.
-/// The hash is used to detect when NodeType definitions change and trigger
-/// re-initialization for tenants.
+/// Re-exported from [`crate::nodetype_init`], which owns the embedded YAML
+/// directory. This module used to `include_dir!` the same directory a second
+/// time and carry its own copy of the loader — two loaders that could drift
+/// apart while claiming to describe the same definitions.
 ///
 /// # Returns
 /// A hex-encoded MD5 hash string
 pub fn calculate_nodetype_version() -> String {
-    let mut hasher = md5::Context::new();
-
-    // Iterate over all .yaml files in the embedded directory
-    for file in GLOBAL_NODETYPES_DIR.files() {
-        if file.path().extension().and_then(|e| e.to_str()) == Some("yaml") {
-            if let Some(content) = file.contents_utf8() {
-                hasher.consume(content.as_bytes());
-            }
-        }
-    }
-
-    format!("{:x}", hasher.finalize())
+    crate::nodetype_init::calculate_nodetype_version()
 }
 
 /// Initialize NodeTypes for a specific tenant/deployment
@@ -91,34 +77,7 @@ where
 
 /// Load global NodeType definitions from embedded YAML
 fn load_global_nodetypes() -> Vec<NodeType> {
-    let mut nodetypes = Vec::new();
-
-    // Iterate over all .yaml files in the embedded directory
-    for file in GLOBAL_NODETYPES_DIR.files() {
-        if file.path().extension().and_then(|e| e.to_str()) == Some("yaml") {
-            if let Some(content) = file.contents_utf8() {
-                match serde_yaml::from_str::<NodeType>(content) {
-                    Ok(nodetype) => {
-                        tracing::debug!(
-                            "Loaded nodetype '{}' from {}",
-                            nodetype.name,
-                            file.path().display()
-                        );
-                        nodetypes.push(nodetype);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to parse NodeType YAML from {}: {}",
-                            file.path().display(),
-                            e
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    nodetypes
+    crate::nodetype_init::load_global_nodetypes()
 }
 
 /// Initialize global "raisin:" NodeTypes from embedded YAML files

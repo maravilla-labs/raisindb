@@ -13,6 +13,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
+import DefinitionSourcesPanel from '../components/DefinitionSourcesPanel'
 import {
   systemUpdatesApi,
   PendingUpdatesResponse,
@@ -146,6 +147,12 @@ export default function SystemUpdatesPage() {
           <h1 className="text-2xl font-bold text-white">System Updates</h1>
         </div>
 
+        <DefinitionSourcesPanel
+          onStackChanged={loadUpdates}
+          onError={showError}
+          onSuccess={showSuccess}
+        />
+
         <GlassCard>
           <div className="text-center py-12">
             <Check className="w-16 h-16 text-green-400 mx-auto mb-4" />
@@ -205,6 +212,12 @@ export default function SystemUpdatesPage() {
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      <DefinitionSourcesPanel
+        onStackChanged={loadUpdates}
+        onError={showError}
+        onSuccess={showSuccess}
+      />
 
       {/* Breaking changes warning */}
       {updates.breaking_count > 0 && (

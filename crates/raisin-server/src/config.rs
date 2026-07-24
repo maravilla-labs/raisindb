@@ -133,6 +133,11 @@ pub struct ServerConfigFile {
     /// Atomic locks / inventory subsystem configuration
     #[serde(default)]
     pub locks: raisin_locks::LocksConfig,
+    /// How built-in NodeTypes / Workspaces / packages are sourced and rolled
+    /// out. Defaults reproduce the historical behaviour exactly: embedded
+    /// definitions only, no registries, non-breaking changes applied on start.
+    #[serde(default)]
+    pub system_definitions: raisin_core::definitions::SystemDefinitionsConfig,
     /// Trigger circuit breaker configuration — guards against a single
     /// tenant's runaway trigger/function loop growing the job registry
     /// without bound. Defined locally (rather than reusing

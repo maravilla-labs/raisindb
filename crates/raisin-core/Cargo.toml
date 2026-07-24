@@ -33,9 +33,11 @@ include_dir = "0.7"
 tokio = { workspace = true, features = ["full"] }
 dashmap = "6.1"
 zip = "2.1"
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+toml = "0.9"
 async-trait = "0.1.89"
 raisin-storage-memory = { path = "../raisin-storage-memory" }
 raisin-rocksdb = { path = "../raisin-rocksdb" }

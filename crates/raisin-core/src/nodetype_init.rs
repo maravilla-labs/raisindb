@@ -57,7 +57,11 @@ pub fn calculate_nodetype_version() -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Load global NodeType definitions from embedded YAML
+/// Load the effective global NodeType definitions.
+///
+/// Resolves through the process-wide definition stack, so an overlay definition
+/// is what every caller sees. Reading the embedded YAML directly here would let
+/// the legacy init paths overwrite an overlay definition with the built-in one.
 pub fn load_global_nodetypes() -> Vec<NodeType> {
     load_global_nodetypes_with_hashes()
         .into_iter()
@@ -65,15 +69,23 @@ pub fn load_global_nodetypes() -> Vec<NodeType> {
         .collect()
 }
 
-/// Load global NodeType definitions with their content hashes
+/// Load the effective global NodeType definitions with their content hashes.
 ///
-/// This function loads all embedded NodeType YAML files and returns them
-/// along with their SHA256 content hashes. The hash can be used to track
-/// which version of each NodeType has been applied to a repository.
+/// Resolved through the process-wide definition stack (see
+/// [`crate::definitions`]). Use [`load_embedded_nodetypes_with_hashes`] when you
+/// specifically need the binary's own copies.
+pub fn load_global_nodetypes_with_hashes() -> Vec<(NodeType, String)> {
+    crate::definitions::global_resolver().nodetypes()
+}
+
+/// Load NodeType definitions straight from the embedded YAML.
+///
+/// This is the raw baseline layer. It must not consult the resolver — the
+/// resolver's own embedded layer is built from it.
 ///
 /// # Returns
 /// A vector of tuples containing (NodeType, content_hash)
-pub fn load_global_nodetypes_with_hashes() -> Vec<(NodeType, String)> {
+pub fn load_embedded_nodetypes_with_hashes() -> Vec<(NodeType, String)> {
     let mut nodetypes = Vec::new();
 
     // Iterate over all .yaml files in the embedded directory

@@ -44,6 +44,33 @@ pub(crate) type Store = InMemoryStorage;
 // TODO: Implement RocksDB-backed audit repository
 type AuditRepo = InMemoryAuditRepo;
 
+/// The server's live system-definition stack.
+///
+/// Held behind a lock so the overlay directory can be re-read at runtime
+/// (`POST /api/management/system-definitions/reload`) without a restart: an
+/// operator drops a corrected YAML on the box, reloads, and the change shows up
+/// as a pending system update. The config and data dir travel with the resolver
+/// because both the reload and any registry fetch need to know where the overlay
+/// lives.
+pub struct SystemDefinitionsState {
+    /// Currently resolved layers.
+    pub resolver: Arc<raisin_core::definitions::DefinitionResolver>,
+    /// The `[system_definitions]` section this resolver was built from.
+    pub config: raisin_core::definitions::SystemDefinitionsConfig,
+    /// Server data directory, for resolving a defaulted overlay path.
+    pub data_dir: String,
+}
+
+impl Default for SystemDefinitionsState {
+    fn default() -> Self {
+        Self {
+            resolver: Arc::new(raisin_core::definitions::DefinitionResolver::embedded_only()),
+            config: raisin_core::definitions::SystemDefinitionsConfig::default(),
+            data_dir: String::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) storage: Arc<Store>,
@@ -106,6 +133,9 @@ pub struct AppState {
     /// short-lived authorization codes in-process via the default store.
     #[cfg(feature = "storage-rocksdb")]
     pub(crate) oauth_server: Arc<raisin_auth::authserver::AuthorizationServer<OAuthStore>>,
+    /// Live system-definition stack. Defaults to embedded-only; the server
+    /// replaces it at startup via [`AppState::configure_system_definitions`].
+    pub(crate) definitions: Arc<tokio::sync::RwLock<SystemDefinitionsState>>,
 }
 
 /// The store backing the OAuth authorization server.
@@ -126,6 +156,61 @@ impl AppState {
     /// Get access to the underlying storage for NodeType operations
     pub fn storage(&self) -> &Arc<Store> {
         &self.storage
+    }
+
+    /// Install the server's configured system-definition stack.
+    ///
+    /// Called once at startup, after the router is built: the state is shared
+    /// by `Arc`, so replacing the contents here is visible to every handler.
+    pub async fn configure_system_definitions(
+        &self,
+        config: raisin_core::definitions::SystemDefinitionsConfig,
+        data_dir: impl Into<String>,
+    ) {
+        let data_dir = data_dir.into();
+        let resolver = Arc::new(raisin_core::definitions::build_and_install_resolver(
+            &config, &data_dir,
+        ));
+        let mut guard = self.definitions.write().await;
+        *guard = SystemDefinitionsState {
+            resolver,
+            config,
+            data_dir,
+        };
+    }
+
+    /// The currently resolved definition stack.
+    pub async fn definitions(&self) -> Arc<raisin_core::definitions::DefinitionResolver> {
+        self.definitions.read().await.resolver.clone()
+    }
+
+    /// The `[system_definitions]` config and the resolved overlay directory.
+    pub async fn system_definitions_config(
+        &self,
+    ) -> (
+        raisin_core::definitions::SystemDefinitionsConfig,
+        std::path::PathBuf,
+    ) {
+        let guard = self.definitions.read().await;
+        let dir = guard.config.resolved_overlay_dir(&guard.data_dir);
+        (guard.config.clone(), dir)
+    }
+
+    /// Re-read the overlay directory and rebuild the definition stack.
+    ///
+    /// This is the "no restart" half of out-of-band updates: files land on the
+    /// box, this rebuilds the resolver, and the changed definitions surface as
+    /// pending system updates. It does NOT write anything into any repository.
+    pub async fn reload_system_definitions(
+        &self,
+    ) -> Arc<raisin_core::definitions::DefinitionResolver> {
+        let mut guard = self.definitions.write().await;
+        let resolver = Arc::new(raisin_core::definitions::build_and_install_resolver(
+            &guard.config,
+            &guard.data_dir,
+        ));
+        guard.resolver = resolver.clone();
+        resolver
     }
 
     /// Get access to the underlying RocksDB instance (RocksDB only)
@@ -381,6 +466,7 @@ pub fn router_with_bin_and_audit(
         lock_manager,
         #[cfg(feature = "storage-rocksdb")]
         oauth_server,
+        definitions: Arc::new(tokio::sync::RwLock::new(SystemDefinitionsState::default())),
     };
 
     // NOTE: Global CorsLayer has been removed in favor of unified_cors_middleware

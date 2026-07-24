@@ -65,6 +65,7 @@ pub mod services {
 }
 pub mod audit_adapter;
 pub mod audit_events;
+pub mod definitions;
 pub mod init;
 pub mod nodetype_init;
 pub mod package_init;

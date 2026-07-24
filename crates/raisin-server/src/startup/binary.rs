@@ -39,6 +39,7 @@ pub fn init_binary_storage(data_dir: &str) -> Arc<FilesystemBinaryStorage> {
 pub async fn register_builtin_package_handler<B: BinaryStorage + 'static>(
     storage: &Arc<raisin_rocksdb::RocksDBStorage>,
     bin: &Arc<B>,
+    definitions: &Arc<raisin_core::definitions::DefinitionResolver>,
 ) {
     use crate::builtin_package_init_handler;
 
@@ -51,6 +52,7 @@ pub async fn register_builtin_package_handler<B: BinaryStorage + 'static>(
             storage.job_registry().clone(),
             storage.job_data_store().clone(),
             system_update_repo,
+            definitions.clone(),
         ),
     );
 
@@ -62,48 +64,88 @@ pub async fn register_builtin_package_handler<B: BinaryStorage + 'static>(
     tracing::info!("Builtin package init handler registered");
 }
 
-/// Re-sync embedded global (`raisin:*`) NodeTypes into every EXISTING
-/// repository so a schema change shipped in a new server binary propagates on
-/// upgrade — not only to repositories created after the change.
+/// Re-sync built-in (`raisin:*`) NodeTypes and Workspaces into every EXISTING
+/// repository so a schema change reaches repos created before the change.
 ///
-/// The `RepositoryCreated` handler registers global NodeTypes for NEW repos,
-/// but nothing re-registered them for repos created earlier. That meant a
-/// version-bumped global NodeType (e.g. `raisin:InboxTask` relaxing a required
-/// field so standalone `raisin.tasks.create` tasks validate) never reached an
-/// existing repository, and the old, stricter schema kept rejecting writes.
+/// The `RepositoryCreated` handler registers built-ins for NEW repos, but
+/// nothing re-registered them for repos created earlier, so an updated
+/// definition never reached an existing repository and the old, stricter schema
+/// kept rejecting writes.
 ///
-/// `init_repository_nodetypes` is version-gated: it only writes when the
-/// embedded NodeType version is newer than the one registered in the repo. So
-/// this is a cheap, idempotent no-op on every startup unless a global NodeType
-/// version actually increased.
+/// # Content hash, not `version:`
+///
+/// This used to call the version-gated `init_repository_nodetypes`, which only
+/// wrote when the YAML's `version:` integer had been bumped. Editing a
+/// definition and forgetting that bump was a silent no-op for every existing
+/// tenant — the failure mode that cost a release cycle each time it was hit.
+/// The resync now compares **content hashes** (the same ones the system-updates
+/// view tracks), so any edit propagates. Safety comes from classification
+/// instead: breaking changes are withheld under the default
+/// `AutoApplyPolicy::NonBreaking` and surface as pending updates in the admin
+/// console. Unchanged definitions are a pure no-op, as before.
+///
+/// `definitions` is the resolved definition stack, so an overlay or
+/// registry-fetched definition rolls out through exactly this path too.
 #[cfg(feature = "storage-rocksdb")]
-pub async fn resync_global_nodetypes(storage: &Arc<raisin_rocksdb::RocksDBStorage>) {
+pub async fn resync_system_definitions(
+    storage: &Arc<raisin_rocksdb::RocksDBStorage>,
+    definitions: &raisin_core::definitions::DefinitionResolver,
+    policy: raisin_core::system_updates::AutoApplyPolicy,
+) {
+    use raisin_core::system_updates::{resync_repository_definitions, ResyncOutcome};
+
+    if policy == raisin_core::system_updates::AutoApplyPolicy::Off {
+        tracing::info!("System definition resync disabled (auto_apply = off)");
+        return;
+    }
+
     let repos = match storage.repository_management().list_repositories().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, "Global NodeType resync: failed to list repositories");
+            tracing::warn!(error = %e, "System definition resync: failed to list repositories");
             return;
         }
     };
 
+    let system_update_repo = raisin_rocksdb::SystemUpdateRepositoryImpl::new(storage.db().clone());
+    let nodetypes = definitions.nodetypes();
+    let workspaces = definitions.workspaces();
+    let mut total = ResyncOutcome::default();
+
     for repo_info in repos {
         let branch = repo_info.config.default_branch.clone();
-        if let Err(e) = raisin_core::nodetype_init::init_repository_nodetypes(
+        match resync_repository_definitions(
             storage.clone(),
+            &system_update_repo,
             &repo_info.tenant_id,
             &repo_info.repo_id,
             &branch,
+            &nodetypes,
+            &workspaces,
+            policy,
         )
         .await
         {
-            tracing::warn!(
+            Ok(outcome) => {
+                total.applied += outcome.applied;
+                total.pending += outcome.pending;
+                total.unchanged += outcome.unchanged;
+            }
+            Err(e) => tracing::warn!(
                 tenant_id = %repo_info.tenant_id,
                 repo_id = %repo_info.repo_id,
                 branch = %branch,
                 error = %e,
-                "Global NodeType resync failed for repository"
-            );
+                "System definition resync failed for repository"
+            ),
         }
     }
-    tracing::info!("Global NodeType resync complete");
+
+    tracing::info!(
+        applied = total.applied,
+        pending = total.pending,
+        unchanged = total.unchanged,
+        ?policy,
+        "System definition resync complete"
+    );
 }
