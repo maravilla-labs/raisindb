@@ -165,6 +165,78 @@ install by hand. Multiple registries are allowed and no URL is hardcoded
 anywhere in the server, so a deployment can point at a public index, a private
 mirror, or nothing at all.
 
+**Status: unexercised.** The fetch path has never run against a real index —
+`RegistryClient::fetch_entries` has one caller (the HTTP handler) and no test,
+and `unpack_rap` has never executed even in a test. The registry tests cover
+index parsing, the disabled-registry guard, and filename sanitisation only.
+Treat this path as unproven until someone stands up an index and does one
+end-to-end fetch of a real `.rap`.
+
+## Clusters: read this before enabling replication
+
+**The single-node behaviour is correct. Multi-node is NOT yet safe** — not
+because data corrupts (CRDT converges), but because the distribution model has
+three holes. None of this is live while a deployment runs one node.
+
+The intuition "one node downloads it, writes it into the repository, and
+replication installs it everywhere" is **half right**:
+
+| Layer | Replicates? |
+|---|---|
+| NodeType / Workspace definitions | **Yes** — written through storage, captured as `OpType::UpdateNodeType` / `UpdateWorkspace` |
+| The `raisin:Package` node | **Yes** — an ordinary node |
+| Package *content* installed by the job | **Yes** — ordinary nodes, so install-once-then-replicate works |
+| The `.rap` archive bytes | **No** (filesystem backend) |
+| The overlay directory | **No** — local disk on whichever node fetched |
+| The applied-hash ledger | **No** |
+
+### 1. The `.rap` bytes do not replicate
+
+`apply_package_update` stores the archive through `BinaryStorage::put_bytes`.
+With the **filesystem** backend those bytes exist only on the node that fetched
+them. The Package node replicates and points at a `resource.key`, but on every
+other node that key resolves to nothing — so a later on-demand install of an
+`auto_install: false` package fails there.
+
+Fix: run the **`s3` binary backend**, which makes the blob genuinely shared.
+
+### 2. The applied-hash ledger is node-local
+
+`SystemUpdateRepositoryImpl::set_applied`
+(`raisin-rocksdb/src/repositories/system_updates.rs`) is a raw `db.put_cf` on
+the `SYSTEM_UPDATE_HASHES` column family — no replication capture, no
+transaction. Every node keeps its own opinion of what has been applied, so on a
+cluster restart all N nodes independently resync and all N write identical
+definitions: N× replication ops at boot. Converges, but wasteful.
+
+### 3. The real hazard: silent cluster-wide revert
+
+Node A has an overlay definition and applies it; it replicates, so storage is
+correct everywhere. But B's *ledger* still records the embedded hash and B's
+resolver still serves embedded — ledger and storage now disagree on B. The next
+time B's embedded hash changes (any upgrade), B's resync compares against its
+own ledger, sees a mismatch, applies **embedded**, and replicates that over A's
+overlay version. The overlay reverts across the whole cluster, silently.
+
+This is the same clobber class as the in-process one that
+[`crate::definitions::global_resolver`] exists to prevent, reappearing between
+nodes. Nothing guards it today: the resync takes no lock, and the `inprocess`
+lock backend is single-node only regardless.
+
+### Making it safe
+
+In increasing order of effort:
+
+1. **Distribute the overlay as configuration.** Have config management push the
+   overlay directory to *every* node, so all nodes resolve identically and the
+   node-local ledger is consistent by construction. Works today with no code
+   change — but it is "config management distributes", not "one node downloads".
+2. **Replicate `SYSTEM_UPDATE_HASHES` and use the `s3` binary backend.**
+   Together these fix (1), (2) and (3) and make fetch-on-any-node correct — the
+   model most people expect.
+3. **Guard the startup resync with a cluster lock** (`raisin-locks` with the
+   `redis` backend) so exactly one node applies per cluster.
+
 ## Endpoints
 
 | Method | Path | Purpose |
