@@ -1,7 +1,11 @@
 name: raisin:Package
 description: Installable package with node types, workspaces, and content
 icon: package
-version: 1
+# v2: added `sync_policy` (commit 5bfb544). The bump is REQUIRED — init.rs only
+# re-applies a global NodeType to already-existing repos when new_version >
+# existing_version, so leaving this at 1 left pre-existing tenants on the old
+# strict schema and they 400'd package uploads carrying `sync_policy`.
+version: 2
 strict: true
 indexable: true
 index_types: [Property, Fulltext]
