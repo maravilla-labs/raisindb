@@ -52,21 +52,18 @@ fn test_nodetype_in_operation_msgpack() {
 
     println!("Original operation: {:?}", op);
 
-    // Test COMPACT format (to_vec) - this is what OpLog uses!
-    let bytes_compact = rmp_serde::to_vec(&op).expect("Compact serialize failed");
-    println!("Compact serialized {} bytes", bytes_compact.len());
-    let decoded_compact: Operation =
-        rmp_serde::from_slice(&bytes_compact).expect("Compact deserialize failed");
-    println!("Compact decoded successfully");
-
-    // Test NAMED format (to_vec_named) for comparison
+    // NAMED format (to_vec_named) is what OpLog uses (oplog/helpers.rs).
+    // The COMPACT positional format (to_vec) CANNOT round-trip NodeType:
+    // its many `skip_serializing_if` fields make the array arity variable,
+    // which misaligns positional decoding. Never switch OpLog back to
+    // to_vec without removing those attributes.
     let bytes_named = rmp_serde::to_vec_named(&op).expect("Named serialize failed");
     println!("Named serialized {} bytes", bytes_named.len());
     let decoded_named: Operation =
         rmp_serde::from_slice(&bytes_named).expect("Named deserialize failed");
     println!("Named decoded successfully");
 
-    let decoded = decoded_compact;
+    let decoded = decoded_named;
 
     // Verify
     if let OpType::UpdateNodeType { node_type, .. } = &decoded.op_type {

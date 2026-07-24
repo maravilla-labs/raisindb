@@ -67,9 +67,9 @@ async fn setup_storage() -> Result<(RocksDBStorage, TempDir)> {
 }
 
 /// Create a test node
-fn create_node(id: usize) -> Node {
+fn create_node(batch: usize, id: usize) -> Node {
     let node_id = uuid::Uuid::new_v4().to_string();
-    let name = format!("node{:06}", id);
+    let name = format!("node{}-{:06}", batch, id);
     let path = format!("/{}", name);
 
     Node {
@@ -128,7 +128,7 @@ async fn profile_put_operation() -> Result<()> {
 
         // Create nodes and time each put operation
         for i in 0..size {
-            let node = create_node(i);
+            let node = create_node(size, i);
 
             let start = Instant::now();
             nodes_repo

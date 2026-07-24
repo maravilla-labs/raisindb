@@ -51,13 +51,14 @@ use std::sync::Arc;
 ///
 /// ```rust,no_run
 /// use raisin_rocksdb::{RocksDBStorage, RocksDBConfig};
+/// use raisin_storage::{Storage, Transaction};
+/// use raisin_storage::transactional::TransactionalContext;
 /// use std::sync::Arc;
 ///
 /// # async fn example() -> raisin_error::Result<()> {
 /// // Create storage with production configuration
-/// let config = RocksDBConfig::production()
-///     .with_path("/var/lib/raisindb")
-///     .with_background_jobs_enabled(true);
+/// let mut config = RocksDBConfig::production().with_path("/var/lib/raisindb");
+/// config.background_jobs_enabled = true;
 ///
 /// let storage = Arc::new(RocksDBStorage::with_config(config)?);
 ///
@@ -66,10 +67,12 @@ use std::sync::Arc;
 ///     // ... initialize engines and call init_job_system()
 /// }
 ///
-/// // Use storage for operations
-/// let mut tx = storage.begin().await?;
+/// // Use storage for operations. Commit requires an auth context
+/// // (authorship stamping); use AuthContext::system() for system work.
+/// let tx = storage.begin().await?;
+/// tx.set_auth_context(raisin_models::auth::AuthContext::system())?;
 /// // ... perform operations
-/// tx.commit().await?;
+/// Transaction::commit(&tx).await?;
 /// # Ok(())
 /// # }
 /// ```

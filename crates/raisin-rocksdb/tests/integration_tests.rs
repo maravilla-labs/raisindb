@@ -48,9 +48,10 @@ use raisin_rocksdb::{JobDataStore, RocksDBStorage, UnifiedJobEventHandler};
 use raisin_storage::scope::{BranchScope, RepoScope, StorageScope};
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{
-    BranchRepository, CommitMetadata, CreateNodeOptions, DeleteNodeOptions, ListOptions,
-    NodeRepository, NodeTypeRepository, RegistryRepository, RepositoryManagementRepository,
-    RevisionRepository, Storage, UpdateNodeOptions, WorkspaceRepository,
+    ArchetypeRepository, BranchRepository, CommitMetadata, CreateNodeOptions, DeleteNodeOptions,
+    ListOptions, NodeRepository, NodeTypeRepository, RegistryRepository,
+    RepositoryManagementRepository, RevisionRepository, Storage, UpdateNodeOptions,
+    WorkspaceRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -2206,7 +2207,9 @@ mod transaction {
         let tx = storage.begin().await?;
 
         // Transactions are currently implemented with direct writes
-        // This test validates the transaction can be created and committed
+        // This test validates the transaction can be created and committed.
+        // Commit now REQUIRES an auth context (authorship stamping).
+        tx.set_auth_context(raisin_models::auth::AuthContext::system())?;
         raisin_storage::Transaction::commit(&tx).await?;
 
         Ok(())
@@ -2308,7 +2311,8 @@ mod transaction {
             constants::REPO.to_string(),
             constants::BRANCH.to_string(),
             constants::WORKSPACE.to_string(),
-        );
+        )
+        .with_auth(raisin_models::auth::AuthContext::system());
 
         eprintln!("→ Creating transaction via nodes_svc.transaction()...");
         let mut tx = nodes_svc.transaction();
@@ -8803,6 +8807,23 @@ async fn test_initial_structure_with_transaction_api() -> Result<()> {
     let test_storage = TestStorage::new().await?;
     let storage = test_storage.storage();
 
+    // Seed the archetypes referenced by the initial structure. In a real
+    // server these are built-in definitions loaded at startup; the raw test
+    // storage has no seeded archetypes.
+    for name in ["text/markdown", "text/plain"] {
+        let arch: raisin_models::nodes::types::archetype::Archetype =
+            serde_json::from_value(serde_json::json!({ "name": name }))
+                .expect("archetype should deserialize from name-only JSON");
+        storage
+            .archetypes()
+            .create(
+                BranchScope::new(constants::TENANT, constants::REPO, constants::BRANCH),
+                arch,
+                CommitMetadata::system("seed archetype"),
+            )
+            .await?;
+    }
+
     // Create child NodeType
     let file_type = NodeType {
         id: Some("test:File".to_string()),
@@ -8908,7 +8929,8 @@ async fn test_initial_structure_with_transaction_api() -> Result<()> {
         constants::REPO.to_string(),
         constants::BRANCH.to_string(),
         constants::WORKSPACE.to_string(),
-    );
+    )
+    .with_auth(raisin_models::auth::AuthContext::system());
 
     // Create folder node using Transaction API
     let folder = raisin_models::nodes::Node {
@@ -8954,10 +8976,10 @@ async fn test_initial_structure_with_transaction_api() -> Result<()> {
         "Should auto-create 2 children from initial_structure via Transaction API"
     );
 
-    // Names are sanitized (dots removed)
+    // Names are sanitized (lowercased; dots are preserved)
     let has_readme = children
         .iter()
-        .any(|c| c.name == "readmemd" && c.node_type == "test:File");
+        .any(|c| c.name == "readme.md" && c.node_type == "test:File");
     let has_license = children
         .iter()
         .any(|c| c.name == "license" && c.node_type == "test:File");

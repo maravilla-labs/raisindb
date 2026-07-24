@@ -105,8 +105,8 @@ async fn profile_node_operations() -> Result<()> {
 
             let node = Node {
                 id: uuid::Uuid::new_v4().to_string(),
-                path: format!("/profile{:05}", i),
-                name: format!("profile{:05}", i),
+                path: format!("/profile{}-{:05}", node_count, i),
+                name: format!("profile{}-{:05}", node_count, i),
                 parent: Some("/".to_string()),
                 node_type: "raisin:Page".to_string(),
                 properties: HashMap::new(),

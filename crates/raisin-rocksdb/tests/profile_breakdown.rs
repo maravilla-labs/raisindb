@@ -70,8 +70,8 @@ async fn profile_operation_breakdown() -> Result<()> {
             for i in 0..test_at {
                 let node = Node {
                     id: uuid::Uuid::new_v4().to_string(),
-                    path: format!("/bench{:05}", i),
-                    name: format!("bench{:05}", i),
+                    path: format!("/bench{}-{:05}", test_at, i),
+                    name: format!("bench{}-{:05}", test_at, i),
                     parent: Some("/".to_string()),
                     node_type: "raisin:Page".to_string(),
                     properties: HashMap::new(),
@@ -106,7 +106,7 @@ async fn profile_operation_breakdown() -> Result<()> {
             let start = Instant::now();
             let node = Node {
                 id: uuid::Uuid::new_v4().to_string(),
-                path: format!("/measure{:05}", test_at),
+                path: format!("/measure{}-{}", count, test_at),
                 name: format!("measure{:05}", test_at),
                 parent: Some("/".to_string()),
                 node_type: "raisin:Page".to_string(),
