@@ -17,6 +17,8 @@
 
 mod crud;
 mod deletion;
+
+pub(crate) use deletion::collect_incoming_relations;
 mod global;
 pub mod helpers;
 mod packed;

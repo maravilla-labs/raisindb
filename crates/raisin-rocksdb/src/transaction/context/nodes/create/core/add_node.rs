@@ -56,18 +56,9 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         normalized_node.created_by = Some(actor);
     }
 
-    // Stamp timestamps for this CREATE at the same layer as authorship, so
-    // EVERY write path (SQL bulk, functions, direct repo writes) produces
-    // created_at/updated_at. Missing created_at cascades: no __created_at
-    // property-index entry → `ORDER BY created_at LIMIT k` (PropertyOrderScan)
-    // silently returns nothing, and the row's created_at reads as NULL.
-    let now = chrono::Utc::now();
-    if normalized_node.created_at.is_none() {
-        normalized_node.created_at = Some(now);
-    }
-    if normalized_node.updated_at.is_none() {
-        normalized_node.updated_at = Some(now);
-    }
+    // Stamp timestamps for this CREATE at the same layer as authorship (see
+    // Node::ensure_write_timestamps for why every write path must do this).
+    normalized_node.ensure_write_timestamps();
 
     // 3a. Check CREATE permission
     rls::check_create_permission(tx, &normalized_node, workspace).await?;

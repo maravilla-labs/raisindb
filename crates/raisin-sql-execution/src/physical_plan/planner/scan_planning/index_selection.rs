@@ -56,13 +56,12 @@ impl PhysicalPlanner {
             .iter()
             .any(|(pred, _)| matches!(pred, CanonicalPredicate::SpatialDWithin { .. }));
 
-        // REFERENCES beats DESCENDANT_OF: the reverse reference index returns
-        // only the (few) referrers, and the residual DESCENDANT_OF filter needs
-        // just `path` (always materialized). The other way around leaves
-        // REFERENCES as a row-eval post-filter that depends on `properties`
-        // being projected and on the stored reference path being current —
-        // both silent zero-row traps (`REFERENCES(...) AND DESCENDANT_OF(...)`
-        // used to return nothing).
+        // REFERENCES beats DESCENDANT_OF on cost: the reverse reference index
+        // returns only the (few) referrers, and the residual DESCENDANT_OF
+        // filter needs just `path`. The reverse order would row-eval
+        // REFERENCES against the STORED reference path, which can be stale
+        // after a target move — the index is keyed by the target's stable id
+        // and doesn't have that problem.
         if has_references {
             tracing::debug!(
                 "Prioritizing REFERENCES scan (uses reverse reference index for efficient lookup)"

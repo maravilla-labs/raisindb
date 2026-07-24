@@ -261,76 +261,36 @@ impl PhysicalPlanner {
         }
     }
 
-    /// Check if an expression contains a PATH_STARTS_WITH function call
+    /// Check if an expression contains a call to the named function
+    /// (case-insensitive), recursing through function args and operators.
+    pub(super) fn contains_function(expr: &TypedExpr, fn_name: &str) -> bool {
+        match &expr.expr {
+            Expr::Function { name, args, .. } => {
+                name.eq_ignore_ascii_case(fn_name)
+                    || args.iter().any(|a| Self::contains_function(a, fn_name))
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::contains_function(left, fn_name) || Self::contains_function(right, fn_name)
+            }
+            Expr::UnaryOp { expr, .. } => Self::contains_function(expr, fn_name),
+            _ => false,
+        }
+    }
+
     pub(super) fn contains_path_starts_with(expr: &TypedExpr) -> bool {
-        match &expr.expr {
-            Expr::Function { name, args, .. } => {
-                if name.to_uppercase() == "PATH_STARTS_WITH" {
-                    return true;
-                }
-                // Recursively check arguments
-                args.iter().any(Self::contains_path_starts_with)
-            }
-            Expr::BinaryOp { left, right, .. } => {
-                Self::contains_path_starts_with(left) || Self::contains_path_starts_with(right)
-            }
-            Expr::UnaryOp { expr, .. } => Self::contains_path_starts_with(expr),
-            _ => false,
-        }
+        Self::contains_function(expr, "PATH_STARTS_WITH")
     }
 
-    /// Check if an expression contains a CHILD_OF function call
     pub(super) fn contains_child_of(expr: &TypedExpr) -> bool {
-        match &expr.expr {
-            Expr::Function { name, args, .. } => {
-                if name.to_uppercase() == "CHILD_OF" {
-                    return true;
-                }
-                // Recursively check arguments
-                args.iter().any(Self::contains_child_of)
-            }
-            Expr::BinaryOp { left, right, .. } => {
-                Self::contains_child_of(left) || Self::contains_child_of(right)
-            }
-            Expr::UnaryOp { expr, .. } => Self::contains_child_of(expr),
-            _ => false,
-        }
+        Self::contains_function(expr, "CHILD_OF")
     }
 
-    /// Check if an expression contains a DESCENDANT_OF function call
     pub(super) fn contains_descendant_of(expr: &TypedExpr) -> bool {
-        match &expr.expr {
-            Expr::Function { name, args, .. } => {
-                if name.to_uppercase() == "DESCENDANT_OF" {
-                    return true;
-                }
-                // Recursively check arguments
-                args.iter().any(Self::contains_descendant_of)
-            }
-            Expr::BinaryOp { left, right, .. } => {
-                Self::contains_descendant_of(left) || Self::contains_descendant_of(right)
-            }
-            Expr::UnaryOp { expr, .. } => Self::contains_descendant_of(expr),
-            _ => false,
-        }
+        Self::contains_function(expr, "DESCENDANT_OF")
     }
 
-    /// Check if an expression contains a REFERENCES function call
     pub(super) fn contains_references(expr: &TypedExpr) -> bool {
-        match &expr.expr {
-            Expr::Function { name, args, .. } => {
-                if name.to_uppercase() == "REFERENCES" {
-                    return true;
-                }
-                // Recursively check arguments
-                args.iter().any(Self::contains_references)
-            }
-            Expr::BinaryOp { left, right, .. } => {
-                Self::contains_references(left) || Self::contains_references(right)
-            }
-            Expr::UnaryOp { expr, .. } => Self::contains_references(expr),
-            _ => false,
-        }
+        Self::contains_function(expr, "REFERENCES")
     }
 
     /// Estimate filter selectivity for scan selection.

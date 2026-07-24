@@ -428,15 +428,14 @@ impl NodeRepositoryImpl {
         let incoming_relations =
             self.get_incoming_relations(tenant_id, repo_id, branch, workspace, id)?;
 
-        for (source_node_id, relation_type, source_workspace) in incoming_relations.iter().cloned()
-        {
+        for (source_node_id, relation_type, source_workspace) in &incoming_relations {
             let fwd_key = keys::relation_forward_key_versioned(
                 tenant_id,
                 repo_id,
                 branch,
-                &source_workspace,
-                &source_node_id,
-                &relation_type,
+                source_workspace,
+                source_node_id,
+                relation_type,
                 revision,
                 id,
             );
@@ -448,58 +447,30 @@ impl NodeRepositoryImpl {
                 branch,
                 workspace,
                 id,
-                &relation_type,
+                relation_type,
                 revision,
-                &source_node_id,
+                source_node_id,
             );
             batch.put_cf(cf_relation, rev_key, TOMBSTONE);
         }
 
-        // ALSO clear the PACKED adjacency lists (new format). Reads prefer the
-        // packed list over the legacy per-edge keys, so tombstoning only the
-        // legacy keys left deleted nodes with dangling graph edges (NEIGHBORS /
-        // GRAPH_TABLE kept returning them).
-        use crate::repositories::relations::helpers as rel_helpers;
-
-        // Outgoing: write an empty adjacency list for the deleted node at the
-        // delete revision (older revisions stay intact for MVCC reads).
-        let empty = rel_helpers::serialize_compact_relations(&[])?;
-        let adj_key =
-            keys::node_adjacency_key_versioned(tenant_id, repo_id, branch, workspace, id, revision);
-        batch.put_cf(cf_relation, adj_key, empty);
-
-        // Incoming: rewrite each source node's packed list without edges that
-        // target the deleted node. Dedupe sources (a source may have several
-        // relation types pointing here).
-        let mut seen_sources = std::collections::HashSet::new();
-        for (source_node_id, _relation_type, source_workspace) in &incoming_relations {
-            if !seen_sources.insert((source_workspace.clone(), source_node_id.clone())) {
-                continue;
-            }
-            if let Some(mut packed) = rel_helpers::read_packed_relations_at(
-                &self.db,
-                revision,
-                tenant_id,
-                repo_id,
-                branch,
-                source_workspace,
-                source_node_id,
-            )? {
-                let before = packed.len();
-                packed.retain(|r| !(r.target_id == id && r.target_workspace == workspace));
-                if packed.len() != before {
-                    let bytes = rel_helpers::serialize_compact_relations(&packed)?;
-                    let key = keys::node_adjacency_key_versioned(
-                        tenant_id,
-                        repo_id,
-                        branch,
-                        source_workspace,
-                        source_node_id,
-                        revision,
-                    );
-                    batch.put_cf(cf_relation, key, bytes);
-                }
-            }
+        // ALSO clear the PACKED adjacency lists (see
+        // relations::helpers::packed_adjacency_cleanup_puts) — same batch, so
+        // the packed rewrite stays atomic with the tombstones above.
+        let puts = crate::repositories::packed_adjacency_cleanup_puts(
+            &self.db,
+            revision,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            id,
+            incoming_relations
+                .iter()
+                .map(|(src_id, _, src_ws)| (src_ws.clone(), src_id.clone())),
+        )?;
+        for (key, value) in puts {
+            batch.put_cf(cf_relation, key, value);
         }
 
         Ok(())

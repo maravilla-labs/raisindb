@@ -263,6 +263,22 @@ impl Default for Node {
 }
 
 impl Node {
+    /// Backstop `created_at`/`updated_at` before a write. Every node MUST
+    /// carry both regardless of write path: a missing `created_at` cascades
+    /// into a missing `__created_at` index entry, making `ORDER BY created_at
+    /// LIMIT k` silently return nothing. Called by the low-level write paths
+    /// alongside authorship stamping — if you add a new low-level write path,
+    /// call this there too.
+    pub fn ensure_write_timestamps(&mut self) {
+        let now = chrono::Utc::now();
+        if self.created_at.is_none() {
+            self.created_at = Some(now);
+        }
+        if self.updated_at.is_none() {
+            self.updated_at = Some(now);
+        }
+    }
+
     /// Get the full parent path derived from this node's path
     ///
     /// This derives the parent's full path by extracting it from the node's path.

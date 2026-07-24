@@ -227,7 +227,7 @@ impl NodeRepositoryImpl {
         let iter = self.db.prefix_iterator_cf(cf, prefix);
 
         let mut relations = Vec::new();
-        let mut seen: HashSet<(String, String, String)> = HashSet::new(); // (source, type, workspace)
+        let mut seen: HashSet<(String, String)> = HashSet::new(); // (source, type)
 
         for item in iter {
             let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
@@ -243,33 +243,27 @@ impl NodeRepositoryImpl {
             if parts.len() >= 9 {
                 let relation_type = String::from_utf8_lossy(parts[6]).to_string();
                 let source_node_id = String::from_utf8_lossy(parts[8]).to_string();
+
+                // Keys are sorted by ~revision (newest first): keep only the
+                // first occurrence per (source, type). Marking seen BEFORE the
+                // tombstone check ensures a newest tombstone suppresses older
+                // live versions. (Tombstone values carry no source workspace,
+                // so the workspace can't be part of the dedupe key.)
+                if !seen.insert((source_node_id.clone(), relation_type.clone())) {
+                    continue;
+                }
+                if is_tombstone(&value) {
+                    continue;
+                }
+
                 // The key's workspace segment is the TARGET's workspace; the
                 // SOURCE workspace lives in the reverse value (a RelationRef
-                // written from the source's perspective). Fall back to the
-                // key segment for legacy tombstoned entries with no value.
+                // written from the source's perspective).
                 let source_workspace = crate::repositories::deserialize_relation_ref(&value)
                     .map(|r| r.workspace)
                     .unwrap_or_else(|_| String::from_utf8_lossy(parts[3]).to_string());
 
-                // Since keys are sorted by ~revision (newest first), we only
-                // want the first occurrence. Dedupe on (source, type) WITHOUT
-                // the workspace: tombstone values carry no source workspace
-                // (they fall back to the key's target-workspace segment), so a
-                // workspace-qualified triple would let a cross-workspace
-                // tombstone fail to suppress the older live entry.
-                let triple_key = (source_node_id.clone(), relation_type.clone(), String::new());
-                if !seen.contains(&triple_key) {
-                    // Mark as seen BEFORE checking tombstone - this ensures we don't
-                    // return older versions if the latest is a tombstone
-                    seen.insert(triple_key);
-
-                    // Check if this is a tombstone (deleted relation)
-                    if is_tombstone(&value) {
-                        continue;
-                    }
-
-                    relations.push((source_node_id, relation_type, source_workspace));
-                }
+                relations.push((source_node_id, relation_type, source_workspace));
             }
         }
 

@@ -116,6 +116,78 @@ pub(crate) fn read_packed_relations_at(
     Ok(None)
 }
 
+/// Build the RELATION_INDEX puts that clear a deleted node's PACKED adjacency
+/// data at `revision` (older revisions stay intact for MVCC reads).
+///
+/// Reads prefer the packed list over the legacy per-edge keys, so tombstoning
+/// only the legacy keys leaves deleted nodes with dangling graph edges
+/// (NEIGHBORS / GRAPH_TABLE kept returning them). This is the single home for
+/// that cleanup — every delete path applies these puts through its own
+/// batch/write so the packed rewrite stays atomic with its tombstones.
+///
+/// Produces:
+/// - an EMPTY packed list for the deleted node (only when a non-empty packed
+///   list exists — relation-less deletes don't grow the CF), and
+/// - a rewritten packed list for each `(source_workspace, source_id)` whose
+///   list contains an edge targeting the deleted node (sources deduped here).
+pub(crate) fn packed_adjacency_cleanup_puts(
+    db: &DB,
+    revision: &HLC,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    node_id: &str,
+    incoming_sources: impl IntoIterator<Item = (String, String)>,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut puts = Vec::new();
+
+    // Outgoing: empty adjacency list for the deleted node.
+    if let Some(current) =
+        read_packed_relations_at(db, revision, tenant_id, repo_id, branch, workspace, node_id)?
+    {
+        if !current.is_empty() {
+            let key = crate::keys::node_adjacency_key_versioned(
+                tenant_id, repo_id, branch, workspace, node_id, revision,
+            );
+            puts.push((key, serialize_compact_relations(&[])?));
+        }
+    }
+
+    // Incoming: rewrite each source's packed list without edges to this node.
+    let mut seen = HashSet::new();
+    for (source_workspace, source_id) in incoming_sources {
+        if !seen.insert((source_workspace.clone(), source_id.clone())) {
+            continue;
+        }
+        if let Some(mut packed) = read_packed_relations_at(
+            db,
+            revision,
+            tenant_id,
+            repo_id,
+            branch,
+            &source_workspace,
+            &source_id,
+        )? {
+            let before = packed.len();
+            packed.retain(|r| !(r.target_id == node_id && r.target_workspace == workspace));
+            if packed.len() != before {
+                let key = crate::keys::node_adjacency_key_versioned(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    &source_workspace,
+                    &source_id,
+                    revision,
+                );
+                puts.push((key, serialize_compact_relations(&packed)?));
+            }
+        }
+    }
+
+    Ok(puts)
+}
+
 /// Get the RELATION_INDEX column family handle
 pub fn get_relation_cf(db: &DB) -> Result<&ColumnFamily> {
     crate::cf_handle(db, crate::cf::RELATION_INDEX)

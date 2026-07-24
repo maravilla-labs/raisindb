@@ -70,21 +70,13 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         }
     } else {
         // CREATE: stamp both authorship fields, and backstop the timestamps —
-        // not every create path carries them from build time (SQL bulk,
-        // functions, direct repo writes), and a missing created_at cascades
-        // into a missing __created_at index entry → `ORDER BY created_at
-        // LIMIT k` silently returns nothing.
+        // not every create path carries them from build time (see
+        // Node::ensure_write_timestamps).
         normalized_node.updated_by = Some(actor.clone());
         if normalized_node.created_by.is_none() {
             normalized_node.created_by = Some(actor);
         }
-        let now = chrono::Utc::now();
-        if normalized_node.created_at.is_none() {
-            normalized_node.created_at = Some(now);
-        }
-        if normalized_node.updated_at.is_none() {
-            normalized_node.updated_at = Some(now);
-        }
+        normalized_node.ensure_write_timestamps();
     }
 
     // 4a. Check RLS permission

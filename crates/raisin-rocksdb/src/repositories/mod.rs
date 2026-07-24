@@ -70,10 +70,11 @@ pub(crate) use nodes::hash_property_value;
 pub(crate) use nodes::StorageNode;
 
 // Re-export relation helpers for job handlers
+pub(crate) use relations::collect_incoming_relations;
 pub(crate) use relations::helpers::{
     deserialize_full_relation, deserialize_relation_ref, get_relation_cf,
-    is_tombstone as is_relation_tombstone, read_packed_relations_at, serialize_compact_relations,
-    TOMBSTONE as RELATION_TOMBSTONE,
+    is_tombstone as is_relation_tombstone, packed_adjacency_cleanup_puts, read_packed_relations_at,
+    serialize_compact_relations, TOMBSTONE as RELATION_TOMBSTONE,
 };
 
 // Re-export node helpers for job handlers

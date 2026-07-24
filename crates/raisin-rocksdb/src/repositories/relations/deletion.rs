@@ -66,50 +66,28 @@ pub(super) async fn remove_all_relations_for_node(
         )?;
     }
 
-    // Step 3: Clear the PACKED adjacency lists (new format). Reads prefer the
-    // packed list, so legacy tombstones alone leave the edges visible.
-    let cf_relation = get_relation_cf(db)?;
-
-    // Outgoing: empty adjacency list for this node at the new revision.
-    let empty = super::helpers::serialize_compact_relations(&[])?;
-    let adj_key = crate::keys::node_adjacency_key_versioned(
-        tenant_id, repo_id, branch, workspace, node_id, revision,
-    );
-    db.put_cf(cf_relation, adj_key, empty)
-        .map_err(|e| Error::storage(format!("Failed to clear packed relations: {}", e)))?;
-
-    // Incoming: rewrite each source's packed list without edges to this node.
-    let mut seen_sources = std::collections::HashSet::new();
-    for (_relation_type, source_workspace, source_id) in &incoming_to_remove {
-        if !seen_sources.insert((source_workspace.clone(), source_id.clone())) {
-            continue;
+    // Step 3: Clear the PACKED adjacency lists (see
+    // helpers::packed_adjacency_cleanup_puts) in one atomic batch.
+    let puts = super::helpers::packed_adjacency_cleanup_puts(
+        db,
+        revision,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        node_id,
+        incoming_to_remove
+            .iter()
+            .map(|(_, ws, id)| (ws.clone(), id.clone())),
+    )?;
+    if !puts.is_empty() {
+        let cf_relation = get_relation_cf(db)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        for (key, value) in puts {
+            batch.put_cf(cf_relation, key, value);
         }
-        if let Some(mut packed) = super::helpers::read_packed_relations_at(
-            db,
-            revision,
-            tenant_id,
-            repo_id,
-            branch,
-            source_workspace,
-            source_id,
-        )? {
-            let before = packed.len();
-            packed.retain(|r| !(r.target_id == node_id && r.target_workspace == workspace));
-            if packed.len() != before {
-                let bytes = super::helpers::serialize_compact_relations(&packed)?;
-                let key = crate::keys::node_adjacency_key_versioned(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    source_workspace,
-                    source_id,
-                    revision,
-                );
-                db.put_cf(cf_relation, key, bytes).map_err(|e| {
-                    Error::storage(format!("Failed to rewrite packed relations: {}", e))
-                })?;
-            }
-        }
+        db.write(batch)
+            .map_err(|e| Error::storage(format!("Failed to clear packed relations: {}", e)))?;
     }
 
     Ok(())
@@ -160,7 +138,7 @@ fn collect_outgoing_relations(
 }
 
 /// Collect information about all incoming relations to a node
-fn collect_incoming_relations(
+pub(crate) fn collect_incoming_relations(
     db: &DB,
     tenant_id: &str,
     repo_id: &str,
