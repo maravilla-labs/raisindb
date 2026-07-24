@@ -34,6 +34,19 @@ impl NodeRepositoryImpl {
         // CRITICAL: has_children is a computed field and should NEVER be stored
         node.has_children = None;
 
+        // Every node MUST carry created_at/updated_at regardless of write path
+        // (mirrors the transaction-layer stamping in add_node/put_node). A
+        // missing created_at cascades: no __created_at index entry → `ORDER BY
+        // created_at LIMIT k` silently returns nothing, and the column reads
+        // NULL.
+        let now = chrono::Utc::now();
+        if node.created_at.is_none() {
+            node.created_at = Some(now);
+        }
+        if node.updated_at.is_none() {
+            node.updated_at = Some(now);
+        }
+
         // VALIDATION 1: Check workspace allowed_node_types
         let is_root_node = node.parent_path().map(|p| p == "/").unwrap_or(false);
         self.validate_workspace_allows_node_type(
