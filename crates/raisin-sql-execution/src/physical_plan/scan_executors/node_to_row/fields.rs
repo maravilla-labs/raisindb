@@ -146,13 +146,14 @@ pub(super) fn insert_optional_fields(
     }
 }
 
-/// Insert computed fields (properties, depth, __workspace, locale).
+/// Insert computed fields (properties, depth, __workspace, locale, ordering).
 pub(super) fn insert_computed_fields(
     row: &mut Row,
     node: &Node,
     qualifier: &str,
     workspace: &str,
     effective_locale: &str,
+    order_ctx: Option<&super::OrderContext<'_>>,
     should_include: &dyn Fn(&str) -> bool,
 ) {
     use raisin_models::nodes::properties::PropertyValue;
@@ -187,6 +188,40 @@ pub(super) fn insert_computed_fields(
         row.insert(
             format!("{}.locale", qualifier),
             PropertyValue::String(effective_locale.to_string()),
+        );
+    }
+
+    // Virtual column: __order — the node's editorial position among its siblings.
+    //
+    // Prefer the label the scan already read out of the ordering index: it is
+    // authoritative and free (it was part of the scanned key). Fall back to the
+    // node record's stored `order_key`, which every write path keeps in step with
+    // the index, so scans not driven by the ordering index still report it.
+    if should_include("__order") {
+        let label = order_ctx
+            .and_then(|ctx| ctx.order_label)
+            .unwrap_or(node.order_key.as_str());
+        row.insert(
+            format!("{}.__order", qualifier),
+            if label.is_empty() {
+                PropertyValue::Null
+            } else {
+                PropertyValue::String(label.to_string())
+            },
+        );
+    }
+
+    // Virtual column: __tree_order — editorial order across a whole subtree.
+    //
+    // Only a tree traversal knows a node's ancestor labels, so this is NULL on
+    // every other scan rather than being guessed at.
+    if should_include("__tree_order") {
+        row.insert(
+            format!("{}.__tree_order", qualifier),
+            match order_ctx.and_then(|ctx| ctx.tree_order) {
+                Some(path) if !path.is_empty() => PropertyValue::String(path.to_string()),
+                _ => PropertyValue::Null,
+            },
         );
     }
 }

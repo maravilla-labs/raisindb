@@ -32,11 +32,20 @@ where
     let ctx = extract_context(&request)?;
     let node_service = build_node_service(state, connection_state, &ctx);
 
-    // Parse cursor if provided (it's JSON-serialized PageCursor)
-    let cursor: Option<raisin_models::tree::PageCursor> = payload
-        .cursor
-        .as_ref()
-        .and_then(|c| serde_json::from_str(c).ok());
+    // Parse cursor if provided (it's a JSON-serialized PageCursor).
+    //
+    // A malformed cursor is an error, not "no cursor": silently falling back to
+    // the first page makes a client that mangled its cursor quietly re-read rows
+    // it already had, instead of learning something is wrong.
+    let cursor: Option<raisin_models::tree::PageCursor> = match payload.cursor.as_deref() {
+        Some(raw) => Some(serde_json::from_str(raw).map_err(|e| {
+            WsError::InvalidRequest(format!(
+                "Invalid pagination cursor: {e}. Pass the `next_cursor` from the previous \
+                 response verbatim, or omit it to start from the beginning."
+            ))
+        })?),
+        None => None,
+    };
 
     let limit = payload.limit.unwrap_or(50) as usize;
 

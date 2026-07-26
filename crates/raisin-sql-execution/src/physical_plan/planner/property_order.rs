@@ -57,6 +57,18 @@ impl PhysicalPlanner {
             }
         };
 
+        // The editorial-ordering columns have no property index behind them —
+        // their order comes from the ORDERED_CHILDREN index, which the CHILD_OF /
+        // traversal scans walk natively. Bail out so scan selection can pick one
+        // of those and claim the ordering itself.
+        if property_name == "__order" || property_name == "__tree_order" {
+            tracing::debug!(
+                "❌ PropertyOrderScan: '{}' is served by the editorial-order index, not a property index",
+                property_name
+            );
+            return Ok(None);
+        }
+
         let components = match self.extract_property_order_components(sort_input.as_ref()) {
             Some(c) => {
                 tracing::debug!("✅ PropertyOrderScan: extracted components from plan structure");
@@ -237,6 +249,12 @@ impl PhysicalPlanner {
                     "created_at" => Some(Cow::Borrowed("__created_at")),
                     "updated_at" => Some(Cow::Borrowed("__updated_at")),
                     "path" => Some(Cow::Borrowed("__path")),
+                    // Editorial ordering columns. Recognized so ORDER BY on them
+                    // reaches scan selection as a plan context, but they are NOT
+                    // property-index-backed — `try_plan_property_order` bails on
+                    // them and the editorial scans satisfy the order natively.
+                    "__order" => Some(Cow::Borrowed("__order")),
+                    "__tree_order" => Some(Cow::Borrowed("__tree_order")),
                     other if allow_unknown_columns => Some(Cow::Owned(other.to_string())),
                     _ => None,
                 }

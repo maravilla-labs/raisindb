@@ -277,7 +277,7 @@ pub(super) fn add_ordered_child(
 
         // Append HLC timestamp for causal ordering and conflict resolution
         // HLC provides total ordering across cluster with wall-clock semantics
-        let label = format!("{}::{:016x}", fractional_label, revision.as_u128());
+        let label = crate::fractional_index::format_label(&fractional_label, revision);
         (label, true)
     };
 
@@ -382,7 +382,7 @@ pub(super) fn add_ordered_child_fast(
 
     // Append HLC timestamp for causal ordering and conflict resolution
     // HLC provides total ordering across cluster with wall-clock semantics
-    let order_label = format!("{}::{:016x}", fractional_label, revision.as_u128());
+    let order_label = crate::fractional_index::format_label(&fractional_label, revision);
 
     let ordered_key = keys::ordered_child_key_versioned(
         tenant_id,

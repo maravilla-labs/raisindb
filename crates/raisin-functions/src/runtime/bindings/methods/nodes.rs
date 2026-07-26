@@ -266,6 +266,102 @@ pub fn methods() -> Vec<ApiMethodDescriptor> {
                 })
             },
         },
+        // nodes.reorderChild(workspace, parentPath, childName, position)
+        ApiMethodDescriptor {
+            internal_name: "nodes_reorderChild",
+            js_name: "reorderChild",
+            py_name: "reorder_child",
+            category: "nodes",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("parentPath", ArgType::String),
+                ArgSpec::new("childName", ArgType::String),
+                ArgSpec::new("position", ArgType::U32),
+            ],
+            return_type: ReturnType::Void,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let parent_path = parser.string()?;
+                    let child_name = parser.string()?;
+                    let position = parser.u32()?;
+                    api.node_reorder_child(&workspace, &parent_path, &child_name, position)
+                        .await?;
+                    Ok(InvokeResult::Void)
+                })
+            },
+        },
+        // nodes.moveChildBefore(workspace, parentPath, childName, beforeChildName)
+        ApiMethodDescriptor {
+            internal_name: "nodes_moveChildBefore",
+            js_name: "moveChildBefore",
+            py_name: "move_child_before",
+            category: "nodes",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("parentPath", ArgType::String),
+                ArgSpec::new("childName", ArgType::String),
+                ArgSpec::new("beforeChildName", ArgType::String),
+            ],
+            return_type: ReturnType::Void,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let parent_path = parser.string()?;
+                    let child_name = parser.string()?;
+                    let reference = parser.string()?;
+                    api.node_move_child_relative(
+                        &workspace,
+                        &parent_path,
+                        &child_name,
+                        &reference,
+                        true,
+                    )
+                    .await?;
+                    Ok(InvokeResult::Void)
+                })
+            },
+        },
+        // nodes.moveChildAfter(workspace, parentPath, childName, afterChildName)
+        ApiMethodDescriptor {
+            internal_name: "nodes_moveChildAfter",
+            js_name: "moveChildAfter",
+            py_name: "move_child_after",
+            category: "nodes",
+            args: vec![
+                ArgSpec::new("workspace", ArgType::String),
+                ArgSpec::new("parentPath", ArgType::String),
+                ArgSpec::new("childName", ArgType::String),
+                ArgSpec::new("afterChildName", ArgType::String),
+            ],
+            return_type: ReturnType::Void,
+            invoker: |api: Arc<dyn FunctionApi>,
+                      args: Vec<Value>|
+             -> BoxFuture<'static, Result<InvokeResult>> {
+                Box::pin(async move {
+                    let mut parser = ArgParser::new(&args);
+                    let workspace = parser.string()?;
+                    let parent_path = parser.string()?;
+                    let child_name = parser.string()?;
+                    let reference = parser.string()?;
+                    api.node_move_child_relative(
+                        &workspace,
+                        &parent_path,
+                        &child_name,
+                        &reference,
+                        false,
+                    )
+                    .await?;
+                    Ok(InvokeResult::Void)
+                })
+            },
+        },
         // nodes.applyChildOrder(workspace, parentPath, sourceBranch, targetBranch)
         ApiMethodDescriptor {
             internal_name: "nodes_applyChildOrder",

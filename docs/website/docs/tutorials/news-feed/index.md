@@ -122,6 +122,28 @@ This means:
 - **Reorder categories** → Just update the `sort_order` property
 - **No code changes required** for content structure changes
 
+:::tip Prefer built-in editorial ordering for drag-and-drop
+A `sort_order` property works, but you have to maintain the numbers yourself —
+inserting between `1` and `2` means renumbering. RaisinDB already tracks a
+**manual order per parent** (a fractional index), which is what the admin
+console's drag-and-drop writes to. Expose it with the `__order` column and skip
+the property entirely:
+
+```sql
+SELECT * FROM 'content'
+ WHERE CHILD_OF('/categories')
+ ORDER BY __order
+```
+
+Reordering is then one call — no renumbering, and it keyset-paginates:
+
+```ts
+await ws.nodes().reorder('/categories', 'sport', 0);   // move to the front
+```
+
+See [Editorial ordering](../../access/sql/editorial-ordering.md).
+:::
+
 All three implementations use this pattern—the layout/shell queries categories from the database on every request (or caches them appropriately).
 
 ---

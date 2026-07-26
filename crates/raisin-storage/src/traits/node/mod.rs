@@ -37,6 +37,24 @@ pub struct CrossBranchNodeChange {
     pub operation: ChangeOperation,
 }
 
+/// One entry of a parent's editorial (fractional-index) child order.
+///
+/// Returned by [`NodeRepository::list_ordered_children_page`]. The
+/// `order_label` is opaque but lexicographically sortable, and is directly
+/// usable as a keyset cursor for the next page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrderedChild {
+    /// Id of the child node.
+    pub child_id: String,
+    /// Opaque, lexicographically sortable editorial order label.
+    ///
+    /// Treat as a cursor token: pass the last row's label back as
+    /// `after_label` to fetch the next page. Do not parse or construct it.
+    pub order_label: String,
+    /// Name of the child (carried in the index entry, so no node load needed).
+    pub name: String,
+}
+
 /// Summary of a cross-branch node-set copy (see
 /// [`NodeRepository::copy_nodes_across_branches`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -317,6 +335,72 @@ pub trait NodeRepository: Send + Sync {
         max_revision: Option<&HLC>,
     ) -> impl std::future::Future<Output = Result<Vec<String>>> + Send;
 
+    /// Page through a parent's children in editorial order, with a keyset cursor.
+    ///
+    /// The editorial order index is already keyed `(parent_id, order_label)`, so
+    /// this is a native seek rather than a scan-and-slice: cost is proportional
+    /// to the page, not to the number of children.
+    ///
+    /// # Arguments
+    ///
+    /// * `after_label` - Exclusive cursor. Forward scans resume strictly after
+    ///   this label, reverse scans strictly before it. Pass the `order_label` of
+    ///   the previous page's last row; `None` starts at the beginning (or the
+    ///   end, when `descending`).
+    /// * `limit` - Maximum children to return. `None` returns all of them.
+    /// * `descending` - Walk the editorial order backwards.
+    /// * `max_revision` - MVCC bound for snapshot / time-travel reads.
+    ///
+    /// # Keyset caveat
+    ///
+    /// Editorial order is mutable. If a child is reordered from before the
+    /// cursor to after it, a later page will show it again; moved the other way,
+    /// it may be missed. That is inherent to keyset pagination over a mutable
+    /// sort key — callers that need a stable snapshot should pin `max_revision`.
+    fn list_ordered_children_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        after_label: Option<&str>,
+        limit: Option<usize>,
+        descending: bool,
+        max_revision: Option<&HLC>,
+    ) -> impl std::future::Future<Output = Result<Vec<OrderedChild>>> + Send;
+
+    /// Look up one child's current editorial order label.
+    ///
+    /// Used to materialize the order column on scans that are not themselves
+    /// driven by the editorial index. Returns `None` if the child is not present
+    /// in the parent's order index.
+    fn get_child_order_label(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        child_id: &str,
+        max_revision: Option<&HLC>,
+    ) -> impl std::future::Future<Output = Result<Option<String>>> + Send;
+
+    /// Like [`Self::list_ordered_children_page`], but returns the full nodes
+    /// paired with their editorial order labels.
+    ///
+    /// This is what query execution needs: the label materializes the `__order`
+    /// column and drives the next page's cursor, and it comes for free because it
+    /// is already part of the scanned index key.
+    ///
+    /// A child whose node cannot be loaded (concurrent delete, or a revision not
+    /// yet visible) is skipped, so a page may contain fewer rows than `limit`
+    /// without being the last page. Drive pagination from the last returned
+    /// label, never from the row count.
+    fn list_by_parent_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        after_label: Option<&str>,
+        limit: Option<usize>,
+        descending: bool,
+        options: ListOptions,
+    ) -> impl std::future::Future<Output = Result<Vec<(models::nodes::Node, String)>>> + Send;
+
     // ========================================================================
     // Path-based operations
     // ========================================================================
@@ -412,6 +496,37 @@ pub trait NodeRepository: Send + Sync {
         parent_node_id: &str,
         options: ListOptions,
     ) -> impl std::future::Future<Output = Result<Vec<models::nodes::Node>>> + Send;
+
+    /// Like [`Self::scan_descendants_ordered`], but keyset-paginated and
+    /// returning each node's `tree_order` — the subtree-wide editorial sort key.
+    ///
+    /// Traversal is pre-order depth-first (document order). Sorting the returned
+    /// `tree_order` values byte-wise reproduces exactly this order, which is what
+    /// makes one opaque string serve as both the sort key and the page cursor.
+    ///
+    /// # Arguments
+    ///
+    /// * `after_tree_order` - Resume strictly after the node with this
+    ///   `tree_order`. Pass the last row's value from the previous page; `None`
+    ///   starts at `parent_node_id` itself. Resuming costs O(depth) index seeks,
+    ///   not O(nodes already emitted).
+    /// * `limit` - Maximum nodes to return. `None` walks the whole subtree.
+    ///
+    /// # Cursor stability
+    ///
+    /// Like any keyset cursor over a mutable ordering, a node reordered across
+    /// the cursor position may be seen twice or missed. If the cursor's own node
+    /// has been deleted or moved since the cursor was issued, the walk resumes
+    /// from the still-pending siblings it had already identified rather than
+    /// guessing a position. Pin `max_revision` for a stable snapshot.
+    fn scan_descendants_ordered_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_node_id: &str,
+        after_tree_order: Option<&str>,
+        limit: Option<usize>,
+        options: ListOptions,
+    ) -> impl std::future::Future<Output = Result<Vec<(models::nodes::Node, String)>>> + Send;
 
     /// Check if a node has children
     ///

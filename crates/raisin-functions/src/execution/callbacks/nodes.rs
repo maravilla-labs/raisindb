@@ -33,8 +33,10 @@ use super::sql_generator;
 use crate::api::{
     NodeApplyChildOrderCallback, NodeCreateCallback, NodeDeleteCallback, NodeGetByIdCallback,
     NodeGetCallback, NodeGetChildrenCallback, NodeHistoryCallback, NodeMoveCallback,
-    NodeQueryCallback, NodeUpdateCallback, NodeUpdatePropertyCallback,
+    NodeMoveChildRelativeCallback, NodeQueryCallback, NodeReorderChildCallback, NodeUpdateCallback,
+    NodeUpdatePropertyCallback,
 };
+use raisin_storage::NodeRepository;
 
 // ============================================================================
 // READ OPERATIONS
@@ -398,6 +400,110 @@ where
                     None,
                 )
                 .await
+            })
+        },
+    )
+}
+
+/// The acting user for a function-initiated write, for commit attribution.
+///
+/// Ordering operations record a revision, so they are attributed like any other
+/// write. `None` for an unauthenticated context, which storage renders as
+/// `"system"`.
+fn function_actor<S, B>(ctx: &QueryContext<S, B>) -> Option<String>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    ctx.auth_context
+        .as_ref()
+        .and_then(|auth| auth.user_id.clone())
+}
+
+/// Moves a child to a 0-based position among its siblings.
+///
+/// Like `apply_child_order`, this goes straight through the storage
+/// NodeRepository rather than SQL: editorial order lives in the ordered-children
+/// index, not in a column.
+pub fn create_node_reorder_child<S, B>(
+    query_ctx: Arc<QueryContext<S, B>>,
+) -> NodeReorderChildCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    Arc::new(
+        move |workspace: String, parent_path: String, child_name: String, position: u32| {
+            let ctx = query_ctx.clone();
+            Box::pin(async move {
+                ctx.deps
+                    .storage
+                    .nodes()
+                    .reorder_child(
+                        raisin_storage::StorageScope::new(
+                            &ctx.tenant_id,
+                            &ctx.repo_id,
+                            &ctx.branch,
+                            &workspace,
+                        ),
+                        &parent_path,
+                        &child_name,
+                        position as usize,
+                        Some("Reorder child (function)"),
+                        function_actor(&ctx).as_deref(),
+                    )
+                    .await
+            })
+        },
+    )
+}
+
+/// Moves a child immediately before or after a named sibling.
+pub fn create_node_move_child_relative<S, B>(
+    query_ctx: Arc<QueryContext<S, B>>,
+) -> NodeMoveChildRelativeCallback
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    Arc::new(
+        move |workspace: String,
+              parent_path: String,
+              child_name: String,
+              reference_child_name: String,
+              before: bool| {
+            let ctx = query_ctx.clone();
+            Box::pin(async move {
+                let scope = raisin_storage::StorageScope::new(
+                    &ctx.tenant_id,
+                    &ctx.repo_id,
+                    &ctx.branch,
+                    &workspace,
+                );
+                let nodes = ctx.deps.storage.nodes();
+                if before {
+                    nodes
+                        .move_child_before(
+                            scope,
+                            &parent_path,
+                            &child_name,
+                            &reference_child_name,
+                            Some("Move child before sibling (function)"),
+                            function_actor(&ctx).as_deref(),
+                        )
+                        .await
+                } else {
+                    nodes
+                        .move_child_after(
+                            scope,
+                            &parent_path,
+                            &child_name,
+                            &reference_child_name,
+                            Some("Move child after sibling (function)"),
+                            function_actor(&ctx).as_deref(),
+                        )
+                        .await
+                }
             })
         },
     )

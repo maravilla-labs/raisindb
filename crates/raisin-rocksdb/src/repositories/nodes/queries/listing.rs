@@ -8,6 +8,7 @@
 //! - Check if node has children
 
 use super::super::helpers::is_tombstone;
+use super::super::ordering::OrderedScanStart;
 use super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
@@ -99,6 +100,51 @@ impl NodeRepositoryImpl {
         max_revision: Option<&HLC>,
         populate_has_children: bool,
     ) -> Result<Vec<Node>> {
+        Ok(self
+            .list_by_parent_paged_impl(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent,
+                None,
+                None,
+                false,
+                max_revision,
+                populate_has_children,
+            )
+            .await?
+            .into_iter()
+            .map(|(node, _label)| node)
+            .collect())
+    }
+
+    /// List children in editorial order, keyset-paginated, returning each
+    /// child's order label alongside the node.
+    ///
+    /// This is the single implementation behind [`Self::list_by_parent_impl`]
+    /// (which discards the labels and passes no cursor). The label is needed by
+    /// callers that expose editorial order — the `__order` SQL column and the
+    /// cursor-paginated child listing — and comes for free, since it is already
+    /// part of the scanned index key.
+    ///
+    /// See [`NodeRepository::list_ordered_children_page`] for cursor semantics.
+    ///
+    /// [`NodeRepository::list_ordered_children_page`]: raisin_storage::NodeRepository::list_ordered_children_page
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::repositories::nodes) async fn list_by_parent_paged_impl(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        parent: &str,
+        after_label: Option<&str>,
+        limit: Option<usize>,
+        descending: bool,
+        max_revision: Option<&HLC>,
+        populate_has_children: bool,
+    ) -> Result<Vec<(Node, String)>> {
         // Special case: "/" is the parent NAME for root-level nodes,
         // For root nodes, we use "/" itself as the parent_id
         let parent_id = if parent == "/" {
@@ -109,31 +155,48 @@ impl NodeRepositoryImpl {
         };
 
         tracing::debug!(
-            "list_by_parent_impl: tenant={}, repo={}, branch={}, workspace={}, parent={}, max_revision={:?}",
-            tenant_id, repo_id, branch, workspace, parent_id, max_revision
+            "list_by_parent_paged_impl: tenant={}, repo={}, branch={}, workspace={}, parent={}, \
+             after_label={:?}, limit={:?}, descending={}, max_revision={:?}",
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            parent_id,
+            after_label,
+            limit,
+            descending,
+            max_revision
         );
 
-        // Use ORDERED_CHILDREN index for efficient ordered retrieval
-        let child_ids = self
-            .get_ordered_child_ids(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &parent_id,
-                max_revision,
-            )
-            .await?;
+        let entries = self.list_ordered_children_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &parent_id,
+            match after_label {
+                Some(label) => OrderedScanStart::After(label),
+                None => OrderedScanStart::Beginning,
+            },
+            limit,
+            descending,
+            max_revision,
+        )?;
 
         tracing::debug!(
-            "list_by_parent_impl: got {} child IDs from ordered index",
-            child_ids.len()
+            "list_by_parent_paged_impl: got {} child entries from ordered index",
+            entries.len()
         );
 
-        // Fetch nodes in order
-        let mut result = Vec::with_capacity(child_ids.len());
-        for child_id in child_ids {
-            // Pass through the populate_has_children parameter
+        // Fetch nodes in order, keeping each one's order label.
+        //
+        // An entry whose node cannot be loaded is skipped: the index can
+        // legitimately outlive the node (concurrent delete, or a not-yet-visible
+        // revision). Note this means a page can return fewer rows than `limit`
+        // without being the last page — callers must drive their cursor from the
+        // last returned label, not from the row count.
+        let mut result = Vec::with_capacity(entries.len());
+        for entry in entries {
             let node_opt = match max_revision {
                 Some(rev) => {
                     self.get_at_revision_impl(
@@ -141,7 +204,7 @@ impl NodeRepositoryImpl {
                         repo_id,
                         branch,
                         workspace,
-                        &child_id,
+                        &entry.child_id,
                         rev,
                         populate_has_children,
                     )
@@ -153,14 +216,14 @@ impl NodeRepositoryImpl {
                         repo_id,
                         branch,
                         workspace,
-                        &child_id,
+                        &entry.child_id,
                         populate_has_children,
                     )
                     .await?
                 }
             };
             if let Some(node) = node_opt {
-                result.push(node);
+                result.push((node, entry.order_label));
             }
         }
 

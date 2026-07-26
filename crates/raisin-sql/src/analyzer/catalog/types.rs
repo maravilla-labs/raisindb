@@ -99,6 +99,15 @@ pub enum GeneratedExpr {
     Branch,     // __branch - branch name
     Workspace,  // __workspace - workspace name
     Locale,     // locale - resolved locale code (from translation resolution)
+    /// `__order` - the node's editorial (fractional-index) order among its
+    /// siblings. Opaque but lexicographically sortable, and usable as a keyset
+    /// cursor: `ORDER BY __order` with `WHERE __order > $cursor`.
+    OrderKey,
+    /// `__tree_order` - editorial order of the whole subtree: the node's
+    /// ancestor order labels joined root-first. Sorting by it yields document
+    /// (depth-first) order, so it is the cursor for paging an entire subtree.
+    /// Only populated by tree-traversal scans; NULL elsewhere.
+    TreeOrder,
 }
 
 /// Index definition (for optimizer hints)

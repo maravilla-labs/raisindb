@@ -88,10 +88,11 @@ await nodes.rename('/pages/draft', 'published-page');
 await nodes.copy('/templates/base', '/pages', 'new-page');
 await nodes.copyTree('/sections/header', '/pages/home');  // deep copy
 
-// Reorder siblings
-await nodes.reorder('/pages/about', 'Vz');  // base62 fractional index
-await nodes.moveChildBefore('/pages', '/pages/about', '/pages/home');
-await nodes.moveChildAfter('/pages', '/pages/about', '/pages/contact');
+// Reorder siblings — you name a position or a neighbour; the server owns the
+// fractional order key. Children are named, not full paths.
+await nodes.reorder('/pages', 'about', 0);            // move to the front
+await nodes.moveChildBefore('/pages', 'about', 'home');
+await nodes.moveChildAfter('/pages', 'about', 'contact');
 \`\`\`
 
 ## Relationships

@@ -136,6 +136,34 @@ pub trait FunctionApi: Send + Sync {
         target_branch: &str,
     ) -> Result<()>;
 
+    /// Move a child to a position among its siblings (editorial ordering).
+    ///
+    /// Positions are 0-based and a position past the end appends. The ordering
+    /// index owns the fractional order key — callers name a position, not a key.
+    ///
+    /// `before`/`after` name a sibling to sit next to instead of an index; see
+    /// [`Self::node_move_child_relative`].
+    async fn node_reorder_child(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        child_name: &str,
+        position: u32,
+    ) -> Result<()>;
+
+    /// Move a child so it sits immediately before or after a named sibling.
+    ///
+    /// `before` selects which side: `true` places `child_name` before
+    /// `reference_child_name`, `false` after it.
+    async fn node_move_child_relative(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        child_name: &str,
+        reference_child_name: &str,
+        before: bool,
+    ) -> Result<()>;
+
     // ========== SQL Operations ==========
 
     /// Execute a SQL query and return results

@@ -17,7 +17,7 @@ mod limit;
 mod scan;
 mod vector_knn;
 
-use super::{Error, LogicalPlan, PhysicalPlan, PhysicalPlanner, PlanContext};
+use super::{Error, LogicalPlan, PhysicalPlan, PhysicalPlanner, PlanContext, SortExpr};
 use std::sync::Arc;
 
 impl PhysicalPlanner {
@@ -151,6 +151,23 @@ impl PhysicalPlanner {
                 }
 
                 let input_plan = self.plan_with_context(input, &new_context)?;
+
+                // Sort elision: if the chosen scan already emits exactly the
+                // requested order, sorting again is pure cost (and, with a
+                // LIMIT, forces a full materialization the scan could have
+                // avoided).
+                //
+                // Deliberately narrow — a single sort expression on an editorial
+                // ordering column, over a scan that has claimed that ordering.
+                // This is not a general sort-elision framework.
+                if Self::sort_is_satisfied_by_scan(sort_exprs, &input_plan) {
+                    tracing::info!(
+                        "⚡ Eliding Sort: scan already emits editorial order for {:?}",
+                        new_context.order_by
+                    );
+                    return Ok(input_plan);
+                }
+
                 Ok(PhysicalPlan::Sort {
                     input: Box::new(input_plan),
                     sort_exprs: sort_exprs.clone(),
@@ -380,6 +397,42 @@ impl PhysicalPlanner {
             | LogicalPlan::Relate { .. }
             | LogicalPlan::Unrelate { .. } => {
                 unreachable!("DML variants should have been handled by try_plan_dml")
+            }
+        }
+    }
+
+    /// True when `input` already emits rows in exactly the order `sort_exprs`
+    /// asks for, so the `Sort` above it can be dropped.
+    ///
+    /// Intentionally narrow: one sort expression, on an editorial ordering
+    /// column, over a scan that set `claims_editorial_order`. The scan sets that
+    /// flag only when its own iteration order matches the requested direction and
+    /// nothing below it can reorder rows, so this check is a lookup rather than a
+    /// re-derivation.
+    ///
+    /// Projections pass through (they preserve row order); anything else does
+    /// not, so a Filter or Limit between the Sort and the scan blocks elision.
+    fn sort_is_satisfied_by_scan(sort_exprs: &[SortExpr], input: &PhysicalPlan) -> bool {
+        if sort_exprs.len() != 1 {
+            return false;
+        }
+        let column = match Self::extract_column_name(&sort_exprs[0].expr) {
+            Some(column) => column,
+            None => return false,
+        };
+        if !matches!(column.as_str(), "__order" | "__tree_order") {
+            return false;
+        }
+
+        let mut node = input;
+        loop {
+            match node {
+                PhysicalPlan::Project { input, .. } => node = input,
+                PhysicalPlan::PrefixScan {
+                    claims_editorial_order,
+                    ..
+                } => return *claims_editorial_order,
+                _ => return false,
             }
         }
     }

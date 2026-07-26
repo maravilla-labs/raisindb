@@ -11,6 +11,7 @@ use crate::tombstones::TOMBSTONE;
 use crate::transaction::change_types::NodeChange;
 use crate::transaction::RocksDBTransaction;
 use crate::{cf, cf_handle, keys};
+use raisin_models::nodes::Node;
 
 /// Move an entire node tree to a new parent (transaction-aware)
 ///
@@ -150,6 +151,7 @@ pub async fn move_node_tree(
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
+    let cf_nodes = cf_handle(&tx.db, cf::NODES)?;
     let cf_path = cf_handle(&tx.db, cf::PATH_INDEX)?;
     let cf_node_path = cf_handle(&tx.db, cf::NODE_PATH)?;
     let cf_ordered = cf_handle(&tx.db, cf::ORDERED_CHILDREN)?;
@@ -237,6 +239,48 @@ pub async fn move_node_tree(
             &tenant_id, &repo_id, &branch, workspace, &node.id, &revision,
         );
         batch.put_cf(cf_node_path, node_path_key, node_new_path.as_bytes());
+
+        // A move is mostly index-only, because `Node` stores its parent's NAME
+        // rather than a path. Two kinds of node still go stale and need their
+        // blob rewritten:
+        //
+        //   * the moved ROOT — new `name` (on rename), new `parent`, new
+        //     `order_key`;
+        //   * its DIRECT CHILDREN, but only on a RENAME, since they hold the
+        //     root's old name in `parent`.
+        //
+        // Without this a transactional rename left `node.name` reporting the old
+        // name forever, even though every path had been updated around it.
+        let updated_name = node_new_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&node_new_path)
+            .to_string();
+        let updated_parent = Node::extract_parent_name_from_path(&node_new_path);
+        let is_root = *depth == 0;
+
+        if is_root || node.name != updated_name || node.parent != updated_parent {
+            let mut rewritten = node.clone();
+            rewritten.path = node_new_path.clone();
+            rewritten.name = updated_name;
+            rewritten.parent = updated_parent;
+            rewritten.updated_at = Some(chrono::Utc::now());
+            if is_root {
+                rewritten.order_key = new_order_label.clone();
+            }
+
+            let node_key = keys::node_key_versioned(
+                &tenant_id,
+                &repo_id,
+                &branch,
+                workspace,
+                &rewritten.id,
+                &revision,
+            );
+            let node_value = rmp_serde::to_vec_named(&rewritten)
+                .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
+            batch.put_cf(cf_nodes, node_key, node_value);
+        }
     }
 
     // 9. Update read cache for read-your-writes semantics

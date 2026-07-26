@@ -169,6 +169,29 @@ impl FunctionApi for MockFunctionApi {
         Ok(())
     }
 
+    async fn node_reorder_child(
+        &self,
+        _workspace: &str,
+        _parent_path: &str,
+        _child_name: &str,
+        _position: u32,
+    ) -> Result<()> {
+        self.check_all_errors()?;
+        Ok(())
+    }
+
+    async fn node_move_child_relative(
+        &self,
+        _workspace: &str,
+        _parent_path: &str,
+        _child_name: &str,
+        _reference_child_name: &str,
+        _before: bool,
+    ) -> Result<()> {
+        self.check_all_errors()?;
+        Ok(())
+    }
+
     // ========== SQL Operations ==========
 
     async fn sql_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {

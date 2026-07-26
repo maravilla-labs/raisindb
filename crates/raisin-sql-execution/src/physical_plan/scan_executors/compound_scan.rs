@@ -169,7 +169,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
 
                     // Apply remaining filter if present
                     if let Some(ref filter_expr) = filter {
-                        let row = node_to_row(&translated_node, &qualifier, &workspace, &None, &ctx_clone, locale).await?;
+                        let row = node_to_row(&translated_node, &qualifier, &workspace, &None, &ctx_clone, locale, None,).await?;
                         match eval_expr(filter_expr, &row) {
                             Ok(raisin_sql::analyzer::Literal::Boolean(true)) => {
                                 // Filter passed
@@ -183,7 +183,7 @@ pub async fn execute_compound_index_scan<S: Storage + 'static>(
                         }
                     }
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
 
                     yield row;
                     emitted += 1;

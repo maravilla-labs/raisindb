@@ -5,8 +5,8 @@
 //!
 //! Run with: `cargo test --package raisin-server --test mgmt_jobs_tenant_isolation_test -- --ignored --nocapture`
 
-mod helpers;
-
+#[allow(unused_imports)]
+use crate::helpers;
 use helpers::multi_node::{authenticate, ServerConfig, ServerHandle};
 use reqwest::Client;
 use serde_json::json;

@@ -36,6 +36,7 @@ use raisin_storage::{
 };
 use std::collections::HashMap;
 
+use super::ordering::OrderedScanStart;
 use super::NodeRepositoryImpl;
 
 impl NodeRepository for NodeRepositoryImpl {
@@ -324,6 +325,36 @@ impl NodeRepository for NodeRepositoryImpl {
         .await
     }
 
+    async fn scan_descendants_ordered_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_node_id: &str,
+        after_tree_order: Option<&str>,
+        limit: Option<usize>,
+        options: ListOptions,
+    ) -> Result<Vec<(Node, String)>> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        Ok(self
+            .scan_descendants_ordered_paged_impl(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent_node_id,
+                after_tree_order,
+                limit,
+                options.max_revision.as_ref(),
+            )?
+            .into_iter()
+            .map(|(node, _depth, tree_order)| (node, tree_order))
+            .collect())
+    }
+
     async fn scan_descendants_ordered(
         &self,
         scope: StorageScope<'_>,
@@ -403,6 +434,91 @@ impl NodeRepository for NodeRepositoryImpl {
             max_revision,
         )
         .await
+    }
+
+    async fn list_ordered_children_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        after_label: Option<&str>,
+        limit: Option<usize>,
+        descending: bool,
+        max_revision: Option<&HLC>,
+    ) -> Result<Vec<raisin_storage::OrderedChild>> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        Ok(self
+            .list_ordered_children_impl(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                parent_id,
+                match after_label {
+                    Some(label) => OrderedScanStart::After(label),
+                    None => OrderedScanStart::Beginning,
+                },
+                limit,
+                descending,
+                max_revision,
+            )?
+            .into_iter()
+            .map(|entry| raisin_storage::OrderedChild {
+                child_id: entry.child_id,
+                order_label: entry.order_label,
+                name: entry.name,
+            })
+            .collect())
+    }
+
+    async fn list_by_parent_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        after_label: Option<&str>,
+        limit: Option<usize>,
+        descending: bool,
+        options: ListOptions,
+    ) -> Result<Vec<(Node, String)>> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        self.list_by_parent_paged_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            parent_id,
+            after_label,
+            limit,
+            descending,
+            options.max_revision.as_ref(),
+            options.compute_has_children,
+        )
+        .await
+    }
+
+    async fn get_child_order_label(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        child_id: &str,
+        _max_revision: Option<&HLC>,
+    ) -> Result<Option<String>> {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        self.get_child_order_label_impl(tenant_id, repo_id, branch, workspace, parent_id, child_id)
     }
 
     async fn has_children(

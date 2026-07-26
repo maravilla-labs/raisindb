@@ -91,6 +91,7 @@ pub(super) async fn execute_path_order_scan<S: Storage + 'static>(
                             &projection,
                             &ctx_clone,
                             locale,
+                            None,
                         )
                         .await?;
 

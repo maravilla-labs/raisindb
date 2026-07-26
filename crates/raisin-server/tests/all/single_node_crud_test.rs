@@ -1,7 +1,7 @@
 // Single-node CRUD test via REST API
 
-mod helpers;
-
+#[allow(unused_imports)]
+use crate::helpers;
 use helpers::multi_node::{
     authenticate, create_node, get_node_by_id, get_node_by_path, ServerConfig, ServerHandle,
 };

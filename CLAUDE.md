@@ -17,11 +17,19 @@ RUST_LOG=info ./target/release/raisin-server --config examples/cluster/node1.tom
 # Run all workspace tests
 cargo test --workspace
 
-# Run a single test file
-cargo test --package raisin-server --test cluster_social_feed_test -- --ignored --nocapture
+# Integration tests are consolidated: each crate has ONE test target named `all`
+# (crates/<crate>/tests/all/), with one module per former test file. Select by
+# module name — the old `--test <file>` form no longer exists.
+
+# Run one former test file (now a module)
+cargo test -p raisin-server --test all cluster_social_feed_test -- --ignored --nocapture
 
 # Run a specific test
-cargo test --package raisin-server --test cluster_social_feed_test test_add_post_node1 -- --ignored --nocapture
+cargo test -p raisin-server --test all cluster_social_feed_test::test_add_post_node1 -- --ignored --nocapture
+
+# Adding an integration test? Put it in crates/<crate>/tests/all/ and add a
+# `mod <name>;` line to that crate's tests/all/main.rs. A new file directly under
+# tests/ becomes its own binary again, which is what we consolidated away from.
 
 # Run benchmarks
 cargo bench -p raisin-rocksdb
@@ -30,6 +38,40 @@ cargo bench -p raisin-rocksdb
 cargo fmt --workspace
 cargo clippy --workspace
 ```
+
+## Disk: watch `target/`
+
+A full test build is large and *will* fill a disk if unattended. The driver is
+structural: **each test target links its own binary**, statically including the
+whole dependency graph — rocksdb, tantivy, candle, tesseract — at 25–350 MB apiece.
+
+Integration tests are therefore consolidated to **one target per crate** (see the
+`--test all` note above): 108 binaries became 13, cutting test-executable bytes
+from 7.3 GB to 2.0 GB and removing 95 link steps. Keep it that way — a new file
+placed directly under `tests/` silently adds a binary back.
+
+```bash
+make disk          # where target/ actually went, broken down
+make prune         # reclaim incremental caches (~5 GB), keeps the library build
+make prune-tests   # also drop test executables (~8 GB), keeps the library build
+make clean-hard    # cargo clean; full ~20 min rebuild next time
+```
+
+Reach for `make prune` first — it is nearly free to regenerate. Only use
+`clean-hard` if something is actually corrupt; deleting `target/` wholesale costs
+a full rebuild for space you could have reclaimed without one.
+
+Already configured in `Cargo.toml` / `.cargo/config.toml`, so don't re-add:
+debug info is `line-tables-only` for workspace crates and off entirely for
+dependencies (under **both** the `dev` and `test` profiles — the package override
+must be restated for `test`, or dependency debug info returns for all 108
+binaries), incremental is off for the `test` profile, and `split-debuginfo=unpacked`
+keeps what remains out of the binaries.
+
+The remaining structural lever, not yet taken: consolidating each crate's
+integration tests into one binary per crate (`tests/main.rs` with `mod` includes)
+would cut 108 binaries to ~13 and save most of that 8 GB, plus a lot of link
+time. `raisin-rocksdb` alone has 37.
 
 ## Project Architecture
 
@@ -131,6 +173,52 @@ Notes:
   "no cast returns empty results" symptom). However, if a matching compound index
   is unbuilt/stale it can still return zero rows — so when in doubt, use the cast
   form.
+
+## Editorial Ordering (`__order` / `__tree_order`)
+
+A parent's children carry a **manual order** (drag-and-drop), stored as a
+fractional index in the `ORDERED_CHILDREN` CF. Two SQL columns expose it:
+
+- **`__order`** — a node's position among its **siblings**.
+- **`__tree_order`** — its position within a **whole subtree** (document order:
+  ancestor labels joined, so a node precedes its descendants and subtrees stay
+  contiguous). Only tree traversals populate it; NULL elsewhere.
+
+Both are opaque sortable text, and both work as keyset cursors:
+
+```sql
+SELECT name, __order FROM 'ws' WHERE CHILD_OF('/menu')
+   AND __order > $1 ORDER BY __order LIMIT 20;
+SELECT path, __tree_order FROM 'ws' WHERE DESCENDANT_OF('/menu')
+   AND __tree_order > $1 ORDER BY __tree_order LIMIT 20;
+```
+
+**`__order` is not `path`.** Both order parents before children, but `path` sorts
+siblings *alphabetically* while `__order` sorts them *editorially*. They agree
+only when the manual order happens to be alphabetical — which is why using `path`
+by mistake looks fine until someone drags something. Never mix a cursor on one
+with an `ORDER BY` on the other; that drops and duplicates rows.
+Test: `raisin-sql-execution/tests/editorial_order_tests.rs`.
+
+Invariants to preserve when touching ordering code:
+
+- **`Node.order_key` is server-assigned and must equal the CF label.** Every path
+  that writes `ORDERED_CHILDREN` also stamps the node record — create, update,
+  reorder, rebalance, move, cross-branch copy. A reorder therefore produces a node
+  revision (visible in history) and replicates. Don't let a client-supplied
+  `order_key` through; it is overwritten.
+- **Mint labels only via `next_append_label` / `fractional_index::format_label`.**
+  Never call `inc()` on a *full* label — it parses hex and chokes on the `::`
+  separator, then silently mints a duplicate. Always `extract_fractional` first.
+- **Never split an `ORDERED_CHILDREN` key on `\0`.** The descending HLC contains
+  null bytes when the counter is 0. Use
+  `ordering::key_parse::parse_ordered_child_key`.
+- **`DESCENDANT_OF` is pre-order depth-first** (matching table scans). It was BFS
+  before; keep parents-before-children, which subtree copy/move/prune rely on.
+- Sort elision is gated on `claims_editorial_order`, which the executor honours.
+  Do **not** reuse `CompoundIndexScan.pre_sorted` — it's set but ignored.
+
+Docs: `docs/website/docs/access/sql/editorial-ordering.md`.
 
 ## Node Revision History & Authorship
 

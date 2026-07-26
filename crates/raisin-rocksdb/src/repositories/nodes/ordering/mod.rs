@@ -34,9 +34,18 @@
 //! Labels are lexicographically sorted strings that allow insertion between any two
 //! positions without rebalancing the entire list.
 
+mod key_parse;
+mod labels;
 mod operations;
+mod paged;
 mod queries;
 mod rebalance;
 mod reorder;
+mod tree_order;
+
+pub(in crate::repositories::nodes) use key_parse::parse_ordered_child_key;
+pub(in crate::repositories::nodes) use labels::format_order_label;
+pub(in crate::repositories::nodes) use paged::{OrderedChildEntry, OrderedScanStart};
+pub(in crate::repositories::nodes) use tree_order::{join_tree_order, split_tree_order};
 
 // Re-export nothing - all functions are pub(super) and accessed via NodeRepositoryImpl

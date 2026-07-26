@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::helpers::{build_node_service, extract_context};
+use super::helpers::{build_node_service, connection_actor, extract_context};
 
 /// Handle node move operation
 pub async fn handle_node_move<S, B>(
@@ -140,29 +140,37 @@ where
     let payload: NodeReorderPayload = serde_json::from_value(request.payload.clone())?;
     let ctx = extract_context(&request)?;
     let node_service = build_node_service(state, connection_state, &ctx);
+    let actor = connection_actor(connection_state);
 
-    // Reorder using parent_path, child_name, and position
-    // Note: NodeReorderPayload.position is a u32, not a string order_key
-    // We need to convert this to the appropriate reorder call
-    let child_path = format!("{}/{}", payload.parent_path, payload.child_name);
+    // `NodeService::reorder_child` owns the position→fractional-label conversion
+    // (read the siblings, find the neighbours at `position`, mint a label between
+    // them). This handler used to be a stub that looked the node up and returned
+    // it unchanged, so `node_reorder` reported success while changing nothing.
+    node_service
+        .reorder_child(
+            &payload.parent_path,
+            &payload.child_name,
+            payload.position as usize,
+            Some("Reorder child"),
+            actor.as_deref(),
+        )
+        .await?;
 
-    // For now, we'll use reorder_to_position if available, or we need a different approach
-    // The position field indicates the numeric index position (0-based)
-    // This is a simplified implementation - a full implementation would need to:
-    // 1. Get all children of parent_path
-    // 2. Find the child at position `position`
-    // 3. Calculate new order_key between neighbors
-
-    // Placeholder: Using position as a simple indicator
-    // TODO: Implement proper position-based reordering
-    let result = node_service
+    // Return the node as it now stands, so the caller sees the assigned
+    // `order_key` rather than having to re-read.
+    let child_path = format!(
+        "{}/{}",
+        payload.parent_path.trim_end_matches('/'),
+        payload.child_name
+    );
+    let reordered = node_service
         .get_by_path(&child_path)
         .await?
         .ok_or_else(|| WsError::InvalidRequest(format!("Node not found: {}", child_path)))?;
 
     Ok(Some(ResponseEnvelope::success(
         request.request_id,
-        serde_json::to_value(result)?,
+        serde_json::to_value(reordered)?,
     )))
 }
 
@@ -179,15 +187,15 @@ where
     let payload: NodeMoveChildBeforePayload = serde_json::from_value(request.payload.clone())?;
     let ctx = extract_context(&request)?;
     let node_service = build_node_service(state, connection_state, &ctx);
+    let actor = connection_actor(connection_state);
 
-    // Use fields directly from payload
     node_service
         .move_child_before(
             &payload.parent_path,
             &payload.child_name,
             &payload.before_child_name,
-            None,
-            None,
+            Some("Move child before sibling"),
+            actor.as_deref(),
         )
         .await?;
 
@@ -210,15 +218,15 @@ where
     let payload: NodeMoveChildAfterPayload = serde_json::from_value(request.payload.clone())?;
     let ctx = extract_context(&request)?;
     let node_service = build_node_service(state, connection_state, &ctx);
+    let actor = connection_actor(connection_state);
 
-    // Use fields directly from payload
     node_service
         .move_child_after(
             &payload.parent_path,
             &payload.child_name,
             &payload.after_child_name,
-            None,
-            None,
+            Some("Move child after sibling"),
+            actor.as_deref(),
         )
         .await?;
 

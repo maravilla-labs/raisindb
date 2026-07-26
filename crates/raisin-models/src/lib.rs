@@ -47,7 +47,6 @@ pub mod admin_user;
 pub mod api_key;
 pub mod auth;
 pub mod errors;
-pub mod fractional_index;
 pub mod migrations;
 pub mod nodes;
 pub mod operations;

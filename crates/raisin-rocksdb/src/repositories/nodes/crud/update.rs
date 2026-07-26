@@ -110,6 +110,17 @@ impl NodeRepositoryImpl {
 
         let mut batch = WriteBatch::default();
 
+        // ORDERED_CHILDREN must be maintained BEFORE the node blob is
+        // serialized: it stamps `node.order_key` (preserving the existing label
+        // on update, appending a new one otherwise), and the blob has to carry
+        // the same label the index entry does.
+        let order_step_start = std::time::Instant::now();
+        self.add_ordered_children_to_batch(
+            &mut batch, &mut node, tenant_id, repo_id, branch, workspace, &revision,
+        )
+        .await?;
+        let order_label_time = order_step_start.elapsed().as_micros();
+
         // Property index: tombstone stale OLD-value entries (value changed /
         // property removed / published tag flipped) BEFORE writing the new
         // entries. Without this, equality scans and index COUNTs on the old
@@ -170,18 +181,6 @@ impl NodeRepositoryImpl {
         .await?;
 
         let index_prep_time = step_start.elapsed().as_micros();
-
-        // ========== STEP 3: Order label calculation ==========
-        let step_start = std::time::Instant::now();
-
-        // Add ORDERED_CHILDREN index entry using shared helper
-        // This will preserve the existing order label for updates
-        self.add_ordered_children_to_batch(
-            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
-        )
-        .await?;
-
-        let order_label_time = step_start.elapsed().as_micros();
 
         // ========== STEP 4: Add revision indexing to batch (ATOMIC) ==========
         let step_start = std::time::Instant::now();

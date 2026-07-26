@@ -57,8 +57,8 @@ pub struct Node {
     pub properties: HashMap<String, PropertyValue>,    // Field values
 
     // Hierarchy
-    pub children: Vec<String>,                         // Child node IDs (ordering by order_key)
-    pub order_key: String,                             // Fractional index for sibling ordering (Base62)
+    pub children: Vec<String>,                         // Legacy; NOT the source of child order
+    pub order_key: String,                             // Server-assigned fractional index (sibling order)
     pub has_children: Option<bool>,                    // Computed field (populated at service layer)
     pub parent: Option<String>,                        // Parent node **name** (not full path!)
 

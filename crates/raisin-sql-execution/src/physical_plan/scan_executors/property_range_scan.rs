@@ -182,6 +182,7 @@ pub async fn execute_property_range_scan<S: Storage + 'static>(
                         &projection,
                         &ctx_clone,
                         locale,
+                        None,
                     )
                     .await?;
 

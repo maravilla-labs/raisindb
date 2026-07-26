@@ -8,6 +8,7 @@ use super::super::super::helpers::TOMBSTONE;
 use super::super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
+use raisin_models::nodes::Node;
 use raisin_storage::{
     BranchRepository, BranchScope, NodeRepository, RevisionRepository, StorageScope,
 };
@@ -185,42 +186,24 @@ impl NodeRepositoryImpl {
         // Add root node to new parent's ORDERED_CHILDREN
         let new_parent_id = target_parent_node.id.clone();
 
-        let order_label = {
-            let existing = self.get_order_label_for_child(
+        let order_label = match self.get_order_label_for_child(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &new_parent_id,
+            id,
+        )? {
+            // Already ordered under the target parent (re-move / rename in place).
+            Some(existing) => existing,
+            None => self.next_append_label(
                 tenant_id,
                 repo_id,
                 branch,
                 workspace,
                 &new_parent_id,
-                id,
-            )?;
-            if let Some(existing) = existing {
-                existing
-            } else {
-                let last = self.get_last_order_label(
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    workspace,
-                    &new_parent_id,
-                )?;
-                if let Some(ref l) = last {
-                    match crate::fractional_index::inc(l) {
-                        Ok(label) => label,
-                        Err(e) => {
-                            tracing::warn!(
-                                parent_id = %new_parent_id,
-                                last_label = %l,
-                                error = %e,
-                                "Corrupt order label detected in rename, falling back to first()"
-                            );
-                            crate::fractional_index::first()
-                        }
-                    }
-                } else {
-                    crate::fractional_index::first()
-                }
-            }
+                &revision,
+            )?,
         };
         let ordered_key = keys::ordered_child_key_versioned(
             tenant_id,
@@ -282,14 +265,88 @@ impl NodeRepositoryImpl {
             batch.put_cf(cf_node_path, node_path_key, node_new_path.as_bytes());
         }
 
+        // Most of a move is index-only — a descendant's stored blob stays valid
+        // because `Node` holds its parent's NAME, not a path. But two kinds of node
+        // do go stale and must be rewritten:
+        //
+        //   * the moved ROOT — new `name` (on rename), new `parent`, new `order_key`;
+        //   * its DIRECT CHILDREN, but only when the root was RENAMED, since they
+        //     store the root's old name in `parent`.
+        //
+        // Deeper descendants are untouched: their parent's name did not change.
+        // Rewriting them would turn an O(index) move into an O(subtree) blob
+        // rewrite for no benefit.
+        let mut rewritten_nodes: Vec<Node> = Vec::new();
+        for (node, depth) in &descendants {
+            let node_new_path = if *depth == 0 {
+                new_path.to_string()
+            } else {
+                let relative = node
+                    .path
+                    .strip_prefix(&format!("{}/", old_root_path))
+                    .unwrap_or(&node.path);
+                format!("{}/{}", new_path, relative)
+            };
+
+            let updated_name = node_new_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&node_new_path)
+                .to_string();
+            let updated_parent = Node::extract_parent_name_from_path(&node_new_path);
+            let is_root = *depth == 0;
+
+            // Skip any node whose identity fields are unchanged.
+            if !is_root && node.name == updated_name && node.parent == updated_parent {
+                continue;
+            }
+
+            let mut rewritten = node.clone();
+            rewritten.path = node_new_path;
+            rewritten.name = updated_name;
+            rewritten.parent = updated_parent;
+            rewritten.updated_at = Some(chrono::Utc::now());
+            if is_root {
+                rewritten.order_key = order_label.clone();
+            }
+
+            // The root lands under a new parent; descendants keep theirs.
+            let parent_id_for_index = if is_root {
+                Some(new_parent_id.clone())
+            } else {
+                None
+            };
+            self.add_node_indexes_to_batch_with_parent_id(
+                &mut batch,
+                &rewritten,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &revision,
+                parent_id_for_index,
+            )?;
+            rewritten_nodes.push(rewritten);
+        }
+
+        let root_node_for_replication = rewritten_nodes
+            .iter()
+            .find(|node| node.path == new_path)
+            .cloned();
+
         // Atomic commit
         self.db
             .write(batch)
             .map_err(|e| raisin_error::Error::storage(format!("Atomic tree move failed: {}", e)))?;
 
         tracing::info!(
-            "move_node_tree: wrote {} index updates atomically (no blob writes!)",
-            moved_node_ids.len() * 3
+            "move_node_tree: wrote {} index updates + {} blob rewrites atomically",
+            moved_node_ids.len() * 3,
+            rewritten_nodes.len()
+        );
+        debug_assert!(
+            root_node_for_replication.is_some(),
+            "the traversal must always include the moved root at depth 0"
         );
 
         // Update branch HEAD
@@ -382,7 +439,7 @@ impl NodeRepositoryImpl {
         }
 
         tracing::info!(
-            "move_node_tree: complete - {} nodes moved (IDs preserved, no blob writes)",
+            "move_node_tree: complete - {} nodes moved (IDs preserved)",
             moved_node_ids.len()
         );
         Ok(())

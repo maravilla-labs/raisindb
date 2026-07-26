@@ -147,6 +147,18 @@ pub(crate) fn default_nodes_table() -> TableDef {
                 nullable: false,
                 generated: Some(GeneratedExpr::Locale),
             },
+            ColumnDef {
+                name: "__order".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: Some(GeneratedExpr::OrderKey),
+            },
+            ColumnDef {
+                name: "__tree_order".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: Some(GeneratedExpr::TreeOrder),
+            },
         ],
         primary_key: vec!["path".into()],
         indexes: vec![
@@ -310,6 +322,18 @@ pub(crate) fn workspace_table(table_name: &str, embedding_dimensions: Option<usi
             data_type: DataType::Text,
             nullable: false,
             generated: Some(GeneratedExpr::Locale),
+        },
+        ColumnDef {
+            name: "__order".into(),
+            data_type: DataType::Text,
+            nullable: true,
+            generated: Some(GeneratedExpr::OrderKey),
+        },
+        ColumnDef {
+            name: "__tree_order".into(),
+            data_type: DataType::Text,
+            nullable: true,
+            generated: Some(GeneratedExpr::TreeOrder),
         },
     ];
 

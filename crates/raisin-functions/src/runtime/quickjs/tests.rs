@@ -1763,7 +1763,12 @@ async fn test_raisin_api_surface_snapshot() {
             "getChildren",
             "history",
             "move",
+            // Editorial ordering: name a position or a neighbour; the ordering
+            // index mints the fractional key.
+            "moveChildAfter",
+            "moveChildBefore",
             "query",
+            "reorderChild",
             "update",
             "updateProperty",
             "upsertDeep",

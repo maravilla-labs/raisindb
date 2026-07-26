@@ -147,6 +147,58 @@ impl RaisinFunctionApi {
         callback(workspace.to_string(), parent_path.to_string(), limit).await
     }
 
+    /// Move a child to a 0-based position among its siblings.
+    pub(crate) async fn impl_node_reorder_child(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        child_name: &str,
+        position: u32,
+    ) -> Result<()> {
+        let callback = self.callbacks.node_reorder_child.as_ref().ok_or_else(|| {
+            raisin_error::Error::Validation(
+                "Node reorder child callback not configured".to_string(),
+            )
+        })?;
+
+        callback(
+            workspace.to_string(),
+            parent_path.to_string(),
+            child_name.to_string(),
+            position,
+        )
+        .await
+    }
+
+    /// Move a child immediately before (or after) a named sibling.
+    pub(crate) async fn impl_node_move_child_relative(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        child_name: &str,
+        reference_child_name: &str,
+        before: bool,
+    ) -> Result<()> {
+        let callback = self
+            .callbacks
+            .node_move_child_relative
+            .as_ref()
+            .ok_or_else(|| {
+                raisin_error::Error::Validation(
+                    "Node move child relative callback not configured".to_string(),
+                )
+            })?;
+
+        callback(
+            workspace.to_string(),
+            parent_path.to_string(),
+            child_name.to_string(),
+            reference_child_name.to_string(),
+            before,
+        )
+        .await
+    }
+
     pub(crate) async fn impl_node_apply_child_order(
         &self,
         workspace: &str,

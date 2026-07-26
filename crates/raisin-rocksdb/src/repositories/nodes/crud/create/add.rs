@@ -78,6 +78,19 @@ impl NodeRepositoryImpl {
 
         let mut batch = WriteBatch::default();
 
+        // ========== STEP 2a: Order label - OPTIMIZED (skip existence check) ==========
+        //
+        // Runs BEFORE the node blob is serialized: it stamps `node.order_key`, and
+        // the blob must carry the same label the index entry gets.
+        let order_step_start = std::time::Instant::now();
+
+        self.add_ordered_children_to_batch_fast_path(
+            &mut batch, &mut node, tenant_id, repo_id, branch, workspace, &revision,
+        )
+        .await?;
+
+        let order_label_time = order_step_start.elapsed().as_micros();
+
         // Use shared indexing helper (DRY - eliminates 200+ lines of duplication)
         self.add_node_indexes_to_batch(
             &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
@@ -96,16 +109,6 @@ impl NodeRepositoryImpl {
         .await?;
 
         let index_prep_time = step_start.elapsed().as_micros();
-
-        // ========== STEP 3: Order label - OPTIMIZED (skip existence check) ==========
-        let step_start = std::time::Instant::now();
-
-        self.add_ordered_children_to_batch_fast_path(
-            &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,
-        )
-        .await?;
-
-        let order_label_time = step_start.elapsed().as_micros();
 
         // ========== STEP 4: Add revision indexing to batch (ATOMIC) ==========
         let step_start = std::time::Instant::now();
@@ -176,10 +179,14 @@ impl NodeRepositoryImpl {
     }
 
     /// Fast path for adding ordered children (assumes node is new)
+    ///
+    /// Also stamps the assigned label onto `node.order_key`, so the node record
+    /// and the `ORDERED_CHILDREN` entry agree. Must therefore be called BEFORE
+    /// the node blob is serialized into the batch.
     async fn add_ordered_children_to_batch_fast_path(
         &self,
         batch: &mut WriteBatch,
-        node: &Node,
+        node: &mut Node,
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
@@ -212,28 +219,9 @@ impl NodeRepositoryImpl {
             let substep_start = std::time::Instant::now();
 
             let t = std::time::Instant::now();
-            let last_label =
-                self.get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+            let order_label =
+                self.next_append_label(tenant_id, repo_id, branch, workspace, parent_id, revision)?;
             let get_last_time = t.elapsed().as_micros();
-
-            let t = std::time::Instant::now();
-            let order_label = if let Some(ref last) = last_label {
-                match crate::fractional_index::inc(last) {
-                    Ok(label) => label,
-                    Err(e) => {
-                        tracing::warn!(
-                            parent_id = %parent_id,
-                            last_label = %last,
-                            error = %e,
-                            "Corrupt order label detected, falling back to first()"
-                        );
-                        crate::fractional_index::first()
-                    }
-                }
-            } else {
-                crate::fractional_index::first()
-            };
-            let inc_time = t.elapsed().as_micros();
 
             let label_calc_time = substep_start.elapsed().as_micros();
 
@@ -256,19 +244,21 @@ impl NodeRepositoryImpl {
                 keys::last_child_metadata_key(tenant_id, repo_id, branch, workspace, parent_id);
             batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
 
+            // Keep the node record in step with the index entry.
+            node.order_key = order_label;
+
             let batch_prep_time = substep_start.elapsed().as_micros();
 
             let total_order_time = order_start.elapsed().as_micros();
 
             if std::env::var("RAISIN_PROFILE").is_ok() {
                 eprintln!(
-                    "ORDER_TIMING_FAST node={} total={}us [parent={}us, calc={}us (get_last={}us, inc={}us), batch={}us]",
+                    "ORDER_TIMING_FAST node={} total={}us [parent={}us, calc={}us (get_last={}us), batch={}us]",
                     node.name,
                     total_order_time,
                     parent_lookup_time,
                     label_calc_time,
                     get_last_time,
-                    inc_time,
                     batch_prep_time
                 );
             }

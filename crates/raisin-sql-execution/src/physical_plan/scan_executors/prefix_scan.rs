@@ -11,7 +11,7 @@
 //! 2. **All Descendants** - Uses ORDERED_CHILDREN traversal for tree-ordered results
 
 use super::helpers::{get_locales_to_use, resolve_node_for_locale};
-use super::node_to_row::node_to_row;
+use super::node_to_row::{node_to_row, OrderContext};
 use super::{SCAN_COUNT_CEILING, SCAN_TIME_LIMIT, TIME_CHECK_INTERVAL};
 use crate::physical_plan::executor::{ExecutionContext, ExecutionError, RowStream};
 use crate::physical_plan::operators::PhysicalPlan;
@@ -48,6 +48,9 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
         projection,
         direct_children_only,
         limit,
+        order_cursor,
+        order_descending,
+        claims_editorial_order,
     ) = match plan {
         PhysicalPlan::PrefixScan {
             tenant_id,
@@ -60,6 +63,9 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
             projection,
             direct_children_only,
             limit,
+            order_cursor,
+            order_descending,
+            claims_editorial_order,
         } => (
             tenant_id.clone(),
             repo_id.clone(),
@@ -71,6 +77,9 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
             projection.clone(),
             *direct_children_only,
             *limit,
+            order_cursor.clone(),
+            *order_descending,
+            *claims_editorial_order,
         ),
         _ => {
             return Err(Error::Validation(
@@ -83,8 +92,32 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
     let max_revision = ctx.max_revision;
     let ctx_clone = ctx.clone();
 
-    tracing::info!("   PrefixScan: prefix='{}', direct_children_only={}, workspace='{}', branch='{}', max_revision={:?}",
-        path_prefix, direct_children_only, workspace, branch, max_revision);
+    // Only bound the index seek by `limit` when this scan's own order is the
+    // order the query asked for. Otherwise a Sort/TopN sits above us and
+    // truncating here would drop rows it still needed to consider.
+    //
+    // Locale fan-out emits one row per locale per node, so the node-level bound
+    // has to be scaled by the number of locales or a multi-locale query would
+    // come up short.
+    let scan_limit = if claims_editorial_order {
+        let locale_count = get_locales_to_use(ctx).len().max(1);
+        limit.map(|lim| lim.saturating_mul(locale_count))
+    } else {
+        None
+    };
+
+    tracing::info!(
+        "   PrefixScan: prefix='{}', direct_children_only={}, workspace='{}', branch='{}', \
+         max_revision={:?}, order_cursor={:?}, order_descending={}, claims_order={}",
+        path_prefix,
+        direct_children_only,
+        workspace,
+        branch,
+        max_revision,
+        order_cursor,
+        order_descending,
+        claims_editorial_order
+    );
 
     Ok(Box::pin(try_stream! {
         let qualifier = alias.clone().unwrap_or_else(|| table.clone());
@@ -111,53 +144,62 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
         if direct_children_only {
             // FAST PATH: Direct children only (PARENT optimization)
-            let nodes = if parent_dir == "/" {
-                tracing::debug!("   Listing root-level nodes (direct children of '/')...");
-                storage
-                    .nodes()
-                    .list_root(
-                        StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                        if let Some(rev) = max_revision.as_ref() {
-                            raisin_storage::ListOptions::at_revision(*rev)
-                        } else {
-                            raisin_storage::ListOptions::for_sql()
-                        },
-                    )
-                    .await?
+            //
+            // Goes through the editorial-order index so each row carries its
+            // `__order` label, and so a `__order > cursor` keyset filter and a
+            // LIMIT can be pushed all the way down into the index seek.
+            let list_options = if let Some(rev) = max_revision.as_ref() {
+                raisin_storage::ListOptions::at_revision(*rev)
+            } else {
+                raisin_storage::ListOptions::for_sql()
+            };
+
+            // The ordering index keys root-level children under "/" rather than
+            // under a node id.
+            let parent_id = if parent_dir == "/" {
+                Some("/".to_string())
             } else {
                 let parent_path = parent_dir.trim_end_matches('/');
                 tracing::debug!("   Fetching parent node at path '{}'...", parent_path);
-
-                let parent_node = storage
+                match storage
                     .nodes()
                     .get_by_path(StorageScope::new(&tenant_id, &repo_id, &branch, &workspace), parent_path, max_revision.as_ref())
-                    .await?;
+                    .await?
+                {
+                    Some(parent) => Some(parent.id),
+                    None => {
+                        tracing::warn!("   Parent node not found at path '{}', returning 0 rows", parent_path);
+                        None
+                    }
+                }
+            };
 
-                if let Some(parent) = parent_node {
-                    tracing::debug!("   Listing direct children of parent node '{}'...", parent.id);
+            let nodes = match parent_id {
+                Some(parent_id) => {
+                    tracing::debug!(
+                        "   Listing direct children of parent '{}' (cursor={:?}, limit={:?}, descending={})",
+                        parent_id, order_cursor, scan_limit, order_descending
+                    );
                     storage
                         .nodes()
-                        .list_by_parent(
+                        .list_by_parent_page(
                             StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                            &parent.id,
-                            if let Some(rev) = max_revision.as_ref() {
-                                raisin_storage::ListOptions::at_revision(*rev)
-                            } else {
-                                raisin_storage::ListOptions::for_sql()
-                            },
+                            &parent_id,
+                            order_cursor.as_ref().and_then(|c| c.label()),
+                            scan_limit,
+                            order_descending,
+                            list_options,
                         )
                         .await?
-                } else {
-                    tracing::warn!("   Parent node not found at path '{}', returning 0 rows", parent_path);
-                    Vec::new()
                 }
+                None => Vec::new(),
             };
 
             tracing::info!("   PrefixScan found {} direct children", nodes.len());
 
             let mut emitted = 0usize;
 
-            for node in nodes {
+            for (node, order_label) in nodes {
                 if let Some(lim) = limit {
                     if emitted >= lim {
                         tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
@@ -193,13 +235,15 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                     node
                 };
 
+                let order_ctx = OrderContext::label(&order_label);
+
                 for locale in &locales_to_use {
                     let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
                         Some(n) => n,
                         None => continue,
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
                     yield row;
                     emitted += 1;
                     if let Some(lim) = limit {
@@ -276,7 +320,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         None => continue,
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
                     yield row;
                     emitted += 1;
                     if let Some(lim) = limit {
@@ -307,11 +351,18 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
             if let Some(parent) = parent_node {
                 let parent_id = parent.id.clone();
+                // Paged, document-order walk: each node carries its
+                // `__tree_order`, and a `__tree_order > cursor` predicate
+                // resumes the walk without re-traversing what came before.
                 let nodes = storage
                     .nodes()
-                    .scan_descendants_ordered(
+                    .scan_descendants_ordered_page(
                         StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
                         &parent.id,
+                        order_cursor.as_ref().and_then(|c| c.tree_order()),
+                        // The traversal root is emitted but filtered out below,
+                        // so leave room for it when bounding the walk.
+                        scan_limit.map(|lim| lim.saturating_add(1)),
                         if let Some(rev) = max_revision.as_ref() {
                             raisin_storage::ListOptions::at_revision(*rev)
                         } else {
@@ -324,7 +375,7 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
                 let mut emitted = 0usize;
 
-                for node in nodes {
+                for (node, tree_order) in nodes {
                     // The traversal yields its ROOT too, but the root's path
                     // does not start with '{parent_path}/', so it is NOT part
                     // of the prefix match (`path LIKE '/parent/%'` must not
@@ -366,13 +417,18 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                         node
                     };
 
+                    let order_ctx = OrderContext {
+                        order_label: None,
+                        tree_order: Some(&tree_order),
+                    };
+
                     for locale in &locales_to_use {
                         let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
                             Some(n) => n,
                             None => continue,
                         };
 
-                        let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                        let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
                         yield row;
                         emitted += 1;
                         if let Some(lim) = limit {

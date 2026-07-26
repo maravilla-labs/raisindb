@@ -346,27 +346,46 @@ async fn handle_reorder<S: Storage + TransactionalStorage + 'static>(
     let current_name = current_node.name.clone();
     let target_name = target_path.rsplit('/').next().unwrap_or("");
 
+    // Validate the target sibling exists so a typo is a 404 rather than a
+    // silent no-op. A point lookup by path, not a full sibling listing: the old
+    // `list_children` scan loaded every sibling just to test one name.
     if parent_path != "/" && !parent_path.is_empty() {
-        let siblings = nodes_svc.list_children(&parent_path).await?;
-        if !siblings.iter().any(|n| n.name == target_name) {
+        let target_sibling_path = format!("{}/{}", parent_path.trim_end_matches('/'), target_name);
+        if nodes_svc.get_by_path(&target_sibling_path).await?.is_none() {
             return Err(ApiError::node_not_found(target_path));
         }
     }
 
-    if move_position == "before" {
-        nodes_svc
-            .move_child_before(&parent_path, &current_name, target_name, message, actor)
-            .await?;
-    } else if move_position == "after" {
-        nodes_svc
-            .move_child_after(&parent_path, &current_name, target_name, message, actor)
-            .await?;
-    } else {
-        return Err(ApiError::validation_failed(
-            "move_position must be 'before' or 'after'",
-        ));
+    match move_position {
+        "before" => {
+            nodes_svc
+                .move_child_before(&parent_path, &current_name, target_name, message, actor)
+                .await?
+        }
+        "after" => {
+            nodes_svc
+                .move_child_after(&parent_path, &current_name, target_name, message, actor)
+                .await?
+        }
+        other => {
+            return Err(ApiError::validation_failed(format!(
+                "move_position must be 'before' or 'after', got '{other}'"
+            )))
+        }
     }
-    Ok((StatusCode::OK, Json(serde_json::json!({}))))
+
+    // Return the reordered node so callers can see its newly assigned
+    // `order_key` (and use it as a `__order` cursor) without a follow-up read.
+    // This used to return an empty object.
+    let reordered = nodes_svc
+        .get_by_path(path)
+        .await?
+        .ok_or_else(|| ApiError::node_not_found(path))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::to_value(reordered).unwrap_or_default()),
+    ))
 }
 
 /// Handle the `add-relation` command.

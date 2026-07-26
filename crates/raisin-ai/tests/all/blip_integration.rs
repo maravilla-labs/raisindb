@@ -7,8 +7,8 @@
 
 #![cfg(feature = "integration-tests")]
 
-mod fixtures;
-
+#[allow(unused_imports)]
+use crate::fixtures;
 use image::{DynamicImage, Rgb, RgbImage};
 use raisin_ai::candle::{select_device, BlipCaptioner};
 use raisin_ai::huggingface::ModelRegistry;

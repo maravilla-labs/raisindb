@@ -11,10 +11,16 @@ use raisin_models::nodes::Node;
 use rocksdb::WriteBatch;
 
 impl NodeRepositoryImpl {
+    /// Maintain the `ORDERED_CHILDREN` entry for a created-or-updated node.
+    ///
+    /// On update the node's existing label is preserved; on insert a new one is
+    /// appended. Either way the resulting label is stamped onto
+    /// `node.order_key`, so the node record and the index agree — which means
+    /// this must be called BEFORE the node blob is serialized into the batch.
     pub(crate) async fn add_ordered_children_to_batch(
         &self,
         batch: &mut WriteBatch,
-        node: &Node,
+        node: &mut Node,
         tenant_id: &str,
         repo_id: &str,
         branch: &str,
@@ -62,7 +68,6 @@ impl NodeRepositoryImpl {
             let substep_start = std::time::Instant::now();
             let mut get_existing_time = 0u128;
             let mut get_last_time = 0u128;
-            let mut inc_time = 0u128;
 
             let (order_label, is_new_child) = if is_update {
                 // Node exists - check for existing order label (may scan, but only for updates)
@@ -78,58 +83,20 @@ impl NodeRepositoryImpl {
                 } else {
                     // Update without previous order (rare edge case)
                     let t = std::time::Instant::now();
-                    let last_label = self
-                        .get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+                    let new_label = self.next_append_label(
+                        tenant_id, repo_id, branch, workspace, parent_id, revision,
+                    )?;
                     get_last_time = t.elapsed().as_micros();
-
-                    let t = std::time::Instant::now();
-                    let new_label = if let Some(ref last) = last_label {
-                        // Gracefully handle corrupt order labels
-                        match crate::fractional_index::inc(last) {
-                            Ok(label) => label,
-                            Err(e) => {
-                                tracing::warn!(
-                                    parent_id = %parent_id,
-                                    last_label = %last,
-                                    error = %e,
-                                    "Corrupt order label detected, falling back to first()"
-                                );
-                                crate::fractional_index::first()
-                            }
-                        }
-                    } else {
-                        crate::fractional_index::first()
-                    };
-                    inc_time = t.elapsed().as_micros();
 
                     (new_label, true)
                 }
             } else {
                 // FAST PATH: New node - skip existence check, just calculate new label
                 let t = std::time::Instant::now();
-                let last_label =
-                    self.get_last_order_label(tenant_id, repo_id, branch, workspace, parent_id)?;
+                let new_label = self.next_append_label(
+                    tenant_id, repo_id, branch, workspace, parent_id, revision,
+                )?;
                 get_last_time = t.elapsed().as_micros();
-
-                let t = std::time::Instant::now();
-                let new_label = if let Some(ref last) = last_label {
-                    // Gracefully handle corrupt order labels
-                    match crate::fractional_index::inc(last) {
-                        Ok(label) => label,
-                        Err(e) => {
-                            tracing::warn!(
-                                parent_id = %parent_id,
-                                last_label = %last,
-                                error = %e,
-                                "Corrupt order label detected, falling back to first()"
-                            );
-                            crate::fractional_index::first()
-                        }
-                    }
-                } else {
-                    crate::fractional_index::first()
-                };
-                inc_time = t.elapsed().as_micros();
 
                 (new_label, true)
             };
@@ -161,13 +128,18 @@ impl NodeRepositoryImpl {
                 batch.put_cf(cf_ordered, metadata_key, order_label.as_bytes());
             }
 
+            // Keep the node record in step with the index entry (both on append
+            // and when preserving an existing label, since the stored value may
+            // have been stale).
+            node.order_key = order_label;
+
             let batch_prep_time = substep_start.elapsed().as_micros();
 
             let total_order_time = order_start.elapsed().as_micros();
 
             // Log detailed order label timing breakdown
             tracing::debug!(
-                "ORDER_TIMING node={} total={}us [parent={}us, exist={}us, calc={}us (get_existing={}us, get_last={}us, inc={}us), batch={}us]",
+                "ORDER_TIMING node={} total={}us [parent={}us, exist={}us, calc={}us (get_existing={}us, get_last={}us), batch={}us]",
                 node.name,
                 total_order_time,
                 parent_lookup_time,
@@ -175,14 +147,13 @@ impl NodeRepositoryImpl {
                 label_calc_time,
                 get_existing_time,
                 get_last_time,
-                inc_time,
                 batch_prep_time
             );
 
             // Also output to stderr for test visibility
             if std::env::var("RAISIN_PROFILE").is_ok() {
                 eprintln!(
-                    "ORDER_TIMING node={} total={}us [parent={}us, exist={}us, calc={}us (get_existing={}us, get_last={}us, inc={}us), batch={}us]",
+                    "ORDER_TIMING node={} total={}us [parent={}us, exist={}us, calc={}us (get_existing={}us, get_last={}us), batch={}us]",
                     node.name,
                     total_order_time,
                     parent_lookup_time,
@@ -190,7 +161,6 @@ impl NodeRepositoryImpl {
                     label_calc_time,
                     get_existing_time,
                     get_last_time,
-                    inc_time,
                     batch_prep_time
                 );
             }

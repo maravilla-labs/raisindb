@@ -162,7 +162,7 @@ pub async fn execute_vector_scan<S: Storage + 'static>(
                             }
                         };
 
-                        let mut row = match node_to_row(&translated_node, &qualifier, &result.workspace_id, &projection, &ctx_clone, locale).await {
+                        let mut row = match node_to_row(&translated_node, &qualifier, &result.workspace_id, &projection, &ctx_clone, locale, None,).await {
                             Ok(r) => r,
                             Err(e) => {
                                 yield Err(e);

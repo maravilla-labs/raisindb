@@ -5,8 +5,8 @@
 // Run with:
 //   cargo test --package raisin-server --test flow_e2e_test -- --ignored --nocapture
 
-mod helpers;
-
+#[allow(unused_imports)]
+use crate::helpers;
 use std::time::Duration;
 
 use helpers::multi_node::{authenticate, ServerConfig, ServerHandle};

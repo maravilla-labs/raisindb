@@ -127,6 +127,31 @@ pub type NodeGetChildrenCallback = Arc<
         + Sync,
 >;
 
+/// Callback for moving a child to a 0-based position among its siblings.
+pub type NodeReorderChildCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // parent_path
+            String, // child_name
+            u32,    // position
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback for moving a child immediately before or after a named sibling.
+pub type NodeMoveChildRelativeCallback = Arc<
+    dyn Fn(
+            String, // workspace
+            String, // parent_path
+            String, // child_name
+            String, // reference_child_name
+            bool,   // before (false = after)
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Callback for replaying a parent's child order from `source_branch` onto
 /// `target_branch`.
 pub type NodeApplyChildOrderCallback = Arc<

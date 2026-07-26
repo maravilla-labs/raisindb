@@ -21,20 +21,51 @@ use raisin_error::Error;
 use raisin_models::nodes::Node;
 use raisin_storage::Storage;
 
+/// Editorial-ordering context a scan can supply for the row it is emitting.
+///
+/// Scans driven by the `ORDERED_CHILDREN` index already hold the node's order
+/// label (it is part of the scanned key), and tree traversals additionally know
+/// the chain of ancestor labels. Passing them through avoids a re-lookup and is
+/// the only way `__tree_order` can be known at all.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct OrderContext<'a> {
+    /// The node's own editorial order label among its siblings.
+    ///
+    /// `None` falls back to the node record's stored `order_key`.
+    pub order_label: Option<&'a str>,
+    /// Ancestor order labels joined root-first — sorts as document order.
+    ///
+    /// `None` leaves `__tree_order` NULL, which is correct for any scan that is
+    /// not a tree traversal.
+    pub tree_order: Option<&'a str>,
+}
+
+impl<'a> OrderContext<'a> {
+    /// Context carrying only a sibling order label.
+    pub(crate) fn label(order_label: &'a str) -> Self {
+        Self {
+            order_label: Some(order_label),
+            tree_order: None,
+        }
+    }
+}
+
 /// Convert a Node to a Row, populating virtual columns including embedding.
 ///
 /// This function is async because it may need to fetch the embedding from RocksDB storage
 /// when the `embedding` column is requested in the projection.
 ///
 /// The `effective_locale` parameter specifies which locale this node represents
-/// (for the virtual locale column).
+/// (for the virtual locale column). `order_ctx` supplies editorial-ordering
+/// values the scan already knows; see [`OrderContext`].
 ///
 /// # Column Naming
 ///
 /// All columns are fully qualified with the workspace/alias qualifier:
 /// - Node metadata: `qualifier.id`, `qualifier.path`, `qualifier.node_type`, etc.
 /// - Node properties: `qualifier.property_name`
-/// - Computed columns: `qualifier.depth`, `qualifier.__workspace`, `qualifier.locale`
+/// - Computed columns: `qualifier.depth`, `qualifier.__workspace`, `qualifier.locale`,
+///   `qualifier.__order`, `qualifier.__tree_order`
 pub(crate) async fn node_to_row<S: Storage>(
     node: &Node,
     qualifier: &str,
@@ -42,6 +73,7 @@ pub(crate) async fn node_to_row<S: Storage>(
     projection: &Option<Vec<String>>,
     ctx: &ExecutionContext<S>,
     effective_locale: &str,
+    order_ctx: Option<&OrderContext<'_>>,
 ) -> Result<Row, Error> {
     use raisin_models::nodes::properties::PropertyValue;
 
@@ -93,6 +125,7 @@ pub(crate) async fn node_to_row<S: Storage>(
         qualifier,
         workspace,
         effective_locale,
+        order_ctx,
         &should_include,
     );
 

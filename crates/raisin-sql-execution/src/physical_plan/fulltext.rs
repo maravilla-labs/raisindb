@@ -113,7 +113,7 @@ pub async fn execute_fulltext_scan<S: Storage + 'static>(
                     continue;
                 }
 
-                let mut row = node_to_row(&node, &qualifier, &workspace, &projection, &ctx_clone, "en").await?;
+                let mut row = node_to_row(&node, &qualifier, &workspace, &projection, &ctx_clone, "en", None,).await?;
 
                 // Add pseudo-columns for full-text search metadata
                 row.insert(

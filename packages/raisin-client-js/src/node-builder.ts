@@ -109,7 +109,12 @@ export class NodeBuilder {
   }
 
   /**
-   * Set the order key
+   * Set the order key.
+   *
+   * @deprecated The server owns editorial ordering: the order key is assigned by
+   * the ordering index on write, so any value set here is overwritten. To place a
+   * node, create it (it appends to the end of its parent) then call
+   * `nodes.reorder()`, `nodes.moveChildBefore()` or `nodes.moveChildAfter()`.
    */
   orderKey(orderKey: string): this {
     this.node.order_key = orderKey;
@@ -206,10 +211,14 @@ export class NodeBuilder {
     }
 
     // Ensure required array fields are initialized
+    //
+    // `order_key` is deliberately left empty: the ordering index assigns it at
+    // write time and overwrites whatever arrives, so seeding a value here would
+    // only mislead. New children are appended to the end of their parent.
+    if (this.node.order_key === undefined) this.node.order_key = '';
     if (!this.node.children) this.node.children = [];
     if (!this.node.relations) this.node.relations = [];
     if (!this.node.properties) this.node.properties = {};
-    if (!this.node.order_key) this.node.order_key = 'a';
     if (typeof this.node.version !== 'number') this.node.version = 1;
 
     return this.node as Node;
@@ -311,8 +320,8 @@ export class NodeHelpers {
       node_type: 'MockType',
       properties: {},
       children: [],
+      order_key: '',
       relations: [],
-      order_key: 'a',
       version: 1,
       ...overrides,
     };

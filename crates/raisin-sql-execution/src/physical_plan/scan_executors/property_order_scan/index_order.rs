@@ -178,6 +178,7 @@ pub(super) async fn execute_property_index_order_scan<S: Storage + 'static>(
                     &projection,
                     &ctx_clone,
                     locale,
+                    None,
                 )
                 .await?;
 
@@ -329,6 +330,7 @@ async fn collect_fallback_nodes<S: Storage + 'static>(
             projection,
             ctx,
             locale,
+            None,
         )
         .await?;
 

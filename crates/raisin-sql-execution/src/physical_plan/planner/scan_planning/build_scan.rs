@@ -5,11 +5,38 @@
 //! limit pushdown.
 
 use super::super::{
-    CanonicalPredicate, ComparisonOp, Error, Expr, Literal, PhysicalPlan, PhysicalPlanner,
-    PlanContext, SortExpr, TableSchema, TypedExpr,
+    CanonicalPredicate, ComparisonOp, Error, Expr, Literal, OrderCursor, PhysicalPlan,
+    PhysicalPlanner, PlanContext, SortExpr, TableSchema, TypedExpr,
 };
 use raisin_sql::analyzer::{BinaryOperator, DataType};
 use std::sync::Arc;
+
+/// An editorial-order keyset cursor lifted out of a WHERE clause, together with
+/// the column it came from so the residual filter can drop exactly that bound.
+struct OrderKeyset {
+    column: &'static str,
+    cursor: OrderCursor,
+}
+
+impl OrderKeyset {
+    /// True if `predicate` is the bound this cursor already enforces, and can
+    /// therefore be dropped from the residual filter.
+    fn covers(&self, predicate: &CanonicalPredicate) -> bool {
+        let expected = match &self.cursor {
+            OrderCursor::Label(value) | OrderCursor::TreeOrder(value) => value,
+        };
+        matches!(
+            predicate,
+            CanonicalPredicate::RangeCompare {
+                column,
+                op: ComparisonOp::Gt,
+                value,
+                ..
+            } if column.eq_ignore_ascii_case(self.column)
+                && matches!(&value.expr, Expr::Literal(Literal::Text(text)) if text == expected)
+        )
+    }
+}
 
 impl PhysicalPlanner {
     /// Build a scan plan from the selected best predicate
@@ -41,6 +68,7 @@ impl PhysicalPlanner {
                 workspace,
                 branch,
                 projection,
+                context,
             ),
             CanonicalPredicate::DescendantOf {
                 ref parent_path,
@@ -54,6 +82,7 @@ impl PhysicalPlanner {
                 workspace,
                 branch,
                 projection,
+                context,
             ),
             CanonicalPredicate::References {
                 ref target_workspace,
@@ -188,6 +217,41 @@ impl PhysicalPlanner {
         ))
     }
 
+    /// An editorial-order keyset cursor lifted out of the WHERE clause.
+    ///
+    /// `column` selects which ordering this scan can seek on: `__order` for a
+    /// direct-children scan, `__tree_order` for a subtree walk.
+    ///
+    /// Only the strictly-exclusive forward form (`col > 'value'`) is turned into
+    /// a seek, because that is exactly what the index cursor expresses. An
+    /// inclusive (`>=`) or reverse (`<`) bound stays a row-level filter rather
+    /// than being approximated — a keyset cursor that quietly shifted by one row
+    /// would silently drop or duplicate a record.
+    fn extract_order_keyset(
+        canonical: &[CanonicalPredicate],
+        column: &'static str,
+    ) -> Option<OrderKeyset> {
+        canonical.iter().find_map(|predicate| match predicate {
+            CanonicalPredicate::RangeCompare {
+                column: predicate_column,
+                op: ComparisonOp::Gt,
+                value,
+                ..
+            } if predicate_column.eq_ignore_ascii_case(column) => match &value.expr {
+                Expr::Literal(Literal::Text(text)) => Some(OrderKeyset {
+                    column,
+                    cursor: match column {
+                        "__tree_order" => OrderCursor::TreeOrder(text.clone()),
+                        _ => OrderCursor::Label(text.clone()),
+                    },
+                }),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build_child_of_scan(
         &self,
         parent_path: &str,
@@ -197,14 +261,21 @@ impl PhysicalPlanner {
         workspace: &str,
         branch: &str,
         projection: Option<Vec<String>>,
+        context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
-        // Remove only the ChildOf predicate this scan actually guarantees; a
-        // ChildOf over a DIFFERENT parent must stay a row-level filter.
+        // A CHILD_OF scan walks the editorial-order index, so it can absorb an
+        // `__order` keyset cursor directly into the seek.
+        let order_cursor = Self::extract_order_keyset(canonical, "__order");
+
+        // Remove only the predicates this scan actually guarantees. A ChildOf
+        // over a DIFFERENT parent must stay a row-level filter, and an `__order`
+        // bound is only dropped when the seek makes it exactly redundant.
         let remaining: Vec<_> = canonical
             .iter()
             .filter(|p| {
                 !matches!(p, CanonicalPredicate::ChildOf { parent_path: pp } if pp == parent_path)
             })
+            .filter(|p| !order_cursor.as_ref().is_some_and(|c| c.covers(p)))
             .cloned()
             .collect();
 
@@ -214,6 +285,29 @@ impl PhysicalPlanner {
             "/".to_string()
         } else {
             format!("{}/", parent_path.trim_end_matches('/'))
+        };
+
+        // The scan emits editorial order. It can therefore claim the query's
+        // ORDER BY when that ORDER BY is `__order` (either direction), or when
+        // there is no ORDER BY at all — in which case editorial order is exactly
+        // the documented default for CHILD_OF.
+        let (claims_editorial_order, order_descending) = match &context.order_by {
+            Some((column, ascending)) if column.eq_ignore_ascii_case("__order") => {
+                (true, !*ascending)
+            }
+            // No ORDER BY: editorial order is the documented default for
+            // CHILD_OF, so the scan's own order is what the caller expects.
+            None => (true, false),
+            Some(_) => (false, false),
+        };
+
+        // LIMIT may only ride into the scan when the scan's order is the
+        // requested order AND nothing above it can filter rows away; a residual
+        // filter would otherwise consume part of the budget and return short.
+        let pushed_limit = if claims_editorial_order && remaining_filter.is_none() {
+            context.limit
+        } else {
+            None
         };
 
         let mut scan = PhysicalPlan::PrefixScan {
@@ -226,7 +320,10 @@ impl PhysicalPlanner {
             path_prefix,
             projection,
             direct_children_only: true,
-            limit: None,
+            limit: pushed_limit,
+            order_cursor: order_cursor.map(|keyset| keyset.cursor),
+            order_descending,
+            claims_editorial_order,
         };
 
         if let Some(filter_expr) = remaining_filter {
@@ -250,7 +347,12 @@ impl PhysicalPlanner {
         workspace: &str,
         branch: &str,
         projection: Option<Vec<String>>,
+        context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
+        // A subtree scan walks in document order, so it can absorb an
+        // `__tree_order` keyset cursor directly into the traversal resume.
+        let order_cursor = Self::extract_order_keyset(canonical, "__tree_order");
+
         // Remove only the DescendantOf predicate this scan guarantees (matching
         // parent path AND depth; the depth bound is re-added as a filter below).
         // A DescendantOf over a DIFFERENT parent/depth must stay a row-level
@@ -264,6 +366,7 @@ impl PhysicalPlanner {
                         if pp == parent_path && *md == max_depth
                 )
             })
+            .filter(|p| !order_cursor.as_ref().is_some_and(|c| c.covers(p)))
             .cloned()
             .collect();
 
@@ -311,6 +414,22 @@ impl PhysicalPlanner {
             };
         }
 
+        // The traversal emits document order, so it satisfies
+        // `ORDER BY __tree_order ASC` natively. Ascending only — see
+        // `order_descending` below.
+        let claims_editorial_order = matches!(
+            context.order_by.as_ref(),
+            Some((column, true)) if column.eq_ignore_ascii_case("__tree_order")
+        );
+
+        // As in build_child_of_scan: only bound the walk when its order is the
+        // requested order and no residual filter can consume the budget.
+        let pushed_limit = if claims_editorial_order && remaining_filter.is_none() {
+            context.limit
+        } else {
+            None
+        };
+
         let mut scan = PhysicalPlan::PrefixScan {
             tenant_id: self.default_tenant_id.to_string(),
             repo_id: self.default_repo_id.to_string(),
@@ -321,7 +440,13 @@ impl PhysicalPlanner {
             path_prefix,
             projection,
             direct_children_only: false,
-            limit: None,
+            limit: pushed_limit,
+            order_cursor: order_cursor.map(|keyset| keyset.cursor),
+            // A subtree walk is forward-only: document order has no meaningful
+            // cheap reverse (it would mean reversing every sibling group at every
+            // level), so DESC falls through to a Sort.
+            order_descending: false,
+            claims_editorial_order,
         };
 
         if let Some(filter_expr) = remaining_filter {
@@ -423,6 +548,13 @@ impl PhysicalPlanner {
                 projection,
                 direct_children_only: has_depth_predicate,
                 limit: None,
+                // A PATH_STARTS_WITH scan is driven by the path index, and it
+                // always keeps a residual filter, so it cannot claim editorial
+                // order even when `has_depth_predicate` routes it through the
+                // direct-children branch.
+                order_cursor: None,
+                order_descending: false,
+                claims_editorial_order: false,
             };
 
             if let Some(filter_expr) = remaining_filter {

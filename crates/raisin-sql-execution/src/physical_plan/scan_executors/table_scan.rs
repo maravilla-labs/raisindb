@@ -215,7 +215,7 @@ pub async fn execute_table_scan<S: Storage + 'static>(
                     None => continue,
                 };
 
-                let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
 
                 // Apply pushed-down filter if present
                 if let Some(ref filter_expr) = filter {

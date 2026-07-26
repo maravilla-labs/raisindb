@@ -921,6 +921,69 @@ impl NodeRepository for InMemoryNodeRepo {
         )
     }
 
+    /// Depth-first subtree walk with `tree_order`, for the in-memory backend.
+    ///
+    /// Built on the same positional labels as
+    /// [`Self::list_ordered_children_page`], so it is self-consistent within one
+    /// snapshot. Unlike the RocksDB backend the labels shift on reorder, so
+    /// cursors are not reorder-stable here.
+    fn scan_descendants_ordered_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_node_id: &str,
+        after_tree_order: Option<&str>,
+        limit: Option<usize>,
+        _options: ListOptions,
+    ) -> impl std::future::Future<Output = Result<Vec<(models::nodes::Node, String)>>> + Send {
+        let scope_owned = (
+            scope.tenant_id.to_string(),
+            scope.repo_id.to_string(),
+            scope.branch.to_string(),
+            scope.workspace.to_string(),
+        );
+        let root_id = parent_node_id.to_string();
+        let after = after_tree_order.map(str::to_string);
+        async move {
+            let scope = StorageScope::new(
+                &scope_owned.0,
+                &scope_owned.1,
+                &scope_owned.2,
+                &scope_owned.3,
+            );
+
+            // Walk the whole subtree in document order, then apply the cursor and
+            // limit. The in-memory backend holds everything in a map already, so
+            // there is no seek to save by resuming lazily.
+            let mut out: Vec<(models::nodes::Node, String)> = Vec::new();
+            let mut stack: Vec<(String, String)> = vec![(root_id, String::new())];
+
+            while let Some((node_id, tree_order)) = stack.pop() {
+                if let Some(node) = self.get(scope, &node_id, None).await? {
+                    out.push((node, tree_order.clone()));
+                }
+                let children = self
+                    .list_ordered_children_page(scope, &node_id, None, None, false, None)
+                    .await?;
+                for child in children.into_iter().rev() {
+                    let child_path = if tree_order.is_empty() {
+                        child.order_label.clone()
+                    } else {
+                        format!("{tree_order} {}", child.order_label)
+                    };
+                    stack.push((child.child_id, child_path));
+                }
+            }
+
+            if let Some(cursor) = after {
+                out.retain(|(_, path)| path.as_str() > cursor.as_str());
+            }
+            if let Some(limit) = limit {
+                out.truncate(limit);
+            }
+            Ok(out)
+        }
+    }
+
     fn get_descendants_bulk(
         &self,
         scope: StorageScope<'_>,
@@ -1011,5 +1074,88 @@ impl NodeRepository for InMemoryNodeRepo {
             parent_id,
             max_revision,
         )
+    }
+
+    fn list_ordered_children_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        after_label: Option<&str>,
+        limit: Option<usize>,
+        descending: bool,
+        max_revision: Option<&raisin_hlc::HLC>,
+    ) -> impl std::future::Future<Output = Result<Vec<raisin_storage::OrderedChild>>> + Send {
+        let StorageScope {
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+        } = scope;
+        stubs::list_ordered_children_page(
+            self,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            parent_id,
+            after_label,
+            limit,
+            descending,
+            max_revision,
+        )
+    }
+
+    fn list_by_parent_page(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        after_label: Option<&str>,
+        limit: Option<usize>,
+        descending: bool,
+        _options: ListOptions,
+    ) -> impl std::future::Future<Output = Result<Vec<(models::nodes::Node, String)>>> + Send {
+        let entries =
+            self.list_ordered_children_page(scope, parent_id, after_label, limit, descending, None);
+        let scope_owned = (
+            scope.tenant_id.to_string(),
+            scope.repo_id.to_string(),
+            scope.branch.to_string(),
+            scope.workspace.to_string(),
+        );
+        async move {
+            let entries = entries.await?;
+            let scope = StorageScope::new(
+                &scope_owned.0,
+                &scope_owned.1,
+                &scope_owned.2,
+                &scope_owned.3,
+            );
+            let mut out = Vec::with_capacity(entries.len());
+            for entry in entries {
+                if let Some(node) = self.get(scope, &entry.child_id, None).await? {
+                    out.push((node, entry.order_label));
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    fn get_child_order_label(
+        &self,
+        scope: StorageScope<'_>,
+        parent_id: &str,
+        child_id: &str,
+        max_revision: Option<&raisin_hlc::HLC>,
+    ) -> impl std::future::Future<Output = Result<Option<String>>> + Send {
+        let fut =
+            self.list_ordered_children_page(scope, parent_id, None, None, false, max_revision);
+        let child_id = child_id.to_string();
+        async move {
+            Ok(fut
+                .await?
+                .into_iter()
+                .find(|child| child.child_id == child_id)
+                .map(|child| child.order_label))
+        }
     }
 }

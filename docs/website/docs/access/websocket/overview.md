@@ -49,7 +49,11 @@ The `ResponseEnvelope` echoes `request_id`, sets `status` (`success` or `error`)
 
 `RequestType` enumerates every server capability (see `protocol.ts`). Highlights:
 
-- **Nodes** – `NodeCreate`, `NodeUpdate`, `NodeDelete`, `NodeGet`, `NodeQuery`, `NodeCopyTree`, `NodeReorder`.
+- **Nodes** – `NodeCreate`, `NodeUpdate`, `NodeDelete`, `NodeGet`, `NodeQuery`, `NodeCopyTree`.
+- **Editorial ordering** – `NodeReorder` (move a child to a 0-based position),
+  `NodeMoveChildBefore` / `NodeMoveChildAfter` (place next to a named sibling),
+  `NodeApplyChildOrder` (replay a parent's order from another branch). See
+  [Editorial ordering](../sql/editorial-ordering.md).
 - **Tree helpers** – `NodeListChildren`, `NodeGetTree`, `NodeMoveChildBefore/After`.
 - **Property ops** – `PropertyGet`, `PropertyUpdate`.
 - **Relations** – `RelationAdd`, `RelationRemove`, `RelationsGet`.

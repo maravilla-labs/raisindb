@@ -6709,8 +6709,28 @@ mod ordering {
             )
             .await?;
 
-        // Store original order_key
-        let original_order_key = child.order_key.clone();
+        // Read back the order_key the server ASSIGNED. The caller's incoming
+        // value is a placeholder: the ordering index owns the label and stamps
+        // it onto the node record, so comparing against `child.order_key` here
+        // would just assert that a client-supplied value was persisted verbatim.
+        let original_order_key = nodes
+            .get(
+                StorageScope::new(
+                    constants::TENANT,
+                    constants::REPO,
+                    constants::BRANCH,
+                    constants::WORKSPACE,
+                ),
+                &child.id,
+                None,
+            )
+            .await?
+            .expect("child should exist after create")
+            .order_key;
+        assert!(
+            !original_order_key.is_empty(),
+            "create must assign a non-empty order_key"
+        );
 
         // Update the child's name (not its position)
         child.name = "Updated Child".to_string();

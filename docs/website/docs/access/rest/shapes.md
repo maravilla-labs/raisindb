@@ -55,6 +55,12 @@ Rules:
 - Provide one of: path, parent, nodeType
 - Stable ordering by path then id for pagination
 
+Note this is *path* order (alphabetical within each level), which is **not** the
+manual drag-and-drop order. Hierarchy reads (`CHILD_OF` / `DESCENDANT_OF`, and the
+cursor-paginated child listing) return editorial order instead, and SQL can select
+or sort on it explicitly via `__order` / `__tree_order` — see
+[Editorial ordering](../sql/editorial-ordering.md).
+
 ## DSL Query
 
 Body for `POST /api/repository/{repo}/{branch}/head/{ws}/query/dsl` uses `raisin_query::NodeSearchQuery` (JSON). Example:

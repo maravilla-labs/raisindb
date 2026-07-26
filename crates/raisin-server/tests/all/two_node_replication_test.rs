@@ -1,7 +1,7 @@
 // Two-node replication test via REST API
 
-mod helpers;
-
+#[allow(unused_imports)]
+use crate::helpers;
 use helpers::multi_node::{authenticate, create_node, wait_for_node, ServerConfig, ServerHandle};
 use serde_json::json;
 use std::time::Duration;

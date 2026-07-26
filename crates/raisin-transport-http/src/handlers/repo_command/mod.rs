@@ -3,6 +3,20 @@
 //!
 //! This module contains the `repo_execute_command` function which handles
 //! all SQL-style commands like rename, move, copy, publish, translate, etc.
+//!
+//! # ⚠️ NOT WIRED UP — this code does not run
+//!
+//! There is no `pub mod repo_command;` in `lib.rs`, so this directory is not
+//! compiled and none of it executes. The **live** implementation of the same
+//! commands is [`crate::handlers::repo::commands`], reached from
+//! `handlers/repo/post.rs` and `get.rs` via the `raisin:cmd/<name>` marker.
+//!
+//! It is a parallel, better-factored version of that dispatcher (split into
+//! focused files rather than one large `commands.rs`), covering the same command
+//! set, and it has been unwired since the initial commit. Either finish the
+//! migration to it or delete it — but until then, **edits here have no effect**.
+//! Fixes to reorder, move, copy, publish etc. must go to
+//! `handlers/repo/commands.rs`.
 
 mod common;
 mod node_ops;

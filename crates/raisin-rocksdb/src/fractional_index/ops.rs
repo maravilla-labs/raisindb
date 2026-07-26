@@ -1,8 +1,32 @@
 //! Core fractional index operations.
 
 use raisin_error::Result;
+use raisin_hlc::HLC;
 
-const WARNING_LENGTH: usize = 48;
+/// Label length at which the ordering space is considered fragmented enough to
+/// warrant a rebalance. Reported alongside the warning so the log and the
+/// threshold can never drift apart.
+pub const WARNING_LENGTH: usize = 48;
+
+/// Separator between the fractional part of an order label and its HLC suffix
+/// in a full ORDERED_CHILDREN order label (`{fractional}{SEPARATOR}{HLC_hex}`).
+///
+/// # Why this separator is safe
+///
+/// `ORDERED_CHILDREN` sorts by the **full** label, while every ordering
+/// decision in the codebase is made on [`extract_fractional`]. Those two orders
+/// must agree. They do — but only because the fractional encoding is
+/// **prefix-free**: `fractional_index` serialises to lowercase hex of a byte
+/// vector whose terminator byte (`0x80`) appears *only* in final position, so no
+/// valid label is ever a prefix of another. Two distinct labels therefore always
+/// diverge inside the fractional part, and the comparison never reaches the
+/// separator.
+///
+/// This matters because `':'` (0x3A) sorts *after* `'0'..'9'` (0x30..0x39): if
+/// the encoding ever stopped being prefix-free, a shorter fractional part could
+/// sort after a longer one that extends it, silently inverting read order.
+/// `fractional_index::tests` pins both properties.
+pub const SEPARATOR: &str = "::";
 
 /// Generate first label for an empty sequence
 ///
@@ -94,5 +118,18 @@ pub fn is_approaching_exhaustion(label: &str) -> bool {
 /// This function extracts just the fractional part by finding the LAST `::`
 /// occurrence (since fractional indices may theoretically contain `:`).
 pub fn extract_fractional(label: &str) -> &str {
-    label.rfind("::").map(|pos| &label[..pos]).unwrap_or(label)
+    label
+        .rfind(SEPARATOR)
+        .map(|pos| &label[..pos])
+        .unwrap_or(label)
+}
+
+/// Assemble a full order label from a fractional part and a revision.
+///
+/// The inverse of [`extract_fractional`], and the single definition of the label
+/// format — every write path that mints an `ORDERED_CHILDREN` label uses this so
+/// they cannot drift apart (they previously did: some paths omitted the HLC
+/// suffix entirely).
+pub fn format_label(fractional: &str, revision: &HLC) -> String {
+    format!("{}{}{:016x}", fractional, SEPARATOR, revision.as_u128())
 }

@@ -102,6 +102,16 @@ pub(crate) fn extract_context<'a>(
     })
 }
 
+/// The acting user for this connection, for commit attribution.
+///
+/// Ordering operations record a revision, so they should be attributed like any
+/// other write. Returns `None` for unauthenticated connections, which the
+/// storage layer renders as `"system"`.
+pub(crate) fn connection_actor(connection_state: &Arc<RwLock<ConnectionState>>) -> Option<String> {
+    let conn = connection_state.read();
+    conn.auth_context().and_then(|auth| auth.user_id.clone())
+}
+
 /// Build a `NodeService` from the shared WsState, connection state, and
 /// validated request context. Applies auth context for RLS when present.
 pub(crate) fn build_node_service<S, B>(

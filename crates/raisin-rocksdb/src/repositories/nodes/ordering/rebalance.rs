@@ -200,12 +200,14 @@ impl NodeRepositoryImpl {
         // ordered. A single shared HLC suffix means ordering is purely fractional.
         let mut fractional = crate::fractional_index::first();
         let mut last_full_label = String::new();
+        // Nodes whose record we rewrote, for the post-commit replication capture.
+        let mut relabelled_nodes = Vec::with_capacity(children.len());
 
         for (idx, child) in children.iter().enumerate() {
             if idx > 0 {
                 fractional = crate::fractional_index::inc(&fractional)?;
             }
-            let new_full_label = format!("{}::{:016x}", fractional, revision.as_u128());
+            let new_full_label = super::format_order_label(&fractional, &revision);
 
             // Tombstone the child's current entry (revision isolation - keep history).
             let tombstone_key = keys::ordered_child_key_versioned(
@@ -233,6 +235,39 @@ impl NodeRepositoryImpl {
             );
             batch.put_cf(cf_ordered, new_key, &child.name);
 
+            // Rebalancing changes every child's label, so every child's node
+            // record has to be rewritten too — otherwise the stored `order_key`
+            // (and the `__order` column that reads it) would still report the
+            // pre-rebalance labels. Same batch, same revision.
+            if let Some(mut node) = self
+                .get_impl(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &child.child_id,
+                    false,
+                )
+                .await?
+            {
+                node.order_key = new_full_label.clone();
+                node.updated_at = Some(chrono::Utc::now());
+                self.add_node_indexes_to_batch_with_parent_id(
+                    &mut batch,
+                    &node,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &revision,
+                    Some(parent_id.to_string()),
+                )?;
+                relabelled_nodes.push((
+                    node,
+                    raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
+                ));
+            }
+
             last_full_label = new_full_label;
         }
 
@@ -249,6 +284,18 @@ impl NodeRepositoryImpl {
         self.branch_repo
             .update_head(tenant_id, repo_id, branch, revision)
             .await?;
+
+        // Replicate the relabelled nodes. After the commit, so the capture helper
+        // resolves each child's committed CF order key.
+        self.capture_apply_revision_snapshot(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            relabelled_nodes,
+            revision,
+        )
+        .await;
 
         // Record a system commit for the relabel.
         let op_meta = raisin_models::operations::OperationMeta::new_reorder(

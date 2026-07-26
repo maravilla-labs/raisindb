@@ -3,8 +3,8 @@
 //!
 //! Run with: `cargo test --package raisin-server --test mgmt_superadmin_test -- --ignored --nocapture`
 
-mod helpers;
-
+#[allow(unused_imports)]
+use crate::helpers;
 use helpers::multi_node::{ServerConfig, ServerHandle};
 use reqwest::Client;
 

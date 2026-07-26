@@ -189,6 +189,35 @@ impl FunctionApi for RaisinFunctionApi {
             .await
     }
 
+    async fn node_reorder_child(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        child_name: &str,
+        position: u32,
+    ) -> Result<()> {
+        self.impl_node_reorder_child(workspace, parent_path, child_name, position)
+            .await
+    }
+
+    async fn node_move_child_relative(
+        &self,
+        workspace: &str,
+        parent_path: &str,
+        child_name: &str,
+        reference_child_name: &str,
+        before: bool,
+    ) -> Result<()> {
+        self.impl_node_move_child_relative(
+            workspace,
+            parent_path,
+            child_name,
+            reference_child_name,
+            before,
+        )
+        .await
+    }
+
     // ========== SQL Operations ==========
 
     async fn sql_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {

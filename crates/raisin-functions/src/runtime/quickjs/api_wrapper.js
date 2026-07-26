@@ -333,6 +333,23 @@ globalThis.raisin = {
             const results = __call('nodes_getChildren', [workspace, path, limit]);
             return (__isErr(results) ? [] : results).map(n => wrapNode(n, workspace));
         },
+        // Editorial ordering. You name a position or a neighbour; the ordering
+        // index mints the fractional order key. Children are named, not paths.
+        reorderChild: (workspace, parentPath, childName, position) => {
+            const parsed = __call('nodes_reorderChild', [workspace, parentPath, childName, position]);
+            if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+            return true;
+        },
+        moveChildBefore: (workspace, parentPath, childName, beforeChildName) => {
+            const parsed = __call('nodes_moveChildBefore', [workspace, parentPath, childName, beforeChildName]);
+            if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+            return true;
+        },
+        moveChildAfter: (workspace, parentPath, childName, afterChildName) => {
+            const parsed = __call('nodes_moveChildAfter', [workspace, parentPath, childName, afterChildName]);
+            if (parsed && parsed.error) throw new Error(parsed.message || parsed.error);
+            return true;
+        },
         // Replay a parent's child order from sourceBranch onto targetBranch.
         applyChildOrder: (workspace, parentPath, sourceBranch, targetBranch) => {
             const parsed = __call('nodes_applyChildOrder', [workspace, parentPath, sourceBranch, targetBranch]);

@@ -9,7 +9,7 @@ mod scan_types;
 mod traversal;
 
 // Re-export all public types so the module's public API is unchanged.
-pub use plan::PhysicalPlan;
+pub use plan::{OrderCursor, PhysicalPlan};
 pub use scan_types::{IndexLookupParams, IndexLookupType, ScanReason, VectorDistanceMetric};
 
 #[cfg(test)]
@@ -54,6 +54,9 @@ mod tests {
             projection: None,
             direct_children_only: false,
             limit: None,
+            order_cursor: None,
+            order_descending: false,
+            claims_editorial_order: false,
         };
 
         assert_eq!(plan.describe(), "PrefixScan: prefix=/content/");

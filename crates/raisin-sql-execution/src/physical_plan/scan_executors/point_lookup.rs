@@ -107,7 +107,7 @@ pub async fn execute_path_index_scan<S: Storage + 'static>(
                         None => continue,
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
                     yield row;
                 }
             } else {
@@ -208,7 +208,7 @@ pub async fn execute_node_id_scan<S: Storage + 'static>(
                         None => continue,
                     };
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
                     yield row;
                 }
             } else {

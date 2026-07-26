@@ -26,7 +26,7 @@ mod vector_search;
 mod tests;
 
 use super::catalog::IndexCatalog;
-use super::operators::{PhysicalPlan, ScanReason, VectorDistanceMetric};
+use super::operators::{OrderCursor, PhysicalPlan, ScanReason, VectorDistanceMetric};
 use raisin_error::Error;
 use raisin_models::nodes::properties::schema::CompoundIndexDefinition;
 use raisin_sql::analyzer::{BinaryOperator, DataType, Expr, Literal, TypedExpr};

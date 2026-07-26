@@ -45,6 +45,7 @@ pub use index::{
 };
 pub use node::{
     apply_child_order_from_branch, CrossBranchCopySummary, CrossBranchNodeChange, NodeRepository,
+    OrderedChild,
 };
 pub use processing_rules::ProcessingRulesRepository;
 pub use registry::{RegistryRepository, TreeRepository};

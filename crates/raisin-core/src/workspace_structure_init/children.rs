@@ -10,7 +10,6 @@ use super::{convert_properties, convert_translations};
 pub(super) struct Frame {
     pub parent_path: Option<String>,
     pub children: IntoIter<models::nodes::types::initial_structure::InitialChild>,
-    pub previous_order_key: String,
 }
 
 pub(super) async fn create_children_iterative(
@@ -29,14 +28,11 @@ pub(super) async fn create_children_iterative(
     let mut stack = vec![Frame {
         parent_path: None,
         children: initial_children.to_vec().into_iter(),
-        previous_order_key: String::new(),
     }];
 
     while let Some(mut frame) = stack.pop() {
         if let Some(child_def) = frame.children.next() {
             let parent_path = frame.parent_path.clone();
-            let order_key = models::fractional_index::next_key(&frame.previous_order_key);
-            frame.previous_order_key = order_key.clone();
 
             let sanitized_name = crate::sanitize_name(&child_def.name)?;
 
@@ -86,7 +82,10 @@ pub(super) async fn create_children_iterative(
                     archetype: child_def.archetype.clone(),
                     properties,
                     children: Vec::new(),
-                    order_key: order_key.clone(),
+                    // Assigned by the ordering index at write time (add_node
+                    // stamps the real label onto the record); any value seeded
+                    // here would just be overwritten.
+                    order_key: String::new(),
                     has_children: None,
                     parent: parent_name,
                     version: 1,
@@ -113,7 +112,6 @@ pub(super) async fn create_children_iterative(
                 stack.push(Frame {
                     parent_path: frame.parent_path.clone(),
                     children: frame.children,
-                    previous_order_key: frame.previous_order_key.clone(),
                 });
             }
 
@@ -122,7 +120,6 @@ pub(super) async fn create_children_iterative(
                     stack.push(Frame {
                         parent_path: Some(node_path),
                         children: nested_children.into_iter(),
-                        previous_order_key: String::new(),
                     });
                 }
             }

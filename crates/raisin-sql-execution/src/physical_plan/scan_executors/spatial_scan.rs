@@ -138,7 +138,7 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
                         None => continue,
                     };
 
-                    let mut row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                    let mut row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
 
                     row.insert(
                         "__distance".to_string(),
@@ -267,7 +267,7 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
                         None => continue,
                     };
 
-                    let mut row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale).await?;
+                    let mut row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, None,).await?;
 
                     row.insert(
                         "__distance".to_string(),

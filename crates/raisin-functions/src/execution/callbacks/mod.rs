@@ -95,6 +95,8 @@ where
         node_update_property: Some(nodes::create_node_update_property(query_ctx.clone())),
         node_move: Some(nodes::create_node_move(query_ctx.clone())),
         node_apply_child_order: Some(nodes::create_node_apply_child_order(query_ctx.clone())),
+        node_reorder_child: Some(nodes::create_node_reorder_child(query_ctx.clone())),
+        node_move_child_relative: Some(nodes::create_node_move_child_relative(query_ctx.clone())),
         node_add_resource: Some(resources::create_node_add_resource(
             deps.storage.clone(),
             deps.binary_storage.clone(),

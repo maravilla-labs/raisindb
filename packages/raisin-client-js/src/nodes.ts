@@ -371,18 +371,49 @@ export class NodeOperations {
   // ========================================================================
 
   /**
-   * List children of a parent node
+   * List children of a parent node, in editorial (drag-and-drop) order.
    *
    * @param parentPath - Path of the parent node
    * @returns Array of child nodes
    */
   async listChildren(parentPath: string): Promise<Node[]> {
-    const payload = {
+    const { items } = await this.listChildrenPage(parentPath);
+    return items;
+  }
+
+  /**
+   * List one page of a parent's children, in editorial order.
+   *
+   * Pagination is keyset-based: pass the previous response's `nextCursor` back as
+   * `cursor` to get the following page. `nextCursor` is `null` on the last page.
+   * Treat the cursor as opaque — do not parse or construct it.
+   *
+   * @param parentPath - Path of the parent node
+   * @param options - `cursor` from a previous page, and page `limit`
+   */
+  async listChildrenPage(
+    parentPath: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<{ items: Node[]; nextCursor: string | null }> {
+    const payload: Record<string, unknown> = {
       parent_path: parentPath,
     };
+    if (options.cursor !== undefined) payload.cursor = options.cursor;
+    if (options.limit !== undefined) payload.limit = options.limit;
 
     const result = await this.sendRequest(payload, 'node_list_children');
-    return result as Node[];
+
+    // The paginated shape is `{ nodes, next_cursor }`; a bare array means an
+    // older server that ignored the cursor arguments.
+    if (Array.isArray(result)) {
+      return { items: result as Node[], nextCursor: null };
+    }
+    const page = result as { nodes?: Node[]; next_cursor?: unknown };
+    return {
+      items: page.nodes ?? [],
+      nextCursor:
+        page.next_cursor == null ? null : JSON.stringify(page.next_cursor),
+    };
   }
 
   /**
@@ -511,16 +542,21 @@ export class NodeOperations {
   }
 
   /**
-   * Reorder a node by setting a new order key
+   * Move a child to a specific position among its siblings.
    *
-   * @param nodePath - Node path
-   * @param orderKey - New order key (base62-encoded fractional index)
-   * @returns Reordered node
+   * Positions are 0-based; a position past the end appends. The server owns the
+   * fractional order key — you name a position, it mints the key.
+   *
+   * @param parentPath - Parent node path
+   * @param childName - Name of the child to move (not a full path)
+   * @param position - Target 0-based position among the parent's children
+   * @returns The reordered node, carrying its newly assigned `order_key`
    */
-  async reorder(nodePath: string, orderKey: string): Promise<Node> {
+  async reorder(parentPath: string, childName: string, position: number): Promise<Node> {
     const payload = {
-      node_path: nodePath,
-      order_key: orderKey,
+      parent_path: parentPath,
+      child_name: childName,
+      position,
     };
 
     const result = await this.sendRequest(payload, 'node_reorder');
@@ -528,41 +564,45 @@ export class NodeOperations {
   }
 
   /**
-   * Move a child node before a reference sibling
+   * Move a child so it sits immediately before one of its siblings.
    *
    * @param parentPath - Parent node path
-   * @param childPath - Child node path to move
-   * @param referencePath - Reference sibling path to position before
-   * @returns Moved node
+   * @param childName - Name of the child to move (not a full path)
+   * @param beforeChildName - Name of the sibling to sit before
    */
-  async moveChildBefore(parentPath: string, childPath: string, referencePath: string): Promise<Node> {
+  async moveChildBefore(
+    parentPath: string,
+    childName: string,
+    beforeChildName: string,
+  ): Promise<void> {
     const payload = {
       parent_path: parentPath,
-      child_path: childPath,
-      reference_path: referencePath,
+      child_name: childName,
+      before_child_name: beforeChildName,
     };
 
-    const result = await this.sendRequest(payload, 'node_move_child_before');
-    return result as Node;
+    await this.sendRequest(payload, 'node_move_child_before');
   }
 
   /**
-   * Move a child node after a reference sibling
+   * Move a child so it sits immediately after one of its siblings.
    *
    * @param parentPath - Parent node path
-   * @param childPath - Child node path to move
-   * @param referencePath - Reference sibling path to position after
-   * @returns Moved node
+   * @param childName - Name of the child to move (not a full path)
+   * @param afterChildName - Name of the sibling to sit after
    */
-  async moveChildAfter(parentPath: string, childPath: string, referencePath: string): Promise<Node> {
+  async moveChildAfter(
+    parentPath: string,
+    childName: string,
+    afterChildName: string,
+  ): Promise<void> {
     const payload = {
       parent_path: parentPath,
-      child_path: childPath,
-      reference_path: referencePath,
+      child_name: childName,
+      after_child_name: afterChildName,
     };
 
-    const result = await this.sendRequest(payload, 'node_move_child_after');
-    return result as Node;
+    await this.sendRequest(payload, 'node_move_child_after');
   }
 
   /**

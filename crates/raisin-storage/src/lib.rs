@@ -115,8 +115,8 @@ pub use scope::{
 pub use traits::{
     apply_child_order_from_branch, ArchetypeRepository, CompoundColumnValue,
     CompoundIndexRepository, CompoundIndexScanEntry, CrossBranchCopySummary, CrossBranchNodeChange,
-    ElementTypeRepository, NodeRepository, NodeTypeRepository, ProcessingRulesRepository,
-    PropertyIndexRepository, PropertyScanEntry, ReferenceIndexRepository, RegistryRepository,
-    RelationRepository, Storage, Transaction, TreeRepository, VersioningRepository,
-    WorkspaceRepository,
+    ElementTypeRepository, NodeRepository, NodeTypeRepository, OrderedChild,
+    ProcessingRulesRepository, PropertyIndexRepository, PropertyScanEntry,
+    ReferenceIndexRepository, RegistryRepository, RelationRepository, Storage, Transaction,
+    TreeRepository, VersioningRepository, WorkspaceRepository,
 };

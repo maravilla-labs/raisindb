@@ -169,7 +169,7 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
                             None => continue,
                         };
 
-                        let mut row = node_to_row(&translated_node, &qualifier, &relation.workspace, &projection, &ctx_clone, locale).await?;
+                        let mut row = node_to_row(&translated_node, &qualifier, &relation.workspace, &projection, &ctx_clone, locale, None,).await?;
                         insert_neighbor_columns(&mut row, &translated_node, &qualifier, &relation.relation_type, relation.weight);
                         yield row;
                         emitted += 1;
@@ -235,7 +235,7 @@ pub async fn execute_neighbors_scan<S: Storage + 'static>(
                             None => continue,
                         };
 
-                        let mut row = node_to_row(&translated_node, &qualifier, &src_workspace, &projection, &ctx_clone, locale).await?;
+                        let mut row = node_to_row(&translated_node, &qualifier, &src_workspace, &projection, &ctx_clone, locale, None,).await?;
                         insert_neighbor_columns(&mut row, &translated_node, &qualifier, &relation.relation_type, relation.weight);
                         yield row;
                         emitted += 1;

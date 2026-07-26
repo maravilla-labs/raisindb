@@ -114,6 +114,7 @@ const sidebars: SidebarsConfig = {
           label: 'SQL',
           items: [
             'access/sql/raisinsql',
+            'access/sql/editorial-ordering',
             'access/sql/branches',
             'access/sql/restore',
             'access/sql/graph_table',

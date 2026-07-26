@@ -49,9 +49,39 @@ geojson = { version = "0.24", features = ["geo-types"] }
 geohash = "0.13.1"
 
 # Disk/build tuning — keep target/ from ballooning across feature-set rebuilds.
-# debug info is the largest contributor; deps never need it.
+#
+# Measured breakdown of a full `cargo test --workspace` target/ (~44 GB):
+#
+#   deps/*.rlib + *.rmeta   ~4 GB   one per crate; irreducible for ~200 crates
+#   deps/ test executables  ~2 GB   one per TEST TARGET, each statically linking
+#                                   rocksdb + tantivy + candle + tesseract at
+#                                   25-350 MB. Integration tests are consolidated
+#                                   to one target per crate (tests/all/), which
+#                                   took this from ~8 GB / 108 binaries down to
+#                                   ~2 GB / 13. Don't add loose tests/*.rs files.
+#   incremental/            ~5 GB+  per-crate recompilation caches
+#   build/                  ~1 GB   compiled C deps (rocksdb, aws-lc, tesseract)
+#
+# Debug info is already suppressed below, and `.cargo/config.toml` externalizes
+# what remains via `split-debuginfo=unpacked` (measured at only ~150 MB, so it is
+# no longer a factor). The remaining lever is incremental caches — see
+# `make disk` / `make prune` and the note in CLAUDE.md.
 [profile.dev]
 debug = "line-tables-only"   # enough for panic backtraces with line numbers
 
 [profile.dev.package."*"]
 debug = false                # dependencies: no debug info at all
+
+# `cargo test` builds under the `test` profile. It inherits `dev`, but the
+# package override has to be restated: dependency debug info would otherwise come
+# back for every one of the 108 test binaries.
+[profile.test]
+debug = "line-tables-only"
+# Incremental caches were measured at ~5 GB — the second-largest consumer after
+# the test executables themselves — and buy little for test targets, which are
+# usually compiled once per change rather than iterated on in place. Library
+# iteration still gets incremental via `profile.dev`.
+incremental = false
+
+[profile.test.package."*"]
+debug = false

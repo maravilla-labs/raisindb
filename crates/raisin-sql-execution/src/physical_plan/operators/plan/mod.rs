@@ -22,6 +22,41 @@ use std::sync::Arc;
 
 use super::scan_types::{IndexLookupParams, ScanReason, VectorDistanceMetric};
 
+/// An exclusive editorial-order keyset cursor pushed down into a scan.
+///
+/// The two forms are mutually exclusive because they address different orders:
+/// `__order` orders siblings under one parent, while `__tree_order` orders a
+/// whole subtree in document order. A scan is driven by one or the other, never
+/// both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderCursor {
+    /// Resume strictly after this sibling order label (`__order > 'x'`),
+    /// seeking within one parent's children.
+    Label(String),
+    /// Resume strictly after this subtree tree-order value
+    /// (`__tree_order > 'x'`), continuing a depth-first walk without re-walking
+    /// what came before.
+    TreeOrder(String),
+}
+
+impl OrderCursor {
+    /// The sibling label form, if that is what this cursor is.
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Self::Label(label) => Some(label),
+            Self::TreeOrder(_) => None,
+        }
+    }
+
+    /// The subtree tree-order form, if that is what this cursor is.
+    pub fn tree_order(&self) -> Option<&str> {
+        match self {
+            Self::TreeOrder(value) => Some(value),
+            Self::Label(_) => None,
+        }
+    }
+}
+
 /// Generates the PhysicalPlan enum by composing variant groups from submodules.
 ///
 /// Each `variants!` block corresponds to a category file that contains
@@ -94,6 +129,16 @@ define_physical_plan! {
             projection: Option<Vec<String>>,
             direct_children_only: bool,
             limit: Option<usize>,
+            /// Exclusive editorial-order keyset cursor pushed into the index
+            /// seek, from a `__order > 'x'` or `__tree_order > 'x'` predicate.
+            order_cursor: Option<OrderCursor>,
+            /// Walk editorial order backwards (`ORDER BY __order DESC`).
+            /// `direct_children_only` only — a subtree walk is forward-only.
+            order_descending: bool,
+            /// True when this scan's own iteration order already satisfies the
+            /// query's `ORDER BY`, so the `Sort` above it was elided and the
+            /// `limit` may be applied during the scan.
+            claims_editorial_order: bool,
         },
 
         // ── Index Scans ──────────────────────────────────────────

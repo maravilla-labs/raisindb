@@ -165,7 +165,12 @@ async fn compare_put_vs_add_performance() -> Result<()> {
     let speedup = put_duration.as_secs_f64() / add_duration.as_secs_f64();
     let put_avg_us = put_duration.as_micros() / test_size as u128;
     let add_avg_us = add_duration.as_micros() / test_size as u128;
-    let time_saved_us = put_avg_us - add_avg_us;
+
+    // Signed, because `add()` is not guaranteed to win. This is a timing
+    // diagnostic, and under load (e.g. sharing a test binary with the rest of the
+    // suite) the ordering can flip — an unsigned subtraction here used to panic
+    // with "attempt to subtract with overflow" instead of reporting the result.
+    let time_saved_us = put_avg_us as i128 - add_avg_us as i128;
 
     println!("  put() average: {} μs/node", put_avg_us);
     println!("  add() average: {} μs/node", add_avg_us);
@@ -179,8 +184,11 @@ async fn compare_put_vs_add_performance() -> Result<()> {
     if speedup > 1.5 {
         println!("  ✓ Significant speedup! The existence check is the bottleneck.");
         println!("    The get_order_label_for_child() O(n) scan is causing the slowdown.\n");
-    } else {
+    } else if speedup >= 1.0 {
         println!("  ⚠ Modest speedup. Other factors may be contributing to slowdown.\n");
+    } else {
+        println!("  ⚠ add() measured SLOWER than put() this run — timing noise, not a\n");
+        println!("    regression signal. This test reports; it does not assert.\n");
     }
 
     Ok(())

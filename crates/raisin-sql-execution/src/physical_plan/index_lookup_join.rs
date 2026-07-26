@@ -265,11 +265,13 @@ async fn lookup_by_id<S: Storage>(
                 return Ok(None);
             }
             // Convert node to row
-            let row = node_to_row(&node, qualifier, workspace, projection, ctx, "default")
-                .await
-                .map_err(|e| {
-                    ExecutionError::Backend(format!("IndexLookupJoin node_to_row error: {}", e))
-                })?;
+            let row = node_to_row(
+                &node, qualifier, workspace, projection, ctx, "default", None,
+            )
+            .await
+            .map_err(|e| {
+                ExecutionError::Backend(format!("IndexLookupJoin node_to_row error: {}", e))
+            })?;
             Ok(Some(row))
         }
         None => {
@@ -311,11 +313,13 @@ async fn lookup_by_path<S: Storage>(
                 return Ok(None);
             }
             // Convert node to row
-            let row = node_to_row(&node, qualifier, workspace, projection, ctx, "default")
-                .await
-                .map_err(|e| {
-                    ExecutionError::Backend(format!("IndexLookupJoin node_to_row error: {}", e))
-                })?;
+            let row = node_to_row(
+                &node, qualifier, workspace, projection, ctx, "default", None,
+            )
+            .await
+            .map_err(|e| {
+                ExecutionError::Backend(format!("IndexLookupJoin node_to_row error: {}", e))
+            })?;
             Ok(Some(row))
         }
         None => Ok(None),

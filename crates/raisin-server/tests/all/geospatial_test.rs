@@ -2,8 +2,8 @@
 //
 // Tests: create repo → workspace → nodetype → insert nodes with GeoJSON → ST_* SQL queries
 
-mod helpers;
-
+#[allow(unused_imports)]
+use crate::helpers;
 use helpers::multi_node::{authenticate, ServerConfig, ServerHandle};
 use reqwest::Client;
 use serde_json::{json, Value};

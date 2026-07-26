@@ -47,7 +47,7 @@ use std::time::Duration;
 pub use compound_scan::execute_compound_index_scan;
 pub use count_scan::{execute_count_scan, execute_property_index_count_scan};
 pub use neighbors_scan::execute_neighbors_scan;
-pub(crate) use node_to_row::node_to_row;
+pub(crate) use node_to_row::{node_to_row, OrderContext};
 pub use point_lookup::{execute_node_id_scan, execute_path_index_scan};
 pub use prefix_scan::execute_prefix_scan;
 pub use property_index_scan::execute_property_index_scan;

@@ -434,40 +434,44 @@ async fn test_mixed_siblings_and_nested_children() {
         assert!(node.is_some(), "Node '/assets/{}' should exist", name);
     }
 
-    let docs = storage
+    // The root-level siblings must be distinctly ordered relative to each other.
+    //
+    // Assert this through the ordering index rather than the stored
+    // `Node.order_key`: the label is owned by the backend's ordering index, and
+    // the in-memory backend derives it from position on read instead of storing
+    // a copy (a stored copy would go stale on reorder). Reading it back through
+    // the index is therefore the backend-agnostic way to state the intent.
+    let root_order = storage
         .nodes()
-        .get_by_path(
+        .list_ordered_children_page(
             StorageScope::new("tenant", "repo", "main", "content"),
-            "/docs",
+            "/",
+            None,
+            None,
+            false,
             None,
         )
         .await
-        .unwrap()
-        .unwrap();
-    let assets = storage
-        .nodes()
-        .get_by_path(
-            StorageScope::new("tenant", "repo", "main", "content"),
-            "/assets",
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let pages = storage
-        .nodes()
-        .get_by_path(
-            StorageScope::new("tenant", "repo", "main", "content"),
-            "/pages",
-            None,
-        )
-        .await
-        .unwrap()
         .unwrap();
 
-    assert_ne!(docs.order_key, assets.order_key);
-    assert_ne!(assets.order_key, pages.order_key);
-    assert_ne!(docs.order_key, pages.order_key);
+    let labels: Vec<&str> = root_order
+        .iter()
+        .map(|child| child.order_label.as_str())
+        .collect();
+    let unique: std::collections::HashSet<&&str> = labels.iter().collect();
+    assert_eq!(
+        unique.len(),
+        labels.len(),
+        "root-level siblings must have distinct order labels, got {labels:?}"
+    );
+
+    for name in ["docs", "assets", "pages"] {
+        assert!(
+            root_order.iter().any(|child| child.name == name),
+            "'{name}' should appear in the root ordering, got {:?}",
+            root_order.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[tokio::test]

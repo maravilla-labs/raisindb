@@ -288,6 +288,32 @@ impl Default for TreeWorkspaceConfig {
     }
 }
 
+/// What kind of key a [`PageCursor`]'s `last_key` holds.
+///
+/// Different read paths page over different orderings, and their cursors are not
+/// interchangeable — resuming an editorial-order scan from a content-tree entry
+/// key (or vice versa) would silently skip or repeat rows. Tagging the cursor lets
+/// the receiving path reject a mismatch instead of mis-paginating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PageCursorKind {
+    /// A cursor minted before cursors were tagged.
+    ///
+    /// Its `last_key` was a node **name**, used with an O(N) scan-and-skip that
+    /// broke on renames and duplicate names. It cannot be honoured correctly, so
+    /// it is rejected with a clear error rather than silently mis-paginating.
+    /// This is the deserialization default, so old encoded cursors land here.
+    #[default]
+    Legacy,
+
+    /// `last_key` is an editorial order label, for keyset paging over a parent's
+    /// children (`ORDERED_CHILDREN`).
+    OrderLabel,
+
+    /// `last_key` is a content-tree entry key, for paging a revision snapshot.
+    TreeEntry,
+}
+
 /// Cursor for pagination (MongoDB-style)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageCursor {
@@ -299,6 +325,10 @@ pub struct PageCursor {
     /// If None, uses current HEAD (may shift between pages)
     pub revision: Option<HLC>,
 
+    /// Which ordering `last_key` belongs to. See [`PageCursorKind`].
+    #[serde(default)]
+    pub kind: PageCursorKind,
+
     /// Opaque token to prevent tampering
     /// Hash of (last_key, revision, secret)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -306,13 +336,49 @@ pub struct PageCursor {
 }
 
 impl PageCursor {
-    /// Create cursor from last entry key
+    /// Create cursor from last entry key.
+    ///
+    /// Prefer [`Self::with_kind`]: an untagged cursor is treated as
+    /// [`PageCursorKind::Legacy`] and will be rejected when used.
     pub fn new(last_key: String, revision: Option<HLC>) -> Self {
         Self {
             last_key,
             revision,
+            kind: PageCursorKind::Legacy,
             token: None,
         }
+    }
+
+    /// Create a cursor tagged with the ordering its key belongs to.
+    pub fn with_kind(last_key: String, revision: Option<HLC>, kind: PageCursorKind) -> Self {
+        Self {
+            last_key,
+            revision,
+            kind,
+            token: None,
+        }
+    }
+
+    /// Check this cursor belongs to `expected`, with an actionable error if not.
+    ///
+    /// A `Legacy` cursor gets a distinct message: it is not a client mistake but
+    /// a cursor issued by an older server, and the fix is to restart pagination.
+    pub fn require_kind(&self, expected: PageCursorKind) -> Result<(), String> {
+        if self.kind == expected {
+            return Ok(());
+        }
+        Err(match self.kind {
+            PageCursorKind::Legacy => {
+                "This pagination cursor was issued by an older version of the server and can \
+                 no longer be resumed. Restart pagination without a cursor."
+                    .to_string()
+            }
+            actual => format!(
+                "Pagination cursor belongs to a different ordering ({actual:?}, expected \
+                 {expected:?}). Cursors cannot be moved between orderings; restart pagination \
+                 without a cursor."
+            ),
+        })
     }
 
     /// Encode cursor as base64 string for API responses

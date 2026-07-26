@@ -6,8 +6,8 @@
 // - Replication correctness
 // - REST and SQL API consistency
 
-mod cluster_test_utils;
-
+#[allow(unused_imports)]
+use crate::cluster_test_utils;
 use cluster_test_utils::{
     create_comment, create_post, verify_child_order_via_rest, verify_child_order_via_sql,
     verify_comment_exists_on_all_nodes, verify_node_exists_on_all_nodes,

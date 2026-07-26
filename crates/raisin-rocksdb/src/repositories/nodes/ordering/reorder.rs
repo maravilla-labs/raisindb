@@ -40,7 +40,8 @@ impl NodeRepositoryImpl {
                 parent_id = %parent_id,
                 tenant = %tenant_id,
                 repo = %repo_id,
-                "Order label approaching exhaustion (length >= 20). Consider rebalancing parent's children."
+                threshold = crate::fractional_index::WARNING_LENGTH,
+                "Order label approaching exhaustion. Consider rebalancing parent's children."
             );
         }
 
@@ -67,7 +68,7 @@ impl NodeRepositoryImpl {
         // 4b. Append HLC timestamp to new_label for causal ordering
         // This ensures deterministic ordering across cluster when multiple nodes
         // generate the same fractional part concurrently
-        let final_label = format!("{}::{:016x}", new_label, revision.as_u128());
+        let final_label = super::format_order_label(&new_label, &revision);
 
         // 5. ATOMIC WRITE using WriteBatch
         let mut batch = rocksdb::WriteBatch::default();
@@ -123,6 +124,59 @@ impl NodeRepositoryImpl {
             batch.delete_cf(cf_ordered, metadata_key);
         }
 
+        // 5b. Persist the new label onto the node record, in the SAME batch and
+        // at the SAME revision.
+        //
+        // `Node.order_key` is the value every read surface reports (JSON, the
+        // `__order` SQL column, replication's fallback order key). Before this,
+        // reorder only wrote ORDERED_CHILDREN, so the stored `order_key` silently
+        // went stale the moment a node was moved — the CF and the node record
+        // disagreed, and the delete path had to compensate (see
+        // `crud/delete/tombstone.rs`).
+        //
+        // This writes NODES / PATH_INDEX / NODE_PATH / property indexes at the
+        // already-allocated revision. It deliberately does NOT go through
+        // `update_impl`, which would allocate a second revision, bump HEAD again,
+        // and append another ORDERED_CHILDREN entry.
+        let reordered_node = match self
+            .get_impl(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                target_child_id,
+                false,
+            )
+            .await?
+        {
+            Some(mut node) => {
+                node.order_key = final_label.clone();
+                node.updated_at = Some(chrono::Utc::now());
+                self.add_node_indexes_to_batch_with_parent_id(
+                    &mut batch,
+                    &node,
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    workspace,
+                    &revision,
+                    Some(parent_id.to_string()),
+                )?;
+                Some(node)
+            }
+            None => {
+                // The order index can outlive the node (concurrent delete). The
+                // ordering write above is still correct and idempotent, so don't
+                // fail the reorder over a missing node record.
+                tracing::warn!(
+                    node_id = %target_child_id,
+                    parent_id = %parent_id,
+                    "Reorder: node record not found; ordering index updated without it"
+                );
+                None
+            }
+        };
+
         // Commit batch atomically
         self.db
             .write(batch)
@@ -132,6 +186,26 @@ impl NodeRepositoryImpl {
         self.branch_repo
             .update_head(tenant_id, repo_id, branch, revision)
             .await?;
+
+        // 6b. Replicate the reordered node.
+        //
+        // Must run AFTER the commit: the capture helper re-reads the committed
+        // ORDERED_CHILDREN entry to resolve `cf_order_key`, so peers reproduce
+        // the exact index entry rather than inferring one.
+        if let Some(node) = reordered_node {
+            self.capture_apply_revision_snapshot(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                vec![(
+                    node,
+                    raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
+                )],
+                revision,
+            )
+            .await;
+        }
 
         // 7. Store revision metadata with commit message
         if message.is_some() || actor.is_some() {
