@@ -1,8 +1,9 @@
 use super::super::types::DataType;
 
-/// Reserved schema table names (PascalCase)
-/// These tables provide SQL access to schema management operations
-pub const SCHEMA_TABLES: &[&str] = &["NodeTypes", "Archetypes", "ElementTypes"];
+/// Reserved schema table names (PascalCase) — these read the type registry
+/// instead of content nodes. `Workspaces` is read-only; the other three are
+/// written through DDL (`CREATE/ALTER/DROP NODETYPE|ARCHETYPE|ELEMENTTYPE`).
+pub const SCHEMA_TABLES: &[&str] = &["NodeTypes", "Archetypes", "ElementTypes", "Workspaces"];
 
 /// Check if a table name is a reserved schema table (case-insensitive)
 pub fn is_schema_table(name: &str) -> bool {
@@ -15,6 +16,15 @@ pub enum SchemaTableKind {
     NodeTypes,
     Archetypes,
     ElementTypes,
+    /// Workspace definitions — READ-ONLY over SQL (see `execute_schema_table_scan`).
+    ///
+    /// Unlike the other three, workspaces are repo-scoped rather than
+    /// branch-scoped, and they are created/altered through the management API
+    /// and package install, not DDL. Exposing them here lets server-side
+    /// functions answer "what may be created in this workspace?" — the
+    /// containment question the editor answers from `db.workspaces().list()`,
+    /// which the function runtime has no binding for.
+    Workspaces,
 }
 
 impl SchemaTableKind {
@@ -24,6 +34,11 @@ impl SchemaTableKind {
             "nodetypes" => Some(Self::NodeTypes),
             "archetypes" => Some(Self::Archetypes),
             "elementtypes" => Some(Self::ElementTypes),
+            // NB: this shadows a CONTENT workspace literally named `workspaces`
+            // (which would map to the same table name). Schema tables are
+            // resolved first in table_scan, so such a workspace would become
+            // unqueryable — `workspaces` is not a usable workspace name.
+            "workspaces" => Some(Self::Workspaces),
             _ => None,
         }
     }
@@ -34,6 +49,7 @@ impl SchemaTableKind {
             Self::NodeTypes => "NodeTypes",
             Self::Archetypes => "Archetypes",
             Self::ElementTypes => "ElementTypes",
+            Self::Workspaces => "Workspaces",
         }
     }
 }

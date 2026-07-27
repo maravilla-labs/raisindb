@@ -14,6 +14,7 @@ pub fn get_schema_table(kind: SchemaTableKind) -> TableDef {
         SchemaTableKind::NodeTypes => schema_object_tables::node_types_table(),
         SchemaTableKind::Archetypes => schema_object_tables::archetypes_table(),
         SchemaTableKind::ElementTypes => schema_object_tables::element_types_table(),
+        SchemaTableKind::Workspaces => schema_object_tables::workspaces_table(),
     }
 }
 

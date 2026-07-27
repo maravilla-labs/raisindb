@@ -57,6 +57,21 @@ use helpers::extract_name_from_filter;
 use schema_dml::*;
 use workspace_dml::*;
 
+/// The reserved `Workspaces` schema table is READ-ONLY over SQL.
+///
+/// Workspace definitions are created and altered by package install and the
+/// management API, which also builds the per-workspace nodes table, seeds
+/// `initial_structure` and registers the workspace in the SQL catalog. A bare
+/// row write here would do none of that, so it is refused with a pointer rather
+/// than silently half-applied.
+fn workspaces_are_read_only(op: &str) -> Error {
+    Error::Validation(format!(
+        "{op} is not supported on the reserved `Workspaces` table — it is read-only. \
+         Workspaces are defined by package install (workspaces/*.yaml) or the management API; \
+         SELECT here to read allowed_node_types / allowed_root_node_types."
+    ))
+}
+
 /// Execute a physical INSERT operation.
 ///
 /// Inserts new rows into a schema table or workspace table.
@@ -83,6 +98,12 @@ pub async fn execute_insert<
             }
             SchemaTableKind::ElementTypes => {
                 execute_insert_elementtypes(columns, values, ctx).await?;
+            }
+            // NB: distinct from DmlTableTarget::Workspace below, which is a
+            // CONTENT workspace (a nodes table). This is the reserved
+            // `Workspaces` schema table listing the workspace DEFINITIONS.
+            SchemaTableKind::Workspaces => {
+                return Err(workspaces_are_read_only("INSERT"));
             }
         },
         DmlTableTarget::Workspace(workspace) => {
@@ -124,6 +145,7 @@ pub async fn execute_update<
                 SchemaTableKind::ElementTypes => {
                     execute_update_elementtype(&name, assignments, ctx).await?
                 }
+                SchemaTableKind::Workspaces => return Err(workspaces_are_read_only("UPDATE")),
             }
         }
         DmlTableTarget::Workspace(workspace) => {
@@ -158,6 +180,7 @@ pub async fn execute_delete<
                 SchemaTableKind::NodeTypes => execute_delete_nodetype(&name, ctx).await?,
                 SchemaTableKind::Archetypes => execute_delete_archetype(&name, ctx).await?,
                 SchemaTableKind::ElementTypes => execute_delete_elementtype(&name, ctx).await?,
+                SchemaTableKind::Workspaces => return Err(workspaces_are_read_only("DELETE")),
             }
         }
         DmlTableTarget::Workspace(workspace) => {

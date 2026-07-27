@@ -119,7 +119,7 @@ fn validate_table_name(table: &sqlparser::ast::ObjectName, operation: &str) -> R
         return Ok(());
     }
 
-    // Accept schema tables (NodeTypes, Archetypes, ElementTypes)
+    // Accept schema tables (NodeTypes, Archetypes, ElementTypes, Workspaces)
     if is_schema_table(&table_str) {
         return Ok(());
     }
@@ -128,7 +128,7 @@ fn validate_table_name(table: &sqlparser::ast::ObjectName, operation: &str) -> R
     Err(ParseError::InvalidTable {
         operation: operation.to_string(),
         table: table_str,
-        expected: "nodes, NodeTypes, Archetypes, or ElementTypes".to_string(),
+        expected: "nodes, NodeTypes, Archetypes, ElementTypes, or Workspaces".to_string(),
     })
 }
 

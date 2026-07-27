@@ -334,10 +334,24 @@ impl<'a> AnalyzerContext<'a> {
                 ))
             })?;
 
+            // `Workspaces` has no DDL equivalent — it is read-only over SQL.
+            // Workspaces are defined by package install / the management API,
+            // which also creates the nodes table, seeds `initial_structure` and
+            // registers the workspace in the catalog; a row write would do none
+            // of that, so point at the right tool instead of a DDL form that
+            // does not exist.
             let ddl_syntax = match kind {
                 SchemaTableKind::NodeTypes => "CREATE/ALTER/DROP NODETYPE",
                 SchemaTableKind::Archetypes => "CREATE/ALTER/DROP ARCHETYPE",
                 SchemaTableKind::ElementTypes => "CREATE/ALTER/DROP ELEMENTTYPE",
+                SchemaTableKind::Workspaces => {
+                    return Err(AnalysisError::UnsupportedStatement(format!(
+                        "'{}' is read-only: workspaces are defined by package install \
+                         (workspaces/*.yaml) or the management API, not by SQL. \
+                         SELECT here to read allowed_node_types / allowed_root_node_types.",
+                        kind.table_name()
+                    )))
+                }
             };
 
             return Err(AnalysisError::UnsupportedStatement(format!(

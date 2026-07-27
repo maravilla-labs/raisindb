@@ -416,3 +416,78 @@ pub(crate) fn element_types_table() -> TableDef {
         indexes: vec![],
     }
 }
+
+/// Create the Workspaces schema table definition.
+///
+/// READ-ONLY: workspaces are created and altered through the management API and
+/// package install, never DDL, so the DML executor rejects writes here.
+///
+/// The columns that earn this table its existence are `allowed_node_types` and
+/// `allowed_root_node_types` — the coarse, server-enforced containment rule.
+/// Without them a server-side function can see which archetypes exist
+/// (`Archetypes`) and what a parent accepts (`NodeTypes.allowed_children`) but
+/// not what the workspace itself permits, so it cannot reproduce the editor's
+/// create menu. `config` and `initial_structure` come through as JSONB.
+pub(crate) fn workspaces_table() -> TableDef {
+    TableDef {
+        name: "Workspaces".to_string(),
+        columns: vec![
+            ColumnDef {
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+                generated: None,
+            },
+            ColumnDef {
+                name: "description".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
+                name: "allowed_node_types".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
+                name: "allowed_root_node_types".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
+                name: "depends_on".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
+                name: "initial_structure".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
+                name: "config".into(),
+                data_type: DataType::JsonB,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
+                name: "created_at".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: None,
+            },
+            ColumnDef {
+                name: "updated_at".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: None,
+            },
+        ],
+        primary_key: vec!["name".to_string()],
+        indexes: vec![],
+    }
+}

@@ -533,6 +533,77 @@ Notes:
   written before this guarantee may have NULL `created_at`; prefer an explicit
   property (e.g. `published_at`) when your data predates it.
 
+## 16. Schema Tables (Reserved)
+
+Four reserved table names read the **type registry** rather than content nodes:
+
+| Table | Contents | Writable via SQL |
+|-------|----------|------------------|
+| `NodeTypes` | Registered node types | DDL only — `CREATE/ALTER/DROP NODETYPE` |
+| `Archetypes` | Page templates | DDL only — `CREATE/ALTER/DROP ARCHETYPE` |
+| `ElementTypes` | Content blocks | DDL only — `CREATE/ALTER/DROP ELEMENTTYPE` |
+| `Workspaces` | Workspace definitions | **No — read-only** |
+
+They are queryable from the HTTP SQL API and from `raisin.sql` in server-side
+functions, which is the only route to schema information inside a function: the
+function runtime has no workspaces/types binding, and `raisin.asAdmin()` only
+re-exposes nodes and SQL.
+
+```sql
+SELECT name, base_node_type, extends, title, fields, meta FROM Archetypes
+SELECT name, allowed_children FROM NodeTypes
+SELECT name, extends, description, fields, meta FROM ElementTypes
+SELECT name, allowed_node_types, allowed_root_node_types FROM Workspaces
+```
+
+Nothing is cached — a freshly deployed type is visible on the next query, with
+no catalog to rebuild.
+
+### Three rules
+
+**Full-table SELECTs only.** An equality `WHERE name = 'x'` plans a point-lookup
+that bypasses the schema-table read path and silently returns **nothing**.
+Filter in your own code instead:
+
+```sql
+-- WRONG: returns no rows
+SELECT fields FROM Archetypes WHERE name = 'news:ArticlePage'
+-- RIGHT: read all, filter client-side
+SELECT name, fields FROM Archetypes
+```
+
+**`ElementTypes` has no `title` column.** Selecting it errors the whole query.
+
+**`fields` and `meta` are raw, not `extends`-merged.** Walk the `extends` chain
+yourself if you need the resolved schema.
+
+### `Workspaces` specifics
+
+Read-only, and repo-scoped rather than branch-scoped — workspaces are shared
+across branches and carry no revision history. Writes are refused, because a row
+write would skip everything that actually creating a workspace involves
+(building its nodes table, seeding `initial_structure`, registering it in the
+SQL catalog). Define workspaces in `workspaces/*.yaml` and install the package,
+or use the management API.
+
+Columns: `name`, `description`, `allowed_node_types`, `allowed_root_node_types`,
+`depends_on`, `initial_structure`, `config`, `created_at`, `updated_at`.
+
+`allowed_node_types` / `allowed_root_node_types` are the **coarse, server-enforced
+containment rule** — which node types may exist in a workspace at all, and which
+may sit at its root. Combined with `NodeTypes.allowed_children` (structural
+composition, for typed parents) they let a server-side function answer "what may
+be created here?" the same way an admin UI does:
+
+```sql
+-- What may exist in this workspace, and what does this parent type accept?
+SELECT name, allowed_node_types, allowed_root_node_types FROM Workspaces
+SELECT name, allowed_children FROM NodeTypes
+```
+
+Because `workspaces` is now a reserved table name, a *content* workspace may not
+be named `workspaces` — the schema table would shadow it.
+
 ## Quick Reference: Statement Summary
 
 | Operation | Syntax |
@@ -553,3 +624,4 @@ Notes:
 | Resolve | `SELECT RESOLVE(properties) FROM workspace WHERE ...` |
 | References | `WHERE REFERENCES('workspace:/path')` |
 | Geospatial | `WHERE ST_DWITHIN(location, ST_POINT($1, $2), 5000)` |
+| Schema tables | `SELECT ... FROM NodeTypes \| Archetypes \| ElementTypes \| Workspaces` (no `WHERE name=`) |

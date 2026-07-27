@@ -4,7 +4,7 @@
 // Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
 
 //! Read-side scan for the reserved schema tables (`NodeTypes`, `Archetypes`,
-//! `ElementTypes`).
+//! `ElementTypes`, `Workspaces`).
 //!
 //! These tables previously had only a *write* path (INSERT/UPDATE/DELETE/DDL);
 //! a `SELECT` fell through to the generic content-node DFS in
@@ -23,7 +23,8 @@ use async_stream::try_stream;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_sql::analyzer::catalog::SchemaTableKind;
 use raisin_storage::{
-    ArchetypeRepository, BranchScope, ElementTypeRepository, NodeTypeRepository, Storage,
+    ArchetypeRepository, BranchScope, ElementTypeRepository, NodeTypeRepository, RepoScope, Storage,
+    WorkspaceRepository,
 };
 
 use crate::physical_plan::eval::eval_expr;
@@ -70,6 +71,17 @@ pub(super) async fn execute_schema_table_scan<S: Storage + 'static>(
             SchemaTableKind::ElementTypes => storage
                 .element_types()
                 .list(scope, rev)
+                .await?
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                .collect(),
+            // Workspaces are REPO-scoped, not branch-scoped: they have no
+            // revision history and are shared across branches, so this takes a
+            // RepoScope and ignores `rev`. The `__branch` column still comes
+            // through from build_row, reporting the querying branch.
+            SchemaTableKind::Workspaces => storage
+                .workspaces()
+                .list(RepoScope::new(&tenant_id, &repo_id))
                 .await?
                 .iter()
                 .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))

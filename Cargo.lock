@@ -6649,7 +6649,7 @@ dependencies = [
 
 [[package]]
 name = "raisin-server"
-version = "0.1.40"
+version = "0.1.82"
 dependencies = [
  "anyhow",
  "async-stream",

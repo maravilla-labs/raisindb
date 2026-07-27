@@ -98,8 +98,27 @@ impl HttpFunctionInvoker {
         )
         .await
         .map_err(|e| McpError::protocol(format!("loading function `{name}`: {e}")))?;
-        let loaded = build_loaded_function(&node, code)
+        let mut loaded = build_loaded_function(&node, code)
             .map_err(|e| McpError::protocol(format!("building function `{name}`: {e}")))?;
+
+        // Module files for ES6 `import` resolution. `build_loaded_function` only
+        // carries the entry source, and the QuickJS loader is rebuilt per
+        // execution against `loaded.files` — so without this an MCP tool whose
+        // entry imports anything dies at declare time with
+        // `Error resolving module '…' from 'entry'`, while the very same
+        // function works when run from a trigger or flow (that path goes through
+        // `code_loader` in the job executor). Tools sharing a helper library are
+        // the normal case, so the two paths have to agree.
+        loaded.files = crate::handlers::functions::load_function_modules_on_branch(
+            &self.state,
+            &self.tenant_id,
+            &self.repo,
+            &self.branch,
+            &node.path,
+            loaded.metadata.entry_file_path(),
+            &loaded.code,
+        )
+        .await;
 
         let actor = identity
             .subject

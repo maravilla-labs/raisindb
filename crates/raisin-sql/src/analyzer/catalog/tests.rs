@@ -56,12 +56,14 @@ fn test_missing_table() {
 fn test_list_tables() {
     let catalog = StaticCatalog::default_nodes_schema();
     let tables = catalog.list_tables();
-    // Should include: nodes, NodeTypes, Archetypes, ElementTypes, and default workspace
-    assert_eq!(tables.len(), 5);
+    // Should include: nodes, NodeTypes, Archetypes, ElementTypes, Workspaces,
+    // and the default workspace.
+    assert_eq!(tables.len(), 6);
     assert!(tables.contains(&"nodes"));
     assert!(tables.contains(&"NodeTypes"));
     assert!(tables.contains(&"Archetypes"));
     assert!(tables.contains(&"ElementTypes"));
+    assert!(tables.contains(&"Workspaces"));
     assert!(tables.contains(&"default"));
 }
 
@@ -112,6 +114,8 @@ fn test_is_schema_table() {
     assert!(is_schema_table("NODETYPES"));
     assert!(is_schema_table("Archetypes"));
     assert!(is_schema_table("ElementTypes"));
+    assert!(is_schema_table("Workspaces"));
+    assert!(is_schema_table("workspaces"));
     assert!(!is_schema_table("nodes"));
     assert!(!is_schema_table("default"));
     assert!(!is_schema_table("random"));
@@ -135,6 +139,10 @@ fn test_schema_table_kind() {
         SchemaTableKind::from_table_name("ElementTypes"),
         Some(SchemaTableKind::ElementTypes)
     );
+    assert_eq!(
+        SchemaTableKind::from_table_name("Workspaces"),
+        Some(SchemaTableKind::Workspaces)
+    );
     assert_eq!(SchemaTableKind::from_table_name("nodes"), None);
     assert_eq!(SchemaTableKind::from_table_name("random"), None);
 
@@ -142,6 +150,7 @@ fn test_schema_table_kind() {
     assert_eq!(SchemaTableKind::NodeTypes.table_name(), "NodeTypes");
     assert_eq!(SchemaTableKind::Archetypes.table_name(), "Archetypes");
     assert_eq!(SchemaTableKind::ElementTypes.table_name(), "ElementTypes");
+    assert_eq!(SchemaTableKind::Workspaces.table_name(), "Workspaces");
 }
 
 #[test]

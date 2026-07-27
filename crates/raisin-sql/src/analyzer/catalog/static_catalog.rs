@@ -25,7 +25,7 @@ impl StaticCatalog {
         let mut tables = HashMap::new();
         tables.insert("nodes".to_string(), schema_tables::default_nodes_table());
 
-        // Register schema tables for NodeTypes, Archetypes, ElementTypes
+        // Register schema tables for NodeTypes, Archetypes, ElementTypes, Workspaces
         tables.insert(
             "NodeTypes".to_string(),
             schema_tables::get_schema_table(SchemaTableKind::NodeTypes),
@@ -37,6 +37,10 @@ impl StaticCatalog {
         tables.insert(
             "ElementTypes".to_string(),
             schema_tables::get_schema_table(SchemaTableKind::ElementTypes),
+        );
+        tables.insert(
+            "Workspaces".to_string(),
+            schema_tables::get_schema_table(SchemaTableKind::Workspaces),
         );
 
         let mut workspace_to_table = HashMap::new();

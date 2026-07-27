@@ -409,6 +409,23 @@ async fn execute_function_inline(
     let code = load_function_code(state, tenant_id, repo, node).await?;
     let mut loaded = build_loaded_function(node, code)?;
 
+    // Module files for ES6 `import` resolution. The QuickJS loader is rebuilt
+    // per execution against `loaded.files`, so without this a function whose
+    // entry imports anything fails at declare time — while the SAME function
+    // works when run from a trigger or flow, which goes through `code_loader`
+    // in the job executor. That inconsistency is very hard to diagnose from the
+    // outside, so every path that builds a LoadedFunction must fill this in.
+    loaded.files = super::load_function_modules_on_branch(
+        state,
+        tenant_id,
+        repo,
+        DEFAULT_BRANCH,
+        &node.path,
+        loaded.metadata.entry_file_path(),
+        &loaded.code,
+    )
+    .await;
+
     if let Some(timeout) = timeout_override {
         loaded.metadata.resource_limits.timeout_ms = timeout;
     }

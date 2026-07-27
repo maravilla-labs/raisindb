@@ -39,5 +39,5 @@ pub use types::*;
 pub(crate) use api_factory::build_function_api;
 pub(crate) use helpers::{
     build_loaded_function, find_function_node, find_function_node_on_branch, load_function_code,
-    load_function_code_on_branch,
+    load_function_code_on_branch, load_function_modules_on_branch,
 };

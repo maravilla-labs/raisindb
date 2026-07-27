@@ -5,6 +5,7 @@
 //! Provides node lookup, metadata extraction, code loading, and property
 //! parsing utilities used by invoke, list, and webhook execution paths.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -208,6 +209,60 @@ pub(crate) async fn load_function_code_on_branch(
     .await
     .map_err(|e| ApiError::validation_failed(e.to_string()))?;
     Ok(code)
+}
+
+/// Load a function's importable module files (siblings + `../dir/` externals).
+///
+/// `LoadedFunction::files` is what the QuickJS resolver consults; when it is
+/// empty the resolver rejects EVERY import, because the loader is rebuilt per
+/// execution for tenant isolation. Callers that build a `LoadedFunction` by hand
+/// must therefore fill this in, or any function whose entry uses `import` fails
+/// with `Error resolving module '…' from 'entry'` — even though its sibling
+/// files exist as nodes.
+///
+/// Both loads are best-effort: a function that imports nothing must not fail
+/// because a directory scan did, and a genuinely missing module still surfaces
+/// as a resolver error at declare time.
+pub(crate) async fn load_function_modules_on_branch(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    function_path: &str,
+    entry_file_name: &str,
+    entry_code: &str,
+) -> HashMap<String, String> {
+    use raisin_functions::execution::code_loader;
+
+    let mut files = code_loader::load_sibling_files(
+        state.storage.as_ref(),
+        state.bin.as_ref(),
+        tenant_id,
+        repo,
+        branch,
+        FUNCTIONS_WORKSPACE,
+        function_path,
+        entry_file_name,
+    )
+    .await
+    .unwrap_or_default();
+
+    let external = code_loader::load_external_modules(
+        state.storage.as_ref(),
+        state.bin.as_ref(),
+        tenant_id,
+        repo,
+        branch,
+        FUNCTIONS_WORKSPACE,
+        function_path,
+        entry_code,
+        &files,
+    )
+    .await
+    .unwrap_or_default();
+    files.extend(external);
+
+    files
 }
 
 /// Load binary resource content as UTF-8 string.
