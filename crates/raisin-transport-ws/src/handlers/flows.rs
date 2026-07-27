@@ -64,6 +64,14 @@ mod inner {
     }
 
     /// Require `context.repository` from the request.
+    /// The request's tenant. Flow resolution is tenant-scoped: it used to run
+    /// against a hardcoded "default", so on a multi-tenant server every flow
+    /// lookup missed and reported `Flow '/flows/x' not found` for flows that
+    /// were plainly installed.
+    fn require_tenant(request: &RequestEnvelope) -> String {
+        request.context.tenant_id.clone()
+    }
+
     fn require_repo(request: &RequestEnvelope) -> Result<String, WsError> {
         request
             .context
@@ -82,6 +90,7 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         let payload: FlowRunPayload = serde_json::from_value(request.payload.clone())?;
+        let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
         let (actor, actor_home) = extract_actor(connection_state);
         let scheduler = get_flow_job_scheduler(&state.rocksdb_storage)?;
@@ -89,6 +98,7 @@ mod inner {
         let result = service::run_flow(
             state.storage.as_ref(),
             scheduler,
+            &tenant,
             &repo,
             &payload.flow_path,
             payload.input,
@@ -117,6 +127,7 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         let payload: FlowResumePayload = serde_json::from_value(request.payload.clone())?;
+        let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
         let _actor = extract_actor(connection_state);
         let scheduler = get_flow_job_scheduler(&state.rocksdb_storage)?;
@@ -124,6 +135,7 @@ mod inner {
         let result = service::resume_flow(
             state.storage.as_ref(),
             scheduler,
+            &tenant,
             &repo,
             &payload.instance_id,
             payload.resume_data,
@@ -150,10 +162,11 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         let payload: FlowInstanceIdPayload = serde_json::from_value(request.payload.clone())?;
+        let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
 
         let status =
-            service::get_instance_status(state.storage.as_ref(), &repo, &payload.instance_id)
+            service::get_instance_status(state.storage.as_ref(), &tenant, &repo, &payload.instance_id)
                 .await?;
 
         Ok(Some(ResponseEnvelope::success(
@@ -172,12 +185,14 @@ mod inner {
         B: raisin_binary::BinaryStorage + 'static,
     {
         let payload: FlowInstanceIdPayload = serde_json::from_value(request.payload.clone())?;
+        let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
         let scheduler = get_flow_job_scheduler(&state.rocksdb_storage)?;
 
         service::cancel_instance(
             state.storage.as_ref(),
             scheduler,
+            &tenant,
             &repo,
             &payload.instance_id,
         )

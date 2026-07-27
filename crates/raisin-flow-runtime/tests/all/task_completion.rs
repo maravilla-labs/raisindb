@@ -47,6 +47,7 @@ struct CapturingScheduler {
 impl FlowJobScheduler for CapturingScheduler {
     async fn schedule_flow_job(
         &self,
+        _tenant_id: &str,
         _repo: &str,
         job_type: JobType,
         metadata: HashMap<String, Value>,
@@ -202,6 +203,7 @@ async fn complete_resumes_parked_human_task_flow() {
     let result = complete_task(
         &storage,
         &scheduler,
+        TENANT,
         REPO,
         task_id,
         &completer,
@@ -274,6 +276,7 @@ async fn complete_denies_non_assignee_and_does_not_resume() {
     let err = complete_task(
         &storage,
         &scheduler,
+        TENANT,
         REPO,
         task_id,
         &intruder,
@@ -319,6 +322,7 @@ async fn complete_is_idempotent_after_first_completion() {
     complete_task(
         &storage,
         &scheduler,
+        TENANT,
         REPO,
         task_id,
         &completer,
@@ -330,6 +334,7 @@ async fn complete_is_idempotent_after_first_completion() {
     let err = complete_task(
         &storage,
         &scheduler,
+        TENANT,
         REPO,
         task_id,
         &completer,

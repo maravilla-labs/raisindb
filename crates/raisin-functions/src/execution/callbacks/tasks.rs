@@ -392,6 +392,7 @@ pub fn create_task_complete<S>(
     storage: Arc<S>,
     job_registry: Arc<raisin_storage::jobs::JobRegistry>,
     job_data_store: Arc<raisin_rocksdb::JobDataStore>,
+    tenant_id: String,
     repo_id: String,
     auth_context: Option<AuthContext>,
 ) -> TaskCompleteCallback
@@ -401,6 +402,7 @@ where
     Arc::new(move |task_id: String, response: Value| {
         let storage = storage.clone();
         let scheduler = JobQueueFlowScheduler::new(job_registry.clone(), job_data_store.clone());
+        let tenant = tenant_id.clone();
         let repo = repo_id.clone();
         let completer = completer_from_auth(&auth_context);
 
@@ -408,6 +410,7 @@ where
             let result = raisin_flow_runtime::service::complete_task(
                 storage.as_ref(),
                 &scheduler,
+                &tenant,
                 &repo,
                 &task_id,
                 &completer,

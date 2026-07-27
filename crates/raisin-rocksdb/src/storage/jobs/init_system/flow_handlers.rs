@@ -220,7 +220,7 @@ pub fn create_scheduled_invocation_handler(
 ) -> Arc<crate::jobs::ScheduledInvocationHandler> {
     let storage_for_flows = storage.clone();
     let flow_starter: crate::jobs::FlowStartCallback = Arc::new(
-        move |_tenant_id: String,
+        move |tenant_id: String,
               repo_id: String,
               _branch: String,
               flow_path: String,
@@ -235,6 +235,9 @@ pub fn create_scheduled_invocation_handler(
                 let result = raisin_flow_runtime::service::run_flow(
                     storage.as_ref(),
                     scheduler,
+                    // The scheduler hands us the job's tenant; it used to be
+                    // discarded, which pinned every scheduled flow to "default".
+                    &tenant_id,
                     &repo_id,
                     &flow_path,
                     input,

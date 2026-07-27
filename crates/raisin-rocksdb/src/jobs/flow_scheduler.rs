@@ -13,7 +13,6 @@ use raisin_storage::jobs::{JobContext, JobType};
 
 use crate::storage::RocksDBStorage;
 
-const TENANT_ID: &str = "default";
 const DEFAULT_BRANCH: &str = "main";
 const FUNCTIONS_WORKSPACE: &str = "functions";
 
@@ -21,12 +20,13 @@ const FUNCTIONS_WORKSPACE: &str = "functions";
 impl FlowJobScheduler for RocksDBStorage {
     async fn schedule_flow_job(
         &self,
+        tenant_id: &str,
         repo: &str,
         job_type: JobType,
         metadata: HashMap<String, serde_json::Value>,
     ) -> Result<String, FlowError> {
         let context = JobContext {
-            tenant_id: TENANT_ID.to_string(),
+            tenant_id: tenant_id.to_string(),
             repo_id: repo.to_string(),
             branch: DEFAULT_BRANCH.to_string(),
             workspace_id: FUNCTIONS_WORKSPACE.to_string(),
@@ -45,7 +45,10 @@ impl FlowJobScheduler for RocksDBStorage {
             .register_job_with_id(
                 job_id.clone(),
                 job_type,
-                TENANT_ID.to_string(),
+                // The job must be REGISTERED under the caller's tenant, not
+                // just carry it in the context — the registry is what dispatch
+                // and per-tenant listing scan.
+                tenant_id.to_string(),
                 None,
                 None,
                 None,

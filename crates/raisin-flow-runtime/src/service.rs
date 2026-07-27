@@ -18,7 +18,16 @@ use serde_json::Value;
 use crate::integration::triggers::{FlowInstanceBuilder, FlowTriggerEvent};
 use crate::types::{FlowError, FlowInstance, FlowStatus};
 
-const TENANT_ID: &str = "default";
+// NB: there is deliberately no TENANT_ID constant any more. Flow lookups used a
+// hardcoded "default" tenant, so on a multi-tenant server every flow resolved
+// against the wrong tenant and reported `Flow '/flows/x' not found` even though
+// the node existed — for MCP callers AND the editor's own WebSocket calls. The
+// tenant is now a parameter on every entry point.
+//
+// DEFAULT_BRANCH is still a constant: flow DEFINITIONS are main-scoped, and the
+// publish engine deliberately runs flows that copy main -> publish. Making
+// resolution follow the caller's branch would change that behaviour, so it is
+// left alone rather than changed blind.
 const DEFAULT_BRANCH: &str = "main";
 const FUNCTIONS_WORKSPACE: &str = "functions";
 const SYSTEM_WORKSPACE: &str = "raisin:system";
@@ -41,6 +50,7 @@ pub trait FlowJobScheduler: Send + Sync {
     /// Returns the job ID on success.
     async fn schedule_flow_job(
         &self,
+        tenant_id: &str,
         repo: &str,
         job_type: JobType,
         metadata: HashMap<String, Value>,
@@ -86,10 +96,11 @@ struct ValidatedFlow {
 /// Load a `raisin:Flow` node by path and validate it.
 async fn load_and_validate_flow<S: Storage>(
     storage: &S,
+    tenant_id: &str,
     repo: &str,
     flow_path: &str,
 ) -> Result<ValidatedFlow, FlowError> {
-    let scope = StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE);
+    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, FUNCTIONS_WORKSPACE);
     let flow_node = storage
         .nodes()
         .get_by_path(scope, flow_path, None)
@@ -141,10 +152,11 @@ async fn load_and_validate_flow<S: Storage>(
 /// Load a flow instance node and deserialize it.
 async fn load_instance<S: Storage>(
     storage: &S,
+    tenant_id: &str,
     repo: &str,
     instance_id: &str,
 ) -> Result<(raisin_models::nodes::Node, FlowInstance), FlowError> {
-    let scope = StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, SYSTEM_WORKSPACE);
+    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, SYSTEM_WORKSPACE);
     let instance_path = format!("/flows/instances/{}", instance_id);
 
     let instance_node = storage
@@ -175,13 +187,14 @@ async fn load_instance<S: Storage>(
 pub async fn run_flow<S: Storage>(
     storage: &S,
     scheduler: &dyn FlowJobScheduler,
+    tenant_id: &str,
     repo: &str,
     flow_path: &str,
     input: Value,
     actor: String,
     actor_home: Option<String>,
 ) -> Result<FlowRunResult, FlowError> {
-    let flow = load_and_validate_flow(storage, repo, flow_path).await?;
+    let flow = load_and_validate_flow(storage, tenant_id, repo, flow_path).await?;
 
     let trigger = FlowTriggerEvent::Manual {
         actor,
@@ -196,7 +209,7 @@ pub async fn run_flow<S: Storage>(
         trigger,
         input,
     )
-    .tenant_id(TENANT_ID.to_string())
+    .tenant_id(tenant_id.to_string())
     .repo_id(repo.to_string())
     .branch(DEFAULT_BRANCH.to_string())
     .workspace(FUNCTIONS_WORKSPACE.to_string())
@@ -218,7 +231,7 @@ pub async fn run_flow<S: Storage>(
     );
 
     let job_id = scheduler
-        .schedule_flow_job(repo, job_type, metadata)
+        .schedule_flow_job(tenant_id, repo, job_type, metadata)
         .await?;
 
     tracing::info!(
@@ -238,12 +251,13 @@ pub async fn run_flow<S: Storage>(
 pub async fn run_flow_test<S: Storage>(
     storage: &S,
     scheduler: &dyn FlowJobScheduler,
+    tenant_id: &str,
     repo: &str,
     flow_path: &str,
     input: Value,
     mut test_config: crate::types::TestRunConfig,
 ) -> Result<FlowRunResult, FlowError> {
-    let flow = load_and_validate_flow(storage, repo, flow_path).await?;
+    let flow = load_and_validate_flow(storage, tenant_id, repo, flow_path).await?;
 
     let trigger = FlowTriggerEvent::Manual {
         actor: "test_api".to_string(),
@@ -260,7 +274,7 @@ pub async fn run_flow_test<S: Storage>(
         trigger,
         input,
     )
-    .tenant_id(TENANT_ID.to_string())
+    .tenant_id(tenant_id.to_string())
     .repo_id(repo.to_string())
     .branch(DEFAULT_BRANCH.to_string())
     .workspace(FUNCTIONS_WORKSPACE.to_string())
@@ -284,7 +298,7 @@ pub async fn run_flow_test<S: Storage>(
     metadata.insert("is_test_run".to_string(), serde_json::json!(true));
 
     let job_id = scheduler
-        .schedule_flow_job(repo, job_type, metadata)
+        .schedule_flow_job(tenant_id, repo, job_type, metadata)
         .await?;
 
     tracing::info!(
@@ -307,11 +321,12 @@ pub async fn run_flow_test<S: Storage>(
 pub async fn resume_flow<S: Storage>(
     storage: &S,
     scheduler: &dyn FlowJobScheduler,
+    tenant_id: &str,
     repo: &str,
     instance_id: &str,
     resume_data: Value,
 ) -> Result<FlowRunResult, FlowError> {
-    let (_node, instance) = load_instance(storage, repo, instance_id).await?;
+    let (_node, instance) = load_instance(storage, tenant_id, repo, instance_id).await?;
 
     if instance.status != FlowStatus::Waiting {
         return Err(FlowError::InvalidStateTransition {
@@ -330,7 +345,7 @@ pub async fn resume_flow<S: Storage>(
     metadata.insert("function_result".to_string(), resume_data);
 
     let job_id = scheduler
-        .schedule_flow_job(repo, job_type, metadata)
+        .schedule_flow_job(tenant_id, repo, job_type, metadata)
         .await?;
 
     tracing::info!(
@@ -348,10 +363,11 @@ pub async fn resume_flow<S: Storage>(
 /// Get the current status of a flow instance.
 pub async fn get_instance_status<S: Storage>(
     storage: &S,
+    tenant_id: &str,
     repo: &str,
     instance_id: &str,
 ) -> Result<FlowInstanceStatus, FlowError> {
-    let (_node, instance) = load_instance(storage, repo, instance_id).await?;
+    let (_node, instance) = load_instance(storage, tenant_id, repo, instance_id).await?;
 
     Ok(FlowInstanceStatus {
         id: instance.id,
@@ -370,10 +386,11 @@ pub async fn get_instance_status<S: Storage>(
 pub async fn cancel_instance<S: Storage>(
     storage: &S,
     scheduler: &dyn FlowJobScheduler,
+    tenant_id: &str,
     repo: &str,
     instance_id: &str,
 ) -> Result<(), FlowError> {
-    let (mut node, instance) = load_instance(storage, repo, instance_id).await?;
+    let (mut node, instance) = load_instance(storage, tenant_id, repo, instance_id).await?;
 
     if instance.is_terminated() {
         return Err(FlowError::AlreadyTerminated {
@@ -392,7 +409,7 @@ pub async fn cancel_instance<S: Storage>(
     );
     node.properties.remove("wait_info");
 
-    let scope = StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, SYSTEM_WORKSPACE);
+    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, SYSTEM_WORKSPACE);
     storage
         .nodes()
         .update(
@@ -464,10 +481,11 @@ pub struct TaskCompletionResult {
 /// Load an inbox task node by id or path.
 async fn load_task_node<S: Storage>(
     storage: &S,
+    tenant_id: &str,
     repo: &str,
     task_ref: &str,
 ) -> Result<raisin_models::nodes::Node, FlowError> {
-    let scope = StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
+    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
 
     let node = if task_ref.starts_with('/') {
         storage
@@ -514,12 +532,13 @@ fn task_prop_str(node: &raisin_models::nodes::Node, key: &str) -> Option<String>
 pub async fn complete_task<S: Storage>(
     storage: &S,
     scheduler: &dyn FlowJobScheduler,
+    tenant_id: &str,
     repo: &str,
     task_ref: &str,
     completer: &TaskCompleter,
     response: Value,
 ) -> Result<TaskCompletionResult, FlowError> {
-    let mut task_node = load_task_node(storage, repo, task_ref).await?;
+    let mut task_node = load_task_node(storage, tenant_id, repo, task_ref).await?;
     let task_path = task_node.path.clone();
     let task_id = task_node.id.clone();
 
@@ -543,7 +562,7 @@ pub async fn complete_task<S: Storage>(
     let step_id = task_prop_str(&task_node, "step_id");
 
     if let Some(instance_id) = &flow_instance_id {
-        let (_node, instance) = load_instance(storage, repo, instance_id).await?;
+        let (_node, instance) = load_instance(storage, tenant_id, repo, instance_id).await?;
 
         if instance.status != FlowStatus::Waiting {
             return Err(FlowError::InvalidStateTransition {
@@ -583,7 +602,7 @@ pub async fn complete_task<S: Storage>(
             .insert("response".to_string(), PropertyValue::Object(response_prop));
     }
 
-    let scope = StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
+    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
     storage
         .nodes()
         .update(
@@ -613,7 +632,7 @@ pub async fn complete_task<S: Storage>(
             map.insert("task_path".to_string(), Value::String(task_path.clone()));
         }
 
-        match resume_flow(storage, scheduler, repo, instance_id, resume_data).await {
+        match resume_flow(storage, scheduler, tenant_id, repo, instance_id, resume_data).await {
             Ok(result) => Some(result),
             Err(e) => {
                 // Task is completed but the flow resume could not be queued.
@@ -657,13 +676,14 @@ pub async fn complete_task<S: Storage>(
 /// another principal's inbox path) and falls back to the task's path prefix.
 pub async fn list_inbox_tasks<S: Storage>(
     storage: &S,
+    tenant_id: &str,
     repo: &str,
     assignee: Option<&str>,
     status_filter: Option<&str>,
 ) -> Result<Vec<Value>, FlowError> {
     use raisin_storage::ListOptions;
 
-    let scope = StorageScope::new(TENANT_ID, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
+    let scope = StorageScope::new(tenant_id, repo, DEFAULT_BRANCH, INBOX_WORKSPACE);
     let tasks = storage
         .nodes()
         .list_by_type(scope, "raisin:InboxTask", ListOptions::default())
@@ -731,10 +751,11 @@ pub async fn list_inbox_tasks<S: Storage>(
 /// Get a single inbox task (properties + id/path) by id or path.
 pub async fn get_inbox_task<S: Storage>(
     storage: &S,
+    tenant_id: &str,
     repo: &str,
     task_ref: &str,
 ) -> Result<Value, FlowError> {
-    let node = load_task_node(storage, repo, task_ref).await?;
+    let node = load_task_node(storage, tenant_id, repo, task_ref).await?;
     let mut v = serde_json::to_value(&node.properties).unwrap_or(Value::Null);
     if let Value::Object(ref mut map) = v {
         map.insert("id".to_string(), Value::String(node.id.clone()));
@@ -748,10 +769,11 @@ pub async fn get_inbox_task<S: Storage>(
 /// task-completion path).
 pub async fn get_instance_wait_type<S: Storage>(
     storage: &S,
+    tenant_id: &str,
     repo: &str,
     instance_id: &str,
 ) -> Result<Option<crate::types::WaitType>, FlowError> {
-    let (_node, instance) = load_instance(storage, repo, instance_id).await?;
+    let (_node, instance) = load_instance(storage, tenant_id, repo, instance_id).await?;
     Ok(instance.wait_info.map(|w| w.wait_type))
 }
 

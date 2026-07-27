@@ -46,6 +46,7 @@ fn get_scheduler(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn run_flow(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
     auth_context: Option<Extension<AuthContext>>,
     Json(req): Json<RunFlowRequest>,
@@ -62,6 +63,7 @@ pub async fn run_flow(
     let result = raisin_flow_runtime::service::run_flow(
         state.storage.as_ref(),
         scheduler,
+        &tenant_info.tenant_id,
         &repo,
         &req.flow_path,
         req.input.clone(),
@@ -99,6 +101,7 @@ pub async fn run_flow(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn run_flow_test(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
     Json(req): Json<RunFlowTestRequest>,
 ) -> Result<Json<RunFlowResponse>, ApiError> {
@@ -107,6 +110,7 @@ pub async fn run_flow_test(
     let result = raisin_flow_runtime::service::run_flow_test(
         state.storage.as_ref(),
         scheduler,
+        &tenant_info.tenant_id,
         &repo,
         &req.flow_path,
         req.input.clone(),
@@ -144,6 +148,7 @@ pub async fn run_flow_test(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn resume_flow(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
     auth_context: Option<Extension<AuthContext>>,
     Json(req): Json<ResumeFlowRequest>,
@@ -155,6 +160,7 @@ pub async fn resume_flow(
     // the assignee and records who decided. Admins may still force-resume.
     let wait_type = raisin_flow_runtime::service::get_instance_wait_type(
         state.storage.as_ref(),
+        &tenant_info.tenant_id,
         &repo,
         &instance_id,
     )
@@ -181,6 +187,7 @@ pub async fn resume_flow(
     let result = raisin_flow_runtime::service::resume_flow(
         state.storage.as_ref(),
         scheduler,
+        &tenant_info.tenant_id,
         &repo,
         &instance_id,
         req.resume_data,
@@ -214,11 +221,13 @@ pub async fn resume_flow(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn get_flow_instance(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
     _auth_context: Option<Extension<AuthContext>>,
 ) -> Result<Json<FlowInstanceStatusResponse>, ApiError> {
     let status = raisin_flow_runtime::service::get_instance_status(
         state.storage.as_ref(),
+        &tenant_info.tenant_id,
         &repo,
         &instance_id,
     )
@@ -255,6 +264,7 @@ pub async fn get_flow_instance(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn cancel_flow_instance(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, instance_id)): Path<(String, String)>,
     _auth_context: Option<Extension<AuthContext>>,
 ) -> Result<Json<CancelFlowInstanceResponse>, ApiError> {
@@ -263,6 +273,7 @@ pub async fn cancel_flow_instance(
     raisin_flow_runtime::service::cancel_instance(
         state.storage.as_ref(),
         scheduler,
+        &tenant_info.tenant_id,
         &repo,
         &instance_id,
     )

@@ -20,7 +20,7 @@ use raisin_models::auth::AuthContext;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
 /// Query params for listing inbox tasks.
 #[derive(Debug, Deserialize)]
@@ -83,6 +83,7 @@ fn require_caller(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn list_inbox_tasks(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path(repo): Path<String>,
     auth_context: Option<Extension<AuthContext>>,
     Query(query): Query<ListInboxQuery>,
@@ -121,6 +122,7 @@ pub async fn list_inbox_tasks(
 
     let tasks = raisin_flow_runtime::service::list_inbox_tasks(
         state.storage.as_ref(),
+        &tenant_info.tenant_id,
         &repo,
         assignee.as_deref(),
         query.status.as_deref(),
@@ -138,13 +140,14 @@ pub async fn list_inbox_tasks(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn get_inbox_task(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, task_id)): Path<(String, String)>,
     auth_context: Option<Extension<AuthContext>>,
 ) -> Result<Json<Value>, ApiError> {
     let (caller_id, home, admin) = require_caller(&auth_context)?;
 
     let task =
-        raisin_flow_runtime::service::get_inbox_task(state.storage.as_ref(), &repo, &task_id)
+        raisin_flow_runtime::service::get_inbox_task(state.storage.as_ref(), &tenant_info.tenant_id, &repo, &task_id)
             .await?;
 
     // Only the assignee (or an admin) may read a task
@@ -175,6 +178,7 @@ pub async fn get_inbox_task(
 #[cfg(feature = "storage-rocksdb")]
 pub async fn complete_inbox_task(
     State(state): State<AppState>,
+    Extension(tenant_info): Extension<TenantInfo>,
     Path((repo, task_id)): Path<(String, String)>,
     auth_context: Option<Extension<AuthContext>>,
     Json(req): Json<CompleteTaskRequest>,
@@ -193,6 +197,7 @@ pub async fn complete_inbox_task(
     let result = raisin_flow_runtime::service::complete_task(
         state.storage.as_ref(),
         scheduler,
+        &tenant_info.tenant_id,
         &repo,
         &task_id,
         &completer,

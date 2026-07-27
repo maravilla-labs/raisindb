@@ -36,7 +36,8 @@ use crate::services::SharedSearchProvider;
 
 pub use function::FunctionTool;
 pub use nodes::{
-    CreateNodeTool, DeleteNodeTool, GetNodeTool, ListWorkspacesTool, QueryNodesTool, UpdateNodeTool,
+    CreateNodeTool, DeleteNodeTool, GetNodeTool, ListChildrenTool, ListWorkspacesTool,
+    MoveNodeTool, QueryNodesTool, ReorderNodeTool, UpdateNodeTool,
 };
 pub use search::SearchNodesTool;
 
@@ -95,6 +96,21 @@ pub fn build_data_tools(
             }
             DataOperation::DeleteNode => {
                 tools.push(Arc::new(DeleteNodeTool::new(
+                    backend.clone(),
+                    allowed.clone(),
+                )));
+            }
+            DataOperation::MoveNode => {
+                tools.push(Arc::new(MoveNodeTool::new(backend.clone(), allowed.clone())));
+            }
+            DataOperation::ReorderNode => {
+                tools.push(Arc::new(ReorderNodeTool::new(
+                    backend.clone(),
+                    allowed.clone(),
+                )));
+            }
+            DataOperation::ListChildren => {
+                tools.push(Arc::new(ListChildrenTool::new(
                     backend.clone(),
                     allowed.clone(),
                 )));

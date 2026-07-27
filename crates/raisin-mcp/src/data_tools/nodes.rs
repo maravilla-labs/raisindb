@@ -328,6 +328,196 @@ impl Tool for DeleteNodeTool {
     }
 }
 
+
+/// `move_node` — reparent (and optionally rename) a node.
+///
+/// RaisinDB is a hierarchical store where the path IS the address, so moving a
+/// node is a first-class structural edit, not an `update` of a `path` property.
+/// References to the node are rewritten by the move itself.
+pub struct MoveNodeTool {
+    backend: DataBackend,
+    allowed: AllowedWorkspaces,
+}
+
+impl MoveNodeTool {
+    /// Wrap a data backend as the `move_node` tool.
+    pub fn new(backend: DataBackend, allowed: AllowedWorkspaces) -> Self {
+        Self { backend, allowed }
+    }
+}
+
+impl Tool for MoveNodeTool {
+    fn name(&self) -> &str {
+        "move_node"
+    }
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor::new(
+            "move_node",
+            "Move a node (with its whole subtree) under a new parent. The path is the node's \
+             address, so this is how you re-home content — not an update of a path property. \
+             Use reorder_node to change a node's position among its siblings instead.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path of the node to move." },
+                    "new_parent_path": { "type": "string", "description": "Path of the new parent (\"/\" for root)." },
+                    "workspace": workspace_arg_schema()
+                },
+                "required": ["path", "new_parent_path"]
+            }),
+            ToolKind::Data,
+        )
+    }
+
+    async fn call(&self, identity: &McpIdentity, args: Value) -> Result<Value> {
+        let workspace = resolve_workspace(&args, identity, &self.allowed)?;
+        let path = require_str(&args, "path")?;
+        let new_parent_path = require_str(&args, "new_parent_path")?;
+        let moved = self
+            .backend
+            .node_move(&workspace, path, new_parent_path)
+            .await?;
+        Ok(moved)
+    }
+}
+
+/// `reorder_node` — change a node's position among its siblings.
+///
+/// Sibling order is EDITORIAL order — the sequence an app renders children in
+/// (pages in a site nav, blocks in a list). It is held in a separate ordering
+/// index keyed by a fractional order key, so it cannot be set by writing a
+/// property; this tool is the only way to change it.
+pub struct ReorderNodeTool {
+    backend: DataBackend,
+    allowed: AllowedWorkspaces,
+}
+
+impl ReorderNodeTool {
+    /// Wrap a data backend as the `reorder_node` tool.
+    pub fn new(backend: DataBackend, allowed: AllowedWorkspaces) -> Self {
+        Self { backend, allowed }
+    }
+}
+
+impl Tool for ReorderNodeTool {
+    fn name(&self) -> &str {
+        "reorder_node"
+    }
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor::new(
+            "reorder_node",
+            "Reposition a node among its siblings (editorial order — the order children are \
+             listed and rendered in). Name a sibling with `before` or `after`, or give a 0-based \
+             `position`. Sibling order lives in an ordering index, not in properties, so this is \
+             the only way to change it. Use list_children to see the current order.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "parent_path": { "type": "string", "description": "Path of the parent whose children are being ordered." },
+                    "name": { "type": "string", "description": "Name (last path segment) of the child to move." },
+                    "before": { "type": "string", "description": "Place it immediately BEFORE this sibling name." },
+                    "after": { "type": "string", "description": "Place it immediately AFTER this sibling name." },
+                    "position": { "type": "integer", "description": "0-based index instead of a sibling; past the end appends.", "minimum": 0 },
+                    "workspace": workspace_arg_schema()
+                },
+                "required": ["parent_path", "name"]
+            }),
+            ToolKind::Data,
+        )
+    }
+
+    async fn call(&self, identity: &McpIdentity, args: Value) -> Result<Value> {
+        let workspace = resolve_workspace(&args, identity, &self.allowed)?;
+        let parent_path = require_str(&args, "parent_path")?;
+        let name = require_str(&args, "name")?;
+
+        let before = args.get("before").and_then(Value::as_str);
+        let after = args.get("after").and_then(Value::as_str);
+        let position = args.get("position").and_then(Value::as_u64);
+
+        match (before, after, position) {
+            (Some(_), Some(_), _) => Err(McpError::invalid_params(
+                "pass `before` or `after`, not both",
+            )),
+            (Some(reference), None, _) => {
+                self.backend
+                    .node_move_child_relative(&workspace, parent_path, name, reference, true)
+                    .await?;
+                Ok(json!({ "reordered": true, "parent_path": parent_path, "name": name, "before": reference }))
+            }
+            (None, Some(reference), _) => {
+                self.backend
+                    .node_move_child_relative(&workspace, parent_path, name, reference, false)
+                    .await?;
+                Ok(json!({ "reordered": true, "parent_path": parent_path, "name": name, "after": reference }))
+            }
+            (None, None, Some(pos)) => {
+                self.backend
+                    .node_reorder_child(&workspace, parent_path, name, pos as u32)
+                    .await?;
+                Ok(json!({ "reordered": true, "parent_path": parent_path, "name": name, "position": pos }))
+            }
+            (None, None, None) => Err(McpError::invalid_params(
+                "give one of `before`, `after` or `position` to say where the node should sit",
+            )),
+        }
+    }
+}
+
+/// `list_children` — a parent's direct children IN EDITORIAL ORDER.
+///
+/// `query_nodes` cannot answer this: its `parent_path` filter reads a column
+/// that is null in most stores, and it does not sort by the ordering index. You
+/// need this to see the order before changing it with `reorder_node`.
+pub struct ListChildrenTool {
+    backend: DataBackend,
+    allowed: AllowedWorkspaces,
+}
+
+impl ListChildrenTool {
+    /// Wrap a data backend as the `list_children` tool.
+    pub fn new(backend: DataBackend, allowed: AllowedWorkspaces) -> Self {
+        Self { backend, allowed }
+    }
+}
+
+impl Tool for ListChildrenTool {
+    fn name(&self) -> &str {
+        "list_children"
+    }
+
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor::new(
+            "list_children",
+            "List a node's direct children in EDITORIAL order (the order they are rendered in). \
+             Use this before reorder_node to see the current order.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "parent_path": { "type": "string", "description": "Path of the parent (\"/\" for root)." },
+                    "limit": { "type": "integer", "description": "Maximum children to return.", "minimum": 1 },
+                    "workspace": workspace_arg_schema()
+                },
+                "required": ["parent_path"]
+            }),
+            ToolKind::Data,
+        )
+    }
+
+    async fn call(&self, identity: &McpIdentity, args: Value) -> Result<Value> {
+        let workspace = resolve_workspace(&args, identity, &self.allowed)?;
+        let parent_path = require_str(&args, "parent_path")?;
+        let limit = args.get("limit").and_then(Value::as_u64).map(|n| n as u32);
+        let children = self
+            .backend
+            .node_get_children(&workspace, parent_path, limit)
+            .await?;
+        Ok(json!({ "parent_path": parent_path, "count": children.len(), "children": children }))
+    }
+}
+
 /// `list_workspaces` — list the workspaces this server exposes.
 pub struct ListWorkspacesTool {
     workspaces: Vec<String>,

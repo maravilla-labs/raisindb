@@ -35,7 +35,6 @@ use serde_json::{json, Value};
 use crate::api::FlowRunCallback;
 use crate::execution::types::ExecutionDependencies;
 
-const TENANT_ID: &str = "default";
 const DEFAULT_BRANCH: &str = "main";
 const FUNCTIONS_WORKSPACE: &str = "functions";
 
@@ -69,12 +68,13 @@ impl JobQueueFlowScheduler {
 impl FlowJobScheduler for JobQueueFlowScheduler {
     async fn schedule_flow_job(
         &self,
+        tenant_id: &str,
         repo: &str,
         job_type: JobType,
         metadata: HashMap<String, Value>,
     ) -> Result<String, FlowError> {
         let context = JobContext {
-            tenant_id: TENANT_ID.to_string(),
+            tenant_id: tenant_id.to_string(),
             repo_id: repo.to_string(),
             branch: DEFAULT_BRANCH.to_string(),
             workspace_id: FUNCTIONS_WORKSPACE.to_string(),
@@ -93,7 +93,7 @@ impl FlowJobScheduler for JobQueueFlowScheduler {
             .register_job_with_id(
                 job_id.clone(),
                 job_type,
-                TENANT_ID.to_string(),
+                tenant_id.to_string(),
                 None,
                 None,
                 None,
@@ -130,6 +130,7 @@ pub fn create_flow_run<S, B>(
     deps: Arc<ExecutionDependencies<S, B>>,
     job_registry: Arc<raisin_storage::jobs::JobRegistry>,
     job_data_store: Arc<raisin_rocksdb::JobDataStore>,
+    tenant_id: String,
     repo_id: String,
     auth_context: Option<AuthContext>,
 ) -> FlowRunCallback
@@ -140,6 +141,7 @@ where
     Arc::new(move |flow_path: String, input: Value| {
         let deps = deps.clone();
         let scheduler = JobQueueFlowScheduler::new(job_registry.clone(), job_data_store.clone());
+        let tenant = tenant_id.clone();
         let repo = repo_id.clone();
         let actor = auth_context
             .as_ref()
@@ -167,6 +169,7 @@ where
             let result = raisin_flow_runtime::service::run_flow(
                 deps.storage.as_ref(),
                 &scheduler,
+                &tenant,
                 &repo,
                 &flow_path,
                 input,

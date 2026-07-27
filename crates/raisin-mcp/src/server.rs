@@ -44,19 +44,28 @@ pub enum DataOperation {
     UpdateNode,
     /// `delete_node` — delete a node.
     DeleteNode,
+    /// `move_node` — reparent a node (and its subtree).
+    MoveNode,
+    /// `reorder_node` — reposition a node among its siblings (editorial order).
+    ReorderNode,
+    /// `list_children` — a parent's direct children, in editorial order.
+    ListChildren,
     /// `list_workspaces` — list the workspaces this server exposes.
     ListWorkspaces,
 }
 
 impl DataOperation {
     /// The full set of operations, in stable order.
-    pub const ALL: [DataOperation; 7] = [
+    pub const ALL: [DataOperation; 10] = [
         DataOperation::QueryNodes,
         DataOperation::GetNode,
         DataOperation::SearchNodes,
+        DataOperation::ListChildren,
         DataOperation::CreateNode,
         DataOperation::UpdateNode,
         DataOperation::DeleteNode,
+        DataOperation::MoveNode,
+        DataOperation::ReorderNode,
         DataOperation::ListWorkspaces,
     ];
 
@@ -64,7 +73,11 @@ impl DataOperation {
     pub fn is_write(self) -> bool {
         matches!(
             self,
-            DataOperation::CreateNode | DataOperation::UpdateNode | DataOperation::DeleteNode
+            DataOperation::CreateNode
+                | DataOperation::UpdateNode
+                | DataOperation::DeleteNode
+                | DataOperation::MoveNode
+                | DataOperation::ReorderNode
         )
     }
 
@@ -77,6 +90,9 @@ impl DataOperation {
             "create_node" => Some(Self::CreateNode),
             "update_node" => Some(Self::UpdateNode),
             "delete_node" => Some(Self::DeleteNode),
+            "move_node" => Some(Self::MoveNode),
+            "reorder_node" => Some(Self::ReorderNode),
+            "list_children" => Some(Self::ListChildren),
             "list_workspaces" => Some(Self::ListWorkspaces),
             _ => None,
         }
