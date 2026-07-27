@@ -221,11 +221,16 @@ async fn dispatch(
         Some(AuthContext::system()),
     );
 
+    // Custom function tools execute as the authenticated caller — with the SAME
+    // resolved context the data tools got above. Passing `auth` here rather than
+    // letting the invoker rebuild it from the identity is load-bearing: a rebuilt
+    // context carries no resolved permissions, which RLS treats as deny-all.
     let invoker: Arc<dyn raisin_mcp::FunctionInvoker> = Arc::new(HttpFunctionInvoker::new(
         state.clone(),
         tenant_id,
         repo,
         branch,
+        auth.cloned(),
     ));
     let search: Arc<dyn raisin_mcp::SearchProvider> =
         Arc::new(HttpSearchProvider::new(state.clone(), tenant_id, repo));

@@ -33,21 +33,37 @@ pub(in crate::handlers::mcp) struct HttpFunctionInvoker {
     tenant_id: String,
     repo: String,
     branch: String,
+    /// The request's resolved [`AuthContext`] — the SAME one the data tools get.
+    ///
+    /// This must be the middleware-resolved context, not one rebuilt from
+    /// [`McpIdentity`]: `McpIdentity::to_auth_context` copies `roles` but leaves
+    /// `resolved_permissions: None`, and RLS reads `None` as DENY-ALL. Rebuilding
+    /// it made every custom tool deny-all for non-system callers — reads silently
+    /// returned zero rows, writes failed with `Permission denied: Cannot create …`
+    /// — while the built-in data tools, which receive this context, read the very
+    /// same paths fine. Same SQL, same RLS rules, different `AuthContext`.
+    ///
+    /// `None` for system/anonymous callers, where the identity mapping is exact.
+    auth: Option<AuthContext>,
 }
 
 impl HttpFunctionInvoker {
-    /// Bind an invoker to the request's tenant / repo / branch scope.
+    /// Bind an invoker to the request's tenant / repo / branch scope and the
+    /// caller's resolved auth context (see the field docs — pass the request's
+    /// context, never one derived from the identity).
     pub(in crate::handlers::mcp) fn new(
         state: AppState,
         tenant_id: impl Into<String>,
         repo: impl Into<String>,
         branch: impl Into<String>,
+        auth: Option<AuthContext>,
     ) -> Self {
         Self {
             state,
             tenant_id: tenant_id.into(),
             repo: repo.into(),
             branch: branch.into(),
+            auth,
         }
     }
 
@@ -57,7 +73,14 @@ impl HttpFunctionInvoker {
         name: &str,
         input: Value,
     ) -> raisin_mcp::Result<ExecutionResult> {
-        let auth = identity.to_auth_context();
+        // The request's resolved context when we have it; the identity mapping is
+        // only a fallback for system/anonymous callers, where it is exact.
+        // Deriving it from the identity for a real user drops the resolved
+        // permissions and RLS then denies everything — see the field docs.
+        let auth = self
+            .auth
+            .clone()
+            .unwrap_or_else(|| identity.to_auth_context());
 
         // ── Resolution: system context. Reading the `raisin:Function` node that
         // backs an already-declared tool is *routing metadata*, exactly like

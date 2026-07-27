@@ -299,3 +299,39 @@ fn function_side_mcp_block_honors_overrides_and_disable() {
     let plain = json!({ "name": "y" });
     assert!(CustomTool::from_function_properties(&plain).is_none());
 }
+
+/// `to_auth_context()` carries NO resolved permissions for a real user — and RLS
+/// reads a missing permission set as DENY-ALL.
+///
+/// This is a trap, not a bug in the mapping itself: the identity genuinely does
+/// not know the caller's permissions, so anything that needs to READ OR WRITE as
+/// the caller must be handed the request's middleware-resolved `AuthContext`
+/// instead. `HttpFunctionInvoker` once rebuilt the context from the identity
+/// here, which made every MCP custom tool deny-all for non-system callers:
+/// reads silently returned zero rows and writes failed with
+/// `Permission denied: Cannot create studio:Page at '<path>'`, while the
+/// built-in data tools — handed the real context — read the same nodes fine.
+///
+/// If this assertion ever starts failing because the mapping learned to resolve
+/// permissions, that is good news; delete the test. Until then it exists so the
+/// reconstruct-from-identity shortcut is not reintroduced.
+#[test]
+fn user_auth_context_from_identity_has_no_permissions() {
+    let identity = McpIdentity::new("alice", "repo").with_roles(["studio_admin"]);
+    let ctx = identity.to_auth_context();
+
+    assert!(
+        ctx.permissions().is_none(),
+        "to_auth_context() must not be treated as an authorization-bearing context; \
+         pass the request's resolved AuthContext to anything that executes as the caller",
+    );
+    assert!(!ctx.is_system, "a named subject must not map to the system context");
+
+    // A system identity is the one case where the mapping IS exact.
+    let system = McpIdentity::new("svc", "repo").as_system();
+    let sys_ctx = system.to_auth_context();
+    assert!(sys_ctx.is_system);
+    // And note WHY superadmin masked the bug: the system context ships a full
+    // permission set, so RLS never denies it.
+    assert!(sys_ctx.permissions().is_some());
+}
