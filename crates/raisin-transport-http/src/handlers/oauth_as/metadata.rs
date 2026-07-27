@@ -17,7 +17,9 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 
-use super::helpers::{issuer_from_request, load_tenant_trusted_hosts, oauth_error_response};
+use super::helpers::{
+    issuer_from_request, load_tenant_trusted_hosts, mcp_resource_url, oauth_error_response,
+};
 use crate::middleware::TenantInfo;
 use crate::state::AppState;
 
@@ -57,7 +59,7 @@ pub async fn protected_resource_metadata(
         Ok(issuer) => issuer,
         Err(err) => return oauth_error_response(&err),
     };
-    let resource = format!("{issuer}/mcp/{repo}/{branch}/{slug}");
+    let resource = mcp_resource_url(&issuer, &repo, &branch, &slug);
     Json(
         state
             .oauth_server

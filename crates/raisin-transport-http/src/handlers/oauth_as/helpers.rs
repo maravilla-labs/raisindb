@@ -79,6 +79,69 @@ pub fn issuer_from_request(
     }
 }
 
+/// Canonicalize an origin (`scheme://host[:port]`) so two spellings of the same
+/// origin compare equal.
+///
+/// The scheme and host are lowercased, a default port is dropped (`:443` on
+/// `https`, `:80` on `http`), and any trailing slash is removed. This exists
+/// because the token audience is *minted* from one derivation of the origin and
+/// *verified* against another; without canonicalization a trailing slash, an
+/// explicit `:443`, or an uppercase host silently breaks every MCP request with
+/// an audience mismatch that looks, from the outside, like a permissions bug.
+pub(crate) fn canonical_origin(origin: &str) -> String {
+    let origin = origin.trim().trim_end_matches('/');
+    let (scheme, rest) = match origin.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        // No scheme to normalize; fall back to the input lowercased as a host.
+        None => return origin.to_ascii_lowercase(),
+    };
+
+    let authority = rest.to_ascii_lowercase();
+    let authority = match (scheme.as_str(), authority.rsplit_once(':')) {
+        // Only strip a *default* port, and only when what follows the colon is
+        // actually a port (an IPv6 literal ends in `]`).
+        ("https", Some((host, "443"))) | ("http", Some((host, "80"))) if !host.is_empty() => {
+            host.to_string()
+        }
+        _ => authority,
+    };
+
+    format!("{scheme}://{authority}")
+}
+
+/// The canonical origin of an absolute URL (`None` if it does not parse or has
+/// no host), for comparing a client-supplied resource indicator against the
+/// issuer this deployment actually serves.
+pub(crate) fn origin_of(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    parsed.host_str()?;
+    Some(canonical_origin(&parsed.origin().ascii_serialization()))
+}
+
+/// The canonical RFC 8707 resource URL identifying one MCP endpoint.
+///
+/// This is the single definition of an MCP server's audience. It is what the
+/// protected-resource metadata advertises, what `/authorize` binds into the
+/// authorization code (and hence the token's `aud`), and what the MCP endpoint
+/// verifies the presented token against — all three must agree byte for byte.
+pub(crate) fn mcp_resource_url(issuer: &str, repo: &str, branch: &str, slug: &str) -> String {
+    format!("{}/mcp/{repo}/{branch}/{slug}", canonical_origin(issuer))
+}
+
+/// The RFC 9728 protected-resource metadata URL for an MCP endpoint — the value
+/// a `401` challenge points at so a client can discover the authorization server.
+pub(crate) fn mcp_resource_metadata_url(
+    issuer: &str,
+    repo: &str,
+    branch: &str,
+    slug: &str,
+) -> String {
+    format!(
+        "{}/.well-known/oauth-protected-resource/mcp/{repo}/{branch}/{slug}",
+        canonical_origin(issuer)
+    )
+}
+
 /// Load this tenant's trusted OAuth hosts from its auth config (empty if unset).
 pub(crate) async fn load_tenant_trusted_hosts(state: &AppState, tenant_id: &str) -> Vec<String> {
     state
@@ -265,6 +328,65 @@ mod tests {
 
         let denied = issuer_from_request(&headers_with_host("evil.example"), &tenant);
         assert!(denied.is_err());
+    }
+
+    #[test]
+    fn canonical_origin_normalizes_case_default_port_and_slash() {
+        // Every spelling below is the same origin and must canonicalize alike.
+        for spelling in [
+            "https://Solutas.RDB.Maravilla.Cloud",
+            "https://solutas.rdb.maravilla.cloud/",
+            "https://solutas.rdb.maravilla.cloud:443",
+            "HTTPS://solutas.rdb.maravilla.cloud:443/",
+        ] {
+            assert_eq!(
+                canonical_origin(spelling),
+                "https://solutas.rdb.maravilla.cloud",
+                "failed for {spelling}"
+            );
+        }
+
+        assert_eq!(canonical_origin("http://localhost:80"), "http://localhost");
+        // A non-default port is significant and must be kept.
+        assert_eq!(
+            canonical_origin("http://localhost:8088/"),
+            "http://localhost:8088"
+        );
+        // A default port for the *other* scheme is not a default port here.
+        assert_eq!(
+            canonical_origin("https://example.com:80"),
+            "https://example.com:80"
+        );
+    }
+
+    #[test]
+    fn mcp_resource_url_is_stable_across_issuer_spellings() {
+        let canonical = "https://db.example.com/mcp/studio/main/studio";
+        for issuer in [
+            "https://db.example.com",
+            "https://db.example.com/",
+            "https://DB.Example.com:443",
+        ] {
+            assert_eq!(
+                mcp_resource_url(issuer, "studio", "main", "studio"),
+                canonical,
+                "failed for {issuer}"
+            );
+        }
+
+        // Path segments are case-sensitive and must NOT be folded.
+        assert_eq!(
+            mcp_resource_url("https://db.example.com", "Studio", "main", "Studio"),
+            "https://db.example.com/mcp/Studio/main/Studio"
+        );
+    }
+
+    #[test]
+    fn metadata_url_matches_the_rfc9728_well_known_path() {
+        assert_eq!(
+            mcp_resource_metadata_url("https://db.example.com/", "repo", "main", "srv"),
+            "https://db.example.com/.well-known/oauth-protected-resource/mcp/repo/main/srv"
+        );
     }
 
     #[test]

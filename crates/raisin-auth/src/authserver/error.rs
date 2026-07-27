@@ -69,6 +69,13 @@ pub enum AuthServerError {
     #[error("access_denied: {0}")]
     AccessDenied(String),
 
+    /// The `resource` indicator names a target this server does not host
+    /// (RFC 8707 §2). Raised when the requested resource is not an MCP endpoint
+    /// URL, or when its origin is not this deployment's issuer — a client must
+    /// not be able to pick an audience the resource server would never accept.
+    #[error("invalid_target: {0}")]
+    InvalidTarget(String),
+
     /// An unexpected internal failure (storage, signing, ...).
     #[error("server_error: {0}")]
     ServerError(String),
@@ -90,6 +97,7 @@ impl AuthServerError {
             Self::InvalidRedirectUri(_) => "invalid_request",
             Self::InvalidClientMetadata(_) => "invalid_client_metadata",
             Self::AccessDenied(_) => "access_denied",
+            Self::InvalidTarget(_) => "invalid_target",
             Self::ServerError(_) => "server_error",
         }
     }
@@ -107,6 +115,7 @@ impl AuthServerError {
             | Self::InvalidRedirectUri(m)
             | Self::InvalidClientMetadata(m)
             | Self::AccessDenied(m)
+            | Self::InvalidTarget(m)
             | Self::ServerError(m) => m.clone(),
         }
     }

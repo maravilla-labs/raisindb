@@ -31,3 +31,4 @@ mod http_revisions;
 mod http_sanitization;
 mod http_smoke;
 mod http_snapshot_branches;
+mod mcp_oauth_flow;

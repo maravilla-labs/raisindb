@@ -14,16 +14,21 @@
 //! and redirects back to the client.
 
 use axum::extract::{Form, Query, State};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Extension;
 use serde::Deserialize;
 
 use raisin_auth::authserver::{
-    AuthorizationRequest, IdentityGrants, ResourceOwner, ValidatedAuthorizationRequest,
+    AuthServerError, AuthorizationRequest, IdentityGrants, ResourceOwner,
+    ValidatedAuthorizationRequest,
 };
 
 use super::consent::render_consent_form;
-use super::helpers::oauth_error_response;
+use super::helpers::{
+    issuer_from_request, load_tenant_trusted_hosts, mcp_resource_url, oauth_error_response,
+    origin_of,
+};
 use crate::middleware::TenantInfo;
 use crate::state::AppState;
 
@@ -83,7 +88,11 @@ pub struct AuthorizeForm {
     pub scope: Option<String>,
     /// `resource`.
     pub resource: Option<String>,
-    /// The repository the MCP resource lives under (carried through hidden field).
+    /// The repository the MCP resource lives under (carried through hidden
+    /// field). Accepted for form compatibility but **not trusted**: the
+    /// repository is derived from the canonical `resource` indicator instead, so
+    /// a posted value cannot steer provisioning at a different repo than the one
+    /// the token is bound to.
     pub repo: String,
     /// The resource owner's email.
     pub email: String,
@@ -115,10 +124,11 @@ impl From<&AuthorizeForm> for AuthorizationRequest {
 pub async fn authorize_get(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
+    headers: HeaderMap,
     Query(query): Query<AuthorizeQuery>,
 ) -> Response {
     let req = AuthorizationRequest::from(&query);
-    let validated = match state
+    let mut validated = match state
         .oauth_server
         .begin_authorization(&tenant_info.tenant_id, &req)
         .await
@@ -127,16 +137,63 @@ pub async fn authorize_get(
         Err(err) => return oauth_error_response(&err),
     };
 
-    let (repo, _branch, _slug) = match parse_mcp_resource(&validated.resource) {
-        Some(parts) => parts,
-        None => return Html(
-            "<h1>Invalid resource</h1><p>The resource indicator is not an MCP endpoint URL.</p>"
-                .to_string(),
-        )
-        .into_response(),
-    };
+    let (repo, _branch, _slug) =
+        match canonicalize_resource(&state, &headers, &tenant_info.tenant_id, &mut validated).await
+        {
+            Ok(parts) => parts,
+            Err(err) => return oauth_error_response(&err),
+        };
 
     Html(render_consent_form(&validated, &repo)).into_response()
+}
+
+/// Pin the request's resource indicator to this deployment's canonical MCP
+/// endpoint URL, returning its `(repo, branch, slug)`.
+///
+/// RFC 8707 lets the *client* name the resource, and that string used to flow
+/// verbatim into the authorization code and then into the token's `aud`
+/// (`token.rs`'s `TokenGrant::audience`). The resource server, meanwhile,
+/// reconstructs the audience it expects from its own issuer. Two spellings of
+/// the same URL therefore produced a token that could never be validated — the
+/// request silently degraded to anonymous. Rewriting `resource` here means the
+/// audience is always the server's own canonical form, so mint and verify agree
+/// by construction.
+///
+/// It is also a hardening step: a client may only name a resource on this
+/// issuer's origin, so it cannot choose an audience for someone else.
+#[cfg(feature = "storage-rocksdb")]
+async fn canonicalize_resource(
+    state: &AppState,
+    headers: &HeaderMap,
+    tenant_id: &str,
+    validated: &mut ValidatedAuthorizationRequest,
+) -> Result<(String, String, String), AuthServerError> {
+    let (repo, branch, slug) = parse_mcp_resource(&validated.resource).ok_or_else(|| {
+        AuthServerError::InvalidTarget(format!(
+            "resource '{}' is not an MCP endpoint URL",
+            validated.resource
+        ))
+    })?;
+
+    let tenant_hosts = load_tenant_trusted_hosts(state, tenant_id).await;
+    let issuer = issuer_from_request(headers, &tenant_hosts)?;
+
+    let requested_origin = origin_of(&validated.resource).ok_or_else(|| {
+        AuthServerError::InvalidTarget(format!(
+            "resource '{}' has no usable origin",
+            validated.resource
+        ))
+    })?;
+    let issuer_origin = origin_of(&issuer).unwrap_or_else(|| issuer.clone());
+    if requested_origin != issuer_origin {
+        return Err(AuthServerError::InvalidTarget(format!(
+            "resource origin '{requested_origin}' is not this authorization server's issuer \
+             '{issuer_origin}'"
+        )));
+    }
+
+    validated.resource = mcp_resource_url(&issuer, &repo, &branch, &slug);
+    Ok((repo, branch, slug))
 }
 
 /// `POST /authorize` — authenticate the resource owner, mint a code, redirect.
@@ -144,13 +201,14 @@ pub async fn authorize_get(
 pub async fn authorize_post(
     State(state): State<AppState>,
     Extension(tenant_info): Extension<TenantInfo>,
+    headers: HeaderMap,
     Form(form): Form<AuthorizeForm>,
 ) -> Response {
     let tenant_id = tenant_info.tenant_id.clone();
     let req = AuthorizationRequest::from(&form);
 
     // Re-validate the request: the client/redirect/PKCE/scope must still hold.
-    let validated = match state
+    let mut validated = match state
         .oauth_server
         .begin_authorization(&tenant_id, &req)
         .await
@@ -159,11 +217,23 @@ pub async fn authorize_post(
         Err(err) => return oauth_error_response(&err),
     };
 
+    // Pin the audience to this issuer's canonical URL before the code is minted.
+    // The repo and branch come from the canonical resource, not the form's hidden
+    // `repo` field — the resource is what the token is bound to, so provisioning
+    // and permission resolution must follow it rather than a value the client
+    // could post independently.
+    let (repo, branch, _slug) =
+        match canonicalize_resource(&state, &headers, &tenant_id, &mut validated).await {
+            Ok(parts) => parts,
+            Err(err) => return oauth_error_response(&err),
+        };
+
     // Authenticate the resource owner against the existing identity store.
-    let owner = match authenticate_owner(&state, &tenant_id, &form, &validated).await {
-        Ok(owner) => owner,
-        Err(resp) => return resp,
-    };
+    let owner =
+        match authenticate_owner(&state, &tenant_id, &form, &validated, &repo, &branch).await {
+            Ok(owner) => owner,
+            Err(resp) => return resp,
+        };
 
     // Issue + persist the single-use authorization code.
     let code = match state
@@ -188,12 +258,19 @@ pub async fn authorize_post(
 /// Verify the resource owner's credentials and resolve the scopes they may be
 /// granted, reusing the existing identity store, password strategy, user-node
 /// provisioning, and permission resolution.
+///
+/// `repo` and `branch` come from the canonical resource indicator (see
+/// [`canonicalize_resource`]), so the user node is provisioned and permissions
+/// resolved in the repository the token will actually be bound to.
 #[cfg(feature = "storage-rocksdb")]
+#[allow(clippy::too_many_arguments)]
 async fn authenticate_owner(
     state: &AppState,
     tenant_id: &str,
     form: &AuthorizeForm,
     validated: &ValidatedAuthorizationRequest,
+    repo: &str,
+    branch: &str,
 ) -> Result<ResourceOwner, Response> {
     use raisin_auth::authserver::grant_scopes;
     use raisin_auth::strategies::LocalStrategy;
@@ -241,7 +318,7 @@ async fn authenticate_owner(
     let _home = ensure_user_node(
         &repos.storage,
         tenant_id,
-        &form.repo,
+        repo,
         &identity.identity_id,
         &identity.email,
         identity.display_name.as_deref(),
@@ -254,7 +331,7 @@ async fn authenticate_owner(
     // what the identity actually holds (consent never widens access).
     let permission_service = PermissionService::new(state.storage().clone());
     let grants = match permission_service
-        .resolve_for_identity_id(tenant_id, &form.repo, "main", &identity.identity_id)
+        .resolve_for_identity_id(tenant_id, repo, "main", &identity.identity_id)
         .await
     {
         Ok(Some(perms)) => IdentityGrants::new(
@@ -274,10 +351,8 @@ async fn authenticate_owner(
     Ok(ResourceOwner {
         identity_id: identity.identity_id,
         email: identity.email,
-        repository: form.repo.clone(),
-        branch: parse_mcp_resource(&validated.resource)
-            .map(|(_, branch, _)| branch)
-            .unwrap_or_else(|| "main".to_string()),
+        repository: repo.to_string(),
+        branch: branch.to_string(),
         granted_scopes,
     })
 }

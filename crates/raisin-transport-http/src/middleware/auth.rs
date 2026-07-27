@@ -105,12 +105,82 @@ pub async fn require_auth_middleware(
     Ok(next.run(req).await)
 }
 
+/// Install the [`AuthContext`] a request with no usable credential should carry.
+///
+/// Resolves the physical anonymous user's real permissions when anonymous access
+/// is enabled for this tenant/repo, and [`AuthContext::deny_all`] when it is not.
+///
+/// Every path in [`optional_auth_middleware`] that gives up on a credential
+/// funnels through here, so "no header", "a scheme we don't speak", and "a token
+/// neither login validator accepts" all land on the same context. They used to
+/// diverge: only the no-header path installed anything, so a request bearing an
+/// unusable token reached the handler with the extension *absent* — which reads
+/// downstream as an identity with no grants at all, weaker than anonymous, and
+/// blocked even public resources.
+#[cfg(feature = "storage-rocksdb")]
+async fn insert_unauthenticated_context(state: &AppState, req: &mut Request<Body>) {
+    use raisin_core::PermissionService;
+    use raisin_models::auth::AuthContext;
+
+    let tenant_id = req
+        .extensions()
+        .get::<TenantInfo>()
+        .map(|t| t.tenant_id.clone())
+        .unwrap_or_else(|| "default".to_string());
+    let repo_id = extract_repo_from_path(req.uri().path()).unwrap_or_else(|| "default".to_string());
+
+    let anonymous_enabled = is_anonymous_enabled_for_context(
+        state.storage(),
+        &tenant_id,
+        &repo_id,
+        state.anonymous_enabled,
+    )
+    .await;
+
+    if anonymous_enabled {
+        let permission_service = PermissionService::new(state.storage().clone());
+        let resolved_permissions = permission_service
+            .resolve_anonymous_user(&tenant_id, &repo_id, "main")
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to resolve anonymous user permissions, using empty permissions"
+                );
+                None
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!("Physical anonymous user not found, using empty permissions");
+                raisin_models::permissions::ResolvedPermissions::anonymous(vec![])
+            });
+
+        let user_id = resolved_permissions.user_id.clone();
+        let auth_context = AuthContext::for_user(&user_id).with_permissions(resolved_permissions);
+        tracing::debug!(
+            tenant_id = %tenant_id,
+            repo_id = %repo_id,
+            user_id = %user_id,
+            "Auto-authenticating as physical anonymous user (HTTP) with resolved permissions"
+        );
+        req.extensions_mut().insert(auth_context);
+    } else {
+        tracing::debug!(
+            tenant_id = %tenant_id,
+            repo_id = %repo_id,
+            "Anonymous access disabled - setting deny-all auth context (HTTP)"
+        );
+        req.extensions_mut().insert(AuthContext::deny_all());
+    }
+}
+
 /// Optional auth middleware - extracts auth context if Bearer token present
 /// but does not reject requests without auth.
 ///
 /// **Key differences from `require_auth_middleware`:**
-/// - If no auth header: proceeds without auth context (public access)
-/// - If invalid token: proceeds without auth context
+/// - If no auth header: resolves the anonymous (or deny-all) context
+/// - If the token is not usable as a login credential: same anonymous fallback.
+///   An OAuth 2.1 resource token lands here by design and is picked up at the
+///   resource by [`crate::handlers::mcp::auth::resolve_mcp_auth`].
 /// - If valid token: resolves permissions and stores auth context
 #[cfg(feature = "storage-rocksdb")]
 pub async fn optional_auth_middleware(
@@ -118,7 +188,6 @@ pub async fn optional_auth_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    use raisin_core::PermissionService;
     use raisin_models::auth::AuthContext;
 
     let auth_header = req
@@ -128,62 +197,13 @@ pub async fn optional_auth_middleware(
 
     let Some(auth_header) = auth_header else {
         // No auth header - handle anonymous access
-        let tenant_id = req
-            .extensions()
-            .get::<TenantInfo>()
-            .map(|t| t.tenant_id.clone())
-            .unwrap_or_else(|| "default".to_string());
-        let repo_id =
-            extract_repo_from_path(req.uri().path()).unwrap_or_else(|| "default".to_string());
-
-        let anonymous_enabled = is_anonymous_enabled_for_context(
-            state.storage(),
-            &tenant_id,
-            &repo_id,
-            state.anonymous_enabled,
-        )
-        .await;
-
-        if anonymous_enabled {
-            let permission_service = PermissionService::new(state.storage().clone());
-            let resolved_permissions = permission_service
-                .resolve_anonymous_user(&tenant_id, &repo_id, "main")
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to resolve anonymous user permissions, using empty permissions"
-                    );
-                    None
-                })
-                .unwrap_or_else(|| {
-                    tracing::warn!("Physical anonymous user not found, using empty permissions");
-                    raisin_models::permissions::ResolvedPermissions::anonymous(vec![])
-                });
-
-            let user_id = resolved_permissions.user_id.clone();
-            let auth_context =
-                AuthContext::for_user(&user_id).with_permissions(resolved_permissions);
-            tracing::debug!(
-                tenant_id = %tenant_id,
-                repo_id = %repo_id,
-                user_id = %user_id,
-                "Auto-authenticating as physical anonymous user (HTTP) with resolved permissions"
-            );
-            req.extensions_mut().insert(auth_context);
-        } else {
-            tracing::debug!(
-                tenant_id = %tenant_id,
-                repo_id = %repo_id,
-                "Anonymous access disabled - setting deny-all auth context (HTTP)"
-            );
-            let deny_context = AuthContext::deny_all();
-            req.extensions_mut().insert(deny_context);
-        }
+        insert_unauthenticated_context(&state, &mut req).await;
         return Ok(next.run(req).await);
     };
 
     if !auth_header.starts_with("Bearer ") {
+        // A credential we don't speak (Basic, ...) is no credential at all.
+        insert_unauthenticated_context(&state, &mut req).await;
         return Ok(next.run(req).await);
     }
 
@@ -244,37 +264,54 @@ pub async fn optional_auth_middleware(
 
     let auth_service = match state.auth_service() {
         Some(svc) => svc,
-        None => return Ok(next.run(req).await),
+        None => {
+            insert_unauthenticated_context(&state, &mut req).await;
+            return Ok(next.run(req).await);
+        }
     };
 
-    // Try admin token first, then user token
+    // Try admin token first, then user token.
+    //
+    // These are `debug`, not `warn`: an OAuth 2.1 resource token fails *both* of
+    // these validators by design (no `username` claim for the admin shape; the
+    // login path deliberately refuses an `aud`-bearing token, RFC 8707), and is
+    // then resolved at the resource by `handlers::mcp::auth::resolve_mcp_auth`.
+    // Logging that expected sequence at `warn` made every healthy MCP request
+    // look like an auth failure.
     let principal = match auth_service.validate_token(token) {
         Ok(admin_claims) => {
-            tracing::warn!(
+            tracing::debug!(
                 admin_user = %admin_claims.sub,
                 "Admin token validated successfully (optional auth)"
             );
             AuthPrincipal::Admin(admin_claims)
         }
         Err(admin_err) => {
-            tracing::warn!(
+            tracing::debug!(
                 error = %admin_err,
                 "Admin token validation failed, trying user token"
             );
             match auth_service.validate_user_token(token) {
                 Ok(user_claims) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         user = %user_claims.sub,
                         "User token validated successfully (optional auth)"
                     );
                     AuthPrincipal::User(Box::new(user_claims))
                 }
                 Err(user_err) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         admin_error = %admin_err,
                         user_error = %user_err,
-                        "Both token validations failed, proceeding without auth"
+                        "Neither login validator accepted the bearer token; \
+                         resolving anonymous access instead"
                     );
+                    // Fall through to the same context a credential-less request
+                    // gets. Previously this returned with *no* `AuthContext`
+                    // extension at all, which is strictly less than anonymous:
+                    // downstream consumers then saw a grant-less identity and
+                    // could not even serve a public resource.
+                    insert_unauthenticated_context(&state, &mut req).await;
                     return Ok(next.run(req).await);
                 }
             }

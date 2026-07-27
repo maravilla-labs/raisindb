@@ -21,6 +21,12 @@
 //!
 //! A JSON-RPC notification (a message with no `id`) receives an empty `202`
 //! response, per the JSON-RPC and MCP specs.
+//!
+//! Errors ride in the JSON-RPC envelope on HTTP `200`, **except** authorization
+//! failures: an unauthenticated caller gets `401` with an RFC 9728
+//! `WWW-Authenticate: Bearer resource_metadata="…"` challenge so the client can
+//! discover the authorization server and run the OAuth flow, and an
+//! authenticated caller missing a scope gets `403`.
 
 mod api_factory;
 mod auth;
@@ -82,6 +88,21 @@ pub async fn handle_mcp(
     )
     .await;
 
+    // An unauthenticated caller gets an RFC 9728 challenge pointing at this
+    // endpoint's protected-resource metadata, so the client can find the
+    // authorization server and start (or, when the 1h token lapses, restart) the
+    // OAuth flow instead of surfacing a generic failure.
+    let authenticated = is_authenticated(auth_context.as_ref());
+    let metadata_url = if authenticated {
+        None
+    } else {
+        auth::resource_metadata_challenge(&state, &headers, &tenant_id, &repo, &branch, &slug).await
+    };
+    let challenge = AuthChallenge {
+        authenticated,
+        metadata_url: metadata_url.as_deref(),
+    };
+
     match dispatch(
         &state,
         &tenant_id,
@@ -90,13 +111,24 @@ pub async fn handle_mcp(
         &slug,
         auth_context.as_ref(),
         consented_scopes.as_deref(),
+        &challenge,
         request,
     )
     .await
     {
         Ok(outcome) => outcome,
-        Err(err) => jsonrpc_error_response(Value::Null, &err),
+        Err(err) => jsonrpc_error_response(Value::Null, &err, &challenge),
     }
+}
+
+/// Whether the resolved context represents a real, non-anonymous principal.
+///
+/// Mirrors the branching in [`identity::mcp_identity_from_auth`]: a missing
+/// context, an anonymous one, or one with no user id all count as
+/// unauthenticated, and only those are worth challenging for credentials.
+#[cfg(feature = "storage-rocksdb")]
+fn is_authenticated(auth: Option<&AuthContext>) -> bool {
+    auth.is_some_and(|ctx| ctx.is_system || (!ctx.is_anonymous && ctx.user_id.is_some()))
 }
 
 /// Stub when the RocksDB backend (and thus the function / search services) is
@@ -125,6 +157,7 @@ async fn dispatch(
     slug: &str,
     auth: Option<&AuthContext>,
     consented_scopes: Option<&[String]>,
+    challenge: &AuthChallenge<'_>,
     request: JsonRpcRequest,
 ) -> Result<Response, McpError> {
     use raisin_mcp::{assemble_for_slug, AssemblyServices, Dispatcher, NodeResourceProvider};
@@ -233,7 +266,7 @@ async fn dispatch(
         }
         Ok(result) => Ok(Json(JsonRpcResponse::success(id, result)).into_response()),
         Err(_) if is_notification => Ok(StatusCode::ACCEPTED.into_response()),
-        Err(err) => Ok(jsonrpc_error_response(id, &err)),
+        Err(err) => Ok(jsonrpc_error_response(id, &err, challenge)),
     }
 }
 
@@ -288,8 +321,139 @@ fn subscribe_sse(
 
 /// Build a JSON-RPC error response.
 ///
-/// Errors are carried in the JSON-RPC envelope (HTTP `200`), so a client always
-/// receives a parseable JSON-RPC body whether the call succeeded or failed.
-fn jsonrpc_error_response(id: Value, err: &McpError) -> Response {
-    Json(JsonRpcResponse::failure(id, err)).into_response()
+/// The error is always carried in the JSON-RPC envelope, so a client always
+/// receives a parseable body. Most failures ride on HTTP `200`; authorization
+/// failures do not, because an MCP client keys its OAuth handling off the HTTP
+/// status:
+///
+/// - **`401`** when the caller is unauthenticated, carrying the RFC 9728
+///   `WWW-Authenticate: Bearer resource_metadata="…"` challenge (when `challenge`
+///   is `Some`) that points at this endpoint's protected-resource metadata.
+/// - **`403`** when the caller *is* authenticated but lacks a required scope —
+///   re-authenticating would not help, so no challenge is offered.
+fn jsonrpc_error_response(id: Value, err: &McpError, challenge: &AuthChallenge<'_>) -> Response {
+    let body = Json(JsonRpcResponse::failure(id, err));
+
+    if !matches!(err, McpError::Unauthorized(_)) {
+        return body.into_response();
+    }
+
+    // Authenticated but refused: a fresh token would not change the outcome.
+    if challenge.authenticated {
+        return (StatusCode::FORBIDDEN, body).into_response();
+    }
+
+    let mut response = (StatusCode::UNAUTHORIZED, body).into_response();
+    if let Some(url) = challenge.metadata_url {
+        // RFC 9728 §5.1: the `resource_metadata` parameter tells the client which
+        // document describes how to authenticate for this resource.
+        let value = format!(r#"Bearer error="invalid_token", resource_metadata="{url}""#);
+        if let Ok(header) = axum::http::HeaderValue::from_str(&value) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::WWW_AUTHENTICATE, header);
+        }
+    }
+    response
+}
+
+/// How to answer an authorization failure for this request.
+///
+/// Carries both facts because they are independent: whether the caller was
+/// authenticated decides `401` vs `403`, while the metadata URL may be missing
+/// even for an unauthenticated caller (no trusted issuer could be derived) — in
+/// which case the `401` is still correct, just without a discovery pointer.
+#[derive(Debug, Default, Clone, Copy)]
+struct AuthChallenge<'a> {
+    /// Whether a real, non-anonymous principal was resolved.
+    authenticated: bool,
+    /// The RFC 9728 protected-resource metadata URL to advertise, if derivable.
+    metadata_url: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const METADATA: &str =
+        "https://db.example.com/.well-known/oauth-protected-resource/mcp/r/main/s";
+
+    fn challenge_header(response: &Response) -> Option<&str> {
+        response
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+    }
+
+    /// An unauthenticated caller must get a `401` carrying the discovery
+    /// pointer — this is the whole reason an MCP client knows to start OAuth
+    /// rather than surfacing a generic connection error.
+    #[test]
+    fn unauthenticated_gets_401_with_resource_metadata() {
+        let challenge = AuthChallenge {
+            authenticated: false,
+            metadata_url: Some(METADATA),
+        };
+        let err = McpError::unauthorized("authentication required for this MCP server");
+        let response = jsonrpc_error_response(Value::from(1), &err, &challenge);
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            challenge_header(&response),
+            Some(
+                format!(r#"Bearer error="invalid_token", resource_metadata="{METADATA}""#).as_str()
+            )
+        );
+    }
+
+    /// No trusted issuer could be derived, so there is nothing to point at — but
+    /// the caller is still unauthenticated, so the status must stay `401`.
+    #[test]
+    fn unauthenticated_without_metadata_url_is_still_401() {
+        let challenge = AuthChallenge {
+            authenticated: false,
+            metadata_url: None,
+        };
+        let response =
+            jsonrpc_error_response(Value::from(1), &McpError::unauthorized("nope"), &challenge);
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge_header(&response), None);
+    }
+
+    /// A logged-in caller missing a scope gets `403` and no challenge: another
+    /// round of OAuth would hand back the same scopes.
+    #[test]
+    fn authenticated_but_unscoped_gets_403_without_challenge() {
+        let challenge = AuthChallenge {
+            authenticated: true,
+            metadata_url: None,
+        };
+        let response = jsonrpc_error_response(
+            Value::from(1),
+            &McpError::unauthorized("session is missing required scopes: admin"),
+            &challenge,
+        );
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(challenge_header(&response), None);
+    }
+
+    /// Every non-authorization failure keeps riding on `200` in the JSON-RPC
+    /// envelope, as MCP clients expect.
+    #[test]
+    fn other_errors_stay_on_http_200() {
+        let challenge = AuthChallenge {
+            authenticated: false,
+            metadata_url: Some(METADATA),
+        };
+        for err in [
+            McpError::not_found("unknown method: nope"),
+            McpError::invalid_params("bad params"),
+        ] {
+            let response = jsonrpc_error_response(Value::from(1), &err, &challenge);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(challenge_header(&response), None);
+        }
+    }
 }
