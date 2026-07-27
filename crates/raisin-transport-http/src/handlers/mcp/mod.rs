@@ -75,7 +75,13 @@ pub async fn handle_mcp(
     Path((repo, branch, slug)): Path<(String, String, String)>,
     auth: Option<Extension<AuthContext>>,
     headers: HeaderMap,
-    Json(request): Json<JsonRpcRequest>,
+    // Taken as raw bytes rather than `Json<JsonRpcRequest>` on purpose: the
+    // `Json` extractor rejects a request whose `Content-Type` is missing or not
+    // `application/json` with a bare `415`, before this handler ever runs. MCP
+    // clients probe the endpoint with exactly such a request, and a `415`
+    // carries no `WWW-Authenticate`, so the probe teaches them nothing. Parsing
+    // here lets an unauthenticated probe get the OAuth challenge it needs.
+    body: axum::body::Bytes,
 ) -> Response {
     let tenant_id = tenant_info.tenant_id.clone();
     let ext_auth = auth.map(|Extension(ctx)| ctx);
@@ -101,6 +107,27 @@ pub async fn handle_mcp(
     let challenge = AuthChallenge {
         authenticated,
         metadata_url: metadata_url.as_deref(),
+    };
+
+    // An unparseable body from an unauthenticated caller is treated as a probe:
+    // answer with the challenge, not a parse error, so the client discovers the
+    // authorization server. Authenticated callers get a real JSON-RPC parse
+    // error, which is the actionable answer for them.
+    let request: JsonRpcRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::debug!(
+                %repo, %branch, %slug, authenticated,
+                error = %e,
+                "MCP request body is not a JSON-RPC message"
+            );
+            let err = if authenticated {
+                McpError::Parse(format!("invalid JSON-RPC request body: {e}"))
+            } else {
+                McpError::unauthorized("authentication required for this MCP server")
+            };
+            return jsonrpc_error_response(Value::Null, &err, &challenge);
+        }
     };
 
     match dispatch(
@@ -229,6 +256,28 @@ async fn dispatch(
         &active_workspace,
         consented_scopes,
     );
+
+    // Scope gating is the most common reason a *correctly authenticated* session
+    // is still refused, and until now the reason existed only inside the
+    // JSON-RPC error body — which every client swallows into "connection
+    // failed". Log both sides of the comparison so a 403 names itself.
+    if !descriptor.public {
+        let missing = identity.missing_scopes(&descriptor.scopes);
+        if !missing.is_empty() {
+            tracing::warn!(
+                subject = ?identity.subject,
+                %repo, %branch, %slug,
+                required_scopes = ?descriptor.scopes,
+                granted_scopes = ?identity.scopes,
+                consented_scopes = ?consented_scopes,
+                missing_scopes = ?missing,
+                anonymous = identity.is_anonymous(),
+                "MCP session refused: caller lacks the scopes this server requires. \
+                 Granted scopes come from the caller's roles + groups, intersected \
+                 with the OAuth token's consented scopes when present."
+            );
+        }
+    }
 
     // Wire resource reads + live subscriptions onto the event bus.
     use raisin_storage::Storage;
@@ -436,6 +485,44 @@ mod tests {
         );
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(challenge_header(&response), None);
+    }
+
+    /// A bodyless / wrong-content-type probe from an unauthenticated client used
+    /// to get a bare `415` from the `Json` extractor, which carries no
+    /// `WWW-Authenticate` and so tells the client nothing. It must now produce
+    /// the same challenge any other unauthenticated request gets.
+    #[test]
+    fn unparseable_body_from_unauthenticated_caller_challenges() {
+        let challenge = AuthChallenge {
+            authenticated: false,
+            metadata_url: Some(METADATA),
+        };
+        let response = jsonrpc_error_response(
+            Value::Null,
+            &McpError::unauthorized("authentication required for this MCP server"),
+            &challenge,
+        );
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(challenge_header(&response).is_some_and(|h| h.contains(METADATA)));
+    }
+
+    /// An authenticated caller sending malformed JSON gets the actionable
+    /// answer instead — a JSON-RPC parse error, not an auth challenge.
+    #[test]
+    fn unparseable_body_from_authenticated_caller_is_a_parse_error() {
+        let challenge = AuthChallenge {
+            authenticated: true,
+            metadata_url: None,
+        };
+        let response = jsonrpc_error_response(
+            Value::Null,
+            &McpError::Parse("invalid JSON-RPC request body".to_string()),
+            &challenge,
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(challenge_header(&response), None);
     }
 

@@ -28,6 +28,18 @@ on:
           - patch
           - minor
           - major
+      targets:
+        description: >-
+          Which platforms to build. `linux-only` is the fast path for an urgent
+          server fix (~30 min instead of ~45; Windows is the long pole). The
+          publish step uploads with --clobber, so re-running this workflow on the
+          SAME tag with `all` later backfills the remaining platforms.
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - linux-only
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -46,6 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.compute.outputs.tag }}
+      matrix: ${{ steps.targets.outputs.matrix }}
     steps:
       - name: Compute release tag
         id: compute
@@ -74,6 +87,34 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Select build targets
+        id: targets
+        shell: bash
+        env:
+          # A tag push always builds everything; only a manual dispatch may
+          # narrow to the Linux fast path.
+          TARGETS: ${{ github.event_name == 'push' && 'all' || inputs.targets }}
+        run: |
+          set -euo pipefail
+          FEATURES="storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
+          LINUX=$(jq -cn --arg f "$FEATURES" \
+            '{os:"ubuntu-latest",target:"x86_64-unknown-linux-gnu",archive:"tar.gz",ext:"",features:$f}')
+          WINDOWS=$(jq -cn --arg f "$FEATURES" \
+            '{os:"windows-latest",target:"x86_64-pc-windows-msvc",archive:"zip",ext:".exe",features:$f}')
+          MACOS=$(jq -cn --arg f "$FEATURES" \
+            '{os:"macos-14",target:"aarch64-apple-darwin",archive:"tar.gz",ext:"",features:$f}')
+
+          if [[ "${TARGETS:-all}" == "linux-only" ]]; then
+            MATRIX=$(jq -cn --argjson l "$LINUX" '{include:[$l]}')
+            echo "Building Linux only (fast path)."
+          else
+            MATRIX=$(jq -cn --argjson l "$LINUX" --argjson w "$WINDOWS" --argjson m "$MACOS" \
+              '{include:[$l,$w,$m]}')
+            echo "Building all platforms."
+          fi
+          echo "$MATRIX" | jq .
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   frontend:
     name: Build frontend
@@ -130,23 +171,7 @@ jobs:
     needs: [prepare, frontend]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-            ext: ""
-            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
-            ext: ".exe"
-            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
-          - os: macos-14
-            target: aarch64-apple-darwin
-            archive: tar.gz
-            ext: ""
-            features: "storage-rocksdb,websocket,pgwire,fs,pdf,pdf-markdown,candle,ocr"
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
