@@ -28,7 +28,7 @@ use super::{DEFAULT_BRANCH, FUNCTIONS_WORKSPACE};
 // Node lookup helpers
 // ============================================================================
 
-/// Find a function node by name in the functions workspace.
+/// Find a function node by name in the functions workspace, on `main`.
 ///
 /// The caller's auth context MUST be forwarded - a `None` context is
 /// subject to RLS as an anonymous principal and sees no nodes at all,
@@ -40,10 +40,27 @@ pub(crate) async fn find_function_node(
     name: &str,
     auth_context: Option<&AuthContext>,
 ) -> Result<Node, ApiError> {
+    find_function_node_on_branch(state, tenant_id, repo, DEFAULT_BRANCH, name, auth_context).await
+}
+
+/// Find a function node by name in the functions workspace of a given branch.
+///
+/// Exists because MCP servers are addressed per branch
+/// (`POST /mcp/{repo}/{branch}/{slug}`) while the HTTP function API is
+/// `main`-only; resolving a branch's tools against `main` made every function
+/// unreachable from a non-`main` MCP endpoint.
+pub(crate) async fn find_function_node_on_branch(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    name: &str,
+    auth_context: Option<&AuthContext>,
+) -> Result<Node, ApiError> {
     let node_svc = state.node_service_for_context(
         tenant_id,
         repo,
-        DEFAULT_BRANCH,
+        branch,
         FUNCTIONS_WORKSPACE,
         auth_context.cloned(),
     );
@@ -163,12 +180,27 @@ pub(crate) async fn load_function_code(
     repo: &str,
     function_node: &Node,
 ) -> Result<String, ApiError> {
+    load_function_code_on_branch(state, tenant_id, repo, DEFAULT_BRANCH, function_node).await
+}
+
+/// Load a function node's code from a given branch.
+///
+/// The branch must match the one the node was resolved from, or the
+/// `entry_file` asset lookup misses and a function that exists appears to have
+/// no code.
+pub(crate) async fn load_function_code_on_branch(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    function_node: &Node,
+) -> Result<String, ApiError> {
     let (code, _metadata) = raisin_functions::execution::code_loader::load_function_code(
         state.storage.as_ref(),
         state.bin.as_ref(),
         tenant_id,
         repo,
-        DEFAULT_BRANCH,
+        branch,
         FUNCTIONS_WORKSPACE,
         function_node,
         &function_node.path,

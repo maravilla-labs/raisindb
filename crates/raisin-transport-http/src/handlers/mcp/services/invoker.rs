@@ -10,17 +10,22 @@ use raisin_functions::{ExecutionContext, ExecutionResult, FunctionExecutor};
 use raisin_mcp::{FunctionInvoker, McpError, McpIdentity};
 use serde_json::Value;
 
-use crate::handlers::functions::{build_loaded_function, find_function_node, load_function_code};
+use raisin_models::auth::AuthContext;
+
+use crate::handlers::functions::{
+    build_loaded_function, find_function_node_on_branch, load_function_code_on_branch,
+};
 use crate::state::AppState;
 
 use super::super::api_factory::build_mcp_function_api;
 
 /// Resolves and executes `raisin:Function` nodes for MCP custom tools.
 ///
-/// Mirrors the inline-invocation path of the functions HTTP handler: it resolves
-/// the function node by name (RLS-scoped to the caller), loads its entry-file
-/// code, builds the [`raisin_functions::LoadedFunction`], and runs it via
-/// [`FunctionExecutor::execute`] as the calling identity. The returned
+/// Mirrors the inline-invocation path of the functions HTTP handler, with one
+/// deliberate split: the function node and its code are *resolved* with a system
+/// context (routing metadata for an already-declared, already-scope-gated tool),
+/// then *executed* strictly as the calling identity — RLS scopes every node the
+/// function touches to that user, and admin escalation is off. The returned
 /// [`ExecutionResult`] is the executor output verbatim — a `success: false`
 /// result is a function-level failure the engine surfaces as a tool error.
 pub(in crate::handlers::mcp) struct HttpFunctionInvoker {
@@ -54,14 +59,45 @@ impl HttpFunctionInvoker {
     ) -> raisin_mcp::Result<ExecutionResult> {
         let auth = identity.to_auth_context();
 
-        // Resolve the function node (auth MUST be forwarded or RLS hides it).
-        let node = find_function_node(&self.state, &self.tenant_id, &self.repo, name, Some(&auth))
-            .await
-            .map_err(|e| McpError::not_found(format!("function `{name}`: {e}")))?;
+        // ── Resolution: system context. Reading the `raisin:Function` node that
+        // backs an already-declared tool is *routing metadata*, exactly like
+        // reading the `raisin:McpServer` declaration itself — which `dispatch()`
+        // already resolves with `AuthContext::system()` for the same reason.
+        //
+        // Without this, discovery (system) advertises a tool that invocation
+        // (caller) cannot resolve, because RLS on the `functions` workspace
+        // rarely grants a content author read on platform code. The tool is
+        // listed and then 404s — indistinguishable from a missing deployment.
+        //
+        // This widens nothing: the tool was already advertised to this caller,
+        // and the registry has already enforced the tool's own `scopes` gate
+        // before we get here. Only *which* function node we may look up changes.
+        //
+        // ── Execution: the caller's own context, below. `ExecutionContext`
+        // carries `auth`, the function's data API is built with `auth`, and
+        // admin escalation stays off — so every node the function reads or
+        // writes is RLS-scoped to the authenticated user, never to system.
+        let resolve_auth = AuthContext::system();
+        let node = find_function_node_on_branch(
+            &self.state,
+            &self.tenant_id,
+            &self.repo,
+            &self.branch,
+            name,
+            Some(&resolve_auth),
+        )
+        .await
+        .map_err(|e| McpError::not_found(format!("function `{name}`: {e}")))?;
 
-        let code = load_function_code(&self.state, &self.tenant_id, &self.repo, &node)
-            .await
-            .map_err(|e| McpError::protocol(format!("loading function `{name}`: {e}")))?;
+        let code = load_function_code_on_branch(
+            &self.state,
+            &self.tenant_id,
+            &self.repo,
+            &self.branch,
+            &node,
+        )
+        .await
+        .map_err(|e| McpError::protocol(format!("loading function `{name}`: {e}")))?;
         let loaded = build_loaded_function(&node, code)
             .map_err(|e| McpError::protocol(format!("building function `{name}`: {e}")))?;
 

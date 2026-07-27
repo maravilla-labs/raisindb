@@ -37,4 +37,7 @@ pub use types::*;
 
 // Re-export helpers used by webhooks, SQL, and other handlers
 pub(crate) use api_factory::build_function_api;
-pub(crate) use helpers::{build_loaded_function, find_function_node, load_function_code};
+pub(crate) use helpers::{
+    build_loaded_function, find_function_node, find_function_node_on_branch, load_function_code,
+    load_function_code_on_branch,
+};
