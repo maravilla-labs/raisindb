@@ -16,6 +16,7 @@ on:
           - schema-wasm
           - functions-types
           - client
+          - mcp-ui-client
           - cli
       version:
         description: "Version override (leave empty for auto-bump patch)"
@@ -164,6 +165,53 @@ jobs:
 
       - name: Summary
         run: echo "Published @raisindb/client v$VERSION" >> $GITHUB_STEP_SUMMARY
+
+  publish-mcp-ui-client:
+    name: Publish @raisindb/mcp-ui-client
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      inputs.package == 'all' ||
+      inputs.package == 'mcp-ui-client'
+    defaults:
+      run:
+        working-directory: packages/mcp-ui-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+
+      - name: Set version
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VER="${GITHUB_REF_NAME#npm-v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            VER="${{ inputs.version }}"
+          else
+            VER=""
+          fi
+          if [[ -n "$VER" ]]; then
+            npm version --no-git-tag-version "$VER" --allow-same-version
+          else
+            npm version --no-git-tag-version patch
+          fi
+          echo "VERSION=$VER" >> $GITHUB_ENV
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Summary
+        run: echo "Published @raisindb/mcp-ui-client v$VERSION" >> $GITHUB_STEP_SUMMARY
 
   publish-cli:
     name: Publish @raisindb/cli
