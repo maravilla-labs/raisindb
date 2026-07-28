@@ -97,7 +97,7 @@ properties:
 
 Set only `data:` for a pure auto server, only `tools:` for a pure custom server, or both. Every tool's `scopes` are checked as `tool.scopes ⊆ caller's roles/groups`.
 
-> **Want a tool to render an interactive UI instead of JSON?** Add an `ui: { mode, entry }` block to a tool to attach an HTML widget (MCP-UI) — a rendered card, panel, or form with buttons that fire follow-up tool calls. See the **`raisindb-mcp-ui-widgets`** skill.
+> **Want a tool to render an interactive UI instead of JSON?** Add a `ui: { mode: html, entry, workspace? }` block to a tool to attach an HTML view (MCP Apps, SEP-1865) — a rendered card, panel, or form with buttons that fire follow-up tool calls. The engine predeclares the view as a `ui://` resource, advertises it via `_meta.ui.resourceUri`, and serves it through `resources/read`; the view talks to the host over JSON-RPC via `@raisindb/mcp-ui-client`. See the **`raisindb-mcp-ui-widgets`** skill.
 
 ### Auto data tools
 

@@ -130,6 +130,24 @@ pub async fn handle_mcp(
         }
     };
 
+    // Externally-reachable base for `mode: uri-list` widget URLs: explicit
+    // RAISINDB_BASE_URL wins (same override the signed-URL builder honors),
+    // else derive from the request's forwarded/Host headers.
+    let public_base = std::env::var("RAISINDB_BASE_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            let host = headers
+                .get("x-forwarded-host")
+                .or_else(|| headers.get(axum::http::header::HOST))
+                .and_then(|v| v.to_str().ok())?;
+            let proto = headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("http");
+            Some(format!("{proto}://{host}"))
+        });
+
     match dispatch(
         &state,
         &tenant_id,
@@ -139,6 +157,7 @@ pub async fn handle_mcp(
         auth_context.as_ref(),
         consented_scopes.as_deref(),
         &challenge,
+        public_base,
         request,
     )
     .await
@@ -185,6 +204,7 @@ async fn dispatch(
     auth: Option<&AuthContext>,
     consented_scopes: Option<&[String]>,
     challenge: &AuthChallenge<'_>,
+    public_base: Option<String>,
     request: JsonRpcRequest,
 ) -> Result<Response, McpError> {
     use raisin_mcp::{assemble_for_slug, AssemblyServices, Dispatcher, NodeResourceProvider};
@@ -318,7 +338,8 @@ async fn dispatch(
 
     let dispatcher = Dispatcher::new(descriptor, registry)
         .with_resources(resources)
-        .with_asset_reader(assets);
+        .with_asset_reader(assets)
+        .with_public_base(public_base);
 
     // `resources/subscribe` upgrades to an SSE stream of update notifications.
     if request.method == "resources/subscribe" && request.id.is_some() {

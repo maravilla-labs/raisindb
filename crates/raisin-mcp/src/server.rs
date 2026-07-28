@@ -139,8 +139,40 @@ pub enum UiMode {
     UriList,
 }
 
+/// Content Security Policy domains a widget declares (MCP Apps SEP-1865).
+///
+/// Hosts build the sandbox CSP from these; omitted lists mean the secure
+/// default (no external access of that kind).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCsp {
+    /// Origins for network requests (fetch/XHR/WebSocket) — CSP `connect-src`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect_domains: Vec<String>,
+    /// Origins for static resources (images/scripts/styles/fonts/media).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_domains: Vec<String>,
+    /// Origins for nested iframes — CSP `frame-src`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_domains: Vec<String>,
+    /// Allowed base URIs — CSP `base-uri`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_uri_domains: Vec<String>,
+}
+
+impl UiCsp {
+    /// Whether no domain list is declared at all.
+    pub fn is_empty(&self) -> bool {
+        self.connect_domains.is_empty()
+            && self.resource_domains.is_empty()
+            && self.frame_domains.is_empty()
+            && self.base_uri_domains.is_empty()
+    }
+}
+
 /// A tool's optional MCP-UI binding: a delivery mode plus a workspace-relative
-/// path (with an optional `#fragment`) to the widget's entry document.
+/// path (with an optional `#fragment`) to the widget's entry document, and the
+/// MCP Apps (SEP-1865) resource metadata the widget advertises to hosts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiBinding {
     /// How the host should render the widget.
@@ -148,6 +180,39 @@ pub struct UiBinding {
     /// Workspace-relative path to the entry document, optionally suffixed with a
     /// `#fragment` naming an in-app SPA route (`site/widgets/order/index.html#/card`).
     pub entry: String,
+    /// Workspace the entry path resolves in. Defaults to the session's active
+    /// workspace (the server's first declared content workspace), which cannot
+    /// always hold assets — e.g. a server whose primary workspace only allows
+    /// document types keeps its widgets in a sibling asset workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Display name for the `ui://` resource in `resources/list`. Defaults to
+    /// the tool name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Description of the UI resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// CSP domains the widget needs. When omitted, the engine declares this
+    /// server's own origin for `connect`/`resource` so widget images and API
+    /// calls served from the same RaisinDB instance work out of the box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csp: Option<UiCsp>,
+    /// Sandbox permissions the widget requests (camera/microphone/geolocation/
+    /// clipboardWrite), passed through verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Value>,
+    /// Whether the host should draw a visible border + background.
+    #[serde(
+        default,
+        rename = "prefersBorder",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prefers_border: Option<bool>,
+    /// Who may call this tool: `model` (the agent) and/or `app` (the widget).
+    /// Defaults to both when omitted (the SEP-1865 default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Vec<String>>,
 }
 
 impl UiBinding {
@@ -528,6 +593,27 @@ mod tests {
         assert_eq!(tool.input_schema, props["input_schema"]);
         assert_eq!(tool.output_schema, Some(props["output_schema"].clone()));
         assert_eq!(tool.scopes, vec!["catalog:read".to_string()]);
+    }
+
+    #[test]
+    fn ui_binding_parses_optional_workspace() {
+        let with: UiBinding = serde_json::from_value(json!({
+            "mode": "html",
+            "entry": "/widgets/order/index.html",
+            "workspace": "assets"
+        }))
+        .expect("ui with workspace");
+        assert_eq!(with.workspace.as_deref(), Some("assets"));
+
+        let without: UiBinding = serde_json::from_value(json!({
+            "mode": "uri-list",
+            "entry": "site/widgets/order/index.html#/card"
+        }))
+        .expect("ui without workspace");
+        assert_eq!(without.workspace, None);
+        // Omitted workspace round-trips as absent, not null.
+        let round = serde_json::to_value(&without).expect("serialize");
+        assert!(round.get("workspace").is_none());
     }
 
     #[test]

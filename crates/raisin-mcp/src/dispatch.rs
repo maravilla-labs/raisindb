@@ -30,7 +30,7 @@ use crate::protocol::{
 };
 use crate::registry::ToolRegistry;
 use crate::resources::{NodeResourceProvider, ResourceContents};
-use crate::server::{McpServerDescriptor, UiBinding, UiMode};
+use crate::server::{split_entry, McpServerDescriptor, UiBinding, UiMode};
 use crate::services::SharedAssetReader;
 
 /// URI scheme used to identify an MCP-UI widget resource carried in a tool
@@ -46,6 +46,7 @@ pub struct Dispatcher {
     registry: ToolRegistry,
     resources: Option<NodeResourceProvider>,
     assets: Option<SharedAssetReader>,
+    public_base: Option<String>,
 }
 
 impl Dispatcher {
@@ -56,7 +57,20 @@ impl Dispatcher {
             registry,
             resources: None,
             assets: None,
+            public_base: None,
         }
+    }
+
+    /// Set the server's externally-reachable base URL (`https://host[:port]`).
+    ///
+    /// A `mode: uri-list` widget resource is a URL the HOST iframes — a
+    /// relative `/resources/...` path is meaningless outside the server's own
+    /// origin, so the transport derives a base (config/env or the request's
+    /// Host header) and the dispatcher prefixes it. Without one the URL stays
+    /// relative (previous behavior).
+    pub fn with_public_base(mut self, base: Option<String>) -> Self {
+        self.public_base = base.map(|b| b.trim_end_matches('/').to_string());
+        self
     }
 
     /// Attach a resource provider, enabling `resources/*` methods.
@@ -166,7 +180,57 @@ impl Dispatcher {
 
     fn handle_tools_list(&self, identity: &McpIdentity) -> Result<Value> {
         let tools = self.registry.visible_descriptors(identity);
-        Ok(serde_json::to_value(ListToolsResult { tools })?)
+        // MCP Apps (SEP-1865): a ui-bound tool advertises its widget as a
+        // predeclared `ui://` resource via `_meta.ui.resourceUri`; Apps-capable
+        // hosts fetch it with resources/read and deliver tool results to the
+        // rendered view themselves. The deprecated flat key is included for
+        // hosts that still read the pre-GA shape.
+        let mut entries = Vec::with_capacity(tools.len());
+        for tool in tools {
+            let mut value = serde_json::to_value(&tool)?;
+            if let Some(ui) = &tool.ui {
+                let uri = self.ui_uri_for(identity, ui);
+                let mut meta = json!({ "resourceUri": uri });
+                if let Some(visibility) = &ui.visibility {
+                    meta["visibility"] = json!(visibility);
+                }
+                value["_meta"] = json!({ "ui": meta, "ui/resourceUri": uri });
+            }
+            entries.push(value);
+        }
+        Ok(json!({ "tools": entries }))
+    }
+
+    /// Canonical `ui://` URI for a binding under this session (fragment
+    /// stripped — it names an in-app route, never a different resource).
+    fn ui_uri_for(&self, identity: &McpIdentity, ui: &UiBinding) -> String {
+        let workspace = ui.workspace.as_deref().unwrap_or(&identity.workspace);
+        let (path, _fragment) = ui.split_entry();
+        ui_resource_uri(workspace, path)
+    }
+
+    /// The SEP-1865 `_meta.ui` object for a widget RESOURCE (csp, permissions,
+    /// prefersBorder). When the binding declares no CSP, the server's own
+    /// origin is declared for connect/resource so same-instance images and API
+    /// calls work under the host's sandbox.
+    fn ui_resource_meta(&self, ui: &UiBinding) -> Value {
+        let mut meta = serde_json::Map::new();
+        let csp_value = match &ui.csp {
+            Some(csp) if !csp.is_empty() => Some(serde_json::to_value(csp).unwrap_or(Value::Null)),
+            _ => self.public_base.as_ref().map(|base| {
+                json!({ "connectDomains": [base], "resourceDomains": [base] })
+            }),
+        };
+        if let Some(csp) = csp_value {
+            meta.insert("csp".into(), csp);
+        }
+        if let Some(permissions) = &ui.permissions {
+            meta.insert("permissions".into(), permissions.clone());
+        }
+        if let Some(prefers_border) = ui.prefers_border {
+            meta.insert("prefersBorder".into(), json!(prefers_border));
+        }
+        Value::Object(meta)
     }
 
     async fn handle_tools_call(
@@ -198,19 +262,16 @@ impl Dispatcher {
             // A tool that declares an `outputSchema` returns a result conforming
             // to it, surfaced as `structuredContent` alongside the content block.
             Ok(value) => {
-                let mut result = if descriptor.output_schema.is_some() {
+                // MCP Apps (SEP-1865): a tool result carries DATA only. The
+                // widget is a predeclared `ui://` resource the host discovers
+                // via `_meta.ui.resourceUri`, fetches with resources/read, and
+                // feeds through `ui/notifications/tool-result` — nothing UI is
+                // embedded here.
+                let result = if descriptor.output_schema.is_some() {
                     CallToolResult::json_structured(value)
                 } else {
                     CallToolResult::json(value)
                 };
-                // When the tool binds a UI widget, append its resource block. The
-                // structured/text content stays intact so non-UI hosts still see
-                // the data; a UI-capable host renders the widget resource.
-                if let Some(ui) = &descriptor.ui {
-                    if let Some(block) = self.build_ui_block(identity, ui).await? {
-                        result.content.push(block);
-                    }
-                }
                 Ok(serde_json::to_value(result)?)
             }
             Err(McpError::FunctionFailed(message)) => {
@@ -220,82 +281,47 @@ impl Dispatcher {
         }
     }
 
-    /// Build the widget resource content block for a tool's `ui` binding.
-    ///
-    /// - `mode: html` reads the entry asset's bytes through the asset reader and
-    ///   returns them inline as a `text/html` resource; a `#fragment` injects a
-    ///   `window.__RAISIN_INITIAL_ROUTE__` bootstrap so the widget's router boots
-    ///   into the right in-app view. Returns `Ok(None)` when no asset reader is
-    ///   wired (graceful degradation).
-    /// - `mode: uri-list` returns a `text/uri-list` resource whose single URL
-    ///   points at the static endpoint for the entry path (fragment preserved on
-    ///   the URL so the iframe's own hash router reads it).
-    ///
-    /// The entry path resolves against the session's active workspace.
-    async fn build_ui_block(
-        &self,
-        identity: &McpIdentity,
-        ui: &UiBinding,
-    ) -> Result<Option<ContentBlock>> {
-        let (path, fragment) = ui.split_entry();
-        let resource_uri = ui_resource_uri(&identity.workspace, &ui.entry);
-
-        match ui.mode {
-            UiMode::Html => {
-                let Some(assets) = self.assets.as_ref() else {
-                    // No asset reader: return the structured result without a
-                    // widget rather than failing the whole tool call.
-                    return Ok(None);
-                };
-                let asset = assets
-                    .read_asset(identity, &identity.workspace, path)
-                    .await?;
-                let mut html = String::from_utf8_lossy(&asset.bytes).into_owned();
-                if let Some(fragment) = fragment {
-                    html = inject_initial_route(&html, fragment);
-                }
-                Ok(Some(ContentBlock::resource(ResourceContents {
-                    uri: resource_uri,
-                    mime_type: "text/html".to_string(),
-                    text: Some(html),
-                    blob: None,
-                })))
-            }
-            UiMode::UriList => {
-                let url = static_endpoint_url(
-                    &identity.repo,
-                    &identity.branch,
-                    &identity.workspace,
-                    path,
-                    fragment,
-                );
-                Ok(Some(ContentBlock::resource(ResourceContents {
-                    uri: resource_uri,
-                    mime_type: "text/uri-list".to_string(),
-                    text: Some(url),
-                    blob: None,
-                })))
-            }
-        }
-    }
-
-    fn handle_resources_list(&self, _identity: &McpIdentity) -> Result<Value> {
+    fn handle_resources_list(&self, identity: &McpIdentity) -> Result<Value> {
         // The resource set is open-ended (any node path); advertise the workspace
         // roots the server's data policy exposes as browsable entry points.
         let mut resources = Vec::new();
         if self.resources.is_some() {
             for workspace in &self.descriptor.data_policy.workspaces {
-                resources.push(crate::resources::ResourceDescriptor {
+                resources.push(serde_json::to_value(crate::resources::ResourceDescriptor {
                     uri: crate::resources::resource_uri(workspace, "/"),
                     name: format!("{workspace} (workspace root)"),
                     description: Some(format!(
                         "Browse nodes in the `{workspace}` workspace by path."
                     )),
                     mime_type: "application/json".to_string(),
-                });
+                })?);
             }
         }
-        Ok(serde_json::to_value(ListResourcesResult { resources })?)
+        // MCP Apps (SEP-1865): predeclare each ui-bound tool's widget so hosts
+        // can review and prefetch it. One SPA shared by several tools appears
+        // once (deduped by resolved URI).
+        let mut seen = std::collections::HashSet::new();
+        for tool in self.registry.visible_descriptors(identity) {
+            let Some(ui) = &tool.ui else { continue };
+            let uri = self.ui_uri_for(identity, ui);
+            if !seen.insert(uri.clone()) {
+                continue;
+            }
+            let mut entry = json!({
+                "uri": uri,
+                "name": ui.name.clone().unwrap_or_else(|| tool.name.clone()),
+                "mimeType": "text/html;profile=mcp-app",
+            });
+            if let Some(description) = &ui.description {
+                entry["description"] = json!(description);
+            }
+            let meta = self.ui_resource_meta(ui);
+            if meta.as_object().is_some_and(|m| !m.is_empty()) {
+                entry["_meta"] = json!({ "ui": meta });
+            }
+            resources.push(entry);
+        }
+        Ok(json!({ "resources": resources }))
     }
 
     async fn handle_resources_read(
@@ -303,15 +329,70 @@ impl Dispatcher {
         identity: &McpIdentity,
         request: &crate::protocol::JsonRpcRequest,
     ) -> Result<Value> {
+        let params: ReadResourceParams = request.decode_params()?;
+        // MCP Apps: `ui://{workspace}/{path}` resolves to a widget's HTML,
+        // served with the Apps profile mime so the host renders it as a view.
+        if let Some(rest) = params.uri.strip_prefix(&format!("{UI_RESOURCE_SCHEME}://")) {
+            return self.read_ui_resource(identity, &params.uri, rest).await;
+        }
         let provider = self
             .resources
             .as_ref()
             .ok_or_else(|| McpError::not_found("resources are not enabled"))?;
-        let params: ReadResourceParams = request.decode_params()?;
         let contents = provider.read(identity, &params.uri).await?;
         Ok(serde_json::to_value(ReadResourceResult {
             contents: vec![contents],
         })?)
+    }
+
+    /// Serve a `ui://` widget resource (MCP Apps SEP-1865).
+    ///
+    /// `rest` is `{workspace}/{entry-path}` (fragment tolerated and ignored —
+    /// it names an in-app route, never a different file). The asset read is
+    /// RLS-scoped to the caller like every other asset read. When the URI
+    /// matches a declared tool binding, that binding's resource metadata
+    /// (csp/permissions/prefersBorder) rides on the content item — the
+    /// spec-preferred location, which takes precedence over listing metadata.
+    async fn read_ui_resource(
+        &self,
+        identity: &McpIdentity,
+        uri: &str,
+        rest: &str,
+    ) -> Result<Value> {
+        let Some(assets) = self.assets.as_ref() else {
+            return Err(McpError::not_found("ui resources are not enabled"));
+        };
+        let (rest, _fragment) = split_entry(rest);
+        let (workspace, path) = rest
+            .split_once('/')
+            .ok_or_else(|| McpError::not_found(format!("malformed ui resource uri: {uri}")))?;
+        let asset = assets
+            .read_asset(identity, workspace, &format!("/{path}"))
+            .await?;
+        let html = String::from_utf8_lossy(&asset.bytes).into_owned();
+        let mut content = json!({
+            "uri": uri,
+            "mimeType": "text/html;profile=mcp-app",
+            "text": html,
+        });
+        // Attach the declaring binding's resource metadata, matched by URI.
+        let canonical = {
+            let (bare, _fragment) = split_entry(uri);
+            bare.to_string()
+        };
+        let binding = self
+            .registry
+            .visible_descriptors(identity)
+            .into_iter()
+            .filter_map(|t| t.ui)
+            .find(|ui| self.ui_uri_for(identity, ui) == canonical);
+        if let Some(ui) = binding {
+            let meta = self.ui_resource_meta(&ui);
+            if meta.as_object().is_some_and(|m| !m.is_empty()) {
+                content["_meta"] = json!({ "ui": meta });
+            }
+        }
+        Ok(json!({ "contents": [content] }))
     }
 
     fn handle_resources_subscribe(
@@ -367,59 +448,15 @@ fn ui_resource_uri(workspace: &str, entry: &str) -> String {
     format!("{UI_RESOURCE_SCHEME}://{workspace}/{trimmed}")
 }
 
-/// Build the static-endpoint URL a `uri-list` widget resource points at.
-///
-/// `GET /resources/{repo}/{branch}/{ws}/{path}`, with any `#fragment` appended
-/// so the iframed SPA's hash router reads it on mount (the fragment is never
-/// sent to the server — the browser strips it before the request).
-fn static_endpoint_url(
-    repo: &str,
-    branch: &str,
-    workspace: &str,
-    path: &str,
-    fragment: Option<&str>,
-) -> String {
-    let trimmed = path.strip_prefix('/').unwrap_or(path);
-    let mut url = format!("/resources/{repo}/{branch}/{workspace}/{trimmed}");
-    if let Some(fragment) = fragment {
-        url.push('#');
-        // Strip CR/LF so a fragment can never inject an extra line into the
-        // `text/uri-list` body this URL is emitted into.
-        url.extend(fragment.chars().filter(|c| *c != '\r' && *c != '\n'));
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    #[test]
+    fn ui_resource_uri_strips_leading_slash() {
+        assert_eq!(
+            ui_resource_uri("assets", "/widgets/x/index.html"),
+            "ui://assets/widgets/x/index.html"
+        );
     }
-    url
-}
-
-/// Inject a `window.__RAISIN_INITIAL_ROUTE__` bootstrap into HTML for a
-/// `mode: html` widget so its router boots into the fragment's in-app route.
-///
-/// The script is placed right after the opening `<head>` (or `<head ...>`) tag;
-/// when no head tag is present it is prepended. The fragment is JSON-encoded (so
-/// it is a valid, safely-escaped JS string) and any `</` sequence is neutralized
-/// so the value can never close the `<script>` element early.
-fn inject_initial_route(html: &str, fragment: &str) -> String {
-    let encoded = serde_json::to_string(fragment).unwrap_or_else(|_| "\"\"".to_string());
-    let safe = encoded.replace("</", "<\\/");
-    let script = format!("<script>window.__RAISIN_INITIAL_ROUTE__={safe};</script>");
-
-    // Find the end of the opening `<head>` tag, case-insensitively.
-    if let Some(head_start) = find_head_open(html) {
-        if let Some(rel_close) = html[head_start..].find('>') {
-            let insert_at = head_start + rel_close + 1;
-            let mut out = String::with_capacity(html.len() + script.len());
-            out.push_str(&html[..insert_at]);
-            out.push_str(&script);
-            out.push_str(&html[insert_at..]);
-            return out;
-        }
-    }
-
-    // No usable <head>: prepend so the global is set before any body script runs.
-    format!("{script}{html}")
-}
-
-/// Byte offset of an opening `<head` tag (case-insensitive), if present.
-fn find_head_open(html: &str) -> Option<usize> {
-    let lower = html.to_ascii_lowercase();
-    lower.find("<head")
 }
