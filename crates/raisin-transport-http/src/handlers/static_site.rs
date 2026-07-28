@@ -201,11 +201,19 @@ async fn serve_asset(
         })
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let mime_type = resource.mime_type.clone().unwrap_or_else(|| {
-        mime_guess::from_path(&node.path)
-            .first_or_octet_stream()
-            .to_string()
-    });
+    // `application/octet-stream` is upload-pipeline shorthand for "unknown" —
+    // serving it verbatim makes browsers DOWNLOAD an html/css/js file instead
+    // of rendering it, which breaks every iframe'd static site. Treat it like
+    // an absent mime and re-guess from the filename.
+    let mime_type = resource
+        .mime_type
+        .clone()
+        .filter(|m| m != "application/octet-stream")
+        .unwrap_or_else(|| {
+            mime_guess::from_path(&node.path)
+                .first_or_octet_stream()
+                .to_string()
+        });
 
     // ETag from the Asset's content hash; enables conditional 304 responses.
     // `content_hash` is a free-form string property a writer controls, so it may

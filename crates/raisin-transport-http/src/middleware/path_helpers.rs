@@ -28,6 +28,14 @@ pub(super) fn extract_repo_from_path(path: &str) -> Option<String> {
         return Some(segments[1].to_string());
     }
 
+    // Static-content endpoint: ["resources", "{repo}", "{branch}", "{ws}", ...].
+    // Without this, an anonymous request to a public static subtree resolves
+    // the anonymous role against the "default" repo and is denied even though
+    // the target repo grants it — uri-list MCP widgets can never load.
+    if segments.len() >= 2 && segments[0] == "resources" {
+        return Some(segments[1].to_string());
+    }
+
     None
 }
 
