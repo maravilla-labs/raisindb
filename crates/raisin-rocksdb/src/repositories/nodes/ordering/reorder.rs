@@ -7,7 +7,7 @@ use super::super::helpers::TOMBSTONE;
 use super::super::NodeRepositoryImpl;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
-use raisin_storage::{BranchRepository, RevisionRepository};
+use raisin_storage::{BranchRepository, NodeRepository, RevisionRepository, StorageScope};
 
 impl NodeRepositoryImpl {
     /// Shared reorder logic that handles the atomic write operation
@@ -253,6 +253,56 @@ impl NodeRepositoryImpl {
                 .store_revision_meta(tenant_id, repo_id, rev_meta)
                 .await?;
         }
+
+        // Announce the reorder.
+        //
+        // This path writes the ordering index directly and never goes through
+        // the transaction commit, which is the ONLY other place a
+        // `NodeEventKind::Reordered` is produced
+        // (`transaction/commit/events.rs`). So a reorder issued through the
+        // repository API — `raisin.nodes.reorderChild` / `moveChildBefore` /
+        // `moveChildAfter`, and therefore the MCP `reorder_node` tool — changed
+        // the order and told nobody: subscribed clients kept rendering the old
+        // order until a full reload. A drag in an editor looked fine only
+        // because that goes through the transaction path.
+        //
+        // The event carries the CHILD's path so it lands inside a `<parent>/**`
+        // subscription, which is how a browser watches a folder. Ordering is
+        // keyed by child NAME under the parent, so the path is the parent's
+        // path plus that name — no extra lookup of the child itself.
+        let scope = StorageScope::new(tenant_id, repo_id, branch, workspace);
+        let child_path = match self.get(scope, parent_id, None).await {
+            Ok(Some(parent)) => {
+                let base = parent.path.trim_end_matches('/');
+                Some(format!("{base}/{child_name}"))
+            }
+            // Path is a routing hint for subscription filters, not part of the
+            // write. Losing it must not fail a reorder that already committed.
+            _ => None,
+        };
+
+        let metadata = actor.map(|actor| {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "actor".to_string(),
+                serde_json::Value::String(actor.to_string()),
+            );
+            m
+        });
+
+        self.event_bus
+            .publish(raisin_events::Event::Node(raisin_events::NodeEvent {
+                tenant_id: tenant_id.to_string(),
+                repository_id: repo_id.to_string(),
+                branch: branch.to_string(),
+                workspace_id: workspace.to_string(),
+                node_id: target_child_id.to_string(),
+                node_type: None,
+                revision,
+                kind: raisin_events::NodeEventKind::Reordered,
+                path: child_path,
+                metadata,
+            }));
 
         Ok(())
     }

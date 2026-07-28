@@ -5856,6 +5856,92 @@ mod ordering {
         Ok(())
     }
 
+    /// A reorder through the repository API must ANNOUNCE itself.
+    ///
+    /// The ordering module writes the order index directly and never goes
+    /// through the transaction commit, which is the only other place a
+    /// `Reordered` event is produced. It emitted nothing, so `reorder_child`
+    /// (and the MCP `reorder_node` tool built on it) changed sibling order while
+    /// every subscribed client kept rendering the old one until a full reload.
+    /// A drag in the editor looked fine only because it takes the transaction
+    /// path. Asserting the event here is the only thing that keeps the two paths
+    /// agreeing — the reorder itself succeeds either way.
+    #[tokio::test]
+    async fn test_reorder_child_publishes_reordered_event() -> Result<()> {
+        use std::sync::Mutex;
+
+        let fixture = TestStorage::new().await?;
+        fixture.setup_standard_nodetypes().await?;
+        let storage = fixture.storage();
+        let nodes = storage.nodes();
+        let scope = StorageScope::new(
+            constants::TENANT,
+            constants::REPO,
+            constants::BRANCH,
+            constants::WORKSPACE,
+        );
+
+        struct Capture(Mutex<Vec<raisin_events::NodeEvent>>);
+        impl raisin_events::EventHandler for Capture {
+            fn handle<'a>(
+                &'a self,
+                event: &'a raisin_events::Event,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>,
+            > {
+                if let raisin_events::Event::Node(n) = event {
+                    self.0.lock().unwrap().push(n.clone());
+                }
+                Box::pin(async { Ok(()) })
+            }
+            fn name(&self) -> &str {
+                "capture"
+            }
+        }
+
+        let parent = fixture.create_test_node("/reorder-events", "raisin:Folder");
+        nodes
+            .create(scope, parent.clone(), CreateNodeOptions::default())
+            .await?;
+        for name in ["a", "b"] {
+            let child =
+                fixture.create_test_node(&format!("/reorder-events/{name}"), "raisin:Page");
+            nodes
+                .create(scope, child, CreateNodeOptions::default())
+                .await?;
+        }
+
+        // Subscribe only now, so the creates above are not in the capture.
+        let capture = Arc::new(Capture(Mutex::new(Vec::new())));
+        storage.event_bus().subscribe(capture.clone());
+
+        nodes
+            .reorder_child(scope, &parent.path, "b", 0, Some("reorder"), Some("tester"))
+            .await?;
+
+        // The bus dispatches asynchronously.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let events = capture.0.lock().unwrap().clone();
+        let reordered: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == raisin_storage::NodeEventKind::Reordered)
+            .collect();
+        assert_eq!(
+            reordered.len(),
+            1,
+            "expected exactly one Reordered event, got {events:?}"
+        );
+        // The path must be the CHILD's — a browser watches `<parent>/**`, so an
+        // event carrying the parent path (or none) never reaches the open folder.
+        assert_eq!(
+            reordered[0].path.as_deref(),
+            Some("/reorder-events/b"),
+            "Reordered event must carry the moved child's path"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_reorder_children() -> Result<()> {
         let fixture = TestStorage::new().await?;
