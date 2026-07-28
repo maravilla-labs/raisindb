@@ -32,7 +32,7 @@ use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::{DeepNode, Node, NodeRevisionEntry, NodeWithChildren};
 use raisin_storage::{
     BranchScope, CreateNodeOptions, DeleteNodeOptions, ListOptions, NodeRepository,
-    NodeWithPopulatedChildren, StorageScope, UpdateNodeOptions,
+    NodeWithPopulatedChildren, RevisionRepository, StorageScope, UpdateNodeOptions,
 };
 use std::collections::HashMap;
 
@@ -91,23 +91,44 @@ impl NodeRepository for NodeRepositoryImpl {
         let history = self
             .get_history(tenant_id, repo_id, branch, workspace, node_id, limit)
             .await?;
-        Ok(history
-            .into_iter()
-            .map(|(revision, node)| match node {
+
+        // Join each entry with its revision's commit metadata so the history
+        // carries the MESSAGE, not just a timestamp. The snapshots alone cannot
+        // supply it — the message lives on the revision. This is a bounded point
+        // lookup per entry (the walk is already limited), and it is what lets a
+        // caller render a node's history without fetching every revision in the
+        // repository and filtering client-side.
+        let mut entries = Vec::with_capacity(history.len());
+        for (revision, node) in history {
+            let meta = self
+                .revision_repo
+                .get_revision_meta(tenant_id, repo_id, &revision)
+                .await
+                .ok()
+                .flatten();
+            let (message, is_system) = meta
+                .map(|m| (Some(m.message), m.is_system))
+                .unwrap_or((None, false));
+            entries.push(match node {
                 Some(n) => NodeRevisionEntry {
                     revision,
                     updated_at: n.updated_at,
                     updated_by: n.updated_by,
                     deleted: false,
+                    message,
+                    is_system,
                 },
                 None => NodeRevisionEntry {
                     revision,
                     updated_at: None,
                     updated_by: None,
                     deleted: true,
+                    message,
+                    is_system,
                 },
-            })
-            .collect())
+            });
+        }
+        Ok(entries)
     }
 
     async fn create(

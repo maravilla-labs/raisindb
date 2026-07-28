@@ -23,6 +23,22 @@ pub struct AuditLog {
     pub action: AuditLogAction,
     pub timestamp: DateTime<Utc>,
     pub details: Option<String>,
+
+    /// The non-human principal the write was made *through*, when there was one
+    /// — e.g. `mcp:<server-slug>` for a write that arrived over an MCP tool
+    /// call, or `agent:<agent-node-path>` for an AI-agent-driven write.
+    ///
+    /// Orthogonal to `user_id`, which stays the human on whose behalf the agent
+    /// acted: an MCP write by Alice records `user_id = "alice"` **and**
+    /// `agent = "mcp:studio-admin"`. `None` means the write came straight from a
+    /// human (or an unattributed system job).
+    ///
+    /// Namespaced string rather than an enum so new agent kinds need no schema
+    /// change. Optional + defaulted so records persisted before this field
+    /// existed still decode, and omitted from the wire when absent so older
+    /// clients see the exact JSON they saw before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -97,8 +97,17 @@ impl NodeRepositoryImpl {
         new_node.updated_at = Some(chrono::Utc::now());
 
         // Use add_impl since we're creating a new node (copy creates a brand new node with new ID)
-        self.add_impl(tenant_id, repo_id, branch, workspace, new_node.clone())
-            .await?;
+        self.add_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            new_node.clone(),
+            crate::repositories::nodes::WriteAttribution::from_operation_meta(
+                operation_meta.as_ref(),
+            ),
+        )
+        .await?;
 
         // Get revision after add_impl (add_impl allocates its own revision)
         let revision = self.revision_repo.allocate_revision();

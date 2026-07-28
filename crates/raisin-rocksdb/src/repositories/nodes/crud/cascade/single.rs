@@ -104,6 +104,7 @@ impl NodeRepositoryImpl {
         workspace: &str,
         node_id: &str,
         check_has_children: bool,
+        attribution: crate::repositories::nodes::WriteAttribution<'_>,
     ) -> Result<bool> {
         use raisin_error::Error;
 
@@ -135,7 +136,7 @@ impl NodeRepositoryImpl {
         }
 
         // Delete the node itself using the standard delete_impl
-        self.delete_impl(tenant_id, repo_id, branch, workspace, node_id)
+        self.delete_impl(tenant_id, repo_id, branch, workspace, node_id, attribution)
             .await
     }
 }

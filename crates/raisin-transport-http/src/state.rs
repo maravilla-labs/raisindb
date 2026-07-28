@@ -40,9 +40,14 @@ pub(crate) type Store = RocksDBStorage;
 #[cfg(not(feature = "storage-rocksdb"))]
 pub(crate) type Store = InMemoryStorage;
 
-// Use InMemoryAuditRepo for both storage backends for now
-// TODO: Implement RocksDB-backed audit repository
-type AuditRepo = InMemoryAuditRepo;
+// Audit-log store, chosen by storage backend like `Store` above. The
+// `AuditRepository` trait is not dyn-safe (RPITIT), so this alias — not a trait
+// object — is the swap point. RocksDB persists audit history across restarts;
+// the memory backend has no `DB` handle and keeps the process-local store.
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) type AuditRepo = raisin_rocksdb::RocksDBAuditRepo;
+#[cfg(not(feature = "storage-rocksdb"))]
+pub(crate) type AuditRepo = InMemoryAuditRepo;
 
 /// The server's live system-definition stack.
 ///
@@ -339,7 +344,11 @@ pub fn router(storage: Arc<Store>) -> Router {
         Some("/files".into()),
     ));
 
-    // Create audit repo - currently using in-memory for all backends
+    // Audit repo, matching the backend: persistent under RocksDB, process-local
+    // otherwise.
+    #[cfg(feature = "storage-rocksdb")]
+    let audit: Arc<AuditRepo> = Arc::new(storage.audit_repository());
+    #[cfg(not(feature = "storage-rocksdb"))]
     let audit: Arc<AuditRepo> = Arc::new(InMemoryAuditRepo::default());
 
     let adapter = Arc::new(RepoAuditAdapter::new(audit.clone()));

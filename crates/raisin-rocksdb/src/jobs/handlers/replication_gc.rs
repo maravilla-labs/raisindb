@@ -159,6 +159,7 @@ mod tests {
             actor: "test".to_string(),
             message: None,
             is_system: false,
+            agent: None,
             acknowledged_by: HashSet::new(),
         };
 

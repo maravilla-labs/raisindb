@@ -115,13 +115,18 @@ impl RocksDBTransaction {
         // every event as `metadata.actor` so downstream consumers (e.g. the
         // audit-log subscriber) attribute writes from ANY path — node API, SQL
         // DML, functions — uniformly, including deletes (where node_data is None).
-        let actor = self
-            .get_auth_context()
-            .ok()
-            .flatten()
+        let auth_context = self.get_auth_context().ok().flatten();
+        let actor = auth_context
+            .as_ref()
             .map(|a| a.actor_id())
             .or_else(|| self.get_actor().ok().flatten())
             .unwrap_or_else(|| "anonymous".to_string());
+
+        // Provenance for writes made *through* a non-human principal (an MCP
+        // tool call, an AI agent). Carried as a second metadata key rather than
+        // folded into `actor`, so the human on whose behalf the agent acted stays
+        // an unambiguous, queryable value. Absent for ordinary human writes.
+        let agent = auth_context.as_ref().and_then(|a| a.agent.clone());
 
         for (node_id, change) in changed_nodes.iter() {
             let workspace = &change.workspace;
@@ -201,6 +206,12 @@ impl RocksDBTransaction {
                 "actor".to_string(),
                 serde_json::Value::String(actor.clone()),
             );
+            if let Some(agent) = &agent {
+                metadata.insert(
+                    "agent".to_string(),
+                    serde_json::Value::String(agent.clone()),
+                );
+            }
             if let Some(data) = node_data {
                 metadata.insert("node_data".to_string(), data);
             }

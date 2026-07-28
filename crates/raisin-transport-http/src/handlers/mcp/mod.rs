@@ -193,6 +193,21 @@ async fn dispatch(
     use identity::mcp_identity_from_auth;
     use services::{BusEventSource, HttpAssetReader, HttpFunctionInvoker, HttpSearchProvider};
 
+    // Provenance marker for everything written through this MCP server. It rides
+    // on the `AuthContext` because that is what reaches the transaction commit,
+    // where it is stamped onto every `NodeEvent` and from there into the audit
+    // log — so any write a tool makes is attributable to BOTH the human and the
+    // surface they came through, on every write path, with no per-tool plumbing.
+    //
+    // The server slug is the honest, always-present fact the server can vouch
+    // for. MCP `clientInfo` ("Claude Code 2.1") would be more specific, but it is
+    // client-asserted and the Streamable-HTTP binding is one JSON-RPC message per
+    // POST with no session store to carry it from `initialize` to `tools/call`.
+    // The value is namespaced so such detail can be appended later without any
+    // signature change.
+    let agent = format!("mcp:{slug}");
+    let caller_auth = auth.map(|ctx| ctx.clone().with_agent(agent.clone()));
+
     // Caller-scoped backend: data tools read/write as the authenticated identity
     // (or anonymous), so RLS governs what their calls can touch.
     let backend = build_mcp_function_api(
@@ -202,7 +217,7 @@ async fn dispatch(
         branch,
         MCP_DISCOVERY_WORKSPACE,
         Default::default(),
-        auth.cloned(),
+        caller_auth.clone(),
     );
 
     // Discovery backend: resolves the `raisin:McpServer` declaration (and any
@@ -230,7 +245,8 @@ async fn dispatch(
         tenant_id,
         repo,
         branch,
-        auth.cloned(),
+        caller_auth,
+        agent,
     ));
     let search: Arc<dyn raisin_mcp::SearchProvider> =
         Arc::new(HttpSearchProvider::new(state.clone(), tenant_id, repo));

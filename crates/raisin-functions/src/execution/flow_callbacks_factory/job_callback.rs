@@ -19,7 +19,13 @@ where
 {
     let deps = deps.clone();
     Arc::new(
-        move |job_type, payload, tenant_id, repo_id, branch, workspace| {
+        move |job_type,
+              payload: serde_json::Value,
+              tenant_id,
+              repo_id,
+              branch,
+              workspace,
+              agent: Option<String>| {
             let deps = deps.clone();
             Box::pin(async move {
                 tracing::debug!(
@@ -260,6 +266,32 @@ where
 
                     // Store full payload for other job types or debugging
                     metadata.insert("payload".to_string(), payload);
+
+                    // Carry the flow's provenance into the job it queues.
+                    //
+                    // These are the two keys the existing consumers already
+                    // read -- `function_execution.rs` deserializes
+                    // AUTH_CONTEXT_KEY, and a job enqueued further downstream
+                    // composes onto ORIGIN_AGENT_KEY -- so a `function` step now
+                    // commits attributed with NO new consumer code.
+                    //
+                    // The context is `AuthContext::system()`, which is exactly
+                    // what that handler already fell back to when the key was
+                    // absent. Attribution only; no permission changes.
+                    if let Some(ref marker) = agent {
+                        metadata.insert(
+                            raisin_rocksdb::ORIGIN_AGENT_KEY.to_string(),
+                            serde_json::json!(marker),
+                        );
+                        if let Ok(auth) = serde_json::to_value(
+                            raisin_models::auth::AuthContext::system().with_agent(marker),
+                        ) {
+                            metadata.insert(
+                                raisin_rocksdb::AUTH_CONTEXT_KEY.to_string(),
+                                auth,
+                            );
+                        }
+                    }
 
                     let context = JobContext {
                         tenant_id: tenant_id.clone(),

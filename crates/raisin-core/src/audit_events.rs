@@ -13,7 +13,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use raisin_audit::AuditRepository;
+use raisin_audit::{AuditRepository, AuditScope};
 use raisin_models::nodes::audit_log::AuditLogAction;
 use raisin_storage::{
     BranchScope, Event, EventHandler, NodeEventKind, NodeTypeRepository, Storage,
@@ -101,6 +101,17 @@ where
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
+            // The non-human principal the write came through, when the commit
+            // carried one (MCP tool call, AI agent). Stamped next to `actor`, not
+            // instead of it: both are recorded so "who" and "through what" stay
+            // separately queryable.
+            let agent = e
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("agent"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
             let log = raisin_audit::make_log(
                 e.node_id.clone(),
                 e.path.clone().unwrap_or_default(),
@@ -108,8 +119,18 @@ where
                 user_id,
                 action,
                 None,
+                agent,
             );
-            self.audit.write_log(log).await?;
+            // Write with the event's full scope so a persistent store can key by
+            // it (and a tenant wipe can find the rows). Stores that cannot honour
+            // the scope fall back to the global bucket via the trait default.
+            let scope = AuditScope::new(
+                &e.tenant_id,
+                &e.repository_id,
+                &e.branch,
+                &e.workspace_id,
+            );
+            self.audit.write_log_scoped(scope, log).await?;
             Ok(())
         })
     }

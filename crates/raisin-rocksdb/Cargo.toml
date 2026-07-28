@@ -25,6 +25,7 @@ raisin-hnsw = { path = "../raisin-hnsw" }
 raisin-replication = { path = "../raisin-replication" }
 raisin-binary = { path = "../raisin-binary" }
 raisin-packages = { path = "../raisin-packages" }
+raisin-audit = { path = "../raisin-audit" }
 
 # RocksDB
 rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }

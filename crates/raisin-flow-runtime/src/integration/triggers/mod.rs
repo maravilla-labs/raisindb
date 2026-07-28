@@ -34,4 +34,5 @@ mod tests;
 pub use events::{FlowResumeReason, FlowTriggerEvent};
 pub use instance_builder::{
     build_trigger_info_from_event, create_flow_instance_from_trigger, FlowInstanceBuilder,
+    AGENT_VAR,
 };

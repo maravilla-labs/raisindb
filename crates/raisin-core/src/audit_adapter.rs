@@ -20,9 +20,11 @@ impl<A: AuditRepository> RepoAuditAdapter<A> {
 impl<A: AuditRepository> Audit for RepoAuditAdapter<A> {
     fn write<'a>(
         &'a self,
+        scope: raisin_audit::AuditScope<'a>,
         node: &'a models::nodes::Node,
         action: AuditLogAction,
         details: Option<String>,
+        agent: Option<&'a str>,
     ) -> Pin<Box<dyn std::future::Future<Output = raisin_error::Result<()>> + Send + 'a>> {
         let log = raisin_audit::make_log(
             node.id.clone(),
@@ -31,8 +33,9 @@ impl<A: AuditRepository> Audit for RepoAuditAdapter<A> {
             node.updated_by.clone(),
             action,
             details,
+            agent.map(|a| a.to_string()),
         );
         let inner = self.inner.clone();
-        Box::pin(async move { inner.write_log(log).await })
+        Box::pin(async move { inner.write_log_scoped(scope, log).await })
     }
 }

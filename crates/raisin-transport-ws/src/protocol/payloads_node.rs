@@ -78,6 +78,12 @@ pub struct AuditQueryPayload {
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Maximum entries to return, newest first. Optional and defaulted so
+    /// existing clients (which never send it) are unaffected; the store applies
+    /// its own cap when absent, which matters now that history is persistent and
+    /// no longer bounded by "since the last restart".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

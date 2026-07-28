@@ -354,6 +354,15 @@ impl NodeRepositoryImpl {
             .update_head(tenant_id, repo_id, branch, revision)
             .await?;
 
+        // The acting principal for this move. Resolved once, above the
+        // replication capture, so the operation peers replay carries the SAME
+        // actor the local move events below stamp -- a masterless cluster where
+        // origin and replica disagree on who moved a node is simply wrong.
+        let event_actor = operation_meta
+            .as_ref()
+            .map(|m| m.actor.clone())
+            .unwrap_or_else(|| "system".to_string());
+
         // Capture move for replication as an ApplyRevision snapshot covering
         // every moved node (root + descendants) at its NEW path. A granular
         // MoveNode op only names the root, so peers never learned about
@@ -385,7 +394,16 @@ impl NodeRepositoryImpl {
                 }
             }
             self.capture_apply_revision_snapshot(
-                tenant_id, repo_id, branch, workspace, changes, revision,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                changes,
+                revision,
+                crate::repositories::nodes::WriteAttribution {
+                    actor: Some(&event_actor),
+                    agent: operation_meta.as_ref().and_then(|m| m.agent.as_deref()),
+                },
             )
             .await;
         }
@@ -400,10 +418,6 @@ impl NodeRepositoryImpl {
         // Emit move events (root + descendants) so the subscribed job handler
         // reindexes fulltext and retargets references to the NEW paths. Done
         // after HEAD is updated so each node reads back at its new path.
-        let event_actor = operation_meta
-            .as_ref()
-            .map(|m| m.actor.clone())
-            .unwrap_or_else(|| "system".to_string());
         self.emit_move_node_events(
             tenant_id,
             repo_id,

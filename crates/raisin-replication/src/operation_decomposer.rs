@@ -114,6 +114,9 @@ fn decompose_apply_revision(
             op_type,
             revision: Some(branch_head),
             actor: original_op.actor.clone(),
+            // Decomposition splits ONE logical write into per-node ops; every
+            // piece keeps the original write's attribution.
+            agent: original_op.agent.clone(),
             message: original_op.message.clone(),
             is_system: original_op.is_system,
             acknowledged_by: HashSet::new(), // Reset acknowledgments for decomposed ops
@@ -204,6 +207,7 @@ mod tests {
             actor: "user".to_string(),
             message: None,
             is_system: false,
+            agent: None,
             acknowledged_by: Default::default(),
         };
 
@@ -259,6 +263,7 @@ mod tests {
             actor: "user".to_string(),
             message: Some("Test commit".to_string()),
             is_system: false,
+            agent: None,
             acknowledged_by: Default::default(),
         };
 

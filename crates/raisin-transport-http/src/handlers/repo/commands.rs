@@ -92,7 +92,12 @@ pub async fn repo_execute_command(
         "update_version_note" => {
             super::commands_versioning::handle_update_version_note(&nodes_svc, path, &params).await
         }
-        "audit_log" => super::commands_versioning::handle_audit_log(state, &nodes_svc, path).await,
+        "audit_log" => {
+            super::commands_versioning::handle_audit_log(
+                state, &nodes_svc, tenant_id, repository, branch, ws, path,
+            )
+            .await
+        }
         "commit" => {
             super::commands_commit::handle_commit(
                 state, &nodes_svc, tenant_id, repository, branch, ws, &params, auth,

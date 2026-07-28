@@ -130,12 +130,13 @@ async fn process_batch(
         );
 
         match operation_capture
-            .capture_operation_with_revision(
+            .capture_operation_with_attribution(
                 op.tenant_id.clone(),
                 op.repo_id.clone(),
                 op.branch.clone(),
                 op.op_type.clone(),
                 op.actor.clone(),
+                op.agent.clone(),
                 op.message.clone(),
                 op.is_system,
                 op.revision,

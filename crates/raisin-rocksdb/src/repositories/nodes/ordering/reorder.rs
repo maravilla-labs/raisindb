@@ -203,6 +203,10 @@ impl NodeRepositoryImpl {
                     raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
                 )],
                 revision,
+                // Same actor the revision metadata below records, so the peer's
+                // replay attributes the reorder to the user who made it instead
+                // of to "system".
+                crate::repositories::nodes::WriteAttribution::actor(actor),
             )
             .await;
         }

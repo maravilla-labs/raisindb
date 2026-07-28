@@ -4,10 +4,30 @@
 //! and AI tool result aggregation jobs.
 
 use super::UnifiedJobEventHandler;
+use crate::jobs::ORIGIN_AGENT_KEY;
 use raisin_error::Result;
 use raisin_events::NodeEvent;
 use raisin_storage::jobs::{JobContext, JobType};
 use std::collections::HashMap;
+
+/// Carry the initiating principal of the write that produced `node_event` into
+/// the job it is about to enqueue.
+///
+/// Without this the chain breaks at the node → event → job hop: the commit
+/// stamped `agent` on the event (see `transaction/commit/events.rs`) but the job
+/// context was rebuilt from scratch, so anything the job went on to write was
+/// attributable to nothing. Copying it lets the job compose its own identity on
+/// top (`agent:/agents/bot@trigger:/triggers/t`).
+fn carry_origin_agent(node_event: &NodeEvent, metadata: &mut HashMap<String, serde_json::Value>) {
+    if let Some(agent) = node_event
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("agent"))
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert(ORIGIN_AGENT_KEY.to_string(), serde_json::json!(agent));
+    }
+}
 
 impl UnifiedJobEventHandler {
     /// Enqueue trigger evaluation job for a node event
@@ -64,6 +84,7 @@ impl UnifiedJobEventHandler {
 
         let mut metadata = HashMap::new();
         metadata.insert("node_path".to_string(), serde_json::json!(node_path));
+        carry_origin_agent(node_event, &mut metadata);
 
         // Include node_data if available from event metadata
         if let Some(meta) = &node_event.metadata {
@@ -100,13 +121,19 @@ impl UnifiedJobEventHandler {
         node_event: &NodeEvent,
         tool_call_path: &str,
     ) -> Result<()> {
+        // The AIToolCall node was written by whatever drove the conversation (a
+        // trigger's function, a flow step). Carrying its marker here is what
+        // makes the agent run traceable back to that initiator.
+        let mut metadata = HashMap::new();
+        carry_origin_agent(node_event, &mut metadata);
+
         let context = JobContext {
             tenant_id: node_event.tenant_id.clone(),
             repo_id: node_event.repository_id.clone(),
             branch: node_event.branch.clone(),
             workspace_id: node_event.workspace_id.clone(),
             revision: node_event.revision,
-            metadata: HashMap::new(),
+            metadata,
         };
 
         let job_type = JobType::AIToolCallExecution {

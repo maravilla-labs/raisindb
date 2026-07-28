@@ -105,6 +105,7 @@ async fn apply_revision_replays_full_node_state() {
         actor: "system".to_string(),
         message: None,
         is_system: true,
+        agent: None,
         acknowledged_by: Default::default(),
     };
 
@@ -218,6 +219,7 @@ async fn apply_delete_node_removes_translations() {
         actor: "system".to_string(),
         message: None,
         is_system: true,
+        agent: None,
         acknowledged_by: Default::default(),
     };
 
@@ -287,6 +289,7 @@ async fn apply_delete_node_removes_translations() {
         actor: "system".to_string(),
         message: None,
         is_system: true,
+        agent: None,
         acknowledged_by: Default::default(),
     };
 
@@ -396,6 +399,7 @@ async fn apply_revision_delete_removes_relations_and_translations() {
         actor: "system".to_string(),
         message: None,
         is_system: true,
+        agent: None,
         acknowledged_by: Default::default(),
     };
 
@@ -497,6 +501,7 @@ async fn apply_revision_delete_removes_relations_and_translations() {
         actor: "system".to_string(),
         message: None,
         is_system: true,
+        agent: None,
         acknowledged_by: Default::default(),
     };
 

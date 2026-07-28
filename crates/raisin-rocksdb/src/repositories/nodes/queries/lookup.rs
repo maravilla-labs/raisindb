@@ -202,7 +202,14 @@ impl NodeRepositoryImpl {
             None => return Ok(false),
         };
 
-        self.delete_impl(tenant_id, repo_id, branch, workspace, &node.id)
-            .await
+        self.delete_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &node.id,
+            crate::repositories::nodes::WriteAttribution::default(),
+        )
+        .await
     }
 }

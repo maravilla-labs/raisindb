@@ -53,7 +53,7 @@ impl NodeRepositoryImpl {
             target_branch,
             node_changes,
             *revision,
-            actor,
+            crate::repositories::nodes::WriteAttribution::actor(Some(actor)),
         )
         .await;
 

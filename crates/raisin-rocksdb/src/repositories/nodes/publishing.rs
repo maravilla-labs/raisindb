@@ -1,6 +1,6 @@
 //! Publishing and unpublishing operations
 
-use super::NodeRepositoryImpl;
+use super::{NodeRepositoryImpl, WriteAttribution};
 use raisin_error::Result;
 use raisin_models::nodes::Node;
 use std::future::Future;
@@ -23,8 +23,19 @@ impl NodeRepositoryImpl {
 
         node.published_at = Some(chrono::Utc::now());
 
-        self.update_impl(tenant_id, repo_id, branch, workspace, node)
-            .await
+        // No actor reaches this trait method (`publish`/`unpublish` take only a
+        // path), so attribution stays exactly as it was before this parameter
+        // existed: "system". Threading a real actor here needs the trait to
+        // carry one -- see the TODO in `replication_capture.rs`.
+        self.update_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            WriteAttribution::default(),
+        )
+        .await
     }
 
     /// Publish a node tree recursively
@@ -87,8 +98,15 @@ impl NodeRepositoryImpl {
 
             // Publish this node by setting the published_at timestamp
             node.published_at = Some(chrono::Utc::now());
-            self.update_impl(tenant_id, repo_id, branch, workspace, node.clone())
-                .await?;
+            self.update_impl(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node.clone(),
+                WriteAttribution::default(),
+            )
+            .await?;
 
             // Get ordered children (use None - publish operations always work on current HEAD)
             let child_ids = self
@@ -121,8 +139,19 @@ impl NodeRepositoryImpl {
 
         node.published_at = None;
 
-        self.update_impl(tenant_id, repo_id, branch, workspace, node)
-            .await
+        // No actor reaches this trait method (`publish`/`unpublish` take only a
+        // path), so attribution stays exactly as it was before this parameter
+        // existed: "system". Threading a real actor here needs the trait to
+        // carry one -- see the TODO in `replication_capture.rs`.
+        self.update_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            WriteAttribution::default(),
+        )
+        .await
     }
 
     /// Unpublish a node tree recursively
@@ -185,8 +214,15 @@ impl NodeRepositoryImpl {
 
             // Unpublish this node by clearing the published_at timestamp
             node.published_at = None;
-            self.update_impl(tenant_id, repo_id, branch, workspace, node.clone())
-                .await?;
+            self.update_impl(
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                node.clone(),
+                WriteAttribution::default(),
+            )
+            .await?;
 
             // Get ordered children (use None - unpublish operations always work on current HEAD)
             let child_ids = self

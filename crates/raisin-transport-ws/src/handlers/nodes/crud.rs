@@ -383,7 +383,11 @@ where
         )));
     };
 
-    let logs = state.audit.get_logs_by_node_id(&node.id).await?;
+    let scope = raisin_audit::AuditScope::new(&ctx.tenant_id, &ctx.repo, &ctx.branch, &ctx.workspace);
+    let logs = state
+        .audit
+        .get_logs_scoped(scope, &node.id, payload.limit.map(|l| l as usize))
+        .await?;
 
     Ok(Some(ResponseEnvelope::success(
         request.request_id,

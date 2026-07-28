@@ -250,6 +250,8 @@ async fn process_single_inline_trigger<S: Storage + 'static>(
             priority,
             trigger_path: None,
             workflow_data: None,
+            // Inline triggers run a function directly; there is no flow node.
+            flow_path: None,
             max_retries,
         });
     }

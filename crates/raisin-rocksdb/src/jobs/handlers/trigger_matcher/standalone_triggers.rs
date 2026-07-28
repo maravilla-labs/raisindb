@@ -234,8 +234,10 @@ async fn build_trigger_match<S: Storage + 'static>(
         })
         .unwrap_or(0);
 
-    // Resolve function_flow reference to get workflow_data
-    let workflow_data = match trigger_node.properties.get("function_flow") {
+    // Resolve function_flow reference to get workflow_data. The flow node's
+    // PATH is kept alongside it: it is the flow's stable identity for
+    // attribution (`flow:/flows/x`), and this is the only frame that loads it.
+    let (workflow_data, flow_path) = match trigger_node.properties.get("function_flow") {
         Some(PropertyValue::Reference(ref_val)) => {
             let flow_node = storage
                 .nodes()
@@ -246,13 +248,19 @@ async fn build_trigger_match<S: Storage + 'static>(
                 )
                 .await?;
 
-            flow_node.and_then(|node| {
-                node.properties
-                    .get("workflow_data")
-                    .and_then(|v| serde_json::to_value(v).ok())
-            })
+            match flow_node {
+                Some(node) => {
+                    let data = node
+                        .properties
+                        .get("workflow_data")
+                        .and_then(|v| serde_json::to_value(v).ok());
+                    let path = data.as_ref().map(|_| node.path.clone());
+                    (data, path)
+                }
+                None => (None, None),
+            }
         }
-        _ => None,
+        _ => (None, None),
     };
 
     // Check for function_path
@@ -279,6 +287,7 @@ async fn build_trigger_match<S: Storage + 'static>(
             priority,
             trigger_path: Some(trigger_node.path.clone()),
             workflow_data,
+            flow_path,
             max_retries,
         });
     }

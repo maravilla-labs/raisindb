@@ -123,6 +123,7 @@ mod tests {
             vector_clock: VectorClock::new(),
             message: None,
             is_system: false,
+            agent: None,
             acknowledged_by: HashSet::new(),
             op_type,
             revision: None,

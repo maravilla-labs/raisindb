@@ -19,7 +19,9 @@
 //! It runs periodically (typically every minute) and checks which
 //! scheduled triggers should fire based on their cron expressions.
 
+use crate::jobs::{AUTH_CONTEXT_KEY, ORIGIN_AGENT_KEY};
 use raisin_error::{Error, Result};
+use raisin_models::auth::{agent_identity, AuthContext};
 use raisin_storage::jobs::{JobContext, JobInfo, JobRegistry, JobType};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -175,6 +177,15 @@ impl ScheduledTriggerHandler {
                 serde_json::json!(trigger_match.trigger_name),
             );
             metadata.insert("event_type".to_string(), serde_json::json!("Scheduled"));
+            // Provenance: a cron trigger has no node path in this match (only a
+            // name), so the function it fires is its stable identity. Same
+            // channel the node-event trigger path uses, so a scheduled write is
+            // attributed exactly like an event-driven one.
+            let marker = agent_identity::schedule(&trigger_match.function_path);
+            metadata.insert(ORIGIN_AGENT_KEY.to_string(), serde_json::json!(marker));
+            if let Ok(auth) = serde_json::to_value(AuthContext::system().with_agent(&marker)) {
+                metadata.insert(AUTH_CONTEXT_KEY.to_string(), auth);
+            }
             metadata.insert(
                 "scheduled_time".to_string(),
                 serde_json::json!(current_time),

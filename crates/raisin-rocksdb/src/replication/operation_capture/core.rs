@@ -222,6 +222,31 @@ impl OperationCapture {
         is_system: bool,
         revision: Option<HLC>,
     ) -> Result<Operation> {
+        self.capture_operation_with_attribution(
+            tenant_id, repo_id, branch, op_type, actor, None, message, is_system, revision,
+        )
+        .await
+    }
+
+    /// Capture an operation carrying full attribution (`actor` **and** the
+    /// non-human `agent` that initiated it).
+    ///
+    /// Kept as a separate entry point so the 40+ schema/session/identity/branch
+    /// call sites that have no initiator to declare keep calling
+    /// `capture_operation_with_revision` unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn capture_operation_with_attribution(
+        &self,
+        tenant_id: String,
+        repo_id: String,
+        branch: String,
+        op_type: OpType,
+        actor: String,
+        agent: Option<String>,
+        message: Option<String>,
+        is_system: bool,
+        revision: Option<HLC>,
+    ) -> Result<Operation> {
         if !self.is_enabled() {
             return Ok(Operation {
                 op_id: uuid::Uuid::new_v4(),
@@ -235,6 +260,7 @@ impl OperationCapture {
                 op_type,
                 revision,
                 actor,
+                agent,
                 message,
                 is_system,
                 acknowledged_by: HashSet::new(),
@@ -255,6 +281,7 @@ impl OperationCapture {
             op_type,
             revision,
             actor,
+            agent,
             message,
             is_system,
             acknowledged_by: HashSet::new(),

@@ -34,6 +34,8 @@ use std::sync::Arc;
 
 use crate::jobs::data_store::JobDataStore;
 use crate::jobs::dispatcher::JobDispatcher;
+use crate::jobs::{AUTH_CONTEXT_KEY, ORIGIN_AGENT_KEY};
+use raisin_models::auth::{agent_identity, AuthContext};
 
 /// JobContext metadata key: target function/flow path.
 pub const META_TARGET_PATH: &str = "target_path";
@@ -196,6 +198,25 @@ impl ScheduledInvocationHandler {
             "invocation_id".to_string(),
             serde_json::json!(invocation_id),
         );
+        // The flow branch below forwards META_ACTOR; the function branch dropped
+        // it entirely, so a scheduled function's writes were attributable to
+        // nothing at all. Record the schedule as the initiator.
+        //
+        // The context stays system-privileged, which is what this path already
+        // ran as. Promoting the scheduling actor to the acting identity would be
+        // an authorization change, not an attribution one: `for_user` carries no
+        // resolved permissions and RLS reads that as deny-all, which would break
+        // every scheduled invocation.
+        // TODO: run scheduled functions as the scheduling actor
+        // (`META_ACTOR`) once its permissions can be re-resolved here — see
+        // `jobs/handlers/scheduled_invocation.rs::invoke_function`; the actor is
+        // in `context.metadata[META_ACTOR]` and needs a permission resolver the
+        // handler does not currently hold.
+        let marker = agent_identity::schedule(target_path);
+        metadata.insert(ORIGIN_AGENT_KEY.to_string(), serde_json::json!(marker));
+        if let Ok(auth) = serde_json::to_value(AuthContext::system().with_agent(&marker)) {
+            metadata.insert(AUTH_CONTEXT_KEY.to_string(), auth);
+        }
 
         let function_context = JobContext {
             tenant_id: context.tenant_id.clone(),

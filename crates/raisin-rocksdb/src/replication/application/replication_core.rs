@@ -12,6 +12,7 @@
 
 use super::super::OperationApplicator;
 use super::index_writers::write_all_node_indexes;
+use super::node_operations::EventAttribution;
 use crate::{cf, cf_handle, keys, repositories::hash_property_value};
 use raisin_error::Result;
 use raisin_hlc::HLC;
@@ -39,6 +40,9 @@ pub(super) async fn apply_replicated_revision(
     op: &Operation,
 ) -> Result<()> {
     let revision = OperationApplicator::op_revision(op)?;
+    // The originating node's attribution, replayed verbatim onto every event
+    // this revision produces here.
+    let attribution = EventAttribution::from_op(op);
 
     for change in node_changes {
         let workspace = change.node.workspace.as_deref().unwrap_or("default");
@@ -53,6 +57,7 @@ pub(super) async fn apply_replicated_revision(
                 change.parent_id.as_deref(),
                 &revision,
                 &change.cf_order_key,
+                attribution,
             )?,
             ReplicatedNodeChangeKind::Delete => apply_replicated_delete(
                 applicator,
@@ -63,6 +68,7 @@ pub(super) async fn apply_replicated_revision(
                 &change.node,
                 change.parent_id.as_deref(),
                 &revision,
+                attribution,
             )?,
         }
     }
@@ -80,6 +86,7 @@ pub(super) async fn apply_replicated_revision(
 /// Implements Last-Write-Wins (LWW) semantics using HLC revision timestamps.
 /// The versioned key structure allows multiple versions to coexist, with reads
 /// returning the version with the highest revision.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_replicated_upsert(
     applicator: &OperationApplicator,
     tenant_id: &str,
@@ -90,6 +97,7 @@ pub(super) fn apply_replicated_upsert(
     parent_id: Option<&str>,
     revision: &HLC,
     cf_order_key: &str,
+    attribution: EventAttribution<'_>,
 ) -> Result<()> {
     let mut normalized_node = node.clone();
     normalized_node.has_children = None;
@@ -240,6 +248,7 @@ pub(super) fn apply_replicated_upsert(
         revision,
         event_kind,
         "replication",
+        attribution,
     );
 
     Ok(())
@@ -256,6 +265,7 @@ pub(super) fn apply_replicated_upsert(
 /// - Relation indexes (RELATION_INDEX CF) - both forward and reverse (including incoming)
 /// - Ordered children (ORDERED_CHILDREN CF)
 /// - Translation data (TRANSLATION_DATA CF)
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_replicated_delete(
     applicator: &OperationApplicator,
     tenant_id: &str,
@@ -265,6 +275,7 @@ pub(super) fn apply_replicated_delete(
     node: &Node,
     parent_id: Option<&str>,
     revision: &HLC,
+    attribution: EventAttribution<'_>,
 ) -> Result<()> {
     let mut batch = WriteBatch::default();
     let cf_nodes = cf_handle(&applicator.db, cf::NODES)?;
@@ -497,6 +508,7 @@ pub(super) fn apply_replicated_delete(
         revision,
         raisin_events::NodeEventKind::Deleted,
         "replication",
+        attribution,
     );
 
     Ok(())

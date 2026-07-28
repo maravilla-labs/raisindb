@@ -24,7 +24,7 @@ use raisin_storage::{
     StorageScope, UpdateNodeOptions,
 };
 
-use crate::repositories::nodes::NodeRepositoryImpl;
+use crate::repositories::nodes::{NodeRepositoryImpl, WriteAttribution};
 
 impl NodeRepositoryImpl {
     /// Dispatch for `NodeRepository::get` -- resolves HEAD if no revision given.
@@ -122,7 +122,11 @@ impl NodeRepositoryImpl {
 
         self.validate_for_create(tenant_id, repo_id, branch, workspace, &node, &options)
             .await?;
-        self.add_impl(tenant_id, repo_id, branch, workspace, node)
+        // Attribution rides on the caller-supplied `operation_meta`, the same
+        // bag the revision metadata is built from -- so the operation a peer
+        // replays names the same principal the origin recorded.
+        let attribution = WriteAttribution::from_operation_meta(options.operation_meta.as_ref());
+        self.add_impl(tenant_id, repo_id, branch, workspace, node, attribution)
             .await
     }
 
@@ -138,7 +142,8 @@ impl NodeRepositoryImpl {
     ) -> Result<()> {
         self.validate_for_update(tenant_id, repo_id, branch, workspace, &node, &options)
             .await?;
-        self.update_impl(tenant_id, repo_id, branch, workspace, node)
+        let attribution = WriteAttribution::from_operation_meta(options.operation_meta.as_ref());
+        self.update_impl(tenant_id, repo_id, branch, workspace, node, attribution)
             .await
     }
 
@@ -152,8 +157,9 @@ impl NodeRepositoryImpl {
         id: &str,
         options: DeleteNodeOptions,
     ) -> Result<bool> {
+        let attribution = WriteAttribution::from_operation_meta(options.operation_meta.as_ref());
         if options.cascade {
-            self.delete_with_cascade(tenant_id, repo_id, branch, workspace, id)
+            self.delete_with_cascade(tenant_id, repo_id, branch, workspace, id, attribution)
                 .await
         } else {
             self.delete_without_cascade(
@@ -163,6 +169,7 @@ impl NodeRepositoryImpl {
                 workspace,
                 id,
                 options.check_has_children,
+                attribution,
             )
             .await
         }

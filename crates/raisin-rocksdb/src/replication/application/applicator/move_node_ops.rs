@@ -207,6 +207,7 @@ impl OperationApplicator {
             &new_revision,
             raisin_events::NodeEventKind::Updated,
             "replication",
+            super::super::node_operations::EventAttribution::from_op(op),
         );
 
         tracing::info!(

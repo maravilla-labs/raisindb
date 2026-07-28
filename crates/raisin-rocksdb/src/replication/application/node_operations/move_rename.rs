@@ -258,6 +258,7 @@ pub(in crate::replication::application) async fn apply_move_node(
         &new_revision,
         NodeEventKind::Updated,
         "replication",
+        super::event_helpers::EventAttribution::from_op(op),
     );
 
     tracing::info!(

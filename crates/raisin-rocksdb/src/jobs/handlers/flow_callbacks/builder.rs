@@ -23,6 +23,15 @@ pub struct RocksDBFlowCallbacks {
     /// Workspace where flow instances are stored (default: "flows")
     pub flows_workspace: String,
 
+    /// The non-human principal this flow instance acts as, in the
+    /// `agent_identity` vocabulary (e.g. `flow:/flows/x@trigger:/triggers/t`).
+    ///
+    /// Provenance only: it is stamped onto what the flow's steps write so a
+    /// flow-driven change is attributable to the flow and the trigger behind it.
+    /// It carries no permission -- every consumer pairs it with
+    /// `AuthContext::system()`, which is exactly what these paths already used.
+    pub(super) agent: Option<String>,
+
     /// Callback for loading nodes
     pub(super) node_loader: Option<NodeLoaderCallback>,
 
@@ -59,6 +68,7 @@ impl RocksDBFlowCallbacks {
             repo_id,
             branch,
             flows_workspace: "raisin:system".to_string(),
+            agent: None,
             node_loader: None,
             node_saver: None,
             node_creator: None,
@@ -69,6 +79,12 @@ impl RocksDBFlowCallbacks {
             children_lister: None,
             event_emitter: None,
         }
+    }
+
+    /// Set the agent marker stamped on everything this flow's steps write.
+    pub fn with_agent(mut self, agent: Option<String>) -> Self {
+        self.agent = agent;
+        self
     }
 
     /// Set a custom workspace for flow instances

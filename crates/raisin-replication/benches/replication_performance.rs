@@ -53,6 +53,7 @@ fn make_set_property_op(
         actor: "benchmark".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     }
 }
@@ -86,6 +87,7 @@ fn make_add_child_op(
         actor: "benchmark".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     }
 }
@@ -144,6 +146,7 @@ fn make_apply_revision_op(
         actor: "benchmark".to_string(),
         message: Some("Benchmark commit".to_string()),
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     }
 }

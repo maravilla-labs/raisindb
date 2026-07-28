@@ -197,7 +197,10 @@ impl<S: Storage + TransactionalStorage + 'static> NodeService<S> {
         ctx.set_tenant_repo(&self.tenant_id, &self.repo_id)?;
         ctx.set_branch(&self.branch)?;
         ctx.set_message(&note.unwrap_or_else(|| format!("Manual version {}", next_version)))?;
-        ctx.set_actor("user")?; // TODO: Get from context
+        // Attribute the revision to the real caller. The audit row already
+        // resolved the auth context first; this makes the per-node history agree
+        // instead of recording the literal string "user".
+        ctx.set_actor(&self.commit_actor())?;
         ctx.set_is_manual_version(true)?;
         ctx.set_manual_version_node_id(&node.id)?;
 
@@ -253,7 +256,10 @@ impl<S: Storage + TransactionalStorage + 'static> NodeService<S> {
         ctx.set_tenant_repo(&self.tenant_id, &self.repo_id)?;
         ctx.set_branch(&self.branch)?;
         ctx.set_message(&format!("Restored from manual version {}", version))?;
-        ctx.set_actor("user")?; // TODO: Get from context
+        // Attribute the revision to the real caller. The audit row already
+        // resolved the auth context first; this makes the per-node history agree
+        // instead of recording the literal string "user".
+        ctx.set_actor(&self.commit_actor())?;
 
         ctx.put_node(&self.workspace_id, &current_node).await?;
         ctx.commit().await?;

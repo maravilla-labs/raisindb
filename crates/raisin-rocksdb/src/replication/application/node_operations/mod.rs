@@ -18,7 +18,7 @@ mod snapshot_ops;
 
 pub(super) use create_node::apply_create_node;
 pub(super) use delete_node::apply_delete_node;
-pub(super) use event_helpers::emit_node_event;
+pub(super) use event_helpers::{emit_node_event, EventAttribution};
 pub(super) use move_rename::{apply_move_node, apply_rename_node};
 pub(super) use set_property::apply_set_property;
 pub(super) use snapshot_ops::{apply_delete_node_snapshot, apply_upsert_node_snapshot};

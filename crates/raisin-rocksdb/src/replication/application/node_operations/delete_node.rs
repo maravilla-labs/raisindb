@@ -55,6 +55,7 @@ pub(in crate::replication::application) async fn apply_delete_node(
         &node_snapshot,
         parent_id.as_deref(),
         &revision,
+        super::event_helpers::EventAttribution::from_op(op),
     )?;
 
     // Update branch HEAD
@@ -69,20 +70,9 @@ pub(in crate::replication::application) async fn apply_delete_node(
         revision
     );
 
-    // Emit NodeEvent
-    super::event_helpers::emit_node_event(
-        &applicator.event_bus,
-        tenant_id,
-        repo_id,
-        branch,
-        workspace,
-        node_id,
-        Some(node_snapshot.node_type.clone()),
-        Some(node_snapshot.path.clone()),
-        &revision,
-        NodeEventKind::Deleted,
-        "replication",
-    );
+    // NO event emission here: `apply_replicated_delete` above already emitted
+    // `Deleted` for this node with identical arguments. One logical delete must
+    // produce exactly one event (see the live applicator's `apply_delete_node`).
 
     Ok(())
 }

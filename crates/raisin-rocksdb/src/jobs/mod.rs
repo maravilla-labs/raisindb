@@ -1,5 +1,17 @@
 //! Job storage implementations for RocksDB
 
+/// `JobContext.metadata` key carrying the agent marker of whatever caused the
+/// job — the `agent` stamped on the node event that enqueued it, or the trigger
+/// that fired. Jobs compose their own identity on top of it (see
+/// `raisin_models::auth::agent_identity::with_origin`), which is what makes an
+/// agent run traceable back to the trigger that started it.
+pub const ORIGIN_AGENT_KEY: &str = "origin_agent";
+
+/// `JobContext.metadata` key holding a serialized `AuthContext` for the job to
+/// run under. Written by the HTTP async-invoke handler and by trigger
+/// evaluation; read by `handlers/function_execution.rs`.
+pub const AUTH_CONTEXT_KEY: &str = "auth_context";
+
 pub mod batch_aggregator;
 pub mod cleanup;
 pub mod data_store;

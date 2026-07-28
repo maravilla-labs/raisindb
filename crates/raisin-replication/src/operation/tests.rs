@@ -358,3 +358,69 @@ fn test_update_nodetype_serialization() {
 "
     );
 }
+
+/// The `agent` field must be additive in BOTH directions across a mixed-version
+/// cluster. Every production path — the RocksDB oplog
+/// (`repositories/oplog/helpers.rs`), the TCP protocol
+/// (`tcp_protocol/message_impl.rs`) and the HTTP batch handler — encodes an
+/// `Operation` as a NAME-KEYED map, which is what makes that possible.
+mod agent_field_is_additive {
+    use super::*;
+
+    fn sample(agent: Option<&str>) -> Operation {
+        let mut op = Operation::new(
+            7,
+            "node-a".to_string(),
+            VectorClock::new(),
+            "t".to_string(),
+            "r".to_string(),
+            "main".to_string(),
+            OpType::DeleteNode {
+                node_id: "n1".to_string(),
+            },
+            "alice".to_string(),
+        );
+        op.agent = agent.map(|a| a.to_string());
+        op
+    }
+
+    #[test]
+    fn it_round_trips_through_the_named_msgpack_used_everywhere() {
+        let op = sample(Some("mcp:studio-admin"));
+        let bytes = rmp_serde::to_vec_named(&op).unwrap();
+        let back: Operation = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back.agent.as_deref(), Some("mcp:studio-admin"));
+        assert_eq!(back, op);
+    }
+
+    /// OLD writer → NEW reader: the key is simply absent.
+    #[test]
+    fn a_record_written_before_the_field_existed_reads_as_none() {
+        let op = sample(None);
+        let mut map: serde_json::Value = serde_json::to_value(&op).unwrap();
+        map.as_object_mut().unwrap().remove("agent");
+        assert!(map.get("agent").is_none(), "simulating a pre-field record");
+
+        let back: Operation = serde_json::from_value(map).unwrap();
+        assert_eq!(back.agent, None);
+        assert_eq!(back, op);
+    }
+
+    /// NEW writer → OLD reader: an older binary has no `agent` field in its
+    /// derive, and serde routes unknown map keys to `IgnoredAny` (there is no
+    /// `deny_unknown_fields` on `Operation`). Stand in for the older struct with
+    /// one that lacks the field and assert the rest still decodes.
+    #[test]
+    fn an_older_peer_ignores_the_extra_key_instead_of_failing() {
+        #[derive(serde::Deserialize)]
+        struct OperationAsAnOlderPeerSeesIt {
+            op_seq: u64,
+            actor: String,
+        }
+
+        let bytes = rmp_serde::to_vec_named(&sample(Some("agent:/agents/bot"))).unwrap();
+        let old: OperationAsAnOlderPeerSeesIt = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(old.op_seq, 7);
+        assert_eq!(old.actor, "alice");
+    }
+}

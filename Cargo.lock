@@ -6605,6 +6605,7 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "raisin-ai",
+ "raisin-audit",
  "raisin-auth",
  "raisin-binary",
  "raisin-context",
@@ -6649,7 +6650,7 @@ dependencies = [
 
 [[package]]
 name = "raisin-server"
-version = "0.1.84"
+version = "0.1.85"
 dependencies = [
  "anyhow",
  "async-stream",

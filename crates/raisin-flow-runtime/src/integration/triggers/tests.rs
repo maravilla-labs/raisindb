@@ -298,3 +298,87 @@ fn test_serialization() {
 
     assert!(matches!(deserialized, FlowTriggerEvent::ToolResult { .. }));
 }
+
+/// Decision (1): the flow's agent marker must be PERSISTED on the instance.
+///
+/// The resume job's context is rebuilt from scratch and carries only
+/// `function_result`, so a marker held only in job metadata would be lost the
+/// moment a flow waits on a function. Storing it as an instance variable is what
+/// makes provenance survive the whole flow, not just its first step.
+#[test]
+fn the_agent_marker_is_persisted_as_an_instance_variable() {
+    let trigger_event = FlowTriggerEvent::NodeEvent {
+        event_type: "Created".to_string(),
+        node_id: "node1".to_string(),
+        node_type: "test:Order".to_string(),
+        node_path: "/orders/1".to_string(),
+        properties: json!({}),
+        timestamp: Utc::now(),
+    };
+
+    let marker = "flow:/flows/publish-approval@trigger:/triggers/on-order-created";
+    let instance = FlowInstanceBuilder::new(
+        "/flows/publish-approval".to_string(),
+        1,
+        json!({"nodes": [], "edges": []}),
+        trigger_event,
+        json!({}),
+    )
+    .tenant_id("tenant123".to_string())
+    .repo_id("repo456".to_string())
+    .branch("main".to_string())
+    .workspace("default".to_string())
+    .agent(marker.to_string())
+    .build()
+    .expect("builds");
+
+    let Value::Object(ref vars) = instance.variables else {
+        panic!("instance variables must be an object");
+    };
+    assert_eq!(
+        vars.get(AGENT_VAR).and_then(|v| v.as_str()),
+        Some(marker),
+        "the marker must round-trip through the persisted instance"
+    );
+
+    // It must also survive serialization, since that is how the instance
+    // actually reaches storage and comes back on resume.
+    let json_str = serde_json::to_string(&instance).expect("serializes");
+    let restored: crate::types::FlowInstance =
+        serde_json::from_str(&json_str).expect("deserializes");
+    assert_eq!(
+        restored
+            .variables
+            .get(AGENT_VAR)
+            .and_then(|v| v.as_str()),
+        Some(marker)
+    );
+}
+
+/// A flow built without a marker must gain no `__agent` key at all, so an
+/// unattributed flow stays unattributed rather than acquiring a bogus identity.
+#[test]
+fn an_unmarked_flow_instance_has_no_agent_variable() {
+    let trigger_event = FlowTriggerEvent::NodeEvent {
+        event_type: "Created".to_string(),
+        node_id: "node1".to_string(),
+        node_type: "test:Order".to_string(),
+        node_path: "/orders/1".to_string(),
+        properties: json!({}),
+        timestamp: Utc::now(),
+    };
+
+    let instance = FlowInstanceBuilder::new(
+        "/flows/x".to_string(),
+        1,
+        json!({"nodes": [], "edges": []}),
+        trigger_event,
+        json!({}),
+    )
+    .build()
+    .expect("builds");
+
+    if let Value::Object(ref vars) = instance.variables {
+        assert!(!vars.contains_key(AGENT_VAR));
+    }
+}

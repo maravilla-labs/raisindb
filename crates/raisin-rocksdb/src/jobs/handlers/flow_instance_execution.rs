@@ -235,6 +235,32 @@ impl FlowInstanceExecutionHandler {
             callbacks = callbacks.with_event_emitter(emitter.clone());
         }
 
+        // Resolve the flow's agent marker once per job, then hold it on the
+        // callbacks -- they are the single funnel through which every step
+        // reaches storage, jobs and functions, so this is the only place that
+        // needs to learn it.
+        //
+        // A "start" job carries it in its context (trigger evaluation put it
+        // there). A resume job's context is rebuilt from scratch and holds only
+        // `function_result`, so the marker has to come off the persisted
+        // instance -- which is exactly why it is stored as `__agent`.
+        let instance_path = format!("/flows/instances/{}", instance_id);
+        let mut agent_marker = context
+            .metadata
+            .get(crate::jobs::ORIGIN_AGENT_KEY)
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if agent_marker.is_none() && execution_type != "start" {
+            if let Ok(instance) = callbacks.load_instance(&instance_path).await {
+                agent_marker = instance
+                    .variables
+                    .get(raisin_flow_runtime::integration::triggers::AGENT_VAR)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+            }
+        }
+        callbacks = callbacks.with_agent(agent_marker);
+
         // For "start" execution, extract FlowInstance from metadata and save to storage first
         if execution_type == "start" {
             if let Some(flow_instance_value) = context.metadata.get("flow_instance") {
@@ -352,7 +378,6 @@ impl FlowInstanceExecutionHandler {
 
         // Load the instance to get its final state for reporting
         // Note: load_instance expects full path, not just the instance_id
-        let instance_path = format!("/flows/instances/{}", instance_id);
         let final_instance = callbacks.load_instance(&instance_path).await.ok();
         let flow_status = final_instance
             .as_ref()

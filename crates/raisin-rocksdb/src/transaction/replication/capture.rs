@@ -33,6 +33,25 @@ impl RocksDBTransaction {
                 .and_then(|meta| meta.transaction_revision)
         });
 
+        // Resolve attribution from the SAME source the local event path uses
+        // (`commit/events.rs`), so what peers replay can never drift from what
+        // this node stamped on its own NodeEvent — the cluster is masterless, so
+        // an entry that differs between nodes is simply wrong.
+        //
+        // The auth context wins over the caller-supplied `actor` for the same
+        // reason it does locally: paths that set a literal actor (SQL DML sets
+        // `"sql-update"`) still know the real principal, and the local audit row
+        // already records *that*. Falling back to the caller's value keeps every
+        // path that has no auth context (system jobs, seeds) unchanged.
+        let (actor, agent) = {
+            use raisin_storage::transactional::TransactionalContext;
+            let auth = self.get_auth_context().ok().flatten();
+            (
+                auth.as_ref().map(|a| a.actor_id()).unwrap_or(actor),
+                auth.as_ref().and_then(|a| a.agent.clone()),
+            )
+        };
+
         if resolved_revision.is_none() {
             tracing::warn!(
                 "capture_operation_internal called without revision (tenant={}, repo={}, branch={}, op_type={:?})",
@@ -61,6 +80,7 @@ impl RocksDBTransaction {
                     branch,
                     op_type,
                     actor,
+                    agent,
                     message,
                     is_system,
                     revision: resolved_revision,
@@ -80,12 +100,13 @@ impl RocksDBTransaction {
         // Synchronous capture for critical operations or when queue not available
         match self
             .operation_capture
-            .capture_operation_with_revision(
+            .capture_operation_with_attribution(
                 tenant_id,
                 repo_id,
                 branch,
                 op_type,
                 actor,
+                agent,
                 message,
                 is_system,
                 resolved_revision,

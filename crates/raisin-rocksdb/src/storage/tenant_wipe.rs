@@ -94,6 +94,8 @@ const TENANT_PREFIXED_CFS: &[&str] = &[
     cf::GRAPH_PROJECTION,
     // Processing
     cf::PROCESSING_RULES,
+    // Audit log (retention: a wiped tenant must not leave audit rows behind)
+    cf::AUDIT_LOG,
     // Per-tenant registry entries (the global tenants entry is wiped separately)
     cf::REGISTRY,
 ];

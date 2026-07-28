@@ -188,7 +188,14 @@ impl NodeRepositoryImpl {
 
         node.properties.insert(property_path.to_string(), value);
 
-        self.update_impl(tenant_id, repo_id, branch, workspace, node)
-            .await
+        self.update_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            crate::repositories::nodes::WriteAttribution::default(),
+        )
+        .await
     }
 }

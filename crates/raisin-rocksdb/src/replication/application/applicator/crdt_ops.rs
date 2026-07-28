@@ -14,6 +14,7 @@ use rocksdb::WriteBatch;
 use std::collections::HashMap;
 
 use super::super::index_writers::write_all_node_indexes;
+use super::super::node_operations::EventAttribution;
 use super::{is_tombstone, OperationApplicator, TOMBSTONE};
 
 impl OperationApplicator {
@@ -28,6 +29,9 @@ impl OperationApplicator {
         op: &Operation,
     ) -> Result<()> {
         let revision = Self::op_revision(op)?;
+        // The originating node's attribution, replayed verbatim onto every event
+        // this revision produces here.
+        let attribution = EventAttribution::from_op(op);
 
         for change in node_changes {
             let workspace = change.node.workspace.as_deref().unwrap_or("default");
@@ -41,6 +45,7 @@ impl OperationApplicator {
                     change.parent_id.as_deref(),
                     &revision,
                     &change.cf_order_key,
+                    attribution,
                 )?,
                 ReplicatedNodeChangeKind::Delete => self.apply_replicated_delete(
                     tenant_id,
@@ -50,6 +55,7 @@ impl OperationApplicator {
                     &change.node,
                     change.parent_id.as_deref(),
                     &revision,
+                    attribution,
                 )?,
             }
         }
@@ -91,6 +97,7 @@ impl OperationApplicator {
     }
 
     /// Apply a single replicated node upsert
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::replication::application) fn apply_replicated_upsert(
         &self,
         tenant_id: &str,
@@ -101,6 +108,7 @@ impl OperationApplicator {
         parent_id: Option<&str>,
         revision: &HLC,
         cf_order_key: &str,
+        attribution: EventAttribution<'_>,
     ) -> Result<()> {
         let mut normalized_node = node.clone();
         normalized_node.has_children = None;
@@ -294,6 +302,7 @@ impl OperationApplicator {
             revision,
             raisin_events::NodeEventKind::Updated,
             "replication",
+            attribution,
         );
 
         Ok(())
@@ -305,6 +314,7 @@ impl OperationApplicator {
     /// truth for deletion tombstones), so replicated deletes clean up the same
     /// families as local deletes — including packed adjacency lists,
     /// compound/spatial indexes, and NODE_PATH.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::replication::application) fn apply_replicated_delete(
         &self,
         tenant_id: &str,
@@ -314,6 +324,7 @@ impl OperationApplicator {
         node: &Node,
         parent_id: Option<&str>,
         revision: &HLC,
+        attribution: EventAttribution<'_>,
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
 
@@ -351,6 +362,7 @@ impl OperationApplicator {
             revision,
             raisin_events::NodeEventKind::Deleted,
             "replication",
+            attribution,
         );
 
         Ok(())
@@ -368,7 +380,7 @@ impl OperationApplicator {
         parent_id: Option<&str>,
         revision: &HLC,
         cf_order_key: &str,
-        _op: &Operation,
+        op: &Operation,
     ) -> Result<()> {
         let workspace = node.workspace.as_deref().unwrap_or("default");
 
@@ -381,6 +393,7 @@ impl OperationApplicator {
             parent_id,
             revision,
             cf_order_key,
+            EventAttribution::from_op(op),
         )?;
 
         tracing::debug!(
@@ -402,7 +415,7 @@ impl OperationApplicator {
         branch: &str,
         node_id: &str,
         revision: &HLC,
-        _op: &Operation,
+        op: &Operation,
     ) -> Result<()> {
         let node = match self.load_latest_node(tenant_id, repo_id, branch, node_id)? {
             Some(n) => n,
@@ -421,7 +434,16 @@ impl OperationApplicator {
         // We use None for parent_id - delete logic handles this gracefully
         let _parent_id: Option<&str> = None;
 
-        self.apply_replicated_delete(tenant_id, repo_id, branch, workspace, &node, None, revision)?;
+        self.apply_replicated_delete(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &node,
+            None,
+            revision,
+            EventAttribution::from_op(op),
+        )?;
 
         tracing::debug!(
             node_id = %node_id,

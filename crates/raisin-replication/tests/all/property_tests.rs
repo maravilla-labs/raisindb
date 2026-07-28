@@ -417,6 +417,7 @@ fn arb_set_property_from_node(
                 actor: "test".to_string(),
                 message: None,
                 is_system: false,
+                agent: None,
                 acknowledged_by: HashSet::new(),
             }
         })
@@ -449,6 +450,7 @@ fn arb_delete_property_from_node(
                 actor: "test".to_string(),
                 message: None,
                 is_system: false,
+                agent: None,
                 acknowledged_by: HashSet::new(),
             }
         },
@@ -492,6 +494,7 @@ fn arb_add_relation_from_node(
                 actor: "test".to_string(),
                 message: None,
                 is_system: false,
+                agent: None,
                 acknowledged_by: HashSet::new(),
             }
         },
@@ -529,6 +532,7 @@ fn arb_remove_relation_from_node(
         actor: "test".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     }
 }
@@ -556,6 +560,7 @@ fn arb_delete_node_from_node(
             actor: "test".to_string(),
             message: None,
             is_system: false,
+            agent: None,
             acknowledged_by: HashSet::new(),
         }
     })
@@ -724,6 +729,7 @@ proptest! {
                 actor: "test".to_string(),
                 message: None,
                 is_system: false,
+                agent: None,
                 acknowledged_by: HashSet::new(),
             });
         }
@@ -799,6 +805,7 @@ fn prop_lww_property_updates() {
         actor: "user1".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     };
 
@@ -820,6 +827,7 @@ fn prop_lww_property_updates() {
         actor: "user2".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     };
 
@@ -882,6 +890,7 @@ fn prop_add_wins_relations() {
         actor: "user".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     };
 
@@ -955,6 +964,7 @@ fn prop_delete_wins_nodes() {
         actor: "user".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     };
 
@@ -974,6 +984,7 @@ fn prop_delete_wins_nodes() {
         actor: "user".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     };
 
@@ -1084,6 +1095,7 @@ fn prop_crdt_merge_deterministic() {
         actor: "user".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     };
 
@@ -1105,6 +1117,7 @@ fn prop_crdt_merge_deterministic() {
         actor: "user".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: HashSet::new(),
     };
 
@@ -1167,6 +1180,7 @@ proptest! {
                     actor: "test".to_string(),
                     message: None,
                     is_system: false,
+                    agent: None,
                     acknowledged_by: HashSet::new(),
                 });
             }

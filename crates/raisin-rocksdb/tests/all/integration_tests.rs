@@ -4781,6 +4781,7 @@ mod tree_operations {
             parent_revision: Some(revision_before),
             timestamp: chrono::Utc::now(),
             actor: "test-user".to_string(),
+            agent: None,
             message: "Moving source tree to archive for long-term storage".to_string(),
             is_system: false,
             node_id: String::new(), // Will be filled
@@ -5551,6 +5552,7 @@ mod tree_operations {
             parent_revision: Some(revision_before),
             timestamp: chrono::Utc::now(),
             actor: "test-user".to_string(),
+            agent: None,
             message: "Creating backup of source tree for archival".to_string(),
             is_system: false,
             node_id: String::new(), // Will be filled

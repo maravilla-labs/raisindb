@@ -22,6 +22,36 @@ use std::sync::Arc;
 const SUPPRESSED_CREATED_EVENT_TYPES: &[&str] =
     &["raisin:AIToolCall", "raisin:AIToolSingleCallResult"];
 
+/// The `NodeEvent.metadata` bag a flow write carries.
+///
+/// Key names and value shapes match
+/// `raisin-rocksdb/src/transaction/commit/events.rs` byte-for-byte, because the
+/// audit subscriber (`raisin-core/src/audit_events.rs`) reads exactly `"actor"`
+/// and `"agent"` and does not branch on `"source"`. A flow write is therefore
+/// audited identically to a write from any other path.
+///
+/// `actor` is `"system"`: a flow step has no human behind it, and that is the
+/// value this path effectively recorded before. `agent` names the flow and the
+/// trigger behind it -- the thing that used to be missing entirely.
+fn flow_event_metadata(agent: Option<&str>) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "source".to_string(),
+        serde_json::Value::String("local".to_string()),
+    );
+    metadata.insert(
+        "actor".to_string(),
+        serde_json::Value::String("system".to_string()),
+    );
+    if let Some(agent) = agent {
+        metadata.insert(
+            "agent".to_string(),
+            serde_json::Value::String(agent.to_string()),
+        );
+    }
+    metadata
+}
+
 /// Publish a node event on the storage event bus, mirroring exactly what
 /// `NodeService` publishes after a write (see
 /// raisin-core/src/services/node_service/crud/{create,update}.rs).
@@ -45,6 +75,7 @@ async fn publish_node_event<S>(
     workspace: &str,
     node: &raisin_models::nodes::Node,
     kind: raisin_storage::NodeEventKind,
+    agent: Option<&str>,
 ) where
     S: Storage,
 {
@@ -71,6 +102,8 @@ async fn publish_node_event<S>(
         _ => raisin_hlc::HLC::new(0, 0),
     };
 
+    let metadata = flow_event_metadata(agent);
+
     storage
         .event_bus()
         .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
@@ -83,7 +116,9 @@ async fn publish_node_event<S>(
             revision,
             kind,
             path: Some(node.path.clone()),
-            metadata: None,
+            // See `flow_event_metadata`: this is what carries a flow write to
+            // the audit log attributed, instead of the `None` it used to send.
+            metadata: Some(metadata),
         }));
 }
 
@@ -141,7 +176,13 @@ where
 {
     let deps = deps.clone();
     Arc::new(
-        move |tenant_id, repo_id, branch, workspace, path, properties| {
+        move |tenant_id,
+              repo_id,
+              branch,
+              workspace,
+              path: String,
+              properties,
+              agent: Option<String>| {
             let deps = deps.clone();
             Box::pin(async move {
                 use raisin_storage::{NodeRepository, UpdateNodeOptions};
@@ -179,13 +220,22 @@ where
                 existing.properties = props_map;
                 existing.updated_at = Some(chrono::Utc::now());
 
-                // Update the node using the correct API
+                // Update the node using the correct API.
+                //
+                // The write MECHANISM is deliberately unchanged (still the raw
+                // NodeRepository, still no schema/parent validation). The only
+                // addition is `operation_meta`, which is pure attribution: it is
+                // what carries the flow's agent marker into the replicated
+                // operation so a peer records the same initiator this node does.
                 deps.storage
                     .nodes()
                     .update(
                         StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
                         existing.clone(),
-                        UpdateNodeOptions::default(),
+                        UpdateNodeOptions {
+                            operation_meta: flow_operation_meta(agent.as_deref(), &existing),
+                            ..Default::default()
+                        },
                     )
                     .await
                     .map_err(|e| format!("Failed to update node: {}", e))?;
@@ -200,6 +250,7 @@ where
                     &workspace,
                     &existing,
                     raisin_storage::NodeEventKind::Updated,
+                    agent.as_deref(),
                 )
                 .await;
 
@@ -219,7 +270,14 @@ where
 {
     let deps = deps.clone();
     Arc::new(
-        move |tenant_id, repo_id, branch, workspace, node_type, path, properties| {
+        move |tenant_id,
+              repo_id,
+              branch,
+              workspace,
+              node_type: String,
+              path: String,
+              properties,
+              agent: Option<String>| {
             let deps = deps.clone();
             Box::pin(async move {
                 use raisin_storage::{CreateNodeOptions, NodeRepository};
@@ -272,6 +330,19 @@ where
                     ..Default::default()
                 };
 
+                // Attribution is computed before the node is moved into the create.
+                //
+                // NOTE: `create_deep_node_impl` currently captures only the HEAD
+                // update for replication, never an `ApplyRevision` for the nodes
+                // it writes (see
+                // `raisin-rocksdb/src/repositories/nodes/crud/create/deep_create.rs`),
+                // so this meta does not yet reach a replicated operation. It is
+                // set anyway because it is the correct carrier and the local
+                // audit path below is already attributed; closing the deep-create
+                // replication gap is a separate change, deliberately not made
+                // here.
+                let operation_meta = flow_operation_meta(agent.as_deref(), &node);
+
                 // Create the node using deep create to auto-create parent folders
                 let created = deps
                     .storage
@@ -285,7 +356,8 @@ where
                             validate_schema: false,
                             validate_parent_allows_child: false,
                             validate_workspace_allows_type: false,
-                            operation_meta: None,
+                            // Attribution only -- see the note in the saver.
+                            operation_meta,
                         },
                     )
                     .await
@@ -302,6 +374,7 @@ where
                     &workspace,
                     &created,
                     raisin_storage::NodeEventKind::Created,
+                    agent.as_deref(),
                 )
                 .await;
 
@@ -355,4 +428,64 @@ where
                 .collect()
         })
     })
+}
+
+/// Build the `OperationMeta` that carries a flow's agent marker into a node
+/// write, or `None` when the flow has no marker (leaving behaviour untouched).
+///
+/// The `actor` stays `"system"` -- exactly what these paths recorded before --
+/// because a flow step has no human behind it. The marker rides in `agent`,
+/// which is provenance and confers no authority.
+fn flow_operation_meta(
+    agent: Option<&str>,
+    node: &raisin_models::nodes::Node,
+) -> Option<raisin_models::operations::OperationMeta> {
+    let agent = agent?;
+    Some(
+        raisin_models::operations::OperationMeta::new_rename(
+            node.id.clone(),
+            node.name.clone(),
+            node.name.clone(),
+            &raisin_hlc::HLC::new(0, 0),
+            None,
+            "system".to_string(),
+            "Flow node write".to_string(),
+        )
+        .with_agent(Some(agent.to_string())),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flow_event_metadata;
+
+    /// Decision (1): a flow-driven node write must reach the audit log naming
+    /// the flow AND the trigger behind it.
+    ///
+    /// This pins the producer half of the contract. The consumer half -- that
+    /// `audit_events.rs` reads exactly these keys -- is covered by
+    /// `raisin-rocksdb/tests/all/audit_attribution_test.rs`.
+    #[test]
+    fn a_flow_write_stamps_the_actor_and_the_flow_marker() {
+        let marker = "flow:/flows/publish-approval@trigger:/triggers/on-order-created";
+        let meta = flow_event_metadata(Some(marker));
+
+        assert_eq!(meta.get("actor").and_then(|v| v.as_str()), Some("system"));
+        assert_eq!(meta.get("agent").and_then(|v| v.as_str()), Some(marker));
+        // The audit handler ignores `source`, but the key must stay present and
+        // identically shaped so replicated/local events remain comparable.
+        assert_eq!(meta.get("source").and_then(|v| v.as_str()), Some("local"));
+        // Both hops must be recoverable, and the kind stays leftmost so
+        // `LIKE 'flow:%'` still selects flow-driven writes.
+        assert!(marker.starts_with("flow:"));
+        assert_eq!(marker.matches('@').count(), 1);
+    }
+
+    /// An unmarked flow must not acquire an agent -- absent, not empty-string.
+    #[test]
+    fn an_unmarked_flow_write_carries_no_agent_key() {
+        let meta = flow_event_metadata(None);
+        assert!(!meta.contains_key("agent"));
+        assert_eq!(meta.get("actor").and_then(|v| v.as_str()), Some("system"));
+    }
 }

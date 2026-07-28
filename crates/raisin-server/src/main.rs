@@ -911,7 +911,14 @@ async fn main() {
     // HTTP router assembly
     // ========================================================================
 
-    let audit_repo = Arc::new(raisin_audit::InMemoryAuditRepo::default());
+    // Persistent audit store under RocksDB, so a node's audit history survives a
+    // restart; the memory backend has no DB handle and keeps the process-local
+    // store. One instance is shared by the HTTP router, the WS transport, and the
+    // event-bus writer below.
+    #[cfg(feature = "storage-rocksdb")]
+    let audit_repo = Arc::new(storage.audit_repository());
+    #[cfg(not(feature = "storage-rocksdb"))]
+    let audit_repo = Arc::new(InMemoryAuditRepo::default());
     let audit_adapter = Arc::new(RepoAuditAdapter::new(audit_repo.clone()));
 
     // Audit logging is driven by a single event-bus subscriber: every write path

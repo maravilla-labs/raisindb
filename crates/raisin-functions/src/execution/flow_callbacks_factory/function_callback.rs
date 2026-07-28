@@ -21,7 +21,7 @@ where
 {
     let deps = deps.clone();
     Arc::new(
-        move |function_ref, input, tenant_id, repo_id, branch, workspace| {
+        move |function_ref, input, tenant_id, repo_id, branch, workspace, agent| {
             let deps = deps.clone();
             Box::pin(async move {
                 tracing::debug!(
@@ -51,7 +51,18 @@ where
                     &repo_id,
                     &branch,
                     &workspace,
-                    None, // auth context
+                    // The flow's identity, so a function called inline from a
+                    // flow step commits attributed to the flow (and the trigger
+                    // behind it) instead of to nobody.
+                    //
+                    // PRIVILEGE IS UNCHANGED: this was `None`, and the executor
+                    // already resolved `None` to system privileges. The context
+                    // here is `AuthContext::system()` -- the same authority --
+                    // carrying an agent marker that grants nothing. When the
+                    // flow has no marker this stays `None`, exactly as before.
+                    agent.map(|marker: String| {
+                        raisin_models::auth::AuthContext::system().with_agent(marker)
+                    }),
                     None, // no real-time log streaming for flow functions
                 )
                 .await

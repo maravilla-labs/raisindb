@@ -116,6 +116,7 @@ pub(in crate::replication::application) async fn apply_set_property(
         &new_revision,
         NodeEventKind::Updated,
         "replication",
+        super::event_helpers::EventAttribution::from_op(op),
     );
 
     Ok(())

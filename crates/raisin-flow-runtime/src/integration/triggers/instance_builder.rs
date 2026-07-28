@@ -18,6 +18,13 @@
 use serde_json::Value;
 
 use crate::types::{FlowDefinition, FlowInstance, TriggerEventType, TriggerInfo};
+
+/// Reserved instance variable holding the flow's agent marker.
+///
+/// Lives in `FlowInstance::variables` (a JSON object) rather than as a struct
+/// field so instances written by an older binary keep deserializing -- the same
+/// reason `__trigger_info` is stored this way.
+pub const AGENT_VAR: &str = "__agent";
 use crate::FlowError;
 
 use super::events::FlowTriggerEvent;
@@ -213,6 +220,7 @@ pub struct FlowInstanceBuilder {
     repo_id: Option<String>,
     branch: Option<String>,
     workspace: Option<String>,
+    agent: Option<String>,
     test_config: Option<crate::types::TestRunConfig>,
 }
 
@@ -235,6 +243,7 @@ impl FlowInstanceBuilder {
             repo_id: None,
             branch: None,
             workspace: None,
+            agent: None,
             test_config: None,
         }
     }
@@ -260,6 +269,19 @@ impl FlowInstanceBuilder {
     /// Set the workspace
     pub fn workspace(mut self, workspace: String) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Set the non-human principal this instance acts as, in the
+    /// `agent_identity` vocabulary (e.g. `flow:/flows/x@trigger:/triggers/t`).
+    ///
+    /// Stored as the reserved `__agent` instance variable rather than a struct
+    /// field, for the same reason `__trigger_info` is: `variables` is a JSON
+    /// object, so in-flight instances written by an older binary simply lack the
+    /// key instead of failing to deserialize. It is provenance only and confers
+    /// no privilege.
+    pub fn agent(mut self, agent: String) -> Self {
+        self.agent = Some(agent);
         self
     }
 
@@ -309,6 +331,11 @@ impl FlowInstanceBuilder {
                 serde_json::to_value(trigger_info)
                     .map_err(|e| FlowError::Serialization(e.to_string()))?,
             );
+
+            // Survives the resume hop, whose job context is rebuilt from scratch.
+            if let Some(agent) = self.agent {
+                vars.insert(AGENT_VAR.to_string(), Value::String(agent));
+            }
         }
 
         // Apply test configuration if provided

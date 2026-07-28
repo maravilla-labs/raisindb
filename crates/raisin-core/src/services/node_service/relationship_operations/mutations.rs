@@ -73,7 +73,9 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
 
         ctx.set_tenant_repo(&self.tenant_id, &self.repo_id)?;
         ctx.set_branch(&self.branch)?;
-        ctx.set_actor("system")?;
+        // Real caller rather than a blanket "system", so relation changes are
+        // attributable in the revision history like any other write.
+        ctx.set_actor(&self.commit_actor())?;
         ctx.set_message(&format!(
             "Added relation '{}' from {} to {}",
             relation.relation_type, source_path, target_path
@@ -220,7 +222,9 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
 
         ctx.set_tenant_repo(&self.tenant_id, &self.repo_id)?;
         ctx.set_branch(&self.branch)?;
-        ctx.set_actor("system")?;
+        // Real caller rather than a blanket "system", so relation changes are
+        // attributable in the revision history like any other write.
+        ctx.set_actor(&self.commit_actor())?;
         ctx.set_message(&format!(
             "Removed relation '{}' from {} to {}",
             relation_type, source_path, target_path

@@ -79,6 +79,25 @@ pub struct AuthContext {
     /// Available as `$auth.home` in REL permission conditions
     /// Used for path-based access control (e.g., `node.path.descendantOf($auth.home)`)
     pub home: Option<String>,
+
+    /// The non-human principal that *initiated* this request, if any — e.g.
+    /// `mcp:<server-slug>` for a call arriving over an MCP tool, or
+    /// `agent:<agent-node-path>` for an AI-agent-driven write, optionally
+    /// composed with its origin (`agent:/a@trigger:/t`). The full vocabulary
+    /// lives in [`crate::auth::agent_identity`].
+    ///
+    /// Set independently of [`Self::user_id`]: an autonomous workflow or AI
+    /// agent legitimately populates this while no human is involved at all.
+    ///
+    /// Purely provenance: it carries to the audit log (as `AuditLog::agent`) and
+    /// grants nothing. It is deliberately NOT folded into [`Self::actor_id`] —
+    /// the human stays the human, so `user_id` remains a queryable key — and it
+    /// is deliberately NOT `is_system`, which means "bypass RLS".
+    ///
+    /// Optional + defaulted so contexts serialized before this field existed
+    /// still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 impl Default for AuthContext {
@@ -106,6 +125,7 @@ impl AuthContext {
             acting_as_ward: None,
             active_stewardship_source: None,
             home: None,
+            agent: None,
         }
     }
 
@@ -131,6 +151,7 @@ impl AuthContext {
             acting_as_ward: None,
             active_stewardship_source: None,
             home: None,
+            agent: None,
         }
     }
 
@@ -155,6 +176,7 @@ impl AuthContext {
             acting_as_ward: None,
             active_stewardship_source: None,
             home: None,
+            agent: None,
         }
     }
 
@@ -176,6 +198,7 @@ impl AuthContext {
             acting_as_ward: None,
             active_stewardship_source: None,
             home: None,
+            agent: None,
         }
     }
 
@@ -196,6 +219,7 @@ impl AuthContext {
             acting_as_ward: None,
             active_stewardship_source: None,
             home: None,
+            agent: None,
         }
     }
 
@@ -296,6 +320,21 @@ impl AuthContext {
             return true;
         }
         self.groups.iter().any(|g| g == group_id)
+    }
+
+    /// Mark this context as acting through a non-human principal.
+    ///
+    /// `agent` is a namespaced provenance string (`mcp:<slug>`,
+    /// `agent:<node-path>`, …). It rides to the audit log alongside — never
+    /// instead of — the human actor, and confers no privilege.
+    pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = Some(agent.into());
+        self
+    }
+
+    /// The non-human principal this request is acting through, if any.
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent.as_deref()
     }
 
     /// Get the user ID for audit logging

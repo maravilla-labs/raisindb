@@ -36,6 +36,7 @@ fn create_test_operation(node_id: &str, op_seq: u64, timestamp_ms: u64) -> Opera
         actor: "test".to_string(),
         message: None,
         is_system: false,
+        agent: None,
         acknowledged_by: std::collections::HashSet::new(),
     }
 }

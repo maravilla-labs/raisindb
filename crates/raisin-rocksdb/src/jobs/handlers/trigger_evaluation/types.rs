@@ -17,6 +17,13 @@ pub struct TriggerMatch {
     /// Workflow data from referenced raisin:Flow node
     /// When present, a FlowInstanceExecution job is created
     pub workflow_data: Option<serde_json::Value>,
+    /// Path of the referenced `raisin:Flow` node backing `workflow_data`.
+    ///
+    /// Provenance only: it is what the flow instance records as its agent
+    /// (`flow:<flow_path>`), so a write made by a flow step names the flow that
+    /// made it and not just the trigger that started it. `None` for inline
+    /// triggers, which have no flow node.
+    pub flow_path: Option<String>,
     /// Maximum retry attempts on failure (0 = no retries, None = use default of 3)
     pub max_retries: Option<u32>,
 }

@@ -170,6 +170,7 @@ pub(in crate::replication::application) async fn apply_create_node(
         &revision,
         NodeEventKind::Created,
         "replication",
+        super::event_helpers::EventAttribution::from_op(op),
     );
 
     Ok(())

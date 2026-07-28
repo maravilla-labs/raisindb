@@ -303,7 +303,7 @@ impl FunctionExecutionHandler {
         // AIToolCallExecutionHandler which passes appropriate auth.
         let auth_context: Option<AuthContext> = context
             .metadata
-            .get("auth_context")
+            .get(crate::jobs::AUTH_CONTEXT_KEY)
             .and_then(|v| serde_json::from_value(v.clone()).ok());
         let start = std::time::Instant::now();
         let result = executor(

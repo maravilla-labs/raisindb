@@ -53,6 +53,7 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         node_id: &str,
+        attribution: crate::repositories::nodes::WriteAttribution<'_>,
     ) -> Result<bool> {
         // Check if node exists
         let node = self
@@ -176,7 +177,13 @@ impl NodeRepositoryImpl {
             ));
         }
         self.capture_apply_revision_snapshot(
-            tenant_id, repo_id, branch, workspace, changes, revision,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            changes,
+            revision,
+            attribution,
         )
         .await;
 

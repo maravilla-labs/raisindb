@@ -26,6 +26,10 @@ mod validation;
 // Re-export StorageNode for use within this crate
 pub(crate) use storage_node::StorageNode;
 
+// Attribution carried into replication capture by every direct (non-transaction)
+// write path. The transaction path resolves the same pair from its AuthContext.
+pub(crate) use replication_capture::WriteAttribution;
+
 // Re-export hash_property_value for use by property_index repository
 pub(crate) use helpers::hash_property_value;
 
@@ -303,8 +307,15 @@ impl NodeRepositoryImpl {
         workspace: &str,
         node: Node,
     ) -> Result<()> {
-        self.add_impl(tenant_id, repo_id, branch, workspace, node)
-            .await
+        self.add_impl(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            WriteAttribution::default(),
+        )
+        .await
     }
 }
 

@@ -20,6 +20,7 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         id: &str,
+        attribution: crate::repositories::nodes::WriteAttribution<'_>,
     ) -> Result<bool> {
         // Check referential integrity first - prevent deletion if other nodes reference this node
         self.check_delete_safety(tenant_id, repo_id, branch, workspace, id)
@@ -117,8 +118,31 @@ impl NodeRepositoryImpl {
                 raisin_replication::operation::ReplicatedNodeChangeKind::Delete,
             )],
             revision,
+            attribution,
         )
         .await;
+
+        // Stamp the SAME attribution onto the local event that the replication
+        // capture above carries. Without this the origin records the delete with
+        // no actor while every replica records the one from `attribution` — the
+        // origin/replica divergence this whole path exists to prevent. Keys must
+        // match what `raisin-core::audit_events` reads: "actor" and "agent".
+        let event_metadata = {
+            let mut m = std::collections::HashMap::new();
+            if let Some(actor) = attribution.actor.as_deref() {
+                m.insert(
+                    "actor".to_string(),
+                    serde_json::Value::String(actor.to_string()),
+                );
+            }
+            if let Some(agent) = attribution.agent.as_deref() {
+                m.insert(
+                    "agent".to_string(),
+                    serde_json::Value::String(agent.to_string()),
+                );
+            }
+            (!m.is_empty()).then_some(m)
+        };
 
         // Emit node deletion event to trigger background cleanup job
         let node_event = NodeEvent {
@@ -131,7 +155,7 @@ impl NodeRepositoryImpl {
             node_type: Some(node.node_type.clone()),
             kind: NodeEventKind::Deleted,
             path: Some(node.path.clone()),
-            metadata: None,
+            metadata: event_metadata,
         };
 
         self.event_bus

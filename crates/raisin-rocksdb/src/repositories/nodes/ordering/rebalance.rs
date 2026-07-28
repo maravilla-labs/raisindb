@@ -294,6 +294,8 @@ impl NodeRepositoryImpl {
             workspace,
             relabelled_nodes,
             revision,
+            // Matches the actor stamped on the rebalance revision metadata below.
+            crate::repositories::nodes::WriteAttribution::actor(actor),
         )
         .await;
 

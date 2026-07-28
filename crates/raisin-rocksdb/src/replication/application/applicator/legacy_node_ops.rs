@@ -7,6 +7,7 @@ use raisin_replication::Operation;
 use raisin_storage::BranchRepository;
 use std::collections::HashMap;
 
+use super::super::node_operations::EventAttribution;
 use super::{node_workspace, OperationApplicator};
 
 impl OperationApplicator {
@@ -285,6 +286,7 @@ impl OperationApplicator {
             &revision,
             raisin_events::NodeEventKind::Created,
             "replication",
+            EventAttribution::from_op(op),
         );
 
         Ok(())
@@ -338,6 +340,7 @@ impl OperationApplicator {
             &node_snapshot,
             parent_id.as_deref(),
             &revision,
+            EventAttribution::from_op(op),
         )?;
 
         self.branch_repo
@@ -350,19 +353,13 @@ impl OperationApplicator {
             revision
         );
 
-        super::super::node_operations::emit_node_event(
-            &self.event_bus,
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
-            node_id,
-            Some(node_snapshot.node_type.clone()),
-            Some(node_snapshot.path.clone()),
-            &revision,
-            raisin_events::NodeEventKind::Deleted,
-            "replication",
-        );
+        // NO event emission here: `apply_replicated_delete` above already
+        // emitted `Deleted` for this node, with the same id / node_type / path /
+        // revision / attribution, co-located with the durable tombstone write.
+        // Emitting again produced two events for ONE logical delete -- two
+        // identical audit rows, two websocket frames, and (worse) node_event
+        // triggers firing twice per replicated delete. The sibling entry point
+        // `apply_delete_node_snapshot` never re-emitted; this one now matches.
 
         Ok(())
     }
@@ -466,6 +463,7 @@ impl OperationApplicator {
             &new_revision,
             raisin_events::NodeEventKind::Updated,
             "replication",
+            EventAttribution::from_op(op),
         );
 
         Ok(())

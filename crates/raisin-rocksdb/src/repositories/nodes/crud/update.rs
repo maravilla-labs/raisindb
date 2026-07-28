@@ -23,6 +23,7 @@ impl NodeRepositoryImpl {
         branch: &str,
         workspace: &str,
         mut node: Node,
+        attribution: crate::repositories::nodes::WriteAttribution<'_>,
     ) -> Result<()> {
         let update_start = std::time::Instant::now();
 
@@ -233,6 +234,7 @@ impl NodeRepositoryImpl {
                 raisin_replication::operation::ReplicatedNodeChangeKind::Upsert,
             )],
             revision,
+            attribution,
         )
         .await;
 

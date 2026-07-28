@@ -36,6 +36,18 @@ pub struct NodeRevisionEntry {
     pub updated_by: Option<String>,
     /// True when this revision is a tombstone (the node was deleted at this revision).
     pub deleted: bool,
+    /// The commit message for the revision this change was part of.
+    ///
+    /// Joined from the revision's commit metadata. Without it a per-node history
+    /// is a list of opaque timestamps: the message is written on every mutation
+    /// (`"Updated node: <id>"`, `"MOVE … TO …"`, a caller-supplied one) but used
+    /// to be readable only through the repo-wide revisions endpoint — which is
+    /// why the admin console fetched EVERY revision and filtered client-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// True when the revision was system-initiated rather than user-driven.
+    #[serde(default)]
+    pub is_system: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

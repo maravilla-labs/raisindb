@@ -34,6 +34,8 @@ pub type NodeSaverCallback = Arc<
             String,
             String,
             serde_json::Value,
+            // agent marker (agent_identity vocabulary), provenance only
+            Option<String>,
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
         + Send
         + Sync,
@@ -49,6 +51,8 @@ pub type NodeCreatorCallback = Arc<
             String,
             String,
             serde_json::Value,
+            // agent marker (agent_identity vocabulary), provenance only
+            Option<String>,
         ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
         + Send
         + Sync,
@@ -63,6 +67,8 @@ pub type JobQueuerCallback = Arc<
             String,
             String,
             String,
+            // agent marker (agent_identity vocabulary), provenance only
+            Option<String>,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
         + Send
         + Sync,
@@ -106,6 +112,8 @@ pub type FunctionExecutorCallback = Arc<
             String,
             String,
             String,
+            // agent marker (agent_identity vocabulary), provenance only
+            Option<String>,
         ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
         + Send
         + Sync,

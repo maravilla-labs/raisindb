@@ -177,9 +177,29 @@ impl<S: Storage + TransactionalStorage> NodeService<S> {
             .unwrap_or(false);
 
         if auditable {
-            audit.write(node, action, details).await?;
+            let scope = raisin_audit::AuditScope::new(
+                &self.tenant_id,
+                &self.repo_id,
+                &self.branch,
+                &self.workspace_id,
+            );
+            let agent = self.auth_context.as_ref().and_then(|c| c.agent_id());
+            audit.write(scope, node, action, details, agent).await?;
         }
         Ok(())
+    }
+
+    /// The actor string to stamp on a transaction's commit metadata.
+    ///
+    /// Prefers the caller's real identity over a hardcoded label so per-node
+    /// revision history attributes a change to the user who made it. Falls back
+    /// to `"system"` only when no auth context is present — which commit itself
+    /// rejects, so in practice this is unreachable on a committing path.
+    pub(crate) fn commit_actor(&self) -> String {
+        self.auth_context
+            .as_ref()
+            .map(|c| c.actor_id())
+            .unwrap_or_else(|| "system".to_string())
     }
 
     /// Get the current storage scope as a `StorageScope` struct.

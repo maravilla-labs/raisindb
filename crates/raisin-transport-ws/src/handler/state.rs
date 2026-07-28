@@ -14,6 +14,14 @@ use crate::{auth::JwtAuthService, event_handler::WsEventHandler, registry::Conne
 use super::config::{WsConfig, WsPathParams};
 use super::socket::handle_socket;
 
+/// Audit-log store, chosen by storage backend — the same alias the HTTP
+/// transport uses, because `raisin-server` hands the SAME instance to both.
+/// `AuditRepository` is not dyn-safe (RPITIT), so this must be a concrete type.
+#[cfg(feature = "storage-rocksdb")]
+pub type WsAuditRepo = raisin_rocksdb::RocksDBAuditRepo;
+#[cfg(not(feature = "storage-rocksdb"))]
+pub type WsAuditRepo = raisin_audit::InMemoryAuditRepo;
+
 /// WebSocket upgrade handler
 ///
 /// This is the entry point for WebSocket connections.
@@ -168,7 +176,7 @@ where
     /// Audit-log query store (shared with the HTTP transport). Used by the
     /// `audit_query` request to read a node's audit-log entries. Audit *writes*
     /// are produced globally by the event-bus `AuditEventHandler`, not here.
-    pub audit: Arc<raisin_audit::InMemoryAuditRepo>,
+    pub audit: Arc<WsAuditRepo>,
 }
 
 impl<S, B> WsState<S, B>
@@ -196,7 +204,7 @@ where
         >,
         schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
         lock_manager: Option<raisin_locks::LockManagerHandle>,
-        audit: Arc<raisin_audit::InMemoryAuditRepo>,
+        audit: Arc<WsAuditRepo>,
     ) -> Self {
         let event_bus = storage.event_bus();
         let auth_service = Arc::new(JwtAuthService::new(&config.jwt_secret));

@@ -3,7 +3,7 @@
 
 use axum::http::StatusCode;
 use axum::Json;
-use raisin_audit::AuditRepository;
+use raisin_audit::{AuditRepository, AuditScope};
 use raisin_storage::Storage;
 
 use crate::error::ApiError;
@@ -60,7 +60,12 @@ pub async fn handle_audit_log<S: Storage>(ctx: &mut CommandContext<'_, S>) -> Co
         .get_by_path(ctx.path)
         .await?
         .ok_or_else(|| ApiError::node_not_found(ctx.path))?;
-    let logs = ctx.state.audit.get_logs_by_node_id(&node.id).await?;
+    let scope = AuditScope::new(ctx.tenant_id, ctx.repository, ctx.branch, ctx.ws);
+    let logs = ctx
+        .state
+        .audit
+        .get_logs_scoped(scope, &node.id, None)
+        .await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::to_value(logs).expect("audit logs should serialize to JSON")),

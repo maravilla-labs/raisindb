@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 mod apply_revision_capture_test;
+mod audit_attribution_test;
 mod apply_revision_test;
 mod branch_fork_publish_test;
 mod branch_head_monotonic_test;
@@ -45,6 +46,7 @@ mod reference_index_consistency_test;
 mod reference_retarget_test;
 mod rename_updates_node_identity_test;
 mod reorder_persists_order_key_test;
+mod replication_attribution_test;
 mod replication_performance_test;
 mod rls_integration_tests;
 mod scheduled_invocation_test;

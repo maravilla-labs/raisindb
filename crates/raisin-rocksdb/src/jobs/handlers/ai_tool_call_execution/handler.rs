@@ -303,6 +303,14 @@ impl<S: Storage + 'static> AIToolCallExecutionHandler<S> {
                 &context.branch,
                 tool_call_workspace,
                 tool_call_path,
+                // Provenance of whatever caused this tool call, copied off the
+                // originating node event when the job was enqueued (see
+                // `jobs/event_handler/trigger_helpers.rs`). Absent when the
+                // conversation was driven by a path that carries no marker yet.
+                context
+                    .metadata
+                    .get(crate::jobs::ORIGIN_AGENT_KEY)
+                    .and_then(|v| v.as_str()),
             )
             .await;
 

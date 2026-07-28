@@ -5,8 +5,8 @@ use crate::jobs::JobDataStore;
 use crate::lazy_indexing::LazyIndexManager;
 use crate::repositories::{BranchRepositoryImpl, NodeRepositoryImpl};
 use crate::repositories::{
-    ProcessingRulesRepositoryImpl, TenantAIConfigRepository, TenantAuthConfigRepository,
-    TenantEmbeddingConfigRepository,
+    ProcessingRulesRepositoryImpl, RocksDBAuditRepo, TenantAIConfigRepository,
+    TenantAuthConfigRepository, TenantEmbeddingConfigRepository,
 };
 use raisin_storage::jobs::JobRegistry;
 use rocksdb::DB;
@@ -147,6 +147,20 @@ impl RocksDBStorage {
     /// AI processing rules configuration (chunking, captioning, OCR settings, etc.)
     pub fn processing_rules_repository(&self) -> ProcessingRulesRepositoryImpl {
         ProcessingRulesRepositoryImpl::new(self.db.clone())
+    }
+
+    /// Get the persistent audit-log repository.
+    ///
+    /// Deliberately not part of the `Storage` trait: `raisin-storage` has no
+    /// dependency on `raisin-audit`, and an associated type there would force
+    /// every backend (including `raisin-storage-memory`) to grow one. Callers
+    /// that need audit persistence construct it here, the same way the auth
+    /// service and the ad-hoc config repositories are built.
+    /// Each call mints a fresh repo over the same db handle; they share a
+    /// process-wide write-sequence counter so two instances cannot mint the same
+    /// key in the same millisecond.
+    pub fn audit_repository(&self) -> RocksDBAuditRepo {
+        RocksDBAuditRepo::new(self.db.clone())
     }
 
     /// Get access to the operation capture component

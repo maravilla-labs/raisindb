@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, State},
     Extension, Json,
 };
-use raisin_audit::AuditRepository;
+use raisin_audit::{AuditRepository, AuditScope};
 use raisin_models::auth::AuthContext;
 
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
@@ -24,7 +24,8 @@ pub async fn audit_get_by_id(
         .get(&id)
         .await?
         .ok_or_else(|| ApiError::node_not_found(&id))?;
-    let logs = state.audit.get_logs_by_node_id(&node.id).await?;
+    let scope = AuditScope::new(tenant_id, &repo, &branch, &ws);
+    let logs = state.audit.get_logs_scoped(scope, &node.id, None).await?;
     Ok(Json(logs))
 }
 
@@ -47,6 +48,9 @@ pub async fn audit_get_by_path(
         .get_by_path(&path)
         .await?
         .ok_or_else(|| ApiError::node_not_found(&path))?;
-    let logs = state.audit.get_logs_by_node_id(&node.id).await?;
+    // Read by the resolved node id, never by path: a MOVE/RENAME changes the
+    // path while the history stays attached to the node.
+    let scope = AuditScope::new(tenant_id, &repo, &branch, &ws);
+    let logs = state.audit.get_logs_scoped(scope, &node.id, None).await?;
     Ok(Json(logs))
 }

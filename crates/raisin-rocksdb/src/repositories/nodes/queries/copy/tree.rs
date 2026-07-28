@@ -565,7 +565,10 @@ impl NodeRepositoryImpl {
             branch,
             node_changes,
             revision,
-            &actor,
+            crate::repositories::nodes::WriteAttribution {
+                actor: Some(&actor),
+                agent: operation_meta.as_ref().and_then(|m| m.agent.as_deref()),
+            },
         )
         .await;
     }

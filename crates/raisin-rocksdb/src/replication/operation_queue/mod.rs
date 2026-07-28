@@ -54,6 +54,14 @@ pub struct QueuedOperation {
     pub op_type: OpType,
     /// Actor who performed the operation
     pub actor: String,
+    /// Non-human principal that initiated the operation (`mcp:…`, `agent:…`,
+    /// `trigger:…`), carried alongside `actor` so replicas can attribute the
+    /// replayed write exactly as the originating node did.
+    ///
+    /// Adding this field has no compatibility surface at all: `QueuedOperation`
+    /// is process-local (no `Serialize`/`Deserialize`), travelling only over an
+    /// in-process mpsc channel to the queue worker.
+    pub agent: Option<String>,
     /// Optional commit message
     pub message: Option<String>,
     /// Whether this is a system operation

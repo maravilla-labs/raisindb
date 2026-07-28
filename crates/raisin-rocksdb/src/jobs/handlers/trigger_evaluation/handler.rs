@@ -7,7 +7,9 @@ use super::types::{
 };
 use crate::jobs::data_store::JobDataStore;
 use crate::jobs::dispatcher::JobDispatcher;
+use crate::jobs::{AUTH_CONTEXT_KEY, ORIGIN_AGENT_KEY};
 use raisin_error::{Error, Result};
+use raisin_models::auth::{agent_identity, AuthContext};
 use raisin_storage::jobs::{JobContext, JobInfo, JobRegistry, JobType};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -297,6 +299,41 @@ impl TriggerEvaluationHandler {
         metadata.insert("node_type".to_string(), serde_json::json!(node_type));
         metadata.insert("node_path".to_string(), serde_json::json!(node_path));
 
+        // Provenance: everything this trigger goes on to write is attributable
+        // to the trigger, composed with whatever caused the originating write.
+        // A trigger node has a path; an inline trigger has none, so the function
+        // it is declared on is its only stable identity.
+        let trigger_marker = match (&trigger_match.trigger_path, &trigger_match.function_path) {
+            (Some(trigger_path), _) => agent_identity::trigger(trigger_path),
+            (None, Some(function_path)) => agent_identity::inline_trigger(function_path),
+            // Same synthetic path `enqueue_flow_instance` derives, so the two
+            // agree on what to call a trigger that has neither.
+            (None, None) => {
+                agent_identity::trigger(&format!("/_triggers/{}", trigger_match.trigger_name))
+            }
+        };
+        let trigger_marker = agent_identity::with_origin(
+            trigger_marker,
+            context.metadata.get(ORIGIN_AGENT_KEY).and_then(|v| v.as_str()),
+        );
+
+        // Two keys, two consumers: `auth_context` is what the function executor
+        // reads (the same channel the HTTP async-invoke handler uses), so the
+        // trigger's writes commit attributed. `origin_agent` is what a job
+        // enqueued *downstream* of this one composes onto — an AI agent fired
+        // here ends up as `agent:/agents/bot@trigger:/triggers/t`.
+        //
+        // The context stays `AuthContext::system()`, exactly what the executor
+        // already fell back to for triggers (see `function_execution.rs`), so
+        // this adds attribution without changing any permission.
+        metadata.insert(
+            ORIGIN_AGENT_KEY.to_string(),
+            serde_json::json!(trigger_marker),
+        );
+        if let Ok(auth) = serde_json::to_value(AuthContext::system().with_agent(&trigger_marker)) {
+            metadata.insert(AUTH_CONTEXT_KEY.to_string(), auth);
+        }
+
         // Build input with event data and workspace
         let flow_input = if let Some(node_data) = context.metadata.get("node_data") {
             serde_json::json!({
@@ -414,6 +451,28 @@ impl TriggerEvaluationHandler {
             timestamp: Utc::now(),
         };
 
+        // Provenance for everything this flow instance goes on to do.
+        //
+        // The single-function branch already records `trigger:/triggers/t` via
+        // `job_context.metadata`; a flow-backed trigger must record BOTH hops,
+        // so the flow is composed onto the trigger marker the caller left in
+        // ORIGIN_AGENT_KEY -> `flow:/flows/x@trigger:/triggers/t`.
+        //
+        // The flow node's own path is the flow's identity. It is absent only for
+        // a trigger with no flow node, where the synthetic trigger path is the
+        // only stable name available.
+        let flow_identity = trigger_match
+            .flow_path
+            .clone()
+            .unwrap_or_else(|| trigger_path.clone());
+        let flow_marker = agent_identity::with_origin(
+            agent_identity::flow(&flow_identity),
+            job_context
+                .metadata
+                .get(ORIGIN_AGENT_KEY)
+                .and_then(|v| v.as_str()),
+        );
+
         // Build the flow instance
         let instance = FlowInstanceBuilder::new(
             trigger_path.clone(),
@@ -426,6 +485,9 @@ impl TriggerEvaluationHandler {
         .repo_id(context.repo_id.clone())
         .branch(context.branch.clone())
         .workspace(context.workspace_id.clone())
+        // Persisted on the instance so the marker survives the resume hop,
+        // whose job context is rebuilt from scratch and would otherwise drop it.
+        .agent(flow_marker.clone())
         .build()
         .map_err(|e| Error::Backend(format!("Failed to create flow instance: {}", e)))?;
 
@@ -444,6 +506,22 @@ impl TriggerEvaluationHandler {
             "flow_instance".to_string(),
             serde_json::to_value(&instance).unwrap_or(serde_json::Value::Null),
         );
+
+        // Re-stamp both attribution keys with the FLOW marker, replacing the
+        // trigger-only marker inherited from `job_context`. Downstream jobs
+        // compose onto this, so an AI agent invoked by a step becomes
+        // `agent:/agents/bot@flow:/flows/x`.
+        //
+        // The stored context stays `AuthContext::system()` -- identical to the
+        // `None` the flow path already fell back to -- so this records who acted
+        // without granting anything new.
+        instance_metadata.insert(
+            ORIGIN_AGENT_KEY.to_string(),
+            serde_json::json!(flow_marker),
+        );
+        if let Ok(auth) = serde_json::to_value(AuthContext::system().with_agent(&flow_marker)) {
+            instance_metadata.insert(AUTH_CONTEXT_KEY.to_string(), auth);
+        }
 
         let instance_context = JobContext {
             tenant_id: context.tenant_id.clone(),

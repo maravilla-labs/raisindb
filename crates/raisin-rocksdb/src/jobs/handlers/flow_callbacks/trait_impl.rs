@@ -82,6 +82,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
                 self.flows_workspace.clone(),
                 path,
                 properties,
+                self.agent.clone(),
             )
             .await
             .map_err(|e| FlowError::Other(format!("Failed to update instance: {}", e)))?;
@@ -99,6 +100,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
                 "raisin:FlowInstance".to_string(),
                 path,
                 properties,
+                self.agent.clone(),
             )
             .await
             .map_err(|e| FlowError::Other(format!("Failed to create instance: {}", e)))?;
@@ -165,6 +167,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             node_type.to_string(),
             path.to_string(),
             properties,
+            self.agent.clone(),
         )
         .await
         .map_err(|e| FlowError::Other(format!("Failed to create node: {}", e)))
@@ -185,6 +188,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             self.flows_workspace.clone(),
             path.to_string(),
             properties.clone(),
+            self.agent.clone(),
         )
         .await
         .map_err(|e| FlowError::Other(format!("Failed to update node: {}", e)))?;
@@ -245,6 +249,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             self.repo_id.clone(),
             self.branch.clone(),
             self.flows_workspace.clone(),
+            self.agent.clone(),
         )
         .await
         .map_err(|e| FlowError::Other(format!("Failed to queue job: {}", e)))
@@ -339,6 +344,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             node_type.to_string(),
             path.to_string(),
             properties,
+            self.agent.clone(),
         )
         .await
         .map_err(|e| FlowError::Other(format!("Failed to create node: {}", e)))
@@ -410,6 +416,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             workspace.to_string(),
             path.to_string(),
             properties.clone(),
+            self.agent.clone(),
         )
         .await
         .map_err(|e| FlowError::Other(format!("Failed to update node: {}", e)))?;
@@ -431,6 +438,7 @@ impl FlowCallbacks for RocksDBFlowCallbacks {
             self.repo_id.clone(),
             self.branch.clone(),
             "functions".to_string(), // Functions are always in "functions" workspace
+            self.agent.clone(),
         )
         .await
         .map_err(|e| FlowError::FunctionExecution(format!("Function execution failed: {}", e)))

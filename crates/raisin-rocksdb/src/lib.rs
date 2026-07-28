@@ -97,6 +97,9 @@ pub use jobs::{
     DryRunSummary,
     FunctionEnabledChecker,
     FunctionExecutionResult,
+    // Job-context metadata keys carrying provenance (see `jobs/mod.rs`)
+    AUTH_CONTEXT_KEY,
+    ORIGIN_AGENT_KEY,
     // Function execution callback types
     FunctionExecutorCallback,
     JobDataStore,
@@ -128,10 +131,10 @@ pub use lazy_indexing::{BuildResult, LazyIndexManager};
 pub use management::{DimensionMismatch, HnswManagement, VectorRebuildStats, VerificationReport};
 pub use replication::OperationCapture;
 pub use repositories::{
-    OpLogRepository, OpLogStats, ProximityResult, RocksDBEmbeddingJobStore,
+    OpLogRepository, OpLogStats, ProximityResult, RocksDBAuditRepo, RocksDBEmbeddingJobStore,
     RocksDBEmbeddingStorage, RocksDBTranslationRepository, RocksDbJobStore, SpatialIndexEntry,
     SpatialIndexRepository, SystemUpdateRepositoryImpl, TenantAIConfigRepository,
-    TenantEmbeddingConfigRepository,
+    TenantEmbeddingConfigRepository, DEFAULT_AUDIT_READ_LIMIT,
 };
 
 // Re-export StorageNode for internal use across modules
@@ -244,6 +247,13 @@ pub mod cf {
     // Stores ProcessingRuleSet for content processing configuration
     pub const PROCESSING_RULES: &str = "processing_rules";
 
+    // Persistent audit log
+    // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0audit\0{node_id}\0{~ts_ms}{~seq}
+    // Stores AuditLog entries (msgpack, field-named) for NodeTypes marked
+    // `auditable`. The inverted fixed-width suffix makes a forward prefix scan
+    // return a node's history newest-first without an in-memory sort.
+    pub const AUDIT_LOG: &str = "audit_log";
+
     // Pending batch aggregator operations (durability layer)
     // Key format: {tenant}\0{repo}\0{branch}\0{queued_at_nanos_be:16}\0{uuid_bytes:16}
     // Stores PendingOpRecord (bincode) so single-op fulltext edits survive
@@ -301,6 +311,7 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
         cf::GRAPH_PROJECTION,
         cf::PROCESSING_RULES,
         cf::PENDING_BATCH_OPS,
+        cf::AUDIT_LOG,
     ]
 }
 

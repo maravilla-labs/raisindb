@@ -33,10 +33,21 @@ impl Operation {
             op_type,
             revision: None, // For this constructor, revision must be set separately
             actor,
+            agent: None, // set separately via `with_agent` when the initiator is non-human
             message: None,
             is_system: false,
             acknowledged_by: HashSet::new(),
         }
+    }
+
+    /// Record the non-human principal that initiated this operation.
+    ///
+    /// A builder rather than a `new` parameter so the ~50 existing construction
+    /// sites (schema, session, identity, branch ops) stay untouched: only the
+    /// paths that actually know an initiator opt in.
+    pub fn with_agent(mut self, agent: Option<String>) -> Self {
+        self.agent = agent;
+        self
     }
 
     /// Get the target of this operation (what it modifies)

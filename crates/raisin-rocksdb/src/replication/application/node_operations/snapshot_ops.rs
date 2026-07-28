@@ -17,7 +17,7 @@ pub(in crate::replication::application) async fn apply_upsert_node_snapshot(
     parent_id: Option<&str>,
     revision: &HLC,
     cf_order_key: &str,
-    _op: &Operation,
+    op: &Operation,
 ) -> Result<()> {
     let workspace = node.workspace.as_deref().unwrap_or("default");
 
@@ -35,6 +35,7 @@ pub(in crate::replication::application) async fn apply_upsert_node_snapshot(
         parent_id,
         revision,
         cf_order_key,
+        super::event_helpers::EventAttribution::from_op(op),
     )?;
 
     tracing::debug!(
@@ -60,7 +61,7 @@ pub(in crate::replication::application) async fn apply_delete_node_snapshot(
     branch: &str,
     node_id: &str,
     revision: &HLC,
-    _op: &Operation,
+    op: &Operation,
 ) -> Result<()> {
     // Load the node to get its full information for deletion
     let node = match applicator.load_latest_node(tenant_id, repo_id, branch, node_id)? {
@@ -82,8 +83,17 @@ pub(in crate::replication::application) async fn apply_delete_node_snapshot(
     let parent_id: Option<&str> = None;
 
     // Apply the delete using the existing replicated delete logic
+    let attribution = super::event_helpers::EventAttribution::from_op(op);
     super::super::replication_core::apply_replicated_delete(
-        applicator, tenant_id, repo_id, branch, workspace, &node, parent_id, revision,
+        applicator,
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        &node,
+        parent_id,
+        revision,
+        attribution,
     )?;
 
     tracing::debug!(
@@ -92,20 +102,9 @@ pub(in crate::replication::application) async fn apply_delete_node_snapshot(
         "Applied DeleteNodeSnapshot with Delete-Wins semantics"
     );
 
-    // Emit NodeEvent for websocket clients
-    super::event_helpers::emit_node_event(
-        &applicator.event_bus,
-        tenant_id,
-        repo_id,
-        branch,
-        workspace,
-        node_id,
-        Some(node.node_type.clone()),
-        Some(node.path.clone()),
-        revision,
-        NodeEventKind::Deleted,
-        "replication",
-    );
+    // NO event emission here: `apply_replicated_delete` above already emitted
+    // `Deleted` for this node with identical arguments. One logical delete must
+    // produce exactly one event (see the live applicator's `apply_delete_node`).
 
     Ok(())
 }

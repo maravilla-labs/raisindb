@@ -15,6 +15,7 @@
 //! - Descending revision encoding (~rev = bitwise_not(revision)) for newest-first ordering
 //! - Prefix-based isolation for tenants, repos, and branches
 
+mod audit_keys;
 mod graph_cache_keys;
 mod graph_projection_keys;
 mod identity_keys;
@@ -30,6 +31,7 @@ mod schema_keys;
 mod spatial_keys;
 
 // Re-export all public items from submodules
+pub use audit_keys::*;
 pub use graph_cache_keys::*;
 pub use graph_projection_keys::*;
 pub use identity_keys::*;

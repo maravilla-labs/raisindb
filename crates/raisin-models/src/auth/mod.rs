@@ -39,6 +39,8 @@
 //! - `access` - WorkspaceAccess, AccessStatus, AccessSettings
 //! - `config` - TenantAuthConfig, AuthProviderConfig, PasswordPolicy
 
+pub mod agent_identity;
+
 mod access;
 mod claims;
 mod config;

@@ -45,6 +45,11 @@ pub(in crate::handlers::mcp) struct HttpFunctionInvoker {
     ///
     /// `None` for system/anonymous callers, where the identity mapping is exact.
     auth: Option<AuthContext>,
+    /// Provenance marker (`mcp:<slug>`) stamped onto the executing context so
+    /// every node this tool writes is auditable as an MCP-originated change.
+    /// Held separately from `auth` so the identity-derived fallback below gets it
+    /// too — otherwise anonymous/system tool writes would lose the marker.
+    agent: String,
 }
 
 impl HttpFunctionInvoker {
@@ -57,6 +62,7 @@ impl HttpFunctionInvoker {
         repo: impl Into<String>,
         branch: impl Into<String>,
         auth: Option<AuthContext>,
+        agent: String,
     ) -> Self {
         Self {
             state,
@@ -64,6 +70,7 @@ impl HttpFunctionInvoker {
             repo: repo.into(),
             branch: branch.into(),
             auth,
+            agent,
         }
     }
 
@@ -77,10 +84,12 @@ impl HttpFunctionInvoker {
         // only a fallback for system/anonymous callers, where it is exact.
         // Deriving it from the identity for a real user drops the resolved
         // permissions and RLS then denies everything — see the field docs.
+        // `self.auth` already carries the agent marker; the identity-derived
+        // fallback is built fresh here, so mark it too.
         let auth = self
             .auth
             .clone()
-            .unwrap_or_else(|| identity.to_auth_context());
+            .unwrap_or_else(|| identity.to_auth_context().with_agent(self.agent.clone()));
 
         // ── Resolution: system context. Reading the `raisin:Function` node that
         // backs an already-declared tool is *routing metadata*, exactly like

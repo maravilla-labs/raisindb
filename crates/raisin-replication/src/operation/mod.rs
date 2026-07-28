@@ -56,6 +56,35 @@ pub struct Operation {
     /// User or system actor that performed this operation
     pub actor: String,
 
+    /// The non-human principal that *initiated* this operation, if any —
+    /// `mcp:<slug>`, `agent:<agent-node-path>`, `trigger:<trigger-node-path>`,
+    /// optionally suffixed with its origin (`agent:/a@trigger:/t`).
+    ///
+    /// WHY it rides on the operation: RaisinDB is a masterless
+    /// eventual-consistency cluster — no replica is "lesser" than the node that
+    /// first accepted the write. An audit entry written when this operation is
+    /// replayed on a peer must therefore carry the SAME attribution the
+    /// originating node recorded. `actor` already replicated; `agent` did not,
+    /// so agent-initiated writes landed unattributed on every other node.
+    ///
+    /// Independent of `actor`: an autonomous workflow or AI agent legitimately
+    /// sets `agent` while `actor` stays `"system"`.
+    ///
+    /// MIXED-VERSION SAFETY: `Operation` is persisted to the oplog and sent over
+    /// TCP/HTTP with `rmp_serde::to_vec_named` / serde_json — both **map**
+    /// encodings keyed by field name (see `repositories/oplog/helpers.rs` and
+    /// `raisin-replication/src/tcp_protocol/message_impl.rs`; the invariant is
+    /// asserted by `operation/tests.rs::compact encoding`). An older peer routes
+    /// the unknown `agent` key to `IgnoredAny` and applies the op unchanged; a
+    /// newer peer reading an older record gets `None` from `#[serde(default)]`.
+    /// Rollback to the previous binary is therefore safe too. This is the same
+    /// additive pattern already used by `revision` and `acknowledged_by`, and is
+    /// explicitly NOT the positional-array trap documented on
+    /// `raisin-context/src/repository/branch.rs` (`to_vec`, arity-sensitive) or
+    /// on `RevisionMeta` — neither of which may gain a field this way.
+    #[serde(default)]
+    pub agent: Option<String>,
+
     /// Optional commit message (for user-initiated commits)
     pub message: Option<String>,
 
