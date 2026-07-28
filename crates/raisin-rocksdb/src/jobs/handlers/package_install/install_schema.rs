@@ -37,11 +37,18 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
     /// Mixins are installed BEFORE node types since node types may reference them.
     /// In `skip` mode: Skip if node type (mixin) already exists
     /// In `overwrite`/`sync` mode: Overwrite existing mixins
+    // Schema registrations are BRANCH-scoped: an install writes its
+    // mixins/node types/archetypes/element types onto the branch the
+    // install targets — this is the explicit mechanism for bringing a
+    // secondary branch's type registry up to date (a `?branch=publish`
+    // install used to write content to `publish` but schema to `main`,
+    // leaving branch writes failing archetype resolution).
     pub(super) async fn install_mixins(
         &self,
         archive: &mut ZipArchive<Cursor<&Vec<u8>>>,
         tenant_id: &str,
         repo_id: &str,
+        branch: &str,
         job_id: &JobId,
         install_mode: InstallMode,
         stats: &mut InstallStats,
@@ -88,7 +95,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
             node_type_repo
                 .upsert(
-                    BranchScope::new(tenant_id, repo_id, "main"),
+                    BranchScope::new(tenant_id, repo_id, branch),
                     node_type,
                     commit,
                 )
@@ -116,6 +123,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         archive: &mut ZipArchive<Cursor<&Vec<u8>>>,
         tenant_id: &str,
         repo_id: &str,
+        branch: &str,
         job_id: &JobId,
         install_mode: InstallMode,
         stats: &mut InstallStats,
@@ -161,7 +169,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
             node_type_repo
                 .upsert(
-                    BranchScope::new(tenant_id, repo_id, "main"),
+                    BranchScope::new(tenant_id, repo_id, branch),
                     node_type,
                     commit,
                 )
@@ -189,6 +197,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         archive: &mut ZipArchive<Cursor<&Vec<u8>>>,
         tenant_id: &str,
         repo_id: &str,
+        branch: &str,
         job_id: &JobId,
         install_mode: InstallMode,
         stats: &mut InstallStats,
@@ -234,7 +243,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
             archetype_repo
                 .upsert(
-                    BranchScope::new(tenant_id, repo_id, "main"),
+                    BranchScope::new(tenant_id, repo_id, branch),
                     archetype,
                     commit,
                 )
@@ -262,6 +271,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
         archive: &mut ZipArchive<Cursor<&Vec<u8>>>,
         tenant_id: &str,
         repo_id: &str,
+        branch: &str,
         job_id: &JobId,
         install_mode: InstallMode,
         stats: &mut InstallStats,
@@ -307,7 +317,7 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
 
             element_type_repo
                 .upsert(
-                    BranchScope::new(tenant_id, repo_id, "main"),
+                    BranchScope::new(tenant_id, repo_id, branch),
                     element_type,
                     commit,
                 )
