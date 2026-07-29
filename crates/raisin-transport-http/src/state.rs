@@ -224,6 +224,15 @@ impl AppState {
         self.rocksdb_storage.as_ref().map(|s| Arc::clone(s.db()))
     }
 
+    /// Get the RocksDB storage handle (RocksDB only).
+    ///
+    /// Public because the operator surface in `raisin-server` constructs
+    /// repositories directly instead of going through a handler in this crate.
+    #[cfg(feature = "storage-rocksdb")]
+    pub fn rocksdb_storage(&self) -> Option<&Arc<raisin_rocksdb::RocksDBStorage>> {
+        self.rocksdb_storage.as_ref()
+    }
+
     /// Create a workspace-scoped NodeService for the given workspace
     /// This is a helper for handlers that extract workspace from the path
     #[deprecated(note = "Use node_service_for_context instead")]

@@ -81,6 +81,20 @@ mod handlers {
     pub mod workspace_access;
     pub mod workspaces;
 }
+/// Identity-provisioning primitives, re-exported for the operator surface.
+///
+/// `raisin-server` mounts superadmin-gated identity-user endpoints under
+/// `/management/admin/*`. Those handlers need the same building blocks the
+/// customer-facing `/api/.../identity-users` handlers use, so the pieces are
+/// exposed here rather than duplicated. Nothing here is tenant- or
+/// application-specific: callers supply the repositories and roles they want.
+#[cfg(feature = "storage-rocksdb")]
+pub mod identity_provisioning {
+    pub use crate::handlers::identity_auth::helpers::{validate_email, validate_password};
+    pub use crate::handlers::identity_auth::user_node::ensure_user_node;
+    pub use crate::handlers::identity_users::IdentityUserResponse;
+}
+
 // Note: router() is only available when s3 feature is disabled (for tests)
 // Production code uses router_with_bin_and_audit() directly
 #[cfg(not(feature = "s3"))]

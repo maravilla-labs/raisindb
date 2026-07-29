@@ -267,6 +267,15 @@ pub fn management_router(
             "/management/admin/reset-password",
             post(admin::passwords::reset_admin_password),
         )
+        // Identity-user provisioning for a managed tenant. Scoped by path
+        // param rather than `x-tenant-id`, because `ensure_tenant_middleware`
+        // silently falls back to the "default" tenant when the header is
+        // absent — too sharp an edge for a cross-tenant write.
+        .route(
+            "/management/admin/tenants/{tenant_id}/identity-users",
+            post(admin::identity_users::create_identity_user)
+                .get(admin::identity_users::list_identity_users),
+        )
         .with_state(app_state.clone());
 
     // Server-wide health, metrics, maintenance, backup, jobs — use

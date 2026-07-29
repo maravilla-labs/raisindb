@@ -31,14 +31,15 @@
 mod config;
 mod config_types;
 mod constants;
-pub(crate) mod helpers;
+pub mod helpers;
 mod local;
 mod magic_link;
 mod oidc;
+mod password;
 mod profile;
 mod session;
 mod types;
-pub(crate) mod user_node;
+pub mod user_node;
 
 // Re-export all public types
 pub use config_types::{
@@ -64,6 +65,9 @@ pub use magic_link::{request_magic_link, request_magic_link_for_repo, verify_mag
 
 #[cfg(feature = "storage-rocksdb")]
 pub use oidc::{oidc_authorize, oidc_callback};
+
+#[cfg(feature = "storage-rocksdb")]
+pub use password::change_password;
 
 #[cfg(feature = "storage-rocksdb")]
 pub use profile::{get_me, get_me_for_repo, get_providers, get_providers_for_repo};

@@ -19,6 +19,8 @@
 //! a new value — there is no rotation API.
 
 #[cfg(feature = "storage-rocksdb")]
+pub mod identity_users;
+#[cfg(feature = "storage-rocksdb")]
 pub mod jobs;
 #[cfg(feature = "storage-rocksdb")]
 pub mod passwords;

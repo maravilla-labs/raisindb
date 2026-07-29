@@ -24,6 +24,9 @@ pub struct IdentityUserResponse {
     pub avatar_url: Option<String>,
     pub email_verified: bool,
     pub is_active: bool,
+    /// Whether the identity must change its password on next login.
+    /// False when the identity has no local credentials (e.g. OIDC-only).
+    pub must_change_password: bool,
     pub linked_providers: Vec<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
@@ -32,6 +35,11 @@ pub struct IdentityUserResponse {
 
 impl From<raisin_models::auth::Identity> for IdentityUserResponse {
     fn from(identity: raisin_models::auth::Identity) -> Self {
+        let must_change_password = identity
+            .local_credentials
+            .as_ref()
+            .map(|c| c.must_change_password)
+            .unwrap_or(false);
         Self {
             id: identity.identity_id,
             email: identity.email,
@@ -39,6 +47,7 @@ impl From<raisin_models::auth::Identity> for IdentityUserResponse {
             avatar_url: identity.avatar_url,
             email_verified: identity.email_verified,
             is_active: identity.is_active,
+            must_change_password,
             linked_providers: identity
                 .linked_providers
                 .iter()

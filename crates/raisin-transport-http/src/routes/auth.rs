@@ -75,6 +75,15 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
             "/auth/refresh",
             post(crate::handlers::identity_auth::refresh_token),
         )
+        // Self-service password change (requires an identity access token).
+        // Separate from the admin-console change-password above, which acts on
+        // the AdminUser store; this one clears `must_change_password` on the
+        // identity's own LocalCredentials.
+        .route(
+            "/auth/change-password",
+            post(crate::handlers::identity_auth::change_password)
+                .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
+        )
         // Logout (requires auth)
         .route("/auth/logout", post(crate::handlers::identity_auth::logout))
         // Session management (requires auth)
@@ -109,6 +118,14 @@ pub(crate) fn auth_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/auth/{repo}/refresh",
             post(crate::handlers::identity_auth::refresh_token),
+        )
+        // Repo-scoped alias so apps that authenticate via /auth/{repo}/login
+        // can stay on one base path. The repo segment is not used to resolve
+        // the account — tenant and identity come from the token either way.
+        .route(
+            "/auth/{repo}/change-password",
+            post(crate::handlers::identity_auth::change_password)
+                .layer(from_fn_with_state(state.clone(), require_auth_middleware)),
         )
         .route(
             "/auth/{repo}/magic-link",
