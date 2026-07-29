@@ -205,9 +205,14 @@ fn default_priority() -> u8 {
     3
 }
 
-/// Task type for human tasks
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Task type for human tasks.
+///
+/// The four named variants are the types the runtime understands
+/// semantically; any other slug is carried through verbatim as
+/// [`TaskType::Custom`] so an application can define its own task
+/// vocabulary without an engine change. The slug is what lands in the
+/// task node's `task_type` property and what a task UI dispatches on.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskType {
     /// Approval decision
     Approval,
@@ -220,6 +225,80 @@ pub enum TaskType {
 
     /// Generic action
     Action,
+
+    /// Application-defined task type, carried through verbatim
+    Custom(String),
+}
+
+// Serialized as its bare slug (not a tagged enum), so `task_type: approval`
+// and `task_type: seat_assignment` are both just strings on the wire and in
+// flow YAML.
+impl Serialize for TaskType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let slug = String::deserialize(deserializer)?;
+        TaskType::parse(&slug).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid task_type '{}': expected a slug of 1-64 chars \
+                 matching [a-z][a-z0-9_-]*",
+                slug
+            ))
+        })
+    }
+}
+
+impl TaskType {
+    /// The slug form written to the task node and matched on by task UIs
+    pub fn as_str(&self) -> &str {
+        match self {
+            TaskType::Approval => "approval",
+            TaskType::Input => "input",
+            TaskType::Review => "review",
+            TaskType::Action => "action",
+            TaskType::Custom(slug) => slug,
+        }
+    }
+
+    /// Parse a task-type slug.
+    ///
+    /// Known slugs map to their named variant; anything else that is a
+    /// valid slug becomes [`TaskType::Custom`]. Returns `None` for a slug
+    /// that is not usable as a task type (see [`is_valid_task_type_slug`]).
+    pub fn parse(slug: &str) -> Option<Self> {
+        match slug {
+            "approval" => Some(TaskType::Approval),
+            "input" => Some(TaskType::Input),
+            "review" => Some(TaskType::Review),
+            "action" => Some(TaskType::Action),
+            other if is_valid_task_type_slug(other) => Some(TaskType::Custom(other.to_string())),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TaskType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether a string is usable as a task-type slug.
+///
+/// Task types are indexed and matched on as identifiers, so the shape is
+/// constrained (length, and `[a-z0-9_-]` after a leading letter) even
+/// though the *set* of values is open.
+pub fn is_valid_task_type_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 64
+        && slug.starts_with(|c: char| c.is_ascii_lowercase())
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 /// Response option for human tasks

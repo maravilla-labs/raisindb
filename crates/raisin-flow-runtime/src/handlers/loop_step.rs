@@ -102,8 +102,9 @@ fn start_for_each_loop(
         FlowError::MissingProperty("collection required for for_each loop".to_string())
     })?;
 
-    // Resolve collection from context
-    let mut items = resolve_collection(&collection_expr, context)?;
+    // Resolve collection from context (shared with the parallel
+    // container's `for_each`, so both accept the same expression forms)
+    let mut items = crate::handlers::collection::resolve_collection(&collection_expr, context)?;
 
     // Optional safety cap on the number of iterations
     if let Some(max) = step.get_u32_property("max_iterations") {
@@ -394,58 +395,6 @@ fn continue_loop(
     })
 }
 
-/// Resolve a collection expression to a Vec<Value>
-fn resolve_collection(expr: &str, context: &FlowContext) -> FlowResult<Vec<Value>> {
-    // Template expressions: "${input.items}", "{{ steps.fetch.rows }}", ...
-    if expr.contains("${") || expr.contains("{{") {
-        let resolved = crate::runtime::DataMapper::map(&Value::String(expr.to_string()), context)?;
-        return match resolved {
-            Value::Array(arr) => Ok(arr),
-            Value::Object(obj) => Ok(obj
-                .iter()
-                .map(|(k, v)| json!({"key": k, "value": v}))
-                .collect()),
-            other => Err(FlowError::InvalidNodeConfiguration(format!(
-                "Collection '{}' resolved to a non-iterable value: {}",
-                expr, other
-            ))),
-        };
-    }
-
-    // Handle variable reference
-    let var_name = expr.trim_start_matches("$.").trim_start_matches('$');
-
-    if let Some(value) = context.variables.get(var_name) {
-        match value {
-            Value::Array(arr) => Ok(arr.clone()),
-            Value::Object(obj) => {
-                // Iterate over object as key-value pairs
-                Ok(obj
-                    .iter()
-                    .map(|(k, v)| json!({"key": k, "value": v}))
-                    .collect())
-            }
-            _ => Err(FlowError::InvalidNodeConfiguration(format!(
-                "Collection '{}' is not iterable",
-                expr
-            ))),
-        }
-    } else if let Some(value) = context.input.get(var_name) {
-        match value {
-            Value::Array(arr) => Ok(arr.clone()),
-            _ => Err(FlowError::InvalidNodeConfiguration(format!(
-                "Collection '{}' is not an array",
-                expr
-            ))),
-        }
-    } else {
-        // Try to parse as JSON array literal
-        serde_json::from_str(expr).map_err(|_| {
-            FlowError::InvalidNodeConfiguration(format!("Could not resolve collection: {}", expr))
-        })
-    }
-}
-
 /// Evaluate a raisin-rel condition against the flow context (same
 /// namespaces as decision steps: input.*, steps.*, trigger.*, variables)
 fn evaluate_rel_condition(condition: &str, context: &FlowContext) -> FlowResult<bool> {
@@ -514,7 +463,7 @@ mod tests {
     #[test]
     fn test_resolve_collection_array() {
         let context = create_test_context();
-        let result = resolve_collection("$items", &context).unwrap();
+        let result = crate::handlers::collection::resolve_collection("$items", &context).unwrap();
         assert_eq!(result.len(), 5);
     }
 

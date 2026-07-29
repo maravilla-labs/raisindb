@@ -99,6 +99,15 @@ pub enum DesignerNode {
         /// Loop configuration (only for loop containers)
         #[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
         loop_config: Option<DesignerLoopConfig>,
+        /// Fan-out configuration (parallel containers only): run the
+        /// container's child subgraph once per item of a runtime collection
+        /// and join all of the runs
+        #[serde(rename = "fan_out", skip_serializing_if = "Option::is_none")]
+        fan_out: Option<DesignerFanOutConfig>,
+        /// Merge strategy for parallel containers
+        /// (`merge_all` | `first_success` | `all_success`)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        merge_strategy: Option<String>,
         /// Shared task prompt for competition containers (template
         /// expressions supported); children may override with their own
         /// `prompt`
@@ -142,6 +151,56 @@ pub struct DesignerStepProperties {
     /// Condition expression (REL)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+
+    // Decision step (step_type = decision, or any step with a `condition`)
+    /// Node id to run when `condition` is true. Defaults to the next
+    /// sibling, so a decision that only names `no_branch` reads as
+    /// "skip ahead unless".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yes_branch: Option<String>,
+
+    /// Node id to run when `condition` is false. Defaults to the next sibling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_branch: Option<String>,
+
+    // Wait step (step_type = wait)
+    /// What the step waits for: `delay` | `until` | `event` | `cron`
+    /// (defaults to `delay`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_type: Option<String>,
+
+    /// Duration for a `delay` wait, e.g. `"30m"`, `"1h"` (templates allowed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+
+    /// Absolute timestamp for an `until` wait (templates allowed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+
+    /// Event type for an `event` wait
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+
+    /// Optional deadline for an `event` wait
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+
+    /// Cron expression for a `cron` wait
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+
+    // Sub-flow step (step_type = sub_flow)
+    /// The flow to invoke, as a path or reference
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_ref: Option<RaisinReference>,
+
+    /// Input mapping for the child flow (template expressions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_mapping: Option<serde_json::Value>,
+
+    /// Run the child flow asynchronously
+    #[serde(rename = "async", skip_serializing_if = "Option::is_none")]
+    pub async_mode: Option<bool>,
 
     /// Key for payload data
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,6 +353,12 @@ pub enum DesignerStepType {
     Chat,
     /// Human task step (approval / input / review / action)
     HumanTask,
+    /// Pause for time, an event, or a cron point
+    Wait,
+    /// Invoke another deployed flow as a step
+    SubFlow,
+    /// Two-way branch on a REL condition
+    Decision,
 }
 
 /// Retry configuration
@@ -424,6 +489,29 @@ pub struct DesignerLoopConfig {
 
 fn default_loop_item() -> String {
     "item".to_string()
+}
+
+/// Fan-out configuration for a parallel container.
+///
+/// Without it, a parallel container's children ARE its branches - a fixed
+/// set authored in the designer. With it, the container has exactly one
+/// child subgraph that runs once per item of a runtime collection, and the
+/// container joins all of those runs. That is the difference between "these
+/// three things happen at once" and "one of these happens per row", and the
+/// latter is what a per-row human task needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignerFanOutConfig {
+    /// Collection expression to fan out over, e.g.
+    /// `${steps.plan.items}` or `{{ input.rows }}`. Must resolve to an
+    /// array (objects iterate as `{key, value}` pairs) - the same forms the
+    /// loop container's `over` accepts.
+    pub over: String,
+
+    /// Safety cap on the number of branches created. Fan-out width comes
+    /// from runtime data, so it is bounded; defaults to the runtime's own
+    /// cap when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_branches: Option<u32>,
 }
 
 /// Step error behavior

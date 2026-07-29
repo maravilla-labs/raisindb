@@ -12,6 +12,40 @@ use tracing::{debug, instrument};
 /// Wait reason for human tasks
 pub(super) const WAIT_REASON_HUMAN_TASK: &str = "human_task";
 
+/// Priority assigned when a step does not specify one (1-5, 5 highest)
+const DEFAULT_TASK_PRIORITY: i64 = 3;
+
+/// Coerce a post-template-resolution property value to an integer.
+///
+/// Templates always resolve to JSON strings, so a resolved deadline arrives
+/// as `"259200"` rather than `259200`; both forms are accepted. `Ok(None)`
+/// means absent (or an unresolvable expression); `Err` carries the offending
+/// value, which is an authoring error worth reporting rather than ignoring.
+fn coerce_i64(value: Option<&Value>) -> Result<Option<i64>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        // A float truncates rather than failing (e.g. 1.5 -> 1)
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f as i64))
+            .map(Some)
+            .ok_or_else(|| n.to_string()),
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+                .parse::<i64>()
+                .ok()
+                .or_else(|| trimmed.parse::<f64>().ok().map(|f| f as i64))
+                .map(Some)
+                .ok_or_else(|| s.clone())
+        }
+        Some(other) => Err(other.to_string()),
+    }
+}
+
 /// Handler for human task steps
 ///
 /// Creates inbox tasks for user interaction and pauses flow execution.
@@ -34,16 +68,16 @@ impl HumanTaskHandler {
             ))
         })?;
 
-        match task_type_str.as_str() {
-            "approval" => Ok(TaskType::Approval),
-            "input" => Ok(TaskType::Input),
-            "review" => Ok(TaskType::Review),
-            "action" => Ok(TaskType::Action),
-            _ => Err(FlowError::InvalidNodeConfiguration(format!(
-                "Invalid task_type '{}' for human task step '{}'",
+        // The named types (approval/input/review/action) are the ones the
+        // runtime understands semantically; any other valid slug is an
+        // application-defined type and is carried through verbatim.
+        TaskType::parse(&task_type_str).ok_or_else(|| {
+            FlowError::InvalidNodeConfiguration(format!(
+                "Invalid task_type '{}' for human task step '{}': expected a \
+                 slug of 1-64 chars matching [a-z][a-z0-9_-]*",
                 task_type_str, step.id
-            ))),
-        }
+            ))
+        })
     }
 
     /// Extract task title from step properties
@@ -126,35 +160,24 @@ impl HumanTaskHandler {
         &self,
         step: &FlowNode,
         context: &FlowContext,
-        task_type: TaskType,
+        task_type: &TaskType,
     ) -> FlowResult<Value> {
         let title = self.get_title(step)?;
         let assignee = self.get_assignee(step)?;
         let description = step.get_string("description");
         let options = self.get_options(step)?;
-        let due_in_seconds = step.get_i64_property("due_in_seconds");
-        let priority = step
-            .get_u32_property("priority")
-            .map(|v| v as u8)
-            .unwrap_or(3);
         let input_schema = step.get_property("input_schema").cloned();
 
         debug!(
-            "Building task properties: type={:?}, title={}, assignee={}",
+            "Building task properties: type={}, title={}, assignee={}",
             task_type, title, assignee
         );
 
         // Build task properties JSON
         let mut task_props = serde_json::json!({
-            "task_type": match task_type {
-                TaskType::Approval => "approval",
-                TaskType::Input => "input",
-                TaskType::Review => "review",
-                TaskType::Action => "action",
-            },
+            "task_type": task_type.as_str(),
             "title": title,
             "assignee": assignee,
-            "priority": priority,
             "status": "pending",
             "flow_instance_id": context.instance_id,
             "step_id": step.id,
@@ -183,13 +206,54 @@ impl HumanTaskHandler {
             task_props["data"] = data;
         }
 
-        if let Some(due_seconds) = due_in_seconds {
-            task_props["due_in_seconds"] = Value::Number(due_seconds.into());
+        // `due_in_seconds` and `priority` are inserted RAW (they may be
+        // `${...}` / `{{...}}` expressions, e.g. a per-policy deadline read
+        // from a node) and coerced to numbers only AFTER the mapper below
+        // has resolved them. Reading them as numbers here instead would
+        // silently drop any templated value - a template resolves to a
+        // JSON string, and a string is not an i64.
+        if let Some(due) = step.get_property("due_in_seconds").cloned() {
+            task_props["due_in_seconds"] = due;
         }
+        task_props["priority"] = step
+            .get_property("priority")
+            .cloned()
+            .unwrap_or_else(|| Value::from(DEFAULT_TASK_PRIORITY));
 
         // Resolve template expressions (e.g. "Approve order {{ input.order_id }}")
-        // in title, description, assignee, option labels, etc.
-        crate::runtime::DataMapper::map(&task_props, context)
+        // in title, description, assignee, option labels, deadline, etc.
+        let mut resolved = crate::runtime::DataMapper::map(&task_props, context)?;
+
+        // Coerce the two numeric fields post-resolution. A template that
+        // resolved to a numeric string ("259200") counts as a number here;
+        // anything genuinely non-numeric is an authoring error and is
+        // reported rather than silently ignored.
+        let bad_value = |field: &str, raw: String| {
+            FlowError::InvalidNodeConfiguration(format!(
+                "Human task step '{}' property '{}' resolved to a non-numeric value: {}",
+                step.id, field, raw
+            ))
+        };
+
+        match coerce_i64(resolved.get("due_in_seconds"))
+            .map_err(|raw| bad_value("due_in_seconds", raw))?
+        {
+            // An unresolvable deadline leaves the task WITHOUT one, which is
+            // the safe outcome; a bogus deadline would not be.
+            None => {
+                if let Some(obj) = resolved.as_object_mut() {
+                    obj.remove("due_in_seconds");
+                }
+            }
+            Some(secs) => resolved["due_in_seconds"] = Value::from(secs),
+        }
+
+        let priority = coerce_i64(resolved.get("priority"))
+            .map_err(|raw| bad_value("priority", raw))?
+            .unwrap_or(DEFAULT_TASK_PRIORITY);
+        resolved["priority"] = Value::from(priority.clamp(1, 5));
+
+        Ok(resolved)
     }
 
     /// Generate the inbox task path for a human task wait.

@@ -18,6 +18,7 @@ pub mod agent_step;
 pub mod ai_container;
 pub mod ai_tool_loop;
 pub mod chat_step;
+pub(crate) mod collection;
 pub mod context_injection;
 pub mod conversation_persistence;
 pub mod decision;

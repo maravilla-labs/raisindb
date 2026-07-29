@@ -64,6 +64,14 @@ where
                             .get("input")
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
+                        // Set when a parallel container fans out over a
+                        // DEPLOYED flow: the child echoes it back on
+                        // completion so the join correlates each result with
+                        // the item that produced it.
+                        let branch_id = payload
+                            .get("branch_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
 
                         let (workflow_data, flow_version) =
                             load_flow_definition(&deps, &tenant_id, &repo_id, &branch, &flow_path)
@@ -80,7 +88,7 @@ where
                             input,
                             parent_instance_id,
                             parent_step_id,
-                            None,
+                            branch_id,
                         )
                         .await;
                     }
@@ -286,10 +294,7 @@ where
                         if let Ok(auth) = serde_json::to_value(
                             raisin_models::auth::AuthContext::system().with_agent(marker),
                         ) {
-                            metadata.insert(
-                                raisin_rocksdb::AUTH_CONTEXT_KEY.to_string(),
-                                auth,
-                            );
+                            metadata.insert(raisin_rocksdb::AUTH_CONTEXT_KEY.to_string(), auth);
                         }
                     }
 

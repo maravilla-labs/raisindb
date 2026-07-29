@@ -72,7 +72,8 @@ fn completer_from_auth(auth: &Option<AuthContext>) -> TaskCompleter {
 /// Creates a human task (raisin:InboxTask) in the assignee's inbox.
 ///
 /// Required request fields:
-/// - `task_type`: "approval" | "input" | "review" | "action"
+/// - `task_type`: "approval" | "input" | "review" | "action", or any
+///   application-defined slug matching `[a-z][a-z0-9_-]{0,63}`
 /// - `title`: Task title string
 /// - `assignee`: User path (e.g., "/users/manager" or "users/manager")
 ///
@@ -122,10 +123,16 @@ where
                     raisin_error::Error::Validation("assignee is required".to_string())
                 })?;
 
-            // Validate task_type
-            if !["approval", "input", "review", "action"].contains(&task_type) {
+            // Validate the SHAPE of task_type, not the set of values.
+            // approval/input/review/action are the types the workflow runtime
+            // understands semantically; any other slug is an
+            // application-defined type and is stored verbatim for the task UI
+            // to dispatch on.
+            if !raisin_flow_runtime::types::is_valid_task_type_slug(task_type) {
                 return Err(raisin_error::Error::Validation(format!(
-                    "Invalid task_type: {}. Must be one of: approval, input, review, action",
+                    "Invalid task_type: {}. Expected a slug of 1-64 characters \
+                     matching [a-z][a-z0-9_-]* (canonical types: approval, \
+                     input, review, action)",
                     task_type
                 )));
             }

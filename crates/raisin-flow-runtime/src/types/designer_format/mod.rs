@@ -21,7 +21,7 @@ pub use config_types::{
     DesignerToolMode, HandoffTarget,
 };
 pub use types::{
-    DesignerContainerRule, DesignerContainerType, DesignerErrorStrategy, DesignerFlowDefinition,
-    DesignerLoopConfig, DesignerNode, DesignerStepProperties, DesignerStepType,
-    ExecutionIdentityMode, RaisinReference, RetryConfig, StepErrorBehavior,
+    DesignerContainerRule, DesignerContainerType, DesignerErrorStrategy, DesignerFanOutConfig,
+    DesignerFlowDefinition, DesignerLoopConfig, DesignerNode, DesignerStepProperties,
+    DesignerStepType, ExecutionIdentityMode, RaisinReference, RetryConfig, StepErrorBehavior,
 };

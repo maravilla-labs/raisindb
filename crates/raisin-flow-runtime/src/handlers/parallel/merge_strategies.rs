@@ -65,6 +65,19 @@ impl ParallelHandler {
     }
 
     /// Merge all outputs into context (regardless of success/failure)
+    ///
+    /// The merged object carries each branch two ways:
+    ///
+    /// - `branch_{index}` - positional, as it has always been
+    /// - `branches` - an ordered array, each entry tagged with its
+    ///   `branch_id` and `instance_id`. A dynamic fan-out's branch id is the
+    ///   only handle on WHICH item produced a result, so a positional-only
+    ///   merge would lose the correlation.
+    ///
+    /// Branch ids are deliberately NOT also spliced in as top-level keys:
+    /// author-chosen ids would share a namespace with `branch_0` / `branches`
+    /// (a branch literally named `branches` would shadow the array), and they
+    /// would store every result a third time in the persisted step output.
     pub(super) fn merge_all_outputs(
         &self,
         step: &FlowNode,
@@ -72,23 +85,29 @@ impl ParallelHandler {
         child_statuses: &[ChildFlowStatus],
     ) -> FlowResult<StepResult> {
         let mut merged_output = serde_json::Map::new();
+        let mut ordered = Vec::with_capacity(child_statuses.len());
 
         for (index, child_status) in child_statuses.iter().enumerate() {
-            let branch_key = format!("branch_{}", index);
-
             let branch_result = serde_json::json!({
                 "status": child_status.status,
                 "output": child_status.output,
                 "error": child_status.error,
             });
 
-            merged_output.insert(branch_key, branch_result);
+            merged_output.insert(format!("branch_{}", index), branch_result.clone());
+
+            let mut entry = branch_result;
+            entry["branch_id"] = Value::String(child_status.branch_id.clone());
+            entry["instance_id"] = Value::String(child_status.instance_id.clone());
+            ordered.push(entry);
 
             // If child has output, merge it into context
             if let Some(output) = &child_status.output {
                 context.merge_output(output.clone());
             }
         }
+
+        merged_output.insert("branches".to_string(), Value::Array(ordered));
 
         Ok(StepResult::Continue {
             next_node_id: step.next_node.clone().unwrap_or_else(|| "end".to_string()),

@@ -128,6 +128,30 @@ impl DesignerFlowDefinition {
         next
     }
 
+    /// Lower a sequence of designer nodes into a self-contained inline flow
+    /// definition (`{ nodes: [start, …, end] }`) suitable for a parallel
+    /// branch - a child flow instance, so it needs its own start/end.
+    fn lower_children_to_inline_flow(&self, children: &[DesignerNode]) -> Value {
+        let mut branch_nodes: Vec<FlowNode> = Vec::new();
+        let mut branch_edges: Vec<FlowEdge> = Vec::new();
+        let entry = self.lower_nodes(children, "end", &mut branch_nodes, &mut branch_edges);
+
+        let mut nodes_json: Vec<Value> = vec![serde_json::json!({
+            "id": "start",
+            "step_type": "start",
+            "next_node": entry,
+        })];
+        for node in &branch_nodes {
+            nodes_json.push(serde_json::to_value(node).unwrap_or(Value::Null));
+        }
+        nodes_json.push(serde_json::json!({
+            "id": "end",
+            "step_type": "end",
+        }));
+
+        serde_json::json!({ "nodes": nodes_json })
+    }
+
     /// Lower a single designer node into executable runtime node(s).
     /// Returns the entry id for the lowered construct (always the node's
     /// own id, so rules / error edges referencing it keep working).
@@ -147,6 +171,7 @@ impl DesignerFlowDefinition {
             } => {
                 let mut runtime_node =
                     convert_step_node(id, properties, on_error, error_edge, self);
+                fill_decision_branches(&mut runtime_node, successor);
                 runtime_node.next_node = Some(successor.to_string());
                 edges.push(FlowEdge {
                     from: id.clone(),
@@ -167,6 +192,8 @@ impl DesignerFlowDefinition {
                 router,
                 referee,
                 loop_config,
+                fan_out,
+                merge_strategy,
                 prompt,
                 timeout_ms,
             } => match container_type {
@@ -364,40 +391,60 @@ impl DesignerFlowDefinition {
                     id.clone()
                 }
 
-                // Parallel: each child becomes an inline branch flow
+                // Parallel: each child becomes an inline branch flow, or -
+                // with a fan_out config - the children become ONE branch
+                // subgraph run once per item of a runtime collection.
                 DesignerContainerType::Parallel => {
-                    let mut branches: Vec<Value> = Vec::new();
-                    for child in children {
-                        let mut branch_nodes: Vec<FlowNode> = Vec::new();
-                        let mut branch_edges: Vec<FlowEdge> = Vec::new();
-                        let branch_entry =
-                            self.lower_node(child, "end", &mut branch_nodes, &mut branch_edges);
+                    let mut props = HashMap::new();
 
-                        let mut nodes_json: Vec<Value> = Vec::new();
-                        nodes_json.push(serde_json::json!({
-                            "id": "start",
-                            "step_type": "start",
-                            "next_node": branch_entry,
-                        }));
-                        for n in &branch_nodes {
-                            nodes_json.push(serde_json::to_value(n).unwrap_or(Value::Null));
+                    match fan_out {
+                        Some(cfg) => {
+                            // All children lower into a single branch
+                            // subgraph; the fan-out width comes from the
+                            // collection, not from the child count.
+                            let branch_flow = self.lower_children_to_inline_flow(children);
+                            props.insert("for_each".to_string(), Value::String(cfg.over.clone()));
+                            if let Some(max) = cfg.max_branches {
+                                props.insert("max_branches".to_string(), Value::Number(max.into()));
+                            }
+                            props.insert(
+                                "branch".to_string(),
+                                serde_json::json!({
+                                    "id": format!("{}-${{index}}", id),
+                                    "flow_definition": branch_flow,
+                                    // `item` / `index` are bound by the
+                                    // runtime; passing them explicitly keeps
+                                    // the child input shape stable and
+                                    // self-describing.
+                                    "input_mapping": {
+                                        "item": "${item}",
+                                        "index": "${index}",
+                                    },
+                                }),
+                            );
                         }
-                        nodes_json.push(serde_json::json!({
-                            "id": "end",
-                            "step_type": "end",
-                        }));
-
-                        branches.push(serde_json::json!({
-                            "id": child.id(),
-                            "flow_definition": { "nodes": nodes_json },
-                        }));
+                        None => {
+                            let mut branches: Vec<Value> = Vec::new();
+                            for child in children {
+                                branches.push(serde_json::json!({
+                                    "id": child.id(),
+                                    "flow_definition":
+                                        self.lower_children_to_inline_flow(std::slice::from_ref(
+                                            child,
+                                        )),
+                                }));
+                            }
+                            props.insert("branches".to_string(), Value::Array(branches));
+                        }
                     }
 
-                    let mut props = HashMap::new();
-                    props.insert("branches".to_string(), Value::Array(branches));
                     props.insert(
                         "merge_strategy".to_string(),
-                        Value::String("merge_all".to_string()),
+                        Value::String(
+                            merge_strategy
+                                .clone()
+                                .unwrap_or_else(|| "merge_all".to_string()),
+                        ),
                     );
                     if let Some(timeout) = timeout_ms {
                         props.insert("timeout_ms".to_string(), Value::Number((*timeout).into()));
@@ -599,6 +646,12 @@ impl DesignerFlowDefinition {
         {
             // Explicit human task (approval / input / review / action)
             StepType::HumanTask
+        } else if matches!(props.step_type, Some(DesignerStepType::Wait)) {
+            StepType::Wait
+        } else if matches!(props.step_type, Some(DesignerStepType::SubFlow)) {
+            StepType::SubFlow
+        } else if matches!(props.step_type, Some(DesignerStepType::Decision)) {
+            StepType::Decision
         } else if props.function_ref.is_some() {
             StepType::FunctionStep
         } else if matches!(props.step_type, Some(DesignerStepType::AiAgent)) {
@@ -614,6 +667,24 @@ impl DesignerFlowDefinition {
         } else {
             StepType::FunctionStep // Default to function step
         }
+    }
+}
+
+/// Default a decision step's unnamed arm to the sequential successor.
+///
+/// The runtime's decision handler requires BOTH `yes_branch` and
+/// `no_branch`, but designer format is sequential: the useful spelling is to
+/// name only the arm that diverges and let the other fall through to the
+/// next sibling. Without this, a designer decision step lowered to a node
+/// the handler rejects at run time for a missing property.
+fn fill_decision_branches(node: &mut FlowNode, successor: &str) {
+    if node.step_type != StepType::Decision {
+        return;
+    }
+    for arm in ["yes_branch", "no_branch"] {
+        node.properties
+            .entry(arm.to_string())
+            .or_insert_with(|| Value::String(successor.to_string()));
     }
 }
 
@@ -674,6 +745,63 @@ fn convert_step_node(
     if let Some(cond) = &properties.condition {
         props.insert("condition".to_string(), Value::String(cond.clone()));
     }
+
+    // Decision branches. Whichever arm is not named falls through to the
+    // next sibling; the caller fills that in once the successor is known
+    // (`fill_decision_branches`), so a decision step needs only the arm
+    // that actually diverges.
+    if let Some(target) = &properties.yes_branch {
+        props.insert("yes_branch".to_string(), Value::String(target.clone()));
+    }
+    if let Some(target) = &properties.no_branch {
+        props.insert("no_branch".to_string(), Value::String(target.clone()));
+    }
+
+    // Wait step
+    if let Some(wait_type) = &properties.wait_type {
+        props.insert("wait_type".to_string(), Value::String(wait_type.clone()));
+    } else if step_type == StepType::Wait {
+        // `delay` is the overwhelmingly common case and the handler's own
+        // default vocabulary; spelling it out keeps the lowered node
+        // self-describing.
+        props.insert("wait_type".to_string(), Value::String("delay".to_string()));
+    }
+    if let Some(duration) = &properties.duration {
+        props.insert("duration".to_string(), Value::String(duration.clone()));
+    }
+    if let Some(until) = &properties.until {
+        props.insert("until".to_string(), Value::String(until.clone()));
+    }
+    if let Some(event_type) = &properties.event_type {
+        props.insert("event_type".to_string(), Value::String(event_type.clone()));
+    }
+    if let Some(timeout) = &properties.timeout {
+        props.insert("timeout".to_string(), Value::String(timeout.clone()));
+    }
+    if let Some(cron) = &properties.cron {
+        props.insert("cron".to_string(), Value::String(cron.clone()));
+    }
+
+    // Sub-flow step
+    if let Some(flow_ref) = &properties.flow_ref {
+        let path = flow_ref
+            .raisin_path
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| flow_ref.raisin_ref.clone());
+        props.insert("flow_ref".to_string(), Value::String(path));
+        props.insert(
+            "flow_workspace".to_string(),
+            Value::String(flow_ref.raisin_workspace.clone()),
+        );
+    }
+    if let Some(mapping) = &properties.input_mapping {
+        props.insert("input_mapping".to_string(), mapping.clone());
+    }
+    if let Some(async_mode) = properties.async_mode {
+        props.insert("async".to_string(), Value::Bool(async_mode));
+    }
+
     if let Some(key) = &properties.payload_key {
         props.insert("payload_key".to_string(), Value::String(key.clone()));
     }

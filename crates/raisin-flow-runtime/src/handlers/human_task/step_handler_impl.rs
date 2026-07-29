@@ -54,7 +54,7 @@ impl StepHandler for HumanTaskHandler {
         let task_type = self.get_task_type(step)?;
 
         // Build task properties (template expressions resolved against context)
-        let mut task_properties = self.build_task_properties(step, context, task_type)?;
+        let mut task_properties = self.build_task_properties(step, context, &task_type)?;
 
         // Use the resolved assignee (may contain templates like
         // "/users/{{ input.approver }}")
@@ -183,12 +183,7 @@ impl StepHandler for HumanTaskHandler {
                     // target_path lands in WaitInfo so timeout expiry can
                     // mark the inbox task as expired
                     "target_path": task_path,
-                    "task_type": match task_type {
-                        TaskType::Approval => "approval",
-                        TaskType::Input => "input",
-                        TaskType::Review => "review",
-                        TaskType::Action => "action",
-                    },
+                    "task_type": task_type.as_str(),
                     "step_id": step.id,
                     "assignee": assignee,
                 });

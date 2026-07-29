@@ -16,8 +16,8 @@ pub mod definition;
 pub mod node_types;
 
 pub use config_types::{
-    AIContainerConfig, AiExecutionConfig, DecisionConfig, FunctionStepConfig, HumanTaskConfig,
-    TaskOption, TaskType, ToolMode,
+    is_valid_task_type_slug, AIContainerConfig, AiExecutionConfig, DecisionConfig,
+    FunctionStepConfig, HumanTaskConfig, TaskOption, TaskType, ToolMode,
 };
 pub use definition::FlowDefinition;
 pub use node_types::{FlowEdge, FlowMetadata, FlowNode, StepType};

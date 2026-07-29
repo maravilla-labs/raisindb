@@ -437,3 +437,241 @@ fn test_or_container_router_only_carries_container_id() {
     assert!(matches!(router.step_type, StepType::AgentDecision));
     assert_eq!(router.next_node.as_deref(), Some("end"));
 }
+
+/// A parallel container WITHOUT fan_out keeps its historical shape: one
+/// static branch per child, default merge strategy.
+#[test]
+fn test_parallel_container_static_branches() {
+    let json = r#"{
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "fork",
+                "node_type": "raisin:FlowContainer",
+                "container_type": "parallel",
+                "children": [
+                    { "id": "a", "node_type": "raisin:FlowStep", "properties": {} },
+                    { "id": "b", "node_type": "raisin:FlowStep", "properties": {} }
+                ]
+            }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition = serde_json::from_str(json).unwrap();
+    let runtime = def.to_runtime_format();
+
+    let parallel = runtime
+        .nodes
+        .iter()
+        .find(|n| n.step_type == StepType::Parallel)
+        .expect("parallel container lowers to a parallel step");
+
+    let branches = parallel.get_array("branches").expect("static branches");
+    assert_eq!(branches.len(), 2);
+    assert_eq!(branches[0]["id"], "a");
+    assert_eq!(branches[1]["id"], "b");
+    assert!(parallel.get_property("for_each").is_none());
+    assert_eq!(
+        parallel.get_string_property("merge_strategy").as_deref(),
+        Some("merge_all")
+    );
+}
+
+/// With fan_out, the children become ONE branch subgraph instantiated per
+/// item of a runtime collection - this is what makes a per-row human task
+/// (one task per item, then join) expressible from the designer format.
+#[test]
+fn test_parallel_container_fan_out_lowering() {
+    let json = r#"{
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "collect",
+                "node_type": "raisin:FlowContainer",
+                "container_type": "parallel",
+                "fan_out": { "over": "${steps.plan.items}", "max_branches": 50 },
+                "merge_strategy": "all_success",
+                "children": [
+                    { "id": "approve", "node_type": "raisin:FlowStep", "properties": {} }
+                ]
+            }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition = serde_json::from_str(json).unwrap();
+    let runtime = def.to_runtime_format();
+
+    let parallel = runtime
+        .nodes
+        .iter()
+        .find(|n| n.step_type == StepType::Parallel)
+        .expect("parallel container lowers to a parallel step");
+
+    assert_eq!(
+        parallel.get_string_property("for_each").as_deref(),
+        Some("${steps.plan.items}")
+    );
+    assert_eq!(parallel.get_u32_property("max_branches"), Some(50));
+    assert_eq!(
+        parallel.get_string_property("merge_strategy").as_deref(),
+        Some("all_success")
+    );
+    // A fan-out has a branch TEMPLATE, not a branch list
+    assert!(parallel.get_property("branches").is_none());
+
+    let branch = parallel.get_object("branch").expect("branch template");
+    assert_eq!(branch["id"], "collect-${index}");
+    assert_eq!(branch["input_mapping"]["item"], "${item}");
+    // The child subgraph is a self-contained child flow
+    let nodes = branch["flow_definition"]["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["id"], "start");
+    assert_eq!(nodes[0]["next_node"], "approve");
+    assert_eq!(nodes.last().unwrap()["id"], "end");
+}
+
+/// `wait`, `sub_flow`, and free-standing `decision` used to be runtime-format
+/// only, so needing any one of them forced the WHOLE flow out of the
+/// designer format (the two formats cannot be mixed in one definition).
+#[test]
+fn test_wait_and_sub_flow_steps_in_designer_format() {
+    let json = r#"{
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "cool_off",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Cool off",
+                    "step_type": "wait",
+                    "duration": "30m"
+                }
+            },
+            {
+                "id": "run_child",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Run child flow",
+                    "step_type": "sub_flow",
+                    "flow_ref": "/flows/settle-order",
+                    "input_mapping": { "order_id": "${input.order_id}" },
+                    "async": true
+                }
+            }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition = serde_json::from_str(json).unwrap();
+    let runtime = def.to_runtime_format();
+
+    let wait = runtime
+        .nodes
+        .iter()
+        .find(|n| n.id == "cool_off")
+        .expect("wait step lowers");
+    assert_eq!(wait.step_type, StepType::Wait);
+    // wait_type defaults to delay so the lowered node is self-describing
+    assert_eq!(
+        wait.get_string_property("wait_type").as_deref(),
+        Some("delay")
+    );
+    assert_eq!(wait.get_string_property("duration").as_deref(), Some("30m"));
+
+    let sub = runtime
+        .nodes
+        .iter()
+        .find(|n| n.id == "run_child")
+        .expect("sub_flow step lowers");
+    assert_eq!(sub.step_type, StepType::SubFlow);
+    assert_eq!(
+        sub.get_string_property("flow_ref").as_deref(),
+        Some("/flows/settle-order")
+    );
+    assert_eq!(sub.get_bool_property("async"), Some(true));
+    assert_eq!(
+        sub.get_object("input_mapping").unwrap()["order_id"],
+        "${input.order_id}"
+    );
+}
+
+/// A designer decision names only the arm that diverges; the other falls
+/// through to the next sibling. Both must be present on the lowered node or
+/// the decision handler rejects it at run time for a missing property.
+#[test]
+fn test_decision_step_defaults_unnamed_arm_to_successor() {
+    let json = r#"{
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "needs_review",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Large order?",
+                    "step_type": "decision",
+                    "condition": "input.amount > 500",
+                    "yes_branch": "escalate"
+                }
+            },
+            { "id": "ship", "node_type": "raisin:FlowStep", "properties": { "action": "Ship" } },
+            { "id": "escalate", "node_type": "raisin:FlowStep", "properties": { "action": "Escalate" } }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition = serde_json::from_str(json).unwrap();
+    let runtime = def.to_runtime_format();
+
+    let decision = runtime
+        .nodes
+        .iter()
+        .find(|n| n.id == "needs_review")
+        .expect("decision step lowers");
+    assert_eq!(decision.step_type, StepType::Decision);
+    assert_eq!(
+        decision.get_string_property("condition").as_deref(),
+        Some("input.amount > 500")
+    );
+    assert_eq!(
+        decision.get_string_property("yes_branch").as_deref(),
+        Some("escalate")
+    );
+    // Unnamed arm falls through to the next sibling
+    assert_eq!(
+        decision.get_string_property("no_branch").as_deref(),
+        Some("ship")
+    );
+}
+
+/// A step carrying only a bare `condition` (no explicit step_type) is still
+/// a decision — and must not lower to a node the handler rejects.
+#[test]
+fn test_bare_condition_step_gets_both_branches() {
+    let json = r#"{
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "gate",
+                "node_type": "raisin:FlowStep",
+                "properties": { "action": "Gate", "condition": "input.ok == true" }
+            },
+            { "id": "after", "node_type": "raisin:FlowStep", "properties": { "action": "After" } }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition = serde_json::from_str(json).unwrap();
+    let runtime = def.to_runtime_format();
+
+    let gate = runtime.nodes.iter().find(|n| n.id == "gate").unwrap();
+    assert_eq!(gate.step_type, StepType::Decision);
+    assert_eq!(
+        gate.get_string_property("yes_branch").as_deref(),
+        Some("after")
+    );
+    assert_eq!(
+        gate.get_string_property("no_branch").as_deref(),
+        Some("after")
+    );
+}

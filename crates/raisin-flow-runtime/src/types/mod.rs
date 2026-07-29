@@ -25,8 +25,9 @@ pub use context::{
 };
 pub use events::FlowExecutionEvent;
 pub use flow_definition::{
-    AIContainerConfig, AiExecutionConfig, DecisionConfig, FlowDefinition, FlowEdge, FlowMetadata,
-    FlowNode, FunctionStepConfig, HumanTaskConfig, StepType, TaskOption, TaskType, ToolMode,
+    is_valid_task_type_slug, AIContainerConfig, AiExecutionConfig, DecisionConfig, FlowDefinition,
+    FlowEdge, FlowMetadata, FlowNode, FunctionStepConfig, HumanTaskConfig, StepType, TaskOption,
+    TaskType, ToolMode,
 };
 pub use flow_instance::{FlowInstance, FlowMetrics, FlowStatus, WaitInfo, WaitType};
 pub use parallel::{ChildFlowStatus, CreateChildFlowRequest};

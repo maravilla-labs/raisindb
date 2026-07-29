@@ -12,7 +12,12 @@ icon: inbox
 # renders (e.g. the linked-site conflict change set the Inbox tree reads). Both
 # raisin.tasks.create and the human_task flow step persist it; without a declared
 # property the strict type silently dropped `data` on write. Bump forces resync.
-version: 4
+# v5: dropped the closed `enum` on task_type. approval/input/review/action stay
+# the canonical types the runtime understands semantically, but an application
+# may define its own task vocabulary (e.g. a triage or dispatch type) without an
+# engine change; the writers validate the SHAPE of the slug instead of the set.
+# Bump forces resync so existing repositories accept custom types on upgrade.
+version: 5
 strict: true
 indexable: true
 index_types: [Property]
@@ -21,8 +26,11 @@ properties:
     type: String
     required: true
     title: Task Type
-    description: Type of task requiring user action
-    enum: [approval, input, review, action]
+    description: >-
+      Type of task requiring user action. Canonical values understood by the
+      workflow runtime are approval, input, review and action; any other slug
+      matching [a-z][a-z0-9_-]{0,63} is an application-defined type and is
+      carried through verbatim for the task UI to dispatch on.
     index: [Property]
 
   - name: title

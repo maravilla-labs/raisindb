@@ -198,4 +198,31 @@ impl StepType {
             StepType::Decision | StepType::Parallel | StepType::AgentDecision
         )
     }
+
+    /// Whether re-entering this step would REPEAT work that already happened.
+    ///
+    /// A function call can be retried: at worst it runs again. A step that
+    /// spawns child flows or iterates a collection cannot — re-entering it
+    /// forks the branches again, or restarts the iteration, duplicating every
+    /// side effect the first attempt already produced (for a fan-out of human
+    /// tasks, a second task for every assignee).
+    pub fn re_entry_duplicates_work(&self) -> bool {
+        matches!(
+            self,
+            StepType::Parallel | StepType::SubFlow | StepType::Loop
+        )
+    }
+
+    /// How many times a step of this type may be retried when it has no
+    /// explicit `max_retries`.
+    ///
+    /// Zero for steps whose re-entry duplicates work — those must opt IN to
+    /// retries, because the safe default cannot be "do it all again".
+    pub fn default_max_retries(&self) -> u32 {
+        if self.re_entry_duplicates_work() {
+            0
+        } else {
+            3
+        }
+    }
 }

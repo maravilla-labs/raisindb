@@ -236,6 +236,14 @@ impl Harness {
                         .unwrap_or_else(|| panic!("flow node {} not seeded", flow_path));
                     let workflow_data = flow_node["properties"]["workflow_data"].clone();
 
+                    // Set when a parallel container fans out over a DEPLOYED
+                    // flow, so the child echoes it back on completion and the
+                    // join can correlate (mirrors job_callback.rs).
+                    let branch_id = payload
+                        .get("branch_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
                     let child_id = payload["__child_id"].as_str().unwrap().to_string();
                     self.spawn_child(
                         child_id,
@@ -243,7 +251,7 @@ impl Harness {
                         payload.get("input").cloned().unwrap_or(Value::Null),
                         parent_id,
                         parent_step,
-                        None,
+                        branch_id,
                     )
                     .await;
                 }
@@ -2869,4 +2877,769 @@ async fn shiftboard_fill_shift_nobody_accepts_skips_assignment() {
         .find(|(r, _)| r == "/lib/shiftboard/message-staff")
         .expect("manager must still be notified");
     assert_eq!(notify.1["message"], json!(summary));
+}
+
+// ===========================================================================
+// 20. Dynamic fan-out of human tasks, joined (per-item review)
+// ===========================================================================
+
+/// The shape an application needs for "one task per row, then join": fan out
+/// over a runtime collection, park a human task per item, and have the FLOW
+/// own the join rather than deriving a roll-up from child state outside it.
+///
+/// Exercises, end to end and through the real job pump:
+/// - `for_each` resolving a collection produced by an UPSTREAM step
+/// - one child flow instance per item, each referencing a DEPLOYED flow by
+///   path (so `flow_execution` + `branch_id` correlation is on the hook)
+/// - `item` / `index` bound in the branch template's `input_mapping`
+/// - a templated `due_in_seconds` inside the branch (the per-item deadline)
+/// - a CUSTOM `task_type` (not one of the canonical four)
+/// - the join waiting for EVERY child, then merging by branch id
+#[tokio::test]
+async fn fan_out_of_human_tasks_joins_after_every_person_answers() {
+    let harness = Harness::new();
+
+    // The deployed per-item flow: ask its owner, then record the answer.
+    harness.seed_node(
+        "functions",
+        "/flows/review-item",
+        json!({
+            "properties": {
+                "workflow_data": {
+                    "nodes": [
+                        { "id": "start", "step_type": "start", "next_node": "review" },
+                        {
+                            "id": "review",
+                            "step_type": "human_task",
+                            "properties": {
+                                // Application-defined task type - would have
+                                // been rejected outright before.
+                                "task_type": "deliverable_review",
+                                "title": "Review {{ input.item.name }}",
+                                "assignee": "${input.item.owner}",
+                                // Per-ITEM deadline, from data. Read
+                                // pre-template this silently vanished.
+                                "due_in_seconds": "${input.item.sla_seconds}",
+                                "priority": "${input.item.priority}"
+                            },
+                            "next_node": "end"
+                        },
+                        { "id": "end", "step_type": "end" }
+                    ]
+                }
+            }
+        }),
+    );
+
+    harness.script_function(
+        "/lib/plan",
+        json!({"success": true, "result": {"items": [
+            {"name": "Hero image", "owner": "/users/ana", "sla_seconds": 3600, "priority": 5},
+            {"name": "Launch copy", "owner": "/users/bo", "sla_seconds": 7200, "priority": 2}
+        ]}}),
+    );
+    harness.script_function(
+        "/lib/publish",
+        json!({"success": true, "result": {"published": true}}),
+    );
+
+    let flow = json!({
+        "nodes": [
+            { "id": "start", "step_type": "start", "next_node": "plan" },
+            {
+                "id": "plan",
+                "step_type": "function_step",
+                "properties": { "function_ref": "/lib/plan" },
+                "next_node": "collect_reviews"
+            },
+            {
+                "id": "collect_reviews",
+                "step_type": "parallel",
+                "properties": {
+                    "for_each": "${steps.plan.items}",
+                    "max_branches": 50,
+                    "branch": {
+                        "id": "review-${index}",
+                        "flow_path": "/flows/review-item",
+                        "input_mapping": { "item": "${item}", "index": "${index}" }
+                    },
+                    "merge_strategy": "all_success"
+                },
+                "next_node": "publish"
+            },
+            {
+                "id": "publish",
+                "step_type": "function_step",
+                "properties": { "function_ref": "/lib/publish" },
+                "next_node": "end"
+            },
+            { "id": "end", "step_type": "end" }
+        ]
+    });
+
+    // Real-time pump: the per-item deadlines are an hour out, and the
+    // virtual-time pump deliberately forces future deadlines to fire.
+    let id = harness.seed_instance(make_instance(flow, json!({"campaign": "spring"})));
+    let _ = execute_flow(&id, &harness).await;
+    harness.pump_real_time().await;
+
+    // ---- The parent is parked on the join, not finished ------------------
+    let parent = harness.instance(&id);
+    assert_eq!(
+        parent.status,
+        FlowStatus::Waiting,
+        "parent must wait for the fan-out; error: {:?}",
+        parent.error
+    );
+    assert!(
+        harness
+            .function_invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(f, _)| f != "/lib/publish"),
+        "publish must NOT run before every review is in"
+    );
+
+    // ---- One task per item, each with its OWN resolved deadline ---------
+    let (ana_path, ana_task) = harness
+        .find_node_by_prefix("raisin:access_control", "/users/ana/inbox/")
+        .expect("a task was created for the first item's owner");
+    let (bo_path, bo_task) = harness
+        .find_node_by_prefix("raisin:access_control", "/users/bo/inbox/")
+        .expect("a task was created for the second item's owner");
+
+    assert_eq!(ana_task["properties"]["title"], json!("Review Hero image"));
+    assert_eq!(bo_task["properties"]["title"], json!("Review Launch copy"));
+
+    // Custom task type survived the whole round trip
+    assert_eq!(
+        ana_task["properties"]["task_type"],
+        json!("deliverable_review")
+    );
+
+    // Per-item templated deadline + priority actually landed
+    assert_eq!(ana_task["properties"]["due_in_seconds"], json!(3600));
+    assert_eq!(ana_task["properties"]["priority"], json!(5));
+    assert_eq!(bo_task["properties"]["due_in_seconds"], json!(7200));
+    assert_eq!(bo_task["properties"]["priority"], json!(2));
+    assert!(
+        ana_task["properties"]["due_at"].is_string(),
+        "due_at is materialized so the task is sortable/overdue-able"
+    );
+
+    // ---- Answering ONE does not release the join ------------------------
+    let ana_instance = ana_task["properties"]["flow_instance_id"]
+        .as_str()
+        .expect("task records its owning child instance")
+        .to_string();
+    let _ = resume_flow(
+        &ana_instance,
+        json!({"action": "approved", "completed_by": "ana", "task_path": ana_path}),
+        &harness,
+    )
+    .await;
+    harness.pump_real_time().await;
+
+    let parent = harness.instance(&id);
+    assert_eq!(
+        parent.status,
+        FlowStatus::Waiting,
+        "one of two answers must not release the join"
+    );
+
+    // ---- Answering the LAST one releases it ------------------------------
+    let bo_instance = bo_task["properties"]["flow_instance_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = resume_flow(
+        &bo_instance,
+        json!({"action": "approved", "completed_by": "bo", "task_path": bo_path}),
+        &harness,
+    )
+    .await;
+    harness.pump_real_time().await;
+
+    let parent = harness.instance(&id);
+    assert_eq!(
+        parent.status,
+        FlowStatus::Completed,
+        "the join releases once the last person answered; error: {:?}",
+        parent.error
+    );
+
+    // ---- The join output correlates results with their items -------------
+    let joined = &parent.variables["step_outputs"]["collect_reviews"];
+    let branches = joined["branches"].as_array().expect("ordered branch array");
+    assert_eq!(branches.len(), 2);
+    assert_eq!(branches[0]["branch_id"], json!("review-0"));
+    assert_eq!(branches[0]["status"], json!("completed"));
+    assert_eq!(branches[0]["output"]["completed_by"], json!("ana"));
+    assert_eq!(branches[1]["branch_id"], json!("review-1"));
+    assert_eq!(branches[1]["output"]["completed_by"], json!("bo"));
+
+    // ---- And the downstream step ran, exactly once -----------------------
+    let invocations = harness.function_invocations.lock().unwrap();
+    let publishes = invocations
+        .iter()
+        .filter(|(f, _)| f == "/lib/publish")
+        .count();
+    assert_eq!(publishes, 1, "publish runs once, after the join");
+}
+
+/// `all_success` must make the join AUTHORITATIVE: one branch failing has to
+/// fail the container, rather than the flow continuing and leaving the
+/// application to notice from child state.
+#[tokio::test]
+async fn fan_out_all_success_fails_the_join_when_a_branch_fails() {
+    let harness = Harness::new();
+
+    harness.seed_node(
+        "functions",
+        "/flows/process-item",
+        json!({
+            "properties": {
+                "workflow_data": {
+                    "nodes": [
+                        { "id": "start", "step_type": "start", "next_node": "work" },
+                        {
+                            "id": "work",
+                            "step_type": "function_step",
+                            "properties": {
+                                "function_ref": "/lib/process",
+                                // Runtime format takes retry config as FLAT
+                                // properties (and defaults to 3 retries);
+                                // this test asserts a SINGLE failure reaches
+                                // the join.
+                                "max_retries": 0
+                            },
+                            "next_node": "end"
+                        },
+                        { "id": "end", "step_type": "end" }
+                    ]
+                }
+            }
+        }),
+    );
+
+    // First item succeeds, second fails.
+    harness.script_function(
+        "/lib/process",
+        json!({"success": true, "result": {"ok": 1}}),
+    );
+    harness.script_function(
+        "/lib/process",
+        json!({"success": false, "error": "processing blew up"}),
+    );
+    harness.script_function(
+        "/lib/after",
+        json!({"success": true, "result": {"ran": true}}),
+    );
+
+    let flow = json!({
+        "nodes": [
+            { "id": "start", "step_type": "start", "next_node": "fan" },
+            {
+                "id": "fan",
+                "step_type": "parallel",
+                "properties": {
+                    "for_each": "${input.rows}",
+                    "branch": {
+                        "flow_path": "/flows/process-item",
+                        "input_mapping": { "row": "${item}" }
+                    },
+                    "merge_strategy": "all_success"
+                },
+                "next_node": "after"
+            },
+            {
+                "id": "after",
+                "step_type": "function_step",
+                "properties": { "function_ref": "/lib/after" },
+                "next_node": "end"
+            },
+            { "id": "end", "step_type": "end" }
+        ]
+    });
+
+    let id = run_to_quiescence(&harness, flow, json!({"rows": ["a", "b"]})).await;
+
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.status,
+        FlowStatus::Failed,
+        "all_success must fail the container when a branch failed"
+    );
+    assert!(
+        harness
+            .function_invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(f, _)| f != "/lib/after"),
+        "the step after a failed join must not run"
+    );
+}
+
+/// An empty collection is a no-op fan-out that flows straight through — not a
+/// wait that never resolves.
+#[tokio::test]
+async fn fan_out_over_empty_collection_continues_immediately() {
+    let harness = Harness::new();
+    harness.script_function(
+        "/lib/plan",
+        json!({"success": true, "result": {"items": []}}),
+    );
+    harness.script_function(
+        "/lib/after",
+        json!({"success": true, "result": {"ran": true}}),
+    );
+
+    let flow = json!({
+        "nodes": [
+            { "id": "start", "step_type": "start", "next_node": "plan" },
+            {
+                "id": "plan",
+                "step_type": "function_step",
+                "properties": { "function_ref": "/lib/plan" },
+                "next_node": "fan"
+            },
+            {
+                "id": "fan",
+                "step_type": "parallel",
+                "properties": {
+                    "for_each": "${steps.plan.items}",
+                    "branch": { "flow_path": "/flows/never-used" }
+                },
+                "next_node": "after"
+            },
+            {
+                "id": "after",
+                "step_type": "function_step",
+                "properties": { "function_ref": "/lib/after" },
+                "next_node": "end"
+            },
+            { "id": "end", "step_type": "end" }
+        ]
+    });
+
+    let id = run_to_quiescence(&harness, flow, json!({})).await;
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.status,
+        FlowStatus::Completed,
+        "error: {:?}",
+        instance.error
+    );
+    assert!(harness
+        .function_invocations
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(f, _)| f == "/lib/after"));
+}
+
+// ===========================================================================
+// 21. Templated human-task deadline drives the REAL timeout
+// ===========================================================================
+
+/// The point of the deadline fix: a `${...}` deadline must not merely be
+/// stored, it must actually arm the wait so `timeout_edge` fires. Before, the
+/// property was dropped and the flow waited forever.
+#[tokio::test]
+async fn templated_due_in_seconds_arms_the_wait_and_times_out() {
+    let harness = Harness::new();
+    harness.script_function(
+        "/lib/escalate",
+        json!({"success": true, "result": {"escalated": true}}),
+    );
+
+    let flow = json!({
+        "nodes": [
+            { "id": "start", "step_type": "start", "next_node": "approve" },
+            {
+                "id": "approve",
+                "step_type": "human_task",
+                "properties": {
+                    "task_type": "approval",
+                    "title": "Approve",
+                    "assignee": "/users/manager",
+                    // Deadline comes from the run's input, not the flow
+                    "due_in_seconds": "${input.sla_seconds}",
+                    "timeout_edge": "escalate"
+                },
+                "next_node": "end"
+            },
+            {
+                "id": "escalate",
+                "step_type": "function_step",
+                "properties": { "function_ref": "/lib/escalate" },
+                "next_node": "end"
+            },
+            { "id": "end", "step_type": "end" }
+        ]
+    });
+
+    // Real-time pump: a future deadline must stay pending, so the armed
+    // state is observable before it fires.
+    let id = harness.seed_instance(make_instance(flow, json!({"sla_seconds": 3600})));
+    let _ = execute_flow(&id, &harness).await;
+    harness.pump_real_time().await;
+
+    // The wait carries a real deadline derived from the template
+    let instance = harness.instance(&id);
+    assert_eq!(instance.status, FlowStatus::Waiting);
+    let wait = instance.wait_info.as_ref().unwrap();
+    assert_eq!(wait.wait_type, WaitType::HumanTask);
+    assert!(
+        wait.timeout_at.is_some(),
+        "a templated deadline must arm the wait, not be dropped"
+    );
+
+    // Let the deadline pass, then run the timeout check the scheduler would
+    {
+        let mut map = harness.instances.lock().unwrap();
+        let inst = map.get_mut(&id).unwrap();
+        inst.wait_info.as_mut().unwrap().timeout_at =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    }
+    let _ = check_flow_timeout(&id, &harness).await;
+    harness.pump_real_time().await;
+
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.status,
+        FlowStatus::Completed,
+        "timeout_edge should have routed to escalation; error: {:?}",
+        instance.error
+    );
+    assert!(
+        harness
+            .function_invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(f, _)| f == "/lib/escalate"),
+        "the escalation step must have run"
+    );
+
+    // And the task itself was marked expired
+    let (_, task) = harness
+        .find_node_by_prefix("raisin:access_control", "/users/manager/inbox/")
+        .expect("task node exists");
+    assert_eq!(task["properties"]["status"], json!("expired"));
+}
+
+// ===========================================================================
+// 22. Designer-format wait / sub_flow / decision run end to end
+// ===========================================================================
+
+/// These three step types used to be runtime-format only, so needing one
+/// forced the whole flow out of the designer format. Prove a single
+/// designer-format flow using all three actually runs.
+///
+/// Note the shape of the decision: designer siblings chain in array order, so
+/// a free-standing decision is a **guard** that skips forward over steps.
+/// Mutually exclusive branches are what an `or` container is for.
+#[tokio::test]
+async fn designer_wait_sub_flow_and_decision_run_end_to_end() {
+    let harness = Harness::new();
+
+    harness.seed_node(
+        "functions",
+        "/flows/settle",
+        json!({
+            "properties": {
+                "workflow_data": {
+                    "nodes": [
+                        { "id": "start", "step_type": "start", "next_node": "work" },
+                        {
+                            "id": "work",
+                            "step_type": "function_step",
+                            "properties": { "function_ref": "/lib/settle" },
+                            "next_node": "end"
+                        },
+                        { "id": "end", "step_type": "end" }
+                    ]
+                }
+            }
+        }),
+    );
+    harness.script_function(
+        "/lib/settle",
+        json!({"success": true, "result": {"settled": true}}),
+    );
+    harness.script_function(
+        "/lib/discount",
+        json!({"success": true, "result": {"discounted": true}}),
+    );
+    harness.script_function(
+        "/lib/invoice",
+        json!({"success": true, "result": {"invoiced": true}}),
+    );
+
+    // Designer format: no start/end, no next_node, array order is the chain.
+    let flow = json!({
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "cool_off",
+                "node_type": "raisin:FlowStep",
+                "properties": { "action": "Cool off", "step_type": "wait", "duration": "1s" }
+            },
+            {
+                "id": "settle",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Settle",
+                    "step_type": "sub_flow",
+                    "flow_ref": "/flows/settle",
+                    "input_mapping": { "order_id": "${input.order_id}" }
+                }
+            },
+            {
+                "id": "big_order",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Big order? skip the discount",
+                    "step_type": "decision",
+                    "condition": "input.amount > 500",
+                    // Guard: on true, jump PAST the discount step.
+                    "yes_branch": "invoice"
+                }
+            },
+            {
+                "id": "discount",
+                "node_type": "raisin:FlowStep",
+                "properties": { "action": "Apply discount", "function_ref": "/lib/discount" }
+            },
+            {
+                "id": "invoice",
+                "node_type": "raisin:FlowStep",
+                "properties": { "action": "Invoice", "function_ref": "/lib/invoice" }
+            }
+        ]
+    });
+
+    // amount > 500 -> the guard skips the discount step
+    let id = harness.seed_instance(make_instance(
+        flow.clone(),
+        json!({"order_id": "ORD-9", "amount": 900}),
+    ));
+    let _ = execute_flow(&id, &harness).await;
+    // Virtual time: advances the 1s scheduled wake-up deterministically.
+    harness.pump().await;
+
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.status,
+        FlowStatus::Completed,
+        "error: {:?}",
+        instance.error
+    );
+
+    let called: Vec<String> = harness
+        .function_invocations
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(f, _)| f.clone())
+        .collect();
+    // The wait elapsed, the sub-flow ran through its own child instance...
+    assert!(
+        called.contains(&"/lib/settle".to_string()),
+        "the sub-flow must have run; called: {:?}",
+        called
+    );
+    // ...and the guard skipped the discount, landing on invoice
+    assert!(
+        !called.contains(&"/lib/discount".to_string()),
+        "the guard should have skipped the discount; called: {:?}",
+        called
+    );
+    assert!(
+        called.contains(&"/lib/invoice".to_string()),
+        "called: {:?}",
+        called
+    );
+}
+
+/// The same flow with a small amount: the UNNAMED `no_branch` falls through to
+/// the next sibling, so the guarded step runs. Before the fix this lowered
+/// with no `no_branch` at all and the decision handler rejected it at run
+/// time for a missing property.
+#[tokio::test]
+async fn designer_decision_unnamed_arm_falls_through_to_next_sibling() {
+    let harness = Harness::new();
+    harness.script_function(
+        "/lib/discount",
+        json!({"success": true, "result": {"discounted": true}}),
+    );
+    harness.script_function(
+        "/lib/invoice",
+        json!({"success": true, "result": {"invoiced": true}}),
+    );
+
+    let flow = json!({
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "big_order",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Big order? skip the discount",
+                    "step_type": "decision",
+                    "condition": "input.amount > 500",
+                    "yes_branch": "invoice"
+                }
+            },
+            {
+                "id": "discount",
+                "node_type": "raisin:FlowStep",
+                "properties": { "action": "Apply discount", "function_ref": "/lib/discount" }
+            },
+            {
+                "id": "invoice",
+                "node_type": "raisin:FlowStep",
+                "properties": { "action": "Invoice", "function_ref": "/lib/invoice" }
+            }
+        ]
+    });
+
+    let id = run_to_quiescence(&harness, flow, json!({"amount": 100})).await;
+
+    let instance = harness.instance(&id);
+    assert_eq!(
+        instance.status,
+        FlowStatus::Completed,
+        "error: {:?}",
+        instance.error
+    );
+
+    let called: Vec<String> = harness
+        .function_invocations
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(f, _)| f.clone())
+        .collect();
+    assert_eq!(
+        called,
+        vec!["/lib/discount".to_string(), "/lib/invoice".to_string()],
+        "the false arm falls through to the next sibling"
+    );
+}
+
+// ===========================================================================
+// 23. A timed-out CHILD must release its parent's join
+// ===========================================================================
+
+/// Regression: `fail_timed_out` transitioned a child to Failed but never
+/// notified the parent, so a parent parked on a join waited FOREVER the
+/// moment one child's wait expired - the child was Failed, the parent never
+/// learned, and no error surfaced anywhere. A fan-out with per-item deadlines
+/// has one chance to hit this per item.
+#[tokio::test]
+async fn timed_out_child_notifies_parent_and_releases_the_join() {
+    let harness = Harness::new();
+
+    // Per-item flow that parks on a human task with a deadline nobody meets.
+    harness.seed_node(
+        "functions",
+        "/flows/ask-owner",
+        json!({
+            "properties": {
+                "workflow_data": {
+                    "nodes": [
+                        { "id": "start", "step_type": "start", "next_node": "ask" },
+                        {
+                            "id": "ask",
+                            "step_type": "human_task",
+                            "properties": {
+                                "task_type": "approval",
+                                "title": "Approve {{ input.item }}",
+                                "assignee": "/users/owner",
+                                "due_in_seconds": 1
+                            },
+                            "next_node": "end"
+                        },
+                        { "id": "end", "step_type": "end" }
+                    ]
+                }
+            }
+        }),
+    );
+
+    let flow = json!({
+        "nodes": [
+            { "id": "start", "step_type": "start", "next_node": "fan" },
+            {
+                "id": "fan",
+                "step_type": "parallel",
+                "properties": {
+                    "for_each": "${input.items}",
+                    "branch": {
+                        "flow_path": "/flows/ask-owner",
+                        "input_mapping": { "item": "${item}" }
+                    },
+                    "merge_strategy": "merge_all"
+                },
+                "next_node": "end"
+            },
+            { "id": "end", "step_type": "end" }
+        ]
+    });
+
+    // The virtual-time pump forces the children's deadlines to fire.
+    let id = run_to_quiescence(&harness, flow, json!({"items": ["a", "b"]})).await;
+
+    // Both children timed out...
+    let statuses: Vec<FlowStatus> = {
+        let map = harness.instances.lock().unwrap();
+        map.values()
+            .filter(|i| i.parent_instance_ref.is_some())
+            .map(|i| i.status)
+            .collect()
+    };
+    assert_eq!(statuses.len(), 2, "two children were forked");
+    assert!(
+        statuses.iter().all(|s| *s == FlowStatus::Failed),
+        "both children timed out: {:?}",
+        statuses
+    );
+
+    // ...and the parent was RELEASED rather than stranded in Waiting.
+    let parent = harness.instance(&id);
+    assert_ne!(
+        parent.status,
+        FlowStatus::Waiting,
+        "a timed-out child must notify its parent; the join must not hang"
+    );
+
+    // merge_all continues with the failed branch results recorded.
+    assert_eq!(
+        parent.status,
+        FlowStatus::Completed,
+        "error: {:?}",
+        parent.error
+    );
+    let joined = &parent.variables["step_outputs"]["fan"];
+    let branches = joined["branches"].as_array().expect("ordered branch array");
+    assert_eq!(branches.len(), 2);
+    assert!(
+        branches.iter().all(|b| b["status"] == json!("failed")),
+        "both branches recorded as failed: {}",
+        joined
+    );
+    assert!(
+        branches[0]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("timed out"),
+        "the timeout reason reaches the parent: {}",
+        branches[0]
+    );
 }

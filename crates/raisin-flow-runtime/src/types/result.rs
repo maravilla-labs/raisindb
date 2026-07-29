@@ -161,6 +161,21 @@ pub enum FlowError {
     SecurityViolation(String),
 }
 
+impl FlowError {
+    /// Whether this is an INFRASTRUCTURAL error rather than a step failure.
+    ///
+    /// Infrastructural errors describe the delivery mechanism, not the work:
+    /// the caller must let the job system redeliver, and the instance must be
+    /// left alone for whichever writer won. Step failures instead go through
+    /// the normal retry / error-edge / compensation path.
+    ///
+    /// Callers should ask this rather than matching variants, so a new
+    /// infrastructural variant is handled everywhere at once.
+    pub fn is_infrastructural(&self) -> bool {
+        matches!(self, FlowError::VersionConflict)
+    }
+}
+
 impl From<serde_json::Error> for FlowError {
     fn from(err: serde_json::Error) -> Self {
         FlowError::Serialization(err.to_string())

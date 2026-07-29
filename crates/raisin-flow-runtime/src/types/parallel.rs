@@ -13,6 +13,11 @@ use serde_json::Value;
 pub struct CreateChildFlowRequest {
     pub branch_id: String,
     pub parent_instance_id: String,
+    /// Parent step that forked this branch. Recorded on the child so its
+    /// completion notification can name the step to resume, which matters
+    /// once a flow has more than one parked container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_step_id: Option<String>,
     pub flow_definition: Value,
     pub input: Value,
 }
