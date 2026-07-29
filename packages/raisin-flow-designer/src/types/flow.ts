@@ -10,6 +10,33 @@ export type ContainerType = 'and' | 'or' | 'parallel' | 'ai_sequence' | 'competi
 /** Step error behavior */
 export type StepErrorBehavior = 'stop' | 'skip' | 'continue';
 
+/** The human task types the workflow runtime understands semantically */
+export const CANONICAL_TASK_TYPES = ['approval', 'input', 'review', 'action'] as const;
+
+/** A canonical task type */
+export type CanonicalTaskType = (typeof CANONICAL_TASK_TYPES)[number];
+
+/**
+ * A human task type.
+ *
+ * The canonical types are suggestions, not a closed set: an application may
+ * define its own task vocabulary, and any slug matching
+ * `[a-z][a-z0-9_-]{0,63}` is carried through to the task node verbatim for
+ * a task UI to dispatch on. The union is spelled this way so the canonical
+ * values still autocomplete.
+ */
+export type TaskTypeSlug = CanonicalTaskType | (string & {});
+
+/** Whether a string is usable as a task type slug (mirrors the engine's rule) */
+export function isValidTaskTypeSlug(slug: string): boolean {
+  return /^[a-z][a-z0-9_-]{0,63}$/.test(slug);
+}
+
+/** Whether a task type is one the runtime understands semantically */
+export function isCanonicalTaskType(slug: string): slug is CanonicalTaskType {
+  return (CANONICAL_TASK_TYPES as readonly string[]).includes(slug);
+}
+
 /**
  * RaisinDB reference type (PropertyValue::Reference)
  * Used for cross-node references with workspace context
@@ -123,7 +150,7 @@ export interface FlowStepProperties {
   /** Whether step is disabled */
   disabled?: boolean;
   /** Step type - distinguishes AI agent, chat, and human task steps from regular steps */
-  step_type?: 'default' | 'ai_agent' | 'human_task' | 'chat';
+  step_type?: 'default' | 'ai_agent' | 'human_task' | 'chat' | 'wait' | 'sub_flow' | 'decision';
   /** Function arguments - values support template expressions like "{{ input.x }}" or "${steps.prev.field}" */
   arguments?: Record<string, unknown>;
   /** Prompt for ai_agent steps (template expressions supported) */
@@ -161,8 +188,8 @@ export interface FlowStepProperties {
 
   // Human task specific properties (when step_type = 'human_task')
 
-  /** Type of human task */
-  task_type?: 'approval' | 'input' | 'review' | 'action';
+  /** Type of human task — a canonical type or an application-defined slug */
+  task_type?: TaskTypeSlug;
   /** User or AI agent path to assign the task to */
   assignee?: string;
   /** Human user path to escalate to when an AI agent assignee fails or is not confident */
@@ -175,10 +202,45 @@ export interface FlowStepProperties {
   options?: TaskOption[];
   /** JSON schema for input tasks */
   input_schema?: object;
-  /** Task due time in seconds from creation */
-  due_in_seconds?: number;
-  /** Task priority (1-5, where 5 is highest) */
-  priority?: number;
+  /**
+   * Task due time in seconds from creation. A template expression is
+   * allowed (e.g. "${input.due_seconds}") so a deadline can come from data
+   * rather than being authored into the flow.
+   */
+  due_in_seconds?: number | string;
+  /** Task priority (1-5, where 5 is highest); a template expression is allowed */
+  priority?: number | string;
+
+  // Wait step (step_type = 'wait')
+
+  /** What to wait for (defaults to 'delay') */
+  wait_type?: 'delay' | 'until' | 'event' | 'cron';
+  /** Duration for a 'delay' wait, e.g. "30m" (templates allowed) */
+  duration?: string;
+  /** Absolute timestamp for an 'until' wait (templates allowed) */
+  until?: string;
+  /** Event type for an 'event' wait */
+  event_type?: string;
+  /** Optional deadline for an 'event' wait */
+  timeout?: string;
+  /** Cron expression for a 'cron' wait */
+  cron?: string;
+
+  // Sub-flow step (step_type = 'sub_flow')
+
+  /** The flow to invoke */
+  flow_ref?: RaisinReference;
+  /** Input mapping for the child flow (template expressions) */
+  input_mapping?: object;
+  /** Run the child flow asynchronously */
+  async?: boolean;
+
+  // Decision step (step_type = 'decision', or any step with a condition)
+
+  /** Node id to run when the condition is true (defaults to the next sibling) */
+  yes_branch?: string;
+  /** Node id to run when the condition is false (defaults to the next sibling) */
+  no_branch?: string;
 
   // Chat step specific properties (when step_type = 'chat')
 
@@ -341,6 +403,45 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   item: 'item',
 };
 
+/**
+ * Fan-out configuration for parallel containers.
+ *
+ * Without it, a parallel container's children ARE its branches — a fixed set
+ * authored in the designer, all running at once. With it, the children form
+ * ONE branch subgraph that runs once per item of a runtime collection, and
+ * the container joins every one of those runs. That is the difference
+ * between "these three things happen concurrently" and "one of these happens
+ * per row" — the latter being what a per-item human task needs.
+ */
+export interface FanOutConfig {
+  /** Collection expression to fan out over, e.g. "${steps.plan.items}" (must resolve to an array) */
+  over: string;
+  /** Safety cap on branches created; fan-out width comes from runtime data, so it is bounded */
+  max_branches?: number;
+}
+
+/** Default fan-out configuration */
+export const DEFAULT_FAN_OUT_CONFIG: FanOutConfig = {
+  over: '',
+};
+
+/** How a parallel container joins its branches */
+export type MergeStrategy = 'merge_all' | 'first_success' | 'all_success';
+
+/** Merge strategy display labels */
+export const MERGE_STRATEGY_LABELS: Record<MergeStrategy, string> = {
+  merge_all: 'Merge all',
+  first_success: 'First success',
+  all_success: 'All must succeed',
+};
+
+/** Merge strategy descriptions */
+export const MERGE_STRATEGY_DESCRIPTIONS: Record<MergeStrategy, string> = {
+  merge_all: 'Continue with every branch result, successful or not',
+  first_success: 'Continue with the first successful branch; fail if all failed',
+  all_success: 'Fail the container if any branch failed',
+};
+
 /** Container node with children (AND/OR/Parallel/AI/Competition/Loop) */
 export interface FlowContainer extends FlowNodeBase {
   node_type: 'raisin:FlowContainer';
@@ -355,6 +456,10 @@ export interface FlowContainer extends FlowNodeBase {
   referee?: ContainerRefereeConfig;
   /** Loop configuration (only for loop type) */
   loop?: LoopConfig;
+  /** Fan-out configuration (only for parallel type): one branch per collection item */
+  fan_out?: FanOutConfig;
+  /** How branches are joined (only for parallel type; default "merge_all") */
+  merge_strategy?: MergeStrategy;
   /** Shared task prompt (only for competition type; children may override) */
   prompt?: string;
   /** Container timeout in milliseconds */

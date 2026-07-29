@@ -94,6 +94,10 @@ export type {
   ContainerRouterConfig,
   ContainerRefereeConfig,
   LoopConfig,
+  FanOutConfig,
+  MergeStrategy,
+  CanonicalTaskType,
+  TaskTypeSlug,
   // Execution state types
   StepExecutionState,
   StepExecutionInfo,
@@ -134,6 +138,12 @@ export {
   DEFAULT_AI_CONTAINER_CONFIG,
   AI_TOOL_MODE_DESCRIPTIONS,
   DEFAULT_LOOP_CONFIG,
+  DEFAULT_FAN_OUT_CONFIG,
+  MERGE_STRATEGY_LABELS,
+  MERGE_STRATEGY_DESCRIPTIONS,
+  CANONICAL_TASK_TYPES,
+  isValidTaskTypeSlug,
+  isCanonicalTaskType,
   INITIAL_EXECUTION_STATE,
 } from './types';
 

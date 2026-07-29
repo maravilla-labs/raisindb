@@ -87,8 +87,22 @@ export type RetryStrategy = keyof typeof RETRY_STRATEGIES;
 // Human tasks
 // ============================================================================
 
-/** Human task type */
-export type HumanTaskType = 'approval' | 'input' | 'review' | 'action';
+/** The human task types the flow runtime understands semantically */
+export const CANONICAL_TASK_TYPES = ['approval', 'input', 'review', 'action'] as const;
+
+/** A canonical human task type */
+export type CanonicalTaskType = (typeof CANONICAL_TASK_TYPES)[number];
+
+/**
+ * Human task type.
+ *
+ * The canonical types are suggestions, not a closed set: an application may
+ * define its own task vocabulary, and any slug matching
+ * `[a-z][a-z0-9_-]{0,63}` is carried through to the task node verbatim for
+ * a task UI to dispatch on. Spelled this way so the canonical values still
+ * autocomplete.
+ */
+export type HumanTaskType = CanonicalTaskType | (string & {});
 
 /** Human task option for approval tasks */
 export interface TaskOption {
@@ -216,7 +230,7 @@ export interface FlowStepProperties {
   /** Whether step is disabled */
   disabled?: boolean;
   /** Step type - distinguishes AI agent, chat, and human task steps */
-  step_type?: 'default' | 'ai_agent' | 'human_task' | 'chat';
+  step_type?: 'default' | 'ai_agent' | 'human_task' | 'chat' | 'wait' | 'sub_flow' | 'decision';
   /** Prompt for ai_agent steps (template expressions supported) */
   prompt?: string;
   /** Retry configuration for this step */
@@ -257,16 +271,51 @@ export interface FlowStepProperties {
   options?: TaskOption[];
   /** JSON schema for input tasks */
   input_schema?: object;
-  /** Task due time in seconds from creation (doubles as the wait deadline) */
-  due_in_seconds?: number;
-  /** Task priority (1-5, where 5 is highest) */
-  priority?: number;
+  /**
+   * Task due time in seconds from creation (doubles as the wait deadline).
+   * A template expression (e.g. "${input.due_seconds}") is allowed, so a
+   * deadline can come from data instead of being authored into the flow.
+   */
+  due_in_seconds?: number | string;
+  /** Task priority (1-5, where 5 is highest); a template expression is allowed */
+  priority?: number | string;
   /** Minimum confidence (0-1) for an agent assignee's decision to be
    * accepted; below it the task escalates (default 0.7) */
   min_confidence?: number;
   /** Human assignee to escalate to when an agent assignee fails or is
    * not confident enough */
   escalation_assignee?: string;
+
+  // Wait step (step_type = 'wait')
+
+  /** What to wait for (defaults to 'delay') */
+  wait_type?: 'delay' | 'until' | 'event' | 'cron';
+  /** Duration for a 'delay' wait, e.g. "30m" (templates allowed) */
+  duration?: string;
+  /** Absolute timestamp for an 'until' wait (templates allowed) */
+  until?: string;
+  /** Event type for an 'event' wait */
+  event_type?: string;
+  /** Optional deadline for an 'event' wait */
+  timeout?: string;
+  /** Cron expression for a 'cron' wait */
+  cron?: string;
+
+  // Sub-flow step (step_type = 'sub_flow')
+
+  /** The flow to invoke */
+  flow_ref?: RaisinReference;
+  /** Input mapping for the child flow (template expressions) */
+  input_mapping?: object;
+  /** Run the child flow asynchronously */
+  async?: boolean;
+
+  // Decision step (step_type = 'decision', or any step with a condition)
+
+  /** Node id to run when the condition is true (defaults to the next sibling) */
+  yes_branch?: string;
+  /** Node id to run when the condition is false (defaults to the next sibling) */
+  no_branch?: string;
 
   // Chat step (step_type = 'chat')
 
@@ -291,6 +340,25 @@ export interface ContainerRule {
   next_step: string;
 }
 
+/**
+ * Fan-out configuration for parallel containers.
+ *
+ * Without it, a parallel container's children ARE its branches - a fixed
+ * set, all running at once. With it, the children form ONE branch subgraph
+ * that runs once per item of a runtime collection, and the container joins
+ * every one of those runs. That is what a per-item human task needs: one
+ * task per row, then a real join.
+ */
+export interface FanOutConfig {
+  /** Collection expression to fan out over, e.g. "${steps.plan.items}" */
+  over: string;
+  /** Safety cap on branches created (fan-out width comes from runtime data) */
+  max_branches?: number;
+}
+
+/** How a parallel container joins its branches */
+export type MergeStrategy = 'merge_all' | 'first_success' | 'all_success';
+
 /** Container node with children (AND/OR/Parallel/AI) */
 export interface FlowDefinitionContainer extends FlowDefinitionNodeBase {
   node_type: 'raisin:FlowContainer';
@@ -299,6 +367,10 @@ export interface FlowDefinitionContainer extends FlowDefinitionNodeBase {
   children: FlowDefinitionNode[];
   /** AI container configuration (only for ai_sequence type) */
   ai_config?: AiContainerConfig;
+  /** Fan-out configuration (only for parallel type): one branch per collection item */
+  fan_out?: FanOutConfig;
+  /** How branches are joined (only for parallel type; default "merge_all") */
+  merge_strategy?: MergeStrategy;
   /** Container timeout in milliseconds */
   timeout_ms?: number;
 }

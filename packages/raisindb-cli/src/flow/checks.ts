@@ -10,6 +10,7 @@ import { checkTemplates, expressionRoots } from './template-check.js';
 import {
   CONTAINER_NODE_TYPE,
   KNOWN_CONTAINER_TYPES,
+  KNOWN_MERGE_STRATEGIES,
   STEP_NODE_TYPE,
   isContainer,
   isStep,
@@ -195,9 +196,83 @@ function checkContainer(
     });
   }
 
+  if (node.fan_out != null && containerType !== 'parallel') {
+    findings.push({
+      code: 'FAN_OUT_ON_NON_PARALLEL',
+      severity: 'error',
+      nodeId,
+      field: 'fan_out',
+      message: `Fan-out config is only supported on parallel containers (this is "${containerType}").`,
+    });
+  }
+
+  if (node.merge_strategy != null) {
+    if (containerType !== 'parallel') {
+      findings.push({
+        code: 'MERGE_STRATEGY_ON_NON_PARALLEL',
+        severity: 'error',
+        nodeId,
+        field: 'merge_strategy',
+        message: `Merge strategy is only supported on parallel containers (this is "${containerType}").`,
+      });
+    } else if (!KNOWN_MERGE_STRATEGIES.includes(node.merge_strategy)) {
+      findings.push({
+        code: 'UNKNOWN_MERGE_STRATEGY',
+        severity: 'error',
+        nodeId,
+        field: 'merge_strategy',
+        message: `Unknown merge_strategy "${node.merge_strategy}" (expected one of: ${KNOWN_MERGE_STRATEGIES.join(', ')}).`,
+      });
+    }
+  }
+
   if (containerType === 'or') checkOrRouting(node, findings);
   if (containerType === 'competition') checkCompetition(node, findings);
   if (containerType === 'loop') checkLoop(node, allIds, findings);
+  if (node.fan_out != null) checkFanOut(node, findings);
+}
+
+/**
+ * A fan-out turns the container's children into ONE branch subgraph run per
+ * collection item, so it needs both a resolvable collection and a body.
+ */
+function checkFanOut(node: DesignerNode, findings: Finding[]): void {
+  const nodeId = node.id ?? '<missing-id>';
+  const fanOut = node.fan_out;
+  if (fanOut == null) return;
+
+  if (typeof fanOut.over !== 'string' || fanOut.over.trim() === '') {
+    findings.push({
+      code: 'FAN_OUT_MISSING_OVER',
+      severity: 'error',
+      nodeId,
+      field: 'fan_out.over',
+      message:
+        'Fan-out requires fan_out.over — the collection expression to fan out over (e.g. ${steps.plan.items}).',
+    });
+  }
+
+  if (
+    fanOut.max_branches != null &&
+    (typeof fanOut.max_branches !== 'number' || fanOut.max_branches < 1)
+  ) {
+    findings.push({
+      code: 'FAN_OUT_INVALID_MAX_BRANCHES',
+      severity: 'error',
+      nodeId,
+      field: 'fan_out.max_branches',
+      message: `fan_out.max_branches must be a number >= 1 (got ${fanOut.max_branches}).`,
+    });
+  }
+
+  if (!Array.isArray(node.children) || node.children.length === 0) {
+    findings.push({
+      code: 'FAN_OUT_EMPTY_BRANCH',
+      severity: 'error',
+      nodeId,
+      message: 'Fan-out container has no children — there is no branch to run per item.',
+    });
+  }
 }
 
 function checkLoop(node: DesignerNode, allIds: Set<string>, findings: Finding[]): void {

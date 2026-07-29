@@ -1,14 +1,18 @@
 /**
  * Task type badge
  *
- * Small chip describing the inbox task type (approval / input / review / action).
+ * Small chip describing the inbox task type. The canonical types
+ * (approval / input / review / action) get their own icon and colour; an
+ * application-defined type falls back to a neutral chip showing the type's
+ * own name, rather than being mislabelled as one of the four.
  * Reusable outside the inbox page (e.g. flow editor).
  */
 
-import { CheckSquare, FormInput, Eye, Zap } from 'lucide-react'
-import type { InboxTaskType } from '../../api/inbox'
+import { CheckSquare, FormInput, Eye, Zap, Tag } from 'lucide-react'
+import { formatLabel } from '../../utils/propertySchema'
+import type { CanonicalTaskType, InboxTaskType } from '../../api/inbox'
 
-const TYPE_CONFIG: Record<InboxTaskType, {
+const TYPE_CONFIG: Record<CanonicalTaskType, {
   icon: typeof CheckSquare
   color: string
   bg: string
@@ -25,7 +29,12 @@ interface TaskTypeBadgeProps {
 }
 
 export default function TaskTypeBadge({ taskType }: TaskTypeBadgeProps) {
-  const config = TYPE_CONFIG[taskType] || TYPE_CONFIG.action
+  const config = TYPE_CONFIG[taskType as CanonicalTaskType] ?? {
+    icon: Tag,
+    color: 'text-slate-300',
+    bg: 'bg-slate-500/10',
+    label: formatLabel(taskType),
+  }
   const Icon = config.icon
 
   return (

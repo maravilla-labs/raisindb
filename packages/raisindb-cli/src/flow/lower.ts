@@ -28,7 +28,7 @@ export interface PlanBranch {
 
 export interface PlanNode {
   id: string;
-  /** start | end | function | ai_agent | ai_container | chat | human_task | decision | sequence | parallel | loop */
+  /** start | end | function | ai_agent | ai_container | chat | human_task | wait | sub_flow | decision | sequence | parallel | loop */
   kind: string;
   label?: string;
   /** Extra human-readable details (function ref, assignee, retry, ...). */
@@ -77,7 +77,28 @@ function lowerStep(node: DesignerNode, successor: string, out: Map<string, PlanN
     detail.push(`task: ${props.task_type ?? '?'} → ${props.assignee ?? '(no assignee)'}`);
     if (props.escalation_assignee) detail.push(`escalates to: ${props.escalation_assignee}`);
   }
-  if (kind === 'decision' && props.condition) detail.push(`condition: ${props.condition}`);
+  if (kind === 'wait') {
+    const waitType = typeof props.wait_type === 'string' ? props.wait_type : 'delay';
+    const target =
+      (typeof props.duration === 'string' && props.duration) ||
+      (typeof props.until === 'string' && props.until) ||
+      (typeof props.event_type === 'string' && props.event_type) ||
+      (typeof props.cron === 'string' && props.cron) ||
+      '(unset)';
+    detail.push(`wait ${waitType}: ${target}`);
+  }
+  if (kind === 'sub_flow') {
+    detail.push(`sub-flow: ${refPath(props.flow_ref as never) ?? '(no flow_ref)'}`);
+    if (props.async === true) detail.push('async');
+  }
+  if (kind === 'decision') {
+    if (props.condition) detail.push(`condition: ${props.condition}`);
+    // The unnamed arm falls through to the next sibling (the engine fills
+    // it in during lowering), so show the effective routing.
+    const yes = typeof props.yes_branch === 'string' ? props.yes_branch : successor;
+    const no = typeof props.no_branch === 'string' ? props.no_branch : successor;
+    detail.push(`yes → ${yes}, no → ${no}`);
+  }
   if (props.retry) {
     detail.push(
       `retry: max ${props.retry.max_retries ?? '?'} (base ${props.retry.base_delay_ms ?? '?'}ms, cap ${props.retry.max_delay_ms ?? '?'}ms)`
@@ -90,12 +111,24 @@ function lowerStep(node: DesignerNode, successor: string, out: Map<string, PlanN
   if (props.continue_on_fail) detail.push('continue_on_fail');
   if (props.disabled) detail.push('disabled');
 
+  // A decision step routes; record the arms so reachability and cycle
+  // analysis follow BOTH of them, not just the sequential successor.
+  const routing =
+    kind === 'decision'
+      ? {
+          condition: typeof props.condition === 'string' ? props.condition : undefined,
+          yes: typeof props.yes_branch === 'string' ? props.yes_branch : successor,
+          no: typeof props.no_branch === 'string' ? props.no_branch : successor,
+        }
+      : {};
+
   out.set(id, {
     id,
     kind,
     label: props.action,
     detail,
     next: successor,
+    ...routing,
     errorEdge: node.error_edge ?? props.error_edge,
     timeoutEdge: props.timeout_edge,
   });
@@ -150,6 +183,29 @@ function lowerContainer(node: DesignerNode, successor: string, out: Map<string, 
     }
 
     case 'parallel': {
+      const mergeStrategy =
+        typeof node.merge_strategy === 'string' ? node.merge_strategy : 'merge_all';
+      const fanOut = node.fan_out;
+
+      if (fanOut != null) {
+        // Fan-out: the children are ONE branch subgraph instantiated per
+        // collection item, so the branch COUNT is only known at run time.
+        const entry = lowerNodes(children, 'end', out);
+        const detail = [
+          `fan-out over: ${typeof fanOut.over === 'string' ? fanOut.over : '(missing)'}`,
+          `1 branch per item, merge strategy: ${mergeStrategy}`,
+        ];
+        if (fanOut.max_branches != null) detail.push(`max_branches: ${fanOut.max_branches}`);
+        out.set(id, {
+          id,
+          kind: 'parallel',
+          detail,
+          next: successor,
+          branches: entry === 'end' ? [] : [{ id: `${id}-\${index}`, entry }],
+        });
+        return id;
+      }
+
       const branches: PlanBranch[] = [];
       for (const child of children) {
         // Branch flows are independent child flows that end at their own end
@@ -159,7 +215,7 @@ function lowerContainer(node: DesignerNode, successor: string, out: Map<string, 
       out.set(id, {
         id,
         kind: 'parallel',
-        detail: [`${branches.length} branch(es), merge strategy: merge_all`],
+        detail: [`${branches.length} branch(es), merge strategy: ${mergeStrategy}`],
         next: successor,
         branches,
       });

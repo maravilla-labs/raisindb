@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { FlowDefinition, FlowNode, FlowStep, FlowContainer } from '../types';
 import type { ValidationResult, ValidationIssue } from '../context/FlowDesignerContext';
 import { isFlowStep, isFlowContainer, getErrorEdge } from '../utils';
+import { isValidTaskTypeSlug } from '../types';
 
 export interface UseFlowValidationOptions {
   /** Debounce delay in milliseconds (default: 300ms) */
@@ -90,13 +91,30 @@ function validateStepProperties(nodes: FlowNode[], _parentId?: string): Validati
         });
       }
 
-      // Check for human task step without task type
+      // Check for human task step without task type. The SET of types is
+      // open (applications may define their own), so only presence and the
+      // slug shape are checked - not membership in the canonical four.
       if (step.properties.step_type === 'human_task' && !step.properties.task_type) {
         issues.push({
           nodeId: step.id,
           field: 'task_type',
           code: 'MISSING_TASK_TYPE',
-          message: 'Human Task step requires a task type (approval, input, review, or action).',
+          message:
+            'Human Task step requires a task type (approval, input, review, action, or an application-defined slug).',
+          severity: 'error',
+        });
+      }
+
+      if (
+        step.properties.step_type === 'human_task' &&
+        step.properties.task_type &&
+        !isValidTaskTypeSlug(step.properties.task_type)
+      ) {
+        issues.push({
+          nodeId: step.id,
+          field: 'task_type',
+          code: 'INVALID_TASK_TYPE',
+          message: `task_type "${step.properties.task_type}" must be 1-64 characters matching [a-z][a-z0-9_-]*.`,
           severity: 'error',
         });
       }
@@ -336,6 +354,59 @@ function validateStepProperties(nodes: FlowNode[], _parentId?: string): Validati
             severity: 'error',
           });
         }
+      }
+
+      // Parallel fan-out: one branch per collection item
+      if (container.fan_out) {
+        if (!container.fan_out.over?.trim()) {
+          issues.push({
+            nodeId: container.id,
+            field: 'fan_out.over',
+            code: 'FAN_OUT_MISSING_OVER',
+            message:
+              'Fan-out requires fan_out.over - the collection expression to fan out over (e.g. ${steps.plan.items}).',
+            severity: 'error',
+          });
+        }
+        if (container.fan_out.max_branches != null && container.fan_out.max_branches < 1) {
+          issues.push({
+            nodeId: container.id,
+            field: 'fan_out.max_branches',
+            code: 'FAN_OUT_INVALID_MAX_BRANCHES',
+            message: `fan_out.max_branches must be at least 1 (got ${container.fan_out.max_branches}).`,
+            severity: 'error',
+          });
+        }
+        // A fan-out instantiates the children as ONE branch subgraph per
+        // item, so an empty container fans out over nothing to run.
+        if (container.children.length === 0) {
+          issues.push({
+            nodeId: container.id,
+            code: 'FAN_OUT_EMPTY_BRANCH',
+            message: 'Fan-out container has no children - there is no branch to run per item.',
+            severity: 'error',
+          });
+        }
+      }
+
+      // Fan-out / merge strategy are only supported on parallel containers
+      if (container.fan_out && container.container_type !== 'parallel') {
+        issues.push({
+          nodeId: container.id,
+          field: 'fan_out',
+          code: 'FAN_OUT_ON_NON_PARALLEL',
+          message: `Fan-out config is only supported on parallel containers (this is "${container.container_type}").`,
+          severity: 'error',
+        });
+      }
+      if (container.merge_strategy && container.container_type !== 'parallel') {
+        issues.push({
+          nodeId: container.id,
+          field: 'merge_strategy',
+          code: 'MERGE_STRATEGY_ON_NON_PARALLEL',
+          message: `Merge strategy is only supported on parallel containers (this is "${container.container_type}").`,
+          severity: 'error',
+        });
       }
 
       // Loop config is only supported on loop containers

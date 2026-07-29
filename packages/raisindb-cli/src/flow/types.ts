@@ -117,6 +117,18 @@ export interface DesignerNode {
     until?: string;
     [key: string]: unknown;
   };
+  /**
+   * Fan-out configuration for parallel containers: run the container's
+   * child subgraph once per item of a runtime collection, then join every
+   * run. Without it the children ARE the branches.
+   */
+  fan_out?: {
+    over?: string;
+    max_branches?: number;
+    [key: string]: unknown;
+  };
+  /** Branch join strategy for parallel containers */
+  merge_strategy?: string;
   timeout_ms?: number;
   [key: string]: unknown;
 }
@@ -163,10 +175,30 @@ export interface FlowReport {
 export const STEP_NODE_TYPE = 'raisin:FlowStep';
 export const CONTAINER_NODE_TYPE = 'raisin:FlowContainer';
 
-export const KNOWN_STEP_TYPES = ['default', 'ai_agent', 'chat', 'human_task'];
+export const KNOWN_STEP_TYPES = [
+  'default',
+  'ai_agent',
+  'chat',
+  'human_task',
+  'wait',
+  'sub_flow',
+  'decision',
+];
 export const KNOWN_CONTAINER_TYPES = ['and', 'or', 'parallel', 'ai_sequence', 'competition', 'loop'];
+/**
+ * The human task types the flow runtime understands semantically.
+ *
+ * These are CANONICAL, not exhaustive: an application may define its own
+ * task vocabulary, and any slug matching {@link TASK_TYPE_SLUG_PATTERN} is
+ * carried through to the task node verbatim. Validation therefore checks
+ * the slug's shape, not its membership here.
+ */
 export const KNOWN_TASK_TYPES = ['approval', 'input', 'review', 'action'];
+
+/** Shape a task_type slug must have (mirrors the engine's own rule). */
+export const TASK_TYPE_SLUG_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 export const KNOWN_RETRY_STRATEGIES = ['none', 'quick', 'standard', 'aggressive', 'llm'];
+export const KNOWN_MERGE_STRATEGIES = ['merge_all', 'first_success', 'all_success'];
 
 /** Template/condition root namespaces resolvable by the flow runtime. */
 export const KNOWN_TEMPLATE_ROOTS = [
@@ -222,6 +254,9 @@ export function normalizeReference(raw: RawReference | null | undefined): Normal
  */
 export function determineStepKind(props: DesignerStepProperties): string {
   if (props.step_type === 'human_task' || props.task_type != null) return 'human_task';
+  if (props.step_type === 'wait') return 'wait';
+  if (props.step_type === 'sub_flow') return 'sub_flow';
+  if (props.step_type === 'decision') return 'decision';
   if (props.function_ref != null) return 'function';
   if (props.step_type === 'ai_agent') return 'ai_agent';
   if (props.agent_ref != null) return 'ai_container';

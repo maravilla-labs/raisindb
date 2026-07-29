@@ -11,6 +11,7 @@ import { Code, User, Bot, Clock, RotateCcw } from 'lucide-react';
 import { useFlowDesignerContext } from '../../context/FlowDesignerContext';
 import { useThemeClasses } from '../../context';
 import { UpdateStepCommand } from '../../commands';
+import { CANONICAL_TASK_TYPES, isValidTaskTypeSlug } from '../../types';
 import type { FlowStep, FlowStepProperties, RetryStrategy, RaisinReference } from '../../types';
 
 export interface StepPropertiesEditorProps {
@@ -37,6 +38,14 @@ export function StepPropertiesEditor({
     },
     [commandContext, executeCommand, step.id]
   );
+
+  // The SET of task types is open, but the slug shape is not — surface a
+  // malformed one here rather than letting the server reject the flow.
+  const taskType = step.properties.task_type;
+  const taskTypeError =
+    taskType && !isValidTaskTypeSlug(taskType)
+      ? 'Use lowercase letters, digits, _ or - (starting with a letter)'
+      : undefined;
 
   return (
     <div className={clsx('space-y-4', className)}>
@@ -101,10 +110,21 @@ export function StepPropertiesEditor({
       {/* Human Task Properties */}
       {step.properties.step_type === 'human_task' && (
         <>
+          {/*
+            Task types are an OPEN set: the canonical four are what the
+            runtime understands semantically, but an application may define
+            its own vocabulary. So this is a free-text field with the
+            canonical values offered as completions, not a closed select.
+          */}
           <FieldGroup label="Task Type" icon={<User className="w-4 h-4" />}>
-            <select
-              value={step.properties.task_type || 'approval'}
-              onChange={(e) => updateProperty('task_type', e.target.value as FlowStepProperties['task_type'])}
+            <input
+              type="text"
+              list="raisin-task-types"
+              value={step.properties.task_type || ''}
+              onChange={(e) =>
+                updateProperty('task_type', (e.target.value || undefined) as FlowStepProperties['task_type'])
+              }
+              placeholder="approval"
               className={clsx(
                 'w-full px-3 py-2 rounded-md border text-sm',
                 themeClasses.stepBg,
@@ -112,12 +132,13 @@ export function StepPropertiesEditor({
                 themeClasses.stepText,
                 'focus:outline-none focus:ring-2 focus:ring-blue-500'
               )}
-            >
-              <option value="approval">Approval</option>
-              <option value="input">Input</option>
-              <option value="review">Review</option>
-              <option value="action">Action</option>
-            </select>
+            />
+            <datalist id="raisin-task-types">
+              {CANONICAL_TASK_TYPES.map((type) => (
+                <option key={type} value={type} />
+              ))}
+            </datalist>
+            {taskTypeError && <p className="mt-1 text-xs text-red-500">{taskTypeError}</p>}
           </FieldGroup>
 
           <FieldGroup label="Assignee">

@@ -12,6 +12,7 @@ import { useThemeClasses } from '../context';
 import { isFlowStep, isFlowContainer } from '../utils';
 import { StepPropertiesEditor } from './properties/StepPropertiesEditor';
 import { ErrorHandlingEditor } from './properties/ErrorHandlingEditor';
+import { MERGE_STRATEGY_DESCRIPTIONS } from '../types';
 import type { FlowStep, FlowContainer } from '../types';
 
 export interface PropertiesPanelProps {
@@ -218,6 +219,46 @@ function ContainerPropertiesContent({ container }: { container: FlowContainer })
             {JSON.stringify(container.loop, null, 2)}
           </pre>
         </div>
+      )}
+
+      {/* Parallel: fan-out + join. Without a fan_out the children ARE the
+          branches; with one they are a single branch run per collection item. */}
+      {container.container_type === 'parallel' && (
+        <>
+          <div>
+            <label className={clsx('block text-xs font-medium mb-1', themeClasses.stepTextMuted)}>
+              Branches
+            </label>
+            <p className={clsx('text-sm', themeClasses.stepText)}>
+              {container.fan_out
+                ? `One per item of ${container.fan_out.over || '(unset collection)'}`
+                : 'One per child (static)'}
+            </p>
+          </div>
+
+          {container.fan_out && (
+            <div>
+              <label className={clsx('block text-xs font-medium mb-1', themeClasses.stepTextMuted)}>
+                Fan-out Configuration
+              </label>
+              <pre className={clsx(
+                'text-xs p-2 rounded bg-gray-100 dark:bg-gray-800 overflow-x-auto',
+                themeClasses.stepText
+              )}>
+                {JSON.stringify(container.fan_out, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          <div>
+            <label className={clsx('block text-xs font-medium mb-1', themeClasses.stepTextMuted)}>
+              Join
+            </label>
+            <p className={clsx('text-sm', themeClasses.stepText)}>
+              {MERGE_STRATEGY_DESCRIPTIONS[container.merge_strategy ?? 'merge_all']}
+            </p>
+          </div>
+        </>
       )}
 
       {/* AI Config */}

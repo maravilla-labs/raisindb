@@ -9,6 +9,7 @@ import {
   KNOWN_RETRY_STRATEGIES,
   KNOWN_STEP_TYPES,
   KNOWN_TASK_TYPES,
+  TASK_TYPE_SLUG_PATTERN,
   determineStepKind,
   normalizeReference,
   type DesignerNode,
@@ -97,15 +98,17 @@ function checkHumanTask(node: DesignerNode, findings: Finding[]): void {
       severity: 'error',
       nodeId,
       field: 'task_type',
-      message: 'Human Task step requires a task type (approval, input, review, or action).',
+      message: `Human Task step requires a task type (${KNOWN_TASK_TYPES.join(', ')}, or an application-defined slug).`,
     });
-  } else if (!KNOWN_TASK_TYPES.includes(props.task_type)) {
+  } else if (!TASK_TYPE_SLUG_PATTERN.test(props.task_type)) {
+    // The SET of task types is open - only the slug SHAPE is enforced, so a
+    // package can define its own task vocabulary without a CLI release.
     findings.push({
-      code: 'UNKNOWN_TASK_TYPE',
+      code: 'INVALID_TASK_TYPE',
       severity: 'error',
       nodeId,
       field: 'task_type',
-      message: `Unknown task_type "${props.task_type}" (expected one of: ${KNOWN_TASK_TYPES.join(', ')}).`,
+      message: `Invalid task_type "${props.task_type}": expected 1-64 characters matching [a-z][a-z0-9_-]* (canonical types: ${KNOWN_TASK_TYPES.join(', ')}).`,
     });
   }
 

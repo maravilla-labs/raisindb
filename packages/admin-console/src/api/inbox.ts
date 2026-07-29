@@ -2,16 +2,33 @@
  * Inbox API
  *
  * API functions for the human-in-the-loop task inbox. Tasks are created by
- * flow wait steps (approval / input / review / action) and completing a task
- * resumes the waiting flow instance.
+ * flow wait steps (approval / input / review / action, or an
+ * application-defined type) and completing a task resumes the waiting flow
+ * instance.
  */
 
 import { getAuthHeaders } from './client'
 
 // Types
 
-/** Task type discriminator */
-export type InboxTaskType = 'approval' | 'input' | 'review' | 'action'
+// The canonical task list and slug validator live in @raisindb/flow-designer;
+// re-exported here so inbox consumers have one import site.
+export {
+  CANONICAL_TASK_TYPES,
+  isValidTaskTypeSlug,
+  type CanonicalTaskType,
+} from '@raisindb/flow-designer'
+import type { CanonicalTaskType as CanonicalTaskTypeInternal } from '@raisindb/flow-designer'
+
+/**
+ * Task type discriminator.
+ *
+ * The canonical types are not a closed set - an application may define its
+ * own task vocabulary, and any slug matching `[a-z][a-z0-9_-]{0,63}` reaches
+ * the inbox verbatim. UI that switches on the type must therefore have a
+ * fallback for an unrecognised one.
+ */
+export type InboxTaskType = CanonicalTaskTypeInternal | (string & {})
 
 /** Task lifecycle status */
 export type InboxTaskStatus = 'pending' | 'completed' | 'expired' | 'cancelled'

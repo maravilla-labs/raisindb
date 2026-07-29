@@ -37,7 +37,7 @@ import type {
   ContainerRefereeConfig,
   LoopConfig,
 } from '@raisindb/flow-designer'
-import { isFlowStep, isFlowContainer } from '@raisindb/flow-designer'
+import { isFlowStep, isFlowContainer, isValidTaskTypeSlug } from '@raisindb/flow-designer'
 
 // Retry strategy definitions
 const RETRY_STRATEGIES = {
@@ -92,15 +92,29 @@ const AI_TOOL_MODES = {
 
 type AiToolMode = keyof typeof AI_TOOL_MODES
 
-// Human task types
+/**
+ * Help text under the task-type field: the canonical types get their
+ * description, anything else is an application-defined type (valid as long as
+ * the slug shape is right).
+ */
+function taskTypeHint(taskType: string | undefined): string {
+  const key = taskType || 'approval'
+  const known = (HUMAN_TASK_TYPES as Record<string, { description: string } | undefined>)[key]
+  if (known) return known.description
+  return isValidTaskTypeSlug(key)
+    ? 'Application-defined task type'
+    : 'Use lowercase letters, digits, _ or - (starting with a letter)'
+}
+
+// Human task types. These four are what the runtime understands
+// semantically; the SET is open, so this is a suggestion list rather than a
+// closed enum (see `isValidTaskTypeSlug` for the shape that is enforced).
 const HUMAN_TASK_TYPES = {
   approval: { label: 'Approval', description: 'User approves or rejects' },
   input: { label: 'Input', description: 'User provides form data' },
   review: { label: 'Review', description: 'User reviews content' },
   action: { label: 'Action', description: 'User takes an action' },
 } as const
-
-type HumanTaskType = keyof typeof HUMAN_TASK_TYPES
 
 // Human task priorities
 const TASK_PRIORITIES = [
@@ -391,28 +405,32 @@ export function StepConfigPanel({
             <h4 className="text-sm font-medium text-white">Human Task Settings</h4>
           </div>
 
-          {/* Task Type */}
+          {/* Task Type - free text with the canonical four as completions,
+              since an application may define its own task vocabulary */}
           <div className="space-y-2">
             <label className="block text-xs text-gray-400">Task Type</label>
             <div className="relative">
-              <select
-                value={stepProps?.task_type || 'approval'}
+              <input
+                type="text"
+                list="admin-task-types"
+                value={stepProps?.task_type || ''}
+                placeholder="approval"
                 onChange={(e) => {
-                  onUpdateStep({ task_type: e.target.value as HumanTaskType })
+                  onUpdateStep({ task_type: e.target.value || undefined })
                   onDirty()
                 }}
-                className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-amber-500"
-              >
+                className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+              <datalist id="admin-task-types">
                 {Object.entries(HUMAN_TASK_TYPES).map(([key, { label }]) => (
-                  <option key={key} value={key} className="bg-gray-800">
+                  <option key={key} value={key}>
                     {label}
                   </option>
                 ))}
-              </select>
-              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+              </datalist>
             </div>
             <p className="text-xs text-gray-500">
-              {HUMAN_TASK_TYPES[(stepProps?.task_type as HumanTaskType) || 'approval']?.description}
+              {taskTypeHint(stepProps?.task_type)}
             </p>
           </div>
 

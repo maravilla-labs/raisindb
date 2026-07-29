@@ -25,6 +25,10 @@ export type {
   ContainerRouterConfig,
   ContainerRefereeConfig,
   LoopConfig,
+  FanOutConfig,
+  MergeStrategy,
+  CanonicalTaskType,
+  TaskTypeSlug,
   HandoffTarget,
   ChatTerminationMode,
   ChatTerminationConfig,
@@ -44,6 +48,12 @@ export {
   AI_TOOL_MODE_DESCRIPTIONS,
   DEFAULT_CHAT_STEP_CONFIG,
   DEFAULT_LOOP_CONFIG,
+  DEFAULT_FAN_OUT_CONFIG,
+  MERGE_STRATEGY_LABELS,
+  MERGE_STRATEGY_DESCRIPTIONS,
+  CANONICAL_TASK_TYPES,
+  isValidTaskTypeSlug,
+  isCanonicalTaskType,
   INITIAL_EXECUTION_STATE,
 } from './flow';
 

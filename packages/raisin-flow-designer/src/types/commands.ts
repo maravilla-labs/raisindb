@@ -15,7 +15,10 @@ import type {
   ContainerRouterConfig,
   ContainerRefereeConfig,
   LoopConfig,
+  FanOutConfig,
+  MergeStrategy,
   TaskOption,
+  TaskTypeSlug,
   RetryConfig,
   RetryStrategy,
   ChatStepConfig,
@@ -78,12 +81,14 @@ export interface UpdateStepParams {
     disabled?: boolean;
     on_error?: StepErrorBehavior;
     // Human task properties
-    task_type?: 'approval' | 'input' | 'review' | 'action';
+    task_type?: TaskTypeSlug;
     assignee?: string;
     task_description?: string;
     options?: TaskOption[];
-    priority?: number;
-    due_in_seconds?: number;
+    /** Number, or a template expression resolved at run time */
+    priority?: number | string;
+    /** Number, or a template expression resolved at run time */
+    due_in_seconds?: number | string;
     // Retry configuration
     retry_strategy?: RetryStrategy;
     retry?: RetryConfig;
@@ -115,6 +120,10 @@ export interface UpdateContainerParams {
   referee?: ContainerRefereeConfig | null;
   /** Loop configuration for loop containers (null removes the config) */
   loop?: LoopConfig | null;
+  /** Fan-out configuration for parallel containers (null removes the config) */
+  fan_out?: FanOutConfig | null;
+  /** Branch join strategy for parallel containers */
+  merge_strategy?: MergeStrategy;
   /** Shared task prompt for competition containers (null removes the prompt) */
   prompt?: string | null;
   /** Container timeout in milliseconds */

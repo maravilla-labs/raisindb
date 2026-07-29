@@ -73,7 +73,8 @@ properties:
   node_type: raisin:FlowStep
   properties:
     step_type: human_task
-    task_type: approval                       # approval | input | review | action
+    task_type: approval                       # approval | input | review | action,
+                                              # or your OWN slug ([a-z][a-z0-9_-]*)
     assignee: "${candidate.user_path}"        # user home path, e.g. /users/internal/anna-at-example-com
     action: "Can you take {{ steps.pick_candidates.shift_title }}?"
     task_description: "Details: {{ steps.pick_candidates.day }} {{ steps.pick_candidates.start }}"
@@ -102,7 +103,7 @@ properties:
 |---|---|
 | `and` | Children run as a sequence |
 | `or` | REL `rules` evaluated in order; first match routes to its child; no match → container skipped. Add a `router: {agent_ref...}` and an AI agent picks the branch when no rule matched |
-| `parallel` | Children as parallel branch flows |
+| `parallel` | Children as parallel branch flows; add `fan_out` for one branch PER COLLECTION ITEM (below) |
 | `loop` | Iterate a collection (below) |
 | `ai_sequence` | Agentic tool loop (agent + tools until done) |
 | `competition` | Several agents answer; a referee judges/refines |
@@ -127,6 +128,34 @@ Output: `steps.ask_each.results` (array, index-aligned with the collection)
 plus `count`. To find *which* iteration succeeded, add a small function step
 that zips `${steps.ask_each.results}` with the original collection — see
 `resolve-accepter` in the shiftboard package.
+
+### Fan-out (ask everyone AT ONCE, then join)
+
+A loop asks one person at a time. To ask everyone concurrently and wait for
+all of them, use a `parallel` container with `fan_out` — the children become
+ONE branch subgraph run per item, and the container joins every run:
+
+```yaml
+- id: ask_all
+  node_type: raisin:FlowContainer
+  container_type: parallel
+  fan_out:
+    over: "${steps.pick_candidates.candidates}"   # required, collection expr
+    max_branches: 100                             # optional cap (default 500)
+  merge_strategy: all_success                     # or merge_all | first_success
+  children: [ ...branch steps reference ${item.*} and ${index}... ]
+```
+
+- Each branch is its own child flow instance, so a branch may park on a
+  human task — the join resumes once the LAST person has answered.
+- `item` / `index` are bound per branch; the branch's flow input is
+  `{ item, index }`.
+- Iterate `steps.ask_all.branches` — each entry carries `branch_id`,
+  `status`, `output`. Positional `steps.ask_all.branch_0` also works.
+
+Loop vs fan-out: **loop** = sequential, can early-exit with `until` (ask
+until someone accepts). **fan-out** = concurrent, always waits for all
+(collect every answer).
 
 ## Templates and data flow
 

@@ -15,6 +15,7 @@
  * cannot be converted (callers should fall back to a JSON view).
  */
 
+import { isValidTaskTypeSlug } from '@raisindb/flow-designer'
 import type {
   FlowDefinition,
   FlowNode as DesignerFlowNode,
@@ -125,8 +126,11 @@ function runtimeNodeToStep(node: RuntimeFlowNode): FlowStep {
     case 'human_task': {
       stepProps.step_type = 'human_task'
       stepProps.action = action || asString(props.title) || node.id
+      // Task types are an OPEN set: preserve any well-formed slug, not just
+      // the canonical four, or a custom type would be silently dropped on
+      // every snapshot round-trip.
       const taskType = asString(props.task_type)
-      if (taskType === 'approval' || taskType === 'input' || taskType === 'review' || taskType === 'action') {
+      if (taskType && isValidTaskTypeSlug(taskType)) {
         stepProps.task_type = taskType
       }
       const assignee = asString(props.assignee)
