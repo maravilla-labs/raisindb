@@ -333,6 +333,9 @@ mod tests {
 
         let meta = sample().with_agent(Some("flow:/flows/x".to_string()));
         assert_eq!(meta.agent.as_deref(), Some("flow:/flows/x"));
-        assert_eq!(meta.actor, "alice", "attribution must not rewrite the actor");
+        assert_eq!(
+            meta.actor, "alice",
+            "attribution must not rewrite the actor"
+        );
     }
 }

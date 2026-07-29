@@ -33,7 +33,9 @@ const SUPPRESSED_CREATED_EVENT_TYPES: &[&str] =
 /// `actor` is `"system"`: a flow step has no human behind it, and that is the
 /// value this path effectively recorded before. `agent` names the flow and the
 /// trigger behind it -- the thing that used to be missing entirely.
-fn flow_event_metadata(agent: Option<&str>) -> std::collections::HashMap<String, serde_json::Value> {
+fn flow_event_metadata(
+    agent: Option<&str>,
+) -> std::collections::HashMap<String, serde_json::Value> {
     let mut metadata = std::collections::HashMap::new();
     metadata.insert(
         "source".to_string(),

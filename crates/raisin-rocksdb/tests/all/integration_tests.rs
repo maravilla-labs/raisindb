@@ -5886,9 +5886,8 @@ mod ordering {
             fn handle<'a>(
                 &'a self,
                 event: &'a raisin_events::Event,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>,
-            > {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>>
+            {
                 if let raisin_events::Event::Node(n) = event {
                     self.0.lock().unwrap().push(n.clone());
                 }
@@ -5904,8 +5903,7 @@ mod ordering {
             .create(scope, parent.clone(), CreateNodeOptions::default())
             .await?;
         for name in ["a", "b"] {
-            let child =
-                fixture.create_test_node(&format!("/reorder-events/{name}"), "raisin:Page");
+            let child = fixture.create_test_node(&format!("/reorder-events/{name}"), "raisin:Page");
             nodes
                 .create(scope, child, CreateNodeOptions::default())
                 .await?;

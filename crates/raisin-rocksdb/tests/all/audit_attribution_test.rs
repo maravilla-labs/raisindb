@@ -168,7 +168,12 @@ async fn setup() -> Result<(Arc<RocksDBStorage>, Arc<RocksDBAuditRepo>, TempDir)
 }
 
 /// Commit one create as `auth`, returning the new node's id.
-async fn create_as(storage: &Arc<RocksDBStorage>, path: &str, ty: &str, auth: AuthContext) -> Result<String> {
+async fn create_as(
+    storage: &Arc<RocksDBStorage>,
+    path: &str,
+    ty: &str,
+    auth: AuthContext,
+) -> Result<String> {
     let node = build_node(path, ty);
     let id = node.id.clone();
 
@@ -251,13 +256,7 @@ async fn agent_marker_reaches_the_audit_log_alongside_the_human() -> Result<()> 
 async fn a_direct_human_write_records_no_agent() -> Result<()> {
     let (storage, audit, _tmp) = setup().await?;
 
-    let id = create_as(
-        &storage,
-        "/audited-direct",
-        AUDITED_TYPE,
-        user("bob"),
-    )
-    .await?;
+    let id = create_as(&storage, "/audited-direct", AUDITED_TYPE, user("bob")).await?;
     settle().await;
 
     let logs = audit.get_logs_scoped(scope(), &id, None).await?;
@@ -435,13 +434,7 @@ async fn a_trigger_fired_agent_records_both_the_agent_and_the_trigger() -> Resul
 async fn reads_do_not_cross_tenant_or_branch() -> Result<()> {
     let (storage, audit, _tmp) = setup().await?;
 
-    let id = create_as(
-        &storage,
-        "/scoped",
-        AUDITED_TYPE,
-        user("erin"),
-    )
-    .await?;
+    let id = create_as(&storage, "/scoped", AUDITED_TYPE, user("erin")).await?;
     settle().await;
 
     assert_eq!(audit.get_logs_scoped(scope(), &id, None).await?.len(), 1);

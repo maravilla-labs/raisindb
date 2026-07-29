@@ -23,8 +23,8 @@ use async_stream::try_stream;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_sql::analyzer::catalog::SchemaTableKind;
 use raisin_storage::{
-    ArchetypeRepository, BranchScope, ElementTypeRepository, NodeTypeRepository, RepoScope, Storage,
-    WorkspaceRepository,
+    ArchetypeRepository, BranchScope, ElementTypeRepository, NodeTypeRepository, RepoScope,
+    Storage, WorkspaceRepository,
 };
 
 use crate::physical_plan::eval::eval_expr;

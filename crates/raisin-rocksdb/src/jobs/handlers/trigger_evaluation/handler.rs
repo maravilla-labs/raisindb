@@ -314,7 +314,10 @@ impl TriggerEvaluationHandler {
         };
         let trigger_marker = agent_identity::with_origin(
             trigger_marker,
-            context.metadata.get(ORIGIN_AGENT_KEY).and_then(|v| v.as_str()),
+            context
+                .metadata
+                .get(ORIGIN_AGENT_KEY)
+                .and_then(|v| v.as_str()),
         );
 
         // Two keys, two consumers: `auth_context` is what the function executor
@@ -515,10 +518,7 @@ impl TriggerEvaluationHandler {
         // The stored context stays `AuthContext::system()` -- identical to the
         // `None` the flow path already fell back to -- so this records who acted
         // without granting anything new.
-        instance_metadata.insert(
-            ORIGIN_AGENT_KEY.to_string(),
-            serde_json::json!(flow_marker),
-        );
+        instance_metadata.insert(ORIGIN_AGENT_KEY.to_string(), serde_json::json!(flow_marker));
         if let Ok(auth) = serde_json::to_value(AuthContext::system().with_agent(&flow_marker)) {
             instance_metadata.insert(AUTH_CONTEXT_KEY.to_string(), auth);
         }

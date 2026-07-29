@@ -129,7 +129,10 @@ async fn reads_are_isolated_by_tenant_repo_branch_and_workspace() {
         AuditScope::new("tenant-1", "repo-1", "feature-x", "content"),
         AuditScope::new("tenant-1", "repo-1", "main", "assets"),
     ] {
-        let read = repo.get_logs_scoped(other, "shared-id", None).await.unwrap();
+        let read = repo
+            .get_logs_scoped(other, "shared-id", None)
+            .await
+            .unwrap();
         assert!(
             read.is_empty(),
             "scope {:?} must not see another scope's entries",
@@ -291,7 +294,8 @@ async fn a_database_without_the_audit_cf_still_opens_and_gains_it() {
 
     // 2. The new binary opens it through the normal path.
     let db = Arc::new(
-        open_db(temp_dir.path()).expect("an existing database must still open after the CF is added"),
+        open_db(temp_dir.path())
+            .expect("an existing database must still open after the CF is added"),
     );
     let repo = RocksDBAuditRepo::new(db);
 
@@ -299,7 +303,13 @@ async fn a_database_without_the_audit_cf_still_opens_and_gains_it() {
     repo.write_log_scoped(scope(), entry("n", "/p", AuditLogAction::Create, 0))
         .await
         .unwrap();
-    assert_eq!(repo.get_logs_scoped(scope(), "n", None).await.unwrap().len(), 1);
+    assert_eq!(
+        repo.get_logs_scoped(scope(), "n", None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

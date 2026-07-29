@@ -325,7 +325,10 @@ fn user_auth_context_from_identity_has_no_permissions() {
         "to_auth_context() must not be treated as an authorization-bearing context; \
          pass the request's resolved AuthContext to anything that executes as the caller",
     );
-    assert!(!ctx.is_system, "a named subject must not map to the system context");
+    assert!(
+        !ctx.is_system,
+        "a named subject must not map to the system context"
+    );
 
     // A system identity is the one case where the mapping IS exact.
     let system = McpIdentity::new("svc", "repo").as_system();

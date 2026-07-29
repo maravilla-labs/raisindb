@@ -76,8 +76,7 @@ impl RocksDBAuditRepo {
         // `prefix_iterator_cf` seeks to the prefix but keeps reading past it, so
         // the `starts_with` re-check below is what actually bounds the scan.
         for item in self.db.prefix_iterator_cf(cf, &prefix) {
-            let (key, value) =
-                item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
             if !key.starts_with(&prefix) {
                 break;

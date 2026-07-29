@@ -217,9 +217,10 @@ impl Dispatcher {
         let mut meta = serde_json::Map::new();
         let csp_value = match &ui.csp {
             Some(csp) if !csp.is_empty() => Some(serde_json::to_value(csp).unwrap_or(Value::Null)),
-            _ => self.public_base.as_ref().map(|base| {
-                json!({ "connectDomains": [base], "resourceDomains": [base] })
-            }),
+            _ => self
+                .public_base
+                .as_ref()
+                .map(|base| json!({ "connectDomains": [base], "resourceDomains": [base] })),
         };
         if let Some(csp) = csp_value {
             meta.insert("csp".into(), csp);
@@ -287,14 +288,16 @@ impl Dispatcher {
         let mut resources = Vec::new();
         if self.resources.is_some() {
             for workspace in &self.descriptor.data_policy.workspaces {
-                resources.push(serde_json::to_value(crate::resources::ResourceDescriptor {
-                    uri: crate::resources::resource_uri(workspace, "/"),
-                    name: format!("{workspace} (workspace root)"),
-                    description: Some(format!(
-                        "Browse nodes in the `{workspace}` workspace by path."
-                    )),
-                    mime_type: "application/json".to_string(),
-                })?);
+                resources.push(serde_json::to_value(
+                    crate::resources::ResourceDescriptor {
+                        uri: crate::resources::resource_uri(workspace, "/"),
+                        name: format!("{workspace} (workspace root)"),
+                        description: Some(format!(
+                            "Browse nodes in the `{workspace}` workspace by path."
+                        )),
+                        mime_type: "application/json".to_string(),
+                    },
+                )?);
             }
         }
         // MCP Apps (SEP-1865): predeclare each ui-bound tool's widget so hosts

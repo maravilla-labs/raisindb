@@ -124,12 +124,7 @@ where
             // Write with the event's full scope so a persistent store can key by
             // it (and a tenant wipe can find the rows). Stores that cannot honour
             // the scope fall back to the global bucket via the trait default.
-            let scope = AuditScope::new(
-                &e.tenant_id,
-                &e.repository_id,
-                &e.branch,
-                &e.workspace_id,
-            );
+            let scope = AuditScope::new(&e.tenant_id, &e.repository_id, &e.branch, &e.workspace_id);
             self.audit.write_log_scoped(scope, log).await?;
             Ok(())
         })

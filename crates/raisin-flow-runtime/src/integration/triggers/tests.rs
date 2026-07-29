@@ -347,10 +347,7 @@ fn the_agent_marker_is_persisted_as_an_instance_variable() {
     let restored: crate::types::FlowInstance =
         serde_json::from_str(&json_str).expect("deserializes");
     assert_eq!(
-        restored
-            .variables
-            .get(AGENT_VAR)
-            .and_then(|v| v.as_str()),
+        restored.variables.get(AGENT_VAR).and_then(|v| v.as_str()),
         Some(marker)
     );
 }

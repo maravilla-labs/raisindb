@@ -146,9 +146,13 @@ pub async fn get_inbox_task(
 ) -> Result<Json<Value>, ApiError> {
     let (caller_id, home, admin) = require_caller(&auth_context)?;
 
-    let task =
-        raisin_flow_runtime::service::get_inbox_task(state.storage.as_ref(), &tenant_info.tenant_id, &repo, &task_id)
-            .await?;
+    let task = raisin_flow_runtime::service::get_inbox_task(
+        state.storage.as_ref(),
+        &tenant_info.tenant_id,
+        &repo,
+        &task_id,
+    )
+    .await?;
 
     // Only the assignee (or an admin) may read a task
     if !admin {

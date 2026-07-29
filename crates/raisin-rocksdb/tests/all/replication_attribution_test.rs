@@ -341,7 +341,9 @@ async fn direct_update_replicates_the_operation_meta_actor_and_agent() -> Result
         "carol".to_string(),
         "edit title".to_string(),
     )
-    .with_agent(Some("flow:/flows/publish@trigger:/triggers/on-edit".to_string()));
+    .with_agent(Some(
+        "flow:/flows/publish@trigger:/triggers/on-edit".to_string(),
+    ));
 
     nodes
         .update(

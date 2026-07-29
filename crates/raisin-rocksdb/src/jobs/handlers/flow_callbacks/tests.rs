@@ -83,7 +83,10 @@ mod agent_provenance {
     /// that started it. Exactly one `@`, kind leftmost so `LIKE 'flow:%'` works.
     const MARKER: &str = "flow:/flows/publish-approval@trigger:/triggers/on-order-created";
 
-    fn recorder() -> (Arc<Mutex<Vec<Option<String>>>>, Arc<Mutex<Vec<Option<String>>>>) {
+    fn recorder() -> (
+        Arc<Mutex<Vec<Option<String>>>>,
+        Arc<Mutex<Vec<Option<String>>>>,
+    ) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         (seen.clone(), seen)
     }

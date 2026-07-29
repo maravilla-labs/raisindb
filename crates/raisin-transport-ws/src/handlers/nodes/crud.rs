@@ -383,7 +383,8 @@ where
         )));
     };
 
-    let scope = raisin_audit::AuditScope::new(&ctx.tenant_id, &ctx.repo, &ctx.branch, &ctx.workspace);
+    let scope =
+        raisin_audit::AuditScope::new(&ctx.tenant_id, &ctx.repo, &ctx.branch, &ctx.workspace);
     let logs = state
         .audit
         .get_logs_scoped(scope, &node.id, payload.limit.map(|l| l as usize))

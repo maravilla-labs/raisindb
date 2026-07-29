@@ -328,7 +328,6 @@ impl Tool for DeleteNodeTool {
     }
 }
 
-
 /// `move_node` — reparent (and optionally rename) a node.
 ///
 /// RaisinDB is a hierarchical store where the path IS the address, so moving a
@@ -445,19 +444,25 @@ impl Tool for ReorderNodeTool {
                 self.backend
                     .node_move_child_relative(&workspace, parent_path, name, reference, true)
                     .await?;
-                Ok(json!({ "reordered": true, "parent_path": parent_path, "name": name, "before": reference }))
+                Ok(
+                    json!({ "reordered": true, "parent_path": parent_path, "name": name, "before": reference }),
+                )
             }
             (None, Some(reference), _) => {
                 self.backend
                     .node_move_child_relative(&workspace, parent_path, name, reference, false)
                     .await?;
-                Ok(json!({ "reordered": true, "parent_path": parent_path, "name": name, "after": reference }))
+                Ok(
+                    json!({ "reordered": true, "parent_path": parent_path, "name": name, "after": reference }),
+                )
             }
             (None, None, Some(pos)) => {
                 self.backend
                     .node_reorder_child(&workspace, parent_path, name, pos as u32)
                     .await?;
-                Ok(json!({ "reordered": true, "parent_path": parent_path, "name": name, "position": pos }))
+                Ok(
+                    json!({ "reordered": true, "parent_path": parent_path, "name": name, "position": pos }),
+                )
             }
             (None, None, None) => Err(McpError::invalid_params(
                 "give one of `before`, `after` or `position` to say where the node should sit",

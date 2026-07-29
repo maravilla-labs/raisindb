@@ -79,10 +79,7 @@ pub(super) async fn handle_audit_log<S: Storage + TransactionalStorage + 'static
     // unscoped call returns nothing at all against RocksDB — this command
     // silently returned `[]` for every node until it was scoped.
     let scope = AuditScope::new(tenant_id, repository, branch, workspace);
-    let logs = state
-        .audit
-        .get_logs_scoped(scope, &node.id, None)
-        .await?;
+    let logs = state.audit.get_logs_scoped(scope, &node.id, None).await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::to_value(logs).expect("audit logs should serialize to JSON")),

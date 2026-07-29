@@ -101,7 +101,10 @@ pub fn build_data_tools(
                 )));
             }
             DataOperation::MoveNode => {
-                tools.push(Arc::new(MoveNodeTool::new(backend.clone(), allowed.clone())));
+                tools.push(Arc::new(MoveNodeTool::new(
+                    backend.clone(),
+                    allowed.clone(),
+                )));
             }
             DataOperation::ReorderNode => {
                 tools.push(Arc::new(ReorderNodeTool::new(

@@ -165,9 +165,13 @@ mod inner {
         let tenant = require_tenant(&request);
         let repo = require_repo(&request)?;
 
-        let status =
-            service::get_instance_status(state.storage.as_ref(), &tenant, &repo, &payload.instance_id)
-                .await?;
+        let status = service::get_instance_status(
+            state.storage.as_ref(),
+            &tenant,
+            &repo,
+            &payload.instance_id,
+        )
+        .await?;
 
         Ok(Some(ResponseEnvelope::success(
             request.request_id,

@@ -97,9 +97,6 @@ pub use jobs::{
     DryRunSummary,
     FunctionEnabledChecker,
     FunctionExecutionResult,
-    // Job-context metadata keys carrying provenance (see `jobs/mod.rs`)
-    AUTH_CONTEXT_KEY,
-    ORIGIN_AGENT_KEY,
     // Function execution callback types
     FunctionExecutorCallback,
     JobDataStore,
@@ -126,6 +123,9 @@ pub use jobs::{
     TriggerRegistry,
     UnifiedJobEventHandler,
     UploadSessionCleanupHandler,
+    // Job-context metadata keys carrying provenance (see `jobs/mod.rs`)
+    AUTH_CONTEXT_KEY,
+    ORIGIN_AGENT_KEY,
 };
 pub use lazy_indexing::{BuildResult, LazyIndexManager};
 pub use management::{DimensionMismatch, HnswManagement, VectorRebuildStats, VerificationReport};
