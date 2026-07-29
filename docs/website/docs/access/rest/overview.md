@@ -199,6 +199,86 @@ See the [Translation API](./translations.md) for end-to-end workflows.
 | GET/POST | `/api/raisindb/sys/{tenant_id}/admin-users` | List or create admin users |
 | GET/PUT/DELETE | `/api/raisindb/sys/{tenant_id}/admin-users/{username}` | Manage a specific admin account |
 
+Admin users are console/CLI operators. Application end users are **identities**,
+a separate store with its own login and its own password endpoints:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/auth/login` / `/auth/{repo}/login` | Authenticate an identity, returns an access token |
+| POST | `/auth/change-password` / `/auth/{repo}/change-password` | Change your own password (requires an identity access token) |
+| GET/POST | `/api/raisindb/sys/{tenant_id}/identity-users` | List or create identities (per-tenant admin JWT) |
+| GET/PATCH/DELETE | `/api/raisindb/sys/{tenant_id}/identity-users/{identity_id}` | Manage a specific identity |
+
+`change-password` reads the tenant and identity from the token, never the body,
+so it can only ever act on the caller's own account. A successful change also
+clears `must_change_password`. Note the flag is embedded in already-issued
+tokens, so a client that gates on it should re-authenticate afterwards rather
+than re-read the old token.
+
+---
+
+## 🛡️ Operator / Superadmin *(RocksDB builds)*
+
+Cross-tenant endpoints for a hosting control plane. Gated by
+`Authorization: Bearer $RAISIN_SUPERADMIN_TOKEN` (constant-time compare). If
+`RAISIN_SUPERADMIN_TOKEN` is unset or empty these routes are **not mounted at
+all** — callers get 404 rather than 401, so the surface can't be probed. Rotation
+is by restart with a new value; there is no rotation API. Treat the token like a
+root credential.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/management/admin/tenants` | Provision a tenant and its initial `admin` user (409 if it already exists) |
+| DELETE | `/management/admin/tenants/{tenant_id}` | Wipe all data for a tenant |
+| POST | `/management/admin/reset-password` | Reset the `admin` password for the tenant in `x-tenant-id` |
+| POST | `/management/admin/tenants/{tenant_id}/identity-users` | Provision an identity in a tenant |
+| GET | `/management/admin/tenants/{tenant_id}/identity-users` | List a tenant's identities |
+| GET | `/management/admin/jobs` | Cross-tenant job list |
+| POST | `/management/admin/jobs/purge-all` | Purge all jobs |
+| POST | `/management/admin/jobs/force-fail-stuck` | Force-fail stuck jobs |
+| GET | `/management/admin/health` | Server-wide health |
+| GET | `/management/admin/metrics` | Server-wide metrics |
+| POST | `/management/admin/compact` | Cross-tenant compaction |
+| POST | `/management/admin/backup/all` | Cross-tenant backup |
+
+### Provisioning an identity
+
+The identity-users endpoint exists because the customer-facing equivalent needs
+a per-tenant admin JWT, which a control plane managing tenants on a customer's
+behalf does not hold — it holds the superadmin token. Using it avoids having to
+mint or store per-tenant admin credentials just to create a login.
+
+It is deliberately policy-free: which repositories the identity is granted
+access to, which roles it gets there, and whether it must rotate its password
+are all supplied by the caller. RaisinDB attaches no meaning to any particular
+repo or role name. It also never sends email — delivering the credential is the
+caller's job.
+
+```bash
+curl -X POST "$RAISIN_URL/management/admin/tenants/acme/identity-users" \
+  -H "Authorization: Bearer $RAISIN_SUPERADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "email": "jane@acme.com",
+        "password": "<generated>",
+        "display_name": "Jane Doe",
+        "email_verified": true,
+        "repos": ["my-app"],
+        "default_roles": ["editor"],
+        "must_change_password": true
+      }'
+```
+
+Creates the `Identity` and, for each entry in `repos`, a `raisin:User` node in
+that repo's `raisin:access_control` workspace carrying `default_roles`. Returns
+`409` if the email is taken. Node creation is best-effort per repo: a repo that
+doesn't exist yet is logged and skipped rather than failing the request, so a
+partially-configured tenant still yields a usable login. `default_roles` falls
+back to `["viewer", "authenticated_user"]`.
+
+Pair `must_change_password: true` with `/auth/change-password` above — without a
+way for the user to clear the flag, setting it locks them out.
+
 ---
 
 ## 🔁 Replication & Sync *(RocksDB builds)*

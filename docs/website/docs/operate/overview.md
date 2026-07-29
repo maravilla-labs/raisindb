@@ -40,11 +40,53 @@ When `replication.enabled = true`:
 
 ## Authentication & Admin APIs
 
-Enabled under `storage-rocksdb`:
+Enabled under `storage-rocksdb`. Two distinct user stores — don't mix them up:
+
+**Admin users** (console/CLI/API operators, tenant-scoped):
 
 - `/api/raisindb/sys/{tenant}/auth` – obtain tokens.
 - `/api/raisindb/sys/{tenant}/auth/change-password` – update admin credentials (protected by middleware).
 - `/api/raisindb/sys/{tenant}/admin-users` – manage administrator accounts.
+
+**Identities** (application end users, the pluggable auth system):
+
+- `/auth/login`, `/auth/{repo}/login` – identity login, returns a user token.
+- `/auth/change-password`, `/auth/{repo}/change-password` – identity changes its
+  own password. Tenant and identity come from the token, so it can only act on
+  the caller's own account. Clears `must_change_password`.
+- `/api/raisindb/sys/{tenant}/identity-users` – manage identities with a
+  per-tenant admin JWT.
+
+## Operator (Superadmin) Surface
+
+`/management/admin/*` holds the cross-tenant powers a hosting control plane
+needs: tenant provisioning, credential recovery, identity provisioning, and
+incident response.
+
+Gated by `Authorization: Bearer $RAISIN_SUPERADMIN_TOKEN`, compared in constant
+time. **If `RAISIN_SUPERADMIN_TOKEN` is unset or empty the subtree is not
+mounted at all** — callers see 404 rather than 401, so the surface can't be
+probed for existence. To enable, set it to a long random string at server start.
+Rotation is by restart with a new value; there is no rotation API. Treat it like
+a cloud root credential.
+
+- `POST /management/admin/tenants` – provision a tenant + its initial `admin`
+  user. `409` if the tenant already has admin users.
+- `DELETE /management/admin/tenants/{tenant}` – wipe all data for a tenant.
+- `POST /management/admin/reset-password` – reset the `admin` password for the
+  tenant named in `x-tenant-id`.
+- `POST|GET /management/admin/tenants/{tenant}/identity-users` – provision or
+  list application logins for a tenant, without needing that tenant's admin JWT.
+  Caller supplies `repos`, `default_roles`, and `must_change_password`; RaisinDB
+  applies no policy of its own and sends no email.
+- `GET /management/admin/jobs`, `POST .../jobs/purge-all`,
+  `POST .../jobs/force-fail-stuck` – cross-tenant job control.
+- `GET /management/admin/health`, `/metrics` – server-wide (not per-tenant).
+- `POST /management/admin/compact`, `/backup/all` – cross-tenant maintenance.
+
+If you set `must_change_password` when provisioning an identity, make sure the
+client fronting it can call `/auth/change-password` — otherwise the user has no
+way to clear the flag and is effectively locked out.
 
 ## Index Management
 

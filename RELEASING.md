@@ -2,7 +2,12 @@
 
 ## Server Binary Release (GitHub Releases)
 
-The server binary is built for Linux x64, macOS x64/arm64, and Windows x64.
+The server binary is built for Linux x64, macOS arm64, and Windows x64.
+
+The release version comes from the **git tag** — the `build` job rewrites
+`crates/raisin-server/Cargo.toml` from it before compiling. That file's `version`
+is therefore not authoritative and is expected to lag behind released tags; don't
+bump it by hand as part of a release.
 
 ### Tag-driven release
 ```bash
@@ -15,13 +20,32 @@ The workflow builds all platforms, generates `SHA256SUMS`, and creates a GitHub 
 ### Manual dispatch
 Go to Actions > "Server cross-platform release" > Run workflow. Provide a tag or use auto-bump.
 
+### Linux-only (urgent server fix)
+Windows is the long pole (~45 min for everything, ~30 for Linux alone). When only
+the server binary matters — e.g. a deploy that pulls
+`raisindb-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` — narrow the build:
+
+```bash
+gh workflow run release.yml -f tag=v0.1.0 -f targets=linux-only
+```
+
+**This only works via dispatch.** A tag *push* hard-codes `all`
+(`github.event_name == 'push' && 'all'`), so don't push the tag if you want the
+fast path — let the workflow create it.
+
+Backfill the other platforms later on the same tag; publish uploads with
+`--clobber`, so it tops up the existing release rather than conflicting:
+
+```bash
+gh workflow run release.yml -f tag=v0.1.0 -f targets=all
+```
+
 ### Targets
-| Platform | Target | Archive |
-|----------|--------|---------|
-| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` |
-| macOS x64 | `x86_64-apple-darwin` | `.tar.gz` |
-| macOS arm64 | `aarch64-apple-darwin` | `.tar.gz` |
-| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` |
+| Platform | Target | Archive | Built when |
+|----------|--------|---------|------------|
+| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | always |
+| macOS arm64 | `aarch64-apple-darwin` | `.tar.gz` | `targets=all` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` | `targets=all` |
 
 ### Verify
 ```bash
