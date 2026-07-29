@@ -70,28 +70,35 @@ pub fn generate_select_by_id(workspace: &str, id: &str) -> SqlStatement {
 
 /// Generate SELECT for getting children of a node
 ///
-/// Uses PATH_STARTS_WITH for proper child matching (direct children only).
+/// Uses CHILD_OF for proper child matching (direct children only).
 ///
 /// ```sql
-/// SELECT * FROM workspace WHERE PATH_STARTS_WITH(path, $1) AND path != $1 LIMIT N
+/// SELECT * FROM workspace WHERE CHILD_OF($1) LIMIT N
 /// ```
 pub fn generate_select_children(
     workspace: &str,
     parent_path: &str,
     limit: Option<u32>,
 ) -> SqlStatement {
-    // For direct children, we match paths that:
-    // 1. Start with parent_path
-    // 2. Have exactly one more depth level (using DEPTH function)
+    // CHILD_OF matches on PATH SEGMENTS, so it encodes both "under this parent"
+    // and "exactly one level deeper" in one predicate.
+    //
+    // Do NOT reach for `PATH_STARTS_WITH(path, $1) AND DEPTH(path) = DEPTH($1) + 1`
+    // here: PATH_STARTS_WITH is a raw string prefix, so a sibling whose name
+    // merely EXTENDS the parent's leaks in at the same depth — asking for the
+    // children of `/university` also returned every child of `/university-de`.
+    // (The other PATH_STARTS_WITH call sites avoid this by passing a trailing
+    // slash, e.g. `$1 || '/'` in generate_delete_subtree; this one could not,
+    // because appending it would also shift DEPTH($1).)
     let sql = if let Some(max) = limit {
         format!(
-            "SELECT * FROM {} WHERE PATH_STARTS_WITH(path, $1) AND DEPTH(path) = DEPTH($1) + 1 LIMIT {}",
+            "SELECT * FROM {} WHERE CHILD_OF($1) LIMIT {}",
             escape_identifier(workspace),
             max
         )
     } else {
         format!(
-            "SELECT * FROM {} WHERE PATH_STARTS_WITH(path, $1) AND DEPTH(path) = DEPTH($1) + 1",
+            "SELECT * FROM {} WHERE CHILD_OF($1)",
             escape_identifier(workspace)
         )
     };
