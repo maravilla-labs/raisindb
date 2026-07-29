@@ -273,7 +273,16 @@ Build with `--features locks-redis` (server) to enable the Redis backend.
 - **`inprocess` is single-node only.** Multi-node clusters MUST use `redis` or
   they will oversell; the server logs a warning on `inprocess` + replication.
 - A single `Arc<dyn LockManager>` is built in `main.rs` and shared across all
-  surfaces. Keys are scoped `{tenant}\0{repo}\0{branch}\0{name}` by callers.
+  surfaces. Scope keys with `raisin_locks::scoped_key(tenant, repo, branch,
+  name)` — several call sites still format
+  `{tenant}\0{repo}\0{branch}\0{name}` by hand; use the helper in new code.
+- **`KeyedMutex` (`raisin-rocksdb/src/jobs/keyed_mutex.rs`) is the in-process
+  sibling.** Where `LockManager::try_acquire` REJECTS on contention, `KeyedMutex`
+  QUEUES — the right primitive when a second delivery must run after the first,
+  not fail. It evicts entries on last release, so a map keyed by something
+  unbounded (a flow instance id) doesn't grow forever. Used by the flow-instance
+  execution lock and index rebuilds; prefer it over another hand-rolled
+  `HashMap<K, Arc<Mutex<()>>>`.
 
 Surfaces:
 - **Functions (QuickJS/Starlark)**: `raisin.locks.acquire/release/renew`,
@@ -282,6 +291,55 @@ Surfaces:
   `inventory_claim`/`inventory_release` request types.
 - **HTTP**: `POST /api/{repo}/{branch}/locks/{acquire,release,renew}` and
   `/inventory/{claim,release}` (409 on contention / sold-out).
+
+## Workflow Engine (`raisin-flow-runtime`)
+
+Full authoring guide: `docs/workflows.md`. Engine-owned gaps and their triage:
+`docs/OPEN-ITEMS.md`. Non-obvious invariants:
+
+- **A flow instance has ONE writer at a time.** `save_instance_with_version` is
+  a non-atomic read-check-write (`raisin-rocksdb/.../flow_callbacks/trait_impl.rs`),
+  so its version check does NOT stop two concurrent writers — both pass it and
+  the second silently overwrites the first. Serialization comes from the
+  per-instance lock the job handler takes before any write
+  (`jobs/flow_instance_lock.rs`). **Anything that mutates an instance must go
+  through that lock** or it can clobber a live execution; `service.rs`'s
+  `cancel_instance` writes the node directly and is the one known exception
+  (see `docs/OPEN-ITEMS.md`). Multi-node deployments need `[locks]` with the
+  `redis` backend — `inprocess`/disabled serializes within ONE node only.
+- **Every terminal transition must notify the parent instance.**
+  `notify_parent_flow` is called from four places (complete, fail, timeout,
+  cancel); miss one and a parent parked on a join waits forever with no error
+  anywhere. This has now been the bug twice. The sites are not yet funnelled
+  through one helper — check all of them when adding a terminal path.
+- **A handler returning `Err` and one returning `StepResult::Error` are the
+  same event** and both route through `handle_error_result` (retry / error edge
+  / continue-on-fail / fail). Only `FlowError::is_infrastructural()` errors
+  (version conflict) return raw, so the job system redelivers. Returning a step
+  error raw leaves the instance stuck in `Running` forever.
+- **Retry defaults come from the step type**
+  (`StepType::default_max_retries`): `parallel`, `sub_flow` and `loop` default
+  to 0, because re-entering them re-forks branches or restarts iteration and
+  duplicates side effects. Don't reintroduce a flat default.
+- **`human_task` properties are ALL template-resolved**, including the numeric
+  `due_in_seconds` / `priority` — resolve first, coerce after. Reading them as
+  numbers before `DataMapper::map` silently drops any `${...}` value.
+- **`task_type` is an open set.** approval/input/review/action are what the
+  runtime understands semantically; any `[a-z][a-z0-9_-]{0,63}` slug is valid
+  and is carried through verbatim. Validate the SHAPE, never the membership —
+  the closed enum used to live in four places (nodetype, runtime, function
+  binding, CLI).
+- **`parallel` does fork/join AND dynamic fan-out** (`for_each` + a `branch`
+  template). The join waits for every child to reach a terminal state, so a
+  branch parked on a human task joins correctly. Collection expressions resolve
+  through the shared `handlers/collection.rs` — the loop step uses it too.
+- **Designer format is the canonical authoring format** and can express every
+  step type (`wait`, `sub_flow`, `decision` included). Its siblings chain in
+  array order, so a free-standing `decision` is a forward GUARD, not two
+  rejoining arms — use an `or` container for mutually exclusive branches.
+- Runtime format takes retry config as FLAT step properties (`max_retries`,
+  `retry_base_delay_ms`); the nested `retry: {...}` object is designer-format
+  only and the converter flattens it.
 
 ## Code Conventions
 

@@ -97,8 +97,9 @@ in priority order:
 3. `step_type: ai_agent` → single-shot agent step
 4. `agent_ref` present without `step_type: ai_agent` → full AI container (backward compat: tool loop + conversation persistence)
 5. `step_type: chat` → chat step
-6. `condition` present → decision step
-7. otherwise → function step (which then fails for missing `function_ref`)
+6. `step_type: wait` | `sub_flow` | `decision` → that step type (§2.6)
+7. `condition` present → decision step
+8. otherwise → function step (which then fails for missing `function_ref`)
 
 ### 2.1 References (`function_ref`, `agent_ref`, `compensation_ref`)
 
@@ -202,11 +203,12 @@ Creates an inbox task and pauses the flow until it is completed (§6).
   properties:
     action: "Approve order {{ input.order_id }}"   # becomes the TASK TITLE
     step_type: human_task
-    task_type: approval                 # approval | input | review | action
+    task_type: approval                 # approval | input | review | action, or
+                                        # any application-defined slug (see below)
     assignee: /users/manager            # user path OR agent path; templates allowed
     task_description: "Please review order {{ input.order_id }}."  # becomes description
-    priority: 4                         # 1-5 (5 = highest); default 3
-    due_in_seconds: 86400               # due time AND wait deadline
+    priority: 4                         # 1-5 (5 = highest); default 3; templates allowed
+    due_in_seconds: 86400               # due time AND wait deadline; templates allowed
     timeout_edge: escalate-step         # where to go if the deadline expires
     options:                            # for approval tasks
       - { value: approve, label: Approve, style: success }
@@ -223,8 +225,20 @@ Notes:
 - **The designer's `action` label doubles as the task title** (the runtime
   requires `title`; the converter maps `action` → `title`, defaulting to
   `"Task"`). `task_description` maps to the task's `description`.
-- Title, description, assignee, and option labels are template-resolved
-  (e.g. `assignee: "/users/{{ input.approver }}"`).
+- **`task_type` is an OPEN set.** `approval | input | review | action` are
+  the types the runtime understands semantically (approval options, input
+  schemas), but any slug matching `[a-z][a-z0-9_-]{0,63}` is accepted and
+  carried through to the task node verbatim, so an application can define
+  its own task vocabulary without an engine change. Only the slug's SHAPE is
+  validated — an invalid one is a step configuration error.
+- **Every property is template-resolved, including the numeric ones.**
+  Title, description, assignee, option labels, `data`, *and*
+  `due_in_seconds` / `priority` (e.g. `due_in_seconds: "${input.sla_seconds}"`)
+  resolve against the flow context before the task is created; a resolved
+  numeric string is coerced to a number. A value that resolves to something
+  non-numeric is a configuration error rather than a silently missing
+  deadline; an *unresolvable* expression leaves the task with no deadline
+  at all.
 - `options[*].style` is free-form; the UI understands
   `default | success | danger | warning`.
 - `due_in_seconds` materializes an absolute `due_at` on the task and is
@@ -271,6 +285,78 @@ Behavior (from `handlers/chat_step/`):
   `end_session`).
 - See `builtin-packages/ai-tools/content/functions/flows/chat/.node.yaml`
   for the canonical chat flow shipped with the ai-tools package.
+
+### 2.6 Wait, sub-flow, and decision steps
+
+Three more step types, all authorable in the designer format.
+
+**`step_type: wait`** — pause for time, an event, or a cron point:
+
+```yaml
+- id: cool-off
+  node_type: raisin:FlowStep
+  properties:
+    action: Cool-off period
+    step_type: wait
+    wait_type: delay            # delay (default) | until | event | cron
+    duration: "30m"             # for delay; templates allowed
+    # until: "${input.publish_at}"      # for until
+    # event_type: order.shipped         # for event, with optional `timeout`
+    # cron: "0 9 * * 1"                 # for cron
+```
+
+**`step_type: sub_flow`** — run another deployed flow as one step. The
+child's output becomes `steps.<id>.*` in the parent:
+
+```yaml
+- id: settle
+  node_type: raisin:FlowStep
+  properties:
+    action: Settle the order
+    step_type: sub_flow
+    flow_ref: /flows/settle-order      # path or full reference object
+    input_mapping:
+      order_id: "${input.order_id}"
+    async: true                        # optional
+```
+
+**`step_type: decision`** — a two-way branch on a REL condition, with both
+arms named explicitly. Name only the arm that diverges; the other falls
+through to the next sibling:
+
+```yaml
+- id: big-order
+  node_type: raisin:FlowStep
+  properties:
+    action: Big order? skip the discount
+    step_type: decision
+    condition: "input.amount > 500"
+    yes_branch: invoice          # jump PAST the discount step
+    # no_branch defaults to the next sibling (discount)
+- id: discount
+  node_type: raisin:FlowStep
+  properties: { action: Apply discount, function_ref: /lib/discount }
+- id: invoice
+  node_type: raisin:FlowStep
+  properties: { action: Invoice, function_ref: /lib/invoice }
+```
+
+A step carrying a bare `condition` and no `step_type` is also a decision
+(rule 7 above); it behaves the same way.
+
+> **Mind the fallthrough.** Designer siblings chain in **array order**, so a
+> free-standing decision is naturally a **guard** that skips forward over
+> steps — as above, where `discount` is skipped and both paths land on
+> `invoice`. It does NOT give you two mutually exclusive arms that rejoin
+> afterwards: if you point `yes_branch` at a later sibling, the steps in
+> between still fall through into it when the condition is false.
+>
+> For genuinely exclusive branches use an **`or` container** (§3.2). Its
+> children each continue to the container's successor instead of into each
+> other, which is exactly the "one of these, then carry on" shape. Don't
+> emulate either one with two sibling containers carrying complementary
+> conditions — that has no single point of decision, and both arms can
+> mis-evaluate independently.
 
 ---
 
@@ -376,16 +462,29 @@ steps can reference and audit it. Typical use: a node-event trigger
 starts the flow and the agent routes by looking at the changed node in
 `{{ input }}`.
 
-### 3.3 `parallel` — fork children, join with `merge_all`
+### 3.3 `parallel` — fork branches, join them
 
-Each child becomes its own branch flow (a child flow instance); the
-container waits for all branches and joins their outputs (`merge_all` is
-the only merge strategy currently implemented).
+Each branch becomes its own child flow instance; the container waits until
+**every** branch reaches a terminal state, then joins their outputs with the
+configured `merge_strategy`:
+
+| `merge_strategy` | Behaviour |
+|---|---|
+| `merge_all` (default) | Continue with every branch result, successful or not |
+| `first_success` | Continue with the first successful branch; fail if all failed |
+| `all_success` | Fail the container if any branch failed |
+
+Because the join waits for terminal children rather than polling, a branch
+that itself parks on a human task is joined correctly — the container
+resumes once the last person has answered.
+
+**Static branches** — the children ARE the branches, a fixed set:
 
 ```yaml
 - id: par
   node_type: raisin:FlowContainer
   container_type: parallel
+  merge_strategy: merge_all
   children:
     - id: left
       node_type: raisin:FlowStep
@@ -395,9 +494,52 @@ the only merge strategy currently implemented).
       properties: { function_ref: /lib/right }
 ```
 
-The joined output lands in the container's step output:
-`steps.par.branch_0.status == "completed"`, `steps.par.branch_0.output`,
-etc. (branches indexed in child order). A child may itself be a container.
+**Dynamic fan-out** — `fan_out` turns the children into ONE branch subgraph
+run once per item of a runtime collection, so the branch COUNT comes from
+data rather than from the flow. This is how "one task per row, then join"
+is expressed:
+
+```yaml
+- id: collect-approvals
+  node_type: raisin:FlowContainer
+  container_type: parallel
+  fan_out:
+    over: "${steps.plan.items}"   # same expression forms as a loop's `over`
+    max_branches: 200             # safety cap; defaults to 500
+  merge_strategy: all_success
+  children:
+    - id: approve-item
+      node_type: raisin:FlowStep
+      properties:
+        step_type: human_task
+        action: "Approve {{ input.item.name }}"
+        task_type: approval
+        assignee: "${input.item.owner}"
+```
+
+Inside a fan-out branch, `item` and `index` are bound to the current
+element and its position; the child flow's input is `{ item, index }`.
+
+The joined output lands in the container's step output two ways:
+
+- positionally — `steps.par.branch_0.status`, `steps.par.branch_0.output`
+- as an ordered array — `steps.collect-approvals.branches`, each entry tagged
+  with its `branch_id` and `instance_id`. For a fan-out the branch id is the
+  only handle on WHICH item produced a result, so this is the form to use.
+
+Branch ids are deliberately not also top-level keys: they would share a
+namespace with `branch_0` / `branches`, and REL can't reference an id
+containing `-` without bracket access anyway.
+
+A child may itself be a container.
+
+**Runtime format.** The lowered step takes `for_each` (the collection
+expression) plus a `branch` template (`{ id?, flow_path | flow_definition,
+input_mapping? }`) instead of a `branches` array. A branch may reference a
+DEPLOYED flow by `flow_path` — the fan-out then runs one instance of that
+flow per item — or carry an inline `flow_definition`. Fan-out width is
+bounded by `max_branches`; exceeding it truncates and logs a warning rather
+than fanning out without limit.
 
 ### 3.4 `ai_sequence` — agentic tool loop
 
@@ -764,6 +906,24 @@ condition: "__human_response.action == \"approve\""
 
 Task statuses: `pending | completed | expired | cancelled`.
 
+> **`waiting` does not mean "parked for a human".** The runtime also reports
+> a transient `waiting` status *between* steps, while a queued execution is
+> in flight. Code that asks "is this instance blocked on a person?" must
+> discriminate on the **wait reason** (`human_task`, recorded in the
+> instance's `WaitInfo` alongside the task path) rather than on the bare
+> status — or, from outside the engine, on an inbox task existing for the
+> instance. Two other wait reasons park a flow the same way:
+> `parallel_branches` (a fork awaiting its children) and `sub_flow`.
+>
+> **Completing a task the instant it appears can race the park.** The inbox
+> task node is created — and becomes listable — slightly *before* the owning
+> instance's own status record settles to `Waiting` in the same execution.
+> Completing in that window returns
+> `Invalid state transition from pending to resumed`. Retrying succeeds once
+> the instance settles, so a caller that lists and immediately completes
+> should poll the instance status to `waiting` first, or tolerate and retry
+> that specific error rather than surfacing it as a hard failure.
+
 ### 6.3 AI agent as assignee
 
 If `assignee` resolves to a `raisin:AIAgent` node (in the functions
@@ -1071,11 +1231,11 @@ Before lowering, the engine also accepts `workflow_data` directly in the
 
 | Step type | Key properties | Notes |
 |---|---|---|
-| `decision` | `condition` (REL), `yes_branch`, `no_branch` | Two-way branch. (Designer `or` containers lower to cascades of these.) |
+| `decision` | `condition` (REL), `yes_branch`, `no_branch` | Two-way branch — **the way to express if/else**. Both arms are named explicitly, so exactly one runs; don't try to emulate it with two sibling containers carrying complementary conditions. (Designer `or` containers lower to cascades of these.) |
 | `wait` | `wait_type: delay\|until\|event\|cron`, `duration` (e.g. `"5s"`, `"30m"`, `"1h"`, templated), `until`, ... | Pause for time/event. |
 | `loop` | `loop_type: for_each\|while\|times`, `collection` (expr), `item_var`, `index_var`, `body_step`, `condition`, `max_iterations`, `until` (REL early exit) | The body step must chain back to the loop node. `for_each` loops are authorable in the designer format via `container_type: loop` (section 3.6); `while`/`times` remain runtime-only. |
 | `sub_flow` | `flow_ref` (path to a `raisin:Flow`), `input_mapping` (templated object), `async` | Child output becomes `steps.<id>.*` in the parent. |
-| `parallel` | `branches: [{id, flow_definition, input_mapping?}]`, `merge_strategy: merge_all` | Inline branch definitions. |
+| `parallel` | Static: `branches: [{id, flow_path \| flow_definition, input_mapping?}]`. Dynamic: `for_each` (collection expr) + `branch: {id?, flow_path \| flow_definition, input_mapping?}` + `max_branches`. Both: `merge_strategy: merge_all\|first_success\|all_success` | Fork/join (section 3.3). A `for_each` fan-out creates one child flow per item, with `item`/`index` bound in the branch template. |
 
 Runtime-format example (see `e2e_flows.rs` for many more):
 
@@ -1105,12 +1265,13 @@ top-level field) — set both to be safe.
 
 Verified against the code; re-check when upgrading:
 
-1. **Parallel merge strategies**: only `merge_all` is implemented.
-2. **`wait`, `sub_flow`, free-standing `decision` steps** are not
-   representable in the designer format (runtime format only, Appendix A).
-   `loop` is now representable as a `container_type: loop` container
-   (section 3.6) for `for_each` iteration; `while`/`times` loops remain
-   runtime-format only.
+1. **Human tasks have a single deadline.** `due_in_seconds` is one terminal
+   wait deadline; there is no `reminders: [{after, notify}]` list, so each
+   escalation tier must be authored as its own `human_task` +
+   `timeout_edge`. See `docs/OPEN-ITEMS.md` §2.5.
+2. **`while` / `times` loops** are runtime-format only. `for_each`
+   iteration IS representable in the designer format as a
+   `container_type: loop` container (section 3.6).
 3. **Flow-level `timeout_ms`** is preserved in the lowered flow's metadata
    but not yet enforced as a total-instance deadline (per-step and wait
    timeouts ARE enforced).
@@ -1118,7 +1279,13 @@ Verified against the code; re-check when upgrading:
    termination config but the chat handler does not yet auto-terminate on
    inactivity.
 
-Previously listed gaps now fixed: designer chaining after `ai_agent`/
+Previously listed gaps now fixed: `wait`, `sub_flow`, and free-standing
+`decision` steps in the designer format (section 2.6); all three parallel
+merge strategies
+(`merge_all`, `first_success`, `all_success`) plus dynamic `for_each`
+fan-out (section 3.3); templated `due_in_seconds`/`priority` on human tasks
+(section 2.4); open (application-definable) `task_type` values;
+designer chaining after `ai_agent`/
 `ai_sequence` steps; `compensation_input_mapping`, `response_format`/
 `output_schema`, `max_retries`/`retry_delay_ms` in the designer schema;
 flow-level `error_strategy: continue` (lowers to `continue_on_fail` on work
