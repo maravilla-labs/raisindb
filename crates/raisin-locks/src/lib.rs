@@ -95,6 +95,16 @@ pub trait LockManager: Send + Sync {
 /// Shared handle threaded into every transport / runtime surface.
 pub type LockManagerHandle = Arc<dyn LockManager>;
 
+/// Build a tenant/repo/branch-scoped lock key.
+///
+/// Every caller scopes its keys this way so that two tenants (or two
+/// branches) can hold "the same" logical lock independently. The separator is
+/// a NUL byte, matching the storage key convention, so a name can never be
+/// confused with a scope segment.
+pub fn scoped_key(tenant_id: &str, repo_id: &str, branch: &str, name: &str) -> String {
+    format!("{}\0{}\0{}\0{}", tenant_id, repo_id, branch, name)
+}
+
 /// Which backend to use.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,

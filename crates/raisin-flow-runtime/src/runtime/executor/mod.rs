@@ -15,7 +15,7 @@
 mod execution_loop;
 mod helpers;
 mod isolated_branch;
-mod result_handlers;
+pub(crate) mod result_handlers;
 mod step_dispatch;
 
 pub use execution_loop::execute_flow;

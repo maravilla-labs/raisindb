@@ -13,7 +13,8 @@
 //! - Manages compensation stack for rollback
 
 use crate::types::{
-    FlowCallbacks, FlowDefinition, FlowExecutionEvent, FlowResult, FlowStatus, StepResult,
+    FlowCallbacks, FlowDefinition, FlowError, FlowExecutionEvent, FlowResult, FlowStatus,
+    StepResult,
 };
 use chrono::Utc;
 use serde_json::Value;
@@ -141,7 +142,41 @@ pub(super) async fn execute_flow_with_retry(
                         ),
                     )
                     .await;
-                return Err(e);
+
+                // Optimistic-concurrency conflicts are INFRASTRUCTURAL: the
+                // job system must see them and redeliver, and the instance
+                // must be left alone for the winning writer. Everything else
+                // is a step failure.
+                if e.is_infrastructural() {
+                    return Err(e);
+                }
+
+                // A handler that returns `Err` and one that returns
+                // `StepResult::Error` describe the SAME event, so they must
+                // take the same path: retry, error edge, continue-on-fail,
+                // else fail the flow (which records the error, runs
+                // compensation, and notifies a waiting parent). Returning
+                // the error raw here used to leave the instance stuck in
+                // `Running` forever - not failed, not waiting, no error
+                // recorded, and a parent parked on a join never released.
+                // `parallel`'s `all_success` / `first_success` merges report
+                // failure exactly this way.
+                let should_return = handle_error_result(
+                    instance_id,
+                    &mut instance,
+                    current_step,
+                    &flow_def,
+                    e,
+                    expected_version,
+                    step_duration_ms,
+                    &flow_start,
+                    callbacks,
+                )
+                .await?;
+                if should_return {
+                    return Ok(());
+                }
+                continue;
             }
         };
 

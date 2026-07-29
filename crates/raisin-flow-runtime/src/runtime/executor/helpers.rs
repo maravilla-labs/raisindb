@@ -45,9 +45,15 @@ pub(crate) fn calculate_timeout(metadata: &Value) -> Option<chrono::DateTime<Utc
         .map(|ms| Utc::now() + chrono::Duration::milliseconds(ms as i64))
 }
 
-/// Get max retries for a step
+/// Get max retries for a step.
+///
+/// The default comes from the step TYPE (see
+/// `StepType::default_max_retries`): steps whose re-entry duplicates work —
+/// `parallel`, `sub_flow`, `loop` — default to no retries, and must opt in
+/// explicitly. An explicit `max_retries` always wins.
 pub(crate) fn get_max_retries(step: &FlowNode) -> u32 {
-    step.get_u32_property("max_retries").unwrap_or(3)
+    step.get_u32_property("max_retries")
+        .unwrap_or_else(|| step.step_type.default_max_retries())
 }
 
 /// Calculate exponential backoff duration for a retry attempt.
@@ -174,6 +180,33 @@ mod tests {
         assert_eq!(calculate_backoff(2, None), chrono::Duration::seconds(30));
         assert_eq!(calculate_backoff(3, None), chrono::Duration::seconds(60));
         assert_eq!(calculate_backoff(4, None), chrono::Duration::seconds(120));
+    }
+
+    /// Steps whose re-entry duplicates work must NOT retry by default: their
+    /// effects already happened, so a retry repeats them.
+    #[test]
+    fn test_work_duplicating_steps_do_not_retry_by_default() {
+        use crate::types::StepType;
+        let node = |step_type| FlowNode {
+            id: "s1".to_string(),
+            step_type,
+            properties: HashMap::new(),
+            children: Vec::new(),
+            next_node: None,
+        };
+
+        assert_eq!(get_max_retries(&node(StepType::Parallel)), 0);
+        assert_eq!(get_max_retries(&node(StepType::SubFlow)), 0);
+        assert_eq!(get_max_retries(&node(StepType::Loop)), 0);
+        assert_eq!(get_max_retries(&node(StepType::FunctionStep)), 3);
+        assert_eq!(get_max_retries(&node(StepType::HumanTask)), 3);
+
+        // An explicit setting still wins, for genuinely idempotent branches
+        let mut opted_in = node(StepType::Parallel);
+        opted_in
+            .properties
+            .insert("max_retries".to_string(), serde_json::json!(2));
+        assert_eq!(get_max_retries(&opted_in), 2);
     }
 
     #[test]

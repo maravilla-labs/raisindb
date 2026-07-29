@@ -182,7 +182,7 @@ pub(super) async fn handle_complete_result(
 ///
 /// Best-effort: failures are logged, the wait sweeper / timeout machinery
 /// acts as the backstop for a lost notification.
-pub(super) async fn notify_parent_flow(
+pub(crate) async fn notify_parent_flow(
     instance: &crate::types::FlowInstance,
     status: &str,
     output: Option<Value>,

@@ -426,6 +426,61 @@ pub async fn cancel_instance<S: Storage>(
     // Best-effort cancel associated jobs
     let _ = scheduler.cancel_flow_jobs(&instance.id).await;
 
+    // A cancelled CHILD must tell its parent, exactly as completion, failure
+    // and timeout do. Without this a parent parked on a join (a parallel
+    // fan-out, a sub-flow) waits forever for a branch that will never report:
+    // the child is Cancelled, the parent never learns, and no error surfaces.
+    if let Some(parent_instance_id) = &instance.parent_instance_ref {
+        let branch_id = instance
+            .variables
+            .get("__branch_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "function_result".to_string(),
+            serde_json::json!({
+                "child_completed": true,
+                "child_instance_id": instance.id,
+                "parent_step_id": instance
+                    .variables
+                    .get("__parent_step_id")
+                    .and_then(|v| v.as_str()),
+                "branch_id": branch_id,
+                "status": FlowStatus::Cancelled.as_str(),
+                "output": Value::Null,
+                "error": "child flow was cancelled",
+            }),
+        );
+
+        let job_type = JobType::FlowInstanceExecution {
+            instance_id: parent_instance_id.clone(),
+            execution_type: "resume".to_string(),
+            resume_reason: Some("child_flow_terminal".to_string()),
+        };
+
+        match scheduler
+            .schedule_flow_job(tenant_id, repo, job_type, metadata)
+            .await
+        {
+            Ok(job_id) => tracing::info!(
+                instance_id = %instance_id,
+                parent_instance_id = %parent_instance_id,
+                job_id = %job_id,
+                "Cancelled child flow - queued parent resume"
+            ),
+            // Best-effort, like every other parent notification: the wait
+            // sweeper is the backstop for a lost one.
+            Err(e) => tracing::error!(
+                instance_id = %instance_id,
+                parent_instance_id = %parent_instance_id,
+                error = %e,
+                "Cancelled child flow but failed to notify parent"
+            ),
+        }
+    }
+
     tracing::info!(instance_id = %instance_id, "Cancelled flow instance");
 
     Ok(())
@@ -632,7 +687,16 @@ pub async fn complete_task<S: Storage>(
             map.insert("task_path".to_string(), Value::String(task_path.clone()));
         }
 
-        match resume_flow(storage, scheduler, tenant_id, repo, instance_id, resume_data).await {
+        match resume_flow(
+            storage,
+            scheduler,
+            tenant_id,
+            repo,
+            instance_id,
+            resume_data,
+        )
+        .await
+        {
             Ok(result) => Some(result),
             Err(e) => {
                 // Task is completed but the flow resume could not be queued.

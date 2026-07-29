@@ -324,7 +324,7 @@ async fn fail_timed_out(
             instance_id,
             FlowExecutionEvent::flow_failed(
                 format!("Wait timed out at step '{}'", node_id),
-                Some(node_id),
+                Some(node_id.clone()),
                 0,
             ),
         )
@@ -334,6 +334,25 @@ async fn fail_timed_out(
         error!(instance_id = %instance_id, error = %e, "Failed to save timed-out instance");
         FlowError::Other(format!("Failed to save timed-out instance: {}", e))
     })?;
+
+    // A timed-out CHILD must still tell its parent, exactly as any other
+    // terminal state does. Without this a parent parked on a join (a
+    // parallel fan-out, a sub-flow) waits forever the moment one child's
+    // wait expires: the child is Failed, the parent never learns, and no
+    // error surfaces anywhere. Same payload shape as the ordinary failure
+    // path in `result_handlers::fail_flow`.
+    let error_message = instance
+        .error
+        .clone()
+        .unwrap_or_else(|| format!("Wait timed out at step '{}'", node_id));
+    crate::runtime::executor::result_handlers::notify_parent_flow(
+        instance,
+        "failed",
+        None,
+        Some(error_message),
+        callbacks,
+    )
+    .await;
 
     Err(FlowError::TimeoutExceeded { duration_ms: 0 })
 }

@@ -32,8 +32,13 @@
 //! - AI calls (for AI steps)
 //! - Function execution (for function steps)
 
+use std::sync::Arc;
+
 use raisin_error::{Error, Result};
+use raisin_locks::LockManagerHandle;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
+
+use crate::jobs::FlowInstanceLockManager;
 
 use super::flow_callbacks::{
     AICallerCallback, AIStreamingCallerCallback, ChildrenListerCallback, FlowEventEmitterCallback,
@@ -57,6 +62,9 @@ pub struct FlowInstanceExecutionHandler {
     function_executor: Option<FunctionExecutorCallback>,
     children_lister: Option<ChildrenListerCallback>,
     event_emitter: Option<FlowEventEmitterCallback>,
+    /// Serializes execution per instance so only one writer advances a flow
+    /// at a time (see `flow_instance_lock` for why that is load-bearing).
+    instance_locks: Arc<FlowInstanceLockManager>,
 }
 
 impl FlowInstanceExecutionHandler {
@@ -72,7 +80,22 @@ impl FlowInstanceExecutionHandler {
             function_executor: None,
             children_lister: None,
             event_emitter: None,
+            instance_locks: Arc::new(FlowInstanceLockManager::new(None)),
         }
+    }
+
+    /// Provide the locks subsystem so instance serialization also holds
+    /// ACROSS nodes.
+    ///
+    /// Without it, execution is serialized only within this process: correct
+    /// for a single node, but two nodes can still advance one instance
+    /// concurrently and lose a write. A multi-node deployment must configure
+    /// `[locks]` with the `redis` backend.
+    pub fn with_lock_manager(mut self, lock_manager: Option<LockManagerHandle>) -> Self {
+        if lock_manager.is_some() {
+            self.instance_locks = Arc::new(FlowInstanceLockManager::new(lock_manager));
+        }
+        self
     }
 
     /// Set the node loader callback
@@ -261,6 +284,43 @@ impl FlowInstanceExecutionHandler {
         }
         callbacks = callbacks.with_agent(agent_marker);
 
+        // Take the instance's execution lock BEFORE ANY WRITE: a flow
+        // instance has one writer at a time. Several producers legitimately advance the same
+        // instance in the same instant (sibling parallel branches reporting
+        // terminal, a timeout check next to a resume), and the instance is a
+        // single aggregate — without serialization two writers each persist a
+        // snapshot taken before the other, and the loser's accumulated state
+        // (e.g. a branch result a join is waiting for) is silently lost.
+        //
+        // Contention inside this process queues here. Contention with another
+        // NODE gives up quickly and lets the job system redeliver, exactly
+        // like a persistent version conflict below.
+        let _instance_lease = match self
+            .instance_locks
+            .acquire(
+                &context.tenant_id,
+                &context.repo_id,
+                &context.branch,
+                &instance_id,
+                &format!("job:{}", job.id),
+            )
+            .await
+        {
+            Ok(lease) => lease,
+            Err(busy) => {
+                tracing::warn!(
+                    job_id = %job.id,
+                    instance_id = %instance_id,
+                    execution_type = %execution_type,
+                    "Flow instance held by another worker - job will be retried"
+                );
+                return Err(Error::Backend(format!(
+                    "Flow instance {} busy, retry delivery: {}",
+                    instance_id, busy
+                )));
+            }
+        };
+
         // For "start" execution, extract FlowInstance from metadata and save to storage first
         if execution_type == "start" {
             if let Some(flow_instance_value) = context.metadata.get("flow_instance") {
@@ -294,14 +354,15 @@ impl FlowInstanceExecutionHandler {
 
         // Call raisin-flow-runtime executor.
         //
-        // Delivery to the flow instance uses optimistic concurrency; a transient
-        // `VersionConflict` ("instance modified by another process") just means
-        // another writer touched it in the same instant. Retry INLINE with a
-        // short backoff (~25ms, up to ~1s) so a step advances in milliseconds —
-        // only fall through to the job system's slow retry/backoff (10s/30s/60s)
-        // if contention genuinely persists past the inline budget. Without this,
-        // every flow step paid the ~10s first-retry backoff for a conflict that
-        // clears in milliseconds.
+        // Delivery to the flow instance still uses optimistic concurrency as a
+        // second line of defence (a lost lease, a writer outside the job
+        // system). A transient `VersionConflict` means another writer touched
+        // the instance in the same instant: retry INLINE with a short backoff
+        // (~25ms, up to ~1s) so a step advances in milliseconds, and only fall
+        // through to the job system's slow retry/backoff (10s/30s/60s) if
+        // contention genuinely persists. Without this, every flow step paid
+        // the ~10s first-retry backoff for a conflict that clears in
+        // milliseconds.
         let start = std::time::Instant::now();
         let resume_data = if execution_type.as_str() == "resume" {
             context
@@ -413,7 +474,7 @@ impl FlowInstanceExecutionHandler {
                 // instance right now (e.g. sibling parallel branches
                 // resuming the same parent). Fail the JOB so the job
                 // system's retry/backoff redelivers it.
-                if matches!(e, raisin_flow_runtime::types::FlowError::VersionConflict) {
+                if e.is_infrastructural() {
                     tracing::warn!(
                         job_id = %job.id,
                         instance_id = %instance_id,

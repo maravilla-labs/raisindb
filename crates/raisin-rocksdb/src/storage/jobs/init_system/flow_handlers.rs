@@ -134,6 +134,7 @@ pub fn create_flow_instance_execution_handler(
     flow_ai_streaming_caller: Option<FlowAIStreamingCallerCallback>,
     flow_function_executor: Option<FlowFunctionExecutorCallback>,
     flow_children_lister: Option<FlowChildrenListerCallback>,
+    lock_manager: Option<raisin_locks::LockManagerHandle>,
 ) -> Arc<crate::jobs::FlowInstanceExecutionHandler> {
     let mut builder = crate::jobs::FlowInstanceExecutionHandler::new();
     if let Some(loader) = flow_node_loader {
@@ -160,6 +161,9 @@ pub fn create_flow_instance_execution_handler(
     if let Some(lister) = flow_children_lister {
         builder = builder.with_children_lister(lister);
     }
+    // Serializes execution per flow instance across the cluster; without it
+    // serialization is in-process only (see `jobs::flow_instance_lock`).
+    builder = builder.with_lock_manager(lock_manager);
 
     // Wire up flow event emitter to the global broadcaster for SSE streaming
     let event_emitter: crate::jobs::FlowEventEmitterCallback = Arc::new(

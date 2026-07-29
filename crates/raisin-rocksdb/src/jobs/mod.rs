@@ -18,9 +18,11 @@ pub mod data_store;
 pub mod dispatcher;
 pub mod dispatching_monitor;
 pub mod event_handler;
+pub mod flow_instance_lock;
 pub mod flow_scheduler;
 pub mod handlers;
 pub mod index_lock;
+pub mod keyed_mutex;
 pub mod metadata_store;
 pub mod pool;
 pub mod trigger_registry;
@@ -54,12 +56,14 @@ pub use handlers::{
     VirtualMountSyncHandler,
 };
 // Additional exports for external use (transport layer callbacks)
+pub use flow_instance_lock::{FlowInstanceBusy, FlowInstanceLease, FlowInstanceLockManager};
 pub use handlers::{
     create_trigger_matcher, cron_matches, token_refresh_dedup_key, FlowResumeCallback,
     FlowStartCallback, FunctionEnabledChecker, FunctionExecutionResult, FunctionExecutorCallback,
     ScheduledTriggerFinderCallback, ScheduledTriggerMatch, TriggerMatch, TriggerMatcherCallback,
 };
 pub use index_lock::{IndexKey, IndexLockManager};
+pub use keyed_mutex::{KeyedMutex, KeyedMutexGuard};
 pub use metadata_store::{JobMetadataStore, PersistedJobEntry};
 pub use pool::RocksDBWorkerPool;
 pub use trigger_registry::{CachedTrigger, TriggerFilters, TriggerRegistry};

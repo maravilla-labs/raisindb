@@ -147,6 +147,7 @@ impl RocksDBStorage {
             flow_ai_streaming_caller,
             flow_function_executor,
             flow_children_lister,
+            lock_manager.clone(),
         );
 
         let trigger_evaluation_handler = flow_handlers::create_trigger_evaluation_handler(
