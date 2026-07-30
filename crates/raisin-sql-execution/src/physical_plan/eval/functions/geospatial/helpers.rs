@@ -1,173 +1,60 @@
-//! Helper functions for geospatial operations
+//! Small shared helpers for the geospatial functions.
 //!
-//! Provides utilities for converting between GeoJSON (serde_json::Value)
-//! and geo crate types, plus coordinate extraction helpers.
+//! # What used to be here, and why it is gone
+//!
+//! This file held three hand-rolled GeoJSON converters — `geojson_to_point`,
+//! `geojson_to_linestring`, `geojson_to_polygon` — plus a raw-JSON coordinate
+//! walker and a centroid extractor. Between them they covered exactly three of
+//! the seven GeoJSON types, and **that**, not a missing library, is why `Multi*`
+//! and `GeometryCollection` were unsupported across all forty-nine ST_\*
+//! functions and why several predicates silently returned `false` for input they
+//! did not recognise.
+//!
+//! They have all been deleted. The replacement is [`geojson_to_geom`], one call
+//! into `raisin_geometry::to_geo`, which delegates to `geojson` 1.0's complete
+//! `TryFrom` impls and therefore handles every type. Keeping the old converters
+//! "for compatibility" is exactly how that drift would return, so there is
+//! deliberately nothing left to fall back to.
+//!
+//! Most functions do not use this module at all: they take their arguments
+//! through [`super::convert`] and their maths from [`super::measure`],
+//! [`super::setops`], [`super::metric_ops`], [`super::simple`] or
+//! [`super::validate`].
+//!
+//! # Altitude
+//!
+//! `geo_types::Coord` is strictly two dimensional, so altitude cannot survive
+//! into the `geo` pipeline. It is not lost, it is *relocated*: [`geojson_to_geom`]
+//! carries it as [`Geom::z_range`](raisin_geometry::Geom::z_range), and
+//! `raisin_geometry::zdim` reads it straight off a `serde_json::Value`. Every
+//! Z-aware function (`ST_Z`, `ST_ZMIN`/`ST_ZMAX`, `ST_NDIMS`,
+//! `ST_FORCE2D`/`ST_FORCE3D`, `ST_3DDISTANCE`, `ST_3DDWITHIN`) uses those; every
+//! other function is 2-D, as PostGIS's 2-D predicates are.
 
-use geo::{Coord, LineString, Point, Polygon};
 use raisin_error::Error;
 use serde_json::Value;
 
-/// Convert a serde_json::Value (GeoJSON) to a geo::Point
+/// Parse any GeoJSON value into a [`raisin_geometry::Geom`], preserving its SRID
+/// and vertical extent.
 ///
-/// Expects: {"type": "Point", "coordinates": [lon, lat]}
-pub fn geojson_to_point(value: &Value) -> Result<Point, Error> {
-    let geom_type = value
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Validation("GeoJSON missing 'type' field".to_string()))?;
-
-    if geom_type != "Point" {
-        return Err(Error::Validation(format!(
-            "Expected Point geometry, got {}",
-            geom_type
-        )));
-    }
-
-    let coords = value
-        .get("coordinates")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            Error::Validation("GeoJSON Point missing 'coordinates' array".to_string())
-        })?;
-
-    if coords.len() < 2 {
-        return Err(Error::Validation(
-            "Point coordinates must have at least [lon, lat]".to_string(),
-        ));
-    }
-
-    let lon = coords[0]
-        .as_f64()
-        .ok_or_else(|| Error::Validation("Invalid longitude value".to_string()))?;
-    let lat = coords[1]
-        .as_f64()
-        .ok_or_else(|| Error::Validation("Invalid latitude value".to_string()))?;
-
-    Ok(Point::new(lon, lat))
-}
-
-/// Convert a serde_json::Value (GeoJSON) to a geo::LineString
+/// Accepts every geometry type — including `Multi*` and `GeometryCollection` —
+/// plus a Feature or FeatureCollection.
 ///
-/// Expects: {"type": "LineString", "coordinates": [[lon, lat], [lon, lat], ...]}
-pub fn geojson_to_linestring(value: &Value) -> Result<LineString, Error> {
-    let geom_type = value
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Validation("GeoJSON missing 'type' field".to_string()))?;
-
-    if geom_type != "LineString" {
-        return Err(Error::Validation(format!(
-            "Expected LineString geometry, got {}",
-            geom_type
-        )));
-    }
-
-    let coords = value
-        .get("coordinates")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            Error::Validation("GeoJSON LineString missing 'coordinates' array".to_string())
-        })?;
-
-    let points: Result<Vec<Coord>, Error> = coords
-        .iter()
-        .map(|c| {
-            let arr = c
-                .as_array()
-                .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
-            if arr.len() < 2 {
-                return Err(Error::Validation(
-                    "Coordinate must have [lon, lat]".to_string(),
-                ));
-            }
-            let lon = arr[0]
-                .as_f64()
-                .ok_or_else(|| Error::Validation("Invalid longitude".to_string()))?;
-            let lat = arr[1]
-                .as_f64()
-                .ok_or_else(|| Error::Validation("Invalid latitude".to_string()))?;
-            Ok(Coord { x: lon, y: lat })
-        })
-        .collect();
-
-    Ok(LineString::new(points?))
+/// `schema_default` is the NodeType/workspace default SRID for a value that
+/// carries no explicit `srid` member; pass `None` when the caller has no schema
+/// context (a literal built by `ST_POINT`, for instance).
+#[inline]
+pub fn geojson_to_geom(
+    value: &Value,
+    schema_default: Option<u32>,
+) -> Result<raisin_geometry::Geom, Error> {
+    raisin_geometry::to_geo(value, schema_default).map_err(Into::into)
 }
 
-/// Convert a serde_json::Value (GeoJSON) to a geo::Polygon
+/// Get the geometry type name from a GeoJSON value, without parsing it.
 ///
-/// Expects: {"type": "Polygon", "coordinates": [[[lon, lat], ...], ...]}
-pub fn geojson_to_polygon(value: &Value) -> Result<Polygon, Error> {
-    let geom_type = value
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Validation("GeoJSON missing 'type' field".to_string()))?;
-
-    if geom_type != "Polygon" {
-        return Err(Error::Validation(format!(
-            "Expected Polygon geometry, got {}",
-            geom_type
-        )));
-    }
-
-    let rings = value
-        .get("coordinates")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            Error::Validation("GeoJSON Polygon missing 'coordinates' array".to_string())
-        })?;
-
-    if rings.is_empty() {
-        return Err(Error::Validation(
-            "Polygon must have at least one ring".to_string(),
-        ));
-    }
-
-    // Parse exterior ring
-    let exterior_coords = parse_ring(&rings[0])?;
-    let exterior = LineString::new(exterior_coords);
-
-    // Parse interior rings (holes)
-    let interiors: Result<Vec<LineString>, Error> = rings
-        .iter()
-        .skip(1)
-        .map(|ring| {
-            let coords = parse_ring(ring)?;
-            Ok(LineString::new(coords))
-        })
-        .collect();
-
-    Ok(Polygon::new(exterior, interiors?))
-}
-
-/// Parse a ring (array of coordinate arrays) into a Vec<Coord>
-fn parse_ring(ring: &Value) -> Result<Vec<Coord>, Error> {
-    let coords = ring
-        .as_array()
-        .ok_or_else(|| Error::Validation("Ring must be an array".to_string()))?;
-
-    coords
-        .iter()
-        .map(|c| {
-            let arr = c
-                .as_array()
-                .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
-            if arr.len() < 2 {
-                return Err(Error::Validation(
-                    "Coordinate must have [lon, lat]".to_string(),
-                ));
-            }
-            let lon = arr[0]
-                .as_f64()
-                .ok_or_else(|| Error::Validation("Invalid longitude".to_string()))?;
-            let lat = arr[1]
-                .as_f64()
-                .ok_or_else(|| Error::Validation("Invalid latitude".to_string()))?;
-            Ok(Coord { x: lon, y: lat })
-        })
-        .collect()
-}
-
-/// Get the geometry type from a GeoJSON value
+/// For the few places that need only the discriminant — reporting it in an error
+/// message, or `ST_GEOMETRYTYPE` — and would otherwise pay for a full conversion.
 pub fn get_geometry_type(value: &Value) -> Result<&str, Error> {
     value
         .get("type")
@@ -175,7 +62,10 @@ pub fn get_geometry_type(value: &Value) -> Result<&str, Error> {
         .ok_or_else(|| Error::Validation("GeoJSON missing 'type' field".to_string()))
 }
 
-/// Create a GeoJSON Point from lon/lat
+/// Build a GeoJSON Point from a longitude and a latitude.
+///
+/// Axis order is `(longitude, latitude)`, pinned everywhere in RaisinDB. See
+/// `super::axis_guard` for the check that catches the reversed call.
 pub fn point_to_geojson(lon: f64, lat: f64) -> Value {
     serde_json::json!({
         "type": "Point",
@@ -183,178 +73,85 @@ pub fn point_to_geojson(lon: f64, lat: f64) -> Value {
     })
 }
 
-/// Convert a geo::Polygon to GeoJSON Value
-pub fn polygon_to_geojson(polygon: &Polygon) -> Value {
-    let exterior: Vec<Vec<f64>> = polygon
-        .exterior()
-        .coords()
-        .map(|c| vec![c.x, c.y])
-        .collect();
-    let mut rings = vec![exterior];
-    for interior in polygon.interiors() {
-        let ring: Vec<Vec<f64>> = interior.coords().map(|c| vec![c.x, c.y]).collect();
-        rings.push(ring);
-    }
-    serde_json::json!({"type": "Polygon", "coordinates": rings})
-}
-
-/// Convert a geo::LineString to GeoJSON Value
-pub fn linestring_to_geojson(line: &LineString) -> Value {
-    let coords: Vec<Vec<f64>> = line.coords().map(|c| vec![c.x, c.y]).collect();
-    serde_json::json!({"type": "LineString", "coordinates": coords})
-}
-
-/// Convert a slice of geo::Point to GeoJSON MultiPoint Value
-pub fn multipoint_to_geojson(points: &[Point]) -> Value {
-    let coords: Vec<Vec<f64>> = points.iter().map(|p| vec![p.x(), p.y()]).collect();
-    serde_json::json!({"type": "MultiPoint", "coordinates": coords})
-}
-
-/// Extract all coordinates from any GeoJSON geometry as Vec<[f64; 2]>
-pub fn extract_all_coords(value: &Value) -> Result<Vec<[f64; 2]>, Error> {
-    let geom_type = get_geometry_type(value)?;
-    let coords = value
-        .get("coordinates")
-        .ok_or_else(|| Error::Validation("GeoJSON missing 'coordinates'".to_string()))?;
-
-    let mut result = Vec::new();
-    match geom_type {
-        "Point" => {
-            let arr = coords
-                .as_array()
-                .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
-            if arr.len() >= 2 {
-                let lon = arr[0].as_f64().ok_or_else(|| {
-                    Error::Validation("Invalid longitude in coordinates".to_string())
-                })?;
-                let lat = arr[1].as_f64().ok_or_else(|| {
-                    Error::Validation("Invalid latitude in coordinates".to_string())
-                })?;
-                result.push([lon, lat]);
-            }
-        }
-        "LineString" | "MultiPoint" => {
-            let arr = coords
-                .as_array()
-                .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
-            for c in arr {
-                let pair = c
-                    .as_array()
-                    .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
-                if pair.len() >= 2 {
-                    let lon = pair[0].as_f64().ok_or_else(|| {
-                        Error::Validation("Invalid longitude in coordinates".to_string())
-                    })?;
-                    let lat = pair[1].as_f64().ok_or_else(|| {
-                        Error::Validation("Invalid latitude in coordinates".to_string())
-                    })?;
-                    result.push([lon, lat]);
-                }
-            }
-        }
-        "Polygon" | "MultiLineString" => {
-            let rings = coords
-                .as_array()
-                .ok_or_else(|| Error::Validation("Invalid coordinates".to_string()))?;
-            for ring in rings {
-                let arr = ring
-                    .as_array()
-                    .ok_or_else(|| Error::Validation("Invalid ring".to_string()))?;
-                for c in arr {
-                    let pair = c
-                        .as_array()
-                        .ok_or_else(|| Error::Validation("Invalid coordinate pair".to_string()))?;
-                    if pair.len() >= 2 {
-                        let lon = pair[0].as_f64().ok_or_else(|| {
-                            Error::Validation("Invalid longitude in coordinates".to_string())
-                        })?;
-                        let lat = pair[1].as_f64().ok_or_else(|| {
-                            Error::Validation("Invalid latitude in coordinates".to_string())
-                        })?;
-                        result.push([lon, lat]);
-                    }
-                }
-            }
-        }
-        _ => {
-            return Err(Error::Validation(format!(
-                "Cannot extract coordinates from geometry type: {}",
-                geom_type
-            )));
-        }
-    }
-    Ok(result)
-}
-
-/// Compute haversine distance between two GeoJSON geometries in meters.
+/// Minimum distance between two GeoJSON geometries, in metres.
 ///
-/// - Point-to-Point: exact haversine distance
-/// - Point-to-LineString/Polygon: finds nearest boundary point via HaversineClosestPoint
-/// - Non-Point to Non-Point: centroid-to-centroid approximation
+/// True shape-to-shape distance for every type pair, including `Multi*` and
+/// `GeometryCollection`. The previous implementation fell back to
+/// centroid-to-centroid for Polygon/Polygon and for anything `Multi*`, which
+/// reported a positive distance between overlapping shapes; see
+/// [`super::measure::distance`] for why fixing that required a projection rather
+/// than a different `geo` trait.
+///
+/// Retained as a function of two `Value`s because `ST_3DDISTANCE` composes the
+/// horizontal leg with a vertical one read off the JSON.
 pub fn compute_haversine_distance(geom1: &Value, geom2: &Value) -> Result<f64, Error> {
-    use geo::{Closest, HaversineClosestPoint, HaversineDistance, Point};
-
-    let type1 = get_geometry_type(geom1)?;
-    let type2 = get_geometry_type(geom2)?;
-
-    match (type1, type2) {
-        ("Point", "Point") => {
-            let p1 = geojson_to_point(geom1)?;
-            let p2 = geojson_to_point(geom2)?;
-            Ok(p1.haversine_distance(&p2))
-        }
-        ("Point", "LineString") => {
-            let point = geojson_to_point(geom1)?;
-            let line = geojson_to_linestring(geom2)?;
-            match line.haversine_closest_point(&point) {
-                Closest::Intersection(_) => Ok(0.0),
-                Closest::SinglePoint(closest) => Ok(point.haversine_distance(&closest)),
-                Closest::Indeterminate => Ok(point.haversine_distance(&get_centroid(geom2)?)),
-            }
-        }
-        ("LineString", "Point") => compute_haversine_distance(geom2, geom1),
-        ("Point", "Polygon") => {
-            let point = geojson_to_point(geom1)?;
-            let polygon = geojson_to_polygon(geom2)?;
-            match polygon.haversine_closest_point(&point) {
-                Closest::Intersection(_) => Ok(0.0),
-                Closest::SinglePoint(closest) => Ok(point.haversine_distance(&closest)),
-                Closest::Indeterminate => Ok(point.haversine_distance(&get_centroid(geom2)?)),
-            }
-        }
-        ("Polygon", "Point") => compute_haversine_distance(geom2, geom1),
-        _ => {
-            // Fallback: centroid-to-centroid for complex geometry pairs
-            let c1 = get_centroid(geom1)?;
-            let c2 = get_centroid(geom2)?;
-            Ok(c1.haversine_distance(&c2))
-        }
-    }
+    // One CRS rule for every binary geospatial function; see `super::convert`.
+    let (a, b) = super::convert::geom_pair_values("ST_DISTANCE", geom1, geom2)?;
+    super::measure::distance(&a, &b)
 }
 
-/// Extract centroid coordinates [lon, lat] from any geometry
-pub fn get_centroid(value: &Value) -> Result<Point, Error> {
-    let geom_type = get_geometry_type(value)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
 
-    match geom_type {
-        "Point" => geojson_to_point(value),
-        "LineString" => {
-            let line = geojson_to_linestring(value)?;
-            use geo::Centroid;
-            line.centroid().ok_or_else(|| {
-                Error::Validation("Cannot compute centroid of empty LineString".to_string())
-            })
+    #[test]
+    fn every_geometry_type_parses_including_the_ones_the_old_converters_could_not() {
+        for value in [
+            json!({"type":"Point","coordinates":[1.0,2.0]}),
+            json!({"type":"MultiPoint","coordinates":[[1,2],[3,4]]}),
+            json!({"type":"MultiLineString","coordinates":[[[0,0],[1,1]]]}),
+            json!({"type":"MultiPolygon","coordinates":[[[[0,0],[1,0],[1,1],[0,0]]]]}),
+            json!({"type":"GeometryCollection","geometries":[]}),
+        ] {
+            geojson_to_geom(&value, None)
+                .unwrap_or_else(|e| panic!("{} must parse: {e}", value["type"]));
         }
-        "Polygon" => {
-            let polygon = geojson_to_polygon(value)?;
-            use geo::Centroid;
-            polygon.centroid().ok_or_else(|| {
-                Error::Validation("Cannot compute centroid of empty Polygon".to_string())
-            })
-        }
-        other => Err(Error::Validation(format!(
-            "Centroid not supported for geometry type: {}",
-            other
-        ))),
+    }
+
+    #[test]
+    fn a_non_numeric_ordinate_is_rejected_rather_than_silently_zeroed() {
+        let bad = json!({"type": "Point", "coordinates": ["not_a_number", 37.0]});
+        assert!(geojson_to_geom(&bad, None).is_err());
+    }
+
+    #[test]
+    fn a_truncated_position_is_rejected_rather_than_padded_with_zero() {
+        let bad = json!({"type": "Point", "coordinates": [8.54]});
+        assert!(geojson_to_geom(&bad, None).is_err());
+    }
+
+    #[test]
+    fn a_coordinate_shape_that_contradicts_the_declared_type_is_rejected() {
+        // The old validation checked only that `type` was a known name and that a
+        // `coordinates` key existed, so this passed and failed much later.
+        let bad = json!({"type": "Polygon", "coordinates": [[8.54, 47.37]]});
+        assert!(geojson_to_geom(&bad, None).is_err());
+    }
+
+    #[test]
+    fn overlapping_polygons_are_zero_metres_apart() {
+        let a = json!({"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]});
+        let b = json!({"type":"Polygon","coordinates":[[[1,1],[3,1],[3,3],[1,3],[1,1]]]});
+        assert_eq!(
+            compute_haversine_distance(&a, &b).unwrap(),
+            0.0,
+            "the centroid fallback used to report a positive distance here"
+        );
+    }
+
+    #[test]
+    fn distance_accepts_multi_geometries_as_input() {
+        let a = json!({"type":"MultiPoint","coordinates":[[0.0,0.0],[10.0,0.0]]});
+        let b = json!({"type":"Point","coordinates":[0.0,1.0]});
+        let d = compute_haversine_distance(&a, &b).unwrap();
+        // Nearest member is (0,0), one degree of latitude away.
+        assert!((1.10e5..1.12e5).contains(&d), "{d}");
+    }
+
+    #[test]
+    fn a_missing_type_member_names_the_problem() {
+        let err = get_geometry_type(&json!({"coordinates": [1, 2]})).unwrap_err();
+        assert!(err.to_string().contains("type"), "{err}");
     }
 }

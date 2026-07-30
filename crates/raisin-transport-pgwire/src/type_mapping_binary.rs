@@ -412,4 +412,22 @@ mod tests {
         let bytes = encode_value_binary(&value, &Type::TIMESTAMPTZ).unwrap();
         assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
+
+    /// The binary form of a geometry is PostgreSQL's JSONB framing — a `0x01`
+    /// version byte followed by the JSON text — which is what the `JSONB` OID both
+    /// wire paths now advertise commits us to. A client decoding by OID would get
+    /// garbage from any other framing.
+    #[test]
+    fn a_geometry_encodes_as_binary_jsonb_carrying_its_srid() {
+        use raisin_models::nodes::properties::GeoJson;
+
+        let value =
+            PropertyValue::Geometry(GeoJson::point(2_683_000.0, 1_247_000.0).with_srid(Some(2056)));
+        let bytes = encode_value_binary(&value, &Type::JSONB).unwrap();
+        assert_eq!(bytes[0], 0x01, "JSONB version byte");
+
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes[1..]).expect("valid JSON");
+        assert_eq!(parsed["type"], "Point");
+        assert_eq!(parsed["srid"], 2056, "the CRS label must survive the wire");
+    }
 }

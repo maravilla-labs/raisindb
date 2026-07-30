@@ -35,6 +35,12 @@
 //! | `Vector`              | `FLOAT4_ARRAY`  | pgvector-compatible |
 //! | `Array`               | `JSONB`         | Heterogeneous arrays as JSON |
 //! | `Object`              | `JSONB`         | Key-value maps as JSON |
+//! | `Geometry`            | `JSONB`         | GeoJSON, `srid` member included |
+//!
+//! The `Geometry` row must stay in step with
+//! `extended_query::pg_type_for_data_type`: one path types a column from the value
+//! it produced, the other from the analyzed expression, and a client that trusts
+//! the `RowDescription` decodes the bytes according to whichever it was given.
 //!
 //! # Examples
 //!
@@ -254,6 +260,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use raisin_models::nodes::properties::value::{RaisinReference, RaisinUrl};
+    use raisin_models::nodes::properties::GeoJson;
     use rust_decimal::Decimal;
     use std::collections::HashMap;
     use std::str::FromStr;
@@ -449,5 +456,74 @@ mod tests {
         assert!(!is_null(&PropertyValue::Integer(0)));
         assert!(!is_null(&PropertyValue::String(String::new())));
         assert!(!is_null(&PropertyValue::Boolean(false)));
+    }
+
+    // --- geometry on the wire -------------------------------------------------
+
+    /// The simple-query path and the extended/prepared path both describe a
+    /// geometry column, and they must agree on the OID.
+    ///
+    /// They did not: this file said `JSONB` while
+    /// `extended_query/schema.rs::datatype_to_pg_type` said `TEXT`, so `psql`
+    /// bound the same column differently depending on whether the statement was
+    /// prepared. A client that trusts the `RowDescription` then decodes the same
+    /// bytes two different ways. This test is the pin; if either mapping is
+    /// changed alone, it fails.
+    #[test]
+    fn geometry_is_jsonb_on_both_paths() {
+        let geometry = PropertyValue::Geometry(GeoJson::point(8.54, 47.37));
+        assert_eq!(to_pg_type(&geometry), Type::JSONB);
+        // The DataType-level mapping is private to its own module, so assert the
+        // contract it must satisfy: whatever the analyzer calls a Geometry column
+        // must arrive as the same OID a Geometry value produces.
+        assert_eq!(
+            crate::extended_query::pg_type_for_data_type(
+                &raisin_sql::analyzer::types::DataType::Geometry
+            ),
+            to_pg_type(&geometry),
+            "the extended-query schema and the value mapping must not diverge"
+        );
+    }
+
+    /// A geometry must reach the client as parseable GeoJSON — not an opaque blob,
+    /// and not a debug rendering.
+    #[test]
+    fn a_geometry_encodes_as_parseable_geojson() {
+        let encoded = encode_value_text(&PropertyValue::Geometry(GeoJson::point(8.54, 47.37)))
+            .expect("encode");
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).expect("valid JSON");
+        assert_eq!(parsed["type"], "Point");
+        assert_eq!(parsed["coordinates"], serde_json::json!([8.54, 47.37]));
+    }
+
+    /// The `srid` member must survive the wire encoding, or a multi-SRID dataset
+    /// silently arrives unlabelled and every client-side CRS decision is wrong.
+    /// It must also be *absent* for WGS84, keeping ordinary output strictly RFC
+    /// 7946 conformant.
+    #[test]
+    fn the_srid_member_rides_along_and_is_elided_for_wgs84() {
+        let labelled = GeoJson::point(2_683_000.0, 1_247_000.0).with_srid(Some(2056));
+        let encoded = encode_value_text(&PropertyValue::Geometry(labelled)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed["srid"], 2056, "{encoded}");
+
+        let unlabelled =
+            encode_value_text(&PropertyValue::Geometry(GeoJson::point(1.0, 2.0))).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&unlabelled).unwrap();
+        assert!(parsed.get("srid").is_none(), "{unlabelled}");
+    }
+
+    /// Altitude must not be truncated on the way out.
+    #[test]
+    fn a_three_dimensional_geometry_keeps_its_altitude() {
+        let encoded = encode_value_text(&PropertyValue::Geometry(GeoJson::point_3d(
+            8.54, 47.37, 412.5,
+        )))
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            parsed["coordinates"],
+            serde_json::json!([8.54, 47.37, 412.5])
+        );
     }
 }

@@ -33,4 +33,5 @@ mod references_compose_tests;
 mod references_integration_tests;
 mod restore_workspace;
 mod rocksdb_integration_tests;
+mod spatial_pushdown_tests;
 mod throughput_sql;

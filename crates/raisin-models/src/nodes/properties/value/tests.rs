@@ -284,7 +284,7 @@ fn test_geojson_point_from_json() {
     let point: GeoJson = serde_json::from_value(json).expect("should deserialize");
 
     match point {
-        GeoJson::Point { coordinates } => {
+        GeoJson::Point { coordinates, .. } => {
             assert_eq!(coordinates[0], -122.4194);
             assert_eq!(coordinates[1], 37.7749);
         }
@@ -308,7 +308,7 @@ fn test_geojson_polygon_from_json() {
     let polygon: GeoJson = serde_json::from_value(json).expect("should deserialize");
 
     match polygon {
-        GeoJson::Polygon { coordinates } => {
+        GeoJson::Polygon { coordinates, .. } => {
             assert_eq!(coordinates.len(), 1); // One ring
             assert_eq!(coordinates[0].len(), 5); // 5 points (closed)
         }
@@ -326,7 +326,7 @@ fn test_property_value_geometry_from_json() {
     let value: PropertyValue = serde_json::from_value(json).expect("should deserialize");
 
     match value {
-        PropertyValue::Geometry(GeoJson::Point { coordinates }) => {
+        PropertyValue::Geometry(GeoJson::Point { coordinates, .. }) => {
             assert_eq!(coordinates[0], -122.4194);
             assert_eq!(coordinates[1], 37.7749);
         }
@@ -337,14 +337,15 @@ fn test_property_value_geometry_from_json() {
 #[test]
 fn test_geojson_centroid() {
     let point = GeoJson::point(-122.4194, 37.7749);
-    assert_eq!(point.centroid(), Some([-122.4194, 37.7749]));
+    assert_eq!(point.centroid(), Some(Position::new_2d(-122.4194, 37.7749)));
 
     let line = GeoJson::LineString {
-        coordinates: vec![[-122.0, 37.0], [-123.0, 38.0]],
+        coordinates: vec![[-122.0, 37.0].into(), [-123.0, 38.0].into()],
+        srid: None,
     };
     let centroid = line.centroid().unwrap();
-    assert!((centroid[0] - (-122.5)).abs() < 0.001);
-    assert!((centroid[1] - 37.5).abs() < 0.001);
+    assert!((centroid.x - (-122.5)).abs() < 0.001);
+    assert!((centroid.y - 37.5).abs() < 0.001);
 }
 
 #[test]
@@ -353,7 +354,8 @@ fn test_geojson_is_point() {
     assert!(point.is_point());
 
     let line = GeoJson::LineString {
-        coordinates: vec![[-122.0, 37.0], [-123.0, 38.0]],
+        coordinates: vec![[-122.0, 37.0].into(), [-123.0, 38.0].into()],
+        srid: None,
     };
     assert!(!line.is_point());
 }
@@ -382,6 +384,258 @@ fn test_property_value_geometry_messagepack() {
     let deserialized: PropertyValue = rmp_serde::from_slice(&bytes).expect("should deserialize");
 
     assert_eq!(deserialized, value);
+}
+
+// === GeoJSON: altitude and SRID extensions ===
+//
+// The whole point of these is compatibility: neither extension may change the
+// bytes of a value that does not use it, or the untagged inference that decides
+// a JSON object is a Geometry at all.
+
+/// The load-bearing compatibility claim. If this fails, every stored node blob
+/// containing a geometry has changed shape.
+#[test]
+fn plain_2d_geometry_serializes_byte_identically_to_the_legacy_shape() {
+    let point = GeoJson::point(-122.4194, 37.7749);
+
+    let json = serde_json::to_string(&point).expect("should serialize");
+    assert_eq!(
+        json,
+        r#"{"type":"Point","coordinates":[-122.4194,37.7749]}"#
+    );
+    assert!(!json.contains("srid"), "srid must be elided when absent");
+
+    let poly = GeoJson::Polygon {
+        coordinates: vec![vec![
+            [0.0, 0.0].into(),
+            [1.0, 0.0].into(),
+            [1.0, 1.0].into(),
+            [0.0, 0.0].into(),
+        ]],
+        srid: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&poly).unwrap(),
+        r#"{"type":"Polygon","coordinates":[[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,0.0]]]}"#
+    );
+}
+
+#[test]
+fn three_dimensional_point_round_trips_and_reports_its_z() {
+    let p = GeoJson::point_3d(8.54, 47.37, 412.0);
+    assert_eq!(
+        serde_json::to_string(&p).unwrap(),
+        r#"{"type":"Point","coordinates":[8.54,47.37,412.0]}"#
+    );
+
+    let back: GeoJson = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+    assert_eq!(back, p);
+    assert_eq!(back.as_point().unwrap().z, Some(412.0));
+    assert_eq!(back.z_range(), Some((412.0, 412.0)));
+    assert!(back.is_3d());
+
+    // ... and through MessagePack, which is what actually hits disk.
+    let bytes = rmp_serde::to_vec_named(&p).unwrap();
+    assert_eq!(rmp_serde::from_slice::<GeoJson>(&bytes).unwrap(), p);
+}
+
+#[test]
+fn z_range_spans_a_mixed_dimension_geometry_and_is_none_when_flat() {
+    let flat = GeoJson::LineString {
+        coordinates: vec![[0.0, 0.0].into(), [1.0, 1.0].into()],
+        srid: None,
+    };
+    assert_eq!(flat.z_range(), None);
+    assert!(!flat.is_3d());
+
+    // A mix of 2-D and 3-D vertices: the range covers only the ones present.
+    let mixed = GeoJson::LineString {
+        coordinates: vec![
+            [0.0, 0.0].into(),
+            [1.0, 1.0, 5.0].into(),
+            [2.0, 2.0, -3.5].into(),
+        ],
+        srid: None,
+    };
+    assert_eq!(mixed.z_range(), Some((-3.5, 5.0)));
+
+    // Nested collections are walked too.
+    let coll = GeoJson::GeometryCollection {
+        geometries: vec![flat, mixed],
+        srid: None,
+    };
+    assert_eq!(coll.z_range(), Some((-3.5, 5.0)));
+}
+
+#[test]
+fn a_third_ordinate_survives_the_untagged_property_value_inference() {
+    // The risk: an extra ordinate or member makes serde fall through to
+    // `Object`, which is never spatially indexed and reports no error.
+    let json = serde_json::json!({
+        "type": "Point",
+        "coordinates": [8.54, 47.37, 412.0]
+    });
+    let value: PropertyValue = serde_json::from_value(json).expect("should deserialize");
+    match value {
+        PropertyValue::Geometry(g) => assert_eq!(g.as_point().unwrap().z, Some(412.0)),
+        other => panic!("expected Geometry, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_srid_member_survives_the_untagged_property_value_inference() {
+    let json = serde_json::json!({
+        "type": "Point",
+        "coordinates": [2683000.0, 1247000.0],
+        "srid": 2056
+    });
+    let value: PropertyValue = serde_json::from_value(json).expect("should deserialize");
+    match value {
+        PropertyValue::Geometry(g) => {
+            assert_eq!(g.srid(), Some(2056));
+            assert_eq!(g.geometry_type(), "Point");
+        }
+        other => panic!("expected Geometry, got {other:?}"),
+    }
+}
+
+#[test]
+fn srid_round_trips_through_json_and_messagepack() {
+    let p = GeoJson::point(2683000.0, 1247000.0).with_srid(Some(2056));
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(json.contains("\"srid\":2056"), "{json}");
+    assert_eq!(serde_json::from_str::<GeoJson>(&json).unwrap(), p);
+
+    let bytes = rmp_serde::to_vec_named(&p).unwrap();
+    assert_eq!(rmp_serde::from_slice::<GeoJson>(&bytes).unwrap(), p);
+}
+
+#[test]
+fn set_srid_is_metadata_only_and_leaves_coordinates_alone() {
+    let mut p = GeoJson::point(8.54, 47.37);
+    p.set_srid(Some(3857));
+    assert_eq!(p.srid(), Some(3857));
+    assert_eq!(p.as_point().unwrap().xy(), [8.54, 47.37]);
+
+    // And an unlabelled geometry stays distinguishable from an explicit 4326,
+    // because unlabelled adopts the other operand's SRID in binary operations.
+    p.set_srid(None);
+    assert_eq!(p.srid(), None);
+}
+
+#[test]
+fn srid_is_carried_by_every_variant() {
+    let variants = vec![
+        GeoJson::Point {
+            coordinates: [0.0, 0.0].into(),
+            srid: Some(3857),
+        },
+        GeoJson::LineString {
+            coordinates: vec![[0.0, 0.0].into()],
+            srid: Some(3857),
+        },
+        GeoJson::Polygon {
+            coordinates: vec![vec![[0.0, 0.0].into()]],
+            srid: Some(3857),
+        },
+        GeoJson::MultiPoint {
+            coordinates: vec![[0.0, 0.0].into()],
+            srid: Some(3857),
+        },
+        GeoJson::MultiLineString {
+            coordinates: vec![vec![[0.0, 0.0].into()]],
+            srid: Some(3857),
+        },
+        GeoJson::MultiPolygon {
+            coordinates: vec![vec![vec![[0.0, 0.0].into()]]],
+            srid: Some(3857),
+        },
+        GeoJson::GeometryCollection {
+            geometries: vec![],
+            srid: Some(3857),
+        },
+    ];
+    for v in variants {
+        assert_eq!(v.srid(), Some(3857), "{}", v.geometry_type());
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(serde_json::from_str::<GeoJson>(&json).unwrap(), v);
+    }
+}
+
+/// Regression guard: `centroid()` used to return `None` for every `Multi*` and
+/// `GeometryCollection`, and a `None` centroid meant "not indexable".
+#[test]
+fn centroid_covers_every_geometry_type() {
+    let cases: Vec<GeoJson> = vec![
+        GeoJson::point(1.0, 1.0),
+        GeoJson::LineString {
+            coordinates: vec![[0.0, 0.0].into(), [2.0, 2.0].into()],
+            srid: None,
+        },
+        GeoJson::Polygon {
+            coordinates: vec![vec![
+                [0.0, 0.0].into(),
+                [2.0, 0.0].into(),
+                [2.0, 2.0].into(),
+                [0.0, 2.0].into(),
+            ]],
+            srid: None,
+        },
+        GeoJson::MultiPoint {
+            coordinates: vec![[0.0, 0.0].into(), [2.0, 2.0].into()],
+            srid: None,
+        },
+        GeoJson::MultiLineString {
+            coordinates: vec![vec![[0.0, 0.0].into()], vec![[2.0, 2.0].into()]],
+            srid: None,
+        },
+        GeoJson::MultiPolygon {
+            coordinates: vec![vec![vec![[0.0, 0.0].into(), [2.0, 2.0].into()]]],
+            srid: None,
+        },
+    ];
+    for g in &cases {
+        let c = g
+            .centroid()
+            .unwrap_or_else(|| panic!("no centroid for {}", g.geometry_type()));
+        assert_eq!(c.xy(), [1.0, 1.0], "{}", g.geometry_type());
+    }
+
+    let coll = GeoJson::GeometryCollection {
+        geometries: cases,
+        srid: None,
+    };
+    assert_eq!(coll.centroid().unwrap().xy(), [1.0, 1.0]);
+}
+
+#[test]
+fn empty_geometries_have_no_centroid_and_report_empty() {
+    let empty = GeoJson::empty();
+    assert!(empty.is_empty());
+    assert_eq!(empty.centroid(), None);
+    assert_eq!(empty.z_range(), None);
+    assert_eq!(
+        serde_json::to_string(&empty).unwrap(),
+        r#"{"type":"GeometryCollection","geometries":[]}"#
+    );
+
+    for g in [
+        GeoJson::LineString {
+            coordinates: vec![],
+            srid: None,
+        },
+        GeoJson::Polygon {
+            coordinates: vec![],
+            srid: None,
+        },
+        GeoJson::MultiPolygon {
+            coordinates: vec![vec![vec![]]],
+            srid: None,
+        },
+    ] {
+        assert!(g.is_empty(), "{}", g.geometry_type());
+        assert_eq!(g.centroid(), None, "{}", g.geometry_type());
+    }
 }
 
 #[test]

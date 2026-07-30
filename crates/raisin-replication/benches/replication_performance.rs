@@ -13,6 +13,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use raisin_hlc::HLC;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
+use raisin_models::nodes::RelationRef;
 use raisin_replication::{
     causal_delivery::CausalDeliveryBuffer,
     operation::{OpType, Operation, ReplicatedNodeChange, ReplicatedNodeChangeKind},
@@ -80,8 +81,13 @@ fn make_add_child_op(
             relation_type: "children".to_string(),
             target_id: format!("child_{}", op_seq),
             target_workspace: "ws".to_string(),
-            properties: Default::default(),
-            relation: todo!(),
+            relation: RelationRef {
+                target: format!("child_{}", op_seq),
+                workspace: "ws".to_string(),
+                target_node_type: "raisin:Page".to_string(),
+                relation_type: "children".to_string(),
+                weight: None,
+            },
         },
         revision: None,
         actor: "benchmark".to_string(),
@@ -125,7 +131,8 @@ fn make_apply_revision_op(
             } else {
                 ReplicatedNodeChangeKind::Upsert
             },
-            cf_order_key: todo!(),
+            // Full ORDERED_CHILDREN label: fractional index, then the node id.
+            cf_order_key: format!("a{}::node_{}", i, i),
         })
         .collect();
 

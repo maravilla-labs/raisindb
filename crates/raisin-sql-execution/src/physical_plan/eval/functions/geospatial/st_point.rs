@@ -6,6 +6,7 @@ use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
+use super::axis_guard::check_lon_lat;
 use super::helpers::point_to_geojson;
 
 /// Create a Point geometry from longitude and latitude
@@ -29,7 +30,12 @@ use super::helpers::point_to_geojson;
 ///
 /// # Notes
 /// - Coordinates are in WGS84 (EPSG:4326)
-/// - Longitude comes first, then latitude (GeoJSON convention)
+/// - **Longitude comes first, then latitude** (GeoJSON / PostGIS convention, not
+///   the EPSG authority's lat/lon order for EPSG:4326 — see `axis_guard`)
+/// - An unambiguously reversed pair is rejected with a message naming the
+///   corrected call; a pair that could be either way round is accepted with a
+///   one-time warning, because both ordinates being valid latitudes makes the
+///   mistake undetectable
 pub struct StPointFunction;
 
 impl SqlFunction for StPointFunction {
@@ -88,19 +94,10 @@ impl SqlFunction for StPointFunction {
             }
         };
 
-        // Validate coordinate ranges
-        if !(-180.0..=180.0).contains(&lon) {
-            return Err(Error::Validation(format!(
-                "Longitude {} out of range [-180, 180]",
-                lon
-            )));
-        }
-        if !(-90.0..=90.0).contains(&lat) {
-            return Err(Error::Validation(format!(
-                "Latitude {} out of range [-90, 90]",
-                lat
-            )));
-        }
+        // Range validation AND the lon/lat swap heuristic. The old check only
+        // caught |lat| > 90, so ST_POINT(47.37, 8.54) — Zurich reversed — passed
+        // silently and landed in Somalia.
+        check_lon_lat("ST_POINT", lon, lat)?;
 
         Ok(Literal::Geometry(point_to_geojson(lon, lat)))
     }

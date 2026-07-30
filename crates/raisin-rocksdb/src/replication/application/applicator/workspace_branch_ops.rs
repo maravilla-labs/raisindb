@@ -1,92 +1,16 @@
-//! Workspace, branch, revision metadata, and tag operations
+//! Branch, revision metadata, and tag operations
+//!
+//! Workspace record application lives in the sibling `workspace_ops` module,
+//! because it carries its own last-write-wins guard.
 
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
-use raisin_models::workspace::Workspace;
 use raisin_replication::Operation;
 
-use super::super::db_helpers::{delete_key, serialize_and_write_compact};
+use super::super::db_helpers::serialize_and_write_compact;
 use super::OperationApplicator;
 
 impl OperationApplicator {
-    /// Apply a workspace update operation
-    pub(in crate::replication::application) async fn apply_update_workspace(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        workspace_id: &str,
-        workspace: &Workspace,
-        op: &Operation,
-    ) -> Result<()> {
-        tracing::info!(
-            "📥 Applying workspace update: {}/{}/{} from node {}",
-            tenant_id,
-            repo_id,
-            workspace_id,
-            op.cluster_node_id
-        );
-
-        let key = keys::workspace_key(tenant_id, repo_id, workspace_id);
-        let cf = cf_handle(&self.db, cf::WORKSPACES)?;
-
-        serialize_and_write_compact(
-            &self.db,
-            cf,
-            key,
-            workspace,
-            &format!(
-                "apply_update_workspace_{}/{}/{}",
-                tenant_id, repo_id, workspace_id
-            ),
-        )?;
-
-        tracing::info!(
-            "✅ Workspace applied successfully: {}/{}/{}",
-            tenant_id,
-            repo_id,
-            workspace_id
-        );
-        Ok(())
-    }
-
-    /// Apply a workspace delete operation
-    pub(in crate::replication::application) async fn apply_delete_workspace(
-        &self,
-        tenant_id: &str,
-        repo_id: &str,
-        workspace_id: &str,
-        op: &Operation,
-    ) -> Result<()> {
-        tracing::info!(
-            "📥 Applying workspace delete: {}/{}/{} from node {}",
-            tenant_id,
-            repo_id,
-            workspace_id,
-            op.cluster_node_id
-        );
-
-        let key = keys::workspace_key(tenant_id, repo_id, workspace_id);
-        let cf = cf_handle(&self.db, cf::WORKSPACES)?;
-
-        delete_key(
-            &self.db,
-            cf,
-            key,
-            &format!(
-                "apply_delete_workspace_{}/{}/{}",
-                tenant_id, repo_id, workspace_id
-            ),
-        )?;
-
-        tracing::info!(
-            "✅ Workspace deleted successfully: {}/{}/{}",
-            tenant_id,
-            repo_id,
-            workspace_id
-        );
-        Ok(())
-    }
-
     /// Apply a branch update operation
     ///
     /// UpdateBranch operations can arrive out of order (network delays, retries),

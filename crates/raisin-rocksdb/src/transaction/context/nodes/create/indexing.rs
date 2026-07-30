@@ -183,14 +183,38 @@ pub(super) fn index_node_properties(
         batch.put_cf(cf_property, updated_at_key, node.id.as_bytes());
     }
 
-    // Index geometry properties in the spatial index (within same batch for atomicity)
+    // Index geometry properties in the spatial index (within same batch for
+    // atomicity). Delegates to the ONE shared spatial writer in
+    // `crate::indexing::spatial`, which the repository and replication apply paths
+    // also call — so a new index type or a change to the cell derivation cannot land
+    // on one path and be forgotten on the others.
+    let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+    let spatial_state = crate::spatial_state::SpatialStateStore::new(tx.db.clone());
+    let policies =
+        crate::indexing::NodeSpatialPolicies::from_local_state(&spatial_state, &ctx, node);
+    let targets = crate::indexing::SpatialIndexTargets::from_db(tx.db.as_ref())?;
+
+    crate::indexing::write_node_spatial_indexes(
+        &mut batch, &targets, &ctx, node, revision, &policies,
+    )?;
+
+    // Create the state record on first write of a geometry property, in the SAME
+    // batch. This is what preserves zero-opt-in automatic indexing: a brand-new
+    // workspace is queryable immediately, with no admin action and no config.
     for (prop_name, prop_value) in &node.properties {
-        if let PropertyValue::Geometry(geojson) = prop_value {
-            tx.storage.spatial_index.index_geometry_to_batch(
-                &mut batch, tenant_id, repo_id, branch, workspace, &node.id, prop_name, geojson,
-                revision,
-            )?;
+        if !matches!(prop_value, PropertyValue::Geometry(_)) {
+            continue;
         }
+        spatial_state.ensure_for_write(
+            &mut batch,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            prop_name,
+            policies.for_property(prop_name),
+            *revision,
+        )?;
     }
 
     Ok(())
@@ -238,6 +262,10 @@ pub(super) fn tombstone_stale_property_indexes(
 /// Tombstone old spatial index entries for a node's geometry properties.
 ///
 /// Called before re-indexing during updates to prevent stale geohash entries.
+///
+/// `new_node` lets an unchanged geometry keep its entries: the re-write reproduces
+/// byte-identical keys and values, so tombstoning and re-putting would be pure MVCC
+/// churn on every update to any *other* property of the node.
 pub(super) fn tombstone_spatial_properties(
     tx: &RocksDBTransaction,
     tenant_id: &str,
@@ -245,29 +273,23 @@ pub(super) fn tombstone_spatial_properties(
     branch: &str,
     workspace: &str,
     old_node: &Node,
+    new_node: Option<&Node>,
     revision: &HLC,
 ) -> Result<()> {
+    let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+    let spatial_state = crate::spatial_state::SpatialStateStore::new(tx.db.clone());
+    let policies =
+        crate::indexing::NodeSpatialPolicies::from_local_state(&spatial_state, &ctx, old_node);
+    let targets = crate::indexing::SpatialIndexTargets::from_db(tx.db.as_ref())?;
+
     let mut batch = tx
         .batch
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-    for (prop_name, prop_value) in &old_node.properties {
-        if matches!(prop_value, PropertyValue::Geometry(_)) {
-            tx.storage.spatial_index.unindex_geometry_to_batch(
-                &mut batch,
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                &old_node.id,
-                prop_name,
-                revision,
-            )?;
-        }
-    }
-
-    Ok(())
+    crate::indexing::spatial::tombstone_superseded_spatial_indexes(
+        &mut batch, &targets, &ctx, old_node, new_node, revision, &policies,
+    )
 }
 
 /// Index unique properties for a node

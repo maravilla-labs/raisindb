@@ -71,6 +71,10 @@ pub enum CanonicalPredicate {
         column: String,
         prefix: String,
     },
+    /// A proximity predicate the spatial index can drive.
+    ///
+    /// Produced only by `super::spatial::extract_spatial_predicate` — the single
+    /// extractor both the optimizer and the execution planner call.
     SpatialDWithin {
         table: String,
         geometry_column: String,
@@ -78,6 +82,30 @@ pub enum CanonicalPredicate {
         center_lon: f64,
         center_lat: f64,
         radius_meters: f64,
+        /// The planner's licence to drop this predicate from the residual
+        /// filter.
+        ///
+        /// `true` only when a *complete* index scan over `(center_lon,
+        /// center_lat, radius_meters)` returns EXACTLY this predicate's match
+        /// set. `false` whenever the scan parameters were widened — a non-point
+        /// query geometry reduced to its envelope centre with an inflated
+        /// radius, or a strict `ST_DISTANCE < r` whose boundary ring the scan's
+        /// `<= r` post-filter includes. An inexact predicate makes the scan a
+        /// *candidate source only*, and [`Self::to_expr`] must be re-applied per
+        /// row.
+        ///
+        /// Note this is necessary but NOT sufficient to strip: the index also
+        /// has to be built and the cell plan has to be a proven cover. See
+        /// `build_spatial_scan`.
+        exact: bool,
+        /// The verbatim source expression.
+        ///
+        /// Kept rather than reconstructed because the reconstruction is only
+        /// equivalent for the canonical `ST_DWITHIN(geom, ST_POINT(..), r)`
+        /// spelling; for every widened form it would be the *widened* predicate,
+        /// which as a residual filter would fail to reject the extra rows the
+        /// widening let in.
+        original: Box<TypedExpr>,
     },
     References {
         target_workspace: String,
@@ -364,66 +392,12 @@ impl CanonicalPredicate {
                     DataType::Boolean,
                 )
             }
-            CanonicalPredicate::SpatialDWithin {
-                table,
-                geometry_column,
-                property_name,
-                center_lon,
-                center_lat,
-                radius_meters,
-            } => {
-                let col =
-                    TypedExpr::column(table.clone(), geometry_column.clone(), DataType::JsonB);
-                let key = TypedExpr::literal(Literal::Text(property_name.clone()));
-                let json_extract = TypedExpr::new(
-                    Expr::JsonExtractText {
-                        object: Box::new(col),
-                        key: Box::new(key),
-                    },
-                    DataType::Text,
-                );
-                // Wrap in CAST(... AS GEOMETRY) so runtime evaluation converts Text→Geometry
-                let je = TypedExpr::new(
-                    Expr::Cast {
-                        expr: Box::new(json_extract),
-                        target_type: DataType::Geometry,
-                    },
-                    DataType::Geometry,
-                );
-                let lon = TypedExpr::literal(Literal::Double(*center_lon));
-                let lat = TypedExpr::literal(Literal::Double(*center_lat));
-                let pt = TypedExpr::new(
-                    Expr::Function {
-                        name: "ST_POINT".into(),
-                        args: vec![lon, lat],
-                        signature: FunctionSignature {
-                            name: "ST_POINT".into(),
-                            params: vec![DataType::Double, DataType::Double],
-                            return_type: DataType::Geometry,
-                            is_deterministic: true,
-                            category: FunctionCategory::Geospatial,
-                        },
-                        filter: None,
-                    },
-                    DataType::Geometry,
-                );
-                let rad = TypedExpr::literal(Literal::Double(*radius_meters));
-                TypedExpr::new(
-                    Expr::Function {
-                        name: "ST_DWITHIN".into(),
-                        args: vec![je, pt, rad],
-                        signature: FunctionSignature {
-                            name: "ST_DWITHIN".into(),
-                            params: vec![DataType::Geometry, DataType::Geometry, DataType::Double],
-                            return_type: DataType::Boolean,
-                            is_deterministic: true,
-                            category: FunctionCategory::Geospatial,
-                        },
-                        filter: None,
-                    },
-                    DataType::Boolean,
-                )
-            }
+            // Return the verbatim source expression. Reconstructing a canonical
+            // `ST_DWITHIN(CAST(properties->>'k' AS GEOMETRY), ST_POINT(..), r)`
+            // here would silently substitute the WIDENED window for what the user
+            // wrote, and a residual filter built from the widened window cannot
+            // reject the rows the widening admitted.
+            CanonicalPredicate::SpatialDWithin { original, .. } => (**original).clone(),
             CanonicalPredicate::References {
                 target_workspace,
                 target_path,

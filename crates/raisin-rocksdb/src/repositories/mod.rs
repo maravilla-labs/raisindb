@@ -21,7 +21,7 @@ mod relations;
 mod repository_management;
 mod revisions;
 mod session;
-mod spatial_index;
+pub mod spatial_index;
 mod system_updates;
 mod tags;
 mod tenant_ai_config;
@@ -54,7 +54,9 @@ pub use relations::RelationRepositoryImpl;
 pub use repository_management::RepositoryManagementRepositoryImpl;
 pub use revisions::RevisionRepositoryImpl;
 pub use session::SessionRepository;
-pub use spatial_index::{ProximityResult, SpatialIndexEntry, SpatialIndexRepository};
+pub use spatial_index::{
+    ProximityResult, SpatialEntry, SpatialGeometryKind, SpatialIndexEntry, SpatialIndexRepository,
+};
 pub use system_updates::SystemUpdateRepositoryImpl;
 pub use tags::TagRepositoryImpl;
 pub use tenant_ai_config::TenantAIConfigRepository;

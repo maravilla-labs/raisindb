@@ -31,8 +31,15 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             .build(analyzed)
             .map_err(|e| Error::Validation(format!("DML plan error: {}", e)))?;
 
-        let index_catalog: Arc<dyn IndexCatalog> =
-            Arc::new(crate::physical_plan::catalog::RocksDBIndexCatalog::new());
+        // Attach the spatial index's build state. Without it the catalog answers
+        // `NotBuilt` for every property and every ST_DWITHIN degrades to a
+        // row-level filter on a full scan — correct, but never fast. With it, the
+        // planner can tell "indexed" from "never indexed" and only then drop the
+        // predicate.
+        let index_catalog: Arc<dyn IndexCatalog> = Arc::new(
+            crate::physical_plan::catalog::RocksDBIndexCatalog::new()
+                .with_optional_spatial_state(self.storage.spatial_state()),
+        );
 
         let physical_planner = PhysicalPlanner::with_catalog(
             self.tenant_id.clone(),

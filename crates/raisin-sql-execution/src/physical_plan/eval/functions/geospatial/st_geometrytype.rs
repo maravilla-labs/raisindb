@@ -1,17 +1,27 @@
-//! ST_GEOMETRYTYPE function - return geometry type as string
+//! ST_GEOMETRYTYPE - the type name of a geometry.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
+use geo::Geometry;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::get_geometry_type;
+use super::convert::geom_arg;
+use super::z_support::expect_arity;
 
-/// Return the geometry type as a string (e.g., "ST_Point", "ST_Polygon")
+const SIGNATURE: &str = "ST_GEOMETRYTYPE(geometry) -> TEXT";
+
+/// The geometry's type as `ST_Point`, `ST_MultiPolygon` and so on.
 ///
 /// # SQL Signature
 /// `ST_GEOMETRYTYPE(geometry) -> TEXT`
+///
+/// # Behaviour
+/// * The `ST_` prefix is PostGIS's convention for this function, kept so that
+///   existing `WHERE ST_GEOMETRYTYPE(g) = 'ST_Point'` filters port unchanged.
+/// * Reported after parsing rather than by echoing the JSON's `type` member, so a
+///   malformed geometry is a query error instead of an invented type name.
+/// * `NULL` in, `NULL` out.
 pub struct StGeometryTypeFunction;
 
 impl SqlFunction for StGeometryTypeFunction {
@@ -24,33 +34,31 @@ impl SqlFunction for StGeometryTypeFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_GEOMETRYTYPE(geometry) -> TEXT"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 1 {
-            return Err(Error::Validation(
-                "ST_GEOMETRYTYPE requires exactly 1 argument".to_string(),
-            ));
+        expect_arity("ST_GEOMETRYTYPE", SIGNATURE, args, 1)?;
+        match geom_arg("ST_GEOMETRYTYPE", args, 0, row)? {
+            None => Ok(Literal::Null),
+            Some(g) => Ok(Literal::Text(format!("ST_{}", type_name(&g.geometry)))),
         }
+    }
+}
 
-        let geom_val = eval_expr(&args[0], row)?;
-        if matches!(geom_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom = match &geom_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_GEOMETRYTYPE requires GEOMETRY argument".to_string(),
-                ))
-            }
-        };
-
-        let geom_type = get_geometry_type(geom)?;
-        Ok(Literal::Text(format!("ST_{}", geom_type)))
+/// The GeoJSON spelling of a `geo` geometry's type.
+///
+/// `Line`, `Rect` and `Triangle` are `geo`-only shapes with no GeoJSON name, so
+/// they are reported as what they serialize to.
+fn type_name(g: &Geometry<f64>) -> &'static str {
+    match g {
+        Geometry::Point(_) => "Point",
+        Geometry::MultiPoint(_) => "MultiPoint",
+        Geometry::Line(_) | Geometry::LineString(_) => "LineString",
+        Geometry::MultiLineString(_) => "MultiLineString",
+        Geometry::Polygon(_) | Geometry::Rect(_) | Geometry::Triangle(_) => "Polygon",
+        Geometry::MultiPolygon(_) => "MultiPolygon",
+        Geometry::GeometryCollection(_) => "GeometryCollection",
     }
 }

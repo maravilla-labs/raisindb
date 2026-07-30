@@ -13,22 +13,18 @@ pub mod verification;
 pub mod websocket_client;
 
 // Re-export commonly used types and functions
-pub use config::{ClusterConfig, NodeConfig};
+pub use config::ClusterConfig;
 pub use fixture::ClusterTestFixture;
-pub use ports::{free_port, unique_ports};
-pub use process::{ClusterProcess, NodeLogs};
+pub use ports::unique_ports;
+pub use process::ClusterProcess;
 pub use rest_client::RestClient;
-pub use social_feed::{
-    add_follow_relationships, create_comment, create_demo_users, create_initial_posts, create_post,
-    init_social_feed_schema, SOCIAL_FEED_BRANCH, SOCIAL_FEED_NODE_TYPES, SOCIAL_FEED_REPO,
-    SOCIAL_FEED_WORKSPACE,
-};
+pub use social_feed::{create_comment, create_post};
 pub use verification::{
-    dump_children_order, verify_child_order_via_rest, verify_child_order_via_sql,
-    verify_comment_exists_on_all_nodes, verify_node_exists_on_all_nodes,
-    verify_node_properties_match, verify_post_at_same_position,
+    explain_on_node, verify_all_nodes_agree, verify_child_order_via_rest,
+    verify_child_order_via_sql, verify_comment_exists_on_all_nodes,
+    verify_node_exists_on_all_nodes, verify_node_properties_match,
+    verify_plan_contains_on_all_nodes, verify_post_at_same_position,
     verify_relation_deleted_on_all_nodes, verify_relation_exists_on_all_nodes,
-    verify_relations_match, wait_for_nodetype_replication, wait_for_replication,
-    wait_for_replication_by_id,
+    verify_relations_match, verify_spatial_query_on_all_nodes, wait_for_nodetype_replication,
+    wait_for_replication, wait_for_replication_by_id,
 };
-pub use websocket_client::WebSocketClient;

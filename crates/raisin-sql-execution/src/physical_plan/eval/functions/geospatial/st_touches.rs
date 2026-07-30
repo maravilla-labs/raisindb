@@ -1,18 +1,42 @@
 //! ST_TOUCHES function - check if geometries touch but interiors don't intersect
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::{Contains, Intersects};
+use geo::relate::IntersectionMatrix;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{geojson_to_point, geojson_to_polygon, get_geometry_type};
+use super::relate;
 
-/// Check if two geometries touch (share boundary but not interior)
+/// Check if two geometries touch — they meet, but their interiors do not.
 ///
 /// # SQL Signature
 /// `ST_TOUCHES(geometry_a, geometry_b) -> BOOLEAN`
+///
+/// # Returns
+/// * TRUE if the geometries share at least one point and their interiors are
+///   disjoint
+/// * FALSE otherwise
+/// * NULL if either input is NULL
+///
+/// # Examples
+/// ```sql
+/// -- Parcels that share a fence line but no ground
+/// SELECT a.id, b.id FROM parcels a, parcels b
+///  WHERE a.id < b.id AND ST_TOUCHES(a.shape, b.shape);
+/// ```
+///
+/// # Notes
+/// - Two `Point`s can never touch: a point has no boundary, so there is nothing
+///   to meet at without the interiors meeting. That answer used to be produced by
+///   a hardcoded `false` for *any* `Point` argument, which also — wrongly —
+///   returned FALSE for a point sitting on the end of a line or on the edge of a
+///   polygon. Those are now TRUE, correctly.
+/// - Accepts every geometry type on both sides; only `Point`/`Point`,
+///   `Point`/`Polygon` and `Polygon`/`Polygon` were handled before, and the
+///   `Polygon`/`Polygon` arm approximated the test with a `1e-10` area threshold
+///   on the boolean intersection.
+/// - DE-9IM `[FT*******] | [F**T*****] | [F***T****]`.
 pub struct StTouchesFunction;
 
 impl SqlFunction for StTouchesFunction {
@@ -30,85 +54,6 @@ impl SqlFunction for StTouchesFunction {
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_TOUCHES requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let geom_a_val = eval_expr(&args[0], row)?;
-        if matches!(geom_a_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_b_val = eval_expr(&args[1], row)?;
-        if matches!(geom_b_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_a = match &geom_a_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_TOUCHES requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom_b = match &geom_b_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_TOUCHES requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let type_a = get_geometry_type(geom_a)?;
-        let type_b = get_geometry_type(geom_b)?;
-
-        let touches = match (type_a, type_b) {
-            // Point-Point: never touch
-            ("Point", "Point") => false,
-            ("Polygon", "Polygon") => {
-                let polygon_a = geojson_to_polygon(geom_a)?;
-                let polygon_b = geojson_to_polygon(geom_b)?;
-                let ext_a = polygon_a.exterior();
-                let ext_b = polygon_b.exterior();
-                if !ext_a.intersects(ext_b) {
-                    false
-                } else {
-                    use geo::Area;
-                    use geo::BooleanOps;
-                    let intersection = polygon_a.intersection(&polygon_b);
-                    let area: f64 = intersection.unsigned_area();
-                    area < 1e-10
-                }
-            }
-            // Point on polygon boundary
-            ("Point", "Polygon") => {
-                let point = geojson_to_point(geom_a)?;
-                let polygon = geojson_to_polygon(geom_b)?;
-                // Touches if point is on boundary (intersects exterior but not contained in interior)
-                let exterior = polygon.exterior();
-                exterior.intersects(&point) && !polygon.contains(&point)
-            }
-            ("Polygon", "Point") => {
-                let polygon = geojson_to_polygon(geom_a)?;
-                let point = geojson_to_point(geom_b)?;
-                let exterior = polygon.exterior();
-                exterior.intersects(&point) && !polygon.contains(&point)
-            }
-            _ => {
-                return Err(Error::Validation(format!(
-                    "ST_TOUCHES not supported for {} and {}",
-                    type_a, type_b
-                )))
-            }
-        };
-
-        Ok(Literal::Boolean(touches))
+        relate::predicate("ST_TOUCHES", args, row, IntersectionMatrix::is_touches)
     }
 }

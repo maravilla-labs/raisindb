@@ -14,6 +14,10 @@ serde = { workspace = true }
 chrono = { workspace = true }
 raisin-error = { path = "../raisin-error" }
 raisin-models = { path = "../raisin-models" }
+# For the spatial index traits: `Crs` in signatures, and the geometry
+# conversion the SpatialEntry value record is built from.
+raisin-geometry = { path = "../raisin-geometry" }
+raisin-proj = { path = "../raisin-proj" }
 raisin-context = { version = "0.1.0", path = "../raisin-context" }
 raisin-ai = { version = "0.1.0", path = "../raisin-ai" }
 tracing = "0.1.41"

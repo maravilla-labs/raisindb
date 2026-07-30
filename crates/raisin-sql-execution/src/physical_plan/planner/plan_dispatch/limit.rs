@@ -33,6 +33,16 @@ impl PhysicalPlanner {
                 sort_exprs,
             } = input
             {
+                // Try spatial k-NN first: ORDER BY ST_DISTANCE(...) LIMIT k. It is
+                // recognised by geometry syntax and cannot collide with the vector
+                // operators below, so the order between the two is arbitrary —
+                // but a bounded index scan beats TopN either way.
+                if let Some(spatial_plan) =
+                    self.try_plan_spatial_knn(sort_input, sort_exprs, limit)?
+                {
+                    return Ok(spatial_plan);
+                }
+
                 // Try vector k-NN optimisation
                 if let Some(vector_plan) =
                     self.try_plan_vector_knn(sort_input, sort_exprs, limit)?

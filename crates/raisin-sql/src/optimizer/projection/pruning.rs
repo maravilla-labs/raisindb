@@ -155,6 +155,30 @@ fn apply_projection_pruning_impl(
                 existing_cols.extend(extract_column_refs(&proj.expr));
             }
 
+            // Names this projection already EMITS. Distinct from `existing_cols`,
+            // which is what it READS — and the distinction is load-bearing.
+            //
+            // A parent requirement is satisfied either way, but only the read set
+            // was being checked. So for a projection like `[jsonextract AS x]`,
+            // whose parent needs `x`, `existing_cols` is {"properties"} and `x`
+            // looked missing — and a pass-through `Column("", "x") AS x` was
+            // appended. That left TWO expressions aliased `x` in one projection:
+            // the real one, and a self-reference resolved against the row BELOW
+            // (where `x` does not exist yet) that therefore evaluates to NULL.
+            //
+            // The batch projection executor keys its output by alias
+            // (`output_columns.insert(alias, col)`), so the second, all-NULL
+            // column silently REPLACED the correct one and the query returned
+            // NULL for that name.
+            //
+            // CSE made this reliably reachable: it lifts a repeated subexpression
+            // into `[<expr> AS __cse_0]` and has the parent reference `__cse_0`,
+            // which is by construction an emitted alias and never a read column.
+            // Hence `SELECT ST_X(g), ST_Y(g) ...` — or any two identical
+            // extractable subexpressions in one SELECT — returned all NULLs.
+            let existing_aliases: HashSet<&str> =
+                exprs.iter().map(|proj| proj.alias.as_str()).collect();
+
             // Build new projection expressions including parent requirements
             let mut new_exprs = exprs.clone();
 
@@ -166,7 +190,7 @@ fn apply_projection_pruning_impl(
 
                 // Add pass-through column references for parent requirements not in SELECT
                 for col in parent_reqs {
-                    if !existing_cols.contains(col) {
+                    if !existing_cols.contains(col) && !existing_aliases.contains(col.as_str()) {
                         // Add a simple column reference to pass through this column
                         use crate::analyzer::{DataType, Expr, TypedExpr};
                         use crate::logical_plan::ProjectionExpr;

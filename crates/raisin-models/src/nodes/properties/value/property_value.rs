@@ -70,6 +70,25 @@ pub type DateTimeTimestamp = StorageTimestamp;
 /// 9. Geometry - Objects with "type": "Point|LineString|Polygon|..."
 /// 10. Vector, Array - Arrays
 /// 11. Object - Fallback for any object
+///
+/// ## Why the geometry slot is safe to extend (read before touching `GeoJson`)
+///
+/// `Geometry` sits at slot 9, *ahead* of `Array` (10) and `Object` (11), and is
+/// discriminated by [`GeoJson`]'s `#[serde(tag = "type")]`. An internally tagged
+/// enum matches on the **value** of the `type` member and ignores unknown
+/// members, so adding members to a geometry (RaisinDB adds an optional `srid`,
+/// and coordinates gained an optional altitude ordinate) does not disturb the
+/// discrimination: such a value still infers as `Geometry`.
+///
+/// The failure mode this ordering protects against is real and silent: a value
+/// that is *not* well-formed GeoJSON falls through to `Object`, which is never
+/// spatially indexed and produces no error. That is why a NodeType declaring
+/// `PropertyType::Geometry` must reject an `Object`/`String` at write time rather
+/// than storing an unindexed pseudo-geometry.
+///
+/// Both extensions are `skip_serializing_if`-elided when absent, so every value
+/// written before them serializes byte-identically — no stored-blob change, no
+/// `hash_property_value` change, no property-index churn, no migration.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 #[serde(untagged)]
 pub enum PropertyValue {

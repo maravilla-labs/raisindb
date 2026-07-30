@@ -37,6 +37,48 @@ where
     V: ApiKeyValidator,
     P: pgwire::api::auth::ServerParameterProvider,
 {
+    /// Resolve a connection's workspace catalog and infer a statement's columns.
+    ///
+    /// Shared by `Describe(statement)` and `Describe(portal)` so a prepared
+    /// statement and its portal can never disagree about the shape of the result —
+    /// a disagreement there is a protocol error the client reports as
+    /// "DataRow field count does not match the number of columns".
+    ///
+    /// Returns `None` whenever the shape cannot be established (no connection
+    /// context yet, workspaces unreadable, statement not analysable). The caller
+    /// then describes zero columns, which is the right answer for a statement that
+    /// returns no rows and a harmless one otherwise, since the portal describe runs
+    /// again with the parameters bound.
+    pub(crate) async fn describe_sql_columns<C>(
+        &self,
+        client: &C,
+        sql: &str,
+    ) -> Option<Vec<FieldInfo>>
+    where
+        C: pgwire::api::ClientInfo,
+    {
+        use raisin_storage::scope::RepoScope;
+        use raisin_storage::WorkspaceRepository;
+
+        let context = self.auth_handler.get_context(client)?;
+        let workspaces = self
+            .storage
+            .workspaces()
+            .list(RepoScope::new(&context.tenant_id, &context.repository))
+            .await
+            .map_err(|e| warn!("Failed to fetch workspaces for describe: {e}"))
+            .ok()?;
+
+        let mut catalog = StaticCatalog::default_nodes_schema();
+        for workspace in &workspaces {
+            catalog.register_workspace(workspace.name.clone());
+        }
+
+        self.infer_schema_from_sql(sql, &Arc::new(catalog))
+            .ok()
+            .map(|fields| fields.to_vec())
+    }
+
     /// Infer schema from SQL using the analyzer.
     ///
     /// This parses the SELECT statement and extracts column names and types
@@ -122,7 +164,21 @@ fn query_projection_to_fields(query: &AnalyzedQuery) -> Vec<FieldInfo> {
 }
 
 /// Map a RaisinDB [`DataType`] to a PostgreSQL [`Type`].
-fn datatype_to_pg_type(data_type: &DataType) -> Type {
+///
+/// # This must agree with the value-level mapping
+///
+/// The simple-query path types a column from the *value* it produced, via
+/// [`crate::type_mapping::property_value_to_pg_type`]; this function types it from
+/// the *analyzed expression*, before any row exists. Both describe the same column,
+/// so a disagreement means a prepared statement and a simple query hand a client
+/// two different OIDs for one column — and the client then decodes the bytes two
+/// different ways.
+///
+/// `DataType::Geometry` was exactly that: `TEXT` here, `JSONB` there. It is now
+/// `JSONB` in both, which is also the honest description — a geometry goes on the
+/// wire as GeoJSON, including its `srid` member. `type_mapping.rs`'s
+/// `geometry_is_jsonb_on_both_paths` test pins the pair together.
+pub(crate) fn datatype_to_pg_type(data_type: &DataType) -> Type {
     match data_type {
         DataType::Boolean => Type::BOOL,
         DataType::Int => Type::INT4,
@@ -135,7 +191,9 @@ fn datatype_to_pg_type(data_type: &DataType) -> Type {
         DataType::Path => Type::TEXT, // Paths are text in PostgreSQL
         DataType::JsonB => Type::JSONB,
         DataType::Vector(_) => Type::TEXT, // Vectors as text for now
-        DataType::Geometry => Type::TEXT,  // GeoJSON as text
+        // GeoJSON, matching the simple-query path (type_mapping.rs). Was TEXT,
+        // which contradicted it — see the doc comment above.
+        DataType::Geometry => Type::JSONB,
         DataType::TSVector => Type::TEXT,
         DataType::TSQuery => Type::TEXT,
         DataType::Array(_) => Type::JSONB, // Arrays as JSONB

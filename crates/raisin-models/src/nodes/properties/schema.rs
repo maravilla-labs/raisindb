@@ -12,6 +12,7 @@
 
 // PropertyValueSchema, PropertyType, and validation functions
 
+use crate::nodes::properties::spatial_policy::SpatialPropertySchema;
 use crate::nodes::properties::value::PropertyValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,15 @@ pub enum IndexType {
     Vector,
     /// RocksDB property_index CF for exact-match lookups
     Property,
+    /// RocksDB spatial_index CF for geohash-cell proximity lookups.
+    ///
+    /// **Documentation only.** Spatial indexing is driven by the runtime property
+    /// *type*: any `PropertyValue::Geometry` is indexed with no opt-in, and
+    /// listing (or omitting) `Spatial` here does not change that. The entry
+    /// exists for symmetry with the other index types and so a schema can state
+    /// the intent; configure the index itself via
+    /// [`PropertyValueSchema::spatial`].
+    Spatial,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
@@ -60,6 +70,14 @@ pub struct PropertyValueSchema {
     /// Default: None (property is not indexed)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<Vec<IndexType>>,
+    /// Spatial indexing configuration for a `Geometry`-valued property.
+    ///
+    /// This tunes an index that already exists rather than enabling one: geometry
+    /// properties are indexed automatically by value type. `None` inherits the
+    /// workspace defaults and then the server constants — see
+    /// [`resolve_spatial_policy`](crate::nodes::properties::spatial_policy::resolve_spatial_policy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial: Option<SpatialPropertySchema>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, JsonSchema)]

@@ -103,6 +103,7 @@ fn create_property_schema(
         is_translatable: None,
         allow_additional_properties: None,
         index: None,
+        spatial: None,
     }
 }
 

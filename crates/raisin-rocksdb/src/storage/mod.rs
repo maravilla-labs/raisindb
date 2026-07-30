@@ -246,6 +246,37 @@ impl Storage for RocksDBStorage {
         &self.compound_index
     }
 
+    /// The RocksDB backend CAN report spatial index state, so the planner gets a real
+    /// answer instead of the trait's fail-closed `None`.
+    ///
+    /// A fresh store is returned per call rather than a cached field because
+    /// `SpatialStateStore` is a thin `Arc<DB>` + `Arc<RwLock<HashMap>>` pair; the cache
+    /// it carries is per-instance, so callers that consult availability in a hot loop
+    /// should hold on to the returned handle rather than re-fetching it.
+    fn spatial_state(&self) -> Option<Arc<dyn raisin_storage::spatial::SpatialStateSource>> {
+        Some(Arc::new(crate::spatial_state::SpatialStateStore::new(
+            self.db.clone(),
+        )))
+    }
+
+    /// The RocksDB backend can administer its spatial index: read the local state
+    /// records, census the keys physically present, and queue a local rebuild.
+    ///
+    /// The enqueuer is always present here because `RocksDBStorage` always owns a
+    /// `JobRegistry`; it stays `Option` in the admin store so a future backend
+    /// without a job system reports the limitation rather than accepting a rebuild
+    /// request and dropping it.
+    fn spatial_admin(&self) -> Option<Arc<dyn raisin_storage::spatial_admin::SpatialIndexAdmin>> {
+        let enqueuer = Arc::new(crate::storage::jobs::spatial::JobSystemEnqueuer::new(
+            self.job_registry.clone(),
+            self.job_data_store.clone(),
+        ));
+        Some(Arc::new(crate::spatial_state::SpatialAdminStore::new(
+            self.db.clone(),
+            Some(enqueuer),
+        )))
+    }
+
     async fn begin(&self) -> Result<Self::Tx> {
         Ok(RocksDBTransaction::new(
             self.db.clone(),

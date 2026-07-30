@@ -93,6 +93,7 @@ fn prop_schema(name: &str, ty: PropertyType) -> PropertyValueSchema {
         is_translatable: None,
         allow_additional_properties: None,
         index: None,
+        spatial: None,
     }
 }
 

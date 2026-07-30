@@ -1,20 +1,44 @@
 //! ST_OVERLAPS function - check if geometries overlap
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::{Contains, Intersects};
+use geo::relate::IntersectionMatrix;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{
-    geojson_to_linestring, geojson_to_point, geojson_to_polygon, get_geometry_type,
-};
+use super::relate;
 
-/// Check if two same-dimension geometries overlap (share space but neither contains the other)
+/// Check if two geometries of the same dimension spatially overlap.
 ///
 /// # SQL Signature
 /// `ST_OVERLAPS(geometry_a, geometry_b) -> BOOLEAN`
+///
+/// # Returns
+/// * TRUE if the geometries have the same dimension, their interiors intersect in
+///   that dimension, and each has at least one point outside the other
+/// * FALSE otherwise — including for mixed dimensions, where overlap is undefined
+/// * NULL if either input is NULL
+///
+/// # Examples
+/// ```sql
+/// -- Two sales territories that partially share ground
+/// SELECT a.id, b.id FROM territories a, territories b
+///  WHERE a.id < b.id AND ST_OVERLAPS(a.area, b.area);
+/// ```
+///
+/// # Notes
+/// - "Same dimension" is measured from the DE-9IM matrix, not from the GeoJSON
+///   type name, so `Polygon`/`MultiPolygon` and `LineString`/`MultiLineString`
+///   pairs are handled as the 2-D and 1-D cases they are.
+/// - Nesting is excluded by definition: if one geometry covers the other they do
+///   not overlap.
+/// - Previously this function returned a **silent catch-all FALSE** for every
+///   type pair it did not name explicitly — three pairs out of the possible
+///   forty-nine — so, for instance, two overlapping `MultiPolygon`s reported
+///   FALSE with no error and no signal. That was the single most dangerous defect
+///   in this family, because a wrong boolean is indistinguishable from a right one.
+/// - DE-9IM `[1*T***T**]` for line/line, `[T*T***T**]` for point/point and
+///   area/area.
 pub struct StOverlapsFunction;
 
 impl SqlFunction for StOverlapsFunction {
@@ -32,72 +56,6 @@ impl SqlFunction for StOverlapsFunction {
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_OVERLAPS requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let geom_a_val = eval_expr(&args[0], row)?;
-        if matches!(geom_a_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_b_val = eval_expr(&args[1], row)?;
-        if matches!(geom_b_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_a = match &geom_a_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_OVERLAPS requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom_b = match &geom_b_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_OVERLAPS requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let type_a = get_geometry_type(geom_a)?;
-        let type_b = get_geometry_type(geom_b)?;
-
-        // Overlaps only applies to same-dimension geometries
-        let overlaps = match (type_a, type_b) {
-            ("Point", "Point") => {
-                let point_a = geojson_to_point(geom_a)?;
-                let point_b = geojson_to_point(geom_b)?;
-                // Points overlap if they are the same point
-                point_a == point_b
-            }
-            ("Polygon", "Polygon") => {
-                let polygon_a = geojson_to_polygon(geom_a)?;
-                let polygon_b = geojson_to_polygon(geom_b)?;
-                // Overlap = intersect but neither contains the other
-                polygon_a.intersects(&polygon_b)
-                    && !polygon_a.contains(&polygon_b)
-                    && !polygon_b.contains(&polygon_a)
-            }
-            ("LineString", "LineString") => {
-                let line_a = geojson_to_linestring(geom_a)?;
-                let line_b = geojson_to_linestring(geom_b)?;
-                line_a.intersects(&line_b) && !line_a.contains(&line_b) && !line_b.contains(&line_a)
-            }
-            _ => {
-                // Different dimensions cannot overlap by definition
-                false
-            }
-        };
-
-        Ok(Literal::Boolean(overlaps))
+        relate::predicate("ST_OVERLAPS", args, row, IntersectionMatrix::is_overlaps)
     }
 }

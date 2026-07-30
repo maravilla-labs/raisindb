@@ -95,6 +95,12 @@ pdf-markdown = ["raisin-ai/pdf-markdown"]
 ocr = ["raisin-ai/ocr"]
 candle = ["raisin-ai/candle"]
 huggingface = ["raisin-ai/huggingface"]
+# Projection tiers for ST_TRANSFORM. See raisin-proj for build costs.
+# `proj` is pure Rust and cheap; `proj-full` drags a libproj build.
+# `?/` so asking for wider CRS coverage does not silently switch on the
+# optional SQL-execution dependency.
+proj = ["raisin-sql-execution?/proj"]
+proj-full = ["raisin-sql-execution?/proj-full"]
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json", "multipart"] }
@@ -104,3 +110,4 @@ tokio-tungstenite = "0.21"
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 zip = "2.2"
+tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"] }

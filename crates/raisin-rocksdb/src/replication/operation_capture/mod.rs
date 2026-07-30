@@ -8,10 +8,12 @@
 //! - `core` - Core capture logic and state management
 //! - `node_ops` - Convenience methods for node operations
 //! - `schema_ops` - Convenience methods for schema and registry operations
+//! - `workspace_ops` - Convenience methods for workspace operations
 
 mod core;
 mod node_ops;
 mod schema_ops;
+mod workspace_ops;
 
 #[cfg(test)]
 mod tests;

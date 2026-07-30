@@ -1,47 +1,42 @@
-//! ST_DWITHIN function - check if geometries are within distance
+//! ST_DWITHIN - proximity test, and the predicate the spatial index answers.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::compute_haversine_distance;
+use super::convert::geom_pair;
+use super::measure;
+use super::z_support::{expect_arity, numeric_arg};
 
-/// Check if two geometries are within a specified distance
+const SIGNATURE: &str = "ST_DWITHIN(geometry1, geometry2, distance) -> BOOLEAN";
+
+/// True when two geometries are no more than `distance` apart: **metres** on a
+/// geographic CRS, native units on a projected one.
 ///
 /// # SQL Signature
-/// `ST_DWITHIN(geometry1, geometry2, distance_meters) -> BOOLEAN`
+/// `ST_DWITHIN(geometry1, geometry2, distance) -> BOOLEAN`
 ///
-/// # Arguments
-/// * `geometry1` - First geometry
-/// * `geometry2` - Second geometry
-/// * `distance_meters` - Maximum distance in meters
+/// # Behaviour
+/// * Exactly `ST_DISTANCE(a, b) <= distance`, so it inherits true shape-to-shape
+///   distance for every type pair — including the `Multi*` and Polygon/Polygon
+///   cases that previously went through a centroid approximation and therefore
+///   answered the wrong question near the boundary.
+/// * A negative distance is rejected rather than silently answering `false`.
+/// * `NULL` in any argument gives `NULL`.
 ///
-/// # Returns
-/// * TRUE if distance <= threshold
-/// * FALSE if distance > threshold
-/// * NULL if any input is NULL
+/// # Why this one matters most
+/// This is the predicate the spatial index is built to answer. The planner
+/// rewrites `ST_DWITHIN(<geometry column>, <constant point>, <constant radius>)`
+/// into an index scan; the row-level implementation here is what runs when the
+/// index cannot be used, and it must agree with the index's own Haversine
+/// post-filter to the metre — which it does, because both use the GRS80 mean
+/// radius from `raisin_geometry::EARTH_MEAN_RADIUS_METERS`.
 ///
 /// # Examples
 /// ```sql
-/// -- Find stores within 5km of user location
-/// SELECT * FROM stores
-/// WHERE ST_DWITHIN(location, ST_POINT(-122.4194, 37.7749), 5000)
-///
-/// -- Find nearby restaurants
-/// SELECT name FROM restaurants
-/// WHERE ST_DWITHIN(
-///     location,
-///     ST_GEOMFROMGEOJSON('{"type":"Point","coordinates":[-73.9857,40.7484]}'),
-///     1000  -- 1km radius
-/// )
+/// SELECT * FROM 'shops' WHERE ST_DWITHIN(location, ST_POINT(8.54, 47.37), 500);
 /// ```
-///
-/// # Notes
-/// - This is the primary function for spatial proximity queries
-/// - Uses Haversine formula for accurate geodesic distance
-/// - More efficient than ST_DISTANCE() < threshold for indexed queries
 pub struct StDWithinFunction;
 
 impl SqlFunction for StDWithinFunction {
@@ -54,88 +49,25 @@ impl SqlFunction for StDWithinFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_DWITHIN(geometry1, geometry2, distance_meters) -> BOOLEAN"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 3 {
-            return Err(Error::Validation(
-                "ST_DWITHIN requires exactly 3 arguments (geom1, geom2, distance)".to_string(),
-            ));
-        }
+        expect_arity("ST_DWITHIN", SIGNATURE, args, 3)?;
 
-        // Evaluate first geometry
-        let geom1_val = eval_expr(&args[0], row)?;
-        if matches!(geom1_val, Literal::Null) {
+        let Some(max_distance) = numeric_arg("ST_DWITHIN", args, 2, row)? else {
             return Ok(Literal::Null);
-        }
-
-        // Evaluate second geometry
-        let geom2_val = eval_expr(&args[1], row)?;
-        if matches!(geom2_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        // Evaluate distance threshold
-        let distance_val = eval_expr(&args[2], row)?;
-        if matches!(distance_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let max_distance = match distance_val {
-            Literal::Double(d) => d,
-            Literal::Int(i) => i as f64,
-            Literal::BigInt(i) => i as f64,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_DWITHIN distance must be numeric".to_string(),
-                ))
-            }
         };
-
-        if max_distance < 0.0 {
-            return Err(Error::Validation(
-                "ST_DWITHIN distance must be non-negative".to_string(),
-            ));
+        if max_distance < 0.0 || !max_distance.is_finite() {
+            return Err(Error::Validation(format!(
+                "ST_DWITHIN: distance must be a non-negative finite number, got {max_distance}"
+            )));
         }
 
-        // Extract GeoJSON values (accept Geometry, JsonB, or Text containing GeoJSON)
-        let geom1_parsed;
-        let geom1 = match &geom1_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            Literal::Text(s) => {
-                geom1_parsed = serde_json::from_str(s).map_err(|e| {
-                    Error::Validation(format!("ST_DWITHIN: invalid GeoJSON text: {}", e))
-                })?;
-                &geom1_parsed
-            }
-            _ => {
-                return Err(Error::Validation(
-                    "ST_DWITHIN requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom2_parsed;
-        let geom2 = match &geom2_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            Literal::Text(s) => {
-                geom2_parsed = serde_json::from_str(s).map_err(|e| {
-                    Error::Validation(format!("ST_DWITHIN: invalid GeoJSON text: {}", e))
-                })?;
-                &geom2_parsed
-            }
-            _ => {
-                return Err(Error::Validation(
-                    "ST_DWITHIN requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let distance = compute_haversine_distance(geom1, geom2)?;
-        Ok(Literal::Boolean(distance <= max_distance))
+        match geom_pair("ST_DWITHIN", args, row)? {
+            None => Ok(Literal::Null),
+            Some((a, b)) => Ok(Literal::Boolean(measure::distance(&a, &b)? <= max_distance)),
+        }
     }
 }

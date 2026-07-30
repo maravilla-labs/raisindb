@@ -238,6 +238,7 @@ mod tests {
             meta: None,
             is_translatable: None,
             allow_additional_properties: None,
+            spatial: None,
         }
     }
 

@@ -1,17 +1,30 @@
-//! ST_STARTPOINT function - return the first point of a LineString
+//! ST_STARTPOINT - first vertex of a linear geometry.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
+use geo::Geometry;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{get_geometry_type, point_to_geojson};
+use super::convert::{derived_result, geom_arg};
+use super::line_access::sole_line;
+use super::z_support::expect_arity;
 
-/// Return the first point of a LineString
+const SIGNATURE: &str = "ST_STARTPOINT(geometry) -> GEOMETRY";
+
+/// The first vertex of a linear geometry, as a Point.
 ///
 /// # SQL Signature
 /// `ST_STARTPOINT(geometry) -> GEOMETRY`
+///
+/// # Behaviour
+/// * A `MultiLineString` with exactly one component is accepted, so the answer does
+///   not depend on how a single path is spelled. Two or more components, or a
+///   non-linear geometry, give `NULL` as in PostGIS.
+/// * On a closed ring the start and end points coincide, so
+///   `ST_STARTPOINT = ST_ENDPOINT` there — that is the definition of closed, not a
+///   bug.
+/// * `NULL` in, `NULL` out. The CRS survives.
 pub struct StStartPointFunction;
 
 impl SqlFunction for StStartPointFunction {
@@ -24,52 +37,18 @@ impl SqlFunction for StStartPointFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_STARTPOINT(geometry) -> GEOMETRY"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 1 {
-            return Err(Error::Validation(
-                "ST_STARTPOINT requires exactly 1 argument".to_string(),
-            ));
-        }
-
-        let geom_val = eval_expr(&args[0], row)?;
-        if matches!(geom_val, Literal::Null) {
+        expect_arity("ST_STARTPOINT", SIGNATURE, args, 1)?;
+        let Some(g) = geom_arg("ST_STARTPOINT", args, 0, row)? else {
             return Ok(Literal::Null);
-        }
-
-        let geom = match &geom_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_STARTPOINT requires GEOMETRY argument".to_string(),
-                ))
-            }
         };
-
-        let geom_type = get_geometry_type(geom)?;
-        if geom_type != "LineString" {
-            return Ok(Literal::Null);
+        match sole_line(&g) {
+            None => Ok(Literal::Null),
+            Some(line) => derived_result(Geometry::Point(line.0[0].into()), &g),
         }
-
-        let coords = geom
-            .get("coordinates")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| Error::Validation("LineString missing coordinates".to_string()))?;
-
-        if coords.is_empty() {
-            return Ok(Literal::Null);
-        }
-
-        let first = coords[0]
-            .as_array()
-            .ok_or_else(|| Error::Validation("Invalid coordinate".to_string()))?;
-        let lon = first[0].as_f64().unwrap_or(0.0);
-        let lat = first[1].as_f64().unwrap_or(0.0);
-
-        Ok(Literal::Geometry(point_to_geojson(lon, lat)))
     }
 }

@@ -180,8 +180,9 @@ pub fn add_node_tombstones(
     // 8. COMPOUND_INDEX - Tombstone compound index entries (prefix scan)
     index_tombstones::tombstone_compound_indexes(batch, db, ctx, cfs, node)?;
 
-    // 9. SPATIAL_INDEX - Tombstone spatial index entries (prefix scan)
-    index_tombstones::tombstone_spatial_indexes(batch, db, ctx, cfs, node)?;
+    // 9. SPATIAL_INDEX - Tombstone spatial index entries (derived from the node's
+    //    own geometry; no scan)
+    index_tombstones::tombstone_spatial_indexes(batch, db, ctx, cfs, node, revision)?;
 
     // 10. TRANSLATION_DATA - Tombstone translation data (prefix scan)
     index_tombstones::tombstone_translation_data(batch, db, ctx, cfs, node, revision)?;

@@ -17,10 +17,12 @@
 //! - `domain_types` - `RaisinReference`, `RaisinUrl`, `Resource`
 //! - `element` - `Element`, `Composite` (with custom serde)
 //! - `geojson` - `GeoJson` geometry types
+//! - `position` - `Position`, a single GeoJSON coordinate with optional altitude
 
 mod domain_types;
 mod element;
 mod geojson;
+mod position;
 mod property_value;
 
 #[cfg(test)]
@@ -30,4 +32,5 @@ mod tests;
 pub use domain_types::{RaisinReference, RaisinUrl, Resource};
 pub use element::{Composite, Element};
 pub use geojson::GeoJson;
+pub use position::Position;
 pub use property_value::{DateTimeTimestamp, PropertyValue};

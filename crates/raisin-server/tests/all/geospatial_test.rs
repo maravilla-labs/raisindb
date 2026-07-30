@@ -134,8 +134,11 @@ async fn test_geospatial_queries() {
         json!({
             "name": WORKSPACE,
             "description": "Store locations workspace",
-            "allowed_node_types": ["geo:Store"],
-            "allowed_root_node_types": ["geo:Store"],
+            // `raisin:Folder` must be allowed as a ROOT type: workspace creation
+            // provisions an initial structure and fails with "does not allow root
+            // nodes of type 'raisin:Folder'" without it.
+            "allowed_node_types": ["geo:Store", "raisin:Folder"],
+            "allowed_root_node_types": ["geo:Store", "raisin:Folder"],
             "depends_on": [],
             "config": {
                 "default_branch": BRANCH,

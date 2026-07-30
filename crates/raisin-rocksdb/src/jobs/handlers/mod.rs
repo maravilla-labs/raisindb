@@ -36,6 +36,7 @@ pub mod revision_history_copy;
 pub mod scheduled_invocation;
 pub mod scheduled_trigger;
 pub mod snapshot;
+pub mod spatial_index;
 pub mod trigger_evaluation;
 pub mod trigger_matcher;
 pub mod vector_clock_verification;
@@ -96,6 +97,7 @@ pub use scheduled_trigger::{
     cron_matches, ScheduledTriggerFinderCallback, ScheduledTriggerHandler, ScheduledTriggerMatch,
 };
 pub use snapshot::{NodeChangeInfo, SnapshotHandler, TranslationChangeInfo};
+pub use spatial_index::{SpatialBuildReport, SpatialIndexJobHandler};
 pub use trigger_evaluation::{
     BreakerTripReason, FilterCheckResult, TriggerBreaker, TriggerBreakerStats,
     TriggerEvaluationHandler, TriggerEvaluationReport, TriggerEvaluationResult, TriggerEventInfo,
@@ -126,6 +128,10 @@ pub struct JobHandlerRegistry {
     pub oplog_compaction: Arc<OpLogCompactionHandler>,
     pub property_index: Arc<PropertyIndexJobHandler>,
     pub compound_index: Arc<CompoundIndexJobHandler>,
+    /// Spatial index build / backfill. `Option` so the (already very long)
+    /// positional `new()` signature stays source-compatible; wired via
+    /// [`JobHandlerRegistry::with_spatial_index`] right after construction.
+    pub spatial_index: Option<Arc<SpatialIndexJobHandler>>,
     pub bulk_sql: Arc<BulkSqlHandler>,
     pub revision_history_copy: Arc<RevisionHistoryCopyHandler>,
     pub copy_tree: Arc<CopyTreeHandler>,
@@ -202,6 +208,7 @@ impl JobHandlerRegistry {
             oplog_compaction,
             property_index,
             compound_index,
+            spatial_index: None,
             bulk_sql,
             revision_history_copy,
             copy_tree,
@@ -229,6 +236,15 @@ impl JobHandlerRegistry {
             integration_token_refresh,
             virtual_mount_sync,
         }
+    }
+
+    /// Attach the spatial index build handler.
+    ///
+    /// Separate from `new()` because that constructor already takes ~35 positional
+    /// arguments and threading a 36th through would touch every caller for no gain.
+    pub fn with_spatial_index(mut self, handler: Arc<SpatialIndexJobHandler>) -> Self {
+        self.spatial_index = Some(handler);
+        self
     }
 
     /// Dispatch a job to the appropriate handler based on job type
@@ -291,6 +307,16 @@ impl JobHandlerRegistry {
             JobType::CompoundIndexBuild { .. } => {
                 self.compound_index.handle(job, context).await.map(|_| None)
             }
+            JobType::SpatialIndexBuild { .. } => match &self.spatial_index {
+                Some(handler) => handler.handle(job, context).await.map(|_| None),
+                // Fail loudly. Silently succeeding would leave the index unbuilt
+                // while the state record claimed otherwise, which is the exact
+                // silent-wrongness this subsystem is being cleaned of.
+                None => Err(raisin_error::Error::storage(
+                    "SpatialIndexBuild job dispatched but no spatial index handler is registered"
+                        .to_string(),
+                )),
+            },
             JobType::BulkSql { .. } => self.bulk_sql.handle(job, context).await.map(|_| None),
             JobType::RevisionHistoryCopy { .. } => self
                 .revision_history_copy

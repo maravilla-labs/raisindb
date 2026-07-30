@@ -1,18 +1,32 @@
-//! ST_INTERSECTION function - compute the intersection of two geometries
+//! ST_INTERSECTION - the shared part of two geometries.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::BooleanOps;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{geojson_to_polygon, get_geometry_type, polygon_to_geojson};
+use super::convert::{geom_pair, geom_result};
+use super::setops::{self, SetOp};
+use super::z_support::expect_arity;
 
-/// Compute the intersection of two geometries
+const SIGNATURE: &str = "ST_INTERSECTION(geometry1, geometry2) -> GEOMETRY";
+
+/// Every point that lies in both geometries.
 ///
 /// # SQL Signature
 /// `ST_INTERSECTION(geometry1, geometry2) -> GEOMETRY`
+///
+/// # Behaviour
+/// * Defined for **every** pair of geometry types; the previous implementation
+///   supported Polygon+Polygon only.
+/// * The result's dimension is that of the overlap, not of the inputs: two
+///   polygons sharing area intersect in a polygon, two lines crossing intersect
+///   in a **point**, two collinear lines in a line, and a line entering a polygon
+///   in the clipped portion of that line.
+/// * No overlap gives the canonical empty geometry rather than an error.
+/// * Planar, in the operands' shared coordinate space. Two *different* explicit
+///   SRIDs are an error naming `ST_TRANSFORM`.
+/// * `NULL` in, `NULL` out.
 pub struct StIntersectionFunction;
 
 impl SqlFunction for StIntersectionFunction {
@@ -25,88 +39,15 @@ impl SqlFunction for StIntersectionFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_INTERSECTION(geometry1, geometry2) -> GEOMETRY"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_INTERSECTION requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let geom1_val = eval_expr(&args[0], row)?;
-        if matches!(geom1_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom2_val = eval_expr(&args[1], row)?;
-        if matches!(geom2_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom1 = match &geom1_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_INTERSECTION requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom2 = match &geom2_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_INTERSECTION requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let type1 = get_geometry_type(geom1)?;
-        let type2 = get_geometry_type(geom2)?;
-
-        match (type1, type2) {
-            ("Polygon", "Polygon") => {
-                let poly1 = geojson_to_polygon(geom1)?;
-                let poly2 = geojson_to_polygon(geom2)?;
-                let result = poly1.intersection(&poly2);
-                let polys: Vec<&geo::Polygon> = result.0.iter().collect();
-                if polys.is_empty() {
-                    Ok(Literal::Geometry(serde_json::json!({
-                        "type": "GeometryCollection",
-                        "geometries": []
-                    })))
-                } else if polys.len() == 1 {
-                    Ok(Literal::Geometry(polygon_to_geojson(polys[0])))
-                } else {
-                    let coords: Vec<serde_json::Value> = polys
-                        .iter()
-                        .map(|p| {
-                            let exterior: Vec<Vec<f64>> =
-                                p.exterior().coords().map(|c| vec![c.x, c.y]).collect();
-                            let mut rings = vec![exterior];
-                            for interior in p.interiors() {
-                                let ring: Vec<Vec<f64>> =
-                                    interior.coords().map(|c| vec![c.x, c.y]).collect();
-                                rings.push(ring);
-                            }
-                            serde_json::json!(rings)
-                        })
-                        .collect();
-                    Ok(Literal::Geometry(serde_json::json!({
-                        "type": "MultiPolygon",
-                        "coordinates": coords
-                    })))
-                }
-            }
-            _ => Err(Error::Validation(format!(
-                "ST_INTERSECTION not supported for {} and {}. Supports: Polygon+Polygon",
-                type1, type2
-            ))),
+        expect_arity("ST_INTERSECTION", SIGNATURE, args, 2)?;
+        match geom_pair("ST_INTERSECTION", args, row)? {
+            None => Ok(Literal::Null),
+            Some((a, b)) => geom_result(&setops::apply(SetOp::Intersection, &a, &b)?),
         }
     }
 }

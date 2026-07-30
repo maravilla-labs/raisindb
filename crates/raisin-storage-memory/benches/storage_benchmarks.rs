@@ -4,7 +4,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use raisin_models as models;
-use raisin_storage::{CreateNodeOptions, DeleteNodeOptions, ListOptions, NodeRepository, Storage};
+use raisin_storage::{
+    CreateNodeOptions, DeleteNodeOptions, ListOptions, NodeRepository, Storage, StorageScope,
+};
 use raisin_storage_memory::InMemoryStorage;
 use std::sync::Arc;
 
@@ -12,6 +14,14 @@ const TENANT: &str = "bench-tenant";
 const REPO: &str = "bench-repo";
 const BRANCH: &str = "main";
 const WORKSPACE: &str = "bench";
+
+/// Workspace scope shared by every benchmark in this file.
+const SCOPE: StorageScope<'static> = StorageScope {
+    tenant_id: TENANT,
+    repo_id: REPO,
+    branch: BRANCH,
+    workspace: WORKSPACE,
+};
 
 fn create_test_node(id: &str, name: &str, parent: Option<String>) -> models::nodes::Node {
     models::nodes::Node {
@@ -39,14 +49,7 @@ fn setup_storage_with_nodes(node_count: usize) -> Arc<InMemoryStorage> {
             let node = create_test_node(&format!("node{}", i), &format!("Node {}", i), None);
             storage
                 .nodes()
-                .create(
-                    TENANT,
-                    REPO,
-                    BRANCH,
-                    WORKSPACE,
-                    node,
-                    CreateNodeOptions::default(),
-                )
+                .create(SCOPE, node, CreateNodeOptions::default())
                 .await
                 .unwrap();
         }
@@ -68,13 +71,7 @@ fn bench_node_get(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     rt.block_on(async {
-                        black_box(
-                            storage
-                                .nodes()
-                                .get(TENANT, REPO, BRANCH, WORKSPACE, "node50", None)
-                                .await
-                                .unwrap(),
-                        )
+                        black_box(storage.nodes().get(SCOPE, "node50", None).await.unwrap())
                     })
                 });
             },
@@ -106,14 +103,7 @@ fn bench_node_put(c: &mut Criterion) {
                         black_box(
                             storage
                                 .nodes()
-                                .create(
-                                    TENANT,
-                                    REPO,
-                                    BRANCH,
-                                    WORKSPACE,
-                                    node,
-                                    CreateNodeOptions::default(),
-                                )
+                                .create(SCOPE, node, CreateNodeOptions::default())
                                 .await
                                 .unwrap(),
                         )
@@ -141,7 +131,7 @@ fn bench_node_list_all(c: &mut Criterion) {
                         black_box(
                             storage
                                 .nodes()
-                                .list_all(TENANT, REPO, BRANCH, WORKSPACE, ListOptions::default())
+                                .list_all(SCOPE, ListOptions::default())
                                 .await
                                 .unwrap(),
                         )
@@ -169,7 +159,7 @@ fn bench_node_get_by_path(c: &mut Criterion) {
                         black_box(
                             storage
                                 .nodes()
-                                .get_by_path(TENANT, REPO, BRANCH, WORKSPACE, "/Node 50", None)
+                                .get_by_path(SCOPE, "/Node 50", None)
                                 .await
                                 .unwrap(),
                         )
@@ -197,14 +187,7 @@ fn bench_node_delete(c: &mut Criterion) {
                             black_box(
                                 storage
                                     .nodes()
-                                    .delete(
-                                        TENANT,
-                                        REPO,
-                                        BRANCH,
-                                        WORKSPACE,
-                                        "node50",
-                                        DeleteNodeOptions::default(),
-                                    )
+                                    .delete(SCOPE, "node50", DeleteNodeOptions::default())
                                     .await
                                     .unwrap(),
                             )
@@ -229,14 +212,7 @@ fn bench_node_tree_operations(c: &mut Criterion) {
         let parent = create_test_node("parent", "Parent", None);
         storage
             .nodes()
-            .create(
-                TENANT,
-                REPO,
-                BRANCH,
-                WORKSPACE,
-                parent,
-                CreateNodeOptions::default(),
-            )
+            .create(SCOPE, parent, CreateNodeOptions::default())
             .await
             .unwrap();
 
@@ -249,14 +225,7 @@ fn bench_node_tree_operations(c: &mut Criterion) {
             );
             storage
                 .nodes()
-                .create(
-                    TENANT,
-                    REPO,
-                    BRANCH,
-                    WORKSPACE,
-                    child,
-                    CreateNodeOptions::default(),
-                )
+                .create(SCOPE, child, CreateNodeOptions::default())
                 .await
                 .unwrap();
         }
@@ -268,14 +237,7 @@ fn bench_node_tree_operations(c: &mut Criterion) {
                 black_box(
                     storage
                         .nodes()
-                        .list_children(
-                            TENANT,
-                            REPO,
-                            BRANCH,
-                            WORKSPACE,
-                            "/Parent",
-                            ListOptions::default(),
-                        )
+                        .list_children(SCOPE, "/Parent", ListOptions::default())
                         .await
                         .unwrap(),
                 )

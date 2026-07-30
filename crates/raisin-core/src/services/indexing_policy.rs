@@ -231,6 +231,7 @@ mod tests {
             is_translatable: None,
             allow_additional_properties: None,
             index: Some(index),
+            spatial: None,
         }
     }
 

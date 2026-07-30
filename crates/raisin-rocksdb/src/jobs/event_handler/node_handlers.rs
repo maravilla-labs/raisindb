@@ -121,6 +121,13 @@ impl UnifiedJobEventHandler {
             }
         }
 
+        // Spatial index reconciliation runs for BOTH local and remote events, because
+        // every node maintains its OWN spatial index from replicated records — the
+        // same principle as the fulltext arm above, but implemented inline in the
+        // write batch, so all this needs to do is notice a POLICY drift and schedule
+        // a local rebuild.
+        self.reconcile_spatial_index(node_event, &context).await;
+
         // Trigger evaluation and AI jobs - only for LOCAL events
         if !is_remote_event {
             self.handle_local_node_change(node_event, &context).await;

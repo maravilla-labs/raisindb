@@ -84,6 +84,21 @@ pub(crate) fn parse_index_build_variants(s: &str) -> Result<Option<JobType>, Str
             }
         }
     }
+    if let Some(rest) = s.strip_prefix("SpatialIndexBuild(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            let p: Vec<&str> = c.split('/').collect();
+            if p.len() == 6 {
+                return Ok(Some(JobType::SpatialIndexBuild {
+                    tenant_id: p[0].to_string(),
+                    repo_id: p[1].to_string(),
+                    branch: p[2].to_string(),
+                    workspace: p[3].to_string(),
+                    property: (p[4] != "*").then(|| p[4].to_string()),
+                    rebuild: p[5] == "true",
+                }));
+            }
+        }
+    }
     if let Some(rest) = s.strip_prefix("CompoundIndexBuild(") {
         if let Some(c) = rest.strip_suffix(')') {
             let p: Vec<&str> = c.split('/').collect();

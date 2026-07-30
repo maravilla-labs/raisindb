@@ -264,7 +264,10 @@ define_physical_plan! {
             projection: Option<Vec<String>>,
             limit: Option<usize>,
         },
-        /// Spatial proximity scan using geohash index
+        /// Spatial proximity scan using geohash index.
+        ///
+        /// Emits a `__distance` column (metres, geodesic) and yields rows in
+        /// ascending distance order.
         SpatialDistanceScan {
             tenant_id: String,
             repo_id: String,
@@ -278,8 +281,38 @@ define_physical_plan! {
             radius_meters: f64,
             projection: Option<Vec<String>>,
             limit: Option<usize>,
+            /// True when this scan's ascending-distance iteration order already
+            /// satisfies the query's `ORDER BY`, so the `Sort` above it was
+            /// elided and `limit` may be applied during the scan.
+            ///
+            /// READ by `sort_is_satisfied_by_scan` in the planner — a flag that
+            /// is set and never consulted is worse than no flag (see the
+            /// `CompoundIndexScan.pre_sorted` note in CLAUDE.md).
+            claims_distance_order: bool,
+            /// The geohash precisions the index was **actually built at**, as
+            /// observed at PLAN time.
+            ///
+            /// Carried in the plan rather than re-read during execution so the
+            /// coverage decision the planner made (and possibly stripped a
+            /// predicate on) is the decision the scan executes. Re-reading could
+            /// pick up a mid-flight reindex and answer a query the planner had
+            /// proven coverable with a precision set that no longer covers it.
+            precisions: Vec<usize>,
+            /// `(property, value)` discriminator pre-filter, e.g.
+            /// `("floor", "L2")`.
+            ///
+            /// A pure *selectivity* device: it rejects only candidates whose
+            /// stored bucket provably differs, and index entries carrying no
+            /// bucket are never rejected. The predicate it came from ALWAYS stays
+            /// in the residual filter, so a stale or absent bucket can cost a
+            /// missed optimisation but never a missed row.
+            bucket_eq: Option<(String, String)>,
         },
-        /// Spatial k-nearest neighbors scan
+        /// Spatial k-nearest neighbors scan.
+        ///
+        /// Built from `ORDER BY ST_DISTANCE(geom, <const>) ASC LIMIT k`, which is
+        /// the only shape with a bounded access path — a DESC or unbounded
+        /// distance sort has to read everything.
         SpatialKnnScan {
             tenant_id: String,
             repo_id: String,
@@ -292,6 +325,13 @@ define_physical_plan! {
             center_lat: f64,
             k: usize,
             projection: Option<Vec<String>>,
+            /// Always true in practice (a k-NN scan exists because a distance
+            /// ordering was requested), but carried explicitly so the sort
+            /// elision reads a promise rather than re-deriving one.
+            claims_distance_order: bool,
+            /// Geohash precisions the index was built at; see
+            /// `SpatialDistanceScan::precisions`.
+            precisions: Vec<usize>,
         },
         /// Reference index scan using reverse reference index
         ReferenceIndexScan {

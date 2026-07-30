@@ -133,6 +133,19 @@ impl PhysicalPlanner {
 
     /// Match a single expression to a canonical predicate
     pub(super) fn match_canonical_predicate(&self, expr: &TypedExpr) -> Option<CanonicalPredicate> {
+        // Spatial shapes are recognised by the SINGLE extractor in
+        // `raisin_sql::optimizer::hierarchy_rewrite::spatial`, shared with the
+        // optimizer's `rewrite_hierarchy_predicates`. This used to be ~75 lines
+        // duplicated byte-for-byte between the two, which is precisely how one
+        // copy came to accept a spelling the other rejected. It runs first so
+        // `ST_DISTANCE(...) < r` is recognised before the generic comparison arms
+        // reach it.
+        if let Some(spatial) =
+            raisin_sql::optimizer::hierarchy_rewrite::extract_spatial_predicate(expr)
+        {
+            return Some(spatial);
+        }
+
         match &expr.expr {
             // PATH_STARTS_WITH(path, prefix)
             Expr::Function { name, args, .. } if name.to_uppercase() == "PATH_STARTS_WITH" => {
@@ -209,83 +222,6 @@ impl PhysicalPlanner {
                             });
                         }
                     }
-                }
-            }
-
-            // ST_DWithin(geometry, ST_Point(lon, lat), radius) - spatial proximity scan
-            Expr::Function { name, args, .. } if name.to_uppercase() == "ST_DWITHIN" => {
-                if args.len() == 3 {
-                    // Extract geometry column/property access
-                    // Supports: properties->>'loc', properties->'loc', CAST(... AS GEOMETRY), column
-                    let (table, geometry_column, property_name) =
-                        match raisin_sql::optimizer::hierarchy_rewrite::extract_geometry_source(
-                            &args[0].expr,
-                        ) {
-                            Some(v) => v,
-                            None => {
-                                tracing::debug!(
-                                "ST_DWITHIN spatial index skipped: could not extract geometry source from first argument"
-                            );
-                                return None;
-                            }
-                        };
-
-                    // Extract center point from ST_Point(lon, lat)
-                    let (center_lon, center_lat) = match &args[1].expr {
-                        Expr::Function {
-                            name,
-                            args: point_args,
-                            ..
-                        } if name.to_uppercase() == "ST_POINT"
-                            || name.to_uppercase() == "ST_MAKEPOINT" =>
-                        {
-                            if point_args.len() == 2 {
-                                let lon = match &point_args[0].expr {
-                                    Expr::Literal(Literal::Double(f)) => *f,
-                                    Expr::Literal(Literal::Int(i)) => *i as f64,
-                                    Expr::Literal(Literal::BigInt(i)) => *i as f64,
-                                    _ => return None,
-                                };
-                                let lat = match &point_args[1].expr {
-                                    Expr::Literal(Literal::Double(f)) => *f,
-                                    Expr::Literal(Literal::Int(i)) => *i as f64,
-                                    Expr::Literal(Literal::BigInt(i)) => *i as f64,
-                                    _ => return None,
-                                };
-                                (lon, lat)
-                            } else {
-                                return None;
-                            }
-                        }
-                        _ => {
-                            tracing::debug!(
-                                "ST_DWITHIN spatial index skipped: second argument is not a literal ST_POINT/ST_MAKEPOINT"
-                            );
-                            return None;
-                        }
-                    };
-
-                    // Extract radius in meters
-                    let radius_meters = match &args[2].expr {
-                        Expr::Literal(Literal::Double(f)) => *f,
-                        Expr::Literal(Literal::Int(i)) => *i as f64,
-                        Expr::Literal(Literal::BigInt(i)) => *i as f64,
-                        _ => {
-                            tracing::debug!(
-                                "ST_DWITHIN spatial index skipped: radius (third argument) is not a numeric literal"
-                            );
-                            return None;
-                        }
-                    };
-
-                    return Some(CanonicalPredicate::SpatialDWithin {
-                        table,
-                        geometry_column,
-                        property_name,
-                        center_lon,
-                        center_lat,
-                        radius_meters,
-                    });
                 }
             }
 

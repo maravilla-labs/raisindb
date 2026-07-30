@@ -15,6 +15,7 @@ pub mod properties;
 pub mod references;
 pub mod schema;
 pub mod search;
+pub mod spatial_policy;
 pub mod utils;
 pub mod value;
 
@@ -24,5 +25,10 @@ pub use schema::{
     CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition, IndexType, PropertyType,
     PropertyValueSchema,
 };
+pub use spatial_policy::{
+    resolve_spatial_policy, sorted_precisions, SpatialCoverMode, SpatialPolicy,
+    SpatialPropertySchema, SpatialWorkspaceSchema, INDEX_PRECISIONS_DEFAULT, MAX_COVER_CELLS,
+    MAX_SCAN_CELLS, PRECISION_RANGE, SPATIAL_NORMALIZER_VERSION,
+};
 pub use utils::*;
-pub use value::{GeoJson, PropertyValue, RaisinReference};
+pub use value::{GeoJson, Position, PropertyValue, RaisinReference};

@@ -1,17 +1,46 @@
-//! ST_ISVALID function - check if geometry is valid
+//! ST_ISVALID - OGC validity of a geometry.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::get_geometry_type;
+use super::convert::geom_arg;
+use super::validate;
+use super::z_support::expect_arity;
 
-/// Check if a geometry is valid (has type, coordinates, and values in range)
+const SIGNATURE: &str = "ST_ISVALID(geometry) -> BOOLEAN";
+
+/// True when a geometry satisfies the OGC Simple Feature validity rules.
 ///
 /// # SQL Signature
 /// `ST_ISVALID(geometry) -> BOOLEAN`
+///
+/// # What changed
+/// The previous implementation inspected the JSON's *array shape* — that rings had
+/// at least four entries and that the ordinates were numbers — so a
+/// self-intersecting bow-tie polygon passed as valid. This now runs `geo`'s real
+/// OGC validation, which catches ring self-intersection, rings crossing each
+/// other, and holes that escape their shell.
+///
+/// # Behaviour
+/// * Points and lines are valid by definition; a `LineString` is permitted to
+///   cross itself (that is a question for
+///   [`ST_ISSIMPLE`](super::StIsSimpleFunction), not for validity).
+/// * `Multi*` and `GeometryCollection` are valid only if every member is.
+/// * The empty geometry is valid.
+/// * A value that is not parseable as a geometry is a query **error**, not
+///   `false`: `ST_ISVALID` answers a question about geometries, and silently
+///   reporting malformed JSON as "an invalid geometry" hides a data problem.
+/// * `NULL` in, `NULL` out.
+///
+/// Use [`ST_ISVALIDREASON`](super::StIsValidReasonFunction) for the explanation
+/// and [`ST_MAKEVALID`](super::StMakeValidFunction) for the repair.
+///
+/// # Known limitation
+/// Inherited verbatim from `geo`: simple connectivity of a polygon's interior is
+/// not checked, so rings that touch in a way that pinches the interior into two
+/// parts are reported valid.
 pub struct StIsValidFunction;
 
 impl SqlFunction for StIsValidFunction {
@@ -24,93 +53,15 @@ impl SqlFunction for StIsValidFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_ISVALID(geometry) -> BOOLEAN"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 1 {
-            return Err(Error::Validation(
-                "ST_ISVALID requires exactly 1 argument".to_string(),
-            ));
+        expect_arity("ST_ISVALID", SIGNATURE, args, 1)?;
+        match geom_arg("ST_ISVALID", args, 0, row)? {
+            None => Ok(Literal::Null),
+            Some(g) => Ok(Literal::Boolean(validate::is_valid(&g.geometry))),
         }
-
-        let geom_val = eval_expr(&args[0], row)?;
-        if matches!(geom_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom = match &geom_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_ISVALID requires GEOMETRY argument".to_string(),
-                ))
-            }
-        };
-
-        // Check that the geometry has a valid type
-        let type_result = get_geometry_type(geom);
-        if type_result.is_err() {
-            return Ok(Literal::Boolean(false));
-        }
-
-        let geom_type = type_result.unwrap();
-
-        // Check that coordinates exist
-        let has_coordinates = geom.get("coordinates").is_some();
-        if !has_coordinates && geom_type != "GeometryCollection" {
-            return Ok(Literal::Boolean(false));
-        }
-
-        // Validate based on type
-        let valid = match geom_type {
-            "Point" => {
-                if let Some(coords) = geom.get("coordinates").and_then(|v| v.as_array()) {
-                    coords.len() >= 2
-                        && coords[0].as_f64().is_some()
-                        && coords[1].as_f64().is_some()
-                } else {
-                    false
-                }
-            }
-            "LineString" => {
-                if let Some(coords) = geom.get("coordinates").and_then(|v| v.as_array()) {
-                    coords.len() >= 2
-                        && coords
-                            .iter()
-                            .all(|c| c.as_array().map(|a| a.len() >= 2).unwrap_or(false))
-                } else {
-                    false
-                }
-            }
-            "Polygon" => {
-                if let Some(rings) = geom.get("coordinates").and_then(|v| v.as_array()) {
-                    !rings.is_empty()
-                        && rings.iter().all(|ring| {
-                            ring.as_array()
-                                .map(|r| {
-                                    r.len() >= 4
-                                        && r.iter().all(|c| {
-                                            c.as_array().map(|a| a.len() >= 2).unwrap_or(false)
-                                        })
-                                })
-                                .unwrap_or(false)
-                        })
-                } else {
-                    false
-                }
-            }
-            "MultiPoint" | "MultiLineString" | "MultiPolygon" => geom
-                .get("coordinates")
-                .and_then(|v| v.as_array())
-                .map(|arr| !arr.is_empty())
-                .unwrap_or(false),
-            "GeometryCollection" => geom.get("geometries").and_then(|v| v.as_array()).is_some(),
-            _ => false,
-        };
-
-        Ok(Literal::Boolean(valid))
     }
 }

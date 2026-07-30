@@ -1,22 +1,32 @@
 //! ST_DISJOINT function - check if geometries do not intersect
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::{Contains, Intersects};
+use geo::relate::IntersectionMatrix;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{
-    geojson_to_linestring, geojson_to_point, geojson_to_polygon, get_geometry_type,
-};
+use super::relate;
 
-/// Check if two geometries are disjoint (do not share any points)
+/// Check if two geometries are disjoint — they share no point at all.
 ///
 /// # SQL Signature
 /// `ST_DISJOINT(geometry_a, geometry_b) -> BOOLEAN`
 ///
-/// This is the opposite of ST_INTERSECTS.
+/// # Returns
+/// * TRUE if the geometries have no point in common
+/// * FALSE if they touch, cross, overlap or one covers the other
+/// * NULL if either input is NULL
+///
+/// # Notes
+/// - The exact complement of `ST_INTERSECTS`. That is now structural
+///   rather than aspirational: both read the same DE-9IM matrix and `geo` defines
+///   `is_intersects` as `!is_disjoint`. Previously the two functions listed
+///   different sets of geometry-type pairs — `ST_DISJOINT` supported nine and
+///   `ST_INTERSECTS` six — so `NOT ST_INTERSECTS(a, b)` and `ST_DISJOINT(a, b)`
+///   could give different answers for the same rows.
+/// - Two empty geometries are disjoint (TRUE), which is the JTS/PostGIS answer.
+/// - DE-9IM `[FF*FF****]`.
 pub struct StDisjointFunction;
 
 impl SqlFunction for StDisjointFunction {
@@ -34,100 +44,6 @@ impl SqlFunction for StDisjointFunction {
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_DISJOINT requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let geom_a_val = eval_expr(&args[0], row)?;
-        if matches!(geom_a_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_b_val = eval_expr(&args[1], row)?;
-        if matches!(geom_b_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_a = match &geom_a_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_DISJOINT requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom_b = match &geom_b_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_DISJOINT requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let type_a = get_geometry_type(geom_a)?;
-        let type_b = get_geometry_type(geom_b)?;
-
-        // Disjoint is the negation of intersects
-        let intersects = match (type_a, type_b) {
-            ("Point", "Point") => {
-                let point_a = geojson_to_point(geom_a)?;
-                let point_b = geojson_to_point(geom_b)?;
-                point_a == point_b
-            }
-            ("Point", "Polygon") => {
-                let point = geojson_to_point(geom_a)?;
-                let polygon = geojson_to_polygon(geom_b)?;
-                polygon.contains(&point) || polygon.exterior().intersects(&point)
-            }
-            ("Polygon", "Point") => {
-                let polygon = geojson_to_polygon(geom_a)?;
-                let point = geojson_to_point(geom_b)?;
-                polygon.contains(&point) || polygon.exterior().intersects(&point)
-            }
-            ("Polygon", "Polygon") => {
-                let polygon_a = geojson_to_polygon(geom_a)?;
-                let polygon_b = geojson_to_polygon(geom_b)?;
-                polygon_a.intersects(&polygon_b)
-            }
-            ("LineString", "Polygon") => {
-                let line = geojson_to_linestring(geom_a)?;
-                let polygon = geojson_to_polygon(geom_b)?;
-                polygon.intersects(&line)
-            }
-            ("Polygon", "LineString") => {
-                let polygon = geojson_to_polygon(geom_a)?;
-                let line = geojson_to_linestring(geom_b)?;
-                polygon.intersects(&line)
-            }
-            ("LineString", "LineString") => {
-                let line_a = geojson_to_linestring(geom_a)?;
-                let line_b = geojson_to_linestring(geom_b)?;
-                line_a.intersects(&line_b)
-            }
-            ("Point", "LineString") => {
-                let point = geojson_to_point(geom_a)?;
-                let line = geojson_to_linestring(geom_b)?;
-                line.intersects(&point)
-            }
-            ("LineString", "Point") => {
-                let line = geojson_to_linestring(geom_a)?;
-                let point = geojson_to_point(geom_b)?;
-                line.intersects(&point)
-            }
-            _ => {
-                return Err(Error::Validation(format!(
-                    "ST_DISJOINT not supported for {} and {}",
-                    type_a, type_b
-                )))
-            }
-        };
-
-        Ok(Literal::Boolean(!intersects))
+        relate::predicate("ST_DISJOINT", args, row, IntersectionMatrix::is_disjoint)
     }
 }

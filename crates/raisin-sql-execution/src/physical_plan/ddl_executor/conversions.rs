@@ -67,6 +67,11 @@ pub(crate) fn convert_property(prop: &PropertyDef) -> Result<PropertyValueSchema
                 value: None,
                 meta: None,
                 allow_additional_properties: None,
+                // Array *items* cannot carry spatial config: the index is keyed
+                // by property name, and an item has none. Area C's
+                // `SPATIAL_INDEX(...)` property modifier fills this at the
+                // top-level property instead.
+                spatial: None,
             };
             (None, Some(Box::new(item_schema)))
         }
@@ -95,6 +100,11 @@ pub(crate) fn convert_property(prop: &PropertyDef) -> Result<PropertyValueSchema
         } else {
             None
         },
+        // TODO(area-C): populate from the `SPATIAL_INDEX (<precisions>)` property
+        // modifier once the DDL parser produces it. `None` inherits the workspace
+        // defaults, so leaving it unset is correct behaviour meanwhile — geometry
+        // properties are still indexed automatically by value type.
+        spatial: None,
     })
 }
 

@@ -24,6 +24,8 @@ mod vector_search;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_spatial;
 
 use super::catalog::IndexCatalog;
 use super::operators::{OrderCursor, PhysicalPlan, ScanReason, VectorDistanceMetric};
@@ -72,6 +74,14 @@ struct PlanContext {
     /// Sort column and direction if there's an ORDER BY above
     /// Format: (column_name, is_ascending)
     order_by: Option<(String, bool)>,
+    /// The first ORDER BY expression verbatim, when there is an ORDER BY above.
+    ///
+    /// `order_by` only survives when the sort key reduces to a column NAME, which
+    /// `ORDER BY ST_DISTANCE(loc, ST_POINT(..))` does not. Without the expression
+    /// a scan cannot tell "no ORDER BY" (safe to bound in its own order) from "an
+    /// ORDER BY it happens to satisfy" or "an ORDER BY it does not" — and getting
+    /// that wrong is how a LIMIT truncates in the wrong order.
+    order_by_expr: Option<(TypedExpr, bool)>,
     /// True if this scan will feed into a COUNT(*) aggregate
     is_count_star: bool,
 }
@@ -82,6 +92,7 @@ impl PlanContext {
         Self {
             limit: None,
             order_by: None,
+            order_by_expr: None,
             is_count_star: false,
         }
     }
@@ -91,6 +102,7 @@ impl PlanContext {
         Self {
             limit: Some(limit),
             order_by: None,
+            order_by_expr: None,
             is_count_star: false,
         }
     }
@@ -99,6 +111,18 @@ impl PlanContext {
     fn with_order_by(mut self, column: String, is_asc: bool) -> Self {
         self.order_by = Some((column, is_asc));
         self
+    }
+
+    /// Record the verbatim first ORDER BY expression and its direction.
+    fn with_order_by_expr(mut self, expr: TypedExpr, is_asc: bool) -> Self {
+        self.order_by_expr = Some((expr, is_asc));
+        self
+    }
+
+    /// True when there is no ORDER BY above this scan at all, so the scan's own
+    /// iteration order is free to bound the result.
+    fn has_no_ordering(&self) -> bool {
+        self.order_by.is_none() && self.order_by_expr.is_none()
     }
 
     /// Mark this context as feeding a COUNT(*)
@@ -180,6 +204,28 @@ impl PhysicalPlanner {
             compound_indexes: Vec::new(),
             schema_stats: None,
         }
+    }
+
+    /// Spatial index availability for one (workspace, branch, property).
+    ///
+    /// The single place the planner asks that question, so the scope is assembled
+    /// consistently: tenant and repo come from the planner's own context, while
+    /// branch and workspace come from the query — a spatial index is per branch,
+    /// and a query against a feature branch must not be planned against main's
+    /// index state.
+    pub(super) fn spatial_availability(
+        &self,
+        workspace: &str,
+        branch: &str,
+        property: &str,
+    ) -> super::catalog::SpatialAvailability {
+        self.index_catalog.spatial_index_availability(
+            &self.default_tenant_id,
+            &self.default_repo_id,
+            branch,
+            workspace,
+            property,
+        )
     }
 
     /// Convert a logical plan to a physical plan (public entry point)

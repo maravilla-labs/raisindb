@@ -69,6 +69,24 @@ impl DataType {
             // PATH can be compared with TEXT literals (TEXT → PATH)
             (DataType::Text, DataType::Path) => true,
 
+            // A GeoJSON document is acceptable wherever a GEOMETRY is expected.
+            //
+            // `properties->>'location'` types as TEXT and `properties->'location'`
+            // as JSONB, so without this the natural spelling
+            // `ST_DWITHIN(properties->>'location', ST_POINT(...), 500)` failed
+            // analysis with "Function not found: ST_DWITHIN(TEXT?, GEOMETRY,
+            // DOUBLE)" and every user had to discover
+            // `CAST(properties->>'location' AS GEOMETRY)` for themselves. Only the
+            // ST_* functions declare a GEOMETRY parameter, so the blast radius is
+            // exactly the geospatial surface — and every one of them already
+            // accepts a TEXT or JSONB argument at runtime (see
+            // `geospatial::z_support::geometry_arg`, which parses TEXT as GeoJSON
+            // and takes JSONB verbatim). The conversion can still fail on a
+            // malformed document; that is a runtime error naming the argument,
+            // exactly as `CAST(... AS GEOMETRY)` already behaves.
+            (DataType::Text, DataType::Geometry) => true,
+            (DataType::JsonB, DataType::Geometry) => true,
+
             // Unknown can coerce to anything (for inference)
             (DataType::Unknown, _) => true,
             (_, DataType::Unknown) => true,
@@ -293,6 +311,26 @@ mod tests {
         // BIGINT → DOUBLE
         assert!(DataType::BigInt.can_coerce_to(&DataType::Double));
         assert!(!DataType::Double.can_coerce_to(&DataType::BigInt));
+    }
+
+    /// A GeoJSON document coerces to GEOMETRY, so the natural spelling
+    /// `ST_DWITHIN(properties->>'location', ST_POINT(...), 500)` resolves.
+    ///
+    /// `properties->>'k'` types as `Nullable(Text)` and `properties->'k'` as
+    /// `Nullable(JsonB)`, so both nullable forms have to work — the unwrapping
+    /// above handles that, and this pins it.
+    #[test]
+    fn test_geojson_coerces_to_geometry() {
+        assert!(DataType::Text.can_coerce_to(&DataType::Geometry));
+        assert!(DataType::JsonB.can_coerce_to(&DataType::Geometry));
+        assert!(DataType::Nullable(Box::new(DataType::Text)).can_coerce_to(&DataType::Geometry));
+        assert!(DataType::Nullable(Box::new(DataType::JsonB)).can_coerce_to(&DataType::Geometry));
+
+        // One-way only. A GEOMETRY is not implicitly a string: `ST_ASGEOJSON` is
+        // the explicit conversion, and letting it coerce would make
+        // `UPPER(geometry_column)` analyse.
+        assert!(!DataType::Geometry.can_coerce_to(&DataType::Text));
+        assert!(!DataType::Geometry.can_coerce_to(&DataType::JsonB));
     }
 
     #[test]

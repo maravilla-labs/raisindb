@@ -1,17 +1,31 @@
-//! ST_ISEMPTY function - check if geometry has no coordinates
+//! ST_ISEMPTY - whether a geometry holds any coordinates.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::get_geometry_type;
+use super::convert::geom_arg;
+use super::z_support::expect_arity;
 
-/// Check if a geometry is empty (has no coordinates)
+const SIGNATURE: &str = "ST_ISEMPTY(geometry) -> BOOLEAN";
+
+/// True when a geometry contains no coordinates.
 ///
 /// # SQL Signature
 /// `ST_ISEMPTY(geometry) -> BOOLEAN`
+///
+/// # Behaviour
+/// * Emptiness is judged after parsing and **recursively**: a GeometryCollection
+///   whose only member is an empty MultiPolygon is empty. The previous
+///   implementation looked one level down at the JSON's `coordinates` array, so it
+///   reported such a collection as non-empty.
+/// * Distinct from `NULL`. `NULL` means "no value"; empty means "a geometry with no
+///   extent" — the canonical
+///   `{"type":"GeometryCollection","geometries":[]}` that set operations return
+///   when nothing is left. `NULL` in, `NULL` out.
+/// * Empty geometries propagate through every ST_\* function rather than raising
+///   errors, which is what makes chained set operations safe.
 pub struct StIsEmptyFunction;
 
 impl SqlFunction for StIsEmptyFunction {
@@ -24,60 +38,15 @@ impl SqlFunction for StIsEmptyFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_ISEMPTY(geometry) -> BOOLEAN"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 1 {
-            return Err(Error::Validation(
-                "ST_ISEMPTY requires exactly 1 argument".to_string(),
-            ));
+        expect_arity("ST_ISEMPTY", SIGNATURE, args, 1)?;
+        match geom_arg("ST_ISEMPTY", args, 0, row)? {
+            None => Ok(Literal::Null),
+            Some(g) => Ok(Literal::Boolean(g.is_empty())),
         }
-
-        let geom_val = eval_expr(&args[0], row)?;
-        if matches!(geom_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom = match &geom_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_ISEMPTY requires GEOMETRY argument".to_string(),
-                ))
-            }
-        };
-
-        let geom_type = get_geometry_type(geom)?;
-
-        let is_empty = match geom_type {
-            "Point" => {
-                // A point with coordinates is not empty
-                geom.get("coordinates")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.is_empty())
-                    .unwrap_or(true)
-            }
-            "LineString" | "MultiPoint" => geom
-                .get("coordinates")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.is_empty())
-                .unwrap_or(true),
-            "Polygon" | "MultiLineString" | "MultiPolygon" => geom
-                .get("coordinates")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.is_empty())
-                .unwrap_or(true),
-            "GeometryCollection" => geom
-                .get("geometries")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.is_empty())
-                .unwrap_or(true),
-            _ => true,
-        };
-
-        Ok(Literal::Boolean(is_empty))
     }
 }

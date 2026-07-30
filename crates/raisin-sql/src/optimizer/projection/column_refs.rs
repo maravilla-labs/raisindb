@@ -133,6 +133,20 @@ fn extract_function_column_refs(name: &str, args: &[TypedExpr]) -> HashSet<Strin
         cols.insert((*col).to_string());
     }
 
+    // Same guard, applied to geospatial functions.
+    //
+    // A row-level `ST_DWITHIN(location, ...)` reads its geometry out of the row's
+    // `properties` map — `extract_geometry_source` reads a bare column reference
+    // as `properties->>'<column>'`. If projection pruning kept only "location"
+    // (a column that does not exist in a materialized row) the evaluation would
+    // find nothing, and the spatial residual filter that exists precisely to
+    // guarantee correct results when the index is unbuilt would silently match
+    // zero rows. That is the REFERENCES bug in a new costume, so it gets the
+    // REFERENCES fix.
+    if func_name.starts_with("ST_") {
+        cols.insert("properties".to_string());
+    }
+
     if (func_name == "TO_JSON" || func_name == "TO_JSONB") && args.len() == 1 {
         if let Expr::Column { table, column } = &args[0].expr {
             if table == column {

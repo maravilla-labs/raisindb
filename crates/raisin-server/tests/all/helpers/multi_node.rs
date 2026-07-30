@@ -15,6 +15,13 @@ pub struct ServerConfig {
     pub initial_admin_password: String,
     pub cluster_node_id: Option<String>,
     pub replication_port: Option<u16>,
+    /// When set, the PostgreSQL wire protocol listener is enabled on this port.
+    ///
+    /// `[pgwire] enabled` defaults to `false` (see `config.rs`), so a test that
+    /// wants to speak to the server with a postgres client must ask for it — the
+    /// port is also written into the TOML rather than passed as a flag so the
+    /// merge order in `startup/cli.rs` is exercised the same way production is.
+    pub pgwire_port: Option<u16>,
     _temp_dir: Option<TempDir>, // Keep alive so data_dir isn't deleted
 }
 
@@ -29,8 +36,16 @@ impl ServerConfig {
             initial_admin_password: "Admin12345!@#".to_string(),
             cluster_node_id: None,
             replication_port: None,
+            pgwire_port: None,
             _temp_dir: Some(temp_dir),
         }
+    }
+
+    /// Enable the PostgreSQL wire protocol listener on `port`.
+    #[allow(dead_code)]
+    pub fn with_pgwire(mut self, port: u16) -> Self {
+        self.pgwire_port = Some(port);
+        self
     }
 
     /// Set cluster configuration for replication
@@ -92,7 +107,7 @@ impl ServerHandle {
 
         // Write TOML config (same approach as cluster tests)
         let config_path = config.data_dir.join("server.toml");
-        let toml_content = format!(
+        let mut toml_content = format!(
             r#"[server]
 port = {}
 bind_address = "127.0.0.1"
@@ -104,6 +119,17 @@ jwt_secret = "test-secret-key-for-integration-tests-only-32chars!"
             config.data_dir.display(),
             config.initial_admin_password,
         );
+        if let Some(pgwire_port) = config.pgwire_port {
+            toml_content.push_str(&format!(
+                r#"
+[pgwire]
+enabled = true
+bind_address = "127.0.0.1"
+port = {pgwire_port}
+max_connections = 16
+"#
+            ));
+        }
         std::fs::write(&config_path, &toml_content)
             .map_err(|e| format!("Failed to write config: {}", e))?;
 

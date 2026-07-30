@@ -30,6 +30,19 @@ pub struct WorkspaceConfig {
     /// None means "track latest", Some(hlc) means "pin to this HLC revision"
     #[serde(default, rename = "node_type_pins", alias = "node_type_refs")]
     pub node_type_pins: HashMap<String, Option<raisin_hlc::HLC>>,
+
+    /// Spatial index defaults for this workspace, with per-property overrides.
+    ///
+    /// This is *replicated intent* — it travels with the workspace record via
+    /// `OperationType::UpdateWorkspace`, so `ALTER SPATIAL INDEX` on one node
+    /// reaches every node, and each node then schedules its own local reindex
+    /// when it notices the policy fingerprint changed. That is the entire
+    /// cluster-wide fan-out mechanism; nothing is broadcast separately.
+    ///
+    /// `None` means "server defaults", and serializes to nothing, so adding this
+    /// field does not rewrite any stored workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial: Option<crate::nodes::properties::spatial_policy::SpatialWorkspaceSchema>,
 }
 
 fn default_branch_name() -> String {
@@ -41,6 +54,7 @@ impl Default for WorkspaceConfig {
         Self {
             default_branch: default_branch_name(),
             node_type_pins: HashMap::new(),
+            spatial: None,
         }
     }
 }

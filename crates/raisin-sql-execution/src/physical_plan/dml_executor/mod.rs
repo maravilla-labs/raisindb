@@ -25,6 +25,8 @@
 mod bulk_delete;
 mod bulk_operations;
 mod helpers;
+#[cfg(test)]
+mod helpers_tests;
 mod initial_structure;
 mod move_copy;
 pub(crate) mod node_helpers;

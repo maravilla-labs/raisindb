@@ -37,6 +37,7 @@ pub mod node_operations;
 mod repository;
 pub mod scope;
 pub mod spatial;
+pub mod spatial_admin;
 pub mod system_updates;
 mod tenant_init;
 pub mod traits;
@@ -87,7 +88,14 @@ pub use fulltext::{
 };
 
 // Re-export spatial types
-pub use spatial::{ProximityResult, SpatialIndexEntry, SpatialIndexRepository};
+pub use spatial::{
+    ProximityResult, SpatialAvailability, SpatialBuildPhase, SpatialIndexEntry, SpatialIndexState,
+    SpatialPreFilter, SpatialStateSource,
+};
+pub use spatial_admin::{SpatialEntryCensus, SpatialIndexAdmin};
+// The trait name collides with the concrete rocksdb repository of the same name,
+// so it stays qualified at its (few) use sites via `raisin_storage::spatial::`.
+pub use spatial::SpatialIndexRepository;
 
 // Re-export system update types
 pub use system_updates::{

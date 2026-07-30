@@ -189,24 +189,58 @@ pub fn write_relation_indexes(
     Ok(())
 }
 
-/// Write all indexes for a node (properties, references, relations)
+/// Column families the replication index writers stage into.
 ///
-/// This is a convenience function that calls all three index writers
+/// Bundled so adding an index type is a struct field rather than another
+/// positional argument at every call site — the shape that let SPATIAL_INDEX be
+/// forgotten here in the first place.
+pub struct ReplicationIndexCfs<'a> {
+    pub property: &'a rocksdb::ColumnFamily,
+    pub reference: &'a rocksdb::ColumnFamily,
+    pub relation: &'a rocksdb::ColumnFamily,
+    pub spatial: &'a rocksdb::ColumnFamily,
+}
+
+/// Write all secondary indexes for a replicated node (properties, references,
+/// relations, **spatial**).
+///
+/// # The cluster bug this closes
+///
+/// RaisinDB is a masterless multi-master CRDT cluster: each instance builds its
+/// own local indexes as replicated records arrive. Property, reference and relation
+/// indexes were written here; **spatial was not written at all** — `grep -rn spatial
+/// crates/raisin-rocksdb/src/replication/` matched one doc comment and zero code.
+///
+/// The production consequence: a geometry written on node1 was spatially queryable
+/// ONLY on node1. Peers converged the node record correctly but held zero spatial
+/// entries for it, so the same `ST_DWITHIN` returned different answers depending on
+/// which node answered — and because the planner's `has_spatial_index()` was a
+/// hardcoded `true` and the predicate was stripped from the residual filter, the
+/// wrong answer was **zero rows, silently**, rather than an error.
+///
+/// Spatial goes inline in this batch rather than through an event -> job hop (the
+/// route fulltext takes) because the spatial index IS a RocksDB column family and
+/// can therefore join the caller's `WriteBatch`. That is strictly stronger: no
+/// window where a peer holds the record but not its index entry, and no dependence
+/// on the job system being healthy.
+///
+/// `policies` must be resolved by the caller (see
+/// [`crate::indexing::NodeSpatialPolicies::from_local_state`]) because policy
+/// resolution reads schema records, which is async, and this path is sync.
 pub fn write_all_node_indexes(
     batch: &mut WriteBatch,
-    cf_property: &rocksdb::ColumnFamily,
-    cf_reference: &rocksdb::ColumnFamily,
-    cf_relation: &rocksdb::ColumnFamily,
+    cfs: &ReplicationIndexCfs<'_>,
     tenant_id: &str,
     repo_id: &str,
     branch: &str,
     workspace: &str,
     node: &Node,
     revision: &HLC,
+    policies: &crate::indexing::NodeSpatialPolicies,
 ) -> Result<()> {
     write_property_indexes(
         batch,
-        cf_property,
+        cfs.property,
         tenant_id,
         repo_id,
         branch,
@@ -217,7 +251,7 @@ pub fn write_all_node_indexes(
 
     write_reference_indexes(
         batch,
-        cf_reference,
+        cfs.reference,
         tenant_id,
         repo_id,
         branch,
@@ -228,13 +262,26 @@ pub fn write_all_node_indexes(
 
     write_relation_indexes(
         batch,
-        cf_relation,
+        cfs.relation,
         tenant_id,
         repo_id,
         branch,
         workspace,
         node,
         revision,
+    )?;
+
+    // Delegates to the ONE shared spatial writer, so this path cannot drift from
+    // the transaction and repository paths again.
+    crate::indexing::write_node_spatial_indexes(
+        batch,
+        &crate::indexing::SpatialIndexTargets {
+            spatial_index: cfs.spatial,
+        },
+        &crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace),
+        node,
+        revision,
+        policies,
     )?;
 
     Ok(())

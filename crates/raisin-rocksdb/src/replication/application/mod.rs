@@ -15,7 +15,6 @@
 //! - `user_operations` - User and workspace operations
 //! - `tag_operations` - Tag creation and deletion operations
 //! - `relation_operations` - Relation and archetype operations
-//! - `replication_core` - Core CRDT replication logic (LWW upsert, delete-wins)
 //! - `schema_operations` - NodeType, Archetype, and ElementType operations
 //!
 //! ## Helper Modules
@@ -33,7 +32,6 @@ mod schema_operations;
 mod identity_operations;
 mod node_operations;
 mod relation_operations;
-mod replication_core;
 mod tag_operations;
 mod tenant_operations;
 mod user_operations;

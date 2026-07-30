@@ -91,6 +91,27 @@ impl fmt::Display for JobType {
                 "PropertyIndexBuild({}/{}/{}/{})",
                 tenant_id, repo_id, branch, workspace
             ),
+            // NOTE: `property` is a slash-free slug and `rebuild` renders as
+            // `true`/`false`, so the round-trip through `parse_index_build_variants`
+            // is exact. A persisted job cannot be reloaded after a restart unless
+            // Display and the parser agree — hence the fixed 6-field shape.
+            Self::SpatialIndexBuild {
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                property,
+                rebuild,
+            } => write!(
+                f,
+                "SpatialIndexBuild({}/{}/{}/{}/{}/{})",
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                property.as_deref().unwrap_or("*"),
+                rebuild
+            ),
             Self::CompoundIndexBuild {
                 tenant_id,
                 repo_id,

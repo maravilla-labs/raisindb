@@ -50,8 +50,9 @@ mod error_ext;
 pub mod fractional_index;
 pub mod graph;
 pub mod hnsw_transfer;
+pub mod indexing;
 mod jobs;
-mod keys;
+pub mod keys;
 pub mod lazy_indexing;
 pub mod management;
 pub mod monitoring;
@@ -60,6 +61,7 @@ pub mod replication;
 pub mod repositories;
 pub mod security;
 pub mod spatial;
+pub mod spatial_state;
 mod storage;
 pub mod tantivy_transfer;
 mod tombstones;
@@ -143,6 +145,12 @@ pub use tantivy_transfer::{TantivyIndexManager, TantivyIndexMetadata, TantivyInd
 
 // Re-export replication handlers for external use
 pub use jobs::handlers::replication_sync::ReplicationSyncHandler;
+
+// Re-export the spatial index build handler. The `jobs` module is private, and a
+// rebuild is not observable from outside the crate without either running the whole
+// job system or driving the handler directly — so an integration test that has to
+// prove what a REAL rebuild writes (entry revisions, precision sets) needs this.
+pub use jobs::handlers::spatial_index::{SpatialBuildReport, SpatialIndexJobHandler};
 
 // Re-export the fulltext error counter so transport-http can render
 // it without needing access to the (private) `jobs` module.

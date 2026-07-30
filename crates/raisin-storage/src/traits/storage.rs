@@ -88,6 +88,35 @@ pub trait Storage: Send + Sync {
     fn fulltext_job_store(&self) -> &Self::FullTextJobStore;
     fn spatial_index(&self) -> &Self::SpatialIndex;
     fn compound_index(&self) -> &Self::CompoundIndex;
+
+    /// Source of per-(workspace, property) spatial index build state, for query
+    /// planning.
+    ///
+    /// `None` means "this backend cannot tell you", which the planner treats as
+    /// [`crate::spatial::SpatialAvailability::NotBuilt`] and therefore as "do not
+    /// use the spatial index; keep the predicate as a row-level filter". That is
+    /// the intended default: the planner is allowed to drop a spatial predicate
+    /// only against a *known* index, because the alternative — assuming an index
+    /// that was never populated — returns zero rows silently.
+    ///
+    /// Deliberately separate from [`Self::spatial_index`]: that is the query
+    /// executor's handle, this is metadata the planner needs *before* it decides
+    /// whether to use it.
+    fn spatial_state(&self) -> Option<Arc<dyn crate::spatial::SpatialStateSource>> {
+        None
+    }
+
+    /// Operator surface for the spatial index: local state, a physical entry
+    /// census, and rebuild scheduling.
+    ///
+    /// `None` means the backend has no spatial index to administer, and the SQL
+    /// admin statements report that rather than pretending to succeed. Kept apart
+    /// from [`Self::spatial_state`] because that one is consulted on every spatial
+    /// query and must stay cheap, whereas this one is allowed to scan.
+    fn spatial_admin(&self) -> Option<Arc<dyn crate::spatial_admin::SpatialIndexAdmin>> {
+        None
+    }
+
     fn begin(&self) -> impl std::future::Future<Output = Result<Self::Tx>> + Send;
 
     /// Get the event bus for subscribing to storage events

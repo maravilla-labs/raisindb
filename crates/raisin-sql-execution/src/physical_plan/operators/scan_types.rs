@@ -21,6 +21,20 @@ pub enum ScanReason {
 
     /// Required index exists but is not enabled
     IndexNotEnabled { index_name: String },
+
+    /// A spatial predicate was present and index-shaped, but the spatial index
+    /// for that (workspace, property) cannot answer it — it has not been built,
+    /// its state record is unreadable, or no configured geohash precision can
+    /// cover the requested radius within the cell budget.
+    ///
+    /// This variant exists so the degradation is *visible*. The query is still
+    /// correct: the spatial predicate stays in the residual filter and the rows
+    /// are re-checked per row. It is slower, and EXPLAIN says why and what to do.
+    SpatialIndexUnusable {
+        workspace: String,
+        property: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for ScanReason {
@@ -36,6 +50,16 @@ impl fmt::Display for ScanReason {
             ScanReason::IndexNotEnabled { index_name } => {
                 write!(f, "{} not enabled", index_name)
             }
+            ScanReason::SpatialIndexUnusable {
+                workspace,
+                property,
+                detail,
+            } => write!(
+                f,
+                "spatial index NOT USED for '{}'.'{}' ({}) — the spatial predicate \
+                 is applied per row, so results are correct but the scan is full",
+                workspace, property, detail
+            ),
         }
     }
 }

@@ -581,10 +581,208 @@ pub async fn verify_relation_deleted_on_all_nodes(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Index-backed query verification
+//
+// Every helper above asserts on *records* — the raw fields of a replicated node.
+// That is why a whole class of defect survived: a secondary index is derived local
+// state, rebuilt independently on every node, and a node can hold a perfectly
+// converged record with zero index entries for it. The query then returns the
+// wrong answer on that node only, and no record-level assertion notices.
+//
+// The helpers below close that gap. They are deliberately written in terms of
+// "run this SQL on every node" rather than in terms of spatial specifically, so
+// the next index type (fulltext MATCH, vector similarity, GRAPH_TABLE) gets the
+// same coverage by passing a different query.
+// ---------------------------------------------------------------------------
+
+/// Run the same SQL on every node and return one `name`-column row set per node,
+/// each sorted so the comparison is order-insensitive.
+pub async fn query_names_on_all_nodes(
+    client: &RestClient,
+    tokens: &[String],
+    repo: &str,
+    sql: &str,
+) -> Result<Vec<Vec<String>>> {
+    let mut per_node = Vec::new();
+    for (idx, (url, token)) in client.base_urls.iter().zip(tokens.iter()).enumerate() {
+        let result = client
+            .execute_sql(url, token, repo, sql, vec![])
+            .await
+            .with_context(|| format!("query failed on node{}: {}", idx + 1, sql))?;
+        let mut names: Vec<String> = result["rows"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        per_node.push(names);
+    }
+    Ok(per_node)
+}
+
+/// Assert an index-backed query returns exactly `expected` on **every** node.
+///
+/// Retries until the row set settles, because a cluster write reaches a peer
+/// asynchronously: a single immediate read would be racing replication rather
+/// than testing the index. On timeout the error names the per-node row sets, so a
+/// one-node divergence — the signature of a partially populated index — is legible
+/// without re-running.
+pub async fn verify_spatial_query_on_all_nodes(
+    client: &RestClient,
+    tokens: &[String],
+    repo: &str,
+    sql: &str,
+    expected: &[&str],
+    timeout: Duration,
+) -> Result<()> {
+    let mut want: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+    want.sort();
+
+    let start = Instant::now();
+    loop {
+        let last = query_names_on_all_nodes(client, tokens, repo, sql).await?;
+        if last.iter().all(|got| *got == want) {
+            return Ok(());
+        }
+        if start.elapsed() > timeout {
+            anyhow::bail!(
+                "index-backed query did not converge on {:?} within {:?}\n  query: {}\n{}",
+                want,
+                timeout,
+                sql,
+                per_node_diagnosis(client, tokens, repo, sql, &last).await
+            );
+        }
+        sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Per-node row set plus the plan that produced it.
+///
+/// A cross-node divergence has two very different causes and the row sets alone
+/// cannot tell them apart: the node genuinely holds no index entry for the row, or
+/// the node fell back to a row-level filter that is itself dropping it. The plan
+/// distinguishes them, so it is worth one extra round trip on the failure path.
+async fn per_node_diagnosis(
+    client: &RestClient,
+    tokens: &[String],
+    repo: &str,
+    sql: &str,
+    rows: &[Vec<String>],
+) -> String {
+    let mut out = String::new();
+    for (idx, (url, token)) in client.base_urls.iter().zip(tokens.iter()).enumerate() {
+        let plan = explain_on_node(client, url, token, repo, sql)
+            .await
+            .unwrap_or_else(|e| format!("<EXPLAIN failed: {e:#}>"));
+        // The banner line carries no information; the access path is what
+        // distinguishes "no index entry" from "index not used".
+        let access_path = plan
+            .lines()
+            .map(str::trim)
+            .find(|line| line.contains("Scan"))
+            .unwrap_or("<no scan node in plan>")
+            .to_string();
+        out.push_str(&format!(
+            "  node{} -> {:?}\n      plan: {}\n",
+            idx + 1,
+            rows.get(idx).cloned().unwrap_or_default(),
+            access_path
+        ));
+    }
+    out
+}
+
+/// Assert every node returns the *same* row set for the same query, whatever that
+/// row set is, and return it.
+///
+/// This is the weaker but sharper assertion: it catches "same query, different
+/// answer depending on which node replies" without the test having to know the
+/// right answer. Used for the cases where the correct answer depends on
+/// behaviour still under discussion (an exotic SRID, say) but cross-node
+/// agreement is non-negotiable.
+pub async fn verify_all_nodes_agree(
+    client: &RestClient,
+    tokens: &[String],
+    repo: &str,
+    sql: &str,
+    timeout: Duration,
+) -> Result<Vec<String>> {
+    let start = Instant::now();
+    loop {
+        let per_node = query_names_on_all_nodes(client, tokens, repo, sql).await?;
+        let reference = per_node[0].clone();
+        if per_node.iter().all(|got| *got == reference) {
+            return Ok(reference);
+        }
+        if start.elapsed() > timeout {
+            anyhow::bail!(
+                "nodes disagree on the same query after {:?}\n  query: {}\n{}",
+                timeout,
+                sql,
+                per_node_diagnosis(client, tokens, repo, sql, &per_node).await
+            );
+        }
+        sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// The `EXPLAIN` plan text for `sql` on one node.
+pub async fn explain_on_node(
+    client: &RestClient,
+    node_url: &str,
+    token: &str,
+    repo: &str,
+    sql: &str,
+) -> Result<String> {
+    let result = client
+        .execute_sql(node_url, token, repo, &format!("EXPLAIN {}", sql), vec![])
+        .await
+        .with_context(|| format!("EXPLAIN failed: {}", sql))?;
+    Ok(result["explain_plan"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| result["rows"][0]["QUERY PLAN"].as_str().map(str::to_string))
+        .unwrap_or_else(|| result.to_string()))
+}
+
+/// Assert every node's plan for `sql` contains `needle`.
+///
+/// Correct rows alone never prove an index ran — a predicate that falls back to a
+/// row-level filter returns correct rows too, just slowly. That is the whole point
+/// of a fail-closed planner, and it is also why "the peers return the right rows"
+/// is NOT sufficient evidence that the peers built index entries. This is the
+/// assertion that distinguishes the two.
+pub async fn verify_plan_contains_on_all_nodes(
+    client: &RestClient,
+    tokens: &[String],
+    repo: &str,
+    sql: &str,
+    needle: &str,
+) -> Result<()> {
+    for (idx, (url, token)) in client.base_urls.iter().zip(tokens.iter()).enumerate() {
+        let plan = explain_on_node(client, url, token, repo, sql).await?;
+        if !plan.contains(needle) {
+            anyhow::bail!(
+                "node{} plan does not contain '{}'\n  query: {}\n  plan:\n{}",
+                idx + 1,
+                needle,
+                sql,
+                plan
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Debug helper: dump children order from all nodes
 pub fn dump_children_order(children_per_node: &[Vec<Value>], labels: &[&str]) {
     println!("\nChildren order on each node:");
-    for (idx, (children, label)) in children_per_node.iter().zip(labels.iter()).enumerate() {
+    for (_idx, (children, label)) in children_per_node.iter().zip(labels.iter()).enumerate() {
         println!("\n{}:", label);
         for (i, child) in children.iter().enumerate() {
             let id = child["id"].as_str().unwrap_or("unknown");

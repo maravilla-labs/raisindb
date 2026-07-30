@@ -1,39 +1,35 @@
-//! ST_AZIMUTH function - calculate bearing between two points
+//! ST_AZIMUTH - bearing from one point to another.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::HaversineBearing;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::geojson_to_point;
+use super::convert::geom_pair;
+use super::measure;
+use super::z_support::expect_arity;
 
-/// Calculate the azimuth (bearing) between two points
+const SIGNATURE: &str = "ST_AZIMUTH(point1, point2) -> DOUBLE";
+
+/// Bearing from `point1` to `point2` in **radians**, north-clockwise, normalized
+/// to `[0, 2pi)`.
 ///
 /// # SQL Signature
 /// `ST_AZIMUTH(point1, point2) -> DOUBLE`
 ///
-/// # Arguments
-/// * `point1` - Origin point
-/// * `point2` - Destination point
-///
-/// # Returns
-/// * Bearing in radians, normalized to 0..2pi (0 = north, pi/2 = east)
-/// * NULL if any input is NULL
+/// # Behaviour
+/// * Geodesic on a geographic CRS, planar on a projected one.
+/// * `NULL` — not an error — when either argument is not a single location, or
+///   when the two coincide. The azimuth from a point to itself is undefined, and
+///   PostGIS likewise returns NULL rather than an arbitrary 0.
+/// * A one-member `MultiPoint` is accepted as a location: the answer must not
+///   depend on how the same place is spelled.
 ///
 /// # Examples
 /// ```sql
-/// SELECT ST_AZIMUTH(
-///     ST_POINT(-122.4194, 37.7749),
-///     ST_POINT(-73.9857, 40.7484)
-/// )
+/// SELECT DEGREES(ST_AZIMUTH(ST_POINT(8.54, 47.37), ST_POINT(8.54, 48.37)));
+/// -- 0, due north
 /// ```
-///
-/// # Notes
-/// - Uses Haversine bearing formula
-/// - Result follows PostGIS convention: 0 = north, pi/2 = east
-/// - Normalized to range [0, 2*pi)
 pub struct StAzimuthFunction;
 
 impl SqlFunction for StAzimuthFunction {
@@ -46,60 +42,17 @@ impl SqlFunction for StAzimuthFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_AZIMUTH(point1, point2) -> DOUBLE"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_AZIMUTH requires exactly 2 arguments".to_string(),
-            ));
+        expect_arity("ST_AZIMUTH", SIGNATURE, args, 2)?;
+        match geom_pair("ST_AZIMUTH", args, row)? {
+            None => Ok(Literal::Null),
+            Some((a, b)) => Ok(measure::bearing_radians(&a, &b)
+                .map(Literal::Double)
+                .unwrap_or(Literal::Null)),
         }
-
-        let geom1_val = eval_expr(&args[0], row)?;
-        if matches!(geom1_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom2_val = eval_expr(&args[1], row)?;
-        if matches!(geom2_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom1 = match &geom1_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_AZIMUTH requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom2 = match &geom2_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_AZIMUTH requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let point1 = geojson_to_point(geom1)?;
-        let point2 = geojson_to_point(geom2)?;
-
-        // haversine_bearing returns degrees (-180..180, 0 = north)
-        let bearing_degrees = point1.haversine_bearing(point2);
-
-        // Convert to radians
-        let bearing_radians = bearing_degrees.to_radians();
-
-        // Normalize to 0..2*pi (PostGIS convention)
-        let two_pi = 2.0 * std::f64::consts::PI;
-        let normalized = ((bearing_radians % two_pi) + two_pi) % two_pi;
-
-        Ok(Literal::Double(normalized))
     }
 }

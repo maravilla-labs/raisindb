@@ -9,8 +9,10 @@
 //! - `selectivity` - Selectivity estimation per predicate type
 //! - `index_selection` - Best predicate selection with ordering heuristics
 //! - `build_scan` - Physical scan plan construction for each strategy
+//! - `build_spatial` - Spatial scan construction and the residual-filter rule
 
 mod build_scan;
+mod build_spatial;
 mod index_selection;
 mod selectivity;
 
@@ -182,7 +184,7 @@ impl PhysicalPlanner {
         }
 
         // Collect all available index options with their selectivity
-        let index_options = self.collect_index_options(&canonical);
+        let index_options = self.collect_index_options(&canonical, workspace, branch);
 
         // Check if parent operator wants path ordering
         let ordering_by_path = context
@@ -213,7 +215,43 @@ impl PhysicalPlanner {
             );
         }
 
-        // Fallback: Table scan
+        // Fallback: Table scan.
+        //
+        // When the query DID carry an index-shaped spatial predicate and we still
+        // ended up here, the reason is spatial-specific and the operator needs to
+        // hear it — a generic "no matching index" would hide the one thing they
+        // can act on.
+        if let Some(CanonicalPredicate::SpatialDWithin {
+            property_name,
+            radius_meters,
+            ..
+        }) = canonical
+            .iter()
+            .find(|p| matches!(p, CanonicalPredicate::SpatialDWithin { .. }))
+        {
+            let availability = self.spatial_availability(workspace, branch, property_name);
+            let detail = if availability.is_ready() {
+                format!(
+                    "indexed precisions {:?} cannot cover a {}m radius within the cell budget",
+                    availability.precisions(),
+                    radius_meters
+                )
+            } else {
+                crate::physical_plan::catalog::explain_reason(&availability)
+            };
+            return Ok(self.build_spatial_fallback_scan(
+                property_name,
+                canonical,
+                table,
+                alias,
+                schema,
+                workspace,
+                branch,
+                projection,
+                detail,
+            ));
+        }
+
         Ok(self.build_fallback_table_scan(
             canonical,
             table,
@@ -462,10 +500,16 @@ impl PhysicalPlanner {
         })
     }
 
-    /// Collect all available index options with their selectivity scores
+    /// Collect all available index options with their selectivity scores.
+    ///
+    /// `workspace` is required because spatial availability is per (workspace,
+    /// property): unlike every other index here, "is it usable" is a question
+    /// about state on this node's disk, not about configuration.
     fn collect_index_options<'a>(
         &self,
         canonical: &'a [CanonicalPredicate],
+        workspace: &str,
+        branch: &str,
     ) -> Vec<(f64, &'a CanonicalPredicate)> {
         let mut index_options = Vec::new();
 
@@ -512,7 +556,58 @@ impl PhysicalPlanner {
                 CanonicalPredicate::PropertyPrefixRange { .. } => {
                     self.index_catalog.has_property_index()
                 }
-                CanonicalPredicate::SpatialDWithin { .. } => self.index_catalog.has_spatial_index(),
+                // The gate that closes the silent-empty trap. `has_spatial_index()`
+                // used to answer a hardcoded `true` here ("the CF is always
+                // present"), which is a statement about schema, not about
+                // whether anything was ever indexed for this property — and
+                // `build_spatial_scan` then stripped the predicate on the
+                // strength of it. A scoped, fail-closed answer means an
+                // unpopulated or stale index costs a full scan, not an empty
+                // result set.
+                CanonicalPredicate::SpatialDWithin {
+                    property_name,
+                    center_lon,
+                    center_lat,
+                    radius_meters,
+                    ..
+                } => {
+                    let availability = self.spatial_availability(workspace, branch, property_name);
+                    // Latitude matters: the same radius needs more geohash cells
+                    // near the poles. This must ask the same question, with the
+                    // same arguments, as `build_spatial_scan` — otherwise the
+                    // "unreachable" degrade path there becomes reachable.
+                    let usable = availability.is_ready()
+                        && crate::physical_plan::catalog::radius_is_covered(
+                            *center_lon,
+                            *center_lat,
+                            *radius_meters,
+                            availability.precisions(),
+                        );
+                    if !usable {
+                        // ONE warning naming workspace, property and reason. The
+                        // query still returns the right rows (the predicate stays
+                        // in the residual filter); this is the signpost.
+                        let detail = if availability.is_ready() {
+                            format!(
+                                "no indexed geohash precision {:?} can cover a {}m radius \
+                                 within the cell budget",
+                                availability.precisions(),
+                                radius_meters
+                            )
+                        } else {
+                            crate::physical_plan::catalog::explain_reason(&availability)
+                        };
+                        tracing::warn!(
+                            workspace = %workspace,
+                            property = %property_name,
+                            radius_meters = %radius_meters,
+                            detail = %detail,
+                            "ST_DWITHIN will NOT use the spatial index; the predicate is \
+                             kept as a row-level filter (correct, but a full scan)"
+                        );
+                    }
+                    usable
+                }
                 CanonicalPredicate::References { .. } => true,
                 CanonicalPredicate::Other(_) => false,
             };

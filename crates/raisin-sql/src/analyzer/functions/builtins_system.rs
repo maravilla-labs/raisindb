@@ -134,6 +134,17 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
         category: FunctionCategory::Geospatial,
     });
 
+    // ST_ASGEOJSON(geometry, max_decimals) - round every ordinate on the way out,
+    // which is the practical way to shrink a tile payload (5 places is about a
+    // metre of longitude, 7 about a centimetre).
+    registry.register(FunctionSignature {
+        name: "ST_ASGEOJSON".into(),
+        params: vec![DataType::Geometry, DataType::Int],
+        return_type: DataType::Text,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
     registry.register(FunctionSignature {
         name: "ST_DISTANCE".into(),
         params: vec![DataType::Geometry, DataType::Geometry],
@@ -221,7 +232,9 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
     registry.register(FunctionSignature {
         name: "ST_AZIMUTH".into(),
         params: vec![DataType::Geometry, DataType::Geometry],
-        return_type: DataType::Double,
+        // Nullable: the azimuth from a point to itself is undefined, and the
+        // arguments may not be single locations at all.
+        return_type: DataType::Nullable(Box::new(DataType::Double)),
         is_deterministic: true,
         category: FunctionCategory::Geospatial,
     });
@@ -300,6 +313,25 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
         category: FunctionCategory::Geospatial,
     });
 
+    // ST_RELATE - the raw DE-9IM matrix that backs every predicate above.
+    // Two overloads, resolved by arity (see FunctionRegistry::resolve): the
+    // 2-argument form returns the nine-character matrix, the 3-argument form
+    // tests it against a DE-9IM pattern.
+    registry.register(FunctionSignature {
+        name: "ST_RELATE".into(),
+        params: vec![DataType::Geometry, DataType::Geometry],
+        return_type: DataType::Text,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+    registry.register(FunctionSignature {
+        name: "ST_RELATE".into(),
+        params: vec![DataType::Geometry, DataType::Geometry, DataType::Text],
+        return_type: DataType::Boolean,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
     // --- New accessor/info functions ---
 
     // ST_GEOMETRYTYPE - Get geometry type as string
@@ -334,6 +366,47 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
         name: "ST_SRID".into(),
         params: vec![DataType::Geometry],
         return_type: DataType::Int,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // --- Coordinate reference systems ---
+    //
+    // ST_SETSRID relabels; ST_TRANSFORM reprojects. Both take the target CRS as
+    // an INTEGER EPSG code or as a TEXT form ('EPSG:2056', 'SRID=2056',
+    // 'urn:ogc:def:crs:EPSG::2056'), which is two overloads each. The registry
+    // resolves overloads by `params.len()` and then by coercion, so a second
+    // signature of the same arity but a different parameter type is exactly how a
+    // union-typed argument is expressed here.
+
+    // ST_SETSRID - Reassign the CRS label without touching coordinates
+    registry.register(FunctionSignature {
+        name: "ST_SETSRID".into(),
+        params: vec![DataType::Geometry, DataType::Int],
+        return_type: DataType::Geometry,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+    registry.register(FunctionSignature {
+        name: "ST_SETSRID".into(),
+        params: vec![DataType::Geometry, DataType::Text],
+        return_type: DataType::Geometry,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_TRANSFORM - Reproject into another CRS
+    registry.register(FunctionSignature {
+        name: "ST_TRANSFORM".into(),
+        params: vec![DataType::Geometry, DataType::Int],
+        return_type: DataType::Geometry,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+    registry.register(FunctionSignature {
+        name: "ST_TRANSFORM".into(),
+        params: vec![DataType::Geometry, DataType::Text],
+        return_type: DataType::Geometry,
         is_deterministic: true,
         category: FunctionCategory::Geospatial,
     });
@@ -374,12 +447,48 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
         category: FunctionCategory::Geospatial,
     });
 
+    // ST_ISVALIDREASON - Explain why a geometry is invalid.
+    //
+    // The companion to ST_ISVALID: that one says whether, this one says why, and
+    // ST_MAKEVALID repairs. Returns the literal "Valid Geometry" for valid input,
+    // as PostGIS does, so diagnostic queries port unchanged.
+    registry.register(FunctionSignature {
+        name: "ST_ISVALIDREASON".into(),
+        params: vec![DataType::Geometry],
+        return_type: DataType::Text,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_MAKEVALID - Repair an invalid geometry, leaving valid input untouched.
+    registry.register(FunctionSignature {
+        name: "ST_MAKEVALID".into(),
+        params: vec![DataType::Geometry],
+        return_type: DataType::Geometry,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
     // --- Geometry processing functions ---
 
-    // ST_BUFFER - Create buffer polygon around geometry at distance
+    // ST_BUFFER - Create buffer polygon around geometry at distance.
+    //
+    // The distance is METRES on a geographic CRS and native units on a projected
+    // one. Two arities: the optional third argument is the number of straight
+    // segments per quarter circle, so a smaller value gives a coarser outline.
+    // Overloads work because `FunctionRegistry` keys a Vec of signatures per name
+    // and resolves on argument count.
     registry.register(FunctionSignature {
         name: "ST_BUFFER".into(),
         params: vec![DataType::Geometry, DataType::Double],
+        return_type: DataType::Geometry,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    registry.register(FunctionSignature {
+        name: "ST_BUFFER".into(),
+        params: vec![DataType::Geometry, DataType::Double, DataType::Int],
         return_type: DataType::Geometry,
         is_deterministic: true,
         category: FunctionCategory::Geospatial,
@@ -497,7 +606,11 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
         category: FunctionCategory::Geospatial,
     });
 
-    // ST_MAKEENVELOPE - Create a rectangular Polygon from bounds
+    // ST_MAKEENVELOPE - Create a rectangular Polygon from bounds.
+    //
+    // Argument order is (xmin, ymin, xmax, ymax) = (west, south, east, north),
+    // following the pinned (longitude, latitude) axis order. The optional fifth
+    // argument LABELS the result's SRID; it does not reproject.
     registry.register(FunctionSignature {
         name: "ST_MAKEENVELOPE".into(),
         params: vec![
@@ -505,6 +618,20 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
             DataType::Double,
             DataType::Double,
             DataType::Double,
+        ],
+        return_type: DataType::Geometry,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    registry.register(FunctionSignature {
+        name: "ST_MAKEENVELOPE".into(),
+        params: vec![
+            DataType::Double,
+            DataType::Double,
+            DataType::Double,
+            DataType::Double,
+            DataType::Int,
         ],
         return_type: DataType::Geometry,
         is_deterministic: true,
@@ -521,12 +648,16 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
     });
 
     // --- Line operations ---
+    //
+    // All four are NULLABLE on purpose: they are defined for a single linear
+    // component, and a geometry column holding a mix of types must not abort the
+    // query on its first polygon. That is PostGIS's behaviour too.
 
     // ST_STARTPOINT - Return the first point of a LineString
     registry.register(FunctionSignature {
         name: "ST_STARTPOINT".into(),
         params: vec![DataType::Geometry],
-        return_type: DataType::Geometry,
+        return_type: DataType::Nullable(Box::new(DataType::Geometry)),
         is_deterministic: true,
         category: FunctionCategory::Geospatial,
     });
@@ -535,25 +666,112 @@ fn register_geospatial(registry: &mut FunctionRegistry) {
     registry.register(FunctionSignature {
         name: "ST_ENDPOINT".into(),
         params: vec![DataType::Geometry],
-        return_type: DataType::Geometry,
+        return_type: DataType::Nullable(Box::new(DataType::Geometry)),
         is_deterministic: true,
         category: FunctionCategory::Geospatial,
     });
 
-    // ST_POINTN - Return the Nth point of a LineString (1-based)
+    // ST_POINTN - Return the Nth point of a LineString.
+    //
+    // 1-based, and a negative index counts back from the end (-1 is the last
+    // vertex). Out of range is NULL rather than an error, because paths in a column
+    // have different lengths.
     registry.register(FunctionSignature {
         name: "ST_POINTN".into(),
         params: vec![DataType::Geometry, DataType::Int],
+        return_type: DataType::Nullable(Box::new(DataType::Geometry)),
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_LINEINTERPOLATEPOINT - Point at fraction along a LineString, measured by
+    // GEODESIC length on a geographic CRS rather than in raw coordinate units.
+    registry.register(FunctionSignature {
+        name: "ST_LINEINTERPOLATEPOINT".into(),
+        params: vec![DataType::Geometry, DataType::Double],
+        return_type: DataType::Nullable(Box::new(DataType::Geometry)),
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+    // === Three-dimensional support ===
+    //
+    // Altitude is metres above the WGS84 ellipsoid. These are the ONLY functions
+    // that look at the third ordinate; every other ST_* function is 2-D, exactly
+    // as PostGIS's 2-D predicates are.
+    //
+    // The nullable return types are load-bearing: ST_Z of a 2-D point and
+    // ST_3DDISTANCE involving a 2-D operand are SQL NULL, not errors, so a query
+    // over a mixed-dimension column does not fail on its first flat row.
+
+    // ST_Z - Altitude of a Point; NULL when 2-D or not a Point
+    registry.register(FunctionSignature {
+        name: "ST_Z".into(),
+        params: vec![DataType::Geometry],
+        return_type: DataType::Nullable(Box::new(DataType::Double)),
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_ZMIN / ST_ZMAX - Vertical extent of any geometry
+    registry.register(FunctionSignature {
+        name: "ST_ZMIN".into(),
+        params: vec![DataType::Geometry],
+        return_type: DataType::Nullable(Box::new(DataType::Double)),
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    registry.register(FunctionSignature {
+        name: "ST_ZMAX".into(),
+        params: vec![DataType::Geometry],
+        return_type: DataType::Nullable(Box::new(DataType::Double)),
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_NDIMS - Coordinate dimension: 2 or 3
+    registry.register(FunctionSignature {
+        name: "ST_NDIMS".into(),
+        params: vec![DataType::Geometry],
+        return_type: DataType::Int,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_FORCE2D - Drop every altitude
+    registry.register(FunctionSignature {
+        name: "ST_FORCE2D".into(),
+        params: vec![DataType::Geometry],
         return_type: DataType::Geometry,
         is_deterministic: true,
         category: FunctionCategory::Geospatial,
     });
 
-    // ST_LINEINTERPOLATEPOINT - Point at fraction along a LineString
+    // ST_FORCE3D - Fill in missing altitudes, keeping any already present
     registry.register(FunctionSignature {
-        name: "ST_LINEINTERPOLATEPOINT".into(),
+        name: "ST_FORCE3D".into(),
         params: vec![DataType::Geometry, DataType::Double],
         return_type: DataType::Geometry,
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_3DDISTANCE - hypot(geodesic horizontal, vertical gap), in metres
+    registry.register(FunctionSignature {
+        name: "ST_3DDISTANCE".into(),
+        params: vec![DataType::Geometry, DataType::Geometry],
+        return_type: DataType::Nullable(Box::new(DataType::Double)),
+        is_deterministic: true,
+        category: FunctionCategory::Geospatial,
+    });
+
+    // ST_3DDWITHIN - ST_3DDISTANCE <= d. No index support; pair it with a 2-D
+    // ST_DWITHIN on the same radius for an index-driven candidate set, which is
+    // safe because horizontal distance is a lower bound on 3-D distance.
+    registry.register(FunctionSignature {
+        name: "ST_3DDWITHIN".into(),
+        params: vec![DataType::Geometry, DataType::Geometry, DataType::Double],
+        return_type: DataType::Nullable(Box::new(DataType::Boolean)),
         is_deterministic: true,
         category: FunctionCategory::Geospatial,
     });

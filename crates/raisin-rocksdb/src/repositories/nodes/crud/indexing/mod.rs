@@ -111,6 +111,111 @@ impl NodeRepositoryImpl {
         // 7. Add relation indexes
         self.add_relation_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
+        // 8. Add spatial indexes.
+        //
+        // This path (`storage.nodes().add(...)`) wrote node blob, path, node_path,
+        // property, system-property, reference and relation indexes and NO spatial
+        // index — so any caller of the repository API produced geometry that was
+        // invisible to `ST_DWITHIN`, with no error. Delegates to the ONE shared
+        // spatial writer, which is also what the transaction and replication paths
+        // call.
+        self.add_spatial_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
+
         Ok(())
+    }
+
+    /// Stage spatial index entries for every geometry-valued property of `node`.
+    ///
+    /// The policy is read from the LOCAL index-state records, which cache the
+    /// resolved configuration per property — this path is synchronous and cannot
+    /// perform the async schema load the transaction path does.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_spatial_indexes(
+        &self,
+        batch: &mut WriteBatch,
+        node: &Node,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+    ) -> Result<()> {
+        use raisin_models::nodes::properties::PropertyValue;
+
+        // Cheap early exit: most nodes carry no geometry, and this keeps the added
+        // cost of the new step at one map scan for them.
+        if !node
+            .properties
+            .values()
+            .any(|v| matches!(v, PropertyValue::Geometry(_)))
+        {
+            return Ok(());
+        }
+
+        let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        let spatial_state = crate::spatial_state::SpatialStateStore::new(self.db.clone());
+        let policies =
+            crate::indexing::NodeSpatialPolicies::from_local_state(&spatial_state, &ctx, node);
+        let targets = crate::indexing::SpatialIndexTargets::from_db(self.db.as_ref())?;
+
+        crate::indexing::write_node_spatial_indexes(
+            batch, &targets, &ctx, node, revision, &policies,
+        )?;
+
+        for (prop_name, prop_value) in &node.properties {
+            if !matches!(prop_value, PropertyValue::Geometry(_)) {
+                continue;
+            }
+            spatial_state.ensure_for_write(
+                batch,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                prop_name,
+                policies.for_property(prop_name),
+                *revision,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Tombstone the spatial entries `old_node` holds that `new_node` supersedes.
+    ///
+    /// `new_node == None` means the node is being deleted. An unchanged geometry is
+    /// left alone: the re-write reproduces byte-identical keys and values, so
+    /// tombstoning it would be pure MVCC churn on every update to any other property.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_spatial_tombstones_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        old_node: &Node,
+        new_node: Option<&Node>,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        revision: &HLC,
+    ) -> Result<()> {
+        use raisin_models::nodes::properties::PropertyValue;
+
+        if !old_node
+            .properties
+            .values()
+            .any(|v| matches!(v, PropertyValue::Geometry(_)))
+        {
+            return Ok(());
+        }
+
+        let ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        let spatial_state = crate::spatial_state::SpatialStateStore::new(self.db.clone());
+        let policies =
+            crate::indexing::NodeSpatialPolicies::from_local_state(&spatial_state, &ctx, old_node);
+        let targets = crate::indexing::SpatialIndexTargets::from_db(self.db.as_ref())?;
+
+        crate::indexing::spatial::tombstone_superseded_spatial_indexes(
+            batch, &targets, &ctx, old_node, new_node, revision, &policies,
+        )
     }
 }

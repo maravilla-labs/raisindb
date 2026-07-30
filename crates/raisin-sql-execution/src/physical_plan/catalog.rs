@@ -7,7 +7,24 @@
 //! # Architecture
 //!
 //! The catalog pattern allows different storage backends to advertise their
-//! capabilities without the physical planner needing to know storage-specific details.
+//! capabilities without the physical planner needing to know storage-specific
+//! details.
+//!
+//! # The spatial index is different, and why
+//!
+//! Every other index here is a *capability* question ("is the CF present, is
+//! Tantivy configured"), answerable with a `bool` that is constant for the
+//! process. The spatial index is a *state* question, per workspace and per
+//! property: the entries only exist if something wrote them, and a workspace
+//! upgraded from a release without spatial indexing has none at all.
+//!
+//! Answering it with a hardcoded `true` — which is what this file did — combined
+//! with a planner that removed `ST_DWITHIN` from the residual filter produced the
+//! worst failure mode a database has: **zero rows, silently, with no error and no
+//! fallback**. `spatial_index_availability` replaces that with a scoped query
+//! that **fails closed**: the default is `NotBuilt`, so a backend that has not
+//! wired up a state source gets a correct (slower) full scan rather than a fast
+//! wrong answer.
 //!
 //! # Example
 //!
@@ -23,6 +40,16 @@
 //! let catalog_no_fts = RocksDBIndexCatalog::without_fulltext();
 //! assert!(!catalog_no_fts.has_fulltext_index());
 //! ```
+
+mod spatial_availability;
+
+pub use spatial_availability::{
+    bucket_property, explain_reason, radius_is_covered, SpatialAvailability, SpatialStateSource,
+    GEOHASH_CELL_RADIUS_METERS,
+};
+
+use std::fmt;
+use std::sync::Arc;
 
 /// Trait for querying available indexes in the storage engine
 ///
@@ -54,13 +81,29 @@ pub trait IndexCatalog: Send + Sync {
     /// - `to_tsvector('english', content) @@ to_tsquery('english', 'query')`
     fn has_fulltext_index(&self) -> bool;
 
-    /// Check if spatial_index column family is available
+    /// Whether the spatial index for this scope's `workspace`.`property` may be
+    /// used to drive a scan, and on what terms.
     ///
-    /// The spatial_index supports geohash-based proximity queries:
-    /// - `ST_DWithin(properties->>'location', ST_Point(-122.4, 37.8), 1000)`
+    /// # This method must fail closed
     ///
-    /// Key format: `{tenant}\0{repo}\0{branch}\0{workspace}\0geo\0{property}\0{geohash}\0{~revision}\0{node_id}`
-    fn has_spatial_index(&self) -> bool;
+    /// The default returns [`SpatialAvailability::NotBuilt`]. That is deliberate
+    /// and load-bearing: the presence of the `spatial_index` column family says
+    /// nothing about whether it holds entries for this workspace and property,
+    /// and a catalog with no state source cannot know. Answering "probably yes"
+    /// would reintroduce the silent-empty bug this signature exists to remove.
+    ///
+    /// Callers must treat a non-`Ready` answer as "do not use the index, keep the
+    /// predicate as a row-level filter, and say so in EXPLAIN".
+    fn spatial_index_availability(
+        &self,
+        _tenant_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        _workspace: &str,
+        _property: &str,
+    ) -> SpatialAvailability {
+        SpatialAvailability::NotBuilt
+    }
 
     /// Check if compound_index column family is available
     ///
@@ -101,6 +144,10 @@ pub trait IndexCatalog: Send + Sync {
     }
 
     /// Get a list of all available index names (for debugging/EXPLAIN)
+    ///
+    /// `spatial_index` is deliberately absent: availability is per workspace and
+    /// per property, so there is no honest process-wide answer. Ask
+    /// [`Self::spatial_index_availability`] instead.
     fn available_indexes(&self) -> Vec<String> {
         let mut indexes = Vec::new();
         if self.has_path_index() {
@@ -111,9 +158,6 @@ pub trait IndexCatalog: Send + Sync {
         }
         if self.has_fulltext_index() {
             indexes.push("fulltext_index".to_string());
-        }
-        if self.has_spatial_index() {
-            indexes.push("spatial_index".to_string());
         }
         if self.has_compound_index() {
             indexes.push("compound_index".to_string());
@@ -128,25 +172,45 @@ pub trait IndexCatalog: Send + Sync {
 /// 1. **path_index** - Always available (core hierarchy support)
 /// 2. **property_index** - Always available (core property lookups)
 /// 3. **fulltext_index** - Depends on Tantivy indexer configuration
+/// 4. **spatial_index** - CF always present, but *populated* per workspace and
+///    property; see [`Self::with_spatial_state`].
 ///
 /// # Notes
 ///
 /// - The path_index and property_index are always present in RocksDB
 /// - Full-text search requires the Tantivy indexer to be enabled
-/// - This catalog does NOT check if indexes exist at runtime - it represents
-///   the expected configuration
-#[derive(Debug, Clone)]
+/// - Apart from the spatial index, this catalog does NOT check whether indexes
+///   exist at runtime — it represents the expected configuration
+#[derive(Clone)]
 pub struct RocksDBIndexCatalog {
     /// Whether Tantivy full-text index is enabled
     has_fulltext: bool,
+    /// Source of per-(workspace, property) spatial index build state.
+    ///
+    /// `None` means "unknown", which resolves to
+    /// [`SpatialAvailability::NotBuilt`] — never to "assume it works".
+    spatial_state: Option<Arc<dyn SpatialStateSource>>,
+}
+
+impl fmt::Debug for RocksDBIndexCatalog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RocksDBIndexCatalog")
+            .field("has_fulltext", &self.has_fulltext)
+            .field("spatial_state", &self.spatial_state.is_some())
+            .finish()
+    }
 }
 
 impl RocksDBIndexCatalog {
-    /// Create a new catalog with all indexes enabled
+    /// Create a new catalog with all *capability* indexes enabled.
     ///
-    /// This is the default configuration for RaisinDB with Tantivy.
+    /// The spatial index reports `NotBuilt` until a state source is attached with
+    /// [`Self::with_spatial_state`].
     pub fn new() -> Self {
-        Self { has_fulltext: true }
+        Self {
+            has_fulltext: true,
+            spatial_state: None,
+        }
     }
 
     /// Create a catalog without full-text search
@@ -155,6 +219,7 @@ impl RocksDBIndexCatalog {
     pub fn without_fulltext() -> Self {
         Self {
             has_fulltext: false,
+            spatial_state: None,
         }
     }
 
@@ -162,7 +227,30 @@ impl RocksDBIndexCatalog {
     pub fn with_fulltext(enabled: bool) -> Self {
         Self {
             has_fulltext: enabled,
+            spatial_state: None,
         }
+    }
+
+    /// Attach the source of per-(workspace, property) spatial index build state.
+    ///
+    /// Without this, every spatial predicate falls back to a row-level filter on
+    /// an ordinary scan — correct, slower, and loudly reported in EXPLAIN.
+    pub fn with_spatial_state(mut self, source: Arc<dyn SpatialStateSource>) -> Self {
+        self.spatial_state = Some(source);
+        self
+    }
+
+    /// Attach a state source if the backend has one.
+    ///
+    /// Convenience for `Storage::spatial_state()`, which returns `None` for
+    /// backends that cannot report build state. `None` keeps the fail-closed
+    /// default.
+    pub fn with_optional_spatial_state(
+        mut self,
+        source: Option<Arc<dyn SpatialStateSource>>,
+    ) -> Self {
+        self.spatial_state = source;
+        self
     }
 }
 
@@ -187,10 +275,21 @@ impl IndexCatalog for RocksDBIndexCatalog {
         self.has_fulltext
     }
 
-    fn has_spatial_index(&self) -> bool {
-        // spatial_index CF is always present in RocksDB
-        // It uses geohash-based indexing for proximity queries
-        true
+    fn spatial_index_availability(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        property: &str,
+    ) -> SpatialAvailability {
+        match &self.spatial_state {
+            Some(source) => {
+                source.spatial_availability(tenant_id, repo_id, branch, workspace, property)
+            }
+            // FAIL CLOSED. The CF exists; that is not the question.
+            None => SpatialAvailability::NotBuilt,
+        }
     }
 }
 
@@ -198,22 +297,43 @@ impl IndexCatalog for RocksDBIndexCatalog {
 mod tests {
     use super::*;
 
+    /// A state source that reports one fixed answer, for the fail-closed tests.
+    #[derive(Debug)]
+    struct FixedState(SpatialAvailability);
+
+    impl SpatialStateSource for FixedState {
+        fn spatial_availability(
+            &self,
+            _tenant_id: &str,
+            _repo_id: &str,
+            _branch: &str,
+            _workspace: &str,
+            _property: &str,
+        ) -> SpatialAvailability {
+            self.0.clone()
+        }
+    }
+
+    fn availability(catalog: &RocksDBIndexCatalog) -> SpatialAvailability {
+        catalog.spatial_index_availability("default", "default", "main", "shops", "location")
+    }
+
     #[test]
     fn test_rocksdb_catalog_default() {
         let catalog = RocksDBIndexCatalog::new();
         assert!(catalog.has_path_index());
         assert!(catalog.has_property_index());
         assert!(catalog.has_fulltext_index());
-        assert!(catalog.has_spatial_index());
         assert!(catalog.has_compound_index());
 
         let indexes = catalog.available_indexes();
-        assert_eq!(indexes.len(), 5);
+        assert_eq!(indexes.len(), 4);
         assert!(indexes.contains(&"path_index".to_string()));
         assert!(indexes.contains(&"property_index".to_string()));
         assert!(indexes.contains(&"fulltext_index".to_string()));
-        assert!(indexes.contains(&"spatial_index".to_string()));
         assert!(indexes.contains(&"compound_index".to_string()));
+        // Per-property state, so no process-wide entry.
+        assert!(!indexes.contains(&"spatial_index".to_string()));
     }
 
     #[test]
@@ -222,15 +342,10 @@ mod tests {
         assert!(catalog.has_path_index());
         assert!(catalog.has_property_index());
         assert!(!catalog.has_fulltext_index());
-        assert!(catalog.has_spatial_index());
         assert!(catalog.has_compound_index());
 
         let indexes = catalog.available_indexes();
-        assert_eq!(indexes.len(), 4);
-        assert!(indexes.contains(&"path_index".to_string()));
-        assert!(indexes.contains(&"property_index".to_string()));
-        assert!(indexes.contains(&"spatial_index".to_string()));
-        assert!(indexes.contains(&"compound_index".to_string()));
+        assert_eq!(indexes.len(), 3);
     }
 
     #[test]
@@ -246,5 +361,36 @@ mod tests {
     fn test_default_trait() {
         let catalog = RocksDBIndexCatalog::default();
         assert!(catalog.has_fulltext_index());
+    }
+
+    /// The regression this whole signature exists for: a catalog with no state
+    /// source must NOT claim the spatial index is usable.
+    #[test]
+    fn spatial_availability_fails_closed_without_a_state_source() {
+        let catalog = RocksDBIndexCatalog::new();
+        assert!(matches!(
+            availability(&catalog),
+            SpatialAvailability::NotBuilt
+        ));
+        assert!(!availability(&catalog).is_ready());
+    }
+
+    #[test]
+    fn spatial_availability_delegates_to_the_state_source() {
+        let ready = SpatialAvailability::Ready {
+            precisions: vec![11, 10, 9, 8, 7, 6, 4, 2],
+            built_through: raisin_hlc::HLC::now(),
+            bucket_property: Some("floor".to_string()),
+        };
+        let catalog = RocksDBIndexCatalog::new().with_spatial_state(Arc::new(FixedState(ready)));
+        assert!(availability(&catalog).is_ready());
+        assert_eq!(
+            availability(&catalog).precisions(),
+            &[11, 10, 9, 8, 7, 6, 4, 2]
+        );
+
+        let unusable = SpatialAvailability::Unusable("state record is corrupt".to_string());
+        let catalog = RocksDBIndexCatalog::new().with_spatial_state(Arc::new(FixedState(unusable)));
+        assert!(!availability(&catalog).is_ready());
     }
 }

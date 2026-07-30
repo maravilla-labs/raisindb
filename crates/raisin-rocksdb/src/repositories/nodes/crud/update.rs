@@ -149,6 +149,21 @@ impl NodeRepositoryImpl {
             &mut batch, &old_node, &node, tenant_id, repo_id, branch, workspace, &revision,
         )?;
 
+        // Spatial index: tombstone the OLD geometry's cells BEFORE writing the new
+        // ones. Without this a moved node matches at BOTH its old and its new
+        // location, which is the read-side stale-entry bug seen from the write side.
+        // Cells are derived from `old_node`'s geometry, never discovered by a scan.
+        self.add_spatial_tombstones_to_batch(
+            &mut batch,
+            &old_node,
+            Some(&node),
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            &revision,
+        )?;
+
         // Use shared indexing helper (DRY)
         self.add_node_indexes_to_batch(
             &mut batch, &node, tenant_id, repo_id, branch, workspace, &revision,

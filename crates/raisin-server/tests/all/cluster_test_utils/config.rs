@@ -105,12 +105,18 @@ impl ClusterConfig {
 /// # Returns
 /// TOML configuration as a string
 pub fn generate_toml_config(config: &NodeConfig, peers: &[&NodeConfig]) -> String {
+    // Every node shares one JWT secret so a token minted on one is verifiable on
+    // any other. Without an explicit secret the server refuses to start at all
+    // ("JWT_SECRET is not set or uses the insecure default"), which is how every
+    // cluster test in this suite came to fail during health check with nothing but
+    // an ERROR line in the node log to explain it.
     let mut toml = format!(
         r#"[server]
 port = {}
 bind_address = "{}"
 data_dir = "{}"
 initial_admin_password = "{}"
+jwt_secret = "test-secret-key-for-integration-tests-only-32chars!"
 
 [replication]
 enabled = true

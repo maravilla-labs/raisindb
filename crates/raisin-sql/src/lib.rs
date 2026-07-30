@@ -438,6 +438,9 @@ impl QueryPlan {
             AnalyzedStatement::AIConfig(ai) => {
                 output.push_str(&format!("AI CONFIG {}\n", ai.operation()));
             }
+            AnalyzedStatement::SpatialAdmin(stmt) => {
+                output.push_str(&format!("SPATIAL ADMIN {}\n", stmt.operation()));
+            }
         }
 
         output.push_str("\n=== Logical Plan (Unoptimized) ===\n");

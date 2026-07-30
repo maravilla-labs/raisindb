@@ -1,0 +1,27 @@
+[package]
+name = "raisin-geometry"
+version = "0.1.0"
+edition = "2021"
+description = "The single conversion layer between RaisinDB's GeoJSON model, serde_json and georust geo-types"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+geo = { workspace = true }
+geojson = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+raisin-error = { path = "../raisin-error" }
+raisin-models = { path = "../raisin-models" }
+raisin-proj = { path = "../raisin-proj" }
+
+[features]
+default = []
+# Forwarded projection tiers. See `raisin-proj` for what each one costs to build;
+# `proj-backend` compiles libproj from source when pkg-config finds nothing.
+proj4rs-backend = ["raisin-proj/proj4rs-backend"]
+proj-backend = ["raisin-proj/proj-backend"]
+proj-backend-bundled = ["raisin-proj/proj-backend-bundled"]

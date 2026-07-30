@@ -64,8 +64,11 @@ impl RocksDBStorage {
         // Create revision and branch repositories first (needed by nodes repository)
         let revision_repo_arc = Arc::new(RevisionRepositoryImpl::new(db.clone(), node_id));
         let branch_repo_arc = Arc::new(BranchRepositoryImpl::new(db.clone()));
-        let workspaces = WorkspaceRepositoryImpl::new(db.clone(), event_bus.clone());
-        let workspace_repo_arc = Arc::new(workspaces.clone());
+        // NOTE: the workspace repository is deliberately NOT built here. It needs
+        // the operation capture that is constructed further down, and building it
+        // early is exactly why workspace records never replicated: the capture-less
+        // instance was the one that ended up in the storage struct. It is built
+        // once, after `operation_capture` exists, below.
 
         // Initialize unified job system components
         let job_metadata_store = Arc::new(JobMetadataStore::new(db.clone()));
@@ -138,6 +141,15 @@ impl RocksDBStorage {
             BranchRepositoryImpl::new_with_capture(db.clone(), operation_capture.clone())
                 .with_job_system(job_registry.clone(), job_data_store.clone()),
         );
+
+        // Build the workspace repository now that operation capture exists, so a
+        // workspace config change (spatial policy included) fans out to peers.
+        let workspaces = WorkspaceRepositoryImpl::new_with_capture(
+            db.clone(),
+            event_bus.clone(),
+            operation_capture.clone(),
+        );
+        let workspace_repo_arc = Arc::new(workspaces.clone());
 
         // Create schema repositories with operation capture now that it's available
         let node_type_repo_arc = Arc::new(NodeTypeRepositoryImpl::new_with_capture(

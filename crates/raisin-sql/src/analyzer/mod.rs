@@ -237,6 +237,30 @@ impl Analyzer {
             }
         }
 
+        // 2e9. Check for spatial index admin statements. Ahead of the AI config
+        // check only for readability; the two guards are disjoint.
+        tracing::debug!("   Checking for spatial index admin statements...");
+        if crate::ast::spatial_admin_parser::is_spatial_admin_statement(sql) {
+            match crate::ast::spatial_admin_parser::parse_spatial_admin(sql) {
+                Ok(Some(stmt)) => {
+                    tracing::debug!(
+                        "   Spatial index admin statement detected: {}",
+                        stmt.operation()
+                    );
+                    return Ok(AnalyzedStatement::SpatialAdmin(stmt));
+                }
+                Ok(None) => {
+                    tracing::debug!("   Not a spatial index admin statement, continuing...");
+                }
+                Err(e) => {
+                    return Err(AnalysisError::ParseError(format!(
+                        "Spatial index admin parse error: {}",
+                        e.message
+                    )));
+                }
+            }
+        }
+
         // 2f0. Check for AI config statements
         tracing::debug!("   Checking for AI config statements...");
         if crate::ast::ai_config_parser::is_ai_config_statement(sql) {

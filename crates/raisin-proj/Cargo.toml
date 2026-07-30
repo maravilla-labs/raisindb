@@ -1,0 +1,36 @@
+[package]
+name = "raisin-proj"
+version = "0.1.0"
+edition = "2021"
+description = "Coordinate reference systems and reprojection for RaisinDB (multi-SRID support)"
+license = "BSL-1.1"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Default is pure Rust with ZERO system dependencies. The built-in backend
+# covers WGS84 <-> WebMercator and all 120 UTM zones exactly (see `builtin`).
+default = []
+
+# Pure-Rust broad-EPSG backend (proj4rs). No C toolchain, no system libraries,
+# WASM-friendly. Adds ~1000 EPSG definitions via `crs-definitions`.
+proj4rs-backend = ["dep:proj4rs", "dep:crs-definitions"]
+
+# Full PROJ backend (C libproj >= 9.6 via pkg-config). Datum-accurate, complete
+# EPSG database, grid shifts. REQUIRES libproj on the build AND run host.
+proj-backend = ["dep:proj"]
+
+# As above, but builds libproj from vendored source instead of using the system
+# copy. Requires a C/C++ toolchain plus sqlite3 and libtiff development headers.
+proj-backend-bundled = ["proj-backend", "proj?/bundled_proj"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+geo = { workspace = true }
+
+proj4rs = { version = "0.1.10", optional = true, features = ["crs-definitions"] }
+crs-definitions = { version = "0.3", optional = true }
+proj = { version = "0.31", optional = true }

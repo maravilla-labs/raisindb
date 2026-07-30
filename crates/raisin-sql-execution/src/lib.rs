@@ -10,8 +10,15 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-// TODO(v0.2): Update deprecated API usages (geo crate migration) and clean up
-#![allow(deprecated)]
+// NOTE: there is deliberately no crate-wide `#![allow(deprecated)]` here any
+// more. It used to sit at the top of this file with a "TODO(v0.2): geo crate
+// migration" comment, and it is why a six-month-stale set of `geo` idioms
+// (`HaversineLength`, `HaversineDistance`, `HaversineClosestPoint`, all
+// `#[deprecated(since = "0.29.0")]`) produced no signal at all while the geospatial
+// functions quietly rotted around them. Those call sites are gone, the crate is
+// deprecation-clean, and keeping it that way means the next upstream deprecation is
+// visible the day it lands. If a single call genuinely must use a deprecated API,
+// put `#[allow(deprecated)]` on that item — not on the crate.
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
@@ -107,5 +114,7 @@ pub use physical_plan::{
     RowAccumulator,
     RowStream,
     SchemaStats,
+    SpatialAvailability,
+    SpatialStateSource,
     VectorDistanceMetric,
 };

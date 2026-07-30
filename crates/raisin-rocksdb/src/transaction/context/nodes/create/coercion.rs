@@ -113,16 +113,16 @@ fn try_coerce_to_geometry(
 /// Validate that coordinates in a GeoJSON geometry are within valid WGS84 ranges.
 fn validate_geometry_coordinates(geo: &GeoJson, field_name: &str) -> Result<()> {
     match geo {
-        GeoJson::Point { coordinates } => {
+        GeoJson::Point { coordinates, .. } => {
             validate_coordinate(coordinates[0], coordinates[1], field_name)
         }
-        GeoJson::LineString { coordinates } => {
+        GeoJson::LineString { coordinates, .. } => {
             for coord in coordinates {
                 validate_coordinate(coord[0], coord[1], field_name)?;
             }
             Ok(())
         }
-        GeoJson::Polygon { coordinates } => {
+        GeoJson::Polygon { coordinates, .. } => {
             for ring in coordinates {
                 for coord in ring {
                     validate_coordinate(coord[0], coord[1], field_name)?;
@@ -130,7 +130,7 @@ fn validate_geometry_coordinates(geo: &GeoJson, field_name: &str) -> Result<()> 
             }
             Ok(())
         }
-        GeoJson::MultiPoint { coordinates } => {
+        GeoJson::MultiPoint { coordinates, .. } => {
             for coord in coordinates {
                 validate_coordinate(coord[0], coord[1], field_name)?;
             }
@@ -204,7 +204,7 @@ mod tests {
         let result = try_coerce_to_geometry(&value, "location").unwrap();
         assert!(result.is_some());
         match result.unwrap() {
-            PropertyValue::Geometry(GeoJson::Point { coordinates }) => {
+            PropertyValue::Geometry(GeoJson::Point { coordinates, .. }) => {
                 assert!((coordinates[0] - 139.6503).abs() < 1e-10); // lon
                 assert!((coordinates[1] - 35.6762).abs() < 1e-10); // lat
             }
@@ -222,7 +222,7 @@ mod tests {
         let result = try_coerce_to_geometry(&value, "location").unwrap();
         assert!(result.is_some());
         match result.unwrap() {
-            PropertyValue::Geometry(GeoJson::Point { coordinates }) => {
+            PropertyValue::Geometry(GeoJson::Point { coordinates, .. }) => {
                 assert!((coordinates[0] - (-0.1278)).abs() < 1e-10);
                 assert!((coordinates[1] - 51.5074).abs() < 1e-10);
             }
@@ -284,9 +284,7 @@ mod tests {
 
     #[test]
     fn test_already_geometry_invalid_coords_rejected() {
-        let value = PropertyValue::Geometry(GeoJson::Point {
-            coordinates: [500.0, 200.0],
-        });
+        let value = PropertyValue::Geometry(GeoJson::point(500.0, 200.0));
         let result = try_coerce_to_geometry(&value, "location");
         assert!(result.is_err());
     }

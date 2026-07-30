@@ -46,8 +46,7 @@ pub(in crate::replication::application) async fn apply_delete_node(
         &node_snapshot,
     )?;
 
-    super::super::replication_core::apply_replicated_delete(
-        applicator,
+    applicator.apply_replicated_delete(
         tenant_id,
         repo_id,
         branch,

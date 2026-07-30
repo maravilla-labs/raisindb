@@ -317,9 +317,34 @@ where
         }
     }
 
+    /// Describe a prepared statement: parameter types **and the row description**.
+    ///
+    /// # Why the row description cannot be omitted here
+    ///
+    /// This used to return an empty field list for everything except `SHOW`, on the
+    /// stated assumption that "client will get schema on portal describe". Most
+    /// clients do not: `tokio-postgres`, and every driver built the same way
+    /// (JDBC, psycopg3, asyncpg), issue `Parse` + `Describe(statement)` once at
+    /// prepare time and cache the resulting `RowDescription` as the shape of every
+    /// later execution. Answering with zero columns therefore told them the
+    /// statement returns nothing, and the first `DataRow` was rejected outright with
+    /// *"DataRow field count does not match the number of columns"* — for
+    /// `SELECT 1 AS one` as surely as for a spatial query.
+    ///
+    /// So the whole extended/prepared protocol was unusable, which also made the
+    /// extended path's type mapping unobservable: `DataType::Geometry` was described
+    /// as `TEXT` there and `JSONB` on the simple-query path for a long time without
+    /// anything noticing, because no client ever got far enough to read a column.
+    ///
+    /// The schema is inferred from the SQL by the analyzer — the same
+    /// `infer_schema_from_sql` that `do_describe_portal` and the empty-result branch
+    /// of `do_query` already use — so all three agree by construction. A statement
+    /// whose schema cannot be inferred (a session `SET`, a DML statement, an
+    /// unanalysable fragment) still answers with no columns, which is the correct
+    /// description for a statement that returns no rows.
     async fn do_describe_statement<C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         stmt: &StoredStatement<Self::Statement>,
     ) -> PgWireResult<DescribeStatementResponse>
     where
@@ -330,7 +355,8 @@ where
         // Get parameter types from the statement
         let param_types = stmt.parameter_types.clone();
 
-        let sql_lower = stmt.statement.sql.trim().to_lowercase();
+        let sql = stmt.statement.sql.trim();
+        let sql_lower = sql.to_lowercase();
 
         // Handle SHOW commands - return single TEXT column
         if sql_lower.starts_with("show ") {
@@ -348,8 +374,16 @@ where
             }
         }
 
-        // For other statements, return empty fields (client will get schema on portal describe)
-        let fields = Vec::new();
+        // Session commands and anything else that produces no result set.
+        if sql_lower.starts_with("set ") || sql_lower.starts_with("reset ") {
+            return Ok(DescribeStatementResponse::new(param_types, Vec::new()));
+        }
+
+        let fields = self
+            .describe_sql_columns(client, sql)
+            .await
+            .unwrap_or_default();
+        debug!("Describing statement: {} column(s)", fields.len());
 
         Ok(DescribeStatementResponse::new(param_types, fields))
     }
@@ -397,46 +431,13 @@ where
             return Ok(DescribePortalResponse::new(Vec::new()));
         }
 
-        // Get connection context from auth handler
-        let context = match self.auth_handler.get_context(client) {
-            Some(ctx) => ctx,
-            None => {
-                warn!("No connection context for describe portal");
-                return Ok(DescribePortalResponse::new(Vec::new()));
-            }
-        };
-
-        // Fetch workspaces for catalog
-        let workspaces = match self
-            .storage
-            .workspaces()
-            .list(RepoScope::new(&context.tenant_id, &context.repository))
+        // Same inference as `Describe(statement)`, deliberately: the two must agree
+        // about the column count or the client rejects the first DataRow.
+        let fields = self
+            .describe_sql_columns(client, &sql)
             .await
-        {
-            Ok(ws) => ws,
-            Err(e) => {
-                warn!("Failed to fetch workspaces for describe: {}", e);
-                return Ok(DescribePortalResponse::new(Vec::new()));
-            }
-        };
-
-        // Create catalog with workspaces
-        let mut catalog = StaticCatalog::default_nodes_schema();
-        for workspace in &workspaces {
-            catalog.register_workspace(workspace.name.clone());
-        }
-        let catalog = Arc::new(catalog);
-
-        // Use analyzer to infer schema from SQL without executing
-        match self.infer_schema_from_sql(&sql, &catalog) {
-            Ok(fields) => {
-                debug!("Inferred {} columns for portal", fields.len());
-                Ok(DescribePortalResponse::new(fields.to_vec()))
-            }
-            Err(e) => {
-                warn!("Failed to infer schema for describe: {}", e);
-                Ok(DescribePortalResponse::new(Vec::new()))
-            }
-        }
+            .unwrap_or_default();
+        debug!("Inferred {} columns for portal", fields.len());
+        Ok(DescribePortalResponse::new(fields))
     }
 }

@@ -17,8 +17,11 @@ mod job_helpers;
 mod node_handlers;
 mod replication_handlers;
 mod repo_handlers;
+mod spatial_reconcile;
 mod trigger_helpers;
 
+#[cfg(test)]
+mod spatial_reconcile_tests;
 #[cfg(test)]
 mod tests;
 
@@ -56,6 +59,14 @@ pub struct UnifiedJobEventHandler {
     trigger_registry: Option<Arc<TriggerRegistry<RocksDBStorage>>>,
     /// Processing rules repository for per-repo asset processing configuration
     processing_rules: ProcessingRulesRepositoryImpl,
+}
+
+impl UnifiedJobEventHandler {
+    /// The raw database handle, for the sync index-state reads the spatial
+    /// reconciliation arm needs.
+    pub(crate) fn storage_db(&self) -> std::sync::Arc<rocksdb::DB> {
+        self.storage.db.clone()
+    }
 }
 
 impl UnifiedJobEventHandler {

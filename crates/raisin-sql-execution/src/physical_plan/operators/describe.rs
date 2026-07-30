@@ -126,11 +126,34 @@ impl PhysicalPlan {
                 center_lon,
                 center_lat,
                 radius_meters,
+                limit,
+                claims_distance_order,
+                bucket_eq,
                 ..
             } => {
                 format!(
-                    "SpatialDistanceScan: {}=ST_DWithin(POINT({:.4}, {:.4}), {:.0}m)",
-                    property_name, center_lon, center_lat, radius_meters
+                    "SpatialDistanceScan: {}=ST_DWithin(POINT({:.4}, {:.4}), {:.0}m) limit={:?}{}{}",
+                    property_name,
+                    center_lon,
+                    center_lat,
+                    radius_meters,
+                    limit,
+                    // The discriminator pre-filter is otherwise invisible: it changes
+                    // only how many candidate node records the scan fetches, never
+                    // which rows come out (the predicate it derives from always stays
+                    // in the residual filter). Printing it is the only way a test — or
+                    // an operator wondering why a floor-filtered query is slow — can
+                    // tell whether it engaged.
+                    match bucket_eq {
+                        Some((property, value)) =>
+                            format!(", bucket {property}='{value}' (pre-filter)"),
+                        None => String::new(),
+                    },
+                    if *claims_distance_order {
+                        ", distance-ordered (Sort elided)"
+                    } else {
+                        ""
+                    }
                 )
             }
             PhysicalPlan::SpatialKnnScan {

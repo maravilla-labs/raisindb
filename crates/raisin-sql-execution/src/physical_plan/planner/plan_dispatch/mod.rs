@@ -9,12 +9,14 @@
 //! - `limit` - Limit planning with pushdown and vector k-NN
 //! - `aggregate` - Aggregate planning with COUNT(*) optimizations
 //! - `dml` - DML operation dispatch (Insert, Update, Delete, etc.)
+//! - `spatial_knn` - Spatial k-NN (`ORDER BY ST_DISTANCE ... LIMIT k`) detection
 //! - `vector_knn` - Vector k-NN pattern detection within limit planning
 
 mod aggregate;
 mod dml;
 mod limit;
 mod scan;
+mod spatial_knn;
 mod vector_knn;
 
 use super::{Error, LogicalPlan, PhysicalPlan, PhysicalPlanner, PlanContext, SortExpr};
@@ -140,8 +142,13 @@ impl PhysicalPlanner {
                 // Extract sort column and direction to pass to child operators
                 let mut new_context = context.clone();
                 if let Some(first_sort) = sort_exprs.first() {
+                    let is_asc = first_sort.ascending;
+                    // Always record the verbatim expression: a scan needs to know
+                    // an ORDER BY exists even when its key is not a column name
+                    // (e.g. ORDER BY ST_DISTANCE(...)), or it will happily bound
+                    // its output in its OWN order and return the wrong rows.
+                    new_context = new_context.with_order_by_expr(first_sort.expr.clone(), is_asc);
                     if let Some(column_name) = Self::extract_column_name(&first_sort.expr) {
-                        let is_asc = first_sort.ascending;
                         new_context = new_context.with_order_by(column_name, is_asc);
                         tracing::debug!(
                             "Propagating ORDER BY {:?} to child operators",
@@ -416,11 +423,25 @@ impl PhysicalPlanner {
         if sort_exprs.len() != 1 {
             return false;
         }
-        let column = match Self::extract_column_name(&sort_exprs[0].expr) {
-            Some(column) => column,
-            None => return false,
-        };
-        if !matches!(column.as_str(), "__order" | "__tree_order") {
+        let sort = &sort_exprs[0];
+
+        // Ascending distance order, spelled either as the emitted `__distance`
+        // column or as the ST_DISTANCE call itself. Descending is NOT elidable:
+        // the index walks nearest-first and has no cheap reverse.
+        let by_distance_column = matches!(
+            Self::extract_column_name(&sort.expr).as_deref(),
+            Some("__distance")
+        );
+        let by_distance_expr =
+            raisin_sql::optimizer::hierarchy_rewrite::extract_distance_order(&sort.expr)
+                .filter(|order| order.exact);
+        let wants_distance_order =
+            sort.ascending && (by_distance_column || by_distance_expr.is_some());
+
+        let editorial_column = Self::extract_column_name(&sort.expr)
+            .filter(|c| matches!(c.as_str(), "__order" | "__tree_order"));
+
+        if editorial_column.is_none() && !wants_distance_order {
             return false;
         }
 
@@ -431,7 +452,38 @@ impl PhysicalPlanner {
                 PhysicalPlan::PrefixScan {
                     claims_editorial_order,
                     ..
-                } => return *claims_editorial_order,
+                } => return editorial_column.is_some() && *claims_editorial_order,
+                PhysicalPlan::SpatialDistanceScan {
+                    property_name,
+                    center_lon,
+                    center_lat,
+                    claims_distance_order,
+                    ..
+                }
+                | PhysicalPlan::SpatialKnnScan {
+                    property_name,
+                    center_lon,
+                    center_lat,
+                    claims_distance_order,
+                    ..
+                } => {
+                    if !wants_distance_order || !*claims_distance_order {
+                        return false;
+                    }
+                    // An explicit ST_DISTANCE key must be measuring the SAME
+                    // property from the SAME centre as the scan, or the scan's
+                    // order is not the requested order at all.
+                    return match &by_distance_expr {
+                        Some(order) => {
+                            order.property_name == *property_name
+                                && order.center_lon == *center_lon
+                                && order.center_lat == *center_lat
+                        }
+                        // `__distance` is by definition the column this scan
+                        // emits, so it always matches.
+                        None => true,
+                    };
+                }
                 _ => return false,
             }
         }

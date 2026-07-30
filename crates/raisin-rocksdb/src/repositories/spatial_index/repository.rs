@@ -1,14 +1,23 @@
-//! Core spatial index repository with geohash-based indexing and query methods.
+//! Core spatial index repository: geohash-based writes and proximity queries.
+//!
+//! Writes delegate to `crate::indexing::spatial`, which is the only code allowed
+//! to construct a spatial index key. This file owns the READ side.
 
+use crate::indexing::{IndexCtx, SpatialIndexTargets};
 use crate::{cf, cf_handle, keys, spatial};
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::GeoJson;
+use raisin_models::nodes::properties::{GeoJson, SpatialPolicy};
 use rocksdb::{WriteBatch, DB};
 use std::sync::Arc;
 
-use super::SpatialIndexEntry;
-use raisin_storage::spatial::ProximityResult;
+use super::entry::SpatialEntry;
+use raisin_storage::spatial::{ProximityResult, SpatialIndexEntry, SpatialPreFilter};
+
+mod knn;
+mod scan;
+
+pub use knn::KnnRingPlan;
 
 /// Repository for managing geospatial indexes
 #[derive(Clone)]
@@ -21,10 +30,13 @@ impl SpatialIndexRepository {
         Self { db }
     }
 
-    /// Index a geometry property for a node at multiple precisions
+    /// Index a geometry property for a node at every precision in `policy`.
     ///
-    /// Creates index entries at precisions 4-8 to support queries at various
-    /// zoom levels. Each entry is keyed by geohash + revision for MVCC support.
+    /// Standalone variant that commits its own batch. Prefer
+    /// [`Self::index_geometry_to_batch`] wherever a caller already has a batch —
+    /// committing separately opens a window in which the node record exists but its
+    /// index entries do not.
+    #[allow(clippy::too_many_arguments)]
     pub fn index_geometry(
         &self,
         tenant_id: &str,
@@ -35,40 +47,30 @@ impl SpatialIndexRepository {
         property_name: &str,
         geometry: &GeoJson,
         revision: &HLC,
+        policy: &SpatialPolicy,
+        bucket: Option<&str>,
     ) -> Result<()> {
-        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
-
-        // Get centroid and generate geohashes at all precisions
-        let geohashes = spatial::geohashes_for_geometry(geometry);
-        if geohashes.is_empty() {
-            return Ok(()); // Invalid geometry, nothing to index
-        }
-
-        for geohash in &geohashes {
-            let key = keys::spatial_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                property_name,
-                geohash,
-                revision,
-                node_id,
-            );
-
-            // Value stores the centroid for efficient distance calculation without node lookup
-            if let Some((lon, lat)) = spatial::geometry_centroid(geometry) {
-                let value = format!("{},{}", lon, lat);
-                self.db
-                    .put_cf(cf, key, value.as_bytes())
-                    .map_err(|e| Error::storage(e.to_string()))?;
-            }
-        }
-
-        Ok(())
+        let mut batch = WriteBatch::default();
+        self.index_geometry_to_batch(
+            &mut batch,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node_id,
+            property_name,
+            geometry,
+            revision,
+            policy,
+            bucket,
+        )?;
+        self.db
+            .write(batch)
+            .map_err(|e| Error::storage(e.to_string()))
     }
 
     /// Index a geometry into a WriteBatch (for atomic commits with node data).
+    #[allow(clippy::too_many_arguments)]
     pub fn index_geometry_to_batch(
         &self,
         batch: &mut WriteBatch,
@@ -80,36 +82,31 @@ impl SpatialIndexRepository {
         property_name: &str,
         geometry: &GeoJson,
         revision: &HLC,
+        policy: &SpatialPolicy,
+        bucket: Option<&str>,
     ) -> Result<()> {
-        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
-
-        let geohashes = spatial::geohashes_for_geometry(geometry);
-        if geohashes.is_empty() {
-            return Ok(());
-        }
-
-        for geohash in &geohashes {
-            let key = keys::spatial_index_key_versioned(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                property_name,
-                geohash,
-                revision,
-                node_id,
-            );
-
-            if let Some((lon, lat)) = spatial::geometry_centroid(geometry) {
-                let value = format!("{},{}", lon, lat);
-                batch.put_cf(cf, key, value.as_bytes());
-            }
-        }
-
-        Ok(())
+        let targets = SpatialIndexTargets::from_db(&self.db)?;
+        let ctx = IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        crate::indexing::write_spatial_property(
+            batch,
+            &targets,
+            &ctx,
+            node_id,
+            property_name,
+            geometry,
+            revision,
+            policy,
+            bucket,
+        )
     }
 
-    /// Tombstone spatial index entries for a node into a WriteBatch.
+    /// Tombstone the spatial index entries for a node's OLD geometry.
+    ///
+    /// Takes the old geometry so the cells can be **derived** rather than
+    /// discovered by scanning. The previous signature omitted it and prefix-scanned
+    /// the whole workspace property range per update — O(all geometries in the
+    /// workspace) for a single-node write.
+    #[allow(clippy::too_many_arguments)]
     pub fn unindex_geometry_to_batch(
         &self,
         batch: &mut WriteBatch,
@@ -119,53 +116,27 @@ impl SpatialIndexRepository {
         workspace: &str,
         node_id: &str,
         property_name: &str,
+        old_geometry: &GeoJson,
         revision: &HLC,
+        policy: &SpatialPolicy,
     ) -> Result<()> {
-        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
-
-        let prefix = keys::spatial_index_property_prefix(
-            tenant_id,
-            repo_id,
-            branch,
-            workspace,
+        let targets = SpatialIndexTargets::from_db(&self.db)?;
+        let ctx = IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        crate::indexing::spatial::tombstone_spatial_property(
+            batch,
+            &targets,
+            &ctx,
+            node_id,
             property_name,
-        );
-
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
-        for item in iter {
-            let (key, _) = item.map_err(|e| Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            let key_str = String::from_utf8_lossy(&key);
-            if key_str.ends_with(&format!("\0{}", node_id)) {
-                let parts: Vec<&str> = key_str.split('\0').collect();
-                if parts.len() >= 7 {
-                    let geohash = parts[6];
-                    let tombstone_key = keys::spatial_index_key_versioned(
-                        tenant_id,
-                        repo_id,
-                        branch,
-                        workspace,
-                        property_name,
-                        geohash,
-                        revision,
-                        node_id,
-                    );
-                    batch.put_cf(cf, tombstone_key, b"T");
-                }
-            }
-        }
-
-        Ok(())
+            old_geometry,
+            revision,
+            policy,
+        )
     }
 
-    /// Remove spatial index entries for a node (creates tombstone at revision)
-    ///
-    /// Rather than physically deleting, we write tombstones for MVCC consistency.
-    /// The tombstones will be cleaned up during garbage collection.
+    /// Tombstone spatial index entries for a node's OLD geometry, committing
+    /// immediately.
+    #[allow(clippy::too_many_arguments)]
     pub fn unindex_geometry(
         &self,
         tenant_id: &str,
@@ -174,60 +145,35 @@ impl SpatialIndexRepository {
         workspace: &str,
         node_id: &str,
         property_name: &str,
+        old_geometry: &GeoJson,
         revision: &HLC,
+        policy: &SpatialPolicy,
     ) -> Result<()> {
-        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
-
-        // Scan all entries for this property and write tombstones
-        let prefix = keys::spatial_index_property_prefix(
+        let mut batch = WriteBatch::default();
+        self.unindex_geometry_to_batch(
+            &mut batch,
             tenant_id,
             repo_id,
             branch,
             workspace,
+            node_id,
             property_name,
-        );
-
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
-        for item in iter {
-            let (key, _) = item.map_err(|e| Error::storage(e.to_string()))?;
-
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            // Check if this entry is for our node
-            // Key format: ...{geohash}\0{~rev}\0{node_id}
-            let key_str = String::from_utf8_lossy(&key);
-            if key_str.ends_with(&format!("\0{}", node_id)) {
-                // Extract geohash from key for tombstone
-                let parts: Vec<&str> = key_str.split('\0').collect();
-                if parts.len() >= 7 {
-                    let geohash = parts[6]; // geo\0property\0geohash\0...
-                    let tombstone_key = keys::spatial_index_key_versioned(
-                        tenant_id,
-                        repo_id,
-                        branch,
-                        workspace,
-                        property_name,
-                        geohash,
-                        revision,
-                        node_id,
-                    );
-                    // Tombstone marker
-                    self.db
-                        .put_cf(cf, tombstone_key, b"T")
-                        .map_err(|e| Error::storage(e.to_string()))?;
-                }
-            }
-        }
-
-        Ok(())
+            old_geometry,
+            revision,
+            policy,
+        )?;
+        self.db
+            .write(batch)
+            .map_err(|e| Error::storage(e.to_string()))
     }
 
-    /// Scan spatial index entries matching geohash cells
+    /// Scan spatial index entries matching geohash cells.
     ///
-    /// Low-level scan that returns entries from multiple geohash cells.
-    /// Used internally by higher-level query functions.
+    /// Low-level scan returning entries from multiple geohash cells, with MVCC
+    /// resolution: for each node only the newest revision at or before
+    /// `max_revision` is considered, and if that revision is a tombstone the node is
+    /// excluded entirely.
+    #[allow(clippy::too_many_arguments)]
     pub fn scan_cells(
         &self,
         tenant_id: &str,
@@ -239,78 +185,39 @@ impl SpatialIndexRepository {
         max_revision: &HLC,
         limit: usize,
     ) -> Result<Vec<SpatialIndexEntry>> {
-        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
-        let mut results = Vec::new();
-        let mut seen_nodes = std::collections::HashSet::new();
-
-        for cell in cells {
-            if results.len() >= limit {
-                break;
-            }
-
-            let prefix = keys::spatial_index_geohash_prefix(
+        let mut results: Vec<SpatialIndexEntry> = self
+            .resolve_live_candidates(
                 tenant_id,
                 repo_id,
                 branch,
                 workspace,
                 property_name,
-                cell,
-            );
+                cells,
+                max_revision,
+                &SpatialPreFilter::default(),
+            )?
+            .into_iter()
+            .map(|c| SpatialIndexEntry {
+                node_id: c.node_id,
+                geohash: c.geohash,
+                revision: c.revision,
+            })
+            .collect();
 
-            let iter = self.db.prefix_iterator_cf(cf, &prefix);
-            for item in iter {
-                if results.len() >= limit {
-                    break;
-                }
-
-                let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
-
-                if !key.starts_with(&prefix) {
-                    break;
-                }
-
-                // Skip tombstones
-                if value.as_ref() == b"T" {
-                    continue;
-                }
-
-                // Extract node_id from key (last component)
-                let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-                if parts.len() < 2 {
-                    continue;
-                }
-
-                let node_id = String::from_utf8_lossy(parts[parts.len() - 1]).to_string();
-
-                // Deduplicate (same node may appear at multiple precisions)
-                if seen_nodes.contains(&node_id) {
-                    continue;
-                }
-
-                // Check revision (HLC is stored before node_id)
-                if let Ok(revision) =
-                    keys::extract_revision_from_key(&key[..key.len() - node_id.len() - 1])
-                {
-                    // Only include if at or before max_revision
-                    if revision <= *max_revision {
-                        seen_nodes.insert(node_id.clone());
-                        results.push(SpatialIndexEntry {
-                            node_id,
-                            geohash: cell.clone(),
-                            revision,
-                        });
-                    }
-                }
-            }
-        }
-
+        // Stable output regardless of the resolution map's iteration order, so a
+        // `limit` truncation is deterministic across runs and across nodes.
+        results.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        results.truncate(limit);
         Ok(results)
     }
 
-    /// Find nodes within a given distance of a point
+    /// Find nodes within a given distance of a point.
     ///
-    /// Uses geohash cell expansion to efficiently find candidate nodes,
-    /// then filters by exact Haversine distance.
+    /// `precisions` must be the precisions the index was **actually built at**. When
+    /// no cell plan can cover the requested radius the call returns an error rather
+    /// than a partial result set, so the planner falls back to a scan instead of
+    /// answering the query wrongly.
+    #[allow(clippy::too_many_arguments)]
     pub fn find_within_radius(
         &self,
         tenant_id: &str,
@@ -323,116 +230,55 @@ impl SpatialIndexRepository {
         radius_meters: f64,
         max_revision: &HLC,
         limit: usize,
+        precisions: &[usize],
+        prefilter: &SpatialPreFilter,
     ) -> Result<Vec<ProximityResult>> {
-        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
+        let precisions = if precisions.is_empty() {
+            spatial::INDEX_PRECISIONS
+        } else {
+            precisions
+        };
 
-        // Get cells to scan based on radius
-        let cells = spatial::cells_for_radius(center_lon, center_lat, radius_meters);
-
-        let mut results = Vec::new();
-        let mut seen_nodes = std::collections::HashSet::new();
-
-        for cell in &cells {
-            let prefix = keys::spatial_index_geohash_prefix(
-                tenant_id,
-                repo_id,
-                branch,
-                workspace,
-                property_name,
-                cell,
-            );
-
-            let iter = self.db.prefix_iterator_cf(cf, &prefix);
-            for item in iter {
-                let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
-
-                if !key.starts_with(&prefix) {
-                    break;
-                }
-
-                // Skip tombstones
-                if value.as_ref() == b"T" {
-                    continue;
-                }
-
-                // Extract node_id and parse centroid from value
-                let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-                if parts.len() < 2 {
-                    continue;
-                }
-
-                let node_id = String::from_utf8_lossy(parts[parts.len() - 1]).to_string();
-
-                // Deduplicate
-                if seen_nodes.contains(&node_id) {
-                    continue;
-                }
-
-                // Check revision
-                if let Ok(revision) =
-                    keys::extract_revision_from_key(&key[..key.len() - node_id.len() - 1])
-                {
-                    if revision > *max_revision {
-                        continue;
-                    }
-                }
-
-                // Parse centroid from value
-                let value_str = String::from_utf8_lossy(&value);
-                let coords: Vec<&str> = value_str.split(',').collect();
-                if coords.len() != 2 {
-                    continue;
-                }
-
-                let lon: f64 = match coords[0].parse() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        tracing::warn!(
-                            raw = coords[0],
-                            "Failed to parse longitude from spatial index, skipping"
-                        );
-                        continue;
-                    }
-                };
-                let lat: f64 = match coords[1].parse() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        tracing::warn!(
-                            raw = coords[1],
-                            "Failed to parse latitude from spatial index, skipping"
-                        );
-                        continue;
-                    }
-                };
-
-                // Calculate exact Haversine distance
-                let distance = haversine_distance(center_lon, center_lat, lon, lat);
-
-                // Filter by actual radius
-                if distance <= radius_meters {
-                    seen_nodes.insert(node_id.clone());
-                    results.push(ProximityResult {
-                        node_id,
-                        distance_meters: distance,
-                        centroid: (lon, lat),
-                    });
-                }
+        let plan = spatial::plan_radius_scan(center_lon, center_lat, radius_meters, precisions);
+        let cells = match &plan {
+            spatial::SpatialScanPlan::Covering { cells, .. } => cells.clone(),
+            spatial::SpatialScanPlan::NotCovering => {
+                return Err(Error::storage(format!(
+                    "spatial index cannot cover a {radius_meters} m radius at precisions {precisions:?} \
+                     within the cell budget; the caller must fall back to a scan"
+                )));
             }
-        }
+        };
 
-        // Sort by distance
+        let candidates = self.resolve_live_candidates(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            property_name,
+            &cells,
+            max_revision,
+            prefilter,
+        )?;
+
+        let mut results: Vec<ProximityResult> = candidates
+            .into_iter()
+            .filter_map(|c| {
+                let distance = haversine_distance(center_lon, center_lat, c.entry.lon, c.entry.lat);
+                (distance <= radius_meters).then(|| c.into_proximity(distance))
+            })
+            .collect();
+
         results.sort_by(|a, b| a.distance_meters.total_cmp(&b.distance_meters));
-
-        // Apply limit
         results.truncate(limit);
-
         Ok(results)
     }
 
-    /// Find k nearest neighbors to a point
+    /// Find the k nearest neighbours to a point.
     ///
-    /// Uses progressive ring expansion to find the k nearest nodes efficiently.
-    /// Starts with a small cell and expands outward until enough results found.
+    /// See [`knn`] for the stopping rule and why the previous implementation was
+    /// both dead and wrong.
+    #[allow(clippy::too_many_arguments)]
     pub fn find_nearest(
         &self,
         tenant_id: &str,
@@ -444,51 +290,128 @@ impl SpatialIndexRepository {
         center_lat: f64,
         k: usize,
         max_revision: &HLC,
+        precisions: &[usize],
+        prefilter: &SpatialPreFilter,
     ) -> Result<Vec<ProximityResult>> {
-        // Start with precision 7 (about 150m cells) and expand if needed
-        let mut precision = 7;
-        let mut results = Vec::new();
+        knn::find_nearest(
+            self,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            property_name,
+            center_lon,
+            center_lat,
+            k,
+            max_revision,
+            precisions,
+            prefilter,
+        )
+    }
 
-        while precision >= 4 && results.len() < k {
-            let center_hash = match spatial::encode_point(center_lon, center_lat, precision) {
-                Some(h) => h,
-                None => break,
+    /// Iterate the workspace's spatial keys for one property, tombstoning every
+    /// entry belonging to `node_id`.
+    ///
+    /// **Repair path only.** This is the O(all entries) shape the hot write path used
+    /// to have; it survives so the reindex job can clean up entries whose originating
+    /// geometry is no longer recoverable (e.g. written under a cover mode that has
+    /// since changed). Never call it from a write path.
+    pub fn tombstone_all_entries_for_node(
+        &self,
+        batch: &mut WriteBatch,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        property_name: &str,
+        node_id: &str,
+        revision: &HLC,
+    ) -> Result<usize> {
+        let cf = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
+        let prefix = keys::spatial_index_property_prefix(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            property_name,
+        );
+
+        let mut count = 0usize;
+        for item in self.db.prefix_iterator_cf(cf, &prefix) {
+            let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if value.as_ref() == crate::indexing::SPATIAL_TOMBSTONE {
+                continue;
+            }
+            let Some(parsed) = keys::parse_spatial_index_key(&key) else {
+                continue;
             };
-            let cells = spatial::center_and_neighbors(&center_hash);
-
-            // Use a large radius for initial filtering, actual k-NN will sort
-            let candidates = self.find_within_radius(
+            if parsed.node_id != node_id {
+                continue;
+            }
+            // A tombstone must SUPERSEDE what it tombstones. Resolution is
+            // newest-revision-wins, so a tombstone stamped older than the entry it
+            // targets simply loses and the stale entry stays live. That is not
+            // hypothetical: entries stranded at a future revision (a rebuild used to
+            // stamp wall-clock now, ahead of the branch head) would otherwise
+            // survive every subsequent rebuild forever. Stamping at the entry's own
+            // revision when that is newer makes the tombstone land on the exact key,
+            // which the batch then overwrites — and a live re-emission written after
+            // it in the same batch still wins, as it must.
+            let stamp = if parsed.revision > *revision {
+                parsed.revision
+            } else {
+                *revision
+            };
+            let tombstone_key = keys::spatial_index_key_versioned(
                 tenant_id,
                 repo_id,
                 branch,
                 workspace,
                 property_name,
-                center_lon,
-                center_lat,
-                spatial::precision_radius_meters(precision) * 2.0, // Cover neighbors too
-                max_revision,
-                k * 2, // Get extra candidates for better results
-            )?;
-
-            if candidates.len() >= k || precision <= 4 {
-                results = candidates;
-                break;
-            }
-
-            precision -= 1;
+                parsed.geohash,
+                &stamp,
+                node_id,
+            );
+            batch.put_cf(cf, tombstone_key, crate::indexing::SPATIAL_TOMBSTONE);
+            count += 1;
         }
-
-        // Ensure we have exactly k or fewer results
-        results.truncate(k);
-
-        Ok(results)
+        Ok(count)
     }
 }
 
-/// Calculate Haversine distance between two points in meters
-pub(super) fn haversine_distance(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
-    const EARTH_RADIUS_METERS: f64 = 6_371_008.8; // Mean radius
+/// A live index candidate, resolved across every scanned cell.
+pub(super) struct SpatialCandidate {
+    pub node_id: String,
+    pub geohash: String,
+    pub revision: HLC,
+    pub entry: SpatialEntry,
+}
 
+impl SpatialCandidate {
+    pub(super) fn into_proximity(self, distance_meters: f64) -> ProximityResult {
+        ProximityResult {
+            node_id: self.node_id,
+            distance_meters,
+            centroid: (self.entry.lon, self.entry.lat),
+            bbox: self.entry.bbox,
+            z_range: self.entry.z,
+            srid: self.entry.srid,
+            bucket: self.entry.bucket,
+        }
+    }
+}
+
+/// Calculate Haversine distance between two points in meters.
+///
+/// Uses the GRS80 mean radius, shared with `raisin_geometry::EARTH_MEAN_RADIUS_METERS`
+/// and hence with `ST_DISTANCE`. If the two constants ever diverge, rows flicker in
+/// and out at the radius boundary depending on whether the index post-filter or the
+/// residual SQL filter saw them last — so the equality is asserted by a test rather
+/// than assumed.
+pub(super) fn haversine_distance(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let lat1_rad = lat1.to_radians();
     let lat2_rad = lat2.to_radians();
     let delta_lat = (lat2 - lat1).to_radians();
@@ -498,5 +421,5 @@ pub(super) fn haversine_distance(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> 
         + lat1_rad.cos() * lat2_rad.cos() * (delta_lon / 2.0).sin().powi(2);
     let c = 2.0 * a.sqrt().asin();
 
-    EARTH_RADIUS_METERS * c
+    raisin_geometry::EARTH_MEAN_RADIUS_METERS * c
 }

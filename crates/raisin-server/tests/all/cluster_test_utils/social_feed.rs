@@ -198,7 +198,7 @@ pub async fn create_demo_users(
 
     let mut user_records = Vec::new();
 
-    for (username, full_name, email) in users {
+    for (username, full_name, _email) in users {
         let user_data = json!({
             "id": username,
             "name": username,

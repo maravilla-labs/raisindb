@@ -1,20 +1,31 @@
 //! ST_COVEREDBY function - check if geometry A is covered by geometry B
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::{Contains, Intersects};
+use geo::relate::IntersectionMatrix;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{geojson_to_point, geojson_to_polygon, get_geometry_type};
+use super::relate;
 
-/// Check if geometry A is covered by geometry B (no point of A is outside B)
+/// Check if geometry A is covered by geometry B — no point of A lies outside B.
 ///
 /// # SQL Signature
 /// `ST_COVEREDBY(geometry_a, geometry_b) -> BOOLEAN`
 ///
-/// Inverse of ST_COVERS: ST_COVEREDBY(A, B) = ST_COVERS(B, A)
+/// # Returns
+/// * TRUE if every point of A is in the interior *or* the boundary of B
+/// * FALSE otherwise
+/// * NULL if either input is NULL
+///
+/// # Notes
+/// - The boundary-inclusive sibling of `ST_WITHIN`. A point exactly on
+///   the polygon boundary is FALSE for `ST_WITHIN` and TRUE here, so
+///   `ST_WITHIN(a, b)` implies `ST_COVEREDBY(a, b)` but not the reverse.
+/// - `ST_COVEREDBY(a, b)` is `ST_COVERS(b, a)`.
+/// - Accepts every geometry type on both sides; the previous implementation
+///   handled only `Point` covered by `Polygon` and `Polygon` covered by `Polygon`.
+/// - DE-9IM `[T*F**F***] | [*TF**F***] | [**FT*F***] | [**F*TF***]`.
 pub struct StCoveredByFunction;
 
 impl SqlFunction for StCoveredByFunction {
@@ -32,65 +43,6 @@ impl SqlFunction for StCoveredByFunction {
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_COVEREDBY requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let geom_a_val = eval_expr(&args[0], row)?;
-        if matches!(geom_a_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_b_val = eval_expr(&args[1], row)?;
-        if matches!(geom_b_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_a = match &geom_a_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_COVEREDBY requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom_b = match &geom_b_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_COVEREDBY requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let type_a = get_geometry_type(geom_a)?;
-        let type_b = get_geometry_type(geom_b)?;
-
-        // CoveredBy is the inverse of Covers: swap A and B
-        let covered_by = match (type_a, type_b) {
-            ("Point", "Polygon") => {
-                let point = geojson_to_point(geom_a)?;
-                let polygon = geojson_to_polygon(geom_b)?;
-                polygon.contains(&point) || polygon.exterior().intersects(&point)
-            }
-            ("Polygon", "Polygon") => {
-                let polygon_a = geojson_to_polygon(geom_a)?;
-                let polygon_b = geojson_to_polygon(geom_b)?;
-                polygon_b.contains(&polygon_a)
-            }
-            _ => {
-                return Err(Error::Validation(format!(
-                    "ST_COVEREDBY not supported for {} covered by {}. Currently supports: Point/Polygon covered by Polygon",
-                    type_a, type_b
-                )))
-            }
-        };
-
-        Ok(Literal::Boolean(covered_by))
+        relate::predicate("ST_COVEREDBY", args, row, IntersectionMatrix::is_coveredby)
     }
 }

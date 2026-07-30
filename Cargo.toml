@@ -44,9 +44,9 @@ matchit = "0.8"
 zip = { version = "2.1", default-features = false, features = ["deflate"] }
 
 # Geospatial
-geo = "0.32"
-geojson = { version = "0.24", features = ["geo-types"] }
-geohash = "0.13.1"
+geo = "0.33.1"
+geojson = { version = "1.0", features = ["geo-types"] }
+geohash = "0.13.2"
 
 # Disk/build tuning — keep target/ from ballooning across feature-set rebuilds.
 #

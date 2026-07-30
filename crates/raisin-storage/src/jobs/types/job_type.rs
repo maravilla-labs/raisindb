@@ -97,6 +97,24 @@ pub enum JobType {
         node_type_name: String,
         index_name: String,
     },
+    /// Build or rebuild the geohash spatial index for a workspace.
+    ///
+    /// This is the backfill for data written before spatial indexing existed (or
+    /// before the current precision policy), and the reconciliation step after a
+    /// `policy_hash` change. Each cluster node runs its own build against its own
+    /// local index — the spatial index is derived local state, exactly like the
+    /// Tantivy fulltext index, so there is nothing to coordinate.
+    SpatialIndexBuild {
+        tenant_id: String,
+        repo_id: String,
+        branch: String,
+        workspace: String,
+        /// `None` builds every geometry-valued property in the workspace.
+        property: Option<String>,
+        /// `true` re-emits every entry and tombstones superseded ones; `false`
+        /// only fills gaps (nodes not already covered by the current policy hash).
+        rebuild: bool,
+    },
     BulkSql {
         sql: String,
         actor: String,
@@ -314,6 +332,10 @@ impl JobType {
             JobType::IndexVerify => 600,
             JobType::FulltextRebuild => 600,
             JobType::VectorRebuild => 600,
+            // A full-workspace spatial backfill pages through every node; it
+            // checkpoints its resume cursor so a timeout resumes rather than
+            // restarts.
+            JobType::SpatialIndexBuild { .. } => 600,
             JobType::Backup => 600,
             JobType::Restore => 600,
             // Default for everything else

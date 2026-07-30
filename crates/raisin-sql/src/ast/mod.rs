@@ -47,6 +47,8 @@ pub mod relate;
 pub mod relate_parser;
 pub mod restore;
 pub mod restore_parser;
+pub mod spatial_admin;
+pub mod spatial_admin_parser;
 pub mod transaction;
 pub mod transaction_parser;
 pub mod translate;
@@ -77,6 +79,8 @@ pub use order_parser::{is_order_statement, parse_order};
 pub use parser::{parse_sql, validate_statement};
 pub use relate::{RelateEndpoint, RelateNodeReference, RelateStatement, UnrelateStatement};
 pub use relate_parser::{is_relate_statement, is_unrelate_statement, parse_relate, parse_unrelate};
+pub use spatial_admin::{CoverModeSpec, SpatialAdminStatement, SpatialIndexSettings};
+pub use spatial_admin_parser::{is_spatial_admin_statement, parse_spatial_admin};
 pub use transaction::TransactionStatement;
 pub use transaction_parser::{is_transaction_statement, parse_transaction};
 pub use translate::{

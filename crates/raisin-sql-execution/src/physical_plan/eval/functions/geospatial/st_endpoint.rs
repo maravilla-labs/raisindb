@@ -1,17 +1,31 @@
-//! ST_ENDPOINT function - return the last point of a LineString
+//! ST_ENDPOINT - last vertex of a linear geometry.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
+use geo::Geometry;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{get_geometry_type, point_to_geojson};
+use super::convert::{derived_result, geom_arg};
+use super::line_access::sole_line;
+use super::z_support::expect_arity;
 
-/// Return the last point of a LineString
+const SIGNATURE: &str = "ST_ENDPOINT(geometry) -> GEOMETRY";
+
+/// The last vertex of a linear geometry, as a Point.
 ///
 /// # SQL Signature
 /// `ST_ENDPOINT(geometry) -> GEOMETRY`
+///
+/// # Behaviour
+/// * A one-component `MultiLineString` is accepted; two or more components, or a
+///   non-linear geometry, give `NULL` as in PostGIS.
+/// * `NULL` in, `NULL` out. The CRS survives.
+///
+/// Together with [`ST_STARTPOINT`](super::StStartPointFunction) this is the pair
+/// [`ST_BOUNDARY`](super::StBoundaryFunction) returns for an open line — and
+/// `ST_BOUNDARY` correctly returns *nothing* for a closed one, whereas these two
+/// still report its coincident seam.
 pub struct StEndPointFunction;
 
 impl SqlFunction for StEndPointFunction {
@@ -24,52 +38,21 @@ impl SqlFunction for StEndPointFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_ENDPOINT(geometry) -> GEOMETRY"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 1 {
-            return Err(Error::Validation(
-                "ST_ENDPOINT requires exactly 1 argument".to_string(),
-            ));
-        }
-
-        let geom_val = eval_expr(&args[0], row)?;
-        if matches!(geom_val, Literal::Null) {
+        expect_arity("ST_ENDPOINT", SIGNATURE, args, 1)?;
+        let Some(g) = geom_arg("ST_ENDPOINT", args, 0, row)? else {
             return Ok(Literal::Null);
-        }
-
-        let geom = match &geom_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_ENDPOINT requires GEOMETRY argument".to_string(),
-                ))
-            }
         };
-
-        let geom_type = get_geometry_type(geom)?;
-        if geom_type != "LineString" {
-            return Ok(Literal::Null);
+        match sole_line(&g) {
+            None => Ok(Literal::Null),
+            Some(line) => {
+                let last = line.0[line.0.len() - 1];
+                derived_result(Geometry::Point(last.into()), &g)
+            }
         }
-
-        let coords = geom
-            .get("coordinates")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| Error::Validation("LineString missing coordinates".to_string()))?;
-
-        if coords.is_empty() {
-            return Ok(Literal::Null);
-        }
-
-        let last = coords[coords.len() - 1]
-            .as_array()
-            .ok_or_else(|| Error::Validation("Invalid coordinate".to_string()))?;
-        let lon = last[0].as_f64().unwrap_or(0.0);
-        let lat = last[1].as_f64().unwrap_or(0.0);
-
-        Ok(Literal::Geometry(point_to_geojson(lon, lat)))
     }
 }

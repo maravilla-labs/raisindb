@@ -96,7 +96,11 @@ impl OperationApplicator {
         Ok(())
     }
 
-    /// Apply a single replicated node upsert
+    /// Apply a single replicated node upsert, forcing an `Updated` event.
+    ///
+    /// The `ApplyRevision` path has always reported `Updated` regardless of whether
+    /// the node is new on this replica; preserved verbatim so subscribers and
+    /// triggers see no change.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::replication::application) fn apply_replicated_upsert(
         &self,
@@ -109,6 +113,42 @@ impl OperationApplicator {
         revision: &HLC,
         cf_order_key: &str,
         attribution: EventAttribution<'_>,
+    ) -> Result<()> {
+        self.apply_replicated_upsert_with_event(
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            node,
+            parent_id,
+            revision,
+            cf_order_key,
+            attribution,
+            Some(raisin_events::NodeEventKind::Updated),
+        )
+    }
+
+    /// Apply a single replicated node upsert.
+    ///
+    /// `event_kind` of `None` derives `Created` vs `Updated` from the SOURCE node's
+    /// timestamps (`created_at == updated_at` means the originating write was a
+    /// create), which is what the snapshot path has always done. This parameter
+    /// exists solely so the snapshot and revision paths can share one body without
+    /// either one's event semantics changing — the drift between them was in the
+    /// *indexing*, and that is what has been unified.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::replication::application) fn apply_replicated_upsert_with_event(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        node: &Node,
+        parent_id: Option<&str>,
+        revision: &HLC,
+        cf_order_key: &str,
+        attribution: EventAttribution<'_>,
+        event_kind: Option<raisin_events::NodeEventKind>,
     ) -> Result<()> {
         let mut normalized_node = node.clone();
         normalized_node.has_children = None;
@@ -140,6 +180,25 @@ impl OperationApplicator {
         let cf_reference = cf_handle(&self.db, cf::REFERENCE_INDEX)?;
         let cf_relation = cf_handle(&self.db, cf::RELATION_INDEX)?;
         let cf_ordered = cf_handle(&self.db, cf::ORDERED_CHILDREN)?;
+        let cf_spatial = cf_handle(&self.db, cf::SPATIAL_INDEX)?;
+
+        // Resolve the spatial policy from the LOCAL index-state records before
+        // touching the batch. Policy resolution reads schema, which is async; this
+        // path is sync, so the state record acts as the local cache of the resolved
+        // policy (see `crate::spatial_state`). A property with no record yet falls
+        // back to the default precision set and the write creates the record —
+        // which is what keeps automatic, opt-in-free indexing working on a replica
+        // that has never seen a local write for this property.
+        let spatial_targets = crate::indexing::SpatialIndexTargets {
+            spatial_index: cf_spatial,
+        };
+        let index_ctx = crate::indexing::IndexCtx::new(tenant_id, repo_id, branch, workspace);
+        let spatial_state = crate::spatial_state::SpatialStateStore::new(self.db.clone());
+        let spatial_policies = crate::indexing::NodeSpatialPolicies::from_local_state(
+            &spatial_state,
+            &index_ctx,
+            &normalized_node,
+        );
 
         // Diff against the locally-stored previous version and tombstone
         // stale index entries the snapshot supersedes. Without this a
@@ -171,6 +230,20 @@ impl OperationApplicator {
                 &normalized_node,
                 revision,
             );
+
+            // Stale SPATIAL entries. Derived from `old_node`'s geometry, never by a
+            // prefix scan: a scan here would be O(all geometries in the workspace)
+            // for a single replicated upsert. Without this a replicated MOVE leaves
+            // the peer matching at BOTH the old and the new location.
+            crate::indexing::spatial::tombstone_superseded_spatial_indexes(
+                &mut batch,
+                &spatial_targets,
+                &index_ctx,
+                &old_node,
+                Some(&normalized_node),
+                revision,
+                &spatial_policies,
+            )?;
 
             if old_node.path != normalized_node.path {
                 let old_path_key = keys::path_index_key_versioned(
@@ -236,19 +309,51 @@ impl OperationApplicator {
         );
         batch.put_cf(cf_node_path, node_path_key, normalized_node.path.as_bytes());
 
-        // Use index writer helpers to write all indexes
+        // Use index writer helpers to write all indexes — property, reference,
+        // relation AND spatial. Spatial rides in this same batch, so a replica can
+        // never hold the record without its index entries.
         write_all_node_indexes(
             &mut batch,
-            cf_property,
-            cf_reference,
-            cf_relation,
+            &super::super::index_writers::ReplicationIndexCfs {
+                property: cf_property,
+                reference: cf_reference,
+                relation: cf_relation,
+                spatial: cf_spatial,
+            },
             tenant_id,
             repo_id,
             branch,
             workspace,
             &normalized_node,
             revision,
+            &spatial_policies,
         )?;
+
+        // Create the local index-state record when this replica is seeing a
+        // geometry property for the first time, so the query planner reports
+        // `Ready` rather than falling back to a scan on a fully-indexed replica.
+        for (property_name, value) in &normalized_node.properties {
+            if !matches!(value, PropertyValue::Geometry(_)) {
+                continue;
+            }
+            let policy = spatial_policies.for_property(property_name);
+            if let Err(e) = spatial_state.ensure_for_write(
+                &mut batch,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                property_name,
+                policy,
+                *revision,
+            ) {
+                tracing::warn!(
+                    property = %property_name,
+                    error = %e,
+                    "Could not record spatial index state for replicated node"
+                );
+            }
+        }
 
         if let Some(pid) = parent_id {
             if cf_key_to_use.is_empty() {
@@ -290,6 +395,22 @@ impl OperationApplicator {
             raisin_error::Error::storage(format!("Failed to apply replicated upsert: {}", e))
         })?;
 
+        // Event kind: forced by the caller, or derived from the SOURCE node's
+        // timestamps. Deriving locally (e.g. "did load_latest_node find anything")
+        // would be wrong on a replica that is catching up out of order.
+        let resolved_kind = event_kind.unwrap_or_else(|| {
+            match (normalized_node.created_at, normalized_node.updated_at) {
+                (Some(created), Some(updated)) if created == updated => {
+                    raisin_events::NodeEventKind::Created
+                }
+                (Some(_), Some(_)) => raisin_events::NodeEventKind::Updated,
+                (Some(_), None) => raisin_events::NodeEventKind::Created,
+                // No timestamps: report an update, which is the conservative
+                // choice (a spurious Created can fire create-only side effects).
+                _ => raisin_events::NodeEventKind::Updated,
+            }
+        });
+
         super::super::node_operations::emit_node_event(
             &self.event_bus,
             tenant_id,
@@ -300,7 +421,7 @@ impl OperationApplicator {
             Some(normalized_node.node_type.clone()),
             Some(normalized_node.path.clone()),
             revision,
-            raisin_events::NodeEventKind::Updated,
+            resolved_kind,
             "replication",
             attribution,
         );

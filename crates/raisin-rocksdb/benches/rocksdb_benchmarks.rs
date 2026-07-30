@@ -31,7 +31,8 @@ use raisin_models::nodes::Node;
 use raisin_models::workspace::Workspace;
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::{
-    BranchRepository, NodeRepository, RegistryRepository, RepositoryManagementRepository, Storage,
+    BranchRepository, CreateNodeOptions, DeleteNodeOptions, ListOptions, NodeRepository,
+    RegistryRepository, RepositoryManagementRepository, Storage,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,6 +47,14 @@ mod constants {
     pub const REPO: &str = "bench-repo";
     pub const BRANCH: &str = "main";
     pub const WORKSPACE: &str = "bench-workspace";
+
+    /// Workspace scope shared by every benchmark in this file.
+    pub const SCOPE: raisin_storage::StorageScope<'static> = raisin_storage::StorageScope {
+        tenant_id: TENANT,
+        repo_id: REPO,
+        branch: BRANCH,
+        workspace: WORKSPACE,
+    };
 }
 
 // ============================================================================
@@ -76,6 +85,9 @@ impl BenchStorage {
             default_branch: constants::BRANCH.to_string(),
             description: Some("Benchmark repository".to_string()),
             tags: HashMap::new(),
+            default_language: "en".to_string(),
+            supported_languages: vec!["en".to_string()],
+            locale_fallback_chains: HashMap::new(),
         };
         repo_mgmt
             .create_repository(constants::TENANT, constants::REPO, repo_config)
@@ -90,6 +102,8 @@ impl BenchStorage {
                 constants::BRANCH,
                 "bench-user",
                 None,
+                None,
+                false,
                 false,
             )
             .await
@@ -131,6 +145,7 @@ impl BenchStorage {
             node_type: node_type.to_string(),
             properties: HashMap::new(),
             children: Vec::new(),
+            relations: Vec::new(),
             order_key: "a0".to_string(),
             has_children: None,
             version: 1,
@@ -164,13 +179,7 @@ async fn create_flat_structure(storage: &RocksDBStorage, count: usize) -> Vec<St
         let node_id = node.id.clone();
 
         nodes_repo
-            .put(
-                constants::TENANT,
-                constants::REPO,
-                constants::BRANCH,
-                constants::WORKSPACE,
-                node,
-            )
+            .create(constants::SCOPE, node, CreateNodeOptions::default())
             .await
             .expect("Failed to create node");
 
@@ -201,13 +210,7 @@ async fn create_binary_tree(
     let root_id = root.id.clone();
 
     nodes_repo
-        .put(
-            constants::TENANT,
-            constants::REPO,
-            constants::BRANCH,
-            constants::WORKSPACE,
-            root,
-        )
+        .create(constants::SCOPE, root, CreateNodeOptions::default())
         .await
         .expect("Failed to create root");
 
@@ -230,13 +233,7 @@ async fn create_binary_tree(
             let left_id = left_node.id.clone();
 
             nodes_repo
-                .put(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
-                    left_node,
-                )
+                .create(constants::SCOPE, left_node, CreateNodeOptions::default())
                 .await
                 .expect("Failed to create left child");
 
@@ -254,13 +251,7 @@ async fn create_binary_tree(
             let right_id = right_node.id.clone();
 
             nodes_repo
-                .put(
-                    constants::TENANT,
-                    constants::REPO,
-                    constants::BRANCH,
-                    constants::WORKSPACE,
-                    right_node,
-                )
+                .create(constants::SCOPE, right_node, CreateNodeOptions::default())
                 .await
                 .expect("Failed to create right child");
 
@@ -321,13 +312,7 @@ fn bench_flat_reorder(c: &mut Criterion) {
                         let nodes = storage.nodes();
                         // List root to get actual child names
                         let children = nodes
-                            .list_root(
-                                constants::TENANT,
-                                constants::REPO,
-                                constants::BRANCH,
-                                constants::WORKSPACE,
-                                None,
-                            )
+                            .list_root(constants::SCOPE, ListOptions::default())
                             .await
                             .expect("Failed to list root");
 
@@ -337,15 +322,7 @@ fn bench_flat_reorder(c: &mut Criterion) {
                             let child_name = &children[middle_idx].name;
                             black_box(
                                 nodes
-                                    .reorder_child(
-                                        constants::TENANT,
-                                        constants::REPO,
-                                        constants::BRANCH,
-                                        constants::WORKSPACE,
-                                        "/",
-                                        child_name,
-                                        0,
-                                    )
+                                    .reorder_child(constants::SCOPE, "/", child_name, 0, None, None)
                                     .await
                                     .ok(),
                             );
@@ -386,11 +363,9 @@ fn bench_flat_delete(c: &mut Criterion) {
                         black_box(
                             nodes
                                 .delete(
-                                    constants::TENANT,
-                                    constants::REPO,
-                                    constants::BRANCH,
-                                    constants::WORKSPACE,
+                                    constants::SCOPE,
                                     &node_ids[middle_idx],
+                                    DeleteNodeOptions::default(),
                                 )
                                 .await
                                 .expect("Failed to delete"),
@@ -435,6 +410,8 @@ fn bench_flat_branch_create(c: &mut Criterion) {
                                     &branch_name,
                                     "bench-user",
                                     None,
+                                    None,
+                                    false,
                                     false,
                                 )
                                 .await
@@ -473,13 +450,7 @@ fn bench_flat_list_root(c: &mut Criterion) {
                         let nodes = storage.nodes();
                         black_box(
                             nodes
-                                .list_root(
-                                    constants::TENANT,
-                                    constants::REPO,
-                                    constants::BRANCH,
-                                    constants::WORKSPACE,
-                                    None,
-                                )
+                                .list_root(constants::SCOPE, ListOptions::default())
                                 .await
                                 .expect("Failed to list root"),
                         );
@@ -542,13 +513,12 @@ fn bench_tree_reorder(c: &mut Criterion) {
                         black_box(
                             nodes
                                 .reorder_child(
-                                    constants::TENANT,
-                                    constants::REPO,
-                                    constants::BRANCH,
-                                    constants::WORKSPACE,
+                                    constants::SCOPE,
                                     "/tree-root",
                                     "l000000",
                                     1,
+                                    None,
+                                    None,
                                 )
                                 .await
                                 .ok(), // Ignore errors if child doesn't exist
@@ -588,13 +558,7 @@ fn bench_tree_delete(c: &mut Criterion) {
                         if let Some((node_id, _, _)) = nodes_info.last() {
                             black_box(
                                 nodes
-                                    .delete(
-                                        constants::TENANT,
-                                        constants::REPO,
-                                        constants::BRANCH,
-                                        constants::WORKSPACE,
-                                        node_id,
-                                    )
+                                    .delete(constants::SCOPE, node_id, DeleteNodeOptions::default())
                                     .await
                                     .expect("Failed to delete"),
                             );
@@ -639,6 +603,8 @@ fn bench_tree_branch_create(c: &mut Criterion) {
                                     &branch_name,
                                     "bench-user",
                                     None,
+                                    None,
+                                    false,
                                     false,
                                 )
                                 .await
@@ -678,12 +644,9 @@ fn bench_tree_list_children(c: &mut Criterion) {
                         black_box(
                             nodes
                                 .list_children(
-                                    constants::TENANT,
-                                    constants::REPO,
-                                    constants::BRANCH,
-                                    constants::WORKSPACE,
+                                    constants::SCOPE,
                                     "/tree-root",
-                                    None,
+                                    ListOptions::default(),
                                 )
                                 .await
                                 .expect("Failed to list children"),

@@ -190,6 +190,44 @@ pub(crate) fn admin_routes(state: &AppState) -> Router<AppState> {
             "/api/admin/management/database/{tenant}/{repo}/vector/health",
             get(crate::handlers::management::get_vector_health),
         )
+        // ----------------------------------------------------------------
+        // Spatial (geohash) index management.
+        //
+        // Unlike the fulltext/vector blocks above, these five carry an EXPLICIT
+        // `require_admin_auth_middleware` layer. The blocks above have no auth layer
+        // in this router at all, so their rebuild/purge endpoints are reachable
+        // unauthenticated — a pre-existing gap that is reported rather than copied.
+        // ----------------------------------------------------------------
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/spatial/config",
+            get(crate::handlers::management::get_spatial_config)
+                .put(crate::handlers::management::put_spatial_config)
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/spatial/health",
+            get(crate::handlers::management::get_spatial_health).layer(from_fn_with_state(
+                state.clone(),
+                crate::middleware::require_admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/spatial/rebuild",
+            post(crate::handlers::management::rebuild_spatial_index).layer(from_fn_with_state(
+                state.clone(),
+                crate::middleware::require_admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/management/database/{tenant}/{repo}/spatial/verify",
+            post(crate::handlers::management::verify_spatial_index).layer(from_fn_with_state(
+                state.clone(),
+                crate::middleware::require_admin_auth_middleware,
+            )),
+        )
         // RocksDB index reindex
         .route(
             "/api/admin/management/database/{tenant}/{repo}/reindex/start",

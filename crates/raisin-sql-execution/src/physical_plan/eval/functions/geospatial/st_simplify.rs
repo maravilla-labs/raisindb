@@ -1,26 +1,42 @@
-//! ST_SIMPLIFY function - simplify geometry using Douglas-Peucker algorithm
+//! ST_SIMPLIFY - drop vertices that do not change the shape much.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::Simplify;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{
-    geojson_to_linestring, geojson_to_polygon, get_geometry_type, linestring_to_geojson,
-    polygon_to_geojson,
-};
+use super::convert::{geom_arg, geom_result};
+use super::metric_ops;
+use super::z_support::{expect_arity, numeric_arg};
 
-/// Simplify a geometry using the Douglas-Peucker algorithm
+const SIGNATURE: &str = "ST_SIMPLIFY(geometry, tolerance) -> GEOMETRY";
+
+/// Ramer-Douglas-Peucker simplification with `tolerance` in **metres** on a
+/// geographic CRS, native units on a projected one.
 ///
 /// # SQL Signature
 /// `ST_SIMPLIFY(geometry, tolerance) -> GEOMETRY`
 ///
-/// # Tolerance Units
-/// The tolerance is in the same units as the geometry coordinates.
-/// For WGS84/EPSG:4326 data, this means **degrees** (not meters).
-/// Example: 0.001 degrees ≈ 111 meters at the equator.
+/// # Behaviour
+/// * Works on every geometry type. Puntal components pass through unchanged, and
+///   areal components keep their rings closed. `Multi*` and `GeometryCollection`
+///   simplify member by member — previously they were rejected outright.
+/// * A tolerance of 0 is a no-op; a negative or non-finite tolerance is an error.
+/// * The CRS and the vertical extent survive.
+/// * `NULL` in, `NULL` out.
+///
+/// # Units, and the trap
+/// Like `ST_BUFFER`, `geo`'s `Simplify` is planar and works in the geometry's own
+/// units, so on EPSG:4326 a raw tolerance would be **degrees**. A geographic
+/// simplification is therefore projected into a metric CRS, simplified, and
+/// projected back — which is why `ST_SIMPLIFY(track, 10)` means "flatten
+/// deviations under ten metres" and not "under ten degrees".
+///
+/// # Caveat inherited from the algorithm
+/// Douglas-Peucker is per-component and does not preserve topology: a large
+/// tolerance can make a polygon self-intersect or make neighbouring polygons
+/// overlap. Check the result with [`ST_ISVALID`](super::StIsValidFunction) when the
+/// tolerance is a significant fraction of the feature size.
 pub struct StSimplifyFunction;
 
 impl SqlFunction for StSimplifyFunction {
@@ -33,67 +49,20 @@ impl SqlFunction for StSimplifyFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_SIMPLIFY(geometry, tolerance) -> GEOMETRY"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_SIMPLIFY requires exactly 2 arguments".to_string(),
-            ));
-        }
+        expect_arity("ST_SIMPLIFY", SIGNATURE, args, 2)?;
 
-        let geom_val = eval_expr(&args[0], row)?;
-        if matches!(geom_val, Literal::Null) {
+        let Some(tolerance) = numeric_arg("ST_SIMPLIFY", args, 1, row)? else {
             return Ok(Literal::Null);
-        }
-
-        let tol_val = eval_expr(&args[1], row)?;
-        if matches!(tol_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom = match &geom_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_SIMPLIFY requires GEOMETRY as first argument".to_string(),
-                ))
-            }
         };
 
-        let tolerance = match &tol_val {
-            Literal::Double(d) => *d,
-            Literal::Int(i) => *i as f64,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_SIMPLIFY requires numeric tolerance".to_string(),
-                ))
-            }
-        };
-
-        let geom_type = get_geometry_type(geom)?;
-
-        match geom_type {
-            "Point" => Ok(Literal::Geometry(geom.clone())),
-            "LineString" => {
-                let line = geojson_to_linestring(geom)?;
-                let simplified = line.simplify(tolerance);
-                let result = linestring_to_geojson(&simplified);
-                Ok(Literal::Geometry(result))
-            }
-            "Polygon" => {
-                let polygon = geojson_to_polygon(geom)?;
-                let simplified = polygon.simplify(tolerance);
-                let result = polygon_to_geojson(&simplified);
-                Ok(Literal::Geometry(result))
-            }
-            other => Err(Error::Validation(format!(
-                "ST_SIMPLIFY not supported for geometry type: {}",
-                other
-            ))),
+        match geom_arg("ST_SIMPLIFY", args, 0, row)? {
+            None => Ok(Literal::Null),
+            Some(g) => geom_result(&metric_ops::simplify(&g, tolerance)?),
         }
     }
 }

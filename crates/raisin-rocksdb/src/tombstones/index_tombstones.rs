@@ -398,34 +398,70 @@ pub(super) fn tombstone_compound_indexes(
 
 /// Tombstone spatial indexes (SPATIAL_INDEX CF)
 ///
-/// Scans workspace spatial prefix to find all spatial index entries for this node.
+/// # Why this no longer scans
+///
+/// The previous implementation prefix-iterated the ENTIRE workspace spatial range
+/// on EVERY node delete — whether or not the node carried any geometry at all —
+/// matching keys with `extract_node_id_from_key`, which splits on `\0` and takes the
+/// last fragment. That is O(all geometries in the workspace) per single-node delete,
+/// the largest write cost in the subsystem, and directly at odds with the
+/// 5k-writes/sec target on a workspace holding bulk-loaded geo data.
+///
+/// The cells are now **derived** from the node's own geometry properties, which the
+/// node blob already carries: O(precisions) puts, zero reads, and an immediate exit
+/// for the overwhelming majority of nodes that hold no geometry. It also routes key
+/// construction through the one shared spatial writer, so a delete tombstones
+/// exactly the cells a write produced.
 pub(super) fn tombstone_spatial_indexes(
     batch: &mut WriteBatch,
     db: &DB,
     ctx: &TombstoneContext,
     cfs: &TombstoneColumnFamilies,
     node: &Node,
+    revision: &HLC,
 ) -> Result<()> {
-    let prefix =
-        keys::spatial_index_workspace_prefix(ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace);
+    use raisin_models::nodes::properties::PropertyValue;
 
-    let iter = db.prefix_iterator_cf(cfs.spatial_index, &prefix);
-    for item in iter {
-        let (key, _) = item.map_err(|e| {
-            raisin_error::Error::storage(format!("Failed to iterate spatial index: {}", e))
-        })?;
+    if !node
+        .properties
+        .values()
+        .any(|v| matches!(v, PropertyValue::Geometry(_)))
+    {
+        return Ok(());
+    }
 
-        // Stop when leaving workspace prefix
-        if !key.starts_with(&prefix) {
-            break;
-        }
+    let index_ctx =
+        crate::indexing::IndexCtx::new(ctx.tenant_id, ctx.repo_id, ctx.branch, ctx.workspace);
+    let targets = crate::indexing::SpatialIndexTargets {
+        spatial_index: cfs.spatial_index,
+    };
 
-        // Check if this key is for our node (node_id is the last component)
-        if let Some(key_node_id) = extract_node_id_from_key(&key) {
-            if key_node_id == node.id {
-                // Write tombstone for this exact key
-                batch.put_cf(cfs.spatial_index, key, TOMBSTONE);
-            }
+    // The policy comes from the local index-state record, which caches the resolved
+    // configuration per property. `tombstone_spatial_property` widens to every
+    // precision in `PRECISION_RANGE` anyway, so a stale or missing record cannot
+    // strand an entry at a precision that is no longer configured — the asymmetry is
+    // deliberately in favour of over-tombstoning, since a superfluous tombstone
+    // shadows nothing while a missing one leaves a deleted node matching forever.
+    for (property_name, value) in &node.properties {
+        if let PropertyValue::Geometry(geometry) = value {
+            let policy = crate::spatial_state::policy_for_property(
+                db,
+                ctx.tenant_id,
+                ctx.repo_id,
+                ctx.branch,
+                ctx.workspace,
+                property_name,
+            );
+            crate::indexing::spatial::tombstone_spatial_property(
+                batch,
+                &targets,
+                &index_ctx,
+                &node.id,
+                property_name,
+                geometry,
+                revision,
+                &policy,
+            )?;
         }
     }
 

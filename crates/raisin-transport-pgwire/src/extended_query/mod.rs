@@ -52,6 +52,17 @@ mod statement;
 // Re-export public API -- same paths as before the split.
 pub use statement::{RaisinQueryParser, RaisinStatement};
 
+/// The extended/prepared-protocol column type for an analyzed [`DataType`].
+///
+/// Re-exported inside the crate so `type_mapping`'s tests can assert that this
+/// path and the value-level path agree on an OID — they disagreed for
+/// `DataType::Geometry` (TEXT here, JSONB there), which made a prepared statement
+/// describe a geometry column differently from a simple query.
+///
+/// [`DataType`]: raisin_sql::analyzer::types::DataType
+#[cfg(test)]
+pub(crate) use schema::datatype_to_pg_type as pg_type_for_data_type;
+
 use crate::auth::{ApiKeyValidator, RaisinAuthHandler};
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::Storage;

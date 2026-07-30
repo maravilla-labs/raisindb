@@ -12,7 +12,7 @@ use crate::physical_plan::executor::Row;
 use indexmap::IndexMap;
 use raisin_error::Error;
 use raisin_models::nodes::properties::value::Element;
-use raisin_models::nodes::properties::{PropertyValue, RaisinReference};
+use raisin_models::nodes::properties::{GeoJson, PropertyValue, RaisinReference};
 use raisin_sql::analyzer::{DataType, Expr, Literal, TypedExpr};
 
 /// Extract the 'name' value from a WHERE clause filter.
@@ -166,6 +166,19 @@ pub(super) fn literal_to_property_value(lit: &Literal) -> Result<PropertyValue, 
                 ))
             }
         }
+        // A geometry-valued expression — `ST_POINT(...)`, `ST_TRANSFORM(...)`,
+        // `ST_GEOMFROMGEOJSON(...)` — assigned straight to a property column.
+        // Without this arm the whole statement failed with "Cannot convert literal",
+        // so the natural PostGIS spelling
+        // `UPDATE ws SET location = ST_POINT(8.54, 47.37)` was unusable and callers
+        // had to hand-write the GeoJSON.
+        Literal::Geometry(value) => match serde_json::from_value::<GeoJson>(value.clone()) {
+            Ok(geometry) => Ok(PropertyValue::Geometry(geometry)),
+            Err(e) => Err(Error::Validation(format!(
+                "Geometry value is not well-formed GeoJSON and would be stored \
+                 unindexed: {e} ({value})"
+            ))),
+        },
         Literal::Null => Ok(PropertyValue::Null),
         _ => Err(Error::Validation(format!(
             "Cannot convert literal {:?} to PropertyValue",
@@ -238,6 +251,30 @@ pub(super) fn json_value_to_property_value(v: &serde_json::Value) -> Result<Prop
                     element_type: element_type.clone(),
                     content,
                 }));
+            }
+
+            // Check if this is a GeoJSON geometry.
+            //
+            // This arm is what makes SQL a first-class geometry write surface. Its
+            // absence was a silent data-loss bug: `PropertyValue`'s canonical
+            // `#[serde(untagged)]` ladder tries `Geometry` (slot 9) BEFORE `Object`
+            // (slot 11), but this hand-rolled converter — which every DML path
+            // funnels through, single INSERT and bulk alike — jumped straight to the
+            // object fallback. A geometry written with `INSERT`/`UPDATE` therefore
+            // reached the low-level write functions as `PropertyValue::Object`, the
+            // type-driven spatial index hook never fired, and `ST_DWITHIN` returned
+            // nothing. No error anywhere: the node stored and read back correctly,
+            // because deserialising the stored blob DOES go through the canonical
+            // ladder and yields `Geometry`. Only the index was missing.
+            //
+            // Delegating to `GeoJson`'s own deserializer rather than sniffing for a
+            // `type` key is deliberate — it is the same code the canonical ladder
+            // runs, so "is this a geometry?" cannot drift between the two, and the
+            // optional `srid` member and the optional altitude ordinate come along
+            // for free. A malformed geometry-ish object still falls through to
+            // `Object`, exactly as it does on the canonical path.
+            if let Ok(geometry) = serde_json::from_value::<GeoJson>(v.clone()) {
+                return Ok(PropertyValue::Geometry(geometry));
             }
 
             // Fallback: regular object

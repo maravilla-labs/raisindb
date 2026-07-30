@@ -1,20 +1,46 @@
 //! ST_CROSSES function - check if geometries cross each other
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
-use geo::{Contains, Intersects};
+use geo::relate::IntersectionMatrix;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{
-    geojson_to_linestring, geojson_to_point, geojson_to_polygon, get_geometry_type,
-};
+use super::relate;
 
-/// Check if two geometries cross (line enters and exits polygon, or lines cross)
+/// Check if two geometries spatially cross — they have some, but not all,
+/// interior points in common, and the shared part is of lower dimension than the
+/// larger input.
 ///
 /// # SQL Signature
 /// `ST_CROSSES(geometry_a, geometry_b) -> BOOLEAN`
+///
+/// # Returns
+/// * TRUE if the interiors intersect in a set of dimension strictly lower than
+///   the maximum dimension of the two inputs, and neither geometry is contained
+///   in the other
+/// * FALSE otherwise
+/// * NULL if either input is NULL
+///
+/// # Examples
+/// ```sql
+/// -- Roads that cut across a flood zone rather than staying inside it
+/// SELECT * FROM roads WHERE ST_CROSSES(path, flood_zone);
+///
+/// -- Two rivers meeting at a confluence
+/// SELECT ST_CROSSES(a.course, b.course) FROM rivers a, rivers b;
+/// ```
+///
+/// # Notes
+/// - Two polygons can never cross (their intersection is 2-D, the same dimension
+///   as the inputs) and two points can never cross. A `MultiPoint` *can* cross a
+///   line or a polygon, when some of its points are inside and some outside —
+///   the old implementation returned a hardcoded FALSE for any `Point`-family
+///   argument and so got that case wrong.
+/// - Accepts every geometry type on both sides; only `LineString`/`Polygon` and
+///   `LineString`/`LineString` were really handled before.
+/// - DE-9IM `[T*T******]` when `dim(a) < dim(b)`, `[T*****T**]` when
+///   `dim(a) > dim(b)`, `[0********]` for line/line.
 pub struct StCrossesFunction;
 
 impl SqlFunction for StCrossesFunction {
@@ -32,73 +58,6 @@ impl SqlFunction for StCrossesFunction {
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_CROSSES requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let geom_a_val = eval_expr(&args[0], row)?;
-        if matches!(geom_a_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_b_val = eval_expr(&args[1], row)?;
-        if matches!(geom_b_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom_a = match &geom_a_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_CROSSES requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom_b = match &geom_b_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_CROSSES requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let type_a = get_geometry_type(geom_a)?;
-        let type_b = get_geometry_type(geom_b)?;
-
-        let crosses = match (type_a, type_b) {
-            // Points never cross
-            ("Point", _) | (_, "Point") => false,
-            // LineString crosses Polygon: line intersects but is not fully contained
-            ("LineString", "Polygon") => {
-                let line = geojson_to_linestring(geom_a)?;
-                let polygon = geojson_to_polygon(geom_b)?;
-                polygon.intersects(&line) && !polygon.contains(&line)
-            }
-            ("Polygon", "LineString") => {
-                let polygon = geojson_to_polygon(geom_a)?;
-                let line = geojson_to_linestring(geom_b)?;
-                polygon.intersects(&line) && !polygon.contains(&line)
-            }
-            // LineString crosses LineString
-            ("LineString", "LineString") => {
-                let line_a = geojson_to_linestring(geom_a)?;
-                let line_b = geojson_to_linestring(geom_b)?;
-                line_a.intersects(&line_b) && !line_a.contains(&line_b) && !line_b.contains(&line_a)
-            }
-            _ => {
-                return Err(Error::Validation(format!(
-                    "ST_CROSSES not supported for {} and {}",
-                    type_a, type_b
-                )))
-            }
-        };
-
-        Ok(Literal::Boolean(crosses))
+        relate::predicate("ST_CROSSES", args, row, IntersectionMatrix::is_crosses)
     }
 }

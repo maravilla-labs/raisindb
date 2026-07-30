@@ -52,6 +52,19 @@ pub fn create_property_index_handler(storage: &RocksDBStorage) -> Arc<PropertyIn
     )))
 }
 
+/// Create the spatial index build handler.
+///
+/// Takes only the raw database handle: the build derives everything else from the
+/// node records and the local index-state records, which is what lets each cluster
+/// node rebuild independently with no coordination.
+pub fn create_spatial_index_handler(
+    storage: &RocksDBStorage,
+) -> Arc<crate::jobs::handlers::SpatialIndexJobHandler> {
+    Arc::new(crate::jobs::handlers::SpatialIndexJobHandler::new(
+        storage.db.clone(),
+    ))
+}
+
 /// Create the compound index handler
 pub fn create_compound_index_handler(storage: &RocksDBStorage) -> Arc<CompoundIndexJobHandler> {
     let revision_repo = Arc::new(crate::repositories::RevisionRepositoryImpl::new(

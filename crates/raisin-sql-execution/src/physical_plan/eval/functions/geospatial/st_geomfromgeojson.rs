@@ -1,4 +1,4 @@
-//! ST_GEOMFROMGEOJSON function - parse GeoJSON text to geometry
+//! ST_GEOMFROMGEOJSON - parse GeoJSON text into a geometry.
 
 use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
@@ -6,27 +6,34 @@ use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-/// Parse GeoJSON text into a geometry
+use super::z_support::expect_arity;
+
+const SIGNATURE: &str = "ST_GEOMFROMGEOJSON(geojson_text) -> GEOMETRY";
+
+/// Parse GeoJSON text into a geometry, validating it on the way in.
 ///
 /// # SQL Signature
 /// `ST_GEOMFROMGEOJSON(geojson_text) -> GEOMETRY`
 ///
-/// # Arguments
-/// * `geojson_text` - GeoJSON string (RFC 7946)
+/// # Behaviour
+/// * Validation is **structural**: the value must actually parse into a geometry,
+///   with well-formed coordinate nesting for its type and finite ordinates. The
+///   previous implementation only checked that the `type` member was one of the
+///   seven names and that a `coordinates` key existed, so
+///   `{"type":"Polygon","coordinates":[1,2]}` passed and failed later, deep inside
+///   some other function.
+/// * Accepts a Feature or a FeatureCollection as well as a bare geometry, because
+///   that is what people paste. The geometry is extracted.
+/// * A `srid` member is preserved, and a third ordinate is preserved.
+/// * Already-parsed JSONB input short-circuits the string parse but takes the same
+///   validation.
+/// * `NULL` in, `NULL` out.
 ///
-/// # Returns
-/// * Geometry parsed from GeoJSON
-/// * NULL if input is NULL
-///
-/// # Examples
-/// ```sql
-/// SELECT ST_GEOMFROMGEOJSON('{"type":"Point","coordinates":[-122.4194,37.7749]}')
-/// SELECT ST_GEOMFROMGEOJSON('{"type":"Polygon","coordinates":[[[-122.5,37.7],[-122.3,37.7],[-122.3,37.8],[-122.5,37.8],[-122.5,37.7]]]}')
-/// ```
-///
-/// # Notes
-/// - Accepts all GeoJSON geometry types: Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, GeometryCollection
-/// - Coordinates must be in WGS84 (EPSG:4326)
+/// # Why validate at all
+/// This is the boundary where a typo becomes a stored value. A geometry that is not
+/// well-formed GeoJSON infers as a plain JSON object in the property system and is
+/// then **never spatially indexed**, with no error at write time — so rejecting it
+/// here is what stops a silent data loss further down.
 pub struct StGeomFromGeoJsonFunction;
 
 impl SqlFunction for StGeomFromGeoJsonFunction {
@@ -39,84 +46,32 @@ impl SqlFunction for StGeomFromGeoJsonFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_GEOMFROMGEOJSON(geojson_text) -> GEOMETRY"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 1 {
-            return Err(Error::Validation(
-                "ST_GEOMFROMGEOJSON requires exactly 1 argument".to_string(),
-            ));
-        }
+        expect_arity("ST_GEOMFROMGEOJSON", SIGNATURE, args, 1)?;
 
-        let text_val = eval_expr(&args[0], row)?;
-
-        if matches!(text_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geojson_str = match text_val {
-            Literal::Text(s) => s,
-            Literal::JsonB(v) => {
-                // Already JSON, validate it's a geometry
-                validate_geometry(&v)?;
-                return Ok(Literal::Geometry(v));
-            }
-            _ => {
-                return Err(Error::Validation(
-                    "ST_GEOMFROMGEOJSON requires TEXT or JSONB input".to_string(),
-                ))
+        let value = match eval_expr(&args[0], row)? {
+            Literal::Null => return Ok(Literal::Null),
+            Literal::Text(s) => serde_json::from_str(&s).map_err(|e| {
+                Error::Validation(format!("ST_GEOMFROMGEOJSON: not valid JSON: {e}"))
+            })?,
+            Literal::JsonB(v) | Literal::Geometry(v) => v,
+            other => {
+                return Err(Error::Validation(format!(
+                    "ST_GEOMFROMGEOJSON requires TEXT or JSONB input, got {:?}",
+                    other.data_type()
+                )))
             }
         };
 
-        // Parse JSON
-        let geojson: serde_json::Value = serde_json::from_str(&geojson_str)
-            .map_err(|e| Error::Validation(format!("Invalid GeoJSON: {}", e)))?;
-
-        // Validate it's a valid geometry
-        validate_geometry(&geojson)?;
-
-        Ok(Literal::Geometry(geojson))
+        // Parsing IS the validation: `to_geo` rejects a wrong coordinate shape for
+        // the declared type, a non-finite ordinate and an unusable `srid` member.
+        // The parsed geometry is discarded because the stored representation must
+        // keep the third ordinate that `geo` cannot hold.
+        raisin_geometry::to_geo(&value, None)?;
+        Ok(Literal::Geometry(value))
     }
-}
-
-/// Validate that a JSON value is a valid GeoJSON geometry
-fn validate_geometry(value: &serde_json::Value) -> Result<(), Error> {
-    let geom_type = value
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Validation("GeoJSON missing 'type' field".to_string()))?;
-
-    // Check for valid geometry types
-    let valid_types = [
-        "Point",
-        "LineString",
-        "Polygon",
-        "MultiPoint",
-        "MultiLineString",
-        "MultiPolygon",
-        "GeometryCollection",
-    ];
-
-    if !valid_types.contains(&geom_type) {
-        return Err(Error::Validation(format!(
-            "Invalid GeoJSON geometry type: {}. Expected one of: {}",
-            geom_type,
-            valid_types.join(", ")
-        )));
-    }
-
-    // Check for coordinates (except GeometryCollection)
-    if geom_type == "GeometryCollection" {
-        value.get("geometries").ok_or_else(|| {
-            Error::Validation("GeometryCollection missing 'geometries' field".to_string())
-        })?;
-    } else {
-        value.get("coordinates").ok_or_else(|| {
-            Error::Validation(format!("{} missing 'coordinates' field", geom_type))
-        })?;
-    }
-
-    Ok(())
 }

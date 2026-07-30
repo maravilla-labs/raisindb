@@ -1,44 +1,45 @@
-//! ST_DISTANCE function - calculate distance between geometries
+//! ST_DISTANCE - minimum distance between two geometries.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::compute_haversine_distance;
+use super::convert::geom_pair;
+use super::measure;
+use super::z_support::expect_arity;
 
-/// Calculate the geodesic distance between two geometries
+const SIGNATURE: &str = "ST_DISTANCE(geometry1, geometry2) -> DOUBLE";
+
+/// Minimum distance between two geometries: **metres** on a geographic CRS,
+/// native units on a projected one.
 ///
 /// # SQL Signature
 /// `ST_DISTANCE(geometry1, geometry2) -> DOUBLE`
 ///
-/// # Arguments
-/// * `geometry1` - First geometry
-/// * `geometry2` - Second geometry
+/// # Behaviour
+/// * True shape-to-shape minimum for **every** type pair, `Multi*` and
+///   `GeometryCollection` included. Intersecting geometries are 0 apart.
+/// * Point-to-point is exact Haversine. Everything else is measured after
+///   projecting both operands into one shared metric CRS — see
+///   [`super::measure::distance`] for why a projection is unavoidable and what
+///   its accuracy costs.
+/// * `NULL` in, `NULL` out. Two geometries with *different* explicit SRIDs are an
+///   error naming `ST_TRANSFORM`; an unlabelled operand adopts the other's SRID.
 ///
-/// # Returns
-/// * Distance in meters (using Haversine formula)
-/// * NULL if any input is NULL
+/// # What changed
+/// The previous implementation fell back to **centroid-to-centroid** for
+/// Polygon/Polygon and for anything `Multi*`. That reported a positive distance
+/// between overlapping polygons and roughly double the true gap between adjacent
+/// ones.
 ///
 /// # Examples
 /// ```sql
-/// -- Distance between two points in meters
-/// SELECT ST_DISTANCE(
-///     ST_POINT(-122.4194, 37.7749),  -- San Francisco
-///     ST_POINT(-73.9857, 40.7484)    -- New York
-/// )
-/// -- Returns: ~4129164.0 (approximately 4129 km)
+/// SELECT ST_DISTANCE(ST_POINT(-122.4194, 37.7749), ST_POINT(-73.9857, 40.7484));
+/// -- ~4129164 metres
 ///
-/// -- Distance from a point to a polygon (uses centroid)
-/// SELECT ST_DISTANCE(store.location, delivery_zone)
-/// FROM stores, zones
+/// SELECT name FROM shops ORDER BY ST_DISTANCE(location, ST_POINT(8.54, 47.37)) LIMIT 5;
 /// ```
-///
-/// # Notes
-/// - Uses Haversine formula for accurate geodesic distance
-/// - For non-point geometries, uses centroid for distance calculation
-/// - Returns distance in meters
 pub struct StDistanceFunction;
 
 impl SqlFunction for StDistanceFunction {
@@ -51,51 +52,15 @@ impl SqlFunction for StDistanceFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_DISTANCE(geometry1, geometry2) -> DOUBLE"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_DISTANCE requires exactly 2 arguments".to_string(),
-            ));
+        expect_arity("ST_DISTANCE", SIGNATURE, args, 2)?;
+        match geom_pair("ST_DISTANCE", args, row)? {
+            None => Ok(Literal::Null),
+            Some((a, b)) => Ok(Literal::Double(measure::distance(&a, &b)?)),
         }
-
-        // Evaluate first geometry
-        let geom1_val = eval_expr(&args[0], row)?;
-        if matches!(geom1_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        // Evaluate second geometry
-        let geom2_val = eval_expr(&args[1], row)?;
-        if matches!(geom2_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        // Extract GeoJSON values
-        let geom1 = match &geom1_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_DISTANCE requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let geom2 = match &geom2_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_DISTANCE requires GEOMETRY arguments".to_string(),
-                ))
-            }
-        };
-
-        let distance = compute_haversine_distance(geom1, geom2)?;
-        Ok(Literal::Double(distance))
     }
 }

@@ -817,7 +817,7 @@ async fn test_copy_operations_impl() {
 }
 
 async fn test_copy_tree_operations_impl() {
-    let client = reqwest::Client::new();
+    let _client = reqwest::Client::new();
 
     // TODO: create a new concept for publish and once implemented, re-enable these tests
     // // Test 1: Copy tree clears publish state for all nodes

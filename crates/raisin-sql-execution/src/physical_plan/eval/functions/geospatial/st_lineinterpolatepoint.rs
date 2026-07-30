@@ -1,17 +1,35 @@
-//! ST_LINEINTERPOLATEPOINT function - return a point at a fraction along a LineString
+//! ST_LINEINTERPOLATEPOINT - a point a given fraction along a line.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
+use geo::{Distance, Euclidean, Geometry, Haversine, Point};
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::{geojson_to_linestring, get_geometry_type, point_to_geojson};
+use super::convert::{derived_result, geom_arg};
+use super::line_access::sole_line;
+use super::z_support::{expect_arity, numeric_arg};
 
-/// Return a point at a given fraction (0.0-1.0) along a LineString
+const SIGNATURE: &str = "ST_LINEINTERPOLATEPOINT(linestring, fraction) -> GEOMETRY";
+
+/// The point at `fraction` of the way along a line, measured by **distance**.
 ///
 /// # SQL Signature
 /// `ST_LINEINTERPOLATEPOINT(linestring, fraction) -> GEOMETRY`
+///
+/// # Behaviour
+/// * `fraction` is in `[0, 1]`; 0 gives the start point and 1 the end point. A
+///   value outside that range is an error rather than a clamp, because a caller
+///   passing 1.5 has made an arithmetic mistake and silently returning the endpoint
+///   would hide it.
+/// * The fraction is of **geodesic** length on a geographic CRS and planar length
+///   on a projected one. The previous implementation always measured in raw
+///   coordinate units, so at 47°N the halfway point of a diagonal line was placed
+///   noticeably off: a degree of longitude there is only about two thirds of a
+///   degree of latitude, and the two were weighted equally.
+/// * A one-component `MultiLineString` is accepted; anything else gives `NULL`.
+/// * A zero-length line returns its own start point.
+/// * `NULL` in, `NULL` out. The CRS survives.
 pub struct StLineInterpolatePointFunction;
 
 impl SqlFunction for StLineInterpolatePointFunction {
@@ -24,114 +42,68 @@ impl SqlFunction for StLineInterpolatePointFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_LINEINTERPOLATEPOINT(linestring, fraction) -> GEOMETRY"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_LINEINTERPOLATEPOINT requires exactly 2 arguments".to_string(),
-            ));
-        }
+        expect_arity("ST_LINEINTERPOLATEPOINT", SIGNATURE, args, 2)?;
 
-        let geom_val = eval_expr(&args[0], row)?;
-        if matches!(geom_val, Literal::Null) {
+        let Some(fraction) = numeric_arg("ST_LINEINTERPOLATEPOINT", args, 1, row)? else {
             return Ok(Literal::Null);
-        }
-
-        let frac_val = eval_expr(&args[1], row)?;
-        if matches!(frac_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom = match &geom_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_LINEINTERPOLATEPOINT requires GEOMETRY as first argument".to_string(),
-                ))
-            }
         };
-
-        let fraction = match &frac_val {
-            Literal::Double(d) => *d,
-            Literal::Int(i) => *i as f64,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_LINEINTERPOLATEPOINT requires numeric fraction".to_string(),
-                ))
-            }
-        };
-
         if !(0.0..=1.0).contains(&fraction) {
-            return Err(Error::Validation(
-                "ST_LINEINTERPOLATEPOINT fraction must be between 0.0 and 1.0".to_string(),
-            ));
-        }
-
-        let geom_type = get_geometry_type(geom)?;
-        if geom_type != "LineString" {
             return Err(Error::Validation(format!(
-                "ST_LINEINTERPOLATEPOINT requires LineString, got {}",
-                geom_type
+                "ST_LINEINTERPOLATEPOINT: fraction must be between 0.0 and 1.0, got {fraction}"
             )));
         }
 
-        let line = geojson_to_linestring(geom)?;
-        let coords: Vec<_> = line.coords().collect();
-
-        if coords.is_empty() {
+        let Some(g) = geom_arg("ST_LINEINTERPOLATEPOINT", args, 0, row)? else {
             return Ok(Literal::Null);
-        }
+        };
+        let Some(line) = sole_line(&g) else {
+            return Ok(Literal::Null);
+        };
 
-        if coords.len() == 1 || fraction == 0.0 {
-            return Ok(Literal::Geometry(point_to_geojson(
-                coords[0].x,
-                coords[0].y,
-            )));
-        }
-
-        if fraction == 1.0 {
-            let last = coords[coords.len() - 1];
-            return Ok(Literal::Geometry(point_to_geojson(last.x, last.y)));
-        }
-
-        // Calculate total length of segments (Euclidean in coordinate space)
-        let mut segment_lengths = Vec::with_capacity(coords.len() - 1);
-        let mut total_length = 0.0;
-        for i in 0..coords.len() - 1 {
-            let dx = coords[i + 1].x - coords[i].x;
-            let dy = coords[i + 1].y - coords[i].y;
-            let len = (dx * dx + dy * dy).sqrt();
-            segment_lengths.push(len);
-            total_length += len;
-        }
-
-        if total_length == 0.0 {
-            return Ok(Literal::Geometry(point_to_geojson(
-                coords[0].x,
-                coords[0].y,
-            )));
-        }
-
-        let target_length = fraction * total_length;
-        let mut accumulated = 0.0;
-
-        for (i, seg_len) in segment_lengths.iter().enumerate() {
-            if accumulated + seg_len >= target_length {
-                let remaining = target_length - accumulated;
-                let t = remaining / seg_len;
-                let x = coords[i].x + t * (coords[i + 1].x - coords[i].x);
-                let y = coords[i].y + t * (coords[i + 1].y - coords[i].y);
-                return Ok(Literal::Geometry(point_to_geojson(x, y)));
+        let geographic = g.is_geographic();
+        let leg = |a: Point<f64>, b: Point<f64>| {
+            if geographic {
+                Haversine.distance(a, b)
+            } else {
+                Euclidean.distance(a, b)
             }
-            accumulated += seg_len;
+        };
+
+        let vertices: Vec<Point<f64>> = line.0.iter().map(|c| Point::from(*c)).collect();
+        let legs: Vec<f64> = vertices
+            .windows(2)
+            .map(|pair| leg(pair[0], pair[1]))
+            .collect();
+        let total: f64 = legs.iter().sum();
+
+        if total == 0.0 {
+            return derived_result(Geometry::Point(vertices[0]), &g);
         }
 
-        // Fallback to last point
-        let last = coords[coords.len() - 1];
-        Ok(Literal::Geometry(point_to_geojson(last.x, last.y)))
+        // Walk the legs until the remaining budget falls inside one, then place the
+        // point proportionally along that leg. Interpolation within a leg is linear
+        // in coordinate space, which is correct to well under a metre for any
+        // realistic vertex spacing.
+        let mut remaining = fraction * total;
+        for (i, leg_length) in legs.iter().enumerate() {
+            if remaining <= *leg_length || i == legs.len() - 1 {
+                let t = if *leg_length == 0.0 {
+                    0.0
+                } else {
+                    (remaining / leg_length).clamp(0.0, 1.0)
+                };
+                let (a, b) = (vertices[i], vertices[i + 1]);
+                let point = Point::new(a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t);
+                return derived_result(Geometry::Point(point), &g);
+            }
+            remaining -= leg_length;
+        }
+
+        derived_result(Geometry::Point(vertices[vertices.len() - 1]), &g)
     }
 }

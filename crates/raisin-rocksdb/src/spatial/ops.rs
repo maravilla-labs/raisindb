@@ -65,12 +65,63 @@ pub fn center_and_neighbors(hash: &str) -> Vec<String> {
     cells
 }
 
-/// Generate multi-precision geohashes for a point
-pub fn multi_precision_geohashes(lon: f64, lat: f64) -> Vec<(usize, String)> {
-    INDEX_PRECISIONS
+/// Expand outward from `hash` by `rings` rings of neighbours.
+///
+/// `rings == 0` yields just the centre cell; `rings == 1` yields the 3x3 Moore
+/// neighbourhood (identical to [`center_and_neighbors`]); `rings == n` yields up
+/// to `(2n+1)^2` cells. Duplicates are removed and insertion order is preserved
+/// so the centre cell is scanned first (helpful for KNN, which wants the nearest
+/// candidates early).
+///
+/// Implemented as a breadth-first walk over `geohash::neighbors`, because the
+/// geohash crate offers no direct k-ring primitive. Cells at the poles or across
+/// the antimeridian may have fewer than eight neighbours; those are simply
+/// absent rather than an error, which is correct — a missing neighbour is a cell
+/// that does not exist.
+pub fn ring_expand(hash: &str, rings: usize) -> Vec<String> {
+    if hash.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = vec![hash.to_string()];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(hash.to_string());
+    let mut frontier = vec![hash.to_string()];
+
+    for _ in 0..rings {
+        let mut next = Vec::new();
+        for cell in &frontier {
+            for n in neighbors(cell) {
+                if seen.insert(n.clone()) {
+                    out.push(n.clone());
+                    next.push(n);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    out
+}
+
+/// Generate multi-precision geohashes for a point at the given precisions.
+pub fn multi_precision_geohashes_at(
+    lon: f64,
+    lat: f64,
+    precisions: &[usize],
+) -> Vec<(usize, String)> {
+    precisions
         .iter()
         .filter_map(|&precision| encode_point(lon, lat, precision).map(|h| (precision, h)))
         .collect()
+}
+
+/// Generate multi-precision geohashes for a point at the default precisions.
+pub fn multi_precision_geohashes(lon: f64, lat: f64) -> Vec<(usize, String)> {
+    multi_precision_geohashes_at(lon, lat, INDEX_PRECISIONS)
 }
 
 /// Calculate the approximate search radius for a geohash precision
@@ -92,21 +143,21 @@ pub fn precision_radius_meters(precision: usize) -> f64 {
     }
 }
 
-/// Choose the optimal geohash precision for a given search radius
-pub fn precision_for_radius(radius_meters: f64) -> usize {
-    for precision in (1..=12).rev() {
-        if precision_radius_meters(precision) >= radius_meters {
-            return precision;
-        }
-    }
-    12
-}
-
-/// Generate geohash cells to scan for a proximity query
-pub fn cells_for_radius(center_lon: f64, center_lat: f64, radius_meters: f64) -> Vec<String> {
-    let precision = precision_for_radius(radius_meters);
-    match encode_point(center_lon, center_lat, precision) {
-        Some(center_hash) => center_and_neighbors(&center_hash),
-        None => Vec::new(),
-    }
+/// Choose the finest geohash precision whose cell still covers `radius_meters`,
+/// restricted to precisions the index was actually built at.
+///
+/// Returns `None` when no member of `precisions` is coarse enough — the caller
+/// must then ring-expand at the coarsest available precision (see
+/// [`super::plan_radius_scan`], which is the only correct entry point).
+///
+/// The old unrestricted `precision_for_radius` walked 12 -> 1 over precisions
+/// that may never have been indexed. Combined with the `\0`-terminated geohash
+/// prefix (which matches exactly one precision), that returned zero rows outside
+/// a narrow radius band. Do not reintroduce it.
+pub fn precision_for_radius_in(radius_meters: f64, precisions: &[usize]) -> Option<usize> {
+    precisions
+        .iter()
+        .copied()
+        .filter(|&p| precision_radius_meters(p) >= radius_meters)
+        .max()
 }

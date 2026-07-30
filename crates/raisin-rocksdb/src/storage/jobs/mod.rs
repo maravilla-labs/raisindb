@@ -10,6 +10,7 @@
 mod flow_events;
 mod init_system;
 mod restore;
+pub(crate) mod spatial;
 
 use super::RocksDBStorage;
 use raisin_error::Result;
@@ -83,6 +84,48 @@ impl RocksDBStorage {
         );
 
         Ok(job_id)
+    }
+
+    /// Queue a spatial index build (or rebuild) for a workspace.
+    ///
+    /// `property = None` covers every geometry-valued property in the workspace.
+    /// `rebuild = true` re-emits every entry and tombstones superseded ones;
+    /// `false` fills gaps only.
+    ///
+    /// # Idempotency
+    ///
+    /// `JobType::SpatialIndexBuild`'s `dedup_key` is
+    /// `spatial:{tenant}:{repo}:{branch}:{ws}:{property|*}`, so a duplicate request
+    /// while one is queued or running collapses onto the existing job — the same
+    /// mechanism the fulltext path uses.
+    ///
+    /// # Scope
+    ///
+    /// **LOCAL to this node.** The spatial index is derived local state, so a repair
+    /// must be run on each node (or via each node's HTTP endpoint). Cluster-wide
+    /// fan-out happens through *configuration*: `WorkspaceConfig.spatial` is
+    /// replicated, so a policy change reaches every peer, and each peer then observes
+    /// the `policy_hash` mismatch and schedules its own build.
+    pub async fn queue_spatial_index_build(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        workspace: &str,
+        property: Option<&str>,
+        rebuild: bool,
+    ) -> Result<raisin_storage::jobs::JobId> {
+        spatial::enqueue_spatial_index_build(
+            &self.job_registry,
+            &self.job_data_store,
+            tenant_id,
+            repo_id,
+            branch,
+            workspace,
+            property,
+            rebuild,
+        )
+        .await
     }
 
     /// Get master encryption key from environment variable

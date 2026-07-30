@@ -4,6 +4,13 @@ use super::{CanonicalPredicate, ComparisonOp};
 use crate::analyzer::{BinaryOperator, Expr, Literal, TypedExpr};
 
 pub fn rewrite_hierarchy_predicates(expr: TypedExpr) -> Vec<CanonicalPredicate> {
+    // Spatial shapes are recognised by ONE extractor, shared with the execution
+    // planner's `filter_analysis`. Run it before the generic comparison arms so
+    // `ST_DISTANCE(...) < r` becomes a `SpatialDWithin` rather than an opaque
+    // `Other`.
+    if let Some(spatial) = super::spatial::extract_spatial_predicate(&expr) {
+        return vec![spatial];
+    }
     match expr.expr.clone() {
         Expr::Function { name, args, .. } if name.to_uppercase() == "CHILD_OF" => {
             rewrite_child_of(&args, expr)
@@ -13,9 +20,6 @@ pub fn rewrite_hierarchy_predicates(expr: TypedExpr) -> Vec<CanonicalPredicate> 
         }
         Expr::Function { name, args, .. } if name.to_uppercase() == "REFERENCES" => {
             rewrite_references(&args, expr)
-        }
-        Expr::Function { name, args, .. } if name.to_uppercase() == "ST_DWITHIN" => {
-            rewrite_st_dwithin(&args, expr)
         }
         Expr::BinaryOp {
             ref left,
@@ -94,107 +98,6 @@ fn rewrite_references(args: &[TypedExpr], expr: TypedExpr) -> Vec<CanonicalPredi
         }
     }
     vec![CanonicalPredicate::Other(expr)]
-}
-
-/// Extract geometry source (table, column, property_name) from an expression.
-///
-/// Handles direct property access and CAST(... AS GEOMETRY) wrappers:
-/// - `properties->>'location'` (JsonExtractText)
-/// - `properties->'location'` (JsonExtract)
-/// - `CAST(properties->>'location' AS GEOMETRY)`
-/// - Direct column reference
-/// Extract geometry source (table, column, property_name) from an expression.
-///
-/// Handles direct property access and CAST(... AS GEOMETRY) wrappers:
-/// - `properties->>'location'` (JsonExtractText)
-/// - `properties->'location'` (JsonExtract)
-/// - `CAST(properties->>'location' AS GEOMETRY)`
-/// - Direct column reference
-///
-/// Returns `(table, geometry_column, property_name)` if matched.
-pub fn extract_geometry_source(expr: &Expr) -> Option<(String, String, String)> {
-    match expr {
-        // Unwrap CAST(... AS GEOMETRY) only — reject other target types
-        Expr::Cast {
-            expr: inner,
-            target_type: crate::analyzer::DataType::Geometry,
-        } => extract_geometry_source(&inner.expr),
-
-        Expr::JsonExtractText { object, key } => {
-            if let Expr::Column { table, column } = &object.expr {
-                let prop = match &key.expr {
-                    Expr::Literal(Literal::Text(t)) => t.clone(),
-                    _ => return None,
-                };
-                Some((table.clone(), column.clone(), prop))
-            } else {
-                None
-            }
-        }
-        Expr::JsonExtract { object, key } => {
-            if let Expr::Column { table, column } = &object.expr {
-                let prop = match &key.expr {
-                    Expr::Literal(Literal::Text(t)) => t.clone(),
-                    _ => return None,
-                };
-                Some((table.clone(), column.clone(), prop))
-            } else {
-                None
-            }
-        }
-        Expr::Column { table, column } => {
-            Some((table.clone(), "properties".to_string(), column.clone()))
-        }
-        _ => None,
-    }
-}
-
-fn rewrite_st_dwithin(args: &[TypedExpr], expr: TypedExpr) -> Vec<CanonicalPredicate> {
-    if args.len() != 3 {
-        return vec![CanonicalPredicate::Other(expr)];
-    }
-    let (table, geometry_column, property_name) = match extract_geometry_source(&args[0].expr) {
-        Some(v) => v,
-        None => return vec![CanonicalPredicate::Other(expr)],
-    };
-    let (center_lon, center_lat) = match &args[1].expr {
-        Expr::Function { name, args: pa, .. }
-            if name.to_uppercase() == "ST_POINT" || name.to_uppercase() == "ST_MAKEPOINT" =>
-        {
-            if pa.len() == 2 {
-                let lon = match &pa[0].expr {
-                    Expr::Literal(Literal::Double(f)) => *f,
-                    Expr::Literal(Literal::Int(i)) => *i as f64,
-                    Expr::Literal(Literal::BigInt(i)) => *i as f64,
-                    _ => return vec![CanonicalPredicate::Other(expr)],
-                };
-                let lat = match &pa[1].expr {
-                    Expr::Literal(Literal::Double(f)) => *f,
-                    Expr::Literal(Literal::Int(i)) => *i as f64,
-                    Expr::Literal(Literal::BigInt(i)) => *i as f64,
-                    _ => return vec![CanonicalPredicate::Other(expr)],
-                };
-                (lon, lat)
-            } else {
-                return vec![CanonicalPredicate::Other(expr)];
-            }
-        }
-        _ => return vec![CanonicalPredicate::Other(expr)],
-    };
-    let radius_meters = match &args[2].expr {
-        Expr::Literal(Literal::Double(f)) => *f,
-        Expr::Literal(Literal::Int(i)) => *i as f64,
-        Expr::Literal(Literal::BigInt(i)) => *i as f64,
-        _ => return vec![CanonicalPredicate::Other(expr)],
-    };
-    vec![CanonicalPredicate::SpatialDWithin {
-        table,
-        geometry_column,
-        property_name,
-        center_lon,
-        center_lat,
-        radius_meters,
-    }]
 }
 
 fn rewrite_equality(

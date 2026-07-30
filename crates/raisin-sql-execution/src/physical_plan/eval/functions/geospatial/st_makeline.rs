@@ -1,17 +1,35 @@
-//! ST_MAKELINE function - create a LineString from two points
+//! ST_MAKELINE - join geometries into a LineString.
 
-use crate::physical_plan::eval::core::eval_expr;
 use crate::physical_plan::eval::functions::traits::{FunctionCategory, SqlFunction};
 use crate::physical_plan::executor::Row;
+use geo::{Coord, Geometry, LineString};
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::helpers::geojson_to_point;
+use super::convert::{derived_result, geom_pair};
+use super::walk::{for_each_line_string, for_each_point};
+use super::z_support::expect_arity;
 
-/// Create a LineString from two Point geometries
+const SIGNATURE: &str = "ST_MAKELINE(geometry1, geometry2) -> GEOMETRY";
+
+/// A LineString through the vertices of both arguments, in order.
 ///
 /// # SQL Signature
-/// `ST_MAKELINE(point1, point2) -> GEOMETRY`
+/// `ST_MAKELINE(geometry1, geometry2) -> GEOMETRY`
+///
+/// # Behaviour
+/// * Accepts points **and** linear geometries, so two route fragments can be
+///   spliced and a `MultiPoint` can become a path. The previous implementation
+///   required two Points exactly.
+/// * Vertices are taken in argument order, then component order, then vertex
+///   order: `ST_MAKELINE(a, b)` and `ST_MAKELINE(b, a)` differ, as they must for a
+///   directed feature.
+/// * Consecutive duplicate vertices are collapsed, so splicing two fragments that
+///   share an endpoint does not leave a zero-length segment behind.
+/// * Areal arguments contribute nothing — a polygon is not a path. If neither
+///   argument yields at least two distinct vertices the result is the empty
+///   geometry rather than an invalid one-point LineString.
+/// * `NULL` in, `NULL` out.
 pub struct StMakeLineFunction;
 
 impl SqlFunction for StMakeLineFunction {
@@ -24,58 +42,32 @@ impl SqlFunction for StMakeLineFunction {
     }
 
     fn signature(&self) -> &str {
-        "ST_MAKELINE(point1, point2) -> GEOMETRY"
+        SIGNATURE
     }
 
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
-        if args.len() != 2 {
-            return Err(Error::Validation(
-                "ST_MAKELINE requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let geom1_val = eval_expr(&args[0], row)?;
-        if matches!(geom1_val, Literal::Null) {
+        expect_arity("ST_MAKELINE", SIGNATURE, args, 2)?;
+        let Some((a, b)) = geom_pair("ST_MAKELINE", args, row)? else {
             return Ok(Literal::Null);
-        }
-
-        let geom2_val = eval_expr(&args[1], row)?;
-        if matches!(geom2_val, Literal::Null) {
-            return Ok(Literal::Null);
-        }
-
-        let geom1 = match &geom1_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_MAKELINE requires GEOMETRY arguments".to_string(),
-                ))
-            }
         };
 
-        let geom2 = match &geom2_val {
-            Literal::Geometry(v) => v,
-            Literal::JsonB(v) => v,
-            _ => {
-                return Err(Error::Validation(
-                    "ST_MAKELINE requires GEOMETRY arguments".to_string(),
-                ))
-            }
+        let mut coords: Vec<Coord<f64>> = Vec::new();
+        push_vertices(&a.geometry, &mut coords);
+        push_vertices(&b.geometry, &mut coords);
+        coords.dedup();
+
+        let line = if coords.len() >= 2 {
+            Geometry::LineString(LineString::new(coords))
+        } else {
+            Geometry::GeometryCollection(Default::default())
         };
-
-        let p1 = geojson_to_point(geom1)?;
-        let p2 = geojson_to_point(geom2)?;
-
-        let result = serde_json::json!({
-            "type": "LineString",
-            "coordinates": [
-                [p1.x(), p1.y()],
-                [p2.x(), p2.y()]
-            ]
-        });
-
-        Ok(Literal::Geometry(result))
+        derived_result(line, &a)
     }
+}
+
+/// Append a geometry's path vertices: its points, then its linear components.
+fn push_vertices(g: &Geometry<f64>, out: &mut Vec<Coord<f64>>) {
+    for_each_point(g, &mut |p| out.push(p.into()));
+    for_each_line_string(g, &mut |ls| out.extend(ls.0.iter().copied()));
 }

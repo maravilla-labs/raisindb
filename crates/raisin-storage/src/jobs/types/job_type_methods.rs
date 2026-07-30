@@ -128,6 +128,23 @@ impl JobType {
                 "prop_idx:{}:{}:{}:{}",
                 tenant_id, repo_id, branch, workspace
             ),
+            // Enqueue idempotency: a duplicate rebuild request while one is
+            // queued or running is a no-op returning the existing job id.
+            Self::SpatialIndexBuild {
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                property,
+                ..
+            } => format!(
+                "spatial:{}:{}:{}:{}:{}",
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                property.as_deref().unwrap_or("*")
+            ),
             Self::CompoundIndexBuild {
                 tenant_id,
                 repo_id,
@@ -367,6 +384,7 @@ impl JobType {
             | Self::VectorRestore
             | Self::PropertyIndexBuild { .. }
             | Self::CompoundIndexBuild { .. }
+            | Self::SpatialIndexBuild { .. }
             | Self::RetargetReferences { .. }
             | Self::IntegrityScan
             | Self::IndexRebuild
@@ -442,6 +460,7 @@ impl JobType {
             | Self::VectorRestore
             | Self::PropertyIndexBuild { .. }
             | Self::CompoundIndexBuild { .. }
+            | Self::SpatialIndexBuild { .. }
             | Self::IntegrityScan
             | Self::IndexRebuild
             | Self::IndexVerify

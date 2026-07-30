@@ -66,6 +66,7 @@ fn create_property(name: &str, property_type: PropertyType) -> PropertyValueSche
         is_translatable: None,
         allow_additional_properties: None,
         index: None,
+        spatial: None,
     }
 }
 

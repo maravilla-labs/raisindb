@@ -47,6 +47,10 @@ raisin-hlc = { path = "../raisin-hlc" }
 uuid.workspace = true
 
 # Geospatial
+# raisin-geometry is THE conversion layer: never hand-roll a GeoJSON ->
+# geo-types converter in this crate again.
+raisin-geometry = { path = "../raisin-geometry" }
+raisin-proj = { path = "../raisin-proj" }
 geo = { workspace = true }
 geojson = { workspace = true }
 geohash = { workspace = true }
@@ -60,5 +64,11 @@ raisin-storage-memory = { path = "../raisin-storage-memory" }
 
 [features]
 default = []
+# Wider CRS coverage for ST_TRANSFORM. Neither is default: `proj` is pure
+# Rust (~1000 EPSG codes), while `proj-full` links libproj -- and compiles
+# it from proj-sys' bundled source when pkg-config finds nothing, which
+# needs a C/C++ toolchain plus sqlite3 and libtiff headers.
+proj = ["raisin-geometry/proj4rs-backend"]
+proj-full = ["raisin-geometry/proj-backend"]
 # Enable detailed profiling with tracing (dev/staging only)
 profiling = ["tracing/max_level_debug"]

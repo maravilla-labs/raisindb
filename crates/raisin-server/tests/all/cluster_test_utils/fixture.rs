@@ -7,7 +7,7 @@ use super::social_feed::{
     add_follow_relationships, create_demo_users, create_initial_posts, init_social_feed_schema,
     SOCIAL_FEED_BRANCH, SOCIAL_FEED_NODE_TYPES, SOCIAL_FEED_REPO, SOCIAL_FEED_WORKSPACE,
 };
-use super::verification::{wait_for_replication, wait_for_replication_by_id};
+use super::verification::wait_for_replication;
 use crate::cluster_test_utils::verification::wait_for_nodetype_replication;
 use anyhow::{Context, Result};
 use std::time::Duration;

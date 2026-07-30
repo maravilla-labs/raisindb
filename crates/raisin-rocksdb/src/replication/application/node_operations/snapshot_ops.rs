@@ -21,12 +21,14 @@ pub(in crate::replication::application) async fn apply_upsert_node_snapshot(
 ) -> Result<()> {
     let workspace = node.workspace.as_deref().unwrap_or("default");
 
-    // Apply the upsert using the existing replicated upsert logic
-    // This writes a versioned key with the revision HLC, implementing LWW
-    // The storage layer naturally handles multiple versions, and load_latest_node
-    // will always return the version with the highest revision
-    super::super::replication_core::apply_replicated_upsert(
-        applicator,
+    // Applies via the ONE replicated-upsert body. This used to call a second,
+    // hand-maintained copy in `replication_core.rs` that was missing the
+    // `load_latest_node` stale-tombstone diff, the NODE_PATH index write, and
+    // spatial indexing entirely — so snapshot-based replication left stale path,
+    // property and reference entries live on peers, and geometry unindexed. That
+    // copy is gone; `event_kind = None` preserves this path's timestamp-derived
+    // Created/Updated distinction.
+    applicator.apply_replicated_upsert_with_event(
         tenant_id,
         repo_id,
         branch,
@@ -36,6 +38,7 @@ pub(in crate::replication::application) async fn apply_upsert_node_snapshot(
         revision,
         cf_order_key,
         super::event_helpers::EventAttribution::from_op(op),
+        None,
     )?;
 
     tracing::debug!(
@@ -84,8 +87,7 @@ pub(in crate::replication::application) async fn apply_delete_node_snapshot(
 
     // Apply the delete using the existing replicated delete logic
     let attribution = super::event_helpers::EventAttribution::from_op(op);
-    super::super::replication_core::apply_replicated_delete(
-        applicator,
+    applicator.apply_replicated_delete(
         tenant_id,
         repo_id,
         branch,

@@ -26,6 +26,8 @@ mod relation_ops;
 mod schema_ops;
 mod user_ops;
 mod workspace_branch_ops;
+mod workspace_lww;
+mod workspace_ops;
 
 use crate::repositories::BranchRepositoryImpl;
 use raisin_error::Result;

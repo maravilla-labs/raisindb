@@ -188,6 +188,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             }
             AnalyzedStatement::Acl(ref acl_stmt) => self.execute_acl(acl_stmt).await,
             AnalyzedStatement::AIConfig(ref stmt) => self.execute_ai_config(stmt).await,
+            AnalyzedStatement::SpatialAdmin(ref stmt) => self.execute_spatial_admin(stmt).await,
             AnalyzedStatement::Query(_) => self.execute_query(analyzed).await,
         }
     }
@@ -242,5 +243,6 @@ fn statement_type_name(stmt: &AnalyzedStatement) -> &'static str {
         AnalyzedStatement::Restore(_) => "RESTORE",
         AnalyzedStatement::Acl(_) => "ACL",
         AnalyzedStatement::AIConfig(_) => "AI CONFIG",
+        AnalyzedStatement::SpatialAdmin(_) => "SPATIAL ADMIN",
     }
 }

@@ -18,6 +18,7 @@ mod branch;
 mod handlers;
 pub(crate) mod helpers;
 mod restore;
+mod spatial_admin;
 
 pub use batch::batch_requires_async;
 
@@ -467,6 +468,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             AnalyzedStatement::AIConfig(ref stmt) => {
                 return self.execute_ai_config(stmt).await;
             }
+            AnalyzedStatement::SpatialAdmin(ref stmt) => {
+                return self.execute_spatial_admin(stmt).await;
+            }
             AnalyzedStatement::Query(_) => {
                 // Continue with query execution below
             }
@@ -492,8 +496,15 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             "default".to_string()
         };
 
-        let index_catalog: Arc<dyn IndexCatalog> =
-            Arc::new(crate::physical_plan::catalog::RocksDBIndexCatalog::new());
+        // Attach the spatial index's build state. Without it the catalog answers
+        // `NotBuilt` for every property and every ST_DWITHIN degrades to a
+        // row-level filter on a full scan — correct, but never fast. With it, the
+        // planner can tell "indexed" from "never indexed" and only then drop the
+        // predicate.
+        let index_catalog: Arc<dyn IndexCatalog> = Arc::new(
+            crate::physical_plan::catalog::RocksDBIndexCatalog::new()
+                .with_optional_spatial_state(self.storage.spatial_state()),
+        );
 
         let mut physical_planner = PhysicalPlanner::with_catalog(
             self.tenant_id.clone(),

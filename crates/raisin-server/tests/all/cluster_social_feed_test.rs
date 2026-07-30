@@ -259,7 +259,7 @@ async fn test_update_post_across_nodes() {
         .await
         .expect("Failed to setup cluster");
 
-    let alice_path = &fixture.user_paths[0];
+    let _alice_path = &fixture.user_paths[0];
     let post_path = fixture.post_paths[0].clone();
 
     // Update post on node2 (post was created on node1)
@@ -317,7 +317,7 @@ async fn test_relations_likes_via_rest() {
         .await
         .expect("Failed to setup cluster");
 
-    let alice_path = &fixture.user_paths[0];
+    let _alice_path = &fixture.user_paths[0];
     let bob_path = &fixture.user_paths[1];
     let post_path = fixture.post_paths[0].clone();
 

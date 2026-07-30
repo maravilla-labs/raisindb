@@ -122,20 +122,22 @@ impl PhysicalPlanner {
                 context,
             ),
             CanonicalPredicate::SpatialDWithin {
-                table: _,
-                geometry_column: _,
                 property_name,
                 center_lon,
                 center_lat,
                 radius_meters,
+                exact,
+                ..
             } => self.build_spatial_scan(
                 property_name,
                 *center_lon,
                 *center_lat,
                 *radius_meters,
+                *exact,
                 canonical,
                 table,
                 alias,
+                schema,
                 workspace,
                 branch,
                 projection,
@@ -758,59 +760,6 @@ impl PhysicalPlanner {
             ascending: true,
             limit: context.limit,
         };
-
-        Ok(scan)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_spatial_scan(
-        &self,
-        property_name: &str,
-        center_lon: f64,
-        center_lat: f64,
-        radius_meters: f64,
-        canonical: &[CanonicalPredicate],
-        table: &str,
-        alias: &Option<String>,
-        workspace: &str,
-        branch: &str,
-        projection: Option<Vec<String>>,
-        context: &PlanContext,
-    ) -> Result<PhysicalPlan, Error> {
-        let remaining: Vec<_> = canonical
-            .iter()
-            .filter(|p| !matches!(p, CanonicalPredicate::SpatialDWithin { .. }))
-            .cloned()
-            .collect();
-
-        let remaining_filter = self.combine_canonical_predicates(&remaining);
-
-        let mut scan = PhysicalPlan::SpatialDistanceScan {
-            tenant_id: self.default_tenant_id.to_string(),
-            repo_id: self.default_repo_id.to_string(),
-            branch: branch.to_string(),
-            workspace: workspace.to_string(),
-            table: table.to_string(),
-            alias: alias.clone(),
-            property_name: property_name.to_string(),
-            center_lon,
-            center_lat,
-            radius_meters,
-            projection,
-            limit: context.limit,
-        };
-
-        if let Some(filter_expr) = remaining_filter {
-            scan = PhysicalPlan::Filter {
-                input: Box::new(scan),
-                predicates: vec![filter_expr],
-            };
-        }
-
-        tracing::info!(
-            "   Using SpatialDistanceScan for ST_DWithin: property='{}', center=({}, {}), radius={}m",
-            property_name, center_lon, center_lat, radius_meters
-        );
 
         Ok(scan)
     }

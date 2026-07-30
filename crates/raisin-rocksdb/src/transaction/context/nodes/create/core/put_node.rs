@@ -206,7 +206,14 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 9a. Tombstone old spatial indexes on update (before re-indexing)
     if let Some(ref old_node) = existing_node {
         indexing::tombstone_spatial_properties(
-            tx, &tenant_id, &repo_id, &branch, workspace, old_node, &revision,
+            tx,
+            &tenant_id,
+            &repo_id,
+            &branch,
+            workspace,
+            old_node,
+            Some(&normalized_node),
+            &revision,
         )?;
     }
 

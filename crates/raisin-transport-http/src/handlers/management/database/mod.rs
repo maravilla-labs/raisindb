@@ -8,6 +8,7 @@
 mod fulltext;
 mod reindex;
 mod relations;
+mod spatial;
 mod stubs;
 pub mod types;
 mod vector;
@@ -34,6 +35,12 @@ pub use reindex::reindex_start;
 
 #[cfg(feature = "storage-rocksdb")]
 pub use relations::{repair_relation_integrity, verify_relation_integrity};
+
+#[cfg(feature = "storage-rocksdb")]
+pub use spatial::{
+    get_spatial_config, get_spatial_health, put_spatial_config, rebuild_spatial_index,
+    verify_spatial_index,
+};
 
 // Non-rocksdb stubs
 #[cfg(not(feature = "storage-rocksdb"))]

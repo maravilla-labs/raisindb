@@ -6,6 +6,7 @@ use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
+use super::axis_guard::check_lon_lat;
 use super::helpers::point_to_geojson;
 
 /// Create a Point geometry from X and Y coordinates
@@ -84,18 +85,9 @@ impl SqlFunction for StMakePointFunction {
             }
         };
 
-        if !(-180.0..=180.0).contains(&lon) {
-            return Err(Error::Validation(format!(
-                "X coordinate {} out of range [-180, 180]",
-                lon
-            )));
-        }
-        if !(-90.0..=90.0).contains(&lat) {
-            return Err(Error::Validation(format!(
-                "Y coordinate {} out of range [-90, 90]",
-                lat
-            )));
-        }
+        // Same guard as ST_POINT, of which this is the PostGIS-named alias: the
+        // two must not diverge on which coordinate pairs they accept.
+        check_lon_lat("ST_MAKEPOINT", lon, lat)?;
 
         Ok(Literal::Geometry(point_to_geojson(lon, lat)))
     }

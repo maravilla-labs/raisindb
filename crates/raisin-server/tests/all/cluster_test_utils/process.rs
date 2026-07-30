@@ -4,7 +4,7 @@ use super::config::{write_configs_to_dir, ClusterConfig, NodeConfig};
 use super::social_feed::SOCIAL_FEED_REPO;
 use anyhow::{Context, Result};
 use reqwest::Client;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -82,63 +82,30 @@ impl ClusterProcess {
 
     /// Wait for all nodes to become healthy
     pub async fn wait_for_health(&self, timeout: Duration) -> Result<()> {
-        let client = Client::new();
         let start = std::time::Instant::now();
-
-        for (idx, node) in self.config.nodes().iter().enumerate() {
-            let health_url = format!("{}/management/health", node.base_url());
-
-            loop {
-                if start.elapsed() > timeout {
-                    // Dump logs for failed node
-                    Self::dump_node_logs(&node.node_id);
-
-                    anyhow::bail!(
-                        "Node {} did not become healthy within {:?}\nCheck logs at /tmp/{}-{{stdout,stderr}}.log",
-                        node.node_id,
-                        timeout,
-                        node.node_id
-                    );
-                }
-
-                match client.get(&health_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        println!("  {} is healthy", node.node_id);
-                        break;
-                    }
-                    Ok(resp) => {
-                        eprintln!(
-                            "  {} health check returned status: {}",
-                            node.node_id,
-                            resp.status()
-                        );
-                        sleep(Duration::from_millis(500)).await;
-                    }
-                    Err(e) => {
-                        if start.elapsed().as_secs() % 5 == 0
-                            && start.elapsed().as_millis() % 500 < 100
-                        {
-                            eprintln!("  {} not ready yet: {}", node.node_id, e);
-                        }
-                        sleep(Duration::from_millis(500)).await;
-                    }
-                }
-            }
+        for index in 0..self.config.nodes().len() {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            self.wait_for_node_health(index, remaining).await?;
         }
-
         println!("All nodes are healthy");
         Ok(())
     }
 
-    /// Dump last lines of a node's logs
-    fn dump_node_logs(node_id: &str) {
-        let log_dir = std::env::temp_dir();
-        let stdout_path = log_dir.join(format!("{}-stdout.log", node_id));
-        let stderr_path = log_dir.join(format!("{}-stderr.log", node_id));
+    /// Dump last lines of a node's logs.
+    ///
+    /// Reads the paths this cluster actually spawned with, rather than
+    /// recomputing them from the node id — see [`Self::log_file_name`] for why
+    /// those are not the same thing.
+    fn dump_node_logs(&self, index: usize) {
+        let Some(logs) = self.node_logs.get(index) else {
+            return;
+        };
+        let (node_id, stdout_path, stderr_path) =
+            (&logs.node_id, &logs.stdout_path, &logs.stderr_path);
 
         println!("\n=== Last 50 lines of {} logs ===", node_id);
 
-        if let Ok(content) = std::fs::read_to_string(&stdout_path) {
+        if let Ok(content) = std::fs::read_to_string(stdout_path) {
             let lines: Vec<&str> = content.lines().collect();
             let start = lines.len().saturating_sub(50);
             println!("\n--- stdout ---");
@@ -147,7 +114,7 @@ impl ClusterProcess {
             }
         }
 
-        if let Ok(content) = std::fs::read_to_string(&stderr_path) {
+        if let Ok(content) = std::fs::read_to_string(stderr_path) {
             let lines: Vec<&str> = content.lines().collect();
             let start = lines.len().saturating_sub(50);
             println!("\n--- stderr ---");
@@ -196,6 +163,114 @@ impl ClusterProcess {
     /// Return the log file paths for each node
     pub fn log_paths(&self) -> &[NodeLogs] {
         &self.node_logs
+    }
+
+    /// Kill the node at `index` and start it again on the same data directory.
+    ///
+    /// Killing is what makes a peer genuinely unreachable, and that matters for
+    /// any test about *undelivered* operations. Merely stopping a process
+    /// (`SIGSTOP`) leaves it owning its listening socket, so the kernel keeps
+    /// accepting and buffering replication bytes on its behalf and delivers the
+    /// backlog the instant it resumes — in receive order, which is send order. A
+    /// killed peer's socket is closed, the sender's delivery genuinely fails, and
+    /// the operation stays in the sender's oplog until it reconnects. That is the
+    /// only way to stage a real out-of-order delivery from outside the process.
+    ///
+    /// The data directory is preserved, so the node comes back with everything it
+    /// had. Its log files are truncated by the respawn — take any
+    /// log offsets you care about *after* the restart.
+    pub fn restart_node(&mut self, index: usize) -> Result<()> {
+        self.kill_node(index)?;
+        self.start_node_again(index)
+    }
+
+    /// Kill the node at `index` and leave it down.
+    ///
+    /// Its data directory and log files survive; [`Self::start_node_again`] brings
+    /// it back. See [`Self::restart_node`] for why a test wanting a peer to be
+    /// unreachable must kill it rather than stop it.
+    pub fn kill_node(&mut self, index: usize) -> Result<()> {
+        let node_id = self
+            .config
+            .nodes
+            .get(index)
+            .map(|n| n.node_id.clone())
+            .with_context(|| format!("no node at index {index}"))?;
+
+        if let Some(child) = self.processes.get_mut(index) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        println!("  [restart] {node_id} killed");
+        Ok(())
+    }
+
+    /// Start a node previously stopped by [`Self::kill_node`].
+    ///
+    /// The respawn truncates that node's log files, so take any log offsets you
+    /// care about *after* calling this.
+    pub fn start_node_again(&mut self, index: usize) -> Result<()> {
+        let node = self
+            .config
+            .nodes
+            .get(index)
+            .cloned()
+            .with_context(|| format!("no node at index {index}"))?;
+
+        let binary_path = Self::find_binary()?;
+        let config_path = self
+            .config_dir
+            .path()
+            .join(format!("{}.toml", node.node_id));
+        let (process, logs) = Self::spawn_node(&binary_path, &config_path, &node)
+            .with_context(|| format!("failed to respawn {}", node.node_id))?;
+
+        self.processes[index] = process;
+        self.node_logs[index] = logs;
+        println!("  [restart] {} started again", node.node_id);
+        Ok(())
+    }
+
+    /// Wait for ONE node to answer its liveness route.
+    ///
+    /// `wait_for_health` polls every node and so cannot be used while any node is
+    /// deliberately down or frozen; it delegates here per node.
+    ///
+    /// `/management/health` no longer exists — it moved to
+    /// `/management/admin/health`, which is behind operator auth. `/health` is the
+    /// unauthenticated liveness route (`state.rs`), and it is what
+    /// `helpers::multi_node` has always used. A 401 counts as healthy: it means
+    /// the process is up and serving, which is all a liveness check asks.
+    pub async fn wait_for_node_health(&self, index: usize, timeout: Duration) -> Result<()> {
+        let node = self
+            .config
+            .nodes
+            .get(index)
+            .with_context(|| format!("no node at index {index}"))?;
+        let health_url = format!("{}/health", node.base_url());
+        let client = Client::new();
+        let start = std::time::Instant::now();
+
+        loop {
+            // 401 counts as healthy: the process is up and serving, which is all a
+            // liveness check asks.
+            if let Ok(resp) = client.get(&health_url).send().await {
+                if resp.status().is_success() || resp.status().as_u16() == 401 {
+                    println!("  {} is healthy again", node.node_id);
+                    return Ok(());
+                }
+            }
+            if start.elapsed() > timeout {
+                let node_id = node.node_id.clone();
+                self.dump_node_logs(index);
+                anyhow::bail!(
+                    "Node {} did not become healthy within {:?}",
+                    node_id,
+                    timeout
+                );
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
     }
 
     /// Find the raisin-server binary (release or debug)
@@ -250,6 +325,19 @@ impl ClusterProcess {
         }
     }
 
+    /// Log file name for one node, qualified by its HTTP port.
+    ///
+    /// The port is what makes this per-CLUSTER rather than per-node-id. Ports come
+    /// from `ports::unique_ports`, so two suites running at once get different
+    /// files; naming them `node1-stdout.log` (as this did) meant every cluster in
+    /// the process wrote to the SAME three files, truncating each other on spawn.
+    /// That is not only a debugging annoyance: `spatial_config_replication_test`
+    /// reads these logs as evidence, and a concurrent run made it dump another
+    /// cluster's node3 while reporting on its own.
+    fn log_file_name(node: &NodeConfig, stream: &str) -> String {
+        format!("{}-{}-{}.log", node.node_id, node.http_port, stream)
+    }
+
     /// Spawn a single node process
     fn spawn_node(
         binary_path: &Path,
@@ -258,8 +346,8 @@ impl ClusterProcess {
     ) -> Result<(Child, NodeLogs)> {
         // Create log files for this node
         let log_dir = std::env::temp_dir();
-        let stdout_path = log_dir.join(format!("{}-stdout.log", node.node_id));
-        let stderr_path = log_dir.join(format!("{}-stderr.log", node.node_id));
+        let stdout_path = log_dir.join(Self::log_file_name(node, "stdout"));
+        let stderr_path = log_dir.join(Self::log_file_name(node, "stderr"));
 
         let stdout_file = OpenOptions::new()
             .create(true)
@@ -291,6 +379,14 @@ impl ClusterProcess {
             )
             .arg("--config")
             .arg(config_path)
+            // Without this the server exits(1) during startup — outside dev-mode it
+            // demands JWT_SECRET, RAISINDB_SIGNING_SECRET and RAISIN_MASTER_KEY from
+            // the ENVIRONMENT (main.rs), which no generated config file can supply.
+            // Every cluster test in this suite was failing its health check for this
+            // reason, with only an ERROR line in the node log to say why.
+            // `helpers::multi_node`, which the single-node suites use, has always
+            // passed it.
+            .arg("--dev-mode")
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .spawn()

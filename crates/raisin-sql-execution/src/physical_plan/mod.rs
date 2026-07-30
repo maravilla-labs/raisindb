@@ -91,7 +91,10 @@ pub use batch_execution::{
 };
 
 // Other re-exports
-pub use catalog::{IndexCatalog, RocksDBIndexCatalog};
+pub use catalog::explain_reason as spatial_explain_reason;
+pub use catalog::{
+    radius_is_covered, IndexCatalog, RocksDBIndexCatalog, SpatialAvailability, SpatialStateSource,
+};
 pub use cte_storage::{CTEConfig, CTEIterator, MaterializedCTE};
 pub use executor::{
     execute_plan, execute_plan_batch, ExecutionContext, ExecutionError, Row, RowStream,

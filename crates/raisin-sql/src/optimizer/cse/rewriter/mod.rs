@@ -82,6 +82,37 @@ impl CsePlanRewriter {
                 tracing::trace!("  [{}] '{}'", idx, expr.alias);
             }
 
+            // If EVERY top-level expression became a pass-through, the rewrite
+            // computes nothing new and is a pure no-op — so skip it.
+            //
+            // A top-level expression is a pass-through when the whole expression
+            // is not itself a CSE candidate, and in that case
+            // `build_intermediate_projection` clones the ORIGINAL, unrewritten
+            // expression down into the intermediate. So for
+            // `SELECT UPPER(p->>'k'), LOWER(p->>'k')` the intermediate ends up
+            // computing `p->>'k'` twice anyway — the duplication CSE exists to
+            // remove — and the outer projection degrades to forwarding two
+            // columns. The layer is dead weight.
+            //
+            // Worse, it is dead weight that ACCUMULATES: the intermediate still
+            // contains the repeated subexpression, so the next optimizer pass
+            // extracts it again and adds another layer, and the plan never
+            // stabilizes. Measured before this guard, a two-occurrence query
+            // reached `max_passes` (10) and produced ELEVEN nested Project nodes
+            // over the scan, each re-evaluating the projection per row.
+            //
+            // Returning the plan unchanged is safe by construction: the outer
+            // projection was forwarding, by alias, exactly the expressions the
+            // intermediate had just computed from the same input.
+            if passthrough_aliases.len() == exprs.len() {
+                tracing::trace!(
+                    "CSE Rewriter: all {} top-level expressions are pass-through — \
+                     the rewrite would add a layer that computes nothing. Skipping.",
+                    exprs.len()
+                );
+                return LogicalPlan::Project { input, exprs };
+            }
+
             let intermediate_project = LogicalPlan::Project {
                 input,
                 exprs: intermediate_exprs,

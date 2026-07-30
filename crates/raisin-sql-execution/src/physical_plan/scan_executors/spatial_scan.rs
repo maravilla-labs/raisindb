@@ -18,6 +18,7 @@ use raisin_core::services::rls_filter;
 use raisin_error::Error;
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::permissions::PermissionScope;
+use raisin_storage::spatial::SpatialPreFilter;
 use raisin_storage::{NodeRepository, SpatialIndexRepository, Storage, StorageScope};
 
 /// Execute a SpatialDistanceScan operator.
@@ -45,6 +46,9 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
         radius_meters,
         projection,
         limit,
+        claims_distance_order,
+        precisions,
+        bucket_eq,
     ) = match plan {
         PhysicalPlan::SpatialDistanceScan {
             tenant_id,
@@ -59,6 +63,9 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
             radius_meters,
             projection,
             limit,
+            claims_distance_order,
+            precisions,
+            bucket_eq,
         } => (
             tenant_id.clone(),
             repo_id.clone(),
@@ -72,6 +79,9 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
             *radius_meters,
             projection.clone(),
             *limit,
+            *claims_distance_order,
+            precisions.clone(),
+            bucket_eq.clone(),
         ),
         _ => {
             return Err(Error::Validation(
@@ -88,10 +98,25 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
     // the `emitted` counter in the stream below.
     let scan_limit = limit.unwrap_or(usize::MAX);
 
+    // `claims_distance_order` does not change what this executor DOES — the index
+    // returns ascending distance order unconditionally. It records that the
+    // PLANNER relied on that order to drop a `Sort`, so it is logged: if rows ever
+    // come back mis-ordered, the trace says whether a Sort was elided on the
+    // strength of a promise this scan no longer keeps.
     tracing::info!(
-        "   SpatialDistanceScan: property='{}', center=({}, {}), radius={}m, workspace='{}', branch='{}', limit={:?}",
-        property_name, center_lon, center_lat, radius_meters, workspace, branch, limit
+        "   SpatialDistanceScan: property='{}', center=({}, {}), radius={}m, workspace='{}', branch='{}', limit={:?}, claims_distance_order={}",
+        property_name, center_lon, center_lat, radius_meters, workspace, branch, limit, claims_distance_order
     );
+
+    // The discriminator pre-filter is a SELECTIVITY device only: it rejects
+    // candidates whose stored bucket provably differs, and never rejects an entry
+    // that carries no bucket. The predicate it came from is still in the residual
+    // filter above this scan, so a stale bucket costs a wasted node fetch, never a
+    // dropped row.
+    let prefilter = SpatialPreFilter {
+        bucket_eq: bucket_eq.map(|(_, value)| value),
+        bbox: None,
+    };
 
     Ok(Box::pin(try_stream! {
         let qualifier = alias.clone().unwrap_or_else(|| table.clone());
@@ -102,7 +127,7 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
             .find_within_radius(
                 &tenant_id, &repo_id, &branch, &workspace,
                 &property_name, center_lon, center_lat, radius_meters,
-                &max_revision, scan_limit,
+                &max_revision, scan_limit, &precisions, &prefilter,
             )?;
 
         tracing::info!("   SpatialDistanceScan found {} nodes within {}m", results.len(), radius_meters);
@@ -177,6 +202,7 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
         center_lat,
         k,
         projection,
+        precisions,
     ) = match plan {
         PhysicalPlan::SpatialKnnScan {
             tenant_id,
@@ -190,6 +216,8 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
             center_lat,
             k,
             projection,
+            claims_distance_order: _,
+            precisions,
         } => (
             tenant_id.clone(),
             repo_id.clone(),
@@ -202,6 +230,7 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
             *center_lat,
             *k,
             projection.clone(),
+            precisions.clone(),
         ),
         _ => {
             return Err(Error::Validation(
@@ -233,7 +262,7 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
             .find_nearest(
                 &tenant_id, &repo_id, &branch, &workspace,
                 &property_name, center_lon, center_lat, k,
-                &max_revision,
+                &max_revision, &precisions, &SpatialPreFilter::default(),
             )?;
 
         tracing::info!("   SpatialKnnScan found {} nearest neighbors", results.len());

@@ -69,6 +69,10 @@ impl<'a> PlanBuilder<'a> {
                 // AI config statements bypass the logical plan - they're executed directly
                 Ok(LogicalPlan::Empty)
             }
+            AnalyzedStatement::SpatialAdmin(_) => {
+                // Spatial index admin statements bypass the logical plan
+                Ok(LogicalPlan::Empty)
+            }
         }
     }
 }

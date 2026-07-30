@@ -89,6 +89,8 @@ pub enum AnalyzedStatement {
     Acl(crate::ast::acl::AclStatement),
     // AI/Embedding configuration statements
     AIConfig(crate::ast::ai_config::AIConfigStatement),
+    // Spatial index administration (SHOW/ALTER/REBUILD/VERIFY SPATIAL INDEX)
+    SpatialAdmin(crate::ast::spatial_admin::SpatialAdminStatement),
 }
 
 /// Analyzed ORDER statement for node sibling positioning

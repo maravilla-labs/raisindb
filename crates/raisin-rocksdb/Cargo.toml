@@ -12,6 +12,11 @@ path = "src/lib.rs"
 # Storage traits
 raisin-storage = { path = "../raisin-storage" }
 raisin-models = { path = "../raisin-models" }
+# Geometry conversion + CRS. The spatial index normalises to WGS84 at write
+# time using raisin-proj's built-in tier ONLY, so index bytes are identical
+# in every build -- see raisin_proj::normalize_for_index.
+raisin-geometry = { path = "../raisin-geometry" }
+raisin-proj = { path = "../raisin-proj" }
 raisin-validation = { path = "../raisin-validation" }
 raisin-error = { path = "../raisin-error" }
 raisin-context = { path = "../raisin-context" }
@@ -103,4 +108,8 @@ harness = false
 
 [[bench]]
 name = "persistent_idempotency_bench"
+harness = false
+
+[[bench]]
+name = "spatial_index_bench"
 harness = false

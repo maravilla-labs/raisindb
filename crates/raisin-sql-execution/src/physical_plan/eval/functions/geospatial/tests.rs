@@ -633,9 +633,24 @@ fn test_st_collect() {
     let result = f.evaluate(&args, &empty_row()).unwrap();
     match result {
         Literal::Geometry(v) => {
+            // Two geometries of the same type collapse to the matching
+            // homogeneous Multi* rather than a GeometryCollection, as in PostGIS,
+            // so the result stays usable by type-specific functions.
+            assert_eq!(v["type"], "MultiPoint");
+            assert_eq!(v["coordinates"].as_array().unwrap().len(), 2);
+        }
+        other => panic!("expected Geometry, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_st_collect_mixed_types_is_a_collection() {
+    let f = StCollectFunction;
+    let args = vec![geom_arg(sf_point()), geom_arg(sf_polygon())];
+    match f.evaluate(&args, &empty_row()).unwrap() {
+        Literal::Geometry(v) => {
             assert_eq!(v["type"], "GeometryCollection");
-            let geometries = v["geometries"].as_array().unwrap();
-            assert_eq!(geometries.len(), 2);
+            assert_eq!(v["geometries"].as_array().unwrap().len(), 2);
         }
         other => panic!("expected Geometry, got {:?}", other),
     }
@@ -1079,23 +1094,51 @@ fn test_st_touches_adjacent_polygons_true() {
 }
 
 #[test]
-fn test_st_equals_slight_float_drift() {
+fn test_st_equals_has_no_coordinate_tolerance() {
     let f = StEqualsFunction;
     let point_a = json!({"type": "Point", "coordinates": [-122.4194, 37.7749]});
-    // Add ~1e-9 drift -- well within the 1e-8 epsilon
     let point_b = json!({"type": "Point", "coordinates": [-122.4194000009, 37.7749000009]});
-    let args = vec![geom_arg(point_a), geom_arg(point_b)];
-    let result = f.evaluate(&args, &empty_row()).unwrap();
-    assert_eq!(result, Literal::Boolean(true));
+
+    // BEHAVIOUR CHANGE. This previously returned true: the hand-rolled comparison
+    // treated coordinates within 1e-8 as equal. ST_EQUALS is now the DE-9IM
+    // topological predicate, which has no epsilon, so two distinct points are not
+    // equal however close they are.
+    //
+    // The tolerance was not a feature. At 1e-8 degrees it silently merged points a
+    // millimetre apart, which is inside the resolution of indoor positioning data,
+    // and it made equality non-transitive: a == b and b == c did not imply a == c.
+    // Callers wanting fuzzy comparison should say so with
+    // ST_DWITHIN(a, b, tolerance_in_metres), which is explicit about the unit.
+    assert_eq!(
+        f.evaluate(
+            &vec![geom_arg(point_a.clone()), geom_arg(point_b)],
+            &empty_row()
+        )
+        .unwrap(),
+        Literal::Boolean(false)
+    );
+    assert_eq!(
+        f.evaluate(
+            &vec![geom_arg(point_a.clone()), geom_arg(point_a)],
+            &empty_row()
+        )
+        .unwrap(),
+        Literal::Boolean(true),
+        "a geometry still equals itself"
+    );
 }
 
 #[test]
-fn test_st_extract_all_coords_rejects_invalid() {
-    // Non-numeric coordinate value should produce an error
+fn test_malformed_coordinates_are_rejected_at_the_conversion_boundary() {
+    // The old raw-JSON coordinate walker checked this; conversion now does, which
+    // means EVERY function inherits the check instead of only those that happened
+    // to call the walker.
     let bad_point = json!({"type": "Point", "coordinates": ["not_a_number", 37.0]});
-    let result = helpers::extract_all_coords(&bad_point);
-    assert!(
-        result.is_err(),
-        "expected error for non-numeric coordinates"
-    );
+    assert!(helpers::geojson_to_geom(&bad_point, None).is_err());
+
+    // The shape must match the declared type, too: this is a Polygon whose
+    // coordinates are not rings. The old `type`-name-only validation passed it and
+    // it failed much later, inside some unrelated function.
+    let bad_polygon = json!({"type": "Polygon", "coordinates": [1.0, 2.0]});
+    assert!(helpers::geojson_to_geom(&bad_polygon, None).is_err());
 }
