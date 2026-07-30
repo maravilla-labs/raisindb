@@ -6289,6 +6289,7 @@ dependencies = [
  "hex",
  "nanoid",
  "raisin-ai",
+ "raisin-hlc",
  "raisin-models",
  "raisin-rel",
  "raisin-storage",

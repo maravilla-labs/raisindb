@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 raisin-storage = { version = "0.1.0", path = "../raisin-storage" }
+raisin-hlc = { version = "0.1.0", path = "../raisin-hlc" }
 raisin-rel = { version = "0.1.0", path = "../raisin-rel" }
 raisin-models = { version = "0.1.0", path = "../raisin-models" }
 serde = { workspace = true }

@@ -59,8 +59,10 @@ export interface DesignerStepProperties {
   task_description?: string;
   options?: unknown;
   input_schema?: unknown;
-  due_in_seconds?: number;
-  priority?: number;
+  /** Number, or a template expression resolved per run */
+  due_in_seconds?: number | string;
+  /** Number, or a template expression resolved per run */
+  priority?: number | string;
   min_confidence?: number;
   escalation_assignee?: string;
   timeout_edge?: string;

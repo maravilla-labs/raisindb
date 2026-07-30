@@ -3643,3 +3643,91 @@ async fn timed_out_child_notifies_parent_and_releases_the_join() {
         branches[0]
     );
 }
+
+/// The deadline fix, exercised through a DESIGNER-format flow.
+///
+/// The earlier coverage used runtime format, which hid a real gap: the
+/// designer types declared `due_in_seconds` as `i64`, so a `${...}` there
+/// failed to DESERIALIZE and took the whole flow definition down with it.
+/// Designer format is the canonical authoring format, so that meant per-run
+/// deadlines were unavailable exactly where flows are actually written.
+#[tokio::test]
+async fn designer_human_task_templated_deadline_arms_the_wait() {
+    let harness = Harness::new();
+    harness.script_function(
+        "/lib/escalate",
+        json!({"success": true, "result": {"escalated": true}}),
+    );
+
+    let flow = json!({
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "approve",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Approve {{ input.order_id }}",
+                    "step_type": "human_task",
+                    "task_type": "approval",
+                    "assignee": "/users/manager",
+                    // Both from data, not authored into the flow
+                    "due_in_seconds": "${input.sla_seconds}",
+                    "priority": "${input.tier}",
+                    "timeout_edge": "escalate"
+                }
+            },
+            {
+                "id": "escalate",
+                "node_type": "raisin:FlowStep",
+                "properties": { "action": "Escalate", "function_ref": "/lib/escalate" }
+            }
+        ]
+    });
+
+    let id = harness.seed_instance(make_instance(
+        flow,
+        json!({"order_id": "ORD-3", "sla_seconds": 3600, "tier": 5}),
+    ));
+    let _ = execute_flow(&id, &harness).await;
+    harness.pump_real_time().await;
+
+    // The task carries the RESOLVED deadline and priority...
+    let (_, task) = harness
+        .find_node_by_prefix("raisin:access_control", "/users/manager/inbox/")
+        .expect("inbox task created");
+    assert_eq!(task["properties"]["title"], json!("Approve ORD-3"));
+    assert_eq!(task["properties"]["due_in_seconds"], json!(3600));
+    assert_eq!(task["properties"]["priority"], json!(5));
+    assert!(task["properties"]["due_at"].is_string());
+
+    // ...and the wait is actually armed with it, so timeout_edge can fire.
+    let instance = harness.instance(&id);
+    assert_eq!(instance.status, FlowStatus::Waiting);
+    let wait = instance.wait_info.as_ref().unwrap();
+    assert_eq!(wait.wait_type, WaitType::HumanTask);
+    assert!(
+        wait.timeout_at.is_some(),
+        "a templated deadline must arm the wait"
+    );
+
+    // Expire it and confirm the escalation branch runs.
+    {
+        let mut map = harness.instances.lock().unwrap();
+        let inst = map.get_mut(&id).unwrap();
+        inst.wait_info.as_mut().unwrap().timeout_at =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    }
+    let _ = check_flow_timeout(&id, &harness).await;
+    harness.pump_real_time().await;
+
+    assert!(
+        harness
+            .function_invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(f, _)| f == "/lib/escalate"),
+        "timeout_edge must route to the escalation step"
+    );
+}

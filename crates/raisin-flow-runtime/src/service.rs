@@ -596,6 +596,7 @@ pub async fn complete_task<S: Storage>(
     let mut task_node = load_task_node(storage, tenant_id, repo, task_ref).await?;
     let task_path = task_node.path.clone();
     let task_id = task_node.id.clone();
+    let task_node_type = task_node.node_type.clone();
 
     // 1. Status must be pending
     let status = task_prop_str(&task_node, "status").unwrap_or_else(|| "pending".to_string());
@@ -670,6 +671,42 @@ pub async fn complete_task<S: Storage>(
         )
         .await
         .map_err(|e| FlowError::Other(format!("Failed to update task node: {}", e)))?;
+
+    // Publish the node:updated event for the completed task.
+    //
+    // This update goes through the raw node repository, which does NOT emit
+    // events — only NodeService and the flow node callbacks do. So task
+    // CREATION was observable (node:created) while COMPLETION was silent,
+    // meaning a subscriber could only ever count tasks up, never down, and had
+    // to poll or refetch to notice a completion. Emitting here is what makes
+    // an inbox badge (or any `{home}/inbox/**` subscription) correct without
+    // client-side polling.
+    // Same revision lookup the flow node callbacks perform after a write.
+    let revision = {
+        use raisin_storage::BranchRepository;
+        match storage
+            .branches()
+            .get_branch(tenant_id, repo, DEFAULT_BRANCH)
+            .await
+        {
+            Ok(Some(b)) => b.head,
+            _ => raisin_hlc::HLC::new(0, 0),
+        }
+    };
+    storage
+        .event_bus()
+        .publish(raisin_storage::Event::Node(raisin_storage::NodeEvent {
+            tenant_id: tenant_id.to_string(),
+            repository_id: repo.to_string(),
+            branch: DEFAULT_BRANCH.to_string(),
+            workspace_id: INBOX_WORKSPACE.to_string(),
+            node_id: task_id.to_string(),
+            node_type: Some(task_node_type.clone()),
+            revision,
+            kind: raisin_storage::NodeEventKind::Updated,
+            path: Some(task_path.clone()),
+            metadata: None,
+        }));
 
     // 5. Resume the owning flow with the response
     let flow = if let Some(instance_id) = &flow_instance_id {

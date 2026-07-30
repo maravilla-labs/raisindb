@@ -675,3 +675,78 @@ fn test_bare_condition_step_gets_both_branches() {
         Some("after")
     );
 }
+
+/// Regression: a templated deadline in DESIGNER format used to fail to
+/// DESERIALIZE (`invalid type: string "${...}", expected i64`), so the whole
+/// flow definition refused to load — the property could not be templated in
+/// the canonical authoring format at all, and attempting it broke the flow.
+#[test]
+fn test_designer_human_task_accepts_templated_deadline_and_priority() {
+    let json = r#"{
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "approve",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Approve",
+                    "step_type": "human_task",
+                    "task_type": "approval",
+                    "assignee": "/users/manager",
+                    "due_in_seconds": "${input.due_secs}",
+                    "priority": "{{ input.tier }}"
+                }
+            }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition =
+        serde_json::from_str(json).expect("a templated deadline must not break the definition");
+    let runtime = def.to_runtime_format();
+
+    let step = runtime
+        .nodes
+        .iter()
+        .find(|n| n.id == "approve")
+        .expect("human task lowers");
+    assert_eq!(step.step_type, StepType::HumanTask);
+    // Passed through RAW: the handler resolves and coerces at run time.
+    assert_eq!(
+        step.get_string_property("due_in_seconds").as_deref(),
+        Some("${input.due_secs}")
+    );
+    assert_eq!(
+        step.get_string_property("priority").as_deref(),
+        Some("{{ input.tier }}")
+    );
+}
+
+/// Literal numbers must still lower as numbers, not as strings.
+#[test]
+fn test_designer_human_task_literal_deadline_stays_numeric() {
+    let json = r#"{
+        "version": 1,
+        "error_strategy": "fail_fast",
+        "nodes": [
+            {
+                "id": "approve",
+                "node_type": "raisin:FlowStep",
+                "properties": {
+                    "action": "Approve",
+                    "step_type": "human_task",
+                    "task_type": "approval",
+                    "assignee": "/users/manager",
+                    "due_in_seconds": 86400,
+                    "priority": 4
+                }
+            }
+        ]
+    }"#;
+
+    let def: DesignerFlowDefinition = serde_json::from_str(json).unwrap();
+    let runtime = def.to_runtime_format();
+    let step = runtime.nodes.iter().find(|n| n.id == "approve").unwrap();
+    assert_eq!(step.get_i64_property("due_in_seconds"), Some(86400));
+    assert_eq!(step.get_u32_property("priority"), Some(4));
+}

@@ -204,6 +204,46 @@ hang.
 **Also fixed alongside it:** cancelling a child never notified its parent
 (`service.rs::cancel_instance`), the same hang as §1.6 by a different route.
 
+### 1.9 Templated deadlines were rejected by the DESIGNER format
+
+§1.1 fixed the human-task handler, which reads the runtime format. The
+designer format — the CANONICAL authoring format — still declared
+`due_in_seconds: Option<i64>` and `priority: Option<u32>`, so a `${...}` there
+was not merely ignored: it failed to DESERIALIZE, and the whole flow
+definition refused to load with
+`invalid type: string "${input.due_secs}", expected i64`. Shipping a per-policy
+deadline into a designer-format flow would therefore have broken that flow
+outright.
+
+**Fixed** with a `TemplatableNumber` (untagged number-or-string) on both
+properties, emitted raw by the converter so the handler resolves and coerces
+it as it already does for the runtime format. Literals still lower as numbers.
+Regression tests cover the deserialization, the lowering, and an end-to-end
+designer-format run whose `timeout_edge` fires; verified live against a server
+with `due_in_seconds: "${input.policy_due_secs}"` resolving to 259200 and a
+`due_at` three days out.
+
+**Lesson worth keeping:** a fix to the runtime format is only half a fix. The
+two formats have independent type declarations, and the designer one is
+stricter — anything the runtime resolves at run time must be typed loosely
+enough there to survive `serde`.
+
+### 1.10 Task completion emitted no event
+
+Task creation published `node:created` and task expiry published
+`node:updated` (both go through the flow node callbacks), but COMPLETION went
+through the raw node repository in `service.rs`, which does not publish. Only
+`NodeService` and the flow callbacks emit node events.
+
+The consequence for any subscriber — an inbox badge, a task list — is that a
+count could only ever be pushed UP, never down: a completion was invisible, so
+clients had to poll, refetch on panel open, or refresh on `visibilitychange`.
+
+**Fixed** by publishing `node:updated` after the task node update, matching
+what the creation and expiry paths already do. Every completion surface (HTTP,
+the `raisin.tasks.complete` function binding) routes through this one
+function, so the single emission covers them all.
+
 ---
 
 ## 2. Open engine items

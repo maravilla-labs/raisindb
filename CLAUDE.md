@@ -323,7 +323,18 @@ Full authoring guide: `docs/workflows.md`. Engine-owned gaps and their triage:
   duplicates side effects. Don't reintroduce a flat default.
 - **`human_task` properties are ALL template-resolved**, including the numeric
   `due_in_seconds` / `priority` — resolve first, coerce after. Reading them as
-  numbers before `DataMapper::map` silently drops any `${...}` value.
+  numbers before `DataMapper::map` silently drops any `${...}` value. **The
+  DESIGNER types must also be loose enough** (`TemplatableNumber`): they are a
+  separate, stricter declaration, and a narrow `Option<i64>` there makes a
+  template a DESERIALIZATION error that takes the whole flow definition down
+  (`invalid type: string, expected i64`). Fixing only the runtime format is
+  half a fix.
+- **Node events come from `NodeService` and the flow node callbacks, NOT from
+  the raw node repository.** A write via `storage.nodes().update(...)` is
+  silent — no `node:updated`, so WS subscriptions, triggers and indexing never
+  see it. That is how task completion ended up unobservable while creation and
+  expiry were fine. Either go through the callbacks or publish on
+  `storage.event_bus()` explicitly.
 - **`task_type` is an open set.** approval/input/review/action are what the
   runtime understands semantically; any `[a-z][a-z0-9_-]{0,63}` slug is valid
   and is carried through verbatim. Validate the SHAPE, never the membership —

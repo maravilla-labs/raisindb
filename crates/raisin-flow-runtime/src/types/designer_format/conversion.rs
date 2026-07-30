@@ -905,11 +905,13 @@ fn convert_step_node(
     if let Some(data) = &properties.data {
         props.insert("data".to_string(), data.clone());
     }
-    if let Some(due) = properties.due_in_seconds {
-        props.insert("due_in_seconds".to_string(), Value::Number(due.into()));
+    // Emitted RAW (number or template string): the human task handler
+    // resolves it with every other property and coerces afterwards.
+    if let Some(due) = &properties.due_in_seconds {
+        props.insert("due_in_seconds".to_string(), due.to_value());
     }
-    if let Some(priority) = properties.priority {
-        props.insert("priority".to_string(), Value::Number(priority.into()));
+    if let Some(priority) = &properties.priority {
+        props.insert("priority".to_string(), priority.to_value());
     }
     if let Some(min_confidence) = properties.min_confidence {
         if let Some(num) = serde_json::Number::from_f64(min_confidence) {

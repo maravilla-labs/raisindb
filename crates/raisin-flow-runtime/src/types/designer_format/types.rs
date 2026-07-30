@@ -307,13 +307,17 @@ pub struct DesignerStepProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 
-    /// Task due time in seconds from creation (wait deadline)
+    /// Task due time in seconds from creation (wait deadline).
+    ///
+    /// A literal number, or a template expression resolved per run.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_in_seconds: Option<i64>,
+    pub due_in_seconds: Option<TemplatableNumber>,
 
-    /// Task priority (1-5, where 5 is highest)
+    /// Task priority (1-5, where 5 is highest).
+    ///
+    /// A literal number, or a template expression resolved per run.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<u32>,
+    pub priority: Option<TemplatableNumber>,
 
     /// Minimum confidence for an agent assignee's decision (0-1)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -489,6 +493,48 @@ pub struct DesignerLoopConfig {
 
 fn default_loop_item() -> String {
     "item".to_string()
+}
+
+/// A numeric step property that may instead be a template expression.
+///
+/// The runtime resolves every human-task property against the flow context
+/// and coerces the result, so a deadline or priority can come from data
+/// (`"${input.sla_seconds}"`) rather than being authored into the flow. This
+/// type exists because a plain `Option<i64>` made such a value a
+/// DESERIALIZATION error — the whole flow definition failed to load with
+/// `invalid type: string, expected i64`, so the property could not be
+/// templated in designer format at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TemplatableNumber {
+    /// A literal value
+    Number(i64),
+    /// A template expression (`${...}` / `{{ ... }}`), resolved per run
+    Expression(String),
+}
+
+impl TemplatableNumber {
+    /// The value as it should be handed to the runtime: a JSON number for a
+    /// literal, the raw string for an expression (resolved and coerced later).
+    pub fn to_value(&self) -> serde_json::Value {
+        match self {
+            TemplatableNumber::Number(n) => serde_json::Value::Number((*n).into()),
+            TemplatableNumber::Expression(expr) => serde_json::Value::String(expr.clone()),
+        }
+    }
+
+    /// Whether a string variant actually looks like a template.
+    ///
+    /// A non-template string here is almost certainly an authoring mistake
+    /// (`"3 days"`), and it would otherwise only surface at run time.
+    pub fn is_resolvable(&self) -> bool {
+        match self {
+            TemplatableNumber::Number(_) => true,
+            TemplatableNumber::Expression(expr) => {
+                expr.contains("${") || expr.contains("{{") || expr.trim().parse::<i64>().is_ok()
+            }
+        }
+    }
 }
 
 /// Fan-out configuration for a parallel container.
