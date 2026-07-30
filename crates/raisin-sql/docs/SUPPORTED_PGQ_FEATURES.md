@@ -68,8 +68,11 @@ LIMIT 10;
 | `(n)` | Any node | `MATCH (n)` |
 | `(n:Label)` | Node with label | `MATCH (n:Article)` |
 | `(n:Label1\|Label2)` | Multiple labels (OR) | `MATCH (n:Article\|Post)` |
-| `(n:Label WHERE cond)` | With inline filter | `MATCH (n:Article WHERE n.featured = true)` |
-| `(n WHERE cond)` | Filter without label | `MATCH (n WHERE n.id = 'x')` |
+
+Inline `WHERE` inside `(...)` or `[...]` is **rejected at parse time**. It used
+to parse into a field no execution path ever read, so the predicate was silently
+dropped. Filter in the `GRAPH_TABLE` `WHERE` clause instead:
+`MATCH (n:Article) WHERE n.featured = true`.
 
 ### Relationship Patterns
 
@@ -84,25 +87,60 @@ LIMIT 10;
 
 ### Variable-Length Paths
 
+The canonical quantifier is the postfix brace form, written after the arrow.
+
 | Pattern | Hops | Description |
 |---------|------|-------------|
-| `*` | 1..10 | Default bounded (1 to 10) |
-| `*n` | exactly n | Exactly n hops |
-| `*n..m` | n to m | Range inclusive |
-| `*n..` | n to 10 | Minimum n, max default |
-| `*..m` | 1 to m | At least 1, max m |
+| `->{n}` | exactly n | Exactly n hops |
+| `->{n,m}` | n to m | Range inclusive |
+| `->{n,}` | n to 10 | Minimum n, unbounded (capped) |
+| `->*` | 0 to 10 | `{0,}`, unbounded (capped) |
+| `->+` | 1 to 10 | `{1,}`, unbounded (capped) |
+| `->?` | 0 or 1 | Optional hop |
+
+**Rule Q-SCOPE:** an unbounded quantifier (`*`, `+`, `{n,}`) must sit under a
+path selector or a path restrictor, or it is a parse error naming both remedies.
 
 **Examples:**
 ```sql
 -- Exactly 2 hops (friend of friend)
-MATCH (a)-[:follows*2]->(b)
+MATCH (a)-[:follows]->{2}(b)
 
 -- 1 to 3 hops
-MATCH (a)-[:follows*1..3]->(b)
+MATCH (a)-[:follows]->{1,3}(b)
 
--- Any path length (capped at 10)
-MATCH (a)-[:follows*]->(b)
+-- Any path length (capped at 10) - needs a selector or restrictor
+MATCH ANY SHORTEST p = (a)-[:follows]->*(b)
+MATCH TRAIL (a)-[:follows]->*(b)
 ```
+
+#### Deprecated: Cypher-style quantifiers
+
+The old in-bracket form is still accepted and emits a deprecation warning.
+Note that legacy `*` is `{1,}` while standard `*` is `{0,}`.
+
+| Deprecated | Canonical |
+|------------|-----------|
+| `-[:t*2]->` | `-[:t]->{2}` |
+| `-[:t*1..3]->` | `-[:t]->{1,3}` |
+| `-[:t*2..]->` | `-[:t]->{2,}` |
+| `-[:t*..5]->` | `-[:t]->{1,5}` |
+| `-[:t*]->` | `-[:t]->{1,}` |
+
+### Path Variables, Selectors and Restrictors
+
+```sql
+-- bind the path, then read it through the path accessors
+MATCH p = (a)-[:follows]->{1,3}(b)          COLUMNS (path_length(p), nodes(p))
+MATCH ANY SHORTEST p = (a)-[:follows]->+(b) COLUMNS (edges(p))
+MATCH ALL SHORTEST TRAIL p = (a)-[:t]->*(b) COLUMNS (element_id(p))
+-- RaisinDB extension: weighted search, requires COST on a bound edge
+MATCH ANY CHEAPEST p = (a)-[r:t COST r.weight]->{1,3}(b) COLUMNS (path_length(p))
+```
+
+Selectors: `ANY`, `ANY SHORTEST`, `ALL SHORTEST`, `ANY CHEAPEST`.
+Restrictors: `WALK`, `TRAIL`, `ACYCLIC` (default). Selector comes first.
+`SHORTEST k`, `SHORTEST k GROUP`, `ANY k` and `SIMPLE` parse to a named error.
 
 **Performance Notes:**
 - Default max depth: 10

@@ -26,7 +26,48 @@ use raisin_sql::analyzer::{Literal, TypedExpr};
 ///
 /// `Text` is accepted because `ST_GEOMFROMGEOJSON` is frequently skipped and a
 /// raw JSON string passed instead; rejecting it would be a gratuitous papercut.
+///
+/// # Nested property paths
+///
+/// When the argument is `properties->>'venue.geo'` and the ordinary JSON lookup
+/// finds no such key, the dotted path is resolved against the row's property tree
+/// (see [`super::property_path`]). The direct key wins, so this is a fallback and
+/// never an override.
+///
+/// A **wildcard** path (`stops[].geo`) names a set, which has no single value.
+/// It is rejected here with a message naming the two functions that define an
+/// answer over a set — `ST_DWITHIN` (any) and `ST_DISTANCE` (minimum) — rather
+/// than silently picking one element, which would be a wrong answer for
+/// `ST_INTERSECTS` and friends.
 pub(super) fn geometry_arg(
+    fn_name: &str,
+    args: &[TypedExpr],
+    index: usize,
+    row: &Row,
+) -> Result<Option<Value>, Error> {
+    if let Some(value) = geometry_arg_direct(fn_name, args, index, row)? {
+        return Ok(Some(value));
+    }
+    let mut matched = super::property_path::resolve_from_row(&args[index], row);
+    match matched.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matched.remove(0).geometry)),
+        n => Err(Error::Validation(format!(
+            "{fn_name}: argument {} names {n} geometries via a wildcard property path; \
+             only ST_DWITHIN and ST_DISTANCE define an answer over several geometries \
+             (any-within and minimum-distance respectively). Name one concrete path, \
+             e.g. properties->>'stops.0.geo'.",
+            index + 1
+        ))),
+    }
+}
+
+/// [`geometry_arg`] WITHOUT the nested-path fallback.
+///
+/// Exists so `convert::geom_pair_multi` can tell "the direct JSON key answered"
+/// from "the path walk still has to run" without re-running the fallback and
+/// without swallowing a genuine type error.
+pub(super) fn geometry_arg_direct(
     fn_name: &str,
     args: &[TypedExpr],
     index: usize,

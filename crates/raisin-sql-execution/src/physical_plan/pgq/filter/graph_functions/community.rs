@@ -24,8 +24,9 @@ pub(crate) async fn evaluate_cdlp<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let communities = algorithms::cdlp::cdlp(&adjacency, 10);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let communities = algorithms::cdlp::cdlp(adjacency, 10);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &community) in &communities {
@@ -52,8 +53,9 @@ pub(crate) async fn evaluate_wcc<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let components = algorithms::connected_components::connected_components(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let components = algorithms::connected_components::connected_components(adjacency);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, component) in &components {
@@ -80,9 +82,10 @@ pub(crate) async fn evaluate_louvain<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
     let communities =
-        algorithms::louvain::louvain(&adjacency, &algorithms::louvain::LouvainConfig::default());
+        algorithms::louvain::louvain(adjacency, &algorithms::louvain::LouvainConfig::default());
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &community) in &communities {
@@ -109,9 +112,10 @@ pub(crate) async fn evaluate_community_id<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
     let communities = algorithms::label_propagation::label_propagation(
-        &adjacency,
+        adjacency,
         &algorithms::label_propagation::LabelPropagationConfig::default(),
     );
 
@@ -139,8 +143,9 @@ pub(crate) async fn evaluate_community_count<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let count = algorithms::community_count(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let count = algorithms::community_count(adjacency);
 
     let mut results = std::collections::HashMap::new();
     results.insert(
@@ -164,8 +169,9 @@ pub(crate) async fn evaluate_component_count<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let count = algorithms::component_count(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let count = algorithms::component_count(adjacency);
 
     let mut results = std::collections::HashMap::new();
     results.insert(

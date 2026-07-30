@@ -24,42 +24,24 @@ const TOMBSTONE: &[u8] = b"T";
 /// Walk a property tree and collect every `PropertyValue::Reference` with its
 /// dot-format property path (`tags.0`, `content.cta.target`, ...).
 ///
-/// This is the canonical walker: forward/reverse index keys embed the path it
-/// produces, so writers AND tombstoners must both use it for keys to line up.
+/// Forward/reverse index keys embed the path this produces, so writers AND
+/// tombstoners must both use it for keys to line up.
+///
+/// The traversal itself lives in [`crate::indexing::walk_properties`], shared with
+/// the spatial index's [`crate::indexing::walk_geometries`]. Two hand-maintained
+/// copies of the same recursion is how the two path formats drift, and a writer
+/// and a tombstoner that disagree about the format leave entries that can never be
+/// shadowed.
 pub(crate) fn walk_references(
     properties: &HashMap<String, PropertyValue>,
 ) -> Vec<(String, RaisinReference)> {
-    let mut refs = Vec::new();
-
-    fn visit(path: &str, value: &PropertyValue, refs: &mut Vec<(String, RaisinReference)>) {
-        match value {
-            PropertyValue::Reference(r) => refs.push((path.to_string(), r.clone())),
-            PropertyValue::Array(items) => {
-                for (i, item) in items.iter().enumerate() {
-                    visit(&format!("{}.{}", path, i), item, refs);
-                }
-            }
-            PropertyValue::Object(obj) => {
-                for (key, val) in obj {
-                    visit(&format!("{}.{}", path, key), val, refs);
-                }
-            }
-            PropertyValue::Element(element) => {
-                // Element blocks carry their fields (incl. references) in
-                // `content` — descend or element-nested refs are invisible
-                // to REFERENCES()/backlinks.
-                for (key, val) in &element.content {
-                    visit(&format!("{}.{}", path, key), val, refs);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for (key, value) in properties {
-        visit(key, value, &mut refs);
-    }
-    refs
+    crate::indexing::walk_properties(properties, |value| match value {
+        PropertyValue::Reference(r) => Some(r),
+        _ => None,
+    })
+    .into_iter()
+    .map(|(path, reference)| (path, reference.clone()))
+    .collect()
 }
 
 /// Write forward + reverse reference index entries for every reference in

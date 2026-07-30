@@ -16,7 +16,8 @@ impl PhysicalPlan {
             | PhysicalPlan::Limit { input, .. }
             | PhysicalPlan::Window { input, .. }
             | PhysicalPlan::Distinct { input, .. }
-            | PhysicalPlan::LateralMap { input, .. } => vec![input.as_ref()],
+            | PhysicalPlan::LateralMap { input, .. }
+            | PhysicalPlan::SpatialAnnotate { input, .. } => vec![input.as_ref()],
             PhysicalPlan::NestedLoopJoin { left, right, .. }
             | PhysicalPlan::HashJoin { left, right, .. }
             | PhysicalPlan::HashSemiJoin { left, right, .. } => {
@@ -61,7 +62,8 @@ impl PhysicalPlan {
             | PhysicalPlan::Limit { input, .. }
             | PhysicalPlan::Window { input, .. }
             | PhysicalPlan::Distinct { input, .. }
-            | PhysicalPlan::LateralMap { input, .. } => vec![input.as_mut()],
+            | PhysicalPlan::LateralMap { input, .. }
+            | PhysicalPlan::SpatialAnnotate { input, .. } => vec![input.as_mut()],
             PhysicalPlan::NestedLoopJoin { left, right, .. }
             | PhysicalPlan::HashJoin { left, right, .. }
             | PhysicalPlan::HashSemiJoin { left, right, .. } => {

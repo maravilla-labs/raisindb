@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Calculate Triangle Count for all nodes in the graph
 ///
@@ -24,7 +24,8 @@ pub fn triangle_count(adjacency: &GraphAdjacency) -> HashMap<GraphNodeId, usize>
     let mut neighbors: HashMap<(String, String), HashSet<(String, String)>> = HashMap::new();
 
     for (source, targets) in adjacency.iter() {
-        for (tgt_w, tgt_id, _) in targets {
+        for edge in targets {
+            let (tgt_w, tgt_id) = (&edge.target_workspace, &edge.target_id);
             let target = (tgt_w.clone(), tgt_id.clone());
             if source != &target {
                 neighbors
@@ -86,14 +87,16 @@ pub fn node_triangle_count(adjacency: &GraphAdjacency, node: &GraphNodeId) -> us
     let mut neighbors_set = HashSet::new();
     // Outgoing
     if let Some(targets) = adjacency.get(node) {
-        for (w, id, _) in targets {
+        for edge in targets {
+            let (w, id) = (&edge.target_workspace, &edge.target_id);
             neighbors_set.insert((w.clone(), id.clone()));
         }
     }
     // Incoming (scan all adjacency? expensive. Better to assume undirected graph is built or passed)
     // Since we only have directed adjacency map, we have to scan it to find incoming edges to `node`.
     for (src, targets) in adjacency {
-        for (w, id, _) in targets {
+        for edge in targets {
+            let (w, id) = (&edge.target_workspace, &edge.target_id);
             if w == &node.0 && id == &node.1 {
                 neighbors_set.insert(src.clone());
             }
@@ -113,7 +116,10 @@ pub fn node_triangle_count(adjacency: &GraphAdjacency, node: &GraphNodeId) -> us
 
             // Check v -> w
             if let Some(targets) = adjacency.get(v) {
-                if targets.iter().any(|(tw, tid, _)| tw == &w.0 && tid == &w.1) {
+                if targets
+                    .iter()
+                    .any(|e| e.target_workspace == w.0 && e.target_id == w.1)
+                {
                     connected = true;
                 }
             }
@@ -121,7 +127,10 @@ pub fn node_triangle_count(adjacency: &GraphAdjacency, node: &GraphNodeId) -> us
             // Check w -> v
             if !connected {
                 if let Some(targets) = adjacency.get(w) {
-                    if targets.iter().any(|(tw, tid, _)| tw == &v.0 && tid == &v.1) {
+                    if targets
+                        .iter()
+                        .any(|e| e.target_workspace == v.0 && e.target_id == v.1)
+                    {
                         connected = true;
                     }
                 }
@@ -140,28 +149,28 @@ pub fn node_triangle_count(adjacency: &GraphAdjacency, node: &GraphNodeId) -> us
 mod tests {
     use super::*;
 
-    fn create_triangle_graph() -> HashMap<(String, String), Vec<(String, String, String)>> {
+    fn create_triangle_graph() -> GraphAdjacency {
         let mut graph = HashMap::new();
         // A-B-C-A triangle
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
             vec![
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
             ],
         );
         graph

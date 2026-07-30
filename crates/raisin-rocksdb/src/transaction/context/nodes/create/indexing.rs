@@ -201,18 +201,21 @@ pub(super) fn index_node_properties(
     // Create the state record on first write of a geometry property, in the SAME
     // batch. This is what preserves zero-opt-in automatic indexing: a brand-new
     // workspace is queryable immediately, with no admin action and no config.
-    for (prop_name, prop_value) in &node.properties {
-        if !matches!(prop_value, PropertyValue::Geometry(_)) {
-            continue;
-        }
+    //
+    // Ranges over the SAME walked path set the writer above used. Iterating
+    // `node.properties` flat here left every nested geometry with entries but no
+    // state record, and a missing record reads as `NotBuilt` — so the planner
+    // refused the index and every nested query fell back to a full scan
+    // permanently, with correct rows and no error to notice.
+    for property_path in &crate::indexing::indexed_geometry_paths(&node.properties) {
         spatial_state.ensure_for_write(
             &mut batch,
             tenant_id,
             repo_id,
             branch,
             workspace,
-            prop_name,
-            policies.for_property(prop_name),
+            property_path,
+            policies.for_property(property_path),
             *revision,
         )?;
     }
@@ -287,7 +290,7 @@ pub(super) fn tombstone_spatial_properties(
         .lock()
         .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
 
-    crate::indexing::spatial::tombstone_superseded_spatial_indexes(
+    crate::indexing::tombstone_superseded_spatial_indexes(
         &mut batch, &targets, &ctx, old_node, new_node, revision, &policies,
     )
 }

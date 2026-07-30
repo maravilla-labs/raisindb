@@ -235,7 +235,7 @@ impl OperationApplicator {
             // prefix scan: a scan here would be O(all geometries in the workspace)
             // for a single replicated upsert. Without this a replicated MOVE leaves
             // the peer matching at BOTH the old and the new location.
-            crate::indexing::spatial::tombstone_superseded_spatial_indexes(
+            crate::indexing::tombstone_superseded_spatial_indexes(
                 &mut batch,
                 &spatial_targets,
                 &index_ctx,
@@ -332,10 +332,12 @@ impl OperationApplicator {
         // Create the local index-state record when this replica is seeing a
         // geometry property for the first time, so the query planner reports
         // `Ready` rather than falling back to a scan on a fully-indexed replica.
-        for (property_name, value) in &normalized_node.properties {
-            if !matches!(value, PropertyValue::Geometry(_)) {
-                continue;
-            }
+        //
+        // Walked, not flat: a replica that recorded state only for top-level
+        // geometry reported `NotBuilt` for every nested path and answered nested
+        // proximity queries by full scan forever, even though the entries were
+        // right there in the same batch.
+        for property_name in &crate::indexing::indexed_geometry_paths(&normalized_node.properties) {
             let policy = spatial_policies.for_property(property_name);
             if let Err(e) = spatial_state.ensure_for_write(
                 &mut batch,

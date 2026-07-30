@@ -35,6 +35,24 @@ pub enum Error {
     InvalidState(String),
     #[error("Internal error: {0}")]
     Internal(String),
+    /// A spatial index scan hit its per-cell entry budget, so it cannot answer
+    /// from the index without answering SHORT.
+    ///
+    /// Typed rather than a `Backend(String)` because it is not a failure but a
+    /// **re-plan signal**: the SQL executor recognises it and degrades to the
+    /// spatial fallback (a correct-but-slow row scan) instead of failing the
+    /// query. A string match on the message would have made that routing depend
+    /// on wording nobody would think to preserve.
+    #[error(
+        "Spatial index budget exceeded: cell '{cell}' for property '{property}' in workspace \
+         '{workspace}' holds more than {limit} entries; refusing to answer from a partial scan"
+    )]
+    SpatialBudgetExceeded {
+        workspace: String,
+        property: String,
+        cell: String,
+        limit: usize,
+    },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -73,5 +91,13 @@ impl Error {
     /// Helper for internal invariant violations
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    /// Whether this is the spatial per-cell budget signal.
+    ///
+    /// The query planner/executor uses it to re-plan onto the spatial fallback.
+    /// Every other caller should treat it as an ordinary error.
+    pub fn is_spatial_budget_exceeded(&self) -> bool {
+        matches!(self, Self::SpatialBudgetExceeded { .. })
     }
 }

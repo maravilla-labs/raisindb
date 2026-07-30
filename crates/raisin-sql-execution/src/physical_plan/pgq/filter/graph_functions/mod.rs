@@ -16,13 +16,9 @@ use raisin_storage::{BranchScope, RelationRepository, Storage};
 
 use super::Result;
 use crate::physical_plan::executor::ExecutionError;
-use crate::physical_plan::pgq::context::PgqContext;
+use crate::physical_plan::graph_algo::{GraphAdjacency, GraphEdge, GraphNodeId};
+use crate::physical_plan::pgq::context::{PgqContext, ScopedAdjacency};
 use crate::physical_plan::pgq::types::{SqlValue, VariableBinding};
-
-use crate::physical_plan::cypher::algorithms::{
-    self,
-    types::{GraphAdjacency, GraphNodeId},
-};
 
 /// Check if a function name is a graph algorithm function
 pub fn is_graph_function(name: &str) -> bool {
@@ -128,25 +124,82 @@ pub async fn evaluate_graph_function<S: Storage>(
 // Helpers (shared across submodules)
 // ---------------------------------------------------------------------------
 
-/// Edge weight map: (source_workspace, source_id, target_workspace, target_id) -> weight
-pub(crate) type EdgeWeightMap = HashMap<(String, String, String, String), f64>;
+pub(crate) use crate::physical_plan::pgq::context::EdgeWeightMap;
 
-/// Build graph adjacency and weight map from storage for the current context
+/// Build (or reuse) the adjacency list and weight map for the current context.
+///
+/// Two things happen here that did not before:
+///
+/// 1. **Relation-type pushdown.** This used to pass `None` to
+///    `scan_relations_global`, loading EVERY relation in the branch across all
+///    workspaces on EVERY algorithm invocation. The scope now comes from the
+///    query's own patterns (see [`PgqContext::relation_type_scope`]). A single
+///    type is pushed into storage; several are pushed as `None` plus an
+///    in-memory filter, because the storage API takes one type — which is also
+///    why `-[:a|b]->` must never be narrowed to just `a`.
+/// 2. **A per-query memo.** Every scalar graph function used to rebuild the
+///    whole adjacency, so `COLUMNS (pagerank(a), wcc(a), bfs(a,b))` scanned the
+///    branch three times PER ROW. The memo is keyed by the relation-type set
+///    and lives exactly as long as the query.
+///
+/// # This changes what the scalar graph functions compute
+///
+/// `COLUMNS (pagerank(a))` under `MATCH (a:User)-[:follows]->(b:User)` now runs
+/// over the **follows graph**, not over every relation in the branch. That is
+/// the projected-graph reading of `GRAPH_TABLE` and is the intended semantics,
+/// but it is a numeric change for any query whose pattern names its types.
+/// A pattern that leaves any hop untyped still gets the whole branch.
+///
+/// Relation types are compared **exactly**, matching both the storage prefix
+/// scan and the single-hop matcher (`t == &rel.relation_type`). A pattern whose
+/// spelling differs in case from the stored type already matched nothing before
+/// this change.
 pub(crate) async fn build_adjacency_with_weights<S: Storage>(
     storage: &Arc<S>,
     context: &PgqContext,
-) -> Result<(GraphAdjacency, EdgeWeightMap)> {
+) -> Result<ScopedAdjacency> {
+    build_adjacency_scoped(storage, context, context.relation_type_scope()).await
+}
+
+/// As [`build_adjacency_with_weights`], for a caller that knows the exact
+/// relation types its pattern traverses.
+pub(crate) async fn build_adjacency_scoped<S: Storage>(
+    storage: &Arc<S>,
+    context: &PgqContext,
+    relation_types: &[String],
+) -> Result<ScopedAdjacency> {
+    let key = PgqContext::adjacency_key(relation_types);
+    if let Some(hit) = context.cached_adjacency(&key) {
+        return Ok(hit);
+    }
+
+    // One type can be pushed into the scan; several cannot, so they are
+    // filtered in memory after an unfiltered scan.
+    let pushed_down = match relation_types {
+        [single] => Some(single.as_str()),
+        _ => None,
+    };
+    let needs_memory_filter = relation_types.len() > 1;
+
     let scope = BranchScope::new(&context.tenant_id, &context.repo_id, &context.branch);
     let relations = storage
         .relations()
-        .scan_relations_global(scope, None, context.revision.as_ref())
+        .scan_relations_global(scope, pushed_down, context.revision.as_ref())
         .await
         .map_err(|e| ExecutionError::Backend(e.to_string()))?;
 
     let mut adjacency: GraphAdjacency = HashMap::new();
     let mut weights: EdgeWeightMap = HashMap::new();
+
     for (src_workspace, src_id, tgt_workspace, tgt_id, rel) in relations {
-        let weight = rel.weight.map(|w| w as f64).unwrap_or(1.0);
+        if needs_memory_filter && !relation_types.contains(&rel.relation_type) {
+            continue;
+        }
+
+        // Legacy weight map: keyed by node pair only, so it cannot hold two
+        // relation types between the same pair, and it defaults a missing
+        // weight to 1.0. Both flaws are why `ANY CHEAPEST` reads
+        // `GraphEdge::weight` instead — see `graph_algo::cost`.
         weights.insert(
             (
                 src_workspace.clone(),
@@ -154,23 +207,32 @@ pub(crate) async fn build_adjacency_with_weights<S: Storage>(
                 tgt_workspace.clone(),
                 tgt_id.clone(),
             ),
-            weight,
+            rel.weight.map(|w| w as f64).unwrap_or(1.0),
         );
-        let source = (src_workspace, src_id);
-        let target_entry = (tgt_workspace, tgt_id, rel.relation_type);
-        adjacency.entry(source).or_default().push(target_entry);
+
+        adjacency
+            .entry((src_workspace, src_id))
+            .or_default()
+            .push(GraphEdge::new(
+                tgt_workspace,
+                tgt_id,
+                rel.target_node_type,
+                rel.relation_type,
+                rel.weight,
+            ));
     }
 
-    Ok((adjacency, weights))
+    let built: ScopedAdjacency = Arc::new((adjacency, weights));
+    context.store_adjacency(&key, Arc::clone(&built));
+    Ok(built)
 }
 
 /// Build graph adjacency from storage (without weights, for algorithms that don't need them)
 pub(crate) async fn build_adjacency<S: Storage>(
     storage: &Arc<S>,
     context: &PgqContext,
-) -> Result<GraphAdjacency> {
-    let (adjacency, _) = build_adjacency_with_weights(storage, context).await?;
-    Ok(adjacency)
+) -> Result<ScopedAdjacency> {
+    build_adjacency_with_weights(storage, context).await
 }
 
 /// Extract a node identifier from the first argument expression

@@ -35,7 +35,7 @@ use raisin_geometry::{from_geo, to_geo, Geom};
 use raisin_sql::analyzer::{Literal, TypedExpr};
 use serde_json::Value;
 
-use super::z_support::geometry_arg;
+use super::z_support::{geometry_arg, geometry_arg_direct};
 use crate::physical_plan::executor::Row;
 
 /// Evaluate one argument into a [`Geom`].
@@ -122,6 +122,60 @@ fn into_crs(
     }
     let wgs84 = to_geo(value, None)?;
     Ok(raisin_geometry::transform(&wgs84, target)?)
+}
+
+/// Evaluate two geometry arguments where the FIRST may name several geometries.
+///
+/// Returns one `(concrete path, resolved pair)` per geometry the first argument
+/// matches. For an ordinary single-valued argument that is exactly one element
+/// with an empty path, so callers need no special case.
+///
+/// # Row semantics for a multi-geometry node: ONE ROW PER NODE
+///
+/// A node may now carry several geometries — one top level, one in a section
+/// element, and an array of elements each holding one. The row model does not
+/// change: a query returns **one row per node**, and a wildcard path collapses to
+/// a per-node scalar.
+///
+/// That is not a convenience. `resolve_live_candidates` already keys its winners
+/// by node id and emits at most one candidate per node (a node is indexed at
+/// eight precisions and would otherwise appear eight times), and `__distance` is
+/// injected as one extra column on a node row. More decisively: with one row per
+/// GEOMETRY, a keyset cursor on `(__distance)` would straddle rows of the SAME
+/// node, and page boundaries would duplicate and skip rows. One row per node keeps
+/// pagination correct because each node appears exactly once with exactly one
+/// distance.
+///
+/// The per-node scalar is therefore defined as:
+/// * `ST_DWITHIN` — true when **any** matched geometry is within the radius;
+/// * `ST_DISTANCE` — the **minimum** over the matched geometries, i.e. "how close
+///   does this node get". Minimum and not first-found, because it is the only
+///   choice that makes `ORDER BY ST_DISTANCE(...) LIMIT 10` mean "the ten nearest
+///   nodes"; first-found is non-deterministic and maximum is nonsense for
+///   proximity. Ties resolve to the lexicographically smallest concrete path.
+pub(super) fn geom_pair_multi(
+    fn_name: &str,
+    args: &[TypedExpr],
+    row: &Row,
+) -> Result<Vec<(String, (Geom, Geom))>, Error> {
+    let Some(other) = geometry_arg(fn_name, args, 1, row)? else {
+        return Ok(Vec::new());
+    };
+
+    // The ordinary path first: a direct JSON key, a literal, a function result.
+    if let Some(value) = geometry_arg_direct(fn_name, args, 0, row)? {
+        return Ok(vec![(
+            String::new(),
+            geom_pair_values(fn_name, &value, &other)?,
+        )]);
+    }
+
+    let matched = super::property_path::resolve_from_row(&args[0], row);
+    let mut out = Vec::with_capacity(matched.len());
+    for m in matched {
+        out.push((m.path, geom_pair_values(fn_name, &m.geometry, &other)?));
+    }
+    Ok(out)
 }
 
 /// Serialize a [`Geom`] back into a geometry literal.

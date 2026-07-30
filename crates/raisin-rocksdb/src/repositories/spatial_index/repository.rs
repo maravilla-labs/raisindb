@@ -15,7 +15,7 @@ use super::entry::SpatialEntry;
 use raisin_storage::spatial::{ProximityResult, SpatialIndexEntry, SpatialPreFilter};
 
 mod knn;
-mod scan;
+pub(crate) mod scan;
 
 pub use knn::KnnRingPlan;
 
@@ -23,11 +23,27 @@ pub use knn::KnnRingPlan;
 #[derive(Clone)]
 pub struct SpatialIndexRepository {
     pub(super) db: Arc<DB>,
+    /// Per-cell scan budget; see [`crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL`]
+    /// and `repository::scan` for what exceeding it means.
+    pub(super) max_entries_per_cell: usize,
 }
 
 impl SpatialIndexRepository {
     pub fn new(db: Arc<DB>) -> Self {
-        Self { db }
+        Self {
+            db,
+            max_entries_per_cell: crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
+        }
+    }
+
+    /// Override the per-cell scan budget.
+    ///
+    /// Set from `RocksDBConfig::spatial_max_entries_per_cell`. Exists as a knob
+    /// so the DEGRADATION path is reachable in a test without writing a quarter
+    /// of a million index entries.
+    pub fn with_max_entries_per_cell(mut self, max_entries_per_cell: usize) -> Self {
+        self.max_entries_per_cell = max_entries_per_cell;
+        self
     }
 
     /// Index a geometry property for a node at every precision in `policy`.
@@ -122,7 +138,7 @@ impl SpatialIndexRepository {
     ) -> Result<()> {
         let targets = SpatialIndexTargets::from_db(&self.db)?;
         let ctx = IndexCtx::new(tenant_id, repo_id, branch, workspace);
-        crate::indexing::spatial::tombstone_spatial_property(
+        crate::indexing::tombstone_spatial_property(
             batch,
             &targets,
             &ctx,
@@ -130,7 +146,9 @@ impl SpatialIndexRepository {
             property_name,
             old_geometry,
             revision,
-            policy,
+            // An explicitly supplied policy carries no evidence about what is
+            // physically present, so this API keeps the unconditional widening.
+            crate::indexing::TombstonePrecisions::every(policy),
         )
     }
 

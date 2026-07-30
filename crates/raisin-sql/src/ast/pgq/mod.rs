@@ -20,6 +20,7 @@
 mod expressions;
 mod patterns;
 mod query;
+mod selectors;
 
 pub use expressions::{BinaryOperator, Expr, Literal, UnaryOperator};
 pub use patterns::{
@@ -29,6 +30,7 @@ pub use query::{
     is_system_field, ColumnExpr, ColumnsClause, GraphTableQuery, MatchClause, SourceSpan,
     WhereClause, DEFAULT_GRAPH_NAME, SYSTEM_FIELDS,
 };
+pub use selectors::{PathRestrictor, PathSelector, QuantifierSyntax};
 
 #[cfg(test)]
 mod tests {
@@ -57,6 +59,32 @@ mod tests {
         assert_eq!(PathQuantifier::exact(2).min, 2);
         assert_eq!(PathQuantifier::exact(2).max, Some(2));
         assert_eq!(PathQuantifier::unbounded().effective_max(), 10);
+        assert_eq!(PathQuantifier::at_least(2).max, None);
+        assert!(PathQuantifier::at_least(2).is_unbounded());
+    }
+
+    #[test]
+    fn legacy_quantifier_carries_a_deprecation_note() {
+        let legacy = PathQuantifier {
+            min: 1,
+            max: Some(3),
+            syntax: QuantifierSyntax::LegacyStar,
+        };
+        let note = legacy
+            .deprecation_note()
+            .expect("legacy form is deprecated");
+        assert!(note.contains("*1..3"), "{note}");
+        assert!(note.contains("->{1,3}"), "{note}");
+        assert!(PathQuantifier::range(1, 3).deprecation_note().is_none());
+    }
+
+    #[test]
+    fn default_restrictor_is_acyclic() {
+        assert_eq!(PathRestrictor::DEFAULT, PathRestrictor::Acyclic);
+        assert_eq!(
+            PathPattern::new(vec![]).effective_restrictor(),
+            PathRestrictor::Acyclic
+        );
     }
 
     #[test]

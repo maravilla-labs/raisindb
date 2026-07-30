@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Compute the local clustering coefficient for every node.
 ///
@@ -83,7 +83,8 @@ fn build_undirected_neighbor_sets(
     let mut undirected: HashMap<GraphNodeId, HashSet<GraphNodeId>> = HashMap::new();
 
     for (source, neighbors) in adjacency.iter() {
-        for (tgt_w, tgt_id, _rel_type) in neighbors {
+        for edge in neighbors {
+            let (tgt_w, tgt_id) = (&edge.target_workspace, &edge.target_id);
             let target = (tgt_w.clone(), tgt_id.clone());
             if source != &target {
                 undirected
@@ -109,22 +110,22 @@ mod tests {
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
             ],
         );
 
@@ -144,9 +145,9 @@ mod tests {
         graph.insert(
             ("ws".to_string(), "center".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
             ],
         );
 
@@ -169,11 +170,11 @@ mod tests {
         let mut graph: GraphAdjacency = HashMap::new();
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "C".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "C".to_string(), "", "LINK", None)],
         );
 
         let coefficients = lcc(&graph);
@@ -190,7 +191,7 @@ mod tests {
             let mut edges = vec![];
             for j in 0..4 {
                 if i != j {
-                    edges.push(("ws".to_string(), format!("n{}", j), "LINK".to_string()));
+                    edges.push(GraphEdge::new("ws", format!("n{}", j), "", "LINK", None));
                 }
             }
             graph.insert(("ws".to_string(), format!("n{}", i)), edges);
@@ -211,7 +212,7 @@ mod tests {
         let mut graph: GraphAdjacency = HashMap::new();
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
 
         let result = node_lcc(&graph, &("ws".to_string(), "A".to_string()));

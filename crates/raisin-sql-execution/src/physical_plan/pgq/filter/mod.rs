@@ -7,12 +7,14 @@
 //! - [`operators`] - Binary/unary operators, comparison, arithmetic
 //! - [`property_access`] - Node and relationship property resolution
 //! - [`functions`] - PGQ function evaluation (CARDINALITY, etc.)
+//! - [`path_accessors`] - path accessors (path_length, nodes, edges, ...)
 //! - [`like_match`] - SQL LIKE pattern matching
 
 mod functions;
 mod graph_functions;
 mod like_match;
 mod operators;
+mod path_accessors;
 mod property_access;
 #[cfg(test)]
 mod tests;
@@ -208,6 +210,8 @@ pub async fn evaluate_expr<S: Storage>(
                             name, args, binding, storage, context,
                         )
                         .await?
+                    } else if path_accessors::is_path_accessor(name) {
+                        path_accessors::evaluate_path_accessor(name, args, binding)?
                     } else {
                         evaluate_function(name, args, binding)?
                     };

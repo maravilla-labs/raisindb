@@ -229,3 +229,86 @@ fn an_empty_property_schema_serializes_to_an_empty_object() {
     let s = SpatialPropertySchema::default();
     assert_eq!(serde_json::to_string(&s).unwrap(), "{}");
 }
+
+/// The array-index normalisation, which MUST be identical on both sides — the
+/// configuration surface writes under this key and the query planner's
+/// availability check looks the record up by it. A disagreement means the
+/// planner reports an indexed field unindexed forever, with no error anywhere.
+#[test]
+fn policy_key_normalises_array_indices_and_nothing_else() {
+    assert_eq!(policy_key_for_path("location"), "location");
+    assert_eq!(policy_key_for_path("venue.geo"), "venue.geo");
+    assert_eq!(policy_key_for_path("hero.map_pin"), "hero.map_pin");
+    assert_eq!(policy_key_for_path("stops.0.geo"), "stops[].geo");
+    assert_eq!(policy_key_for_path("stops.17.geo"), "stops[].geo");
+    assert_eq!(policy_key_for_path("tags.3"), "tags[]");
+    assert_eq!(policy_key_for_path("a.0.1.b"), "a[][].b");
+}
+
+#[test]
+fn policy_key_is_idempotent() {
+    for path in ["location", "venue.geo", "stops[].geo", "tags[]", "a[][].b"] {
+        assert_eq!(policy_key_for_path(path), path, "not idempotent: {path}");
+    }
+    assert_eq!(
+        policy_key_for_path(&policy_key_for_path("stops.4.geo")),
+        "stops[].geo"
+    );
+}
+
+/// A wildcard is only ever written by a query; the walker never produces one.
+#[test]
+fn wildcard_paths_are_recognised() {
+    assert!(is_wildcard_property_path("stops[].geo"));
+    assert!(!is_wildcard_property_path("stops.0.geo"));
+    assert!(!is_wildcard_property_path("venue.geo"));
+}
+
+/// A nested path resolves against the declaration written under its policy key,
+/// whichever spelling the caller used.
+#[test]
+fn a_concrete_array_path_resolves_against_the_wildcard_declaration() {
+    let mut schema = SpatialWorkspaceSchema::default();
+    schema.set_scope(
+        Some("stops[].geo"),
+        SpatialPropertySchema {
+            precisions: Some(vec![6, 8]),
+            ..Default::default()
+        },
+    );
+    let resolved = resolve_spatial_policy(None, Some(&schema), "stops.3.geo");
+    assert_eq!(resolved.precisions, vec![8, 6]);
+
+    // And the operator may equally have written the concrete spelling.
+    let mut concrete = SpatialWorkspaceSchema::default();
+    concrete.set_scope(
+        Some("stops.0.geo"),
+        SpatialPropertySchema {
+            precisions: Some(vec![6, 8]),
+            ..Default::default()
+        },
+    );
+    assert!(concrete.properties.contains_key("stops[].geo"));
+    assert_eq!(
+        resolve_spatial_policy(None, Some(&concrete), "stops.9.geo").precisions,
+        vec![8, 6]
+    );
+}
+
+/// Exact match only: a parent path does NOT supply a policy for a child.
+#[test]
+fn nested_policy_resolution_has_no_prefix_inheritance() {
+    let mut schema = SpatialWorkspaceSchema::default();
+    schema.set_scope(
+        Some("venue"),
+        SpatialPropertySchema {
+            precisions: Some(vec![6]),
+            ..Default::default()
+        },
+    );
+    let resolved = resolve_spatial_policy(None, Some(&schema), "venue.geo");
+    assert_eq!(
+        resolved.precisions,
+        sorted_precisions(INDEX_PRECISIONS_DEFAULT.to_vec())
+    );
+}

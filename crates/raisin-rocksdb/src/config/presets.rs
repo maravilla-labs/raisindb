@@ -47,6 +47,9 @@ impl RocksDBConfig {
             oplog_compaction_batch_size: 100_000,
             trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
             max_active_jobs_per_tenant: Some(5000),
+            spatial_compaction: crate::spatial::SpatialCompactionConfig::default()
+                .with_env_overrides(),
+            spatial_max_entries_per_cell: crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
         }
     }
 
@@ -91,6 +94,9 @@ impl RocksDBConfig {
             oplog_compaction_batch_size: 100_000,
             trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
             max_active_jobs_per_tenant: Some(5000),
+            spatial_compaction: crate::spatial::SpatialCompactionConfig::default()
+                .with_env_overrides(),
+            spatial_max_entries_per_cell: crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
         }
     }
 
@@ -135,6 +141,9 @@ impl RocksDBConfig {
             oplog_compaction_batch_size: 500_000, // Larger batch for high-performance
             trigger_safety: crate::jobs::TriggerSafetyConfig::default(),
             max_active_jobs_per_tenant: Some(5000),
+            spatial_compaction: crate::spatial::SpatialCompactionConfig::default()
+                .with_env_overrides(),
+            spatial_max_entries_per_cell: crate::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
         }
     }
 }

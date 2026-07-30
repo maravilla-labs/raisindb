@@ -7,38 +7,77 @@
 //!
 //! ```text
 //! graph_table_expr ::=
-//!     GRAPH_TABLE '(' [graph_name] MATCH match_pattern [WHERE expr] COLUMNS '(' column_list ')' ')'
+//!     GRAPH_TABLE '(' [graph_name] match_clause [WHERE expr] COLUMNS '(' column_list ')' ')'
 //!
-//! match_pattern ::=
-//!     path_pattern (',' path_pattern)*
+//! match_clause ::=
+//!     MATCH top_level_path (',' top_level_path)*
 //!
-//! path_pattern ::=
+//! top_level_path ::=
+//!     [path_variable '='] [path_selector] [path_restrictor] [path_variable '='] path_expr
+//!
+//! path_selector ::=
+//!     'ANY' 'SHORTEST' | 'ANY' 'CHEAPEST' | 'ALL' 'SHORTEST' | 'ANY'
+//!
+//! path_restrictor ::=
+//!     'WALK' | 'TRAIL' | 'ACYCLIC'          -- default ACYCLIC
+//!
+//! path_expr ::=
 //!     node_pattern (relationship_pattern node_pattern)*
 //!
 //! node_pattern ::=
-//!     '(' [variable] [':' label ('|' label)*] [WHERE expr] ')'
+//!     '(' [variable] [':' label ('|' label)*] ')'
 //!
 //! relationship_pattern ::=
-//!     '-[' [variable] [':' type ('|' type)*] [quantifier] ']->'
-//!   | '<-[' [variable] [':' type ('|' type)*] [quantifier] ']-'
-//!   | '-[' [variable] [':' type ('|' type)*] [quantifier] ']-'
+//!     '-[' edge_body ']->' [quantifier]
+//!   | '<-[' edge_body ']-'  [quantifier]
+//!   | '-['  edge_body ']-'  [quantifier]
 //!
-//! quantifier ::=
+//! edge_body ::=
+//!     [variable] [':' type ('|' type)*] ['COST' expr] [legacy_quantifier]
+//!
+//! quantifier ::=                            -- canonical, after the arrow
+//!     '{' min [',' [max]] '}' | '*' | '+' | '?'
+//!
+//! legacy_quantifier ::=                     -- deprecated, inside the brackets
 //!     '*' [min] ['..' [max]]
 //! ```
+//!
+//! # Deliberate rejections
+//!
+//! These parse to a named error rather than being silently accepted or
+//! silently ignored:
+//!
+//! - inline `WHERE` inside `(...)` or `[...]` — it used to parse into a field
+//!   nothing read, so the predicate vanished and the query returned unfiltered
+//!   rows;
+//! - an unbounded canonical quantifier (`*`, `+`, `{m,}`) with no selector and
+//!   no restrictor (rule Q-SCOPE);
+//! - `ANY CHEAPEST` without `COST`, and `COST` without `ANY CHEAPEST`;
+//! - deferred grammar: `SHORTEST k`, `SHORTEST k GROUP`, `ANY k`, `SIMPLE`;
+//! - a restrictor written before its selector.
 
 mod clauses;
+mod cost;
 mod error;
 mod expression;
 mod graph_table;
+mod keywords;
+mod path;
 mod patterns;
 mod primitives;
+mod quantifier;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_cost;
+#[cfg(test)]
+mod tests_paths;
+#[cfg(test)]
+mod tests_quantifiers;
 
 pub use error::PgqParseError;
-use error::{describe_error_kind, make_error};
+use error::{clear_diagnostic, describe_error_kind, make_error, take_diagnostic};
 use graph_table::parse_graph_table_internal;
 
 use super::pgq::GraphTableQuery;
@@ -165,7 +204,11 @@ fn find_matching_paren(sql: &str, start: usize) -> Option<usize> {
 pub fn parse_graph_table(sql: &str) -> Result<GraphTableQuery, PgqParseError> {
     let trimmed = sql.trim();
 
-    match parse_graph_table_internal(trimmed) {
+    clear_diagnostic();
+    let parsed = parse_graph_table_internal(trimmed);
+    let diagnostic = take_diagnostic();
+
+    match parsed {
         Ok((remaining, query)) => {
             if remaining.trim().is_empty() {
                 Ok(query)
@@ -177,11 +220,19 @@ pub fn parse_graph_table(sql: &str) -> Result<GraphTableQuery, PgqParseError> {
                 ))
             }
         }
-        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => Err(make_error(
-            e.input,
-            trimmed,
-            format!("Expected {}", describe_error_kind(&e.code)),
-        )),
+        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => match diagnostic {
+            // A deliberate rejection: report what the parser actually objected
+            // to, not "Expected keyword".
+            Some((remaining, message)) => {
+                let at = &trimmed[trimmed.len().saturating_sub(remaining)..];
+                Err(make_error(at, trimmed, message))
+            }
+            None => Err(make_error(
+                e.input,
+                trimmed,
+                format!("Expected {}", describe_error_kind(&e.code)),
+            )),
+        },
         Err(nom::Err::Incomplete(_)) => Err(PgqParseError {
             message: "Incomplete input".into(),
             line: 1,

@@ -53,6 +53,56 @@ use raisin_hlc::HLC;
 use raisin_storage::spatial::SpatialPreFilter;
 use std::collections::HashMap;
 
+/// Default hard ceiling on index entries visited inside ONE geohash cell prefix.
+///
+/// Overridable per storage instance via
+/// `RocksDBConfig::spatial_max_entries_per_cell`.
+///
+/// # The unbounded thing this bounds
+///
+/// Resolution prefix-iterates each cell and VISITS EVERY KEY in it, including
+/// every superseded revision and every tombstone. `answered_in_cell` stops a node
+/// from being re-DECIDED but not from being re-ITERATED — the `continue` still
+/// costs an iterator step.
+///
+/// For static places that is harmless: a place is written once and its cell holds
+/// one entry per node. For a **tracked object** it is the dominant cost, and the
+/// distribution is counter-intuitive. At a COARSE precision a vehicle circulating
+/// an airport stays inside the SAME cell across every update, so that one prefix
+/// accumulates roughly two entries per position update (the new live entry and the
+/// tombstone of the old one, both in that cell) without bound. At a FINE precision
+/// the vehicle moves between cells and entries spread thin. **Coarse cells are
+/// where read cost concentrates.**
+///
+/// One vehicle at one update per second for 24h is ~86,400 updates and on the
+/// order of 1.7e5 entries in its precision-6 prefix; 200 vehicles share ~3e7. A
+/// query that was single-digit milliseconds on day one is seconds by day two.
+/// RocksDB compaction does not help: the revision is IN the key
+/// (`keys::spatial_keys`), so superseded entries are DISTINCT keys, not
+/// overwritten versions, and nothing collapses them.
+///
+/// # What the cap does, and what it deliberately does not do
+///
+/// It bounds the *latency* of one cell scan and reports the truncation as a TYPED
+/// error ([`Error::SpatialBudgetExceeded`]), which the SQL executor recognises and
+/// re-plans against: the query degrades to the planner's spatial fallback — an
+/// ordinary scan with the spatial predicate retained per row — instead of failing.
+/// That preserves "a spatial query must never return FEWER rows than the truth"
+/// AND "a spatial query must not fall over because one cell got fat". The budget
+/// is a latency bound, never a correctness boundary. Pruning the accumulation
+/// itself is the compaction filter's job (`crate::spatial::compaction`).
+///
+/// # A seek optimisation that looks obvious and does NOT work
+///
+/// One is tempted to seek past a node's remaining revisions once
+/// `answered_in_cell` has it. It does not apply. The key is
+/// `…geo\0{property}\0{cell}\0{revision:16}\0{node_id}`, so WITHIN a cell prefix
+/// the ordering is by REVISION first and `node_id` only as a tiebreak: every
+/// node's revisions are INTERLEAVED with every other node's. There is nothing
+/// contiguous to seek past, and an implementer who assumes otherwise will write a
+/// scan that silently skips live entries.
+pub const DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL: usize = 250_000;
+
 /// Whether a candidate's bounding box can intersect the query envelope.
 fn bbox_intersects(candidate: &[f64; 4], query: &[f64; 4]) -> bool {
     candidate[0] <= query[2]
@@ -122,12 +172,40 @@ impl SpatialIndexRepository {
             // which nodes this cell has already answered for.
             let mut answered_in_cell: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            let mut visited_in_cell = 0usize;
 
             for item in self.db.prefix_iterator_cf(cf, &prefix) {
                 let (key, value) = item.map_err(|e| Error::storage(e.to_string()))?;
 
                 if !key.starts_with(&prefix) {
                     break;
+                }
+
+                visited_in_cell += 1;
+                if visited_in_cell > self.max_entries_per_cell {
+                    // Loud, and never silently short: the caller treats a truncated
+                    // resolution as "the index cannot answer this completely".
+                    tracing::warn!(
+                        cell = %cell,
+                        property = %property_name,
+                        workspace = %workspace,
+                        visited = visited_in_cell,
+                        "Spatial cell prefix exceeded {} entries; this is superseded-revision \
+                         accumulation, typical of a high-frequency position property indexed at a \
+                         coarse precision. Reduce the precision set for this property, or model \
+                         position history on separate nodes under a different property name.",
+                        self.max_entries_per_cell
+                    );
+                    // A TYPED signal, not a string: the SQL executor recognises
+                    // it and re-plans onto the spatial fallback, so the query
+                    // degrades to a correct-but-slow row scan instead of
+                    // failing. See `Error::is_spatial_budget_exceeded`.
+                    return Err(Error::SpatialBudgetExceeded {
+                        workspace: workspace.to_string(),
+                        property: property_name.to_string(),
+                        cell: cell.to_string(),
+                        limit: self.max_entries_per_cell,
+                    });
                 }
 
                 let Some(parsed) = keys::parse_spatial_index_key(&key) else {

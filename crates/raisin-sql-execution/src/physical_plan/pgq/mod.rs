@@ -97,7 +97,12 @@ pub async fn execute_graph_table<S: Storage + 'static>(
     revision: Option<raisin_hlc::HLC>,
     query: GraphTableQuery,
 ) -> Result<Vec<PgqRow>> {
-    let context = PgqContext::new(workspace_id, tenant_id, repo_id, branch, revision);
+    // Derive the relation-type scope from the query's own patterns so the
+    // adjacency scans stop loading every relation in the branch. Empty (= no
+    // restriction) as soon as any hop leaves its types open.
+    let scope = context::relation_type_scope(&query);
+    let context = PgqContext::new(workspace_id, tenant_id, repo_id, branch, revision)
+        .with_relation_type_scope(scope);
 
     let executor = PgqExecutor::new(storage, context);
     executor.execute(query).await

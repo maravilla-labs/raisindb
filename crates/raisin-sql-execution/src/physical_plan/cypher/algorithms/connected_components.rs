@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Find all weakly connected components in the graph
 ///
@@ -73,7 +73,8 @@ fn build_undirected_graph(adjacency: &GraphAdjacency) -> HashMap<GraphNodeId, Ve
     let mut undirected: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
 
     for (source, neighbors) in adjacency.iter() {
-        for (tgt_workspace, tgt_id, _rel_type) in neighbors {
+        for edge in neighbors {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             let target = (tgt_workspace.clone(), tgt_id.clone());
 
             // Add forward edge
@@ -141,23 +142,23 @@ pub fn component_sizes(adjacency: &GraphAdjacency) -> HashMap<usize, usize> {
 mod tests {
     use super::*;
 
-    fn create_two_component_graph() -> HashMap<(String, String), Vec<(String, String, String)>> {
+    fn create_two_component_graph() -> GraphAdjacency {
         let mut graph = HashMap::new();
 
         // Component 1: A -> B -> C
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "C".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "C".to_string(), "", "LINK", None)],
         );
 
         // Component 2: D -> E
         graph.insert(
             ("ws".to_string(), "D".to_string()),
-            vec![("ws".to_string(), "E".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "E".to_string(), "", "LINK", None)],
         );
 
         graph
@@ -198,18 +199,18 @@ mod tests {
         // Single connected component: A <-> B <-> C (bidirectional)
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
 
         let count = component_count(&graph);
@@ -283,15 +284,15 @@ mod tests {
         // Directed cycle: A -> B -> C -> A (weakly connected, not strongly)
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "C".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "C".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "A".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "A".to_string(), "", "LINK", None)],
         );
 
         let count = component_count(&graph);

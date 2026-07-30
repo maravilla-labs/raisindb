@@ -2,12 +2,20 @@
 //!
 //! Matches graph patterns against the storage layer.
 
+pub mod path_binding;
+pub mod selectors;
 mod single_hop;
 mod single_node;
+mod traversal;
 mod variable_length;
 
+pub use path_binding::{GraphPath, PathEdge, PathNode};
+pub use selectors::{
+    path_semantics_for, PathRestrictor, PathSelector, PathSemantics, RestrictorExt,
+};
 pub use single_hop::{match_from_source, match_single_hop};
 pub use single_node::match_single_node;
+pub use traversal::MAX_PATHS;
 pub use variable_length::execute_variable_length_pattern;
 
 use raisin_sql::ast::{NodePattern, PathPattern, PatternElement, RelationshipPattern};

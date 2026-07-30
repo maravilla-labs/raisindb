@@ -8,6 +8,7 @@
 //! - Merge operations (fast-forward and three-way)
 //! - Branch index copying for efficient branch creation
 
+mod cf_registry;
 mod conflict;
 mod copy;
 mod crud;

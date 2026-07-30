@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Calculate betweenness centrality for a single node
 ///
@@ -49,7 +49,8 @@ pub fn all_betweenness_centrality(adjacency: &GraphAdjacency) -> HashMap<GraphNo
     let mut nodes = HashSet::new();
     for (source, neighbors) in adjacency.iter() {
         nodes.insert(source.clone());
-        for (tgt_workspace, tgt_id, _) in neighbors {
+        for edge in neighbors {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             nodes.insert((tgt_workspace.clone(), tgt_id.clone()));
         }
     }
@@ -90,7 +91,8 @@ pub fn all_betweenness_centrality(adjacency: &GraphAdjacency) -> HashMap<GraphNo
             let current_dist = dist[&current];
 
             if let Some(neighbors) = adjacency.get(&current) {
-                for (next_workspace, next_id, _) in neighbors {
+                for edge in neighbors {
+                    let (next_workspace, next_id) = (&edge.target_workspace, &edge.target_id);
                     let next = (next_workspace.clone(), next_id.clone());
 
                     // First time seeing this node?
@@ -154,45 +156,45 @@ pub fn top_betweenness_nodes(adjacency: &GraphAdjacency, limit: usize) -> Vec<(G
 mod tests {
     use super::*;
 
-    fn create_bridge_graph() -> HashMap<(String, String), Vec<(String, String, String)>> {
+    fn create_bridge_graph() -> GraphAdjacency {
         let mut graph = HashMap::new();
 
         // Left cluster: A <-> B <-> C
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "D".to_string(), "LINK".to_string()), // Bridge to right cluster
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "D".to_string(), "", "LINK", None), // Bridge to right cluster
             ],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
 
         // Right cluster: D <-> E <-> F
         graph.insert(
             ("ws".to_string(), "D".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "E".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "E".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "E".to_string()),
             vec![
-                ("ws".to_string(), "D".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "F".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "D".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "F".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "F".to_string()),
-            vec![("ws".to_string(), "E".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "E".to_string(), "", "LINK", None)],
         );
 
         graph
@@ -225,22 +227,22 @@ mod tests {
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "D".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "D".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "A".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "A".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "A".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "A".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "D".to_string()),
-            vec![("ws".to_string(), "A".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "A".to_string(), "", "LINK", None)],
         );
 
         // In a bidirectional star graph, center node has all the betweenness
@@ -282,7 +284,7 @@ mod tests {
         let mut graph = HashMap::new();
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
 
         // Graph with only 2 nodes has zero betweenness
@@ -298,15 +300,15 @@ mod tests {
         // Linear: A -> B -> C -> D
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "C".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "C".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "D".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "D".to_string(), "", "LINK", None)],
         );
 
         // In a linear graph, middle nodes have higher betweenness

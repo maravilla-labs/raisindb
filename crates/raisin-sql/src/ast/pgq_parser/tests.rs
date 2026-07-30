@@ -60,7 +60,7 @@ fn test_parse_relationship() {
 }
 
 #[test]
-fn test_parse_variable_length_path() {
+fn test_parse_variable_length_path_legacy_quantifier() {
     let sql = "GRAPH_TABLE(MATCH (a)-[:follows*1..3]->(b) COLUMNS (a.id))";
     let result = parse_graph_table(sql).unwrap();
 
@@ -69,6 +69,7 @@ fn test_parse_variable_length_path() {
         let q = rel.quantifier.unwrap();
         assert_eq!(q.min, 1);
         assert_eq!(q.max, Some(3));
+        assert_eq!(q.syntax, QuantifierSyntax::LegacyStar);
     } else {
         panic!("Expected relationship");
     }
@@ -233,23 +234,24 @@ fn test_parse_complex_where() {
 }
 
 #[test]
-fn test_parse_variable_length_star_only() {
+fn test_parse_variable_length_star_only_legacy_quantifier() {
     let sql = "GRAPH_TABLE(MATCH (a)-[:FOLLOWS*]->(b) COLUMNS (a.id))";
     let result = parse_graph_table(sql).unwrap();
 
     let pattern = &result.match_clause.patterns[0];
     if let PatternElement::Relationship(rel) = &pattern.elements[1] {
         let q = rel.quantifier.unwrap();
-        assert_eq!(q.min, 1); // default min
+        assert_eq!(q.min, 1); // legacy `*` is {1,}, unlike the standard `*`
         assert_eq!(q.max, None); // unbounded
         assert_eq!(q.effective_max(), 10); // effective max from default
+        assert_eq!(q.syntax, QuantifierSyntax::LegacyStar);
     } else {
         panic!("Expected relationship");
     }
 }
 
 #[test]
-fn test_parse_exact_hops() {
+fn test_parse_exact_hops_legacy_quantifier() {
     let sql = "GRAPH_TABLE(MATCH (a)-[:FOLLOWS*3]->(b) COLUMNS (a.id))";
     let result = parse_graph_table(sql).unwrap();
 
@@ -258,13 +260,14 @@ fn test_parse_exact_hops() {
         let q = rel.quantifier.unwrap();
         assert_eq!(q.min, 3);
         assert_eq!(q.max, Some(3));
+        assert_eq!(q.syntax, QuantifierSyntax::LegacyStar);
     } else {
         panic!("Expected relationship");
     }
 }
 
 #[test]
-fn test_parse_unbounded_max() {
+fn test_parse_unbounded_max_legacy_quantifier() {
     let sql = "GRAPH_TABLE(MATCH (a)-[:FOLLOWS*2..]->(b) COLUMNS (a.id))";
     let result = parse_graph_table(sql).unwrap();
 
@@ -274,6 +277,7 @@ fn test_parse_unbounded_max() {
         assert_eq!(q.min, 2);
         assert_eq!(q.max, None); // unbounded max
         assert_eq!(q.effective_max(), 10); // effective max from default
+        assert_eq!(q.syntax, QuantifierSyntax::LegacyStar);
     } else {
         panic!("Expected relationship");
     }

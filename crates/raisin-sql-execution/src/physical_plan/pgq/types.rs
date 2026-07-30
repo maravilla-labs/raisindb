@@ -10,6 +10,7 @@ use raisin_models::nodes::Node;
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 
 use super::context::PgqContext;
+use super::matching::path_binding::GraphPath;
 use crate::physical_plan::executor::ExecutionError;
 
 type Result<T> = std::result::Result<T, ExecutionError>;
@@ -361,6 +362,12 @@ pub struct VariableBinding {
     nodes: HashMap<String, NodeInfo>,
     /// Bound relationships: variable name -> RelationInfo
     relations: HashMap<String, RelationInfo>,
+    /// Bound paths: variable name -> ordered matched path
+    ///
+    /// A path variable and a relationship variable can name the same binding:
+    /// a variable-length pattern binds its path under both, so `CARDINALITY(r)`
+    /// and `path_length(p)` read the same value.
+    paths: HashMap<String, GraphPath>,
 }
 
 impl VariableBinding {
@@ -377,6 +384,21 @@ impl VariableBinding {
     /// Bind a relationship to a variable
     pub fn bind_relation(&mut self, var: String, rel: RelationInfo) {
         self.relations.insert(var, rel);
+    }
+
+    /// Bind a matched path to a variable
+    pub fn bind_path(&mut self, var: String, path: GraphPath) {
+        self.paths.insert(var, path);
+    }
+
+    /// Get a bound path
+    pub fn get_path(&self, var: &str) -> Option<&GraphPath> {
+        self.paths.get(var)
+    }
+
+    /// Get all bound path variables
+    pub fn path_vars(&self) -> impl Iterator<Item = &str> {
+        self.paths.keys().map(|s| s.as_str())
     }
 
     /// Get a bound node

@@ -9,7 +9,7 @@ use raisin_cypher_parser::{NodePattern, RelPattern};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_storage::{RelationRepository, Storage};
 
-use crate::physical_plan::cypher::algorithms::GraphAdjacency;
+use crate::physical_plan::cypher::algorithms::{GraphAdjacency, GraphEdge};
 use crate::physical_plan::cypher::types::{
     CypherContext, NodeInfo, PathInfo, RelationInfo, VariableBinding,
 };
@@ -88,13 +88,16 @@ pub async fn execute_variable_length_pattern<S: Storage>(
     let mut adjacency: GraphAdjacency = HashMap::new();
 
     for (src_workspace, src_id, tgt_workspace, tgt_id, rel_ref) in &all_relationships {
-        let key = (src_workspace.clone(), src_id.clone());
-        let value = (
-            tgt_workspace.clone(),
-            tgt_id.clone(),
-            rel_ref.relation_type.clone(),
-        );
-        adjacency.entry(key).or_default().push(value);
+        adjacency
+            .entry((src_workspace.clone(), src_id.clone()))
+            .or_default()
+            .push(GraphEdge::new(
+                tgt_workspace.clone(),
+                tgt_id.clone(),
+                rel_ref.target_node_type.clone(),
+                rel_ref.relation_type.clone(),
+                rel_ref.weight,
+            ));
     }
 
     tracing::debug!(
@@ -372,7 +375,9 @@ pub fn dfs_find_paths(
 
     // Explore neighbors
     if let Some(neighbors) = adjacency.get(current) {
-        for (next_workspace, next_id, rel_type) in neighbors {
+        for edge in neighbors {
+            let (next_workspace, next_id, rel_type) =
+                (&edge.target_workspace, &edge.target_id, &edge.relation_type);
             let next_key = (next_workspace.clone(), next_id.clone());
 
             // Skip if already visited (cycle detection)

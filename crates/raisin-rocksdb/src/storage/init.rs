@@ -212,7 +212,8 @@ impl RocksDBStorage {
                 operation_capture.clone(),
             ),
             fulltext_job_store: RocksDbJobStore::new(db.clone()),
-            spatial_index: SpatialIndexRepository::new(db.clone()),
+            spatial_index: SpatialIndexRepository::new(db.clone())
+                .with_max_entries_per_cell(config.spatial_max_entries_per_cell),
             compound_index: CompoundIndexRepositoryImpl::new(db.clone()),
             lazy_index_manager: LazyIndexManager::new(db.clone()),
             job_registry: job_registry.clone(),

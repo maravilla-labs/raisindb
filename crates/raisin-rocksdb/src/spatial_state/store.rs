@@ -6,7 +6,7 @@ use super::resolve::{
 };
 use crate::{cf, cf_handle};
 use raisin_error::{Error, Result};
-use raisin_models::nodes::properties::SpatialPolicy;
+use raisin_models::nodes::properties::{policy_key_for_path, SpatialPolicy};
 use raisin_storage::spatial::{
     SpatialAvailability, SpatialBuildPhase, SpatialIndexState, SpatialStateSource,
 };
@@ -18,6 +18,25 @@ use std::sync::{Arc, RwLock};
 ///
 /// Shape mirrors the existing `prop_index\0{tenant}\0{repo}\0{branch}\0{ws}`
 /// watermark key, with the property appended.
+///
+/// # Nested paths collapse here, and ONLY here
+///
+/// `property` may be any geometry property path the walker produces
+/// (`location`, `venue.geo`, `stops.3.geo`). It is normalised through
+/// [`policy_key_for_path`] before being embedded, so every element of an array
+/// shares ONE state record under `stops[].geo` — otherwise an array of stops
+/// would mint an unbounded number of state records that no operator could
+/// configure or rebuild.
+///
+/// Every reader and writer of the record goes through this function, including
+/// the query planner's `spatial_availability`. That is what stops the planner
+/// from asking about `stops.3.geo`, missing the record written under
+/// `stops[].geo`, and concluding the field is unindexed forever — correct
+/// results, permanently bad performance, no error anywhere.
+///
+/// **The index ENTRY key is unaffected**: it keeps the concrete path
+/// (`keys::spatial_index_key_versioned`), so a query naming `stops.3.geo` scans
+/// exactly that element's cells.
 pub fn spatial_state_key(
     tenant_id: &str,
     repo_id: &str,
@@ -27,7 +46,11 @@ pub fn spatial_state_key(
 ) -> Vec<u8> {
     format!(
         "spatial_index\0{}\0{}\0{}\0{}\0{}",
-        tenant_id, repo_id, branch, workspace, property
+        tenant_id,
+        repo_id,
+        branch,
+        workspace,
+        policy_key_for_path(property)
     )
     .into_bytes()
 }
@@ -75,6 +98,42 @@ pub fn policy_for_property(
         Ok(Some(state)) => state.policy(),
         _ => SpatialPolicy::default(),
     }
+}
+
+/// The policy and precision set a **delete** must tombstone one property path at.
+///
+/// The delete path holds only a `&DB` (see [`read_state`] for why), so it cannot
+/// go through [`SpatialStateStore`]. It still needs the same bound the update path
+/// gets from [`crate::indexing::NodeSpatialPolicies::tombstone_precisions`]:
+/// `configured ∪ indexed`, which is exactly the set any respecting writer can have
+/// produced.
+///
+/// Falls back to `None` precisions — meaning "tombstone at every precision" — when
+/// there is no state record, because then nothing is known about what is
+/// physically present and under-tombstoning would leave a deleted node matching
+/// `ST_DWITHIN` forever.
+pub fn tombstone_policy_for_property(
+    db: &DB,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    workspace: &str,
+    property: &str,
+) -> (SpatialPolicy, Option<Vec<usize>>) {
+    let configured =
+        super::configured::configured_policy(db, tenant_id, repo_id, workspace, property);
+    let state = read_state(db, tenant_id, repo_id, branch, workspace, property)
+        .ok()
+        .flatten();
+    let has_state = state.is_some();
+    let resolution = resolve_write_policy(configured, state.as_ref());
+    if !has_state {
+        return (resolution.write, None);
+    }
+    let mut union = resolution.write.precisions.clone();
+    union.extend_from_slice(&resolution.configured.precisions);
+    let precisions = raisin_models::nodes::properties::sorted_precisions(union);
+    (resolution.write, Some(precisions))
 }
 
 /// Cached reader/writer for spatial index state records.

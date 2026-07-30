@@ -86,6 +86,75 @@ pub const SPATIAL_NORMALIZER_VERSION: u32 = 1;
 /// Valid geohash precision range.
 pub const PRECISION_RANGE: std::ops::RangeInclusive<usize> = 1..=12;
 
+/// Normalise a concrete geometry **property path** into the key a spatial policy
+/// is configured under.
+///
+/// # Why a normalisation step exists at all
+///
+/// A geometry can live anywhere in a node's property tree, and the index key
+/// embeds the *concrete* dot path the value was found at
+/// (`venue.geo`, `hero.map_pin`, `stops.0.geo` — see
+/// `raisin_rocksdb::indexing::spatial_walk`). For an object or an element that is
+/// exactly the modelled field name and needs no translation. For an **array** it
+/// is not: `stops.0.geo`, `stops.1.geo`, `stops.2.geo` … are unboundedly many
+/// distinct paths for ONE modelled field, and no operator could configure a
+/// precision set for each.
+///
+/// So array indices — and only array indices — collapse into the preceding
+/// segment as `[]` when resolving policy:
+///
+/// | concrete path   | policy key      |
+/// |-----------------|-----------------|
+/// | `location`      | `location`      |
+/// | `venue.geo`     | `venue.geo`     |
+/// | `hero.map_pin`  | `hero.map_pin`  |
+/// | `stops.0.geo`   | `stops[].geo`   |
+/// | `tags.3`        | `tags[]`        |
+/// | `stops[].geo`   | `stops[].geo`   |
+///
+/// **The index key still uses the concrete path.** Only policy lookup normalises.
+///
+/// # This must be the ONLY implementation
+///
+/// It is called from both sides of the same question: the configuration surface
+/// (`SpatialWorkspaceSchema::scope` / `set_scope` / `clear_scope` and
+/// [`resolve_spatial_policy`]) and the local index-state record
+/// (`raisin_rocksdb::spatial_state::spatial_state_key`, which the query planner's
+/// availability check goes through). If the two sides normalised differently the
+/// planner would decide an indexed field is unindexed and take the fallback scan
+/// forever — correct results, permanently bad performance, and no error anywhere.
+///
+/// Idempotent: normalising an already-normalised key returns it unchanged.
+pub fn policy_key_for_path(path: &str) -> String {
+    // Fast path: no numeric segment can exist without a dot.
+    if !path.contains('.') {
+        return path.to_string();
+    }
+
+    let mut segments: Vec<String> = Vec::new();
+    for segment in path.split('.') {
+        let is_index = !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit());
+        match (is_index, segments.last_mut()) {
+            (true, Some(previous)) => previous.push_str("[]"),
+            // A leading numeric segment cannot be an array index of anything, so
+            // it is kept verbatim rather than silently dropped.
+            _ => segments.push(segment.to_string()),
+        }
+    }
+    segments.join(".")
+}
+
+/// Whether a property path names a set of geometries rather than exactly one.
+///
+/// The `[]` wildcard is only ever written by a *query*; the walker never produces
+/// one. A wildcard path can be evaluated per row but can NOT drive a single
+/// cell-ring index scan, because each concrete array element occupies its own
+/// index-key namespace — hence this predicate, which the planner uses to refuse
+/// the index path rather than scan an empty prefix.
+pub fn is_wildcard_property_path(path: &str) -> bool {
+    path.contains("[]")
+}
+
 /// Which cells a non-point geometry occupies in the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
@@ -152,9 +221,16 @@ impl SpatialWorkspaceSchema {
     /// Returns an empty declaration rather than `Option`, because "declared
     /// nothing" and "declared all-inherit" are the same thing to
     /// [`resolve_spatial_policy`].
+    /// Nested paths are normalised through [`policy_key_for_path`], so a caller
+    /// may pass either the configured spelling (`stops[].geo`) or a concrete one
+    /// (`stops.3.geo`) and reach the same declaration.
     pub fn scope(&self, property: Option<&str>) -> SpatialPropertySchema {
         match property {
-            Some(name) => self.properties.get(name).cloned().unwrap_or_default(),
+            Some(name) => self
+                .properties
+                .get(&policy_key_for_path(name))
+                .cloned()
+                .unwrap_or_default(),
             None => self.default.clone(),
         }
     }
@@ -163,7 +239,7 @@ impl SpatialWorkspaceSchema {
     pub fn set_scope(&mut self, property: Option<&str>, settings: SpatialPropertySchema) {
         match property {
             Some(name) => {
-                self.properties.insert(name.to_string(), settings);
+                self.properties.insert(policy_key_for_path(name), settings);
             }
             None => self.default = settings,
         }
@@ -174,7 +250,7 @@ impl SpatialWorkspaceSchema {
     pub fn clear_scope(&mut self, property: Option<&str>) {
         match property {
             Some(name) => {
-                self.properties.remove(name);
+                self.properties.remove(&policy_key_for_path(name));
             }
             None => self.default = SpatialPropertySchema::default(),
         }
@@ -298,6 +374,13 @@ impl SpatialPolicy {
 /// Each *field* resolves independently, so a NodeType can set precisions while
 /// inheriting the workspace's bucket property.
 ///
+/// `property_name` may be a nested dot path (`venue.geo`, `stops.3.geo`); it is
+/// normalised through [`policy_key_for_path`] before the per-property override is
+/// looked up. Resolution is **exact-match only** — `venue` does NOT supply a
+/// policy for `venue.geo`. Prefix inheritance would need a longest-match rule
+/// that the admin surface, the state record, the rebuild job and the planner
+/// would each have to implement identically, and any disagreement strands entries.
+///
 /// This is the only function permitted to compute a [`SpatialPolicy`]: five call
 /// sites depend on them agreeing.
 pub fn resolve_spatial_policy(
@@ -305,8 +388,9 @@ pub fn resolve_spatial_policy(
     workspace_spatial: Option<&SpatialWorkspaceSchema>,
     property_name: &str,
 ) -> SpatialPolicy {
+    let policy_key = policy_key_for_path(property_name);
     let from_type = property_schema.and_then(|s| s.spatial.as_ref());
-    let from_ws_prop = workspace_spatial.and_then(|w| w.properties.get(property_name));
+    let from_ws_prop = workspace_spatial.and_then(|w| w.properties.get(&policy_key));
     let from_ws_default = workspace_spatial.map(|w| &w.default);
 
     // Ordered highest-precedence first; `find_map` takes the first that sets the

@@ -14,7 +14,8 @@ use crate::physical_plan::executor::{Row, RowStream};
 use futures::stream;
 use raisin_error::Error;
 use raisin_models::nodes::properties::{
-    resolve_spatial_policy, PropertyValue, SpatialPolicy, SPATIAL_NORMALIZER_VERSION,
+    policy_key_for_path, resolve_spatial_policy, PropertyValue, SpatialPolicy,
+    SPATIAL_NORMALIZER_VERSION,
 };
 use raisin_storage::scope::RepoScope;
 use raisin_storage::spatial::{SpatialBuildPhase, SpatialIndexState};
@@ -183,7 +184,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             names.sort();
 
             for name in names {
-                let state = states.iter().find(|(n, _)| *n == name).map(|(_, s)| s);
+                let state = state_for(&states, &name);
                 let counts = census.iter().find(|c| c.property == name);
                 let configured = resolve_spatial_policy(None, schema.as_ref(), &name);
                 out.push(health_row(&ws_name, &name, state, counts, &configured));
@@ -223,10 +224,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             if property.is_some_and(|want| want != counts.property) {
                 continue;
             }
-            let state = states
-                .iter()
-                .find(|(n, _)| *n == counts.property)
-                .map(|(_, s)| s);
+            let state = state_for(&states, &counts.property);
             let configured = resolve_spatial_policy(None, schema.as_ref(), &counts.property);
 
             let mut problems: Vec<String> = Vec::new();
@@ -325,6 +323,30 @@ fn declaration_source(
         return "workspace default".to_string();
     }
     "server default".to_string()
+}
+
+/// The index-state record for one property PATH.
+///
+/// State records are keyed by the POLICY key, in which array indices collapse to
+/// `[]` (`stops.3.geo` → `stops[].geo`, see `policy_key_for_path`) — one
+/// declaration for a modelled field rather than one per element. The physical
+/// census, by contrast, is keyed by the CONCRETE path, because that is what the
+/// index key embeds.
+///
+/// So a straight name comparison finds nothing for any array element: HEALTH and
+/// VERIFY reported `not_built` / "no local index state record" for `stops.0.geo`
+/// while the planner — which normalises — was happily using the index. An admin
+/// surface that contradicts the planner is worse than no admin surface, hence the
+/// normalised lookup here.
+fn state_for<'a>(
+    states: &'a [(String, SpatialIndexState)],
+    property: &str,
+) -> Option<&'a SpatialIndexState> {
+    let policy_key = policy_key_for_path(property);
+    states
+        .iter()
+        .find(|(name, _)| name == property || *name == policy_key)
+        .map(|(_, state)| state)
 }
 
 /// One HEALTH row, merging local state with the physical census.

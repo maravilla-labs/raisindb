@@ -307,6 +307,20 @@ define_physical_plan! {
             /// in the residual filter, so a stale or absent bucket can cost a
             /// missed optimisation but never a missed row.
             bucket_eq: Option<(String, String)>,
+            /// The plan to run INSTEAD when the index refuses to answer at
+            /// execution time.
+            ///
+            /// One thing can only be discovered while scanning: a cell prefix
+            /// that exceeds the per-cell entry budget
+            /// (`Error::SpatialBudgetExceeded`). The index then cannot answer
+            /// without answering SHORT, and a short spatial answer is the one
+            /// failure this subsystem refuses. Carrying the fallback plan here is
+            /// what lets the executor degrade to a correct row scan rather than
+            /// fail the query — it cannot re-plan on its own, because the
+            /// predicate may have been stripped from the residual filter.
+            ///
+            /// `None` only where a fallback could not be built.
+            fallback: Option<Box<PhysicalPlan>>,
         },
         /// Spatial k-nearest neighbors scan.
         ///
@@ -361,6 +375,26 @@ define_physical_plan! {
             max_distance: Option<f32>,
             projection: Option<Vec<String>>,
             distance_alias: Option<String>,
+        },
+        /// Materialise the `__distance` / `__matched_path` pseudo-columns on rows
+        /// a spatial FALLBACK scan produced.
+        ///
+        /// A `SpatialDistanceScan` reads its distance straight off the index
+        /// entry, so it injects both columns itself. The fallback path has no
+        /// index entry to read: the predicate is evaluated per row, and the
+        /// distance it was decided on is discarded. This operator recomputes it —
+        /// the MINIMUM over the geometries the (possibly wildcard) property path
+        /// addresses, plus the CONCRETE path of the geometry that achieved it.
+        ///
+        /// Planned only when the query actually asks for one of the two columns,
+        /// so an ordinary spatial fallback pays nothing.
+        SpatialAnnotate {
+            input: Box<PhysicalPlan>,
+            /// The property path as written in the predicate — may be a wildcard
+            /// (`stops[].geo`), which is exactly the case this exists for.
+            property_name: String,
+            center_lon: f64,
+            center_lat: f64,
         },
         /// Scan materialized CTE results
         CTEScan {

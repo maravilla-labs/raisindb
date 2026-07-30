@@ -20,7 +20,7 @@ mod async_eval;
 mod binary_ops;
 mod casting;
 pub(crate) mod core;
-mod functions;
+pub(crate) mod functions;
 mod helpers;
 mod json_ops;
 mod pattern;

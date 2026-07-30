@@ -92,6 +92,34 @@ fn operand<'a>(fn_name: &str, lit: &'a Literal) -> Result<Option<Cow<'a, Value>>
     }
 }
 
+/// The geometry a NULL-evaluating operand reaches through a nested property path.
+///
+/// `Ok(None)` when the operand is not NULL (the ordinary literal is used
+/// instead), or when the path matches nothing.
+fn nested_operand(
+    fn_name: &str,
+    literal: &Literal,
+    args: &[TypedExpr],
+    index: usize,
+    row: &Row,
+) -> Result<Option<serde_json::Value>, Error> {
+    if !matches!(literal, Literal::Null) {
+        return Ok(None);
+    }
+    let mut matched = super::property_path::resolve_from_row(&args[index], row);
+    match matched.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matched.remove(0).geometry)),
+        n => Err(Error::Validation(format!(
+            "{fn_name}: argument {} names {n} geometries via a wildcard property path; \
+             only ST_DWITHIN and ST_DISTANCE define an answer over several geometries \
+             (any-within and minimum-distance respectively). Name one concrete path, \
+             e.g. properties->>'stops.0.geo'.",
+            index + 1
+        ))),
+    }
+}
+
 /// Resolve two arguments to `geo` geometries in a common CRS.
 ///
 /// `Ok(None)` is the SQL `NULL` short circuit. Both arguments are evaluated
@@ -118,17 +146,39 @@ pub(super) fn resolve_pair(
 
     let a_lit = eval_expr(&args[0], row)?;
     let b_lit = eval_expr(&args[1], row)?;
-    if matches!(a_lit, Literal::Null) || matches!(b_lit, Literal::Null) {
+
+    // A NULL operand may be a NESTED property path the ordinary JSON lookup
+    // cannot reach (`properties->>'venue.geo'`). Resolving it here rather than
+    // short-circuiting is what makes the DE-9IM predicates work on nested
+    // geometry at all — without it they answer NULL, which reads as "no match"
+    // and is the silent-empty failure this subsystem exists to avoid. It is also
+    // where a WILDCARD path is rejected: these predicates have no defined answer
+    // over a set of geometries.
+    let a_nested = nested_operand(fn_name, &a_lit, args, 0, row)?;
+    let b_nested = nested_operand(fn_name, &b_lit, args, 1, row)?;
+
+    // The NULL short circuit, restored AFTER nested resolution and BEFORE any
+    // type check — so `f(<not a geometry>, NULL)` still propagates NULL rather
+    // than erroring, exactly as it did before nested paths existed.
+    let a_null = matches!(a_lit, Literal::Null) && a_nested.is_none();
+    let b_null = matches!(b_lit, Literal::Null) && b_nested.is_none();
+    if a_null || b_null {
         return Ok(None);
     }
 
-    let a_val = match operand(fn_name, &a_lit)? {
-        Some(v) => v,
-        None => return Ok(None),
+    let a_val = match a_nested {
+        Some(v) => Cow::Owned(v),
+        None => match operand(fn_name, &a_lit)? {
+            Some(v) => v,
+            None => return Ok(None),
+        },
     };
-    let b_val = match operand(fn_name, &b_lit)? {
-        Some(v) => v,
-        None => return Ok(None),
+    let b_val = match b_nested {
+        Some(v) => Cow::Owned(v),
+        None => match operand(fn_name, &b_lit)? {
+            Some(v) => v,
+            None => return Ok(None),
+        },
     };
 
     // Rejects two different explicit SRIDs before any coordinate is trusted.

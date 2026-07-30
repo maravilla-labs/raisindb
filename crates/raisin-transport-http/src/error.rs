@@ -442,6 +442,18 @@ impl From<raisin_error::Error> for ApiError {
                 tracing::error!("Internal error: {}", msg);
                 ApiError::internal(msg)
             }
+            // Reaching HTTP at all means the SQL executor could not degrade to
+            // the row-scan fallback (no fallback was attached). It is a capacity
+            // condition, not a bug in the request, and the message already names
+            // the workspace, property and cell.
+            ref budget @ raisin_error::Error::SpatialBudgetExceeded { .. } => {
+                tracing::error!("Spatial budget exceeded: {}", budget);
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SPATIAL_BUDGET_EXCEEDED",
+                    budget.to_string(),
+                )
+            }
             raisin_error::Error::Other(e) => {
                 tracing::error!("Unexpected error: {}", e);
                 ApiError::internal(e.to_string())

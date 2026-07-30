@@ -136,6 +136,24 @@ pub struct RocksDBConfig {
     /// registry, not dispatch, is what grows without bound, so the cap has
     /// to live there. See `raisin_storage::jobs::JobRegistry::with_tenant_job_cap`.
     pub max_active_jobs_per_tenant: Option<usize>,
+
+    /// Spatial index compaction filter — prunes superseded spatial index
+    /// entries from `cf::SPATIAL_INDEX`, which otherwise only ever grows
+    /// because the revision is part of the key. See
+    /// [`crate::spatial::compaction`] for the retention trade-off, and set
+    /// `enabled = false` (or `RAISIN_SPATIAL_COMPACTION_FILTER=off`) to turn it
+    /// off. Applied at CF-open time, so a change needs a restart.
+    pub spatial_compaction: crate::spatial::SpatialCompactionConfig,
+
+    /// Hard ceiling on spatial index entries visited inside ONE geohash cell
+    /// prefix before the index gives up on answering the query.
+    ///
+    /// Exceeding it is NOT a query failure: the repository returns
+    /// [`raisin_error::Error::SpatialBudgetExceeded`] and the SQL executor
+    /// degrades to a row scan, which is slow and exact. Configurable mainly so a
+    /// test can reach the degradation path without writing a quarter of a
+    /// million entries.
+    pub spatial_max_entries_per_cell: usize,
 }
 
 /// Compression types supported by RocksDB
@@ -318,6 +336,22 @@ impl RocksDBConfig {
     /// Override the per-tenant active-job registry cap
     pub fn with_max_active_jobs_per_tenant(mut self, max: Option<usize>) -> Self {
         self.max_active_jobs_per_tenant = max;
+        self
+    }
+
+    /// Override the per-cell spatial scan budget (see
+    /// [`Self::spatial_max_entries_per_cell`]).
+    pub fn with_spatial_max_entries_per_cell(mut self, max_entries: usize) -> Self {
+        self.spatial_max_entries_per_cell = max_entries;
+        self
+    }
+
+    /// Override the spatial index compaction filter configuration.
+    pub fn with_spatial_compaction(
+        mut self,
+        spatial_compaction: crate::spatial::SpatialCompactionConfig,
+    ) -> Self {
+        self.spatial_compaction = spatial_compaction;
         self
     }
 }

@@ -129,10 +129,11 @@ impl PhysicalPlan {
                 limit,
                 claims_distance_order,
                 bucket_eq,
+                fallback,
                 ..
             } => {
                 format!(
-                    "SpatialDistanceScan: {}=ST_DWithin(POINT({:.4}, {:.4}), {:.0}m) limit={:?}{}{}",
+                    "SpatialDistanceScan: {}=ST_DWithin(POINT({:.4}, {:.4}), {:.0}m) limit={:?}{}{}{}",
                     property_name,
                     center_lon,
                     center_lat,
@@ -153,6 +154,16 @@ impl PhysicalPlan {
                         ", distance-ordered (Sort elided)"
                     } else {
                         ""
+                    },
+                    // The runtime degradation is otherwise invisible: a cell
+                    // prefix over the per-cell budget is only discoverable while
+                    // scanning. Printing that a fallback is attached is how an
+                    // operator reading EXPLAIN knows the query degrades to a row
+                    // scan instead of failing.
+                    if fallback.is_some() {
+                        ", degrades to a row scan if the per-cell budget is exhausted"
+                    } else {
+                        ", NO fallback (a budget exhaustion fails this query)"
                     }
                 )
             }
@@ -166,6 +177,17 @@ impl PhysicalPlan {
                 format!(
                     "SpatialKnnScan: {} nearest to POINT({:.4}, {:.4}), k={}",
                     property_name, center_lon, center_lat, k
+                )
+            }
+            PhysicalPlan::SpatialAnnotate {
+                property_name,
+                center_lon,
+                center_lat,
+                ..
+            } => {
+                format!(
+                    "SpatialAnnotate: __distance/__matched_path for {} from POINT({:.4}, {:.4})",
+                    property_name, center_lon, center_lat
                 )
             }
             PhysicalPlan::ReferenceIndexScan {

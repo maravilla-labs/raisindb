@@ -133,12 +133,17 @@ ORDER BY article_count DESC;
 -- Node patterns
 MATCH (n:Article)                    -- labeled node
 MATCH (n:Article|Post)               -- multiple labels (OR)
-MATCH (n WHERE n.featured = true)    -- with filter
+-- inline WHERE inside (...) is rejected; filter in the GRAPH_TABLE WHERE clause
+MATCH (n:Article) WHERE n.featured = true
 
 -- Relationship patterns
 MATCH (a)-[:follows]->(b)            -- directed, typed
 MATCH (a)<-[:follows]-(b)            -- reversed
-MATCH (a)-[:follows*1..3]->(b)       -- variable length (1-3 hops)
+MATCH (a)-[:follows]->{1,3}(b)       -- variable length (1-3 hops)
+
+-- Path variables, selectors and restrictors
+MATCH ANY SHORTEST p = (a)-[:follows]->+(b)
+MATCH ALL SHORTEST TRAIL p = (a)-[:follows]->{1,3}(b)
 ```
 
 ### Graph Mutations

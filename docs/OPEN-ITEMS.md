@@ -431,6 +431,321 @@ worth anything.
 
 ---
 
+### 2.99 [DONE] Superseded spatial index entries are never removed
+
+**Shipped:** a stateful RocksDB compaction filter on `cf::SPATIAL_INDEX` —
+`raisin-rocksdb/src/spatial/compaction.rs`, wired in `lib.rs`'s
+`create_column_family_descriptors` and configured by
+`RocksDBConfig::spatial_compaction`. Measured over 500 position updates of one
+vehicle: the precision-6 cell prefix went 501 -> 1 entries, the whole CF
+4,122 -> 8, and a 1 km radius query 1.50 ms -> 0.21 ms, with the query still
+returning the current position and nothing stale. The shipped DEFAULT is
+`keep_revisions = 8`, `retention_secs = 3600` (501 -> 8 in the same test): the
+newest entry per node per cell is always kept, so a read at HEAD is unchanged,
+and a bounded recent history survives for near-HEAD `__revision` reads.
+
+Tombstones are dropped only when `CompactionFilterContext::is_full_compaction`
+says nothing older can survive outside the run, and only once they have aged out
+of the retention window. Partial visibility means the filter can only keep too
+much, never drop a live entry, so pruning is incremental and converges as levels
+merge — that is by design, not a gap.
+
+**Residual: CLOSED.** Spatial time travel is reachable
+(`SELECT ... WHERE __revision = 342 AND ST_DWithin(...)`; the `__revision`
+predicate is stripped by the analyzer into `ExecutionContext::max_revision`), and
+a read behind the retention window would have resolved against whatever survived
+pruning. The planner-side gate now exists: `PlanContext::historical_revision` is
+set from the leaf `Scan`'s `max_revision` (both dispatch sites — the `Scan` arm
+and the `Filter { Scan }` pushdown arm), and `build_spatial_scan` routes a
+revision-scoped predicate to `build_spatial_fallback_scan`, whose EXPLAIN reason
+names the pruning as the cause. `try_plan_spatial_knn` has the same gate and
+falls through to a full scan plus TopN.
+
+**HEAD is deliberately untouched.** The newest entry per node per cell is never
+pruned, so a read at HEAD is exact and must keep using the index — making HEAD
+fall back would undo the whole performance story silently. Both directions are
+asserted:
+`spatial_pushdown_tests::a_revision_scoped_spatial_query_avoids_the_pruned_index`
+(EXPLAIN shows `SpatialDistanceScan` at HEAD, does not at a revision, and the
+rows agree) plus the planner-level pair
+`a_head_query_still_takes_the_spatial_index` /
+`an_explicit_historical_revision_falls_back_to_a_row_scan`.
+
+Original writeup follows.
+
+**Symptom:** a high-frequency position property degrades from milliseconds to
+seconds within days, and never recovers.
+
+The revision is part of the spatial index key
+(`raisin-rocksdb/src/keys/spatial_keys.rs`), so an update writes a NEW key
+rather than overwriting an old one, and RocksDB compaction has nothing to
+collapse. `resolve_live_candidates`
+(`repositories/spatial_index/repository/scan.rs`) prefix-iterates each scanned
+cell and VISITS every key in it, including every superseded revision and every
+tombstone; `answered_in_cell` stops a node being re-decided but not re-iterated.
+
+The distribution is counter-intuitive: at a COARSE precision a tracked object
+stays inside the same cell across every update, so that one prefix accumulates
+~2 entries per update indefinitely, while at a FINE precision entries spread
+thin across cells. Coarse cells are where read cost concentrates. One vehicle at
+1 update/second for 24h puts on the order of 1.7e5 entries in its precision-6
+prefix.
+
+**What ships today:**
+
+- Per-property precision sets, so a tracking field costs 2 keys + 2 tombstones
+  per update instead of 8 + 8 (`docs/website/docs/access/sql/geospatial-tracking.md`).
+  This reduces the RATE of accumulation. It does not bound it.
+- A per-cell scan budget (`MAX_ENTRIES_PER_CELL`, 250k) that refuses to answer
+  from a partial scan rather than silently returning short.
+
+**Verdict: fix in the engine — a RocksDB compaction filter on
+`cf::SPATIAL_INDEX`.** The descending revision sits immediately after the
+geohash in the key, so a filter can drop superseded entries and drop a tombstone
+once nothing older survives. Self-contained work, deliberately NOT smuggled into
+the nested-geospatial pass.
+
+**Verified, so nobody proposes it again:**
+
+- A **rebuild does not prune.** `jobs/handlers/spatial_index.rs` writes MORE
+  tombstones (`tombstone_all_entries_for_node`). Periodic rebuilds are not a
+  mitigation.
+- **Seeking past a node's remaining revisions does not work.** Within a cell
+  prefix the key orders by revision FIRST and `node_id` only as a tiebreak, so
+  all nodes' revisions interleave. There is nothing contiguous to seek past, and
+  an implementer who assumes otherwise writes a scan that silently skips live
+  entries.
+
+### 2.100 [DONE] The per-cell scan budget degrades instead of failing
+
+**Shipped.** The budget is now a TYPED signal, not a message:
+`Error::SpatialBudgetExceeded { workspace, property, cell, limit }`
+(`raisin-error`), returned by `resolve_live_candidates`
+(`raisin-rocksdb/.../spatial_index/repository/scan.rs`). The planner attaches the
+plan it degrades to — `SpatialDistanceScan.fallback`, built eagerly by
+`build_spatial_scan` from the FULL canonical predicate list, so it re-applies the
+spatial predicate even when the index scan was allowed to strip it — and
+`execute_spatial_distance_scan` runs that plan instead of failing the query when
+it sees the typed error. The result is slow and exact.
+
+The executor cannot re-plan on its own (the predicate may have been stripped), so
+carrying the fallback in the plan is what makes this possible at all. It is built
+through `spatial_fallback_plan`, which is `build_spatial_fallback_scan` WITHOUT
+the "degrading" warning — logging at construction would put a spurious warning in
+front of every successful index query.
+
+Loudness is preserved on both channels: the executor logs a warning naming the
+workspace, property and reason at the moment it degrades, and EXPLAIN prints
+`degrades to a row scan if the per-cell budget is exhausted` on the scan line.
+The budget itself is now configurable
+(`RocksDBConfig::spatial_max_entries_per_cell`, default
+`DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL` = 250k), which is also what makes the
+degradation reachable in a test without writing a quarter of a million entries.
+
+Tests: `spatial_pushdown_tests::a_cell_budget_exhaustion_degrades_to_a_row_scan_instead_of_failing`
+(asserts the index genuinely refuses, that EXPLAIN chose the index scan, and that
+the query still returns the truth) and
+`planner::tests_spatial::an_index_scan_carries_the_fallback_it_degrades_to`.
+
+**Not done:** `SpatialKnnScan` still propagates the error rather than degrading.
+A k-NN fallback is a full scan plus a distance sort plus the LIMIT, which the
+planner builds on a different path (`try_plan_spatial_knn` returns `None` and
+lets TopN handle it), so it needs its own eager-fallback wiring rather than a
+copy of this one. A k-NN query over a cell that fat still fails loudly.
+
+### 2.101 [DONE] `__distance` and `__matched_path` are selectable columns
+
+**Shipped.** Both are declared in the nodes-table catalog (both builders) with
+new `GeneratedExpr::SpatialDistance` / `SpatialMatchedPath` variants —
+`__distance` is `Double`, `__matched_path` is `Text`, both nullable — so they
+analyze, get a type on every transport (HTTP, WS and PGWire all carry an
+ordinary typed projected column; verified end to end by
+`spatial_transport_parity_test` and `spatial_nested_e2e_test`), and are NOT
+expanded by `SELECT *`: `GeneratedExpr::hidden_from_wildcard` skips them in
+`expand_wildcard_for_table`. `__order` / `__tree_order` deliberately still
+expand — they carry a value on rows people look at, an always-NULL
+`__distance` does not.
+
+The harder half was making the values REACHABLE on the fallback path. A
+`SpatialDistanceScan` reads its distance off the index entry and injects both
+itself, but a WILDCARD path can never take the index scan, so every wildcard
+query — the case where "which geometry matched?" is the entire point — was
+answered by a row scan that computed the distance inside the predicate and threw
+it away. A new pass-through operator, `PhysicalPlan::SpatialAnnotate`
+(`physical_plan/spatial_annotate.rs`), recomputes it through the same helper the
+ST_\* functions use (`geospatial::nearest_geometry`: the MINIMUM over the matched
+geometries, ties broken by smallest concrete path) and inserts both columns. It
+is planned only when the projection actually asks for one of them, so an ordinary
+spatial fallback pays nothing.
+
+Tests: `analyzer_tests::spatial_pseudo_columns_are_selectable_but_not_expanded_by_star`,
+`spatial_pushdown_tests::the_spatial_columns_name_the_geometry_that_matched`
+(asserts `stops.3.geo`, i.e. the fourth element — a fixture chosen so
+"first found" and "the pattern verbatim" both fail), and the HTTP e2e assertion
+in `spatial_nested_e2e_test` (`stops.1.geo`).
+
+### 2.110 [P2] `SHORTEST k` and `SHORTEST k GROUP` are not implemented
+
+The algorithm is done and tested —
+`physical_plan/graph_algo/yen.rs::k_shortest_paths` — but the selector is not
+wired to it, and writing `SHORTEST 3` is a named parse error rather than a
+silent fallback.
+
+What is missing is not maths but a **row-multiplication decision**:
+`k_shortest_paths` returns k paths per `(start, end)` pair, so one binding
+becomes k rows. That has to be specified against `ORDER BY`, `LIMIT` and
+keyset pagination before it ships — the same class of decision as the spatial
+wildcard's one-row-per-node rule, and the rule there was one such decision per
+pass. Shipping k rows per binding without that specification produces exactly
+the drop-and-duplicate behaviour under pagination that the `__order`-vs-`path`
+note in `CLAUDE.md` warns about.
+
+`ANY k` is deferred for the same reason.
+
+### 2.111 [P2] The `SIMPLE` restrictor is not implemented
+
+`WALK`, `TRAIL` and `ACYCLIC` ship. `SIMPLE` is a named parse error.
+
+Standard `SIMPLE` differs from `ACYCLIC` only in permitting a **closed walk**
+(first node == last node) while still forbidding any other repeated node.
+Aliasing it to `ACYCLIC` would silently drop every cycle-returning path, and a
+subtly-wrong `SIMPLE` is worse than an absent one, so it errors instead.
+Implementing it is a one-predicate change in
+`pgq/matching/selectors.rs::RestrictorExt` plus a test that a closed walk is
+accepted and a mid-path repeat is not.
+
+### 2.112 [P3] Adjacency is materialised per query, in memory, for the whole branch
+
+`build_adjacency_scoped` (`pgq/filter/graph_functions/mod.rs`) loads every
+relation matching the query's relation-type scope into a `HashMap`. Two things
+improved this pass and one did not:
+
+- **Fixed:** the relation-type filter is now pushed down instead of passing
+  `None`, so a typed pattern no longer loads every relation in the branch
+  across all workspaces.
+- **Fixed:** a per-query memo on `PgqContext` keyed by the relation-type set
+  means `COLUMNS (pagerank(a), wcc(a), bfs(a,b))` builds the adjacency once
+  instead of three times per row.
+- **Not fixed, and stated rather than implied:** the ceiling is still
+  **O(all relations in the scope)** in memory, materialised per query. On a
+  branch with millions of relations a path or algorithm query is slow and
+  memory-hungry regardless of selector.
+
+Deferred deliberately, and each is separate work: a cross-query adjacency
+cache (needs invalidation against writes, which the memo does not), a
+CSR/columnar adjacency representation, and incremental maintenance.
+
+Also unfixed and narrower: `scan_relations_global` takes a single
+`Option<&str>`, so a multi-type alternation (`-[:knows|follows]->`) cannot push
+its filter down at all and is filtered in memory after an unfiltered scan.
+Widening that storage API to a type *set* would let alternation push down too.
+
+### 2.113 [P2] `Direction::Any` on a variable-length pattern traverses forward only
+
+`pgq/matching/variable_length.rs` builds both a forward and a reverse adjacency
+but picks one; `-[r]-{1,3}` logs a warning and uses the forward one. The
+undirected answer needs the union of the two adjacencies, which changes the
+path count and interacts with the `TRAIL` restrictor (an undirected edge
+traversed in both directions is one edge, not two). It warns rather than being
+silent, but a bidirectional query still returns fewer paths than the truth.
+
+### 2.114 [P3] `sssp()`'s weight map defaults a missing weight to 1.0
+
+`EdgeWeightMap` (`pgq/context.rs`) is keyed by node pair only and stores
+`rel.weight.unwrap_or(1.0)`. Two consequences, both pre-existing:
+
+- Weighted `sssp()` on an unweighted graph silently reports a **hop count**
+  while presenting as a weighted distance.
+- Two relation types between the same node pair collapse to one entry.
+
+`ANY CHEAPEST` deliberately does **not** use this map — it reads
+`GraphEdge::weight` and errors on a missing or non-positive weight
+(`graph_algo::cost`). Fixing `sssp()` the same way is a behaviour change to a
+shipped function and needs its own decision: error, or return NULL, or keep
+the default and rename the function's contract.
+
+### 2.115 [FIXED] Single-hop `-[:a|b]->` silently bound only the FIRST type
+
+**Wrong results on a documented feature.** Found by
+`pgq_adjacency_scope_e2e_test`, recorded here, and now fixed.
+
+`pgq/matching/single_hop.rs` pushed `rel_pattern.types.first()` into
+`scan_relations_global`, so a two-type alternation never got the second type's
+rows back from storage:
+
+```sql
+-- used to return only the `road` edges; every `walk` edge was dropped, silently
+SELECT * FROM GRAPH_TABLE(MATCH (a)-[r:road|walk]->(b) COLUMNS (a.id, b.id))
+```
+
+One correction to the original write-up: `match_single_hop` had **no**
+relation-type post-filter at all — it relied entirely on the pushdown, so
+merely widening the scan would have bound every type in the branch. (The
+`types.iter().any(...)` filters that do exist are in `match_from_source` and
+`match_to_target`, which take a different route into storage.) The fix is
+therefore both halves, matching what the variable-length matcher already does:
+push down only when `types.len() == 1`, otherwise scan unfiltered and apply
+`matches_relation_type` while building bindings.
+
+Now asserted, not printed: `pgq_adjacency_scope_e2e_test::
+alternation_binding_keeps_every_type` requires both `road` and `walk` to bind
+and `ferry` not to.
+
+### 2.116 [Transport] PGWire extended protocol corrupts a column the analyzer cannot type
+
+**Not a path bug — a PGWire one, found while proving path support across
+transports.** It bites any query whose result columns the analyzer cannot type
+ahead of execution, which today means every `SELECT * FROM GRAPH_TABLE(...)`.
+
+The extended/prepared protocol types a statement's columns **twice, from two
+different sources**:
+
+| when | source | file |
+|---|---|---|
+| `Describe(statement)`, before execution | the analyzer's projection | `extended_query/schema.rs::describe_sql_columns` → `datatype_to_pg_type` |
+| `DataRow`, after execution | the produced value | `extended_query/handler.rs::do_query` → `infer_schema_from_rows` → `to_pg_type` |
+
+Clients built like `tokio-postgres` (also JDBC, psycopg3, asyncpg) cache the
+`RowDescription` from the first and decode the second with it. So the two must
+agree, and for a table function they do not: the analyzer cannot see inside
+`GRAPH_TABLE`, types every column `DataType::Unknown` → `TEXT`, while
+`nodes(p)` produces an array the value mapping types `JSONB`. `tokio-postgres`
+requests the **binary** format, so the value goes out with PostgreSQL's `0x01`
+JSONB version byte and the client — holding `TEXT` — returns a string with a
+stray leading `\x01` that will not parse. The same mismatch applies to
+`path_length(p)`: described `TEXT`, encoded as binary `INT8`.
+
+```sql
+-- eid is fine (TEXT on both sides); ns arrives with a leading 0x01
+SELECT * FROM GRAPH_TABLE(MATCH ANY SHORTEST p = (a)-[e:link]->{1,6}(b)
+  COLUMNS (path_length(p) AS hops, element_id(p) AS eid, nodes(p) AS ns))
+```
+
+This is the drift `spatial_transport_parity_test` exists to prevent, at a
+second site and with a different cause. Geometry is safe because *both* sides
+say `JSONB`; `type_mapping.rs::geometry_is_jsonb_on_both_paths` pins the
+per-`DataType` mapping, which cannot help when the analyzer's answer is
+`Unknown`.
+
+Two candidate fixes, neither smuggled into the path pass:
+
+1. **Teach the analyzer the table function's column types** so `Describe` is
+   honest — `path_length` → `BigInt`, `element_id` → `Text`, `nodes`/`edges` →
+   `JsonB`, `is_trail` → `Boolean`. Correct, and the only fix that makes a
+   prepared `GRAPH_TABLE` statement fully typed.
+2. **Have `do_query` reuse the described types** where the column names match
+   the produced row, keeping the row-derived column *set* so the field count
+   can never diverge. Cheaper, and strictly better than today for every column,
+   but it settles for `TEXT`.
+
+Probed, printed and referenced from
+`pgq_path_selectors_e2e_test::pgwire_extended_json_column`, which flips to a
+`[NOTE]` telling the next reader to turn it into an assertion once fixed. The
+*route* is asserted on all four paths regardless, via `element_id`, which is
+`TEXT` on both sides and therefore unaffected.
+
+---
+
 ## 3. Not engine concerns
 
 Gaps that surfaced as engine requests but are better solved with primitives
@@ -464,3 +779,35 @@ and worth reading before filing a bug.
   `Invalid state transition from pending to resumed`. Retry, or poll the
   instance to `waiting` first. Both are documented in `docs/workflows.md`
   §6.2.
+
+### 2.102 [P1] Three branch-fork index copies are wired but not proven
+
+The fork audit (`repositories/branches/cf_registry.rs`) found **four** column families that a
+branch fork silently failed to copy. All four are now in the copy set, but only `SPATIAL_INDEX`
+is proven end to end.
+
+| CF | locator unit test | e2e fork test | failure mode if the copy is subtly wrong |
+|---|---|---|---|
+| `SPATIAL_INDEX` | yes | **yes** (`tests/all/branch_fork_spatial_index_test.rs`) | — |
+| `COMPOUND_INDEX` | yes | **no** | compound-index `ORDER BY` + filter returns nothing on a fork |
+| `UNIQUE_INDEX` | yes | **no** | **duplicates silently accepted — data integrity, not missing rows** |
+| `EMBEDDINGS` | **no** | **no** | vector search returns nothing on a fork |
+
+**What to do:** one test module shaped like `branch_fork_spatial_index_test.rs` — fork a branch and
+assert each index actually FUNCTIONS on the fork (a compound-index query returns rows; a duplicate
+insert is REJECTED; a vector search finds the parent's embedding), plus independence in both
+directions.
+
+`UNIQUE_INDEX` is the priority: its failure mode is corruption rather than absence, and a
+revision-locator unit test cannot catch a semantic mistake in the copy. Note this file has now
+silently dropped index types **twice** — `ARCHETYPES`/`ELEMENT_TYPES` (broke branch publish), then
+`SPATIAL_INDEX`. The `cf_registry` guard prevents a *fourth* omission, but it cannot prove the
+copies it does perform are correct.
+
+**Also open, deliberately not fixed:** `GRAPH_PROJECTION` is *configuration*, not a derived cache,
+so a fork loses its projection configs. Its branch component sits at key part 3 while the copier
+rewrites part 2. Classified in the registry with this reason.
+
+**Judgement call recorded:** `EMBEDDINGS` was added to the copy set on correctness grounds. It is
+the one entry that materially increases fork cost on an embedding-heavy repo. Flipping it to
+`SkippedOnPurpose` is a one-line registry change if that trade is wrong.

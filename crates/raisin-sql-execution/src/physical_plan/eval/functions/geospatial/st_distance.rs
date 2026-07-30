@@ -5,7 +5,7 @@ use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::convert::geom_pair;
+use super::convert::geom_pair_multi;
 use super::measure;
 use super::z_support::expect_arity;
 
@@ -26,6 +26,16 @@ const SIGNATURE: &str = "ST_DISTANCE(geometry1, geometry2) -> DOUBLE";
 ///   its accuracy costs.
 /// * `NULL` in, `NULL` out. Two geometries with *different* explicit SRIDs are an
 ///   error naming `ST_TRANSFORM`; an unlabelled operand adopts the other's SRID.
+///
+/// # Nested and multi-geometry fields
+///
+/// The first argument may name a geometry anywhere in the property tree, using
+/// the same dotted path the index key embeds (`properties->>'venue.geo'`,
+/// `properties->>'stops.0.geo'`). A **wildcard** path (`properties->>'stops[].geo'`)
+/// returns the **minimum** distance over every matched geometry — "how close does
+/// this node get" — which is what makes
+/// `ORDER BY ST_DISTANCE(properties->>'stops[].geo', …) LIMIT 10` mean "the ten
+/// nearest nodes". Still one row per node.
 ///
 /// # What changed
 /// The previous implementation fell back to **centroid-to-centroid** for
@@ -58,9 +68,14 @@ impl SqlFunction for StDistanceFunction {
     #[inline]
     fn evaluate(&self, args: &[TypedExpr], row: &Row) -> Result<Literal, Error> {
         expect_arity("ST_DISTANCE", SIGNATURE, args, 2)?;
-        match geom_pair("ST_DISTANCE", args, row)? {
-            None => Ok(Literal::Null),
-            Some((a, b)) => Ok(Literal::Double(measure::distance(&a, &b)?)),
+        let matched = geom_pair_multi("ST_DISTANCE", args, row)?;
+        if matched.is_empty() {
+            return Ok(Literal::Null);
         }
+        let mut nearest = f64::INFINITY;
+        for (_, (a, b)) in &matched {
+            nearest = nearest.min(measure::distance(a, b)?);
+        }
+        Ok(Literal::Double(nearest))
     }
 }

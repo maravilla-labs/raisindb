@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Compute BFS distances from `source` to all nodes in the graph.
 ///
@@ -30,7 +30,8 @@ pub fn bfs_distances(
     for key in adjacency.keys() {
         distances.insert(key.clone(), usize::MAX);
         if let Some(neighbors) = adjacency.get(key) {
-            for (tgt_w, tgt_id, _rel_type) in neighbors {
+            for edge in neighbors {
+                let (tgt_w, tgt_id) = (&edge.target_workspace, &edge.target_id);
                 let next = (tgt_w.clone(), tgt_id.clone());
                 distances.entry(next).or_insert(usize::MAX);
             }
@@ -46,7 +47,8 @@ pub fn bfs_distances(
         let current_dist = distances[&current];
 
         if let Some(neighbors) = adjacency.get(&current) {
-            for (tgt_w, tgt_id, _rel_type) in neighbors {
+            for edge in neighbors {
+                let (tgt_w, tgt_id) = (&edge.target_workspace, &edge.target_id);
                 let next = (tgt_w.clone(), tgt_id.clone());
                 if distances[&next] == usize::MAX {
                     distances.insert(next.clone(), current_dist + 1);
@@ -89,7 +91,8 @@ pub fn node_bfs_distance(
         let current_dist = visited[&current];
 
         if let Some(neighbors) = adjacency.get(&current) {
-            for (tgt_w, tgt_id, _rel_type) in neighbors {
+            for edge in neighbors {
+                let (tgt_w, tgt_id) = (&edge.target_workspace, &edge.target_id);
                 let next = (tgt_w.clone(), tgt_id.clone());
                 if !visited.contains_key(&next) {
                     let next_dist = current_dist + 1;
@@ -117,17 +120,17 @@ mod tests {
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "SHORT".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "SHORT", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "C".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "C".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "D".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "D".to_string(), "", "LINK", None)],
         );
 
         graph

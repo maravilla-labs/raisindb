@@ -12,7 +12,7 @@ use raisin_storage::{RelationRepository, Storage};
 
 use super::super::super::expr::evaluate_expr_async_impl;
 use super::super::traits::FunctionContext;
-use crate::physical_plan::cypher::algorithms::GraphAdjacency;
+use crate::physical_plan::cypher::algorithms::{GraphAdjacency, GraphEdge};
 use crate::physical_plan::cypher::types::{PathInfo, VariableBinding};
 
 /// Extract node ID and workspace from an expression
@@ -73,9 +73,16 @@ pub(super) async fn build_adjacency_graph<S: Storage>(
     let mut adjacency: GraphAdjacency = HashMap::new();
 
     for (src_workspace, src_id, tgt_workspace, tgt_id, rel_ref) in all_relationships {
-        let key = (src_workspace, src_id);
-        let value = (tgt_workspace, tgt_id, rel_ref.relation_type);
-        adjacency.entry(key).or_default().push(value);
+        adjacency
+            .entry((src_workspace, src_id))
+            .or_default()
+            .push(GraphEdge::new(
+                tgt_workspace,
+                tgt_id,
+                rel_ref.target_node_type,
+                rel_ref.relation_type,
+                rel_ref.weight,
+            ));
     }
 
     tracing::debug!("   Built adjacency graph with {} nodes", adjacency.len());

@@ -32,4 +32,7 @@ pub use resolve::{
     availability_in_rebuild_window, resolve_write_policy, union_policy, BuildTrigger,
     WritePolicyResolution,
 };
-pub use store::{policy_for_property, read_state, spatial_state_key, SpatialStateStore};
+pub use store::{
+    policy_for_property, read_state, spatial_state_key, tombstone_policy_for_property,
+    SpatialStateStore,
+};

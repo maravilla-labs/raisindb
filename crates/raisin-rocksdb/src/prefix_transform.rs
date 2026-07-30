@@ -70,3 +70,33 @@ pub fn create_spatial_index_prefix() -> SliceTransform {
         None, // in_domain: always returns true (all keys valid)
     )
 }
+
+/// The custom prefix extractor for a column family, if it has one.
+///
+/// THE single source of truth: `configure_column_families` installs whatever
+/// this returns, and [`has_custom_prefix_extractor`] answers from the same
+/// match, so the two cannot drift apart.
+pub fn custom_prefix_extractor(cf_name: &str) -> Option<SliceTransform> {
+    match cf_name {
+        crate::cf::ORDERED_CHILDREN => Some(create_ordered_children_prefix()),
+        crate::cf::SPATIAL_INDEX => Some(create_spatial_index_prefix()),
+        _ => None,
+    }
+}
+
+/// Does this column family have a custom prefix extractor configured?
+///
+/// This matters far beyond bloom filters: `DB::prefix_iterator_cf` is only
+/// meaningful for a prefix that the extractor actually produces. Seeking with a
+/// SHORTER prefix — such as the `{tenant}\0{repo}\0{branch}\0` prefix a branch
+/// fork scans with — can terminate early or skip entries entirely, because the
+/// prefix bloom filter is consulted for a prefix that is not in the domain.
+///
+/// Callers that must scan such a CF with a short prefix have to use
+/// `DB::iterator_cf` with an explicit seek and compare the prefix themselves.
+///
+/// Kept next to the extractors so the list cannot drift from the ones actually
+/// installed in `configure_column_families`, which calls this function.
+pub fn has_custom_prefix_extractor(cf_name: &str) -> bool {
+    custom_prefix_extractor(cf_name).is_some()
+}

@@ -96,8 +96,9 @@ pub use restore_parser::{is_restore_statement, parse_restore};
 // SQL/PGQ (ISO SQL:2023) - Property Graph Queries
 pub use pgq::{
     is_system_field, BinaryOperator, ColumnExpr, ColumnsClause, Direction, Expr, GraphTableQuery,
-    Literal, MatchClause, NodePattern, PathPattern, PathQuantifier, PatternElement,
-    RelationshipPattern, SourceSpan, UnaryOperator, WhereClause, DEFAULT_GRAPH_NAME, SYSTEM_FIELDS,
+    Literal, MatchClause, NodePattern, PathPattern, PathQuantifier, PathRestrictor, PathSelector,
+    PatternElement, QuantifierSyntax, RelationshipPattern, SourceSpan, UnaryOperator, WhereClause,
+    DEFAULT_GRAPH_NAME, SYSTEM_FIELDS,
 };
 pub use pgq_parser::{
     extract_graph_table_arg, find_graph_tables, is_graph_table_expression, parse_graph_table,

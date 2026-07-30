@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Priority-queue state for Dijkstra (min-heap via reversed ordering).
 #[derive(Clone, PartialEq)]
@@ -71,7 +71,9 @@ pub fn sssp_distances(
         }
 
         if let Some(neighbors) = adjacency.get(&node) {
-            for (tgt_w, tgt_id, rel_type) in neighbors {
+            for edge in neighbors {
+                let (tgt_w, tgt_id) = (&edge.target_workspace, &edge.target_id);
+                let rel_type = &edge.relation_type;
                 let next = (tgt_w.clone(), tgt_id.clone());
                 let edge_weight = weight_fn(rel_type);
                 let next_cost = cost + edge_weight;
@@ -147,7 +149,8 @@ pub fn sssp_distances_weighted(
         }
 
         if let Some(neighbors) = adjacency.get(&node) {
-            for (tgt_w, tgt_id, _rel_type) in neighbors {
+            for edge in neighbors {
+                let (tgt_w, tgt_id) = (&edge.target_workspace, &edge.target_id);
                 let next = (tgt_w.clone(), tgt_id.clone());
                 let edge_weight = edge_weights
                     .get(&(
@@ -206,17 +209,17 @@ mod tests {
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "FAST".to_string()),
-                ("ws".to_string(), "C".to_string(), "SLOW".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "FAST", None),
+                GraphEdge::new("ws", "C".to_string(), "", "SLOW", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "D".to_string(), "FAST".to_string())],
+            vec![GraphEdge::new("ws", "D".to_string(), "", "FAST", None)],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "D".to_string(), "FAST".to_string())],
+            vec![GraphEdge::new("ws", "D".to_string(), "", "FAST", None)],
         );
 
         graph

@@ -34,6 +34,11 @@
 //! build configuration, so two nodes compiled with different projection features
 //! can never disagree about what is in the index.
 
+pub mod compaction;
+pub mod compaction_config;
+mod compaction_state;
+#[cfg(test)]
+mod compaction_tests;
 mod cover;
 mod geometry;
 mod normalize;
@@ -42,6 +47,8 @@ mod plan;
 #[cfg(test)]
 mod tests;
 
+pub use compaction::{SpatialPruneFilter, SpatialPruneFilterFactory, SpatialPruneStats};
+pub use compaction_config::SpatialCompactionConfig;
 pub use cover::*;
 pub use geometry::*;
 pub use normalize::{is_indexable_srid, normalize_geometry_for_index};

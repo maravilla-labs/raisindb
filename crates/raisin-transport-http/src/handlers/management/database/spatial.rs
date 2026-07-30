@@ -24,8 +24,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use raisin_models::nodes::properties::{
-    resolve_spatial_policy, sorted_precisions, SpatialCoverMode, SpatialPropertySchema,
-    SpatialWorkspaceSchema,
+    policy_key_for_path, resolve_spatial_policy, sorted_precisions, SpatialCoverMode,
+    SpatialPropertySchema, SpatialWorkspaceSchema,
 };
 use raisin_storage::scope::RepoScope;
 use raisin_storage::{Storage, WorkspaceRepository};
@@ -136,6 +136,29 @@ fn storage(state: &AppState) -> Result<&std::sync::Arc<raisin_rocksdb::RocksDBSt
     })
 }
 
+/// The index-state record for one property PATH.
+///
+/// State records are keyed by the POLICY key, in which array indices collapse to
+/// `[]` (`stops.3.geo` -> `stops[].geo`, see [`policy_key_for_path`]) — one
+/// declaration per modelled field rather than one per element. The physical
+/// census is keyed by the CONCRETE path, because that is what the index key
+/// embeds. A straight name comparison therefore matches nothing for any array
+/// element, and HEALTH answered `not_built` / VERIFY answered "no local index
+/// state record" for `stops.0.geo` while the planner — which normalises — was
+/// using the index perfectly happily. An admin surface that contradicts the
+/// planner sends operators chasing rebuilds that change nothing.
+#[cfg(feature = "storage-rocksdb")]
+fn state_for<'a>(
+    states: &'a [(String, raisin_storage::spatial::SpatialIndexState)],
+    property: &str,
+) -> Option<&'a raisin_storage::spatial::SpatialIndexState> {
+    let policy_key = policy_key_for_path(property);
+    states
+        .iter()
+        .find(|(name, _)| name == property || *name == policy_key)
+        .map(|(_, state)| state)
+}
+
 /// Read the declared spatial policy.
 ///
 /// GET /api/admin/management/database/:tenant/:repo/spatial/config?workspace=…&property=…
@@ -239,7 +262,16 @@ pub async fn put_spatial_config(
             )
         })?;
 
-    let property = req.property.as_deref();
+    // Nested geometry paths are legal policy keys (`venue.geo`, `hero.map_pin`,
+    // `stops[].geo`). An operator may spell an array field either way — with a
+    // concrete index (`stops.0.geo`) or with the wildcard — and both must land on
+    // ONE declaration, or a per-element policy would be unconfigurable. The
+    // normalisation is `policy_key_for_path`, the same function the local state
+    // record's key builder and the query planner's availability check use; if
+    // this side normalised differently the planner would look up a record that
+    // does not exist and report the field unindexed forever.
+    let normalised_property = req.property.as_deref().map(policy_key_for_path);
+    let property = normalised_property.as_deref();
 
     let settings = if req.reset {
         None
@@ -445,7 +477,7 @@ pub async fn get_spatial_health(
         names.sort();
 
         for name in names {
-            let state = states.iter().find(|(n, _)| *n == name).map(|(_, s)| s);
+            let state = state_for(&states, &name);
             let counts = census
                 .iter()
                 .find(|c| c.property == name)
@@ -562,10 +594,7 @@ pub async fn verify_spatial_index(
 
     let mut out = Vec::new();
     for counts in &census {
-        let state = states
-            .iter()
-            .find(|(n, _)| *n == counts.property)
-            .map(|(_, s)| s);
+        let state = state_for(&states, &counts.property);
         let configured = resolve_spatial_policy(None, schema.as_ref(), &counts.property);
 
         let mut problems: Vec<String> = Vec::new();

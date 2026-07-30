@@ -89,6 +89,9 @@ pub fn execute_plan<
             PhysicalPlan::SpatialKnnScan { .. } => {
                 crate::physical_plan::scan_executors::execute_spatial_knn_scan(plan, ctx).await
             }
+            PhysicalPlan::SpatialAnnotate { .. } => {
+                crate::physical_plan::spatial_annotate::execute_spatial_annotate(plan, ctx).await
+            }
             PhysicalPlan::ReferenceIndexScan { .. } => {
                 crate::physical_plan::scan_executors::execute_reference_index_scan(plan, ctx).await
             }

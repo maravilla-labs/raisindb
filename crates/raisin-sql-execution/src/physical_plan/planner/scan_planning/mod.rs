@@ -13,6 +13,7 @@
 
 mod build_scan;
 mod build_spatial;
+mod build_spatial_fallback;
 mod index_selection;
 mod selectivity;
 

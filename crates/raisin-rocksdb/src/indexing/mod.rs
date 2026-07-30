@@ -33,13 +33,25 @@
 //! That is strictly stronger: there is no window in which a node holds the record
 //! but not its index entry, and no dependence on the job system being healthy.
 
+pub mod property_walk;
 pub mod spatial;
 pub mod spatial_policy;
+#[cfg(test)]
+mod spatial_tests;
+pub mod spatial_tombstone;
+pub mod spatial_walk;
 
+pub use property_walk::walk_properties;
 pub use spatial::{
-    write_node_spatial_indexes, write_spatial_property, SpatialIndexTargets, SPATIAL_TOMBSTONE,
+    write_node_spatial_indexes, write_spatial_property, SpatialIndexTargets, TombstonePrecisions,
+    SPATIAL_TOMBSTONE,
 };
 pub use spatial_policy::NodeSpatialPolicies;
+pub use spatial_tombstone::{tombstone_spatial_property, tombstone_superseded_spatial_indexes};
+pub use spatial_walk::{
+    indexed_geometry_paths, walk_geometries, walk_geometries_capped, WalkedGeometries,
+    MAX_GEOMETRY_PATHS_PER_NODE,
+};
 
 /// The scope every index key is prefixed with.
 ///

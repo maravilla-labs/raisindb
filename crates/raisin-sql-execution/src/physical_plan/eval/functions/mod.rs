@@ -19,7 +19,7 @@
 
 mod aggregate;
 mod fulltext;
-mod geospatial;
+pub(crate) mod geospatial;
 mod hierarchy;
 mod json;
 mod numeric;

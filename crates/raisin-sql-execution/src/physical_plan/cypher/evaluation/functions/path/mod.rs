@@ -20,7 +20,7 @@ use helpers::{build_adjacency_graph, extract_node_id_workspace, path_info_to_pro
 
 use super::super::expr::evaluate_expr_async_impl;
 use super::traits::FunctionContext;
-use crate::physical_plan::cypher::types::VariableBinding;
+use crate::physical_plan::cypher::types::{PathInfo, VariableBinding};
 
 /// shortestPath(start, end, maxDepth?) - Find shortest path between nodes
 ///
@@ -68,7 +68,8 @@ pub async fn evaluate_shortest_path<S: Storage>(
 
     let path = crate::physical_plan::cypher::algorithms::shortest_path(
         &adjacency, &start_key, &end_key, max_depth,
-    );
+    )
+    .map(PathInfo::from);
 
     match path {
         Some(path_info) => {
@@ -126,9 +127,12 @@ pub async fn evaluate_all_shortest_paths<S: Storage>(
     let start_key = (start_workspace, start_id);
     let end_key = (end_workspace, end_id);
 
-    let paths = crate::physical_plan::cypher::algorithms::all_shortest_paths(
+    let paths: Vec<PathInfo> = crate::physical_plan::cypher::algorithms::all_shortest_paths(
         &adjacency, &start_key, &end_key, max_depth, 100,
-    );
+    )
+    .into_iter()
+    .map(PathInfo::from)
+    .collect();
 
     tracing::debug!("   Found {} shortest paths", paths.len());
 
@@ -172,7 +176,8 @@ pub async fn evaluate_astar<S: Storage>(
         &end_key,
         |_, _, _| 1.0,
         |_| 0.0,
-    );
+    )
+    .map(PathInfo::from);
 
     match path {
         Some(path_info) => {
@@ -226,13 +231,16 @@ pub async fn evaluate_k_shortest_paths<S: Storage>(
     let start_key = (start_workspace, start_id);
     let end_key = (end_workspace, end_id);
 
-    let paths = crate::physical_plan::cypher::algorithms::k_shortest_paths(
+    let paths: Vec<PathInfo> = crate::physical_plan::cypher::algorithms::k_shortest_paths(
         &adjacency,
         &start_key,
         &end_key,
         k,
         |_, _, _| 1.0,
-    );
+    )
+    .into_iter()
+    .map(PathInfo::from)
+    .collect();
 
     tracing::debug!("   Found {} paths", paths.len());
 
@@ -272,7 +280,8 @@ pub async fn evaluate_distance<S: Storage>(
 
     let path = crate::physical_plan::cypher::algorithms::shortest_path(
         &adjacency, &start_key, &end_key, 100,
-    );
+    )
+    .map(PathInfo::from);
 
     match path {
         Some(path_info) => {

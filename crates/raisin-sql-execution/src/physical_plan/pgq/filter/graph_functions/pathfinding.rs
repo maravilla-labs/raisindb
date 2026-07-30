@@ -30,7 +30,8 @@ pub(crate) async fn evaluate_bfs<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
 
     let source = adjacency
         .keys()
@@ -38,7 +39,7 @@ pub(crate) async fn evaluate_bfs<S: Storage>(
         .cloned()
         .unwrap_or_else(|| (node.0.clone(), source_str));
 
-    let distances = algorithms::bfs_distances(&adjacency, &source);
+    let distances = algorithms::bfs_distances(adjacency, &source);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &dist) in &distances {
@@ -73,7 +74,8 @@ pub(crate) async fn evaluate_sssp<S: Storage>(
         return Ok(cached);
     }
 
-    let (adjacency, weights) = build_adjacency_with_weights(storage, context).await?;
+    let scoped = build_adjacency_with_weights(storage, context).await?;
+    let (adjacency, weights) = (&scoped.0, &scoped.1);
 
     let source = adjacency
         .keys()
@@ -81,7 +83,7 @@ pub(crate) async fn evaluate_sssp<S: Storage>(
         .cloned()
         .unwrap_or_else(|| (node.0.clone(), source_str));
 
-    let distances = algorithms::sssp_distances_weighted(&adjacency, &source, &weights);
+    let distances = algorithms::sssp_distances_weighted(adjacency, &source, weights);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &dist) in &distances {

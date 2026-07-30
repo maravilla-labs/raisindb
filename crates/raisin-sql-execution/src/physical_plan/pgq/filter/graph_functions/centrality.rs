@@ -7,7 +7,8 @@ use raisin_sql::ast::Expr;
 use raisin_storage::Storage;
 
 use super::{build_adjacency, get_node_from_args, Result};
-use crate::physical_plan::cypher::algorithms::{self, types::GraphNodeId};
+use crate::physical_plan::cypher::algorithms;
+use crate::physical_plan::graph_algo::GraphNodeId;
 use crate::physical_plan::pgq::context::PgqContext;
 use crate::physical_plan::pgq::types::{SqlValue, VariableBinding};
 
@@ -24,9 +25,10 @@ pub(crate) async fn evaluate_pagerank<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
     let config = algorithms::PageRankConfig::default();
-    let ranks = algorithms::pagerank(&adjacency, &config);
+    let ranks = algorithms::pagerank(adjacency, &config);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &rank) in &ranks {
@@ -53,8 +55,9 @@ pub(crate) async fn evaluate_betweenness<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let scores = algorithms::betweenness::all_betweenness_centrality(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let scores = algorithms::betweenness::all_betweenness_centrality(adjacency);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &score) in &scores {
@@ -81,8 +84,9 @@ pub(crate) async fn evaluate_closeness<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let scores = algorithms::centrality::all_closeness_centrality(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let scores = algorithms::centrality::all_closeness_centrality(adjacency);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, score) in &scores {
@@ -111,8 +115,9 @@ pub(crate) async fn evaluate_degree<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let degrees = algorithms::centrality::all_degrees(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let degrees = algorithms::centrality::all_degrees(adjacency);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, deg) in &degrees {
@@ -141,16 +146,15 @@ pub(crate) async fn evaluate_in_degree<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
 
     // Compute in-degree for all nodes in a single pass
     let mut in_degrees: HashMap<GraphNodeId, usize> = HashMap::new();
     for (source, neighbors) in adjacency.iter() {
         in_degrees.entry(source.clone()).or_insert(0);
-        for (tgt_ws, tgt_id, _) in neighbors {
-            *in_degrees
-                .entry((tgt_ws.clone(), tgt_id.clone()))
-                .or_insert(0) += 1;
+        for edge in neighbors {
+            *in_degrees.entry(edge.target()).or_insert(0) += 1;
         }
     }
 
@@ -177,16 +181,15 @@ pub(crate) async fn evaluate_out_degree<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
 
     // Compute out-degree for all nodes in a single pass
     let mut out_degrees: HashMap<GraphNodeId, usize> = HashMap::new();
     for (source, neighbors) in adjacency.iter() {
         out_degrees.insert(source.clone(), neighbors.len());
-        for (tgt_ws, tgt_id, _) in neighbors {
-            out_degrees
-                .entry((tgt_ws.clone(), tgt_id.clone()))
-                .or_insert(0);
+        for edge in neighbors {
+            out_degrees.entry(edge.target()).or_insert(0);
         }
     }
 

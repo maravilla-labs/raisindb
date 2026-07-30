@@ -4,7 +4,6 @@
 mod tests {
     use raisin_sql::ast::{BinaryOperator, Expr, Literal};
 
-    use crate::physical_plan::pgq::filter::functions::extract_path_length;
     use crate::physical_plan::pgq::filter::like_match::like_match;
     use crate::physical_plan::pgq::filter::operators::{
         compare_values, evaluate_binary_op, values_equal,
@@ -117,68 +116,74 @@ mod tests {
         );
     }
 
+    /// `CARDINALITY(r)` used to be answered by parsing `"FRIENDS_WITH[2]"`, a
+    /// hop count smuggled through the relation type because nothing else
+    /// carried it. The real path is bound now, so this asserts the count comes
+    /// from the path AND that the relation type is left verbatim.
     #[test]
-    fn test_extract_path_length() {
-        // Variable-length path with encoded length
-        assert_eq!(extract_path_length("FRIENDS_WITH[2]"), Some(2));
-        assert_eq!(extract_path_length("FRIENDS_WITH[3]"), Some(3));
-        assert_eq!(extract_path_length("FOLLOWS[10]"), Some(10));
-
-        // Single-hop path without encoding
-        assert_eq!(extract_path_length("FRIENDS_WITH"), None);
-        assert_eq!(extract_path_length("FOLLOWS"), None);
-
-        // Edge cases
-        assert_eq!(extract_path_length("TYPE[0]"), Some(0));
-        assert_eq!(extract_path_length(""), None);
-        assert_eq!(extract_path_length("[1]"), Some(1));
-    }
-
-    #[test]
-    fn test_cardinality_function() {
+    fn cardinality_reads_the_bound_path_and_leaves_relation_type_alone() {
+        use crate::physical_plan::graph_algo::GraphEdge;
         use crate::physical_plan::pgq::filter::functions::evaluate_function;
+        use crate::physical_plan::pgq::matching::{GraphPath, PathNode};
         use crate::physical_plan::pgq::types::{RelationInfo, VariableBinding};
         use raisin_sql::ast::SourceSpan;
 
+        fn hop(mut path: GraphPath, tgt: &str) -> GraphPath {
+            path.push(&GraphEdge::new("ws", tgt, "User", "FRIENDS_WITH", None));
+            path
+        }
+
+        fn arg(name: &str) -> Vec<Expr> {
+            vec![Expr::PropertyAccess {
+                variable: name.into(),
+                properties: vec![],
+                span: SourceSpan::empty(),
+            }]
+        }
+
         let mut binding = VariableBinding::new();
+
+        // Two-hop path a -> b -> c.
+        let two = hop(
+            hop(GraphPath::start(PathNode::new("a", "ws", "User")), "b"),
+            "c",
+        );
+        binding.bind_path("r".into(), two);
         binding.bind_relation(
             "r".into(),
-            RelationInfo::new("FRIENDS_WITH[2]".into(), None, "a".into(), "b".into()),
+            RelationInfo::new("FRIENDS_WITH".into(), None, "a".into(), "b".into()),
+        );
+        assert_eq!(
+            evaluate_function("CARDINALITY", &arg("r"), &binding).unwrap(),
+            SqlValue::Integer(2)
+        );
+        assert_eq!(
+            binding.get_relation("r").unwrap().relation_type,
+            "FRIENDS_WITH"
         );
 
-        // CARDINALITY(r) should return 2 for a 2-hop path
-        let args = vec![Expr::PropertyAccess {
-            variable: "r".into(),
-            properties: vec![],
-            span: SourceSpan::empty(),
-        }];
-        let result = evaluate_function("CARDINALITY", &args, &binding).unwrap();
-        assert_eq!(result, SqlValue::Integer(2));
-
-        // Test with 3-hop path
-        binding.bind_relation(
-            "r2".into(),
-            RelationInfo::new("FRIENDS_WITH[3]".into(), None, "a".into(), "c".into()),
+        // Three-hop path.
+        let three = hop(
+            hop(
+                hop(GraphPath::start(PathNode::new("a", "ws", "User")), "b"),
+                "c",
+            ),
+            "d",
         );
-        let args2 = vec![Expr::PropertyAccess {
-            variable: "r2".into(),
-            properties: vec![],
-            span: SourceSpan::empty(),
-        }];
-        let result2 = evaluate_function("cardinality", &args2, &binding).unwrap();
-        assert_eq!(result2, SqlValue::Integer(3));
+        binding.bind_path("r2".into(), three);
+        assert_eq!(
+            evaluate_function("cardinality", &arg("r2"), &binding).unwrap(),
+            SqlValue::Integer(3)
+        );
 
-        // Single-hop relationship (no encoding) should return 1
+        // Single-hop relationship: no path bound, cardinality 1.
         binding.bind_relation(
             "r3".into(),
             RelationInfo::new("FOLLOWS".into(), None, "x".into(), "y".into()),
         );
-        let args3 = vec![Expr::PropertyAccess {
-            variable: "r3".into(),
-            properties: vec![],
-            span: SourceSpan::empty(),
-        }];
-        let result3 = evaluate_function("CARDINALITY", &args3, &binding).unwrap();
-        assert_eq!(result3, SqlValue::Integer(1));
+        assert_eq!(
+            evaluate_function("CARDINALITY", &arg("r3"), &binding).unwrap(),
+            SqlValue::Integer(1)
+        );
     }
 }

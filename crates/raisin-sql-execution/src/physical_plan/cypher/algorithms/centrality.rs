@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Calculate the total degree (in + out) of a node
 ///
@@ -50,7 +50,8 @@ pub fn out_degree(adjacency: &GraphAdjacency, node: &GraphNodeId) -> usize {
 pub fn in_degree(adjacency: &GraphAdjacency, node: &GraphNodeId) -> usize {
     let mut count = 0;
     for ((_src_workspace, _src_id), neighbors) in adjacency.iter() {
-        for (tgt_workspace, tgt_id, _rel_type) in neighbors {
+        for edge in neighbors {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             if (tgt_workspace, tgt_id) == (&node.0, &node.1) {
                 count += 1;
             }
@@ -67,7 +68,8 @@ pub fn all_degrees(adjacency: &GraphAdjacency) -> Vec<(GraphNodeId, usize)> {
     let mut nodes = std::collections::HashSet::new();
     for (source, neighbors) in adjacency.iter() {
         nodes.insert(source.clone());
-        for (tgt_workspace, tgt_id, _) in neighbors {
+        for edge in neighbors {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             nodes.insert((tgt_workspace.clone(), tgt_id.clone()));
         }
     }
@@ -119,7 +121,8 @@ pub fn closeness_centrality(
 
     while let Some((current, dist)) = queue.pop_front() {
         if let Some(neighbors) = adjacency.get(&current) {
-            for (next_workspace, next_id, _rel_type) in neighbors {
+            for edge in neighbors {
+                let (next_workspace, next_id) = (&edge.target_workspace, &edge.target_id);
                 let next = (next_workspace.clone(), next_id.clone());
                 if !distances.contains_key(&next) {
                     distances.insert(next.clone(), dist + 1);
@@ -150,7 +153,8 @@ pub fn all_closeness_centrality(adjacency: &GraphAdjacency) -> Vec<(GraphNodeId,
     let mut nodes = HashSet::new();
     for (source, neighbors) in adjacency.iter() {
         nodes.insert(source.clone());
-        for (tgt_workspace, tgt_id, _) in neighbors {
+        for edge in neighbors {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             nodes.insert((tgt_workspace.clone(), tgt_id.clone()));
         }
     }
@@ -178,28 +182,28 @@ pub fn all_closeness_centrality(adjacency: &GraphAdjacency) -> Vec<(GraphNodeId,
 mod tests {
     use super::*;
 
-    fn create_test_graph() -> HashMap<(String, String), Vec<(String, String, String)>> {
+    fn create_test_graph() -> GraphAdjacency {
         let mut graph = HashMap::new();
 
         // A has 2 outgoing: A -> B, A -> C
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
             ],
         );
 
         // B has 1 outgoing: B -> C
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "C".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "C".to_string(), "", "LINK", None)],
         );
 
         // C has 1 outgoing: C -> D
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "D".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "D".to_string(), "", "LINK", None)],
         );
 
         graph
@@ -278,9 +282,9 @@ mod tests {
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "D".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "D".to_string(), "", "LINK", None),
             ],
         );
 

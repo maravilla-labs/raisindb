@@ -137,6 +137,7 @@ pub use repositories::{
     RocksDBEmbeddingStorage, RocksDBTranslationRepository, RocksDbJobStore, SpatialIndexEntry,
     SpatialIndexRepository, SystemUpdateRepositoryImpl, TenantAIConfigRepository,
     TenantEmbeddingConfigRepository, DEFAULT_AUDIT_READ_LIMIT,
+    DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
 };
 
 // Re-export StorageNode for internal use across modules
@@ -324,7 +325,12 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
 }
 
 /// Create column family descriptors with optimized options
-pub(crate) fn create_column_family_descriptors() -> Vec<ColumnFamilyDescriptor> {
+///
+/// `spatial_compaction` configures the [`spatial::SpatialPruneFilterFactory`],
+/// which is attached to `cf::SPATIAL_INDEX` and to NO other column family.
+pub(crate) fn create_column_family_descriptors(
+    spatial_compaction: &spatial::SpatialCompactionConfig,
+) -> Vec<ColumnFamilyDescriptor> {
     let mut cfs = Vec::new();
     let mut default_opts = Options::default();
     default_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
@@ -332,14 +338,12 @@ pub(crate) fn create_column_family_descriptors() -> Vec<ColumnFamilyDescriptor> 
     for cf_name in all_column_families() {
         let mut opts = default_opts.clone();
 
-        // Special configuration for ORDERED_CHILDREN CF
-        // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0ordered\0{parent_id}\0...
-        // Prefix up to parent_id for efficient queries
-        if cf_name == cf::ORDERED_CHILDREN {
-            // Use custom delimiter-based prefix extractor
-            // Extracts prefix up to the 6th null byte (after parent_id)
-            // This enables prefix bloom filters for efficient scans of children under a parent
-            opts.set_prefix_extractor(prefix_transform::create_ordered_children_prefix());
+        // Custom prefix extractors (ORDERED_CHILDREN, SPATIAL_INDEX) come from
+        // ONE table in `prefix_transform`, so code that must know whether a CF
+        // has one — notably the branch fork, which scans with a SHORTER prefix
+        // and therefore cannot use `prefix_iterator_cf` — reads the same list.
+        if let Some(transform) = prefix_transform::custom_prefix_extractor(cf_name) {
+            opts.set_prefix_extractor(transform);
         }
 
         // Enable bloom filters for PROPERTY_INDEX CF
@@ -362,9 +366,16 @@ pub(crate) fn create_column_family_descriptors() -> Vec<ColumnFamilyDescriptor> 
             // Enable bloom filter for negative lookups on geohash prefixes
             block_opts.set_bloom_filter(10.0, false);
             opts.set_block_based_table_factory(&block_opts);
-            // Use custom prefix extractor for efficient geohash range scans
-            // Extracts prefix up to the 7th null byte (after geohash)
-            opts.set_prefix_extractor(prefix_transform::create_spatial_index_prefix());
+            // (the geohash prefix extractor is installed above, from the shared table)
+            // Prune superseded revisions and aged-out tombstones during
+            // compaction. Without this the CF only ever grows: the revision is
+            // part of the key, so an update writes a NEW key and RocksDB has
+            // nothing to collapse. See `spatial::compaction`.
+            if spatial_compaction.enabled {
+                opts.set_compaction_filter_factory(spatial::SpatialPruneFilterFactory::new(
+                    spatial_compaction.clone(),
+                ));
+            }
         }
 
         // Enable bloom filters for UNIQUE_INDEX CF
@@ -407,7 +418,7 @@ pub fn open_db<P: AsRef<Path>>(path: P) -> Result<DB> {
 /// ```
 pub fn open_db_with_config(config: &config::RocksDBConfig) -> Result<DB> {
     let db_opts = config.to_rocksdb_options();
-    let cfs = create_column_family_descriptors();
+    let cfs = create_column_family_descriptors(&config.spatial_compaction);
 
     let db = DB::open_cf_descriptors(&db_opts, &config.path, cfs)
         .map_err(|e| raisin_error::Error::storage(format!("Failed to open RocksDB: {}", e)))?;

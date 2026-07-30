@@ -84,6 +84,19 @@ struct PlanContext {
     order_by_expr: Option<(TypedExpr, bool)>,
     /// True if this scan will feed into a COUNT(*) aggregate
     is_count_star: bool,
+    /// True when the query is scoped to an EXPLICIT historical revision
+    /// (`WHERE __revision = N`), which the analyzer strips into
+    /// `ExecutionContext::max_revision`.
+    ///
+    /// Read by spatial planning: the spatial index is pruned by a compaction
+    /// filter that keeps the newest entry per node per cell plus a bounded
+    /// recent window, so a read at HEAD is exact but a read at an OLD revision
+    /// may resolve against entries that have been pruned away. A historical
+    /// spatial predicate is therefore routed to the row-scan fallback, which is
+    /// always exact. HEAD queries (the overwhelming majority, and the ones the
+    /// index performance work is for) are unaffected — this flag is false for
+    /// them.
+    historical_revision: bool,
 }
 
 impl PlanContext {
@@ -94,6 +107,7 @@ impl PlanContext {
             order_by: None,
             order_by_expr: None,
             is_count_star: false,
+            historical_revision: false,
         }
     }
 
@@ -104,6 +118,7 @@ impl PlanContext {
             order_by: None,
             order_by_expr: None,
             is_count_star: false,
+            historical_revision: false,
         }
     }
 
@@ -123,6 +138,12 @@ impl PlanContext {
     /// iteration order is free to bound the result.
     fn has_no_ordering(&self) -> bool {
         self.order_by.is_none() && self.order_by_expr.is_none()
+    }
+
+    /// Record that this scan reads at an explicit historical revision.
+    fn with_historical_revision(mut self, historical: bool) -> Self {
+        self.historical_revision = historical;
+        self
     }
 
     /// Mark this context as feeding a COUNT(*)
@@ -213,12 +234,39 @@ impl PhysicalPlanner {
     /// branch and workspace come from the query — a spatial index is per branch,
     /// and a query against a feature branch must not be planned against main's
     /// index state.
+    ///
+    /// # Wildcard paths are never index-backed, and that guard lives HERE
+    ///
+    /// `properties->>'stops[].geo'` names every element of an array. Each element
+    /// has its OWN index-key namespace (`stops.0.geo`, `stops.1.geo`, …), so a
+    /// single cell-ring scan over `stops[].geo` would read a prefix that holds
+    /// nothing and return **zero rows** — the exact silent-empty failure this
+    /// subsystem has spent a pass eliminating.
+    ///
+    /// The state record, on the other hand, IS keyed by `stops[].geo` (array
+    /// indices normalise, see `policy_key_for_path`), so availability would
+    /// legitimately answer `Ready`. Answering `Unusable` here instead is what
+    /// routes a wildcard onto `build_spatial_fallback_scan`: correct rows, a full
+    /// scan, and a warning naming the path. Placing the guard at the planner's one
+    /// availability call site means every caller — `collect_index_options`,
+    /// `build_spatial_scan`, the fallback's own EXPLAIN detail — inherits it and
+    /// none can disagree.
     pub(super) fn spatial_availability(
         &self,
         workspace: &str,
         branch: &str,
         property: &str,
     ) -> super::catalog::SpatialAvailability {
+        if raisin_models::nodes::properties::is_wildcard_property_path(property) {
+            return super::catalog::SpatialAvailability::Unusable(format!(
+                "'{}' is a wildcard over an array of geometries; each element is indexed under \
+                 its own concrete path, so no single index scan can answer it. The predicate is \
+                 applied per row instead (correct, but a full scan). Name one element \
+                 (properties->>'{}') to use the index.",
+                property,
+                property.replacen("[]", ".0", 1)
+            ));
+        }
         self.index_catalog.spatial_index_availability(
             &self.default_tenant_id,
             &self.default_repo_id,

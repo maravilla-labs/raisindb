@@ -23,8 +23,9 @@ pub(crate) async fn evaluate_triangle_count<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let counts = algorithms::triangles::triangle_count(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let counts = algorithms::triangles::triangle_count(adjacency);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &count) in &counts {
@@ -51,8 +52,9 @@ pub(crate) async fn evaluate_lcc<S: Storage>(
         return Ok(cached);
     }
 
-    let adjacency = build_adjacency(storage, context).await?;
-    let coefficients = algorithms::lcc::lcc(&adjacency);
+    let scoped = build_adjacency(storage, context).await?;
+    let adjacency = &scoped.0;
+    let coefficients = algorithms::lcc::lcc(adjacency);
 
     let mut results = std::collections::HashMap::new();
     for (node_id, &coeff) in &coefficients {

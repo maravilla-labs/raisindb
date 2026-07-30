@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Configuration for PageRank algorithm
 #[derive(Debug, Clone)]
@@ -57,7 +57,8 @@ pub fn pagerank(adjacency: &GraphAdjacency, config: &PageRankConfig) -> HashMap<
     let mut all_nodes = HashSet::new();
     for (source, targets) in adjacency.iter() {
         all_nodes.insert(source.clone());
-        for (tgt_workspace, tgt_id, _) in targets {
+        for edge in targets {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             all_nodes.insert((tgt_workspace.clone(), tgt_id.clone()));
         }
     }
@@ -78,7 +79,8 @@ pub fn pagerank(adjacency: &GraphAdjacency, config: &PageRankConfig) -> HashMap<
     // Build reverse adjacency (incoming links)
     let mut incoming: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
     for (source, targets) in adjacency.iter() {
-        for (tgt_workspace, tgt_id, _) in targets {
+        for edge in targets {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             let target = (tgt_workspace.clone(), tgt_id.clone());
             incoming.entry(target).or_default().push(source.clone());
         }
@@ -182,37 +184,37 @@ pub fn node_pagerank(
 mod tests {
     use super::*;
 
-    fn create_linear_graph() -> HashMap<(String, String), Vec<(String, String, String)>> {
+    fn create_linear_graph() -> GraphAdjacency {
         let mut graph = HashMap::new();
 
         // A -> B -> C
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "B".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "B".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "C".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "C".to_string(), "", "LINK", None)],
         );
 
         graph
     }
 
-    fn create_hub_graph() -> HashMap<(String, String), Vec<(String, String, String)>> {
+    fn create_hub_graph() -> GraphAdjacency {
         let mut graph = HashMap::new();
 
         // A -> Hub, B -> Hub, C -> Hub (Hub has high PageRank due to incoming links)
         graph.insert(
             ("ws".to_string(), "A".to_string()),
-            vec![("ws".to_string(), "Hub".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "Hub".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
-            vec![("ws".to_string(), "Hub".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "Hub".to_string(), "", "LINK", None)],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
-            vec![("ws".to_string(), "Hub".to_string(), "LINK".to_string())],
+            vec![GraphEdge::new("ws", "Hub".to_string(), "", "LINK", None)],
         );
 
         graph

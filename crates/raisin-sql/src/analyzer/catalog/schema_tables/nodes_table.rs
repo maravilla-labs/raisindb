@@ -159,6 +159,18 @@ pub(crate) fn default_nodes_table() -> TableDef {
                 nullable: true,
                 generated: Some(GeneratedExpr::TreeOrder),
             },
+            ColumnDef {
+                name: "__distance".into(),
+                data_type: DataType::Double,
+                nullable: true,
+                generated: Some(GeneratedExpr::SpatialDistance),
+            },
+            ColumnDef {
+                name: "__matched_path".into(),
+                data_type: DataType::Text,
+                nullable: true,
+                generated: Some(GeneratedExpr::SpatialMatchedPath),
+            },
         ],
         primary_key: vec!["path".into()],
         indexes: vec![
@@ -334,6 +346,22 @@ pub(crate) fn workspace_table(table_name: &str, embedding_dimensions: Option<usi
             data_type: DataType::Text,
             nullable: true,
             generated: Some(GeneratedExpr::TreeOrder),
+        },
+        // Spatial pseudo-columns. Declared so they ANALYZE and get a type on
+        // every transport; withheld from `SELECT *` by
+        // `GeneratedExpr::hidden_from_wildcard` because they are NULL on every
+        // non-spatial access path.
+        ColumnDef {
+            name: "__distance".into(),
+            data_type: DataType::Double,
+            nullable: true,
+            generated: Some(GeneratedExpr::SpatialDistance),
+        },
+        ColumnDef {
+            name: "__matched_path".into(),
+            data_type: DataType::Text,
+            nullable: true,
+            generated: Some(GeneratedExpr::SpatialMatchedPath),
         },
     ];
 

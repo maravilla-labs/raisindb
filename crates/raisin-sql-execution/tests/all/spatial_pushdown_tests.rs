@@ -94,7 +94,14 @@ async fn setup() -> (
     TempDir,
 ) {
     let (storage, tmp) = create_test_storage().await;
+    let engine = engine_for(&storage).await;
+    (storage, engine, tmp)
+}
 
+/// The workspace, node type and engine for an already-created storage.
+async fn engine_for(
+    storage: &Arc<raisin_rocksdb::RocksDBStorage>,
+) -> QueryEngine<raisin_rocksdb::RocksDBStorage> {
     storage
         .workspaces()
         .put(
@@ -130,7 +137,7 @@ async fn setup() -> (
     .with_catalog(Arc::new(catalog))
     .with_auth(raisin_models::auth::AuthContext::system());
 
-    (storage, engine, tmp)
+    engine
 }
 
 /// Insert a shop at `(lon, lat)` on `floor` **via SQL**.
@@ -460,4 +467,285 @@ async fn a_deleted_geometry_matches_nowhere() {
     .await;
 
     assert!(names(&engine, &sql).await.expect("query failed").is_empty());
+}
+
+// ── the spatial pseudo-columns, against the real engine ───────────────────
+
+/// A node carrying FOUR stops, the fourth of which is the near one.
+///
+/// Deliberately index 3: a `__matched_path` implementation that reported the
+/// first element, or the pattern it was asked with, would still look plausible on
+/// a one- or two-element fixture.
+async fn insert_tour(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, name: &str) {
+    let stop = |lon: f64, lat: f64| {
+        format!("{{\"geo\":{{\"type\":\"Point\",\"coordinates\":[{lon},{lat}]}}}}")
+    };
+    let properties = format!(
+        "{{\"stops\":[{},{},{},{}]}}",
+        stop(CENTER_LON, CENTER_LAT + 0.225),
+        stop(CENTER_LON, CENTER_LAT + 0.300),
+        stop(CENTER_LON, CENTER_LAT + 0.400),
+        // ~37 m north of the centre.
+        stop(CENTER_LON, CENTER_LAT + 0.000_33),
+    );
+    let sql = format!(
+        "INSERT INTO '{WS}' (id, path, node_type, properties) VALUES \
+         ('{name}','/{name}','test:Shop', '{properties}'::JSONB)"
+    );
+    run(engine, &sql).await;
+}
+
+/// `__distance` and `__matched_path` are SELECTABLE, and on a wildcard path
+/// `__matched_path` names the CONCRETE element that achieved the minimum
+/// distance.
+///
+/// That value is the whole reason the wildcard spelling exists — "which of this
+/// node's geometries matched?" — and it was computed and unreachable: injected on
+/// the row, undeclared in the catalog, so naming it failed analysis.
+#[tokio::test]
+async fn the_spatial_columns_name_the_geometry_that_matched() {
+    let (_storage, engine, _tmp) = setup().await;
+    insert_tour(&engine, "tour").await;
+
+    let sql = format!(
+        "SELECT name, __distance, __matched_path FROM '{WS}' \
+         WHERE ST_DWITHIN(CAST(properties->>'stops[].geo' AS GEOMETRY), \
+         ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+    );
+    let mut stream = engine.execute(&sql).await.expect("query must analyze");
+    let mut rows = Vec::new();
+    while let Some(row) = stream.next().await {
+        rows.push(row.expect("row"));
+    }
+
+    assert_eq!(rows.len(), 1, "one node, one row");
+    let row = &rows[0];
+
+    let matched = match row.get("__matched_path") {
+        Some(PropertyValue::String(path)) => path.clone(),
+        other => panic!("__matched_path must be a selectable Text column, got {other:?}"),
+    };
+    assert_eq!(
+        matched, "stops.3.geo",
+        "__matched_path must name the CONCRETE element that matched, not the \
+         wildcard pattern and not the first element"
+    );
+
+    let distance = match row.get("__distance") {
+        Some(PropertyValue::Float(d)) => *d,
+        other => panic!("__distance must be a selectable Double column, got {other:?}"),
+    };
+    assert!(
+        distance < 100.0,
+        "__distance must be the MINIMUM over the matched geometries (~37 m), got {distance} m \
+         — the first-found or maximum would be tens of kilometres"
+    );
+}
+
+/// `SELECT *` must not carry them. They are NULL on every non-spatial access
+/// path, so expanding them would add two always-NULL columns to every query in
+/// the system.
+#[tokio::test]
+async fn select_star_does_not_carry_the_spatial_columns() {
+    let (_storage, engine, _tmp) = setup().await;
+    insert_tour(&engine, "tour").await;
+
+    let sql = format!(
+        "SELECT * FROM '{WS}' WHERE ST_DWITHIN(CAST(properties->>'stops[].geo' AS GEOMETRY), \
+         ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+    );
+    let mut stream = engine.execute(&sql).await.expect("query must analyze");
+    let mut rows = Vec::new();
+    while let Some(row) = stream.next().await {
+        rows.push(row.expect("row"));
+    }
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].get("__distance").is_none() && rows[0].get("__matched_path").is_none(),
+        "`SELECT *` must not expand the spatial pseudo-columns"
+    );
+    // A sanity anchor: the row IS the wildcard match, so the columns' absence is
+    // about expansion, not about the query having matched nothing.
+    assert!(rows[0].get("name").is_some());
+}
+
+// ── the per-cell budget degrades, it does not fail ────────────────────────
+
+/// Storage whose per-cell spatial scan budget is `budget` entries.
+async fn storage_with_cell_budget(budget: usize) -> (Arc<raisin_rocksdb::RocksDBStorage>, TempDir) {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let config = raisin_rocksdb::RocksDBConfig::development()
+        .with_path(temp_dir.path().to_string_lossy().to_string())
+        .with_spatial_max_entries_per_cell(budget);
+    let storage = raisin_rocksdb::RocksDBStorage::with_config(config).expect("storage");
+    let _ = storage
+        .branches()
+        .create_branch(TENANT, REPO, BRANCH, "test-user", None, None, false, false)
+        .await;
+    (Arc::new(storage), temp_dir)
+}
+
+/// THE degradation. When a cell prefix blows the per-cell budget the index
+/// cannot answer without answering SHORT — and a short spatial answer is the one
+/// outcome this subsystem refuses. It used to fail the query; it must now fall
+/// back to a row scan and return the truth.
+#[tokio::test]
+async fn a_cell_budget_exhaustion_degrades_to_a_row_scan_instead_of_failing() {
+    // A budget of one entry: any cell holding two shops is over it.
+    let (storage, _tmp) = storage_with_cell_budget(1).await;
+    let engine = engine_for(&storage).await;
+    seed(&engine).await;
+
+    // 1. The INDEX genuinely refuses this query — otherwise the assertion below
+    //    would pass for the boring reason that nothing degraded.
+    let precisions = spatial_precisions(&storage, "location");
+    let refusal = raisin_storage::SpatialIndexRepository::find_within_radius(
+        storage.spatial_index(),
+        TENANT,
+        REPO,
+        BRANCH,
+        WS,
+        "location",
+        CENTER_LON,
+        CENTER_LAT,
+        50_000.0,
+        &raisin_hlc::HLC::now(),
+        usize::MAX,
+        &precisions,
+        &raisin_storage::spatial::SpatialPreFilter::default(),
+    )
+    .expect_err("a 1-entry budget must be exceeded by three shops");
+    assert!(
+        refusal.is_spatial_budget_exceeded(),
+        "the budget must be a TYPED signal the executor can re-plan against, got: {refusal}"
+    );
+
+    // 2. And the query was PLANNED against that index — otherwise it would be
+    //    passing for the boring reason that the planner never chose the index at
+    //    all, and would keep passing if the degradation were deleted.
+    let plan = explain(
+        &engine,
+        &format!(
+            "EXPLAIN SELECT name FROM '{WS}' WHERE              ST_DWITHIN(CAST(properties->>'location' AS GEOMETRY),              ST_POINT({CENTER_LON}, {CENTER_LAT}), 50000)"
+        ),
+    )
+    .await;
+    assert!(
+        plan.contains("SpatialDistanceScan"),
+        "this test only exercises the degradation if the index scan was chosen; plan was:\n{plan}"
+    );
+    assert!(
+        plan.contains("degrades to a row scan"),
+        "EXPLAIN must show the degradation path, plan was:\n{plan}"
+    );
+
+    // 3. The QUERY still returns the truth, via the fallback.
+    let sql = format!(
+        "SELECT name FROM '{WS}' WHERE ST_DWITHIN(CAST(properties->>'location' AS GEOMETRY), \
+         ST_POINT({CENTER_LON}, {CENTER_LAT}), 50000)"
+    );
+    let rows = names(&engine, &sql)
+        .await
+        .expect("a budget exhaustion must DEGRADE, not fail the query");
+    assert_eq!(
+        rows,
+        vec!["far".to_string(), "mid".to_string(), "near".to_string()],
+        "the degraded scan must return exactly the rows within the radius"
+    );
+}
+
+/// Run an `EXPLAIN` and return its plan text.
+async fn explain(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql: &str) -> String {
+    let mut stream = engine.execute(sql).await.expect("explain should execute");
+    let row = stream
+        .next()
+        .await
+        .expect("explain should yield a row")
+        .expect("explain row should decode");
+    match row.columns.get("QUERY PLAN") {
+        Some(PropertyValue::String(plan)) => plan.clone(),
+        other => panic!("unexpected EXPLAIN output: {other:?}"),
+    }
+}
+
+/// The indexed precisions for `property`, read from the same state record the
+/// planner reads.
+fn spatial_precisions(storage: &Arc<raisin_rocksdb::RocksDBStorage>, property: &str) -> Vec<usize> {
+    let state = raisin_storage::Storage::spatial_state(&**storage)
+        .expect("the RocksDB backend reports spatial index state");
+    let availability = state.spatial_availability(TENANT, REPO, BRANCH, WS, property);
+    assert!(
+        availability.is_ready(),
+        "the first geometry write should have made the index Ready, got {availability:?}"
+    );
+    availability.precisions().to_vec()
+}
+
+// ── historical reads must be exact ────────────────────────────────────────
+
+/// A spatial read scoped to an explicit revision must NOT resolve against the
+/// index, and must still return the truth.
+///
+/// The index is pruned by a compaction filter that keeps the newest entry per
+/// node per cell plus a bounded recent window. That makes HEAD exact and
+/// anything behind the window approximate — so a historical spatial query goes
+/// to the row scan, whose MVCC history is intact. Both directions are asserted:
+/// a HEAD query must keep the index, or this gate has quietly undone the whole
+/// spatial performance story.
+#[tokio::test]
+async fn a_revision_scoped_spatial_query_avoids_the_pruned_index() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed(&engine).await;
+
+    let predicate = format!(
+        "ST_DWITHIN(CAST(properties->>'location' AS GEOMETRY), \
+         ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+    );
+    // A revision at "now" in milliseconds: everything seeded is visible, so the
+    // ROWS are the same and only the ACCESS PATH may differ.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+
+    let head_plan = explain(
+        &engine,
+        &format!("EXPLAIN SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await;
+    assert!(
+        head_plan.contains("SpatialDistanceScan"),
+        "a HEAD spatial query must still use the index — the newest entry per node \
+         per cell is never pruned, so HEAD is exact. Plan was:\n{head_plan}"
+    );
+
+    let historical_plan = explain(
+        &engine,
+        &format!("EXPLAIN SELECT name FROM '{WS}' WHERE __revision = {now_ms} AND {predicate}"),
+    )
+    .await;
+    assert!(
+        !historical_plan.contains("SpatialDistanceScan"),
+        "a revision-scoped spatial query must not resolve against the pruned index. \
+         Plan was:\n{historical_plan}"
+    );
+
+    let head_rows = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await
+    .expect("head query");
+    let historical_rows = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE __revision = {now_ms} AND {predicate}"),
+    )
+    .await
+    .expect("historical query");
+    assert_eq!(
+        historical_rows, head_rows,
+        "the fallback must return the same truth as the index at a revision where \
+         nothing has changed"
+    );
+    assert_eq!(head_rows, vec!["mid".to_string(), "near".to_string()]);
 }

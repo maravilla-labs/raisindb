@@ -42,7 +42,7 @@ ORDER BY confidence_score DESC;
 -- Query 1b: Variable-length paths - The killer feature!
 -- "Find proteins 2-3 hops away from APP through the interaction network"
 SELECT * FROM GRAPH_TABLE(
-    MATCH (start:Protein)-[:INTERACTS_WITH*2..3]->(distant:Protein)
+    MATCH (start:Protein)-[:INTERACTS_WITH]->{2,3}(distant:Protein)
     WHERE start.path = '/alzheimer-study/proteins/APP'
     COLUMNS (
         start.properties->>'gene_id' AS source,
@@ -56,7 +56,7 @@ LIMIT 20;
 -- Query 1c: Drug target discovery
 -- "Which proteins are targeted by Aducanumab and what do they interact with?"
 SELECT * FROM GRAPH_TABLE(
-    MATCH (drug:Drug)-[:TARGETS]->(target:Protein)-[:INTERACTS_WITH*1..2]->(downstream:Protein)
+    MATCH (drug:Drug)-[:TARGETS]->(target:Protein)-[:INTERACTS_WITH]->{1,2}(downstream:Protein)
     WHERE drug.path = '/alzheimer-study/drugs/ADUCANUMAB'
     COLUMNS (
         drug.name AS drug_name,
@@ -222,6 +222,8 @@ LIMIT 10;
 -- Bonus 2: Find shortest path between two proteins
 -- "How is BACE1 connected to MAPT (tau)?"
 SELECT * FROM GRAPH_TABLE(
+    -- legacy Cypher-style quantifier, still accepted, deprecated
+    -- (the canonical spelling is -[:INTERACTS_WITH]->{1,4} )
     MATCH (start:Protein)-[:INTERACTS_WITH*1..4]->(end:Protein)
     WHERE start.path = '/alzheimer-study/proteins/BACE1'
       AND end.path = '/alzheimer-study/proteins/MAPT'
@@ -251,7 +253,7 @@ SELECT * FROM GRAPH_TABLE(
 --
 -- Key talking points:
 -- 1. ISO SQL:2023 Part 16 - Graph queries are now SQL standard
--- 2. Variable-length paths with *1..3 syntax
+-- 2. Variable-length paths with the ->{1,3} quantifier
 -- 3. Works with standard PostgreSQL tools (psql, Jupyter, DBeaver)
 -- 4. Combine graph patterns with SQL aggregations and JOINs
 -- 5. JSONB property access for flexible schema

@@ -29,7 +29,9 @@ use raisin_storage::{NodeRepository, SpatialIndexRepository, Storage, StorageSco
 /// # Performance
 /// - Uses geohash cell expansion for candidate filtering
 /// - Post-filters with exact Haversine distance calculation
-pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
+pub async fn execute_spatial_distance_scan<
+    S: Storage + raisin_storage::transactional::TransactionalStorage + 'static,
+>(
     plan: &PhysicalPlan,
     ctx: &ExecutionContext<S>,
 ) -> Result<RowStream, ExecutionError> {
@@ -49,6 +51,7 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
         claims_distance_order,
         precisions,
         bucket_eq,
+        fallback,
     ) = match plan {
         PhysicalPlan::SpatialDistanceScan {
             tenant_id,
@@ -66,6 +69,7 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
             claims_distance_order,
             precisions,
             bucket_eq,
+            fallback,
         } => (
             tenant_id.clone(),
             repo_id.clone(),
@@ -82,6 +86,7 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
             *claims_distance_order,
             precisions.clone(),
             bucket_eq.clone(),
+            fallback.as_deref(),
         ),
         _ => {
             return Err(Error::Validation(
@@ -118,17 +123,46 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
         bbox: None,
     };
 
+    // Resolved BEFORE the stream is built, because a per-cell budget exhaustion
+    // has to be answered by running a DIFFERENT plan, and that decision cannot be
+    // made from inside the stream this function returns.
+    let results = match storage.spatial_index().find_within_radius(
+        &tenant_id,
+        &repo_id,
+        &branch,
+        &workspace,
+        &property_name,
+        center_lon,
+        center_lat,
+        radius_meters,
+        &max_revision,
+        scan_limit,
+        &precisions,
+        &prefilter,
+    ) {
+        Ok(results) => results,
+        // DEGRADE, do not fail. The index cannot answer this query without
+        // answering short, and a short spatial answer is the one outcome this
+        // subsystem refuses — so run the fallback the planner attached, which
+        // re-applies every predicate per row and is therefore exact.
+        Err(error) if error.is_spatial_budget_exceeded() => {
+            let Some(fallback) = fallback else {
+                return Err(error);
+            };
+            tracing::warn!(
+                workspace = %workspace,
+                property = %property_name,
+                reason = %error,
+                "Spatial index cell budget exhausted; DEGRADING to a full row scan for this                  query. Results stay correct and the scan is slow. This is superseded-revision                  accumulation on a high-frequency property — reduce its precision set, or let                  the spatial compaction filter prune (see docs/OPEN-ITEMS.md 2.99/2.100)."
+            );
+            return crate::physical_plan::executor::execute_plan(fallback, ctx).await;
+        }
+        Err(error) => return Err(error),
+    };
+
     Ok(Box::pin(try_stream! {
         let qualifier = alias.clone().unwrap_or_else(|| table.clone());
         let locales_to_use = get_locales_to_use(&ctx_clone);
-
-        let results = storage
-            .spatial_index()
-            .find_within_radius(
-                &tenant_id, &repo_id, &branch, &workspace,
-                &property_name, center_lon, center_lat, radius_meters,
-                &max_revision, scan_limit, &precisions, &prefilter,
-            )?;
 
         tracing::info!("   SpatialDistanceScan found {} nodes within {}m", results.len(), radius_meters);
 
@@ -168,6 +202,15 @@ pub async fn execute_spatial_distance_scan<S: Storage + 'static>(
                     row.insert(
                         "__distance".to_string(),
                         PropertyValue::Float(proximity_result.distance_meters),
+                    );
+                    // Which geometry field produced that distance. On this path it
+                    // is trivially the property the scan was planned for, but a
+                    // node can now carry several geometries at several depths, so
+                    // "which one matched" has to be answerable — and answerable the
+                    // same way whichever field was named.
+                    row.insert(
+                        "__matched_path".to_string(),
+                        PropertyValue::String(property_name.clone()),
                     );
 
                     yield row;
@@ -301,6 +344,15 @@ pub async fn execute_spatial_knn_scan<S: Storage + 'static>(
                     row.insert(
                         "__distance".to_string(),
                         PropertyValue::Float(proximity_result.distance_meters),
+                    );
+                    // Which geometry field produced that distance. On this path it
+                    // is trivially the property the scan was planned for, but a
+                    // node can now carry several geometries at several depths, so
+                    // "which one matched" has to be answerable — and answerable the
+                    // same way whichever field was named.
+                    row.insert(
+                        "__matched_path".to_string(),
+                        PropertyValue::String(property_name.clone()),
                     );
 
                     yield row;

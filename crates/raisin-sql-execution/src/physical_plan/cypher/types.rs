@@ -82,6 +82,36 @@ impl PathInfo {
     }
 }
 
+impl From<crate::physical_plan::graph_algo::GraphPath> for PathInfo {
+    /// Narrow a shared [`GraphPath`] into the Cypher projection type.
+    ///
+    /// Lossy by construction and that is fine here: `PathInfo` has nowhere to
+    /// put a node type or an edge weight, and `RelationInfo::source_var` /
+    /// `target_var` are Cypher *binding* concepts that a path algorithm never
+    /// knew. New code should prefer `GraphPath` directly.
+    fn from(path: crate::physical_plan::graph_algo::GraphPath) -> Self {
+        let length = path.length();
+        Self {
+            nodes: path
+                .nodes
+                .into_iter()
+                .map(|n| (n.id, n.workspace))
+                .collect(),
+            relationships: path
+                .edges
+                .into_iter()
+                .map(|e| RelationInfo {
+                    source_var: String::new(),
+                    target_var: String::new(),
+                    relation_type: e.relation_type,
+                    properties: HashMap::new(),
+                })
+                .collect(),
+            length,
+        }
+    }
+}
+
 /// Variable bindings during query execution
 ///
 /// Tracks which Cypher variables are bound to which nodes/relationships

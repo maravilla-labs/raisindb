@@ -77,6 +77,16 @@ mod measure;
 /// `ST_BUFFER` / `ST_SIMPLIFY`: planar `geo` algorithms run so that their distance
 /// argument means metres.
 mod metric_ops;
+/// Resolving a NESTED geometry property path (`venue.geo`, `stops.0.geo`,
+/// `stops[].geo`) against a row — the row-level half of nested geospatial, and
+/// what keeps the pre-rebuild fallback correct instead of silently empty.
+mod property_path;
+
+// The row-level nearest-geometry resolution, used OUTSIDE the function registry
+// by the spatial annotation operator that materialises `__distance` /
+// `__matched_path` on the fallback path. Exposed here rather than duplicated so
+// the annotated distance and the predicate's own distance cannot drift apart.
+pub(crate) use property_path::{nearest_geometry, NearestGeometry};
 /// Shared DE-9IM machinery: the single code path behind all ten topological
 /// predicates and `ST_RELATE`.
 mod relate;
@@ -231,6 +241,9 @@ mod tests_convert;
 mod tests_crs;
 #[cfg(test)]
 mod tests_dim3;
+/// Nested geometry addressing and the row semantics of a multi-geometry node.
+#[cfg(test)]
+mod tests_nested;
 /// The type-coverage matrix: every measurement, set-operation, processing and
 /// accessor function against every geometry type its signature admits.
 #[cfg(test)]

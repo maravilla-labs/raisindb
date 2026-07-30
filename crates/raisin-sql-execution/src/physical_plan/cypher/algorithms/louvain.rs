@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use super::types::{GraphAdjacency, GraphNodeId};
+use super::types::{GraphAdjacency, GraphEdge, GraphNodeId};
 
 /// Configuration for Louvain algorithm
 pub struct LouvainConfig {
@@ -45,7 +45,8 @@ pub fn louvain(adjacency: &GraphAdjacency, config: &LouvainConfig) -> HashMap<Gr
     let mut m = 0.0; // Total weight of all edges
 
     for (source, neighbors) in adjacency.iter() {
-        for (tgt_workspace, tgt_id, _rel_type) in neighbors {
+        for edge in neighbors {
+            let (tgt_workspace, tgt_id) = (&edge.target_workspace, &edge.target_id);
             let target = (tgt_workspace.clone(), tgt_id.clone());
 
             // Add edge source -> target
@@ -205,30 +206,30 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn create_two_community_graph() -> HashMap<(String, String), Vec<(String, String, String)>> {
+    fn create_two_community_graph() -> GraphAdjacency {
         let mut graph = HashMap::new();
         // Same graph as in label_propagation tests
         // Community 1: A-B-C
         graph.insert(
             ("ws".to_string(), "A".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "B".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "C".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "D".to_string(), "LINK".to_string()), // Bridge
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "C".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "D".to_string(), "", "LINK", None), // Bridge
             ],
         );
         graph.insert(
             ("ws".to_string(), "C".to_string()),
             vec![
-                ("ws".to_string(), "A".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "A".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None),
             ],
         );
 
@@ -236,23 +237,23 @@ mod tests {
         graph.insert(
             ("ws".to_string(), "D".to_string()),
             vec![
-                ("ws".to_string(), "B".to_string(), "LINK".to_string()), // Bridge
-                ("ws".to_string(), "E".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "F".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "B".to_string(), "", "LINK", None), // Bridge
+                GraphEdge::new("ws", "E".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "F".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "E".to_string()),
             vec![
-                ("ws".to_string(), "D".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "F".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "D".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "F".to_string(), "", "LINK", None),
             ],
         );
         graph.insert(
             ("ws".to_string(), "F".to_string()),
             vec![
-                ("ws".to_string(), "D".to_string(), "LINK".to_string()),
-                ("ws".to_string(), "E".to_string(), "LINK".to_string()),
+                GraphEdge::new("ws", "D".to_string(), "", "LINK", None),
+                GraphEdge::new("ws", "E".to_string(), "", "LINK", None),
             ],
         );
 

@@ -16,40 +16,49 @@ pub(super) fn evaluate_function(
 ) -> Result<SqlValue> {
     let name_lower = name.to_lowercase();
     match name_lower.as_str() {
-        "cardinality" => {
-            // CARDINALITY(r) - returns the number of hops in a variable-length path
-            // The path length is encoded in relation_type as "TYPE[length]"
-            if args.len() != 1 {
-                return Err(ExecutionError::Validation(
-                    "CARDINALITY requires exactly one argument".into(),
-                ));
-            }
-
-            // Get the variable name from the argument
-            if let Some(var_name) = get_variable_name(&args[0]) {
-                if let Some(rel) = binding.get_relation(&var_name) {
-                    // Try to extract path length from encoded relation_type
-                    if let Some(len) = extract_path_length(&rel.relation_type) {
-                        return Ok(SqlValue::Integer(len));
-                    }
-                    // Single-hop relationship without encoding - return 1
-                    return Ok(SqlValue::Integer(1));
-                }
-                // Variable not found as relation
-                return Err(ExecutionError::Validation(format!(
-                    "CARDINALITY argument '{}' is not a relationship variable",
-                    var_name
-                )));
-            }
-            Err(ExecutionError::Validation(
-                "CARDINALITY requires a relationship variable as argument".into(),
-            ))
-        }
+        "cardinality" => evaluate_cardinality(args, binding),
         _ => Err(ExecutionError::Validation(format!(
             "Unsupported function in PGQ expression: {}",
             name
         ))),
     }
+}
+
+/// `CARDINALITY(r)` - hop count of the path bound to `r`.
+///
+/// # Migration note
+///
+/// This used to parse the hop count back out of a mangled relation type: a
+/// variable-length match rewrote `relation_type` to `"knows[3]"` purely so this
+/// function could read the `3`. The real path is now bound under the same
+/// variable, so the count is read directly and `relation_type` stays verbatim.
+/// A single-hop relationship has no bound path and is still cardinality 1.
+fn evaluate_cardinality(args: &[Expr], binding: &VariableBinding) -> Result<SqlValue> {
+    if args.len() != 1 {
+        return Err(ExecutionError::Validation(
+            "CARDINALITY requires exactly one argument".into(),
+        ));
+    }
+
+    let var_name = get_variable_name(&args[0]).ok_or_else(|| {
+        ExecutionError::Validation(
+            "CARDINALITY requires a relationship or path variable as argument".into(),
+        )
+    })?;
+
+    if let Some(path) = binding.get_path(&var_name) {
+        return Ok(SqlValue::Integer(path.length() as i64));
+    }
+
+    if binding.get_relation(&var_name).is_some() {
+        // Single-hop relationship: exactly one edge.
+        return Ok(SqlValue::Integer(1));
+    }
+
+    Err(ExecutionError::Validation(format!(
+        "CARDINALITY argument '{}' is not a relationship or path variable",
+        var_name
+    )))
 }
 
 /// Extract variable name from an expression
@@ -66,19 +75,56 @@ fn get_variable_name(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Extract path length from encoded relation_type
-///
-/// Variable-length paths encode their length in the relation_type string:
-/// - "FRIENDS_WITH[2]" -> Some(2)
-/// - "FRIENDS_WITH[3]" -> Some(3)
-/// - "FRIENDS_WITH" -> None (single-hop, no encoding)
-pub(super) fn extract_path_length(relation_type: &str) -> Option<i64> {
-    if let Some(start) = relation_type.rfind('[') {
-        if let Some(end) = relation_type.rfind(']') {
-            if start < end {
-                return relation_type[start + 1..end].parse().ok();
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physical_plan::graph_algo::GraphEdge;
+    use crate::physical_plan::pgq::matching::{GraphPath, PathNode};
+    use crate::physical_plan::pgq::types::RelationInfo;
+    use raisin_sql::ast::SourceSpan;
+
+    fn var(name: &str) -> Expr {
+        Expr::PropertyAccess {
+            variable: name.into(),
+            properties: vec![],
+            span: SourceSpan::empty(),
         }
     }
-    None
+
+    #[test]
+    fn cardinality_reads_the_bound_path_not_a_mangled_relation_type() {
+        let mut path = GraphPath::start(PathNode::new("a", "ws", "T"));
+        path.push(&GraphEdge::new("ws", "b", "T", "knows", None));
+
+        let mut binding = VariableBinding::new();
+        binding.bind_path("r".into(), path);
+        binding.bind_relation(
+            "r".into(),
+            RelationInfo::new("knows".into(), None, "a".into(), "b".into()),
+        );
+
+        assert_eq!(
+            evaluate_function("CARDINALITY", &[var("r")], &binding).unwrap(),
+            SqlValue::Integer(1)
+        );
+    }
+
+    #[test]
+    fn cardinality_of_a_single_hop_relationship_is_one() {
+        let mut binding = VariableBinding::new();
+        binding.bind_relation(
+            "r".into(),
+            RelationInfo::new("knows".into(), None, "a".into(), "b".into()),
+        );
+        assert_eq!(
+            evaluate_function("cardinality", &[var("r")], &binding).unwrap(),
+            SqlValue::Integer(1)
+        );
+    }
+
+    #[test]
+    fn cardinality_of_an_unknown_variable_errors() {
+        let binding = VariableBinding::new();
+        assert!(evaluate_function("cardinality", &[var("nope")], &binding).is_err());
+    }
 }

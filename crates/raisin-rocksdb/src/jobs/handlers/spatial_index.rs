@@ -24,7 +24,7 @@
 
 use raisin_error::{Error, Result};
 use raisin_hlc::HLC;
-use raisin_models::nodes::properties::{PropertyValue, SpatialPolicy};
+use raisin_models::nodes::properties::{policy_key_for_path, PropertyValue, SpatialPolicy};
 use raisin_models::nodes::Node;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
 use raisin_storage::spatial::{SpatialBuildPhase, SpatialIndexState};
@@ -250,12 +250,19 @@ impl SpatialIndexJobHandler {
         {
             report.nodes_scanned += 1;
 
-            for (property_name, value) in &node.properties {
-                let PropertyValue::Geometry(geometry) = value else {
-                    continue;
-                };
+            // The FULL property tree, not just the top level. A rebuild that only
+            // looked at top-level properties is why nested geometry could never
+            // migrate: the writer would index it going forward but no existing
+            // node would ever be picked up.
+            let walked = crate::indexing::walk_geometries_capped(&node.properties, &node.id);
+            for (property_name, geometry) in &walked.indexed {
+                let property_name = property_name.as_str();
+                // `only_property` matches either the concrete path
+                // (`stops.3.geo`) or the policy key the operator configured
+                // (`stops[].geo`), so a targeted rebuild of an array field does
+                // not silently do nothing.
                 if let Some(want) = only_property {
-                    if want != property_name {
+                    if want != property_name && want != policy_key_for_path(property_name) {
                         continue;
                     }
                 }
@@ -299,7 +306,11 @@ impl SpatialIndexJobHandler {
                 report.geometries_indexed += 1;
                 report.entries_written += policy.precisions.len() as u64;
                 in_batch += policy.precisions.len() as u64;
-                touched.insert(property_name.clone());
+                // Record the POLICY key, not the concrete path: state records are
+                // keyed that way (see `spatial_state_key`), so touching
+                // `stops.0.geo` … `stops.9.geo` must stamp ONE `stops[].geo`
+                // record rather than ten.
+                touched.insert(policy_key_for_path(property_name));
             }
 
             if in_batch >= CHECKPOINT_EVERY {

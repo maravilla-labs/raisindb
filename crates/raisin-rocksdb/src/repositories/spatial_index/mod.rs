@@ -23,4 +23,5 @@ pub use raisin_storage::spatial::{ProximityResult, SpatialIndexEntry, SpatialPre
 pub use entry::{
     SpatialEntry, SpatialGeometryKind, SPATIAL_ENTRY_LEGACY_VERSION, SPATIAL_ENTRY_VERSION,
 };
+pub use repository::scan::DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL;
 pub use repository::{KnnRingPlan, SpatialIndexRepository};

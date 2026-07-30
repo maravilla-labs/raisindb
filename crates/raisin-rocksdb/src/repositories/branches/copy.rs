@@ -3,12 +3,13 @@
 //! Provides functionality for physically copying revision-aware indexes
 //! from one branch to another, used during branch creation.
 
-use crate::{cf, cf_handle, keys};
+use crate::{cf, cf_handle, keys, prefix_transform};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use rocksdb::DB;
 use std::sync::Arc;
 
+use super::cf_registry::{cfs_to_copy, CopyPlan, RevisionLocator};
 use super::BranchRepositoryImpl;
 
 /// Entries buffered per RocksDB write. Batching turns one WAL append per copied
@@ -61,32 +62,13 @@ impl BranchRepositoryImpl {
         target_branch: &str,
         max_revision: &HLC,
     ) -> Result<()> {
-        // Copy indexes from these column families:
-        // 1. NODES - actual node data
-        // 2. PATH_INDEX - path-based lookups
-        // 3. PROPERTY_INDEX - property-based lookups
-        // 4. REFERENCE_INDEX - reference relationships
-        // 5. ORDERED_CHILDREN - child ordering
-        // 6. RELATION_INDEX - graph relations
-        // 7. NODE_TYPES - schema definitions and version indexes
-
-        let cfs_to_copy = vec![
-            (cf::NODES, "nodes"),
-            (cf::PATH_INDEX, "path_index"),
-            (cf::PROPERTY_INDEX, "property_index"),
-            (cf::REFERENCE_INDEX, "reference_index"),
-            (cf::RELATION_INDEX, "relation_index"),
-            (cf::ORDERED_CHILDREN, "ordered_children"),
-            (cf::NODE_TYPES, "node_types"),
-            (cf::ARCHETYPES, "archetypes"),
-            (cf::ELEMENT_TYPES, "element_types"),
-            (cf::NODE_PATH, "node_path"),
-            // Translation CFs - translations are part of the node and must be copied
-            (cf::TRANSLATION_DATA, "translation_data"),
-            (cf::BLOCK_TRANSLATIONS, "block_translations"),
-        ];
-
-        for (cf_name, display_name) in cfs_to_copy {
+        // WHICH column families get copied is NOT decided here. It comes from
+        // `super::cf_registry::BRANCH_CF_REGISTRY`, the exhaustive table that
+        // classifies every CF the database defines. A hand-maintained list
+        // lived here before and fell behind reality twice — silently dropping
+        // ARCHETYPES/ELEMENT_TYPES, then the whole SPATIAL_INDEX — because a CF
+        // that was never mentioned was simply never copied and nothing said so.
+        for (cf_name, plan) in cfs_to_copy() {
             let copied = Self::copy_cf_entries(
                 db,
                 tenant_id,
@@ -95,12 +77,13 @@ impl BranchRepositoryImpl {
                 target_branch,
                 max_revision,
                 cf_name,
+                &plan,
             )?;
 
             tracing::info!(
                 "Copied {} entries from {} CF (branch: {} -> {})",
                 copied,
-                display_name,
+                plan.display_name,
                 source_branch,
                 target_branch
             );
@@ -111,6 +94,7 @@ impl BranchRepositoryImpl {
 
     /// Copy entries from a specific column family, preserving revisions.
     /// Synchronous by design — see `copy_branch_indexes`.
+    #[allow(clippy::too_many_arguments)]
     fn copy_cf_entries(
         db: &DB,
         tenant_id: &str,
@@ -119,6 +103,7 @@ impl BranchRepositoryImpl {
         target_branch: &str,
         max_revision: &HLC,
         cf_name: &str,
+        plan: &CopyPlan,
     ) -> Result<usize> {
         let cf = cf_handle(db, cf_name)?;
 
@@ -131,10 +116,17 @@ impl BranchRepositoryImpl {
 
         let source_prefix_clone = source_prefix.clone();
 
-        // For ORDERED_CHILDREN, use iterator_cf with seek instead of prefix_iterator_cf
-        // because the CF has a custom prefix extractor configured
+        // A CF with a custom prefix extractor (ORDERED_CHILDREN, SPATIAL_INDEX)
+        // CANNOT be scanned with `prefix_iterator_cf` here: our prefix stops at
+        // the branch, which is far shorter than the extractor's domain, so the
+        // prefix bloom filter is consulted for a prefix it never produces and
+        // the scan can come back empty. Seek with a plain iterator instead and
+        // do the prefix comparison ourselves (the loop already does).
+        //
+        // Asking `prefix_transform` rather than naming CFs here means adding a
+        // third extractor cannot silently break the fork.
         use rocksdb::IteratorMode;
-        let iter = if cf_name == cf::ORDERED_CHILDREN {
+        let iter = if prefix_transform::has_custom_prefix_extractor(cf_name) {
             db.iterator_cf(
                 &cf,
                 IteratorMode::From(&source_prefix_clone, rocksdb::Direction::Forward),
@@ -169,24 +161,14 @@ impl BranchRepositoryImpl {
 
             let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
 
-            // Find the revision bytes (they're encoded as descending u64)
-            // The revision index varies by CF and key structure.
+            // Locate the 16-byte descending HLC. Which strategy applies is the
+            // registry's declaration, not a guess from the CF name.
             //
-            // ORDERED_CHILDREN is special: its key embeds a 16-byte ~HLC that can
-            // itself contain null bytes, so naive split-based indexing mis-locates
-            // the revision and silently DROPS the entry (revision_opt == None). Parse
-            // it directly from the raw key instead, walking null boundaries like the
-            // query path does.
-            let revision_opt = if cf_name == cf::ORDERED_CHILDREN {
-                Self::extract_ordered_children_revision(&key)
-            } else {
-                Self::extract_revision_from_key_parts(&parts, cf_name, &value, &key)?
-            }
-            // Last resort for the CFs whose revision sits in the MIDDLE of the
-            // key (a node id follows it), where the null-split arms above still
-            // mis-index when the ~HLC contains a null. Strictly additive: it only
-            // runs where the entry would otherwise have been dropped outright.
-            .or_else(|| Self::positional_revision_fallback(cf_name, &key));
+            // Every strategy locates it POSITIONALLY, never by indexing into
+            // `parts`: a `~HLC` is a bitwise NOT and may contain null bytes, so
+            // `split(0)` shreds it and shifts every index after it. That bug
+            // silently dropped ~0.8% of nodes from every fork.
+            let revision_opt = Self::locate_revision(plan.revision, &key, &value, &parts)?;
 
             // An entry whose revision we cannot read is DROPPED from the fork.
             // That is data loss disguised as a successful copy — the forked
@@ -238,213 +220,116 @@ impl BranchRepositoryImpl {
         Ok(copied_count)
     }
 
-    /// Recover a revision from a key whose null-split parsing failed.
+    /// Locate a key's revision using the strategy the registry declares.
     ///
-    /// Both shapes are located WITHOUT splitting, so a null byte inside the
-    /// 16-byte `~HLC` cannot shift them:
-    ///  - PROPERTY_INDEX / RELATION_INDEX / ORDERED_CHILDREN end with
-    ///    `…\0{~revision}\0{node_id}`. The trailing id is a uuid and contains no
-    ///    nulls, so the LAST null in the key is exactly the separator after the
-    ///    revision — take the 16 bytes before it.
-    ///  - Everything else ends with the revision, so take the last 16 bytes.
-    ///
-    /// Returns None rather than a guess when the key is too short to hold one.
-    fn positional_revision_fallback(cf_name: &str, key: &[u8]) -> Option<HLC> {
-        let id_follows_revision = cf_name == cf::PROPERTY_INDEX
-            || cf_name == cf::RELATION_INDEX
-            || cf_name == cf::ORDERED_CHILDREN;
-        if id_follows_revision {
-            let last_null = key.iter().rposition(|&b| b == 0)?;
-            let start = last_null.checked_sub(16)?;
-            return keys::decode_descending_revision(&key[start..last_null]).ok();
-        }
-        keys::extract_revision_from_key(key).ok()
+    /// Returns `Ok(None)` when this key genuinely carries no readable revision;
+    /// the caller counts and warns about those, because dropping one is data
+    /// loss disguised as a successful fork.
+    pub(super) fn locate_revision(
+        locator: RevisionLocator,
+        key: &[u8],
+        value: &[u8],
+        parts: &[&[u8]],
+    ) -> Result<Option<HLC>> {
+        Ok(match locator {
+            RevisionLocator::Tail => keys::extract_revision_from_key(key).ok(),
+            RevisionLocator::BeforeTrailingSegments(n) => {
+                Self::revision_before_trailing_segments(key, n)
+            }
+            RevisionLocator::RelationIndex => {
+                // `rel_global` keys carry FOUR trailing segments
+                // (`…{~rev}\0{src_ws}\0{src_id}\0{tgt_ws}\0{tgt_id}`) where
+                // `rel` / `rel_rev` carry one. Reading them as one lands 16
+                // arbitrary bytes, which decode into a nonsense HLC that is
+                // then compared against `max_revision` — so a global relation
+                // was dropped from, or mis-filtered into, every fork.
+                let trailing = if parts.get(3).copied() == Some(b"rel_global".as_slice()) {
+                    4
+                } else {
+                    1
+                };
+                Self::revision_before_trailing_segments(key, trailing)
+            }
+            RevisionLocator::SpatialKey => {
+                keys::parse_spatial_index_key(key).map(|parsed| parsed.revision)
+            }
+            RevisionLocator::SchemaOrVersionValue => Self::schema_revision(parts, value, key)?,
+        })
     }
 
-    /// Extract revision from key parts based on column family structure.
+    /// Read the revision from a key that ends with `{~revision}` followed by `n`
+    /// null-free segments (node ids, workspace names).
     ///
-    /// `key` is the raw, unsplit key. It is needed because a `~HLC` is 16 raw
-    /// bytes that MAY CONTAIN NULLS, so `key.split(0)` can shred it into several
-    /// "parts" and shift every index after it — see `extract_trailing_revision`.
+    /// Walks back `n` null bytes from the END of the key, then takes the 16
+    /// bytes before that null. Nothing here splits the key, so a null byte
+    /// INSIDE the `~HLC` cannot shift the result — which is the whole point.
+    fn revision_before_trailing_segments(key: &[u8], n: usize) -> Option<HLC> {
+        let mut boundary = key.len();
+        for _ in 0..n {
+            boundary = key[..boundary].iter().rposition(|&b| b == 0)?;
+        }
+        let start = boundary.checked_sub(16)?;
+        keys::decode_descending_revision(&key[start..boundary]).ok()
+    }
+
+    /// Revision for the schema CFs (`NODE_TYPES`, `ARCHETYPES`, `ELEMENT_TYPES`).
+    ///
+    /// These have two shapes: the definition itself ends with the revision,
+    /// while the `*_versions` lookup index stores a descending HLC in the VALUE.
+    /// The discriminator is the literal tag at part 3, which is plain ASCII and
+    /// precedes any `~HLC`, so indexing into `parts` is safe there.
+    fn schema_revision(parts: &[&[u8]], value: &[u8], key: &[u8]) -> Result<Option<HLC>> {
+        let cf_name = match parts.get(3).copied() {
+            Some(b"nodetypes") | Some(b"nodetype_versions") => cf::NODE_TYPES,
+            Some(b"archetypes") | Some(b"archetype_versions") => cf::ARCHETYPES,
+            Some(b"element_types") | Some(b"element_type_versions") => cf::ELEMENT_TYPES,
+            _ => return Ok(None),
+        };
+        Self::extract_revision_from_key_parts(parts, cf_name, value, key)
+    }
+
+    /// Extract the revision for one of the three SCHEMA column families.
+    ///
+    /// Two shapes per CF:
+    ///  - the definition, `{tenant}\0{repo}\0{branch}\0{tag}\0{name}\0{~revision}`,
+    ///    where the revision is the last segment; and
+    ///  - the `*_versions` lookup, `…\0{tag}\0{name}\0{version}`, which carries no
+    ///    revision in the key at all — it is a descending HLC in the VALUE.
+    ///
+    /// `parts` indexing is safe here only because the discriminating tag at
+    /// index 3 is plain ASCII and precedes any `~HLC`.
     fn extract_revision_from_key_parts(
         parts: &[&[u8]],
         cf_name: &str,
         value: &[u8],
         key: &[u8],
     ) -> Result<Option<HLC>> {
-        let revision_opt = if cf_name == cf::NODE_TYPES {
-            match parts.get(3).copied() {
-                Some(segment) if segment == b"nodetypes" => {
-                    if let Some(rev_part) = parts.get(5) {
-                        if rev_part.len() == 16 {
-                            keys::decode_descending_revision(rev_part).ok()
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
+        let (definition_tag, versions_tag) = match cf_name {
+            cf::NODE_TYPES => (b"nodetypes".as_slice(), b"nodetype_versions".as_slice()),
+            cf::ARCHETYPES => (b"archetypes".as_slice(), b"archetype_versions".as_slice()),
+            cf::ELEMENT_TYPES => (
+                b"element_types".as_slice(),
+                b"element_type_versions".as_slice(),
+            ),
+            _ => return Ok(None),
+        };
+
+        let revision_opt = match parts.get(3).copied() {
+            // Read from the TAIL of the raw key rather than `parts[5]`: a
+            // `~HLC` may contain null bytes, and `split(0)` then leaves a
+            // short fragment at index 5 and the entry gets DROPPED.
+            Some(tag) if tag == definition_tag => keys::extract_revision_from_key(key).ok(),
+            Some(tag) if tag == versions_tag => {
+                if value.len() == 16 {
+                    HLC::decode_descending(value).ok()
+                } else {
+                    None
                 }
-                Some(segment) if segment == b"nodetype_versions" => {
-                    if value.len() == 16 {
-                        HLC::decode_descending(value).ok()
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
             }
-        } else if cf_name == cf::ARCHETYPES {
-            // Schema key: {tenant}\0{repo}\0{branch}\0archetypes\0{name}\0{~revision}
-            //   -> revision at index 5
-            // Version index: {tenant}\0{repo}\0{branch}\0archetype_versions\0{name}\0{version}
-            //   -> revision stored in the value (descending HLC)
-            match parts.get(3).copied() {
-                Some(segment) if segment == b"archetypes" => match parts.get(5) {
-                    Some(rev_part) if rev_part.len() == 16 => {
-                        keys::decode_descending_revision(rev_part).ok()
-                    }
-                    _ => None,
-                },
-                Some(segment) if segment == b"archetype_versions" => {
-                    if value.len() == 16 {
-                        HLC::decode_descending(value).ok()
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
-        } else if cf_name == cf::ELEMENT_TYPES {
-            // Schema key: {tenant}\0{repo}\0{branch}\0element_types\0{name}\0{~revision}
-            //   -> revision at index 5
-            // Version index: {tenant}\0{repo}\0{branch}\0element_type_versions\0{name}\0{version}
-            //   -> revision stored in the value (descending HLC)
-            match parts.get(3).copied() {
-                Some(segment) if segment == b"element_types" => match parts.get(5) {
-                    Some(rev_part) if rev_part.len() == 16 => {
-                        keys::decode_descending_revision(rev_part).ok()
-                    }
-                    _ => None,
-                },
-                Some(segment) if segment == b"element_type_versions" => {
-                    if value.len() == 16 {
-                        HLC::decode_descending(value).ok()
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
-        } else if cf_name == cf::RELATION_INDEX && parts.len() >= 9 {
-            // RELATION_INDEX: revision is at index 7 (both forward and reverse)
-            if parts[7].len() == 16 {
-                keys::decode_descending_revision(parts[7]).ok()
-            } else {
-                None
-            }
-        } else if cf_name == cf::ORDERED_CHILDREN && parts.len() >= 9 {
-            // ORDERED_CHILDREN: revision is at index 7
-            if parts[7].len() == 16 {
-                keys::decode_descending_revision(parts[7]).ok()
-            } else {
-                None
-            }
-        } else if cf_name == cf::PROPERTY_INDEX && parts.len() >= 9 {
-            // PROPERTY_INDEX: revision is at index 7
-            if parts[7].len() == 16 {
-                keys::decode_descending_revision(parts[7]).ok()
-            } else {
-                None
-            }
-        } else if cf_name == cf::REFERENCE_INDEX && parts.len() >= 10 {
-            // REFERENCE_INDEX (reverse): Check if this is a reverse key (ref_rev or ref_rev_pub)
-            // by checking if index 9 is a 16-byte HLC revision
-            if parts[9].len() == 16 {
-                keys::decode_descending_revision(parts[9]).ok()
-            } else if parts.len() >= 8 && parts[7].len() == 16 {
-                // REFERENCE_INDEX (forward): revision is at index 7
-                keys::decode_descending_revision(parts[7]).ok()
-            } else {
-                None
-            }
-        } else if cf_name == cf::REFERENCE_INDEX && parts.len() >= 8 {
-            // REFERENCE_INDEX (forward): revision is at index 7
-            if parts[7].len() == 16 {
-                keys::decode_descending_revision(parts[7]).ok()
-            } else {
-                None
-            }
-        } else if cf_name == cf::TRANSLATION_DATA && parts.len() >= 8 {
-            // TRANSLATION_DATA: {tenant}\0{repo}\0{branch}\0{ws}\0translations\0{node_id}\0{locale}\0{revision}
-            // revision is at index 7
-            if parts[7].len() == 16 {
-                keys::decode_descending_revision(parts[7]).ok()
-            } else {
-                None
-            }
-        } else if cf_name == cf::BLOCK_TRANSLATIONS && parts.len() >= 9 {
-            // BLOCK_TRANSLATIONS: {tenant}\0{repo}\0{branch}\0{ws}\0block_trans\0{node_id}\0{block_uuid}\0{locale}\0{revision}
-            // revision is at index 8
-            if parts[8].len() == 16 {
-                keys::decode_descending_revision(parts[8]).ok()
-            } else {
-                None
-            }
-        } else if parts.len() >= 7 {
-            // NODES, PATH_INDEX, NODE_PATH (and node adjacency) all END with the
-            // revision — `node_key_versioned`/`path_index_key_versioned`/
-            // `node_path_key_versioned` all `push_revision(...)` last. So read it
-            // from the TAIL of the raw key, not from `parts[6]`.
-            //
-            // This is the same trap already documented for ORDERED_CHILDREN, and
-            // `keys::extract_revision_from_key` exists precisely for it: the
-            // 16-byte ~HLC is a bitwise-NOT encoding that CAN contain null bytes,
-            // so `split(0)` shreds the revision itself and `parts[6]` is a
-            // fragment of the wrong length. The old code then returned None and
-            // the entry was SILENTLY SKIPPED — so every fork randomly lost
-            // whichever nodes happened to have a null byte in their revision
-            // (~0.8% of them measured), and those pages were simply absent from
-            // the branch, which reads downstream as "that page doesn't exist".
-            keys::extract_revision_from_key(key).ok()
-        } else {
-            None
+            _ => None,
         };
 
         Ok(revision_opt)
-    }
-
-    /// Extract the revision from an ORDERED_CHILDREN key by walking null
-    /// boundaries (the embedded ~HLC may contain null bytes, so `key.split(\0)`
-    /// cannot be trusted here).
-    ///
-    /// Key: `{tenant}\0{repo}\0{branch}\0{workspace}\0ordered\0{parent_id}\0{order_label}\0{~HLC-16}\0{child_id}`
-    fn extract_ordered_children_revision(key: &[u8]) -> Option<HLC> {
-        // Walk to the 6th null byte (end of parent_id == start of order_label).
-        let mut null_count = 0;
-        let mut prefix_end = 0;
-        for (i, &byte) in key.iter().enumerate() {
-            if byte == 0 {
-                null_count += 1;
-                if null_count == 6 {
-                    prefix_end = i + 1;
-                    break;
-                }
-            }
-        }
-        if null_count < 6 {
-            return None;
-        }
-
-        let after_prefix = &key[prefix_end..];
-        // order_label runs until the next null; the 16-byte ~HLC follows it.
-        let order_label_end = after_prefix.iter().position(|&b| b == 0)?;
-        let hlc_start = order_label_end + 1;
-        let hlc_end = hlc_start + 16;
-        if after_prefix.len() < hlc_end {
-            return None;
-        }
-        keys::decode_descending_revision(&after_prefix[hlc_start..hlc_end]).ok()
     }
 
     /// Build a new key with a different branch name
@@ -466,77 +351,5 @@ impl BranchRepositoryImpl {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use raisin_hlc::HLC;
-
-    /// Find an HLC whose descending encoding contains a null byte. These are
-    /// common — the encoding is a bitwise NOT, so any 0xFF byte in the source
-    /// becomes 0x00 — which is why they cannot be located by splitting on nulls.
-    fn hlc_with_null_in_encoding() -> HLC {
-        for counter in 0..4096u64 {
-            let hlc = HLC::new(0x0000_00FF_0000_0000, counter);
-            if hlc.encode_descending().contains(&0) {
-                return hlc;
-            }
-        }
-        panic!("no HLC with a null byte in its encoding found");
-    }
-
-    /// A fork must copy EVERY node, including those whose revision encoding
-    /// happens to contain a null byte.
-    ///
-    /// Regression: the NODES/PATH_INDEX arm read the revision from
-    /// `key.split(0)[6]`. When the 16-byte ~HLC contained a null, the split cut
-    /// the revision in half, that index held a short fragment, extraction
-    /// returned None — and the copy loop skipped the entry WITHOUT error. Every
-    /// forked branch silently lost ~0.8% of its nodes, so random pages 404'd in
-    /// the SSR preview while the fork reported success.
-    #[test]
-    fn revision_is_read_from_keys_whose_hlc_contains_a_null_byte() {
-        let hlc = hlc_with_null_in_encoding();
-        let key = keys::node_key_versioned("t", "r", "main", "ws", "node-1", &hlc);
-
-        assert!(
-            key.split(|&b| b == 0).count() > 7,
-            "this key must actually exercise the split hazard",
-        );
-
-        let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-        let got =
-            BranchRepositoryImpl::extract_revision_from_key_parts(&parts, cf::NODES, &[], &key)
-                .expect("extraction must not error");
-
-        assert_eq!(got, Some(hlc), "the entry would otherwise be dropped");
-    }
-
-    /// The ordinary case must keep working.
-    #[test]
-    fn revision_is_read_from_a_plain_node_key() {
-        let hlc = HLC::new(12_345, 7);
-        let key = keys::node_key_versioned("t", "r", "main", "ws", "node-1", &hlc);
-        let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-        let got =
-            BranchRepositoryImpl::extract_revision_from_key_parts(&parts, cf::NODES, &[], &key)
-                .unwrap();
-        assert_eq!(got, Some(hlc));
-    }
-
-    /// Rebuilding the key must preserve a null-containing revision byte-for-byte,
-    /// or the copied entry lands under a corrupted key.
-    #[test]
-    fn rebuilt_key_only_swaps_the_branch_segment() {
-        let hlc = hlc_with_null_in_encoding();
-        let key = keys::node_key_versioned("t", "r", "main", "ws", "node-1", &hlc);
-        let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-        let rebuilt = BranchRepositoryImpl::build_key_with_branch(&parts, "edit-x");
-
-        let expected = keys::node_key_versioned("t", "r", "edit-x", "ws", "node-1", &hlc);
-        assert_eq!(rebuilt, expected);
-        assert_eq!(
-            keys::extract_revision_from_key(&rebuilt).unwrap(),
-            hlc,
-            "the revision must survive the rebuild",
-        );
-    }
-}
+#[path = "copy_tests.rs"]
+mod tests;

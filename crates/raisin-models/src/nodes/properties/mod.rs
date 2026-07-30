@@ -26,9 +26,10 @@ pub use schema::{
     PropertyValueSchema,
 };
 pub use spatial_policy::{
-    resolve_spatial_policy, sorted_precisions, SpatialCoverMode, SpatialPolicy,
-    SpatialPropertySchema, SpatialWorkspaceSchema, INDEX_PRECISIONS_DEFAULT, MAX_COVER_CELLS,
-    MAX_SCAN_CELLS, PRECISION_RANGE, SPATIAL_NORMALIZER_VERSION,
+    is_wildcard_property_path, policy_key_for_path, resolve_spatial_policy, sorted_precisions,
+    SpatialCoverMode, SpatialPolicy, SpatialPropertySchema, SpatialWorkspaceSchema,
+    INDEX_PRECISIONS_DEFAULT, MAX_COVER_CELLS, MAX_SCAN_CELLS, PRECISION_RANGE,
+    SPATIAL_NORMALIZER_VERSION,
 };
 pub use utils::*;
 pub use value::{GeoJson, Position, PropertyValue, RaisinReference};

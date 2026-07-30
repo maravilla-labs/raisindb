@@ -77,11 +77,24 @@ impl PhysicalPlanner {
             branch_override,
             projection,
             filter,
+            max_revision,
             ..
         } = scan_input
         else {
             return Ok(None);
         };
+
+        // A read at an explicit historical revision must not touch the spatial
+        // index: compaction prunes superseded entries beyond a retention window,
+        // so the index is exact at HEAD and only approximate behind it. Falling
+        // through to a full scan plus TopN is exact at any revision. See the
+        // matching gate in `build_spatial_scan`.
+        if max_revision.is_some() {
+            tracing::debug!(
+                "ORDER BY ST_DISTANCE not planned as SpatialKnnScan: the query reads at an                  explicit historical revision, where the pruned spatial index is not exact"
+            );
+            return Ok(None);
+        }
         if filter.is_some() {
             tracing::debug!(
                 "ST_DISTANCE ORDER BY not planned as SpatialKnnScan: the scan carries a \

@@ -220,6 +220,78 @@ Invariants to preserve when touching ordering code:
 
 Docs: `docs/website/docs/access/sql/editorial-ordering.md`.
 
+## Geospatial: nested geometry & property paths
+
+A geometry may sit **anywhere** in a node's property tree. The index key's
+property segment IS the dot path, and the SQL a user writes IS that same string:
+
+| where it sits | SQL | index key segment |
+|---|---|---|
+| top level | `properties->>'location'` | `location` |
+| in an Object | `properties->>'venue.geo'` | `venue.geo` |
+| in an Element (section field) | `properties->>'hero.map_pin'` | `hero.map_pin` |
+| one array element | `properties->>'stops.0.geo'` | `stops.0.geo` |
+| every array element | `properties->>'stops[].geo'` | *not indexed — row scan* |
+
+Docs: `docs/website/docs/access/sql/nested-geospatial.md` and
+`geospatial-tracking.md`.
+
+Invariants to preserve:
+
+- **ONE walker, ONE path format.** `indexing/property_walk.rs::walk_properties`
+  is the only recursion; `walk_geometries` (spatial) and `walk_references`
+  (references) are selectors over it. A writer and a tombstoner that disagree
+  about the format leave entries that can never be shadowed — a stale spatial hit
+  surviving every update and delete. Never add a third walker.
+- **A top-level path is byte-identical to the bare property name**, which is why
+  no existing index entry needed migrating. Don't "improve" the format.
+- **Five sites must walk, not iterate `node.properties`**: the writer and
+  tombstoner (`indexing/spatial.rs`), policy resolution
+  (`indexing/spatial_policy.rs`), the rebuild job
+  (`jobs/handlers/spatial_index.rs`) and the DELETE path
+  (`tombstones/index_tombstones.rs`). Miss the last one and a deleted node keeps
+  matching forever.
+- **The row-level resolver must ship with the index walk.** Before it,
+  `properties->>'venue.geo'` was a plain JSON key lookup → NULL → zero rows. That
+  is the FALLBACK path, i.e. exactly what runs before a rebuild drains, so
+  shipping the index side alone makes the migration window silently EMPTY.
+  `eval/functions/geospatial/property_path.rs`.
+- **Selection is STRUCTURAL, not shape-driven.** Every stored `Geometry` is
+  indexed wherever it sits. The spatial writer is synchronous, takes
+  `&mut WriteBatch` and must stay callable from the replication apply path —
+  resolving an ElementType there is the read that
+  `jobs/handlers/fulltext/batch.rs:152-161` records as reliably deadlocking.
+  Shape drives POLICY (precisions, cover), resolved off the hot path.
+  Cap: 64 geometry paths per node, warned on overflow.
+- **`policy_key_for_path` has exactly ONE implementation**
+  (`raisin-models/.../spatial_policy.rs`) and is called from BOTH sides: the
+  config surface (`resolve_spatial_policy`, `SpatialWorkspaceSchema::scope`) and
+  the local state record (`spatial_state::spatial_state_key`, which the planner's
+  `spatial_availability` goes through). It collapses array indices only:
+  `stops.3.geo` → `stops[].geo`. If the two sides normalised differently the
+  planner would report an indexed field unindexed forever — correct results,
+  permanently bad performance, no error anywhere. Resolution is **exact match**;
+  there is no prefix inheritance (`venue` does not supply `venue.geo`'s policy).
+- **A wildcard path is NEVER index-backed.** Each array element lives in its own
+  key namespace, so a scan over `stops[].geo` reads an empty prefix. The guard is
+  in `PhysicalPlanner::spatial_availability` — the one call site — which returns
+  `Unusable` so every caller inherits it. `spatial_order_is_satisfied` also
+  returns false for a wildcard, or keyset pagination drops and duplicates rows.
+- **ONE ROW PER NODE**, always. `ST_DWITHIN` over a wildcard is *any*-within;
+  `ST_DISTANCE` is the *minimum* (ties → lexicographically smallest concrete
+  path). One row per geometry would make a `__distance` cursor straddle rows of
+  the same node. `LIMIT k` means k nodes.
+- **Tombstone precisions are bounded by `configured ∪ indexed`** when the state
+  record was consulted, and widen to all twelve only when it was not. That is
+  what takes a tracking profile from 20 writes/update to 4.
+- **Nothing bounds superseded-entry accumulation.** Revisions are IN the key, so
+  compaction collapses nothing and a rebuild writes MORE tombstones. A tracking
+  deployment degrades from ms to seconds within days. The fix is a compaction
+  filter on `cf::SPATIAL_INDEX`, deferred — `docs/OPEN-ITEMS.md` §2.99. Do not
+  attempt the "seek past a node's remaining revisions" optimisation: within a
+  cell the key orders by revision first and `node_id` only as a tiebreak, so all
+  nodes' revisions interleave and such a scan silently skips live entries.
+
 ## Node Revision History & Authorship
 
 **Authorship AND timestamps are stamped at the low-level write layer.**

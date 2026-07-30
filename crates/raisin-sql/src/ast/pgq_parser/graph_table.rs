@@ -10,9 +10,9 @@ use nom::{
 };
 
 use super::clauses::{parse_columns_clause, parse_where_clause};
-use super::patterns::{parse_node_pattern, parse_relationship_pattern};
+use super::path::parse_top_level_path;
 use super::primitives::parse_identifier;
-use crate::ast::pgq::{GraphTableQuery, MatchClause, PathPattern, PatternElement, SourceSpan};
+use crate::ast::pgq::{GraphTableQuery, MatchClause, SourceSpan};
 
 /// Parse complete GRAPH_TABLE expression
 pub fn parse_graph_table_internal(input: &str) -> IResult<&str, GraphTableQuery> {
@@ -65,7 +65,7 @@ fn parse_match_clause(input: &str) -> IResult<&str, MatchClause> {
     let (input, _) = multispace0.parse(input)?;
     let (input, patterns) = separated_list1(
         tuple((multispace0, char(','), multispace0)),
-        parse_path_pattern,
+        parse_top_level_path,
     )
     .parse(input)?;
 
@@ -73,34 +73,6 @@ fn parse_match_clause(input: &str) -> IResult<&str, MatchClause> {
         input,
         MatchClause {
             patterns,
-            span: SourceSpan::empty(),
-        },
-    ))
-}
-
-fn parse_path_pattern(input: &str) -> IResult<&str, PathPattern> {
-    let (input, first_node) = parse_node_pattern(input)?;
-    let (input, _) = multispace0.parse(input)?;
-
-    let mut elements = vec![PatternElement::Node(first_node)];
-
-    let (input, pairs) = nom::multi::many0(tuple((
-        multispace0,
-        parse_relationship_pattern,
-        multispace0,
-        parse_node_pattern,
-    )))
-    .parse(input)?;
-
-    for (_, rel, _, node) in pairs {
-        elements.push(PatternElement::Relationship(rel));
-        elements.push(PatternElement::Node(node));
-    }
-
-    Ok((
-        input,
-        PathPattern {
-            elements,
             span: SourceSpan::empty(),
         },
     ))

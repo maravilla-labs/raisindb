@@ -5,7 +5,7 @@ use crate::physical_plan::executor::Row;
 use raisin_error::Error;
 use raisin_sql::analyzer::{Literal, TypedExpr};
 
-use super::convert::geom_pair;
+use super::convert::geom_pair_multi;
 use super::measure;
 use super::z_support::{expect_arity, numeric_arg};
 
@@ -32,6 +32,24 @@ const SIGNATURE: &str = "ST_DWITHIN(geometry1, geometry2, distance) -> BOOLEAN";
 /// index cannot be used, and it must agree with the index's own Haversine
 /// post-filter to the metre — which it does, because both use the GRS80 mean
 /// radius from `raisin_geometry::EARTH_MEAN_RADIUS_METERS`.
+///
+/// # Nested and multi-geometry fields
+///
+/// The first argument may name a geometry anywhere in the property tree, using
+/// the same dotted path the index key embeds:
+///
+/// ```sql
+/// -- a geometry inside a section element
+/// WHERE ST_DWITHIN(properties->>'hero.map_pin', ST_POINT(8.54, 47.37), 500)
+/// -- one element of an array
+/// WHERE ST_DWITHIN(properties->>'stops.0.geo', ST_POINT(8.54, 47.37), 500)
+/// -- every element of an array (row scan, not index-backed)
+/// WHERE ST_DWITHIN(properties->>'stops[].geo', ST_POINT(8.54, 47.37), 500)
+/// ```
+///
+/// A wildcard is **true when any** matched geometry is within the radius, and
+/// still yields ONE row per node. See `convert::geom_pair_multi` for why one row
+/// per node rather than one per geometry.
 ///
 /// # Examples
 /// ```sql
@@ -65,9 +83,15 @@ impl SqlFunction for StDWithinFunction {
             )));
         }
 
-        match geom_pair("ST_DWITHIN", args, row)? {
-            None => Ok(Literal::Null),
-            Some((a, b)) => Ok(Literal::Boolean(measure::distance(&a, &b)? <= max_distance)),
+        let matched = geom_pair_multi("ST_DWITHIN", args, row)?;
+        if matched.is_empty() {
+            return Ok(Literal::Null);
         }
+        for (_, (a, b)) in &matched {
+            if measure::distance(a, b)? <= max_distance {
+                return Ok(Literal::Boolean(true));
+            }
+        }
+        Ok(Literal::Boolean(false))
     }
 }

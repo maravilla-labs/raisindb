@@ -144,6 +144,12 @@ pub(super) async fn evaluate_property_access<S: Storage>(
             "weight" => Ok(rel.weight.into()),
             _ => Ok(SqlValue::Null), // Relations do not have other properties yet
         }
+    }
+    // A path variable that is not also a relation variable. There is no PATH
+    // column type, so neither `p` nor `p.anything` is selectable; the accessors
+    // are the only way to read a path.
+    else if binding.get_path(variable).is_some() {
+        Err(super::path_accessors::path_is_not_selectable(variable))
     } else {
         Err(ExecutionError::Validation(format!(
             "Unknown variable: {}",

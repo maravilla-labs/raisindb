@@ -40,7 +40,7 @@ impl PhysicalPlanner {
                 alias,
                 schema,
                 workspace,
-                max_revision: _,
+                max_revision,
                 branch_override,
                 locales: _,
                 filter,
@@ -53,7 +53,15 @@ impl PhysicalPlanner {
                 branch_override,
                 filter,
                 projection,
-                context,
+                // An explicit `__revision = N` reaches the planner ONLY here, on
+                // the leaf it scopes. Spatial planning needs it (a pruned index
+                // cannot answer a historical proximity query exactly), so it is
+                // carried down as part of the scan's context rather than
+                // re-derived from the residual filter, which no longer contains
+                // it — the analyzer stripped it.
+                &context
+                    .clone()
+                    .with_historical_revision(max_revision.is_some()),
             ),
 
             LogicalPlan::TableFunction {
@@ -82,7 +90,7 @@ impl PhysicalPlanner {
                     alias,
                     schema,
                     workspace,
-                    max_revision: _,
+                    max_revision,
                     branch_override,
                     locales: _,
                     filter: scan_filter,
@@ -118,7 +126,11 @@ impl PhysicalPlanner {
                         &effective_branch,
                         &combined_filter,
                         projection.clone(),
-                        context, // Pass through parent context
+                        // Parent context, plus the leaf's revision scope — see the
+                        // `Scan` arm above for why spatial planning needs it.
+                        &context
+                            .clone()
+                            .with_historical_revision(max_revision.is_some()),
                     );
                 }
 

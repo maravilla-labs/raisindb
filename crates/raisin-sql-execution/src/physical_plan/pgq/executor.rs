@@ -11,13 +11,65 @@ use super::context::PgqContext;
 use super::filter::filter_bindings;
 use super::matching::{
     analyze_pattern, execute_variable_length_pattern, match_single_hop, match_single_node,
-    PatternStructure,
+    path_semantics_for, PathSemantics, PatternStructure,
 };
 use super::projection::project_columns;
 use super::types::{PgqRow, VariableBinding};
 use crate::physical_plan::executor::ExecutionError;
 
 type Result<T> = std::result::Result<T, ExecutionError>;
+
+/// Refuse a path variable or selector on a pattern shape that cannot honour it.
+///
+/// Only a variable-length hop produces paths today. Accepting `MATCH ANY
+/// SHORTEST p = (a)-[r]->(b)-[s]->(c)` and then quietly matching it as an
+/// ordinary chain would answer a *different question* than the one asked, with
+/// no error anywhere — so it is rejected, loudly, naming the shape.
+///
+/// A restrictor is not rejected: `ACYCLIC` is the default and every shape here
+/// is a single fixed-length hop or a chain of them, where no distinctness rule
+/// can change the result.
+fn reject_unsupported_path_semantics(semantics: &PathSemantics, shape: &str) -> Result<()> {
+    if let Some(selector) = semantics.selector {
+        return Err(ExecutionError::Validation(format!(
+            "path selector {selector} is only supported on a variable-length pattern, \
+             not on {shape}. Add a quantifier, for example -[r:type]->{{1,3}}."
+        )));
+    }
+    if let Some(variable) = &semantics.variable {
+        return Err(ExecutionError::Validation(format!(
+            "path variable '{variable}' is only supported on a variable-length pattern, \
+             not on {shape}. Add a quantifier, for example \
+             MATCH {variable} = (a)-[r:type]->{{1,3}}(b)."
+        )));
+    }
+    Ok(())
+}
+
+/// Surface the deprecated Cypher-style quantifier spelling, once per query.
+///
+/// `-[:t*1..3]->` and `-[:t]->{1,3}` are both accepted — they live in disjoint
+/// syntactic slots, so keeping the old one costs no grammar ambiguity. What it
+/// must not do is go through *silently*: accepting two dialect spellings with no
+/// signal is exactly what the deprecation exists to prevent, so
+/// [`raisin_sql::ast::PathQuantifier::deprecation_note`] is emitted here rather
+/// than left as an unread method on the AST.
+fn warn_on_deprecated_quantifiers(query: &GraphTableQuery) {
+    let mut seen: Vec<String> = Vec::new();
+    for pattern in &query.match_clause.patterns {
+        for relationship in pattern.relationships() {
+            let Some(note) = relationship.quantifier.and_then(|q| q.deprecation_note()) else {
+                continue;
+            };
+            if !seen.contains(&note) {
+                seen.push(note);
+            }
+        }
+    }
+    for note in seen {
+        tracing::warn!("PGQ: deprecated {note}");
+    }
+}
 
 /// PGQ Query Executor
 ///
@@ -42,6 +94,7 @@ impl<S: Storage> PgqExecutor<S> {
             "PGQ: Executing GRAPH_TABLE on graph '{}'",
             query.effective_graph_name()
         );
+        warn_on_deprecated_quantifiers(&query);
 
         // 1. Execute MATCH clause
         let bindings = self.execute_match(&query.match_clause).await?;
@@ -82,9 +135,12 @@ impl<S: Storage> PgqExecutor<S> {
 
         for pattern in &match_clause.patterns {
             let structure = analyze_pattern(pattern)?;
+            // Path variable, selector and restrictor for this top-level path.
+            let semantics = path_semantics_for(pattern);
 
             let bindings = match structure {
                 PatternStructure::SingleNode(node) => {
+                    reject_unsupported_path_semantics(&semantics, "a single-node pattern")?;
                     // Single node pattern - extract unique nodes from relations
                     match_single_node(&node, &self.storage, &self.context).await?
                 }
@@ -94,12 +150,16 @@ impl<S: Storage> PgqExecutor<S> {
                     rel,
                     target,
                 } => {
+                    if rel.quantifier.is_none() {
+                        reject_unsupported_path_semantics(&semantics, "a fixed-length hop")?;
+                    }
                     if rel.quantifier.is_some() {
                         // Variable-length path: (a)-[:TYPE*]->(b)
                         execute_variable_length_pattern(
                             &source,
                             &rel,
                             &target,
+                            &semantics,
                             vec![VariableBinding::new()],
                             &self.storage,
                             &self.context,
@@ -113,6 +173,7 @@ impl<S: Storage> PgqExecutor<S> {
                 }
 
                 PatternStructure::Chain(elements) => {
+                    reject_unsupported_path_semantics(&semantics, "a multi-hop chain")?;
                     // Multi-hop chain - execute incrementally
                     self.execute_chain(&elements).await?
                 }

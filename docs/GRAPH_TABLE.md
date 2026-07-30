@@ -28,13 +28,116 @@ FROM GRAPH_TABLE (social_graph
   COLUMNS (n.name, n)
 ) GROUP BY community_id;
 
--- Find all paths between two nodes
-SELECT path
+-- Find paths between two nodes
+-- A path variable is addressed through accessors; there is no PATH column type,
+-- so COLUMNS (p) is a compile error naming them.
+SELECT hops, nodes
 FROM GRAPH_TABLE (knowledge_graph
-  MATCH p = (a:Concept)-[:RELATED_TO*1..3]-(b:Concept)
+  MATCH p = (a:Concept)-[:RELATED_TO]-{1,3}(b:Concept)
   WHERE a.name = 'Machine Learning' AND b.name = 'Neural Networks'
-  COLUMNS (p as path)
+  COLUMNS (path_length(p) AS hops, nodes(p) AS nodes)
 );
+```
+
+## MATCH Grammar
+
+```text
+match_clause   := MATCH top_level_path { ',' top_level_path }
+top_level_path := [ path_variable '=' ] [ selector ] [ restrictor ]
+                  [ path_variable '=' ] path_expr
+selector       := ANY SHORTEST | ANY CHEAPEST | ALL SHORTEST | ANY
+restrictor     := WALK | TRAIL | ACYCLIC
+path_expr      := node_pattern { edge_pattern node_pattern }
+node_pattern   := '(' [ variable ] [ ':' label { '|' label } ] ')'
+edge_pattern   := '-[' edge_body ']->' [ quantifier ]
+                | '<-[' edge_body ']-'  [ quantifier ]
+                | '-['  edge_body ']-'  [ quantifier ]
+edge_body      := [ variable ] [ ':' type { '|' type } ] [ COST expr ]
+quantifier     := '{' m [ ',' [ n ] ] '}' | '*' | '+' | '?'
+```
+
+### Path variables
+
+`MATCH p = ...` binds the whole path so the [path accessors](#path-accessors)
+can address it. The variable may be written before the selector
+(`p = ANY SHORTEST (...)`) or after the restrictor
+(`ANY SHORTEST TRAIL p = (...)`) — both spellings are in circulation. Selector
+before restrictor is fixed; the other order is a parse error naming the fix.
+
+### Selectors
+
+| Selector | Meaning |
+|----------|---------|
+| *(none)* | Every path matching the pattern |
+| `ANY` | One arbitrary path per endpoint pair (**not** minimum-hop) |
+| `ANY SHORTEST` | One minimum-hop path per endpoint pair |
+| `ALL SHORTEST` | Every minimum-hop path per endpoint pair |
+| `ANY CHEAPEST` | One minimum-cost path — **RaisinDB extension**, requires `COST` |
+
+`SHORTEST k`, `SHORTEST k GROUP` and `ANY k` are not supported yet and parse to
+a named error rather than being silently accepted.
+
+### Restrictors
+
+| Restrictor | Meaning |
+|------------|---------|
+| `WALK` | No distinctness requirement; nodes and edges may repeat |
+| `TRAIL` | Edge-distinct — no edge traversed twice |
+| `ACYCLIC` | Node-distinct — no node visited twice |
+
+**The default is `ACYCLIC`**, chosen to preserve existing behaviour: the engine
+has always skipped already-visited nodes during variable-length traversal. The
+ISO default could not be confirmed, so `WALK` must be requested explicitly.
+`SIMPLE` is not supported yet — it differs from `ACYCLIC` only by permitting a
+closed walk, and shipping a subtly-wrong `SIMPLE` is worse than not shipping it.
+
+### Quantifiers
+
+The canonical form is the postfix brace form, written **after** the arrow:
+
+| Quantifier | Hops |
+|------------|------|
+| `->{2}` | exactly 2 |
+| `->{1,3}` | 1 to 3 inclusive |
+| `->{2,}` | 2 or more (unbounded) |
+| `->*` | `{0,}` |
+| `->+` | `{1,}` |
+| `->?` | `{0,1}` |
+
+**Rule Q-SCOPE:** an unbounded quantifier (`*`, `+`, `{m,}`) must be contained
+in the scope of a selector or a restrictor. `MATCH (a)-[:t]->*(b)` is a parse
+error; `MATCH ANY SHORTEST p = (a)-[:t]->*(b)` and `MATCH TRAIL (a)-[:t]->*(b)`
+are not. Bounded quantifiers need neither. Even under a selector or restrictor
+an unbounded quantifier is capped at 10 hops.
+
+#### Deprecated: the Cypher-style quantifier
+
+The old form written **inside** the brackets is still accepted:
+
+| Deprecated | Canonical |
+|------------|-----------|
+| `-[:t*2]->` | `-[:t]->{2}` |
+| `-[:t*1..3]->` | `-[:t]->{1,3}` |
+| `-[:t*2..]->` | `-[:t]->{2,}` |
+| `-[:t*]->` | `-[:t]->{1,}` |
+
+The two forms occupy different syntactic slots, so they are never ambiguous,
+but they are not interchangeable: **legacy `*` means `{1,}` while standard `*`
+means `{0,}`**. The legacy form is exempt from rule Q-SCOPE (it predates it and
+is capped at 10 hops instead), and using it emits a deprecation warning that
+also appears in `EXPLAIN`. Cypher (`raisin-cypher-parser`) is a different
+dialect where `*1..3` is native and not deprecated.
+
+### Inline WHERE is rejected
+
+`MATCH (n:User WHERE n.active = true)` and
+`MATCH (a)-[r:t WHERE r.since > 2020]->(b)` are parse errors. They used to parse
+into a field no execution path ever read, so the predicate was silently dropped
+and the query returned unfiltered rows. Put predicates in the `GRAPH_TABLE`
+`WHERE` clause:
+
+```sql
+MATCH (n:User) WHERE n.active = true COLUMNS (n.id)
 ```
 
 ## Path Length with CARDINALITY
@@ -195,9 +298,12 @@ FROM GRAPH_TABLE (my_graph MATCH (n:User) COLUMNS (n.name, n))
 WHERE degree(n) > 1;
 ```
 
-### A* Pathfinding
+### Shortest Path
 
-**What it does:** Finds the shortest path between two nodes using the A* algorithm with a heuristic function.
+**What it does:** Finds a minimum-hop path between two nodes.
+
+Written as a path *selector* on the MATCH pattern — there is no `shortestPath()`
+function.
 
 **Use cases:**
 - Navigation and routing
@@ -207,33 +313,49 @@ WHERE degree(n) > 1;
 
 **SQL Usage:**
 ```sql
-SELECT path, cost
+SELECT hops, stops
 FROM GRAPH_TABLE (road_network
-  MATCH path = shortestPath((a:City)-[:ROAD*]-(b:City))
+  MATCH ANY SHORTEST p = (a:City)-[:ROAD]-{1,10}(b:City)
   WHERE a.name = 'New York' AND b.name = 'Los Angeles'
-  COLUMNS (path, cost)
+  COLUMNS (path_length(p) AS hops, nodes(p) AS stops)
 );
 ```
 
-### K-Shortest Paths
+Use `ALL SHORTEST` to get every minimum-hop path rather than one of them.
 
-**What it does:** Finds the K shortest paths between two nodes using Yen's algorithm.
+### Cheapest Path (RaisinDB extension)
 
-**Use cases:**
-- Alternative route suggestions
-- Backup path planning
-- Network resilience analysis
-- Finding diverse connection paths
+> **Not standardised.** Neither GQL nor SQL/PGQ standardises weighted path
+> search; the committee lists "cheapest path search, by adding weights to
+> edges" among features not ready for the current drafts. The spelling here
+> follows Google Spanner Graph. **Portable queries should use `ANY SHORTEST`
+> (hop count).**
 
 **SQL Usage:**
 ```sql
-SELECT path, cost, rank
-FROM GRAPH_TABLE (transport_network
-  MATCH paths = kShortestPaths((a:Station)-[:ROUTE*]-(b:Station), 5)
-  WHERE a.name = 'Central' AND b.name = 'Airport'
-  COLUMNS (paths as path, cost, rank)
+SELECT hops, route
+FROM GRAPH_TABLE (road_network
+  MATCH ANY CHEAPEST p = (a:City)-[r:ROAD COST r.weight]-{1,10}(b:City)
+  WHERE a.name = 'New York' AND b.name = 'Los Angeles'
+  COLUMNS (path_length(p) AS hops, edges(p) AS route)
 );
 ```
+
+`COST` may only reference the edge's `weight` — a RaisinDB relation carries
+`target`, `workspace`, `target_node_type`, `relation_type` and `weight`, and no
+property map. `ANY CHEAPEST` without a `COST`, or `COST` without
+`ANY CHEAPEST`, is a compile error: a weighted query that silently answers by
+hop count is worse than one that refuses.
+
+### K-Shortest Paths — not yet supported
+
+There is no way to ask for the *k* shortest paths today. `SHORTEST k` and
+`SHORTEST k GROUP` parse to a named error rather than being silently ignored.
+
+Yen's algorithm is implemented (`raisin-sql-execution`, `graph_algo/yen.rs`) but
+is not reachable from `GRAPH_TABLE`: returning *k* paths per endpoint pair
+multiplies rows, and that interaction with `ORDER BY` / `LIMIT` is deliberately
+left for a later pass. Use `ALL SHORTEST` when every minimum-hop path is enough.
 
 ## Graph Algorithm Configuration
 
@@ -492,8 +614,31 @@ properties:
 | `louvain(node)` | INTEGER | Community ID |
 | `connectedComponents(node)` | INTEGER | Component ID |
 | `triangleCount(node)` | INTEGER | Number of triangles |
-| `shortestPath(pattern)` | PATH | Shortest path between nodes |
-| `kShortestPaths(pattern, k)` | ARRAY<PATH> | K shortest paths |
+
+Shortest-path search is a MATCH-clause **selector** (`ANY SHORTEST`,
+`ALL SHORTEST`, `ANY CHEAPEST`), not a function. Path results are read through
+the path accessors below.
+
+### Path Accessors
+
+A path variable is not selectable on its own — there is no `PATH` column type,
+and `COLUMNS (p)` is a compile error naming these accessors instead. Every
+accessor lands on a type all three transports (HTTP, WS, PGWire) already carry.
+
+| Accessor | Returns | Description |
+|----------|---------|-------------|
+| `path_length(p)` | INTEGER | Hop count (`= edges(p)` length) |
+| `nodes(p)` | JSON array | Nodes in path order, length `path_length + 1` |
+| `edges(p)` | JSON array | Edges in path order, length `path_length` |
+| `element_id(p)` | TEXT | Opaque stable encoding of the whole path |
+| `path_first(p)` | JSON object | First node identity |
+| `path_last(p)` | JSON object | Last node identity |
+| `is_trail(p)` | BOOLEAN | True when no edge repeats |
+| `is_acyclic(p)` | BOOLEAN | True when no node repeats |
+
+Names are lowercase; uppercase spellings are accepted too. `nodes(p)` is spelled
+"nodes" rather than DuckPGQ's `vertices(p)` because every other surface in
+RaisinDB says *node*.
 
 ### Cache Status Endpoint
 

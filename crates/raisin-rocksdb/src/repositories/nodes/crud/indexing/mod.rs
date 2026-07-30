@@ -140,15 +140,16 @@ impl NodeRepositoryImpl {
         workspace: &str,
         revision: &HLC,
     ) -> Result<()> {
-        use raisin_models::nodes::properties::PropertyValue;
-
-        // Cheap early exit: most nodes carry no geometry, and this keeps the added
-        // cost of the new step at one map scan for them.
-        if !node
-            .properties
-            .values()
-            .any(|v| matches!(v, PropertyValue::Geometry(_)))
-        {
+        // The geometry PATHS of the whole property tree, not the top level.
+        //
+        // Both the early exit and the state-record loop below range over this one
+        // set. A flat `node.properties` scan here skipped nodes whose ONLY
+        // geometry is nested (indexing them not at all) and, for nodes that also
+        // had a top-level one, wrote entries for the nested paths while creating a
+        // state record for none of them — which reads as `NotBuilt` and pins every
+        // nested query to a full scan forever.
+        let geometry_paths = crate::indexing::indexed_geometry_paths(&node.properties);
+        if geometry_paths.is_empty() {
             return Ok(());
         }
 
@@ -162,18 +163,15 @@ impl NodeRepositoryImpl {
             batch, &targets, &ctx, node, revision, &policies,
         )?;
 
-        for (prop_name, prop_value) in &node.properties {
-            if !matches!(prop_value, PropertyValue::Geometry(_)) {
-                continue;
-            }
+        for property_path in &geometry_paths {
             spatial_state.ensure_for_write(
                 batch,
                 tenant_id,
                 repo_id,
                 branch,
                 workspace,
-                prop_name,
-                policies.for_property(prop_name),
+                property_path,
+                policies.for_property(property_path),
                 *revision,
             )?;
         }
@@ -198,13 +196,10 @@ impl NodeRepositoryImpl {
         workspace: &str,
         revision: &HLC,
     ) -> Result<()> {
-        use raisin_models::nodes::properties::PropertyValue;
-
-        if !old_node
-            .properties
-            .values()
-            .any(|v| matches!(v, PropertyValue::Geometry(_)))
-        {
+        // Nested geometry counts here too: a flat guard let a node whose only
+        // geometry sits in a section keep matching its old position forever,
+        // because the tombstoner was never reached.
+        if crate::indexing::walk_geometries(&old_node.properties).is_empty() {
             return Ok(());
         }
 
@@ -214,7 +209,7 @@ impl NodeRepositoryImpl {
             crate::indexing::NodeSpatialPolicies::from_local_state(&spatial_state, &ctx, old_node);
         let targets = crate::indexing::SpatialIndexTargets::from_db(self.db.as_ref())?;
 
-        crate::indexing::spatial::tombstone_superseded_spatial_indexes(
+        crate::indexing::tombstone_superseded_spatial_indexes(
             batch, &targets, &ctx, old_node, new_node, revision, &policies,
         )
     }

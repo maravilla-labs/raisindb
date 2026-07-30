@@ -150,7 +150,9 @@ fn filtered(predicate: TypedExpr) -> LogicalPlan {
     }
 }
 
-/// Descend through `Filter`/`Project`/`Limit`/`Sort` wrappers to the leaf scan.
+/// Descend through `Filter`/`Project`/`Limit`/`Sort`/`SpatialAnnotate` wrappers
+/// to the leaf scan. `SpatialAnnotate` is a pass-through that materialises
+/// `__distance` / `__matched_path`; it changes no row and hides no scan.
 fn leaf(plan: &PhysicalPlan) -> &PhysicalPlan {
     let mut node = plan;
     loop {
@@ -159,6 +161,7 @@ fn leaf(plan: &PhysicalPlan) -> &PhysicalPlan {
             | PhysicalPlan::Project { input, .. }
             | PhysicalPlan::Limit { input, .. }
             | PhysicalPlan::TopN { input, .. }
+            | PhysicalPlan::SpatialAnnotate { input, .. }
             | PhysicalPlan::Sort { input, .. } => node = input,
             other => return other,
         }
@@ -173,6 +176,7 @@ fn has_spatial_residual_filter(plan: &PhysicalPlan) -> bool {
         PhysicalPlan::Project { input, .. }
         | PhysicalPlan::Limit { input, .. }
         | PhysicalPlan::Sort { input, .. }
+        | PhysicalPlan::SpatialAnnotate { input, .. }
         | PhysicalPlan::TopN { input, .. } => has_spatial_residual_filter(input),
         _ => false,
     }
@@ -259,7 +263,7 @@ fn unusable_index_state_also_refuses_the_index() {
         PhysicalPlan::SpatialDistanceScan { .. }
     ));
     assert!(has_spatial_residual_filter(&plan));
-    assert!(format!("{}", plan.describe()).contains("TableScan"));
+    assert!(leaf(&plan).describe().contains("TableScan"));
 }
 
 /// A `Ready` index DOES drive the scan, and only then may the predicate be
@@ -826,6 +830,336 @@ fn distance_order_about_a_different_centre_is_not_elided() {
     assert!(
         matches!(&plan, PhysicalPlan::Sort { .. }),
         "a different centre must keep the Sort, got {}",
+        plan.describe()
+    );
+}
+
+// ── nested and wildcard property paths ─────────────────────────────────────
+
+/// A NESTED path is an ordinary property name as far as the planner is
+/// concerned: the index key's property segment is the dotted path verbatim, so a
+/// `Ready` index for `venue.geo` is index-backed exactly like `location`.
+#[test]
+fn a_nested_dotted_path_is_index_backed_like_any_other_property() {
+    let planner = planner_with(ready(vec![11, 8, 6]));
+    let plan = planner
+        .plan(&filtered(dwithin("venue.geo", 8.54, 47.37, 500.0)))
+        .unwrap();
+    match leaf(&plan) {
+        PhysicalPlan::SpatialDistanceScan { property_name, .. } => {
+            assert_eq!(property_name, "venue.geo");
+        }
+        other => panic!("expected a SpatialDistanceScan, got {}", other.describe()),
+    }
+}
+
+/// THE trap: a wildcard path must NEVER become a `SpatialDistanceScan`.
+///
+/// The state record for `stops[].geo` legitimately says `Ready` (array indices
+/// normalise onto that one key), but each element's ENTRIES live under its own
+/// concrete path — so an index scan over the prefix `stops[].geo` would read a
+/// prefix holding nothing and return zero rows. It must take the fallback.
+#[test]
+fn a_wildcard_path_never_takes_the_index_scan() {
+    let planner = planner_with(ready(vec![11, 8, 6]));
+    let plan = planner
+        .plan(&filtered(dwithin("stops[].geo", 8.54, 47.37, 500.0)))
+        .unwrap();
+
+    assert!(
+        !matches!(leaf(&plan), PhysicalPlan::SpatialDistanceScan { .. }),
+        "a wildcard path must not scan an index namespace that holds nothing, got {}",
+        plan.describe()
+    );
+    assert!(
+        has_spatial_residual_filter(&plan),
+        "the predicate must survive as a row-level filter, got {}",
+        plan.describe()
+    );
+    match leaf(&plan) {
+        PhysicalPlan::TableScan {
+            reason:
+                ScanReason::SpatialIndexUnusable {
+                    property, detail, ..
+                },
+            ..
+        } => {
+            assert_eq!(property, "stops[].geo");
+            assert!(
+                detail.contains("wildcard"),
+                "EXPLAIN must name the reason: {detail}"
+            );
+            // And it must name the remedy: one concrete element.
+            assert!(detail.contains("stops.0.geo"), "{detail}");
+        }
+        other => panic!(
+            "expected an annotated fallback scan, got {}",
+            other.describe()
+        ),
+    }
+}
+
+/// A wildcard's distance is the MINIMUM over the node's matched geometries,
+/// which is a well-defined total order over nodes but NOT the order any single
+/// cell-ring scan emits. The `Sort` must therefore be retained.
+///
+/// This asserts the negative condition directly, because it is an easy line to
+/// omit: everything still looks right in a small test, and it only misbehaves
+/// under keyset pagination at scale, where it drops and duplicates rows.
+#[test]
+fn a_wildcard_path_keeps_its_explicit_sort() {
+    let planner = planner_with(ready(vec![11, 8, 6]));
+    let sort = LogicalPlan::Sort {
+        input: Box::new(filtered(dwithin("stops[].geo", 8.54, 47.37, 500.0))),
+        sort_exprs: vec![SortExpr {
+            expr: func(
+                "ST_DISTANCE",
+                vec![geom_source("stops[].geo"), st_point(8.54, 47.37)],
+                DataType::Double,
+            ),
+            ascending: true,
+            nulls_first: false,
+        }],
+    };
+    let plan = planner.plan(&sort).unwrap();
+    assert!(
+        matches!(&plan, PhysicalPlan::Sort { .. } | PhysicalPlan::TopN { .. }),
+        "a wildcard path must keep an explicit Sort, got {}",
+        plan.describe()
+    );
+}
+
+// ── historical reads, and the pruned index ─────────────────────────────────
+
+/// A scan scoped to an explicit revision, as the analyzer leaves it: the
+/// `__revision = N` predicate is stripped into `max_revision` on the Scan node.
+fn filtered_at_revision(predicate: TypedExpr, revision: raisin_hlc::HLC) -> LogicalPlan {
+    let LogicalPlan::Scan {
+        table,
+        alias,
+        schema,
+        workspace,
+        branch_override,
+        locales,
+        filter,
+        projection,
+        ..
+    } = scan()
+    else {
+        unreachable!("scan() builds a Scan")
+    };
+    LogicalPlan::Filter {
+        input: Box::new(LogicalPlan::Scan {
+            table,
+            alias,
+            schema,
+            workspace,
+            max_revision: Some(revision),
+            branch_override,
+            locales,
+            filter,
+            projection,
+        }),
+        predicate: FilterPredicate::from_expr(predicate),
+    }
+}
+
+/// HEAD is exact and MUST keep using the index.
+///
+/// The compaction filter never prunes the newest entry per node per cell, so a
+/// read at HEAD is unaffected by pruning. This is the half of the historical gate
+/// that is easy to break by making it too broad — routing HEAD queries to a row
+/// scan would undo the entire spatial performance story, silently and only under
+/// load.
+#[test]
+fn a_head_query_still_takes_the_spatial_index() {
+    let planner = planner_with(ready(vec![11, 10, 9, 8, 7, 6, 4, 2]));
+    let plan = planner
+        .plan(&filtered(dwithin("location", 8.54, 47.37, 500.0)))
+        .unwrap();
+    assert!(
+        matches!(leaf(&plan), PhysicalPlan::SpatialDistanceScan { .. }),
+        "a HEAD spatial query must use the index, got {}",
+        plan.describe()
+    );
+}
+
+/// A read at an EXPLICIT older revision must not: the index is pruned beyond its
+/// retention window, so it can only answer approximately there. The row scan is
+/// exact at any revision.
+#[test]
+fn an_explicit_historical_revision_falls_back_to_a_row_scan() {
+    let planner = planner_with(ready(vec![11, 10, 9, 8, 7, 6, 4, 2]));
+    let plan = planner
+        .plan(&filtered_at_revision(
+            dwithin("location", 8.54, 47.37, 500.0),
+            raisin_hlc::HLC::now(),
+        ))
+        .unwrap();
+
+    assert!(
+        !matches!(leaf(&plan), PhysicalPlan::SpatialDistanceScan { .. }),
+        "a historical spatial read must NOT resolve against the pruned index, got {}",
+        plan.describe()
+    );
+    assert!(
+        has_spatial_residual_filter(&plan),
+        "the predicate must be re-applied per row, or the historical query returns \
+         whatever the fallback scan happened to select: {}",
+        plan.describe()
+    );
+
+    let PhysicalPlan::TableScan { reason, .. } = leaf(&plan) else {
+        panic!("expected a TableScan fallback, got {}", plan.describe());
+    };
+    let ScanReason::SpatialIndexUnusable { detail, .. } = reason else {
+        panic!("expected SpatialIndexUnusable, got {reason}");
+    };
+    assert!(
+        detail.contains("historical revision"),
+        "EXPLAIN must say WHY the index was skipped, got: {detail}"
+    );
+}
+
+// ── the per-cell budget degrades, it does not fail ─────────────────────────
+
+/// The index scan carries the plan it degrades to, and EXPLAIN says so.
+///
+/// A per-cell budget exhaustion is only discoverable while scanning, so the
+/// executor cannot re-plan on its own — the predicate may have been stripped from
+/// the residual filter. Carrying the fallback in the plan is what turns a failed
+/// query into a slow one.
+#[test]
+fn an_index_scan_carries_the_fallback_it_degrades_to() {
+    let planner = planner_with(ready(vec![11, 10, 9, 8, 7, 6, 4, 2]));
+    let plan = planner
+        .plan(&filtered(dwithin("location", 8.54, 47.37, 500.0)))
+        .unwrap();
+
+    let PhysicalPlan::SpatialDistanceScan { fallback, .. } = leaf(&plan) else {
+        panic!("expected a SpatialDistanceScan, got {}", plan.describe());
+    };
+    let fallback = fallback
+        .as_ref()
+        .expect("an index scan must carry a degradation fallback");
+
+    // The fallback re-applies EVERY predicate per row, including the spatial one
+    // the index scan was allowed to strip. Without that, degrading would return
+    // every row in the workspace.
+    assert!(
+        has_spatial_residual_filter(fallback),
+        "the fallback must re-apply the spatial predicate, got {}",
+        fallback.describe()
+    );
+    assert!(
+        leaf(&plan)
+            .describe()
+            .contains("degrades to a row scan if the per-cell budget is exhausted"),
+        "EXPLAIN must show the degradation path: {}",
+        leaf(&plan).describe()
+    );
+}
+
+// ── the spatial pseudo-columns ────────────────────────────────────────────
+
+/// Asking for `__distance` / `__matched_path` over a fallback scan plans the
+/// annotation operator that materialises them. Without it the columns analyze
+/// (they are declared in the catalog) and then come back NULL, which is a worse
+/// failure than "column not found".
+#[test]
+fn selecting_the_spatial_columns_plans_the_annotation() {
+    let planner = planner_with(SpatialAvailability::NotBuilt);
+    let LogicalPlan::Filter { input, predicate } =
+        filtered(dwithin("stops[].geo", 8.54, 47.37, 500.0))
+    else {
+        unreachable!()
+    };
+    let LogicalPlan::Scan {
+        table,
+        alias,
+        schema,
+        workspace,
+        max_revision,
+        branch_override,
+        locales,
+        filter,
+        ..
+    } = *input
+    else {
+        unreachable!()
+    };
+    let scoped = LogicalPlan::Filter {
+        input: Box::new(LogicalPlan::Scan {
+            table,
+            alias,
+            schema,
+            workspace,
+            max_revision,
+            branch_override,
+            locales,
+            filter,
+            projection: Some(vec![
+                "name".to_string(),
+                "properties".to_string(),
+                "__distance".to_string(),
+                "__matched_path".to_string(),
+            ]),
+        }),
+        predicate,
+    };
+
+    let plan = planner.plan(&scoped).unwrap();
+    assert!(
+        plan.describe().contains("SpatialAnnotate")
+            || matches!(&plan, PhysicalPlan::SpatialAnnotate { .. }),
+        "expected the annotation operator, got {}",
+        plan.describe()
+    );
+}
+
+/// A projection that does NOT ask for them plans no annotation, so an ordinary
+/// spatial fallback pays nothing for a feature it is not using.
+#[test]
+fn a_projection_without_the_spatial_columns_plans_no_annotation() {
+    let planner = planner_with(SpatialAvailability::NotBuilt);
+    let LogicalPlan::Filter { input, predicate } =
+        filtered(dwithin("stops[].geo", 8.54, 47.37, 500.0))
+    else {
+        unreachable!()
+    };
+    let LogicalPlan::Scan {
+        table,
+        alias,
+        schema,
+        workspace,
+        max_revision,
+        branch_override,
+        locales,
+        filter,
+        ..
+    } = *input
+    else {
+        unreachable!()
+    };
+    let scoped = LogicalPlan::Filter {
+        input: Box::new(LogicalPlan::Scan {
+            table,
+            alias,
+            schema,
+            workspace,
+            max_revision,
+            branch_override,
+            locales,
+            filter,
+            projection: Some(vec!["name".to_string(), "properties".to_string()]),
+        }),
+        predicate,
+    };
+
+    let plan = planner.plan(&scoped).unwrap();
+    assert!(
+        !matches!(&plan, PhysicalPlan::SpatialAnnotate { .. }),
+        "no annotation should be planned when nobody asked for the columns: {}",
         plan.describe()
     );
 }

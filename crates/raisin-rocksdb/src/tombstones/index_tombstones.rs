@@ -420,13 +420,13 @@ pub(super) fn tombstone_spatial_indexes(
     node: &Node,
     revision: &HLC,
 ) -> Result<()> {
-    use raisin_models::nodes::properties::PropertyValue;
-
-    if !node
-        .properties
-        .values()
-        .any(|v| matches!(v, PropertyValue::Geometry(_)))
-    {
+    // The whole property tree, not just the top level: a geometry nested in an
+    // Element / Object / Array is indexed by the writer, so a delete that only
+    // walked the top level would leave it live and the deleted node would keep
+    // matching ST_DWITHIN forever. Same walker as the writer, so the paths — and
+    // therefore the keys — line up exactly.
+    let geometries = crate::indexing::walk_geometries(&node.properties);
+    if geometries.is_empty() {
         return Ok(());
     }
 
@@ -436,33 +436,34 @@ pub(super) fn tombstone_spatial_indexes(
         spatial_index: cfs.spatial_index,
     };
 
-    // The policy comes from the local index-state record, which caches the resolved
-    // configuration per property. `tombstone_spatial_property` widens to every
-    // precision in `PRECISION_RANGE` anyway, so a stale or missing record cannot
-    // strand an entry at a precision that is no longer configured — the asymmetry is
-    // deliberately in favour of over-tombstoning, since a superfluous tombstone
-    // shadows nothing while a missing one leaves a deleted node matching forever.
-    for (property_name, value) in &node.properties {
-        if let PropertyValue::Geometry(geometry) = value {
-            let policy = crate::spatial_state::policy_for_property(
-                db,
-                ctx.tenant_id,
-                ctx.repo_id,
-                ctx.branch,
-                ctx.workspace,
-                property_name,
-            );
-            crate::indexing::spatial::tombstone_spatial_property(
-                batch,
-                &targets,
-                &index_ctx,
-                &node.id,
-                property_name,
-                geometry,
-                revision,
-                &policy,
-            )?;
-        }
+    // The precision set comes from `configured ∪ indexed` when a state record
+    // exists, and widens to every precision in `PRECISION_RANGE` when one does
+    // not. The asymmetry is deliberately in favour of over-tombstoning: a
+    // superfluous tombstone shadows nothing, while a missing one leaves a deleted
+    // node matching forever.
+    for (property_path, geometry) in geometries {
+        let (policy, bounded) = crate::spatial_state::tombstone_policy_for_property(
+            db,
+            ctx.tenant_id,
+            ctx.repo_id,
+            ctx.branch,
+            ctx.workspace,
+            &property_path,
+        );
+        let precisions = match bounded {
+            Some(set) => crate::indexing::TombstonePrecisions::bounded(&policy, set),
+            None => crate::indexing::TombstonePrecisions::every(&policy),
+        };
+        crate::indexing::tombstone_spatial_property(
+            batch,
+            &targets,
+            &index_ctx,
+            &node.id,
+            &property_path,
+            geometry,
+            revision,
+            precisions,
+        )?;
     }
 
     Ok(())

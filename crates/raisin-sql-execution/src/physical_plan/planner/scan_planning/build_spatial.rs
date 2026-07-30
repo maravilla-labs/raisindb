@@ -54,6 +54,41 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
+        // # Historical reads do not go to the index
+        //
+        // `cf::SPATIAL_INDEX` is pruned by a compaction filter
+        // (`raisin-rocksdb/src/spatial/compaction.rs`). It keeps the newest entry
+        // per node per cell ALWAYS, plus a bounded recent window
+        // (`keep_revisions` / `retention_secs`), and drops what is superseded
+        // beyond that. So:
+        //
+        // - at HEAD the index is exact, because the newest entry is never
+        //   pruned — and HEAD must keep using the index, which is the entire
+        //   point of the spatial performance work;
+        // - at an EXPLICIT older revision the entry that was current then may be
+        //   gone, and the scan would resolve the node at a coarser point in its
+        //   history or miss it entirely. Silently approximate, which is the one
+        //   thing this subsystem does not do.
+        //
+        // A row scan re-derives the geometry from the node record, whose MVCC
+        // history is intact, so it is exact at any revision.
+        if context.historical_revision {
+            return Ok(self.build_spatial_fallback_scan(
+                property_name,
+                canonical,
+                table,
+                alias,
+                schema,
+                workspace,
+                branch,
+                projection,
+                "the query reads at an explicit historical revision, and the spatial index is \
+                 pruned by compaction beyond its retention window; answering from a row scan, \
+                 which is exact at any revision"
+                    .to_string(),
+            ));
+        }
+
         let availability = self.spatial_availability(workspace, branch, property_name);
 
         if !availability.is_ready() {
@@ -123,6 +158,26 @@ impl PhysicalPlanner {
                 None
             };
 
+        // The degradation path, planned eagerly so the executor has somewhere to
+        // go when a cell prefix turns out to exceed the per-cell budget. It is
+        // built from the FULL canonical predicate list (not `remaining`), so it
+        // is correct even when the spatial predicate was stripped above.
+        let fallback = Box::new(self.spatial_fallback_plan(
+            property_name,
+            canonical,
+            table,
+            alias,
+            schema,
+            workspace,
+            branch,
+            projection.clone(),
+            format!(
+                "the spatial index cell budget was exhausted for property '{}'; \
+                 answering from a row scan instead",
+                property_name
+            ),
+        ));
+
         let mut scan = PhysicalPlan::SpatialDistanceScan {
             tenant_id: self.default_tenant_id.to_string(),
             repo_id: self.default_repo_id.to_string(),
@@ -139,6 +194,7 @@ impl PhysicalPlanner {
             claims_distance_order,
             precisions,
             bucket_eq,
+            fallback: Some(fallback),
         };
 
         if let Some(filter_expr) = remaining_filter {
@@ -199,6 +255,19 @@ impl PhysicalPlanner {
 
     /// Whether the pending `ORDER BY` is exactly the ascending-distance order a
     /// spatial scan emits for this property and centre.
+    /// # A wildcard path can NEVER satisfy the order
+    ///
+    /// For `stops[].geo` the distance is defined as the MINIMUM over the node's
+    /// matched geometries. That is a well-defined total order over nodes, but it
+    /// is not the order any single cell-ring scan produces — so eliding the `Sort`
+    /// on the strength of the scan's own ordering would be wrong. The visible
+    /// symptom is not "slightly out of order": under keyset pagination on
+    /// `__distance` it drops and duplicates rows across page boundaries, the same
+    /// failure mode as mixing an `__order` cursor with an `ORDER BY path`.
+    ///
+    /// This returns `false` early for a wildcard so the planner keeps an explicit
+    /// `Sort`. It is an easy line to omit because everything still looks right in
+    /// a small test; it only misbehaves at scale.
     pub(super) fn spatial_order_is_satisfied(
         &self,
         context: &PlanContext,
@@ -206,6 +275,9 @@ impl PhysicalPlanner {
         center_lon: f64,
         center_lat: f64,
     ) -> bool {
+        if raisin_models::nodes::properties::is_wildcard_property_path(property_name) {
+            return false;
+        }
         let Some((expr, ascending)) = context.order_by_expr.as_ref() else {
             return false;
         };
@@ -227,58 +299,5 @@ impl PhysicalPlanner {
                     && order.center_lat == center_lat
             },
         )
-    }
-
-    /// The visible spatial fallback: an ordinary scan with the spatial predicate
-    /// retained as a row-level filter, annotated so EXPLAIN says what happened
-    /// and what to do about it.
-    ///
-    /// Slow and correct, with a signpost. Never fast and wrong.
-    #[allow(clippy::too_many_arguments)]
-    pub(in super::super) fn build_spatial_fallback_scan(
-        &self,
-        property_name: &str,
-        canonical: &[CanonicalPredicate],
-        table: &str,
-        alias: &Option<String>,
-        schema: Arc<TableSchema>,
-        workspace: &str,
-        branch: &str,
-        projection: Option<Vec<String>>,
-        detail: String,
-    ) -> PhysicalPlan {
-        tracing::warn!(
-            workspace = %workspace,
-            property = %property_name,
-            detail = %detail,
-            "Spatial predicate NOT pushed to the spatial index; applying it per row \
-             instead. Results are correct but the scan is full — run \
-             `REBUILD SPATIAL INDEX FOR '{}' PROPERTY '{}'` (or \
-             POST /api/admin/management/database/.../spatial/rebuild)",
-            workspace,
-            property_name
-        );
-
-        // EVERY predicate, including the spatial one, survives as a residual
-        // filter. That is the whole point.
-        let filter = self.combine_canonical_predicates(canonical);
-
-        PhysicalPlan::TableScan {
-            tenant_id: self.default_tenant_id.to_string(),
-            repo_id: self.default_repo_id.to_string(),
-            branch: branch.to_string(),
-            workspace: workspace.to_string(),
-            table: table.to_string(),
-            alias: alias.clone(),
-            schema,
-            filter,
-            projection,
-            limit: None,
-            reason: crate::physical_plan::operators::ScanReason::SpatialIndexUnusable {
-                workspace: workspace.to_string(),
-                property: property_name.to_string(),
-                detail,
-            },
-        }
     }
 }

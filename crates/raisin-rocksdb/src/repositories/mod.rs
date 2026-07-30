@@ -56,6 +56,7 @@ pub use revisions::RevisionRepositoryImpl;
 pub use session::SessionRepository;
 pub use spatial_index::{
     ProximityResult, SpatialEntry, SpatialGeometryKind, SpatialIndexEntry, SpatialIndexRepository,
+    DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL,
 };
 pub use system_updates::SystemUpdateRepositoryImpl;
 pub use tags::TagRepositoryImpl;

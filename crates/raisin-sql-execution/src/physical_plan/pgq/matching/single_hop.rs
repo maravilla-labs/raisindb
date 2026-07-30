@@ -19,6 +19,16 @@ use crate::physical_plan::pgq::types::{NodeInfo, RelationInfo, VariableBinding};
 
 type Result<T> = std::result::Result<T, ExecutionError>;
 
+/// Whether a relation's type satisfies the pattern's type list.
+///
+/// An empty list accepts every type — `-[r]->` is deliberately untyped. A list
+/// of several is an ALTERNATION (`-[:road|walk]->`), and every named type must
+/// be kept; keeping only the first is a silent wrong-results bug rather than a
+/// narrower answer.
+fn matches_relation_type(types: &[String], relation_type: &str) -> bool {
+    types.is_empty() || types.iter().any(|t| t == relation_type)
+}
+
 /// Match a single-hop pattern: (source)-[rel]->(target)
 ///
 /// This function scans the global relation index and filters by:
@@ -51,8 +61,17 @@ pub async fn match_single_hop<S: Storage>(
         target_pattern.labels
     );
 
-    // Get relation type filter (first type if specified)
-    let relation_type_filter = rel_pattern.types.first().map(|s| s.as_str());
+    // Only a single-typed pattern can push its filter into storage:
+    // `scan_relations_global` takes one `Option<&str>`. A multi-type alternation
+    // such as `-[:road|walk]->` must therefore scan UNFILTERED and be filtered
+    // in memory below. Taking `types.first()` — as this did — silently dropped
+    // every `walk` edge and returned a strict subset of the truth with no error
+    // anywhere, on a documented feature. Same defect, same fix as
+    // `variable_length::scan_relations`.
+    let relation_type_filter = match rel_pattern.types.as_slice() {
+        [single] => Some(single.as_str()),
+        _ => None,
+    };
 
     // Scan global relation index
     // Returns: Vec<(src_workspace, src_id, tgt_workspace, tgt_id, FullRelation)>
@@ -72,6 +91,12 @@ pub async fn match_single_hop<S: Storage>(
     let mut bindings = Vec::with_capacity(relations.len());
 
     for (src_ws, src_id, tgt_ws, tgt_id, full_rel) in relations {
+        // The other half of the alternation fix: when the scan could not be
+        // narrowed, keep only the types the pattern actually named.
+        if !matches_relation_type(&rel_pattern.types, &full_rel.relation_type) {
+            continue;
+        }
+
         // Apply direction filter
         let (source_ws, source_id, source_type, target_ws, target_id, target_type) =
             match rel_pattern.direction {

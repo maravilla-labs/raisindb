@@ -278,6 +278,53 @@ fn test_wildcard_expansion() {
     assert!(query.projection.len() >= 19);
 }
 
+/// The spatial pseudo-columns are **opt-in**: selectable by name, never expanded
+/// by `*`.
+///
+/// Both halves matter. Declaring them is what makes
+/// `SELECT __matched_path ... WHERE ST_DWITHIN(properties->>'stops[].geo', ...)`
+/// analyze at all — the value that says WHICH geometry matched was computed and
+/// unreachable before. Withholding them from `*` is what keeps two always-NULL
+/// columns out of every non-spatial query in the system.
+#[test]
+fn spatial_pseudo_columns_are_selectable_but_not_expanded_by_star() {
+    let analyzer = Analyzer::new();
+
+    let AnalyzedStatement::Query(star) = analyzer
+        .analyze("SELECT * FROM nodes")
+        .expect("SELECT * must analyze")
+    else {
+        panic!("Expected Query");
+    };
+    let expanded: Vec<String> = star
+        .projection
+        .iter()
+        .filter_map(|(_, alias)| alias.clone())
+        .collect();
+    for hidden in ["__distance", "__matched_path"] {
+        assert!(
+            !expanded.contains(&hidden.to_string()),
+            "`SELECT *` must not expand {hidden}; got {expanded:?}"
+        );
+    }
+    // The editorial-ordering columns deliberately DO expand — this is the
+    // difference being asserted, not an accident of the same mechanism.
+    assert!(
+        expanded.contains(&"__order".to_string()),
+        "`__order` must still expand in `SELECT *`; got {expanded:?}"
+    );
+
+    let AnalyzedStatement::Query(named) = analyzer
+        .analyze("SELECT id, __distance, __matched_path FROM nodes")
+        .expect("naming the spatial columns must analyze")
+    else {
+        panic!("Expected Query");
+    };
+    assert_eq!(named.projection.len(), 3);
+    assert_eq!(named.projection[1].0.data_type, DataType::Double);
+    assert_eq!(named.projection[2].0.data_type, DataType::Text);
+}
+
 #[test]
 fn test_generated_columns() {
     let analyzer = Analyzer::new();
