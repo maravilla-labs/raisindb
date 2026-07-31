@@ -67,6 +67,17 @@ function raiseForStatus(resp, context) {
 // { status, headers, body }.
 function graphFetch(credential, method, url, opts) {
   opts = opts || {};
+  // The engine passes `credential: null` when no account is selected. Without
+  // this guard that surfaced as an opaque
+  // "cannot read property 'access_token' of null" TypeError from deep inside
+  // the adapter. Plain Error on purpose: a coded "auth_expired" would be
+  // rewritten by the host into "credential is expired or was rejected", which
+  // is the wrong diagnosis for "no account connected".
+  if (!credential || !credential.access_token) {
+    throw new Error(
+      "no account credential — connect a Microsoft account and select it for this connector or mount"
+    );
+  }
   var headers = { Authorization: "Bearer " + credential.access_token };
   if (opts.headers) {
     for (var k in opts.headers) headers[k] = opts.headers[k];
@@ -86,10 +97,16 @@ function enc(v) {
 
 // ---- mount helpers --------------------------------------------------------
 
+// Which Graph surface this mount targets. Reads the engine's pre-merged
+// `mount.config` (api_config < connector < connection < sync_config) so a
+// connection can set a default resource, with sync_config as the fallback for
+// an older engine that does not send `config`.
 function resourceOf(mount) {
+  var merged = (mount && mount.config) || {};
   var sc = (mount && mount.sync_config) || {};
-  if (sc.resource === "calendar") return "calendar";
-  if (sc.resource === "files") return "files";
+  var resource = merged.resource !== undefined ? merged.resource : sc.resource;
+  if (resource === "calendar") return "calendar";
+  if (resource === "files") return "files";
   return "mail";
 }
 

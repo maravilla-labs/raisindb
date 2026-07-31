@@ -179,7 +179,7 @@ impl IntegrationTokenRefreshHandler {
     async fn refresh_node(
         &self,
         svc: &NodeService<RocksDBStorage>,
-        mut node: Node,
+        node: Node,
         secret_box: &SecretBox,
         now_secs: i64,
     ) -> Result<usize> {
@@ -190,7 +190,7 @@ impl IntegrationTokenRefreshHandler {
         };
         let client_secret = decrypt_client_secret(&node.properties, secret_box);
 
-        let mut accounts = match node.properties.get("connected_accounts") {
+        let accounts = match node.properties.get("connected_accounts") {
             Some(pv) => match serde_json::to_value(pv) {
                 Ok(Value::Array(a)) => a,
                 _ => return Ok(0),
@@ -198,8 +198,18 @@ impl IntegrationTokenRefreshHandler {
             None => return Ok(0),
         };
 
+        // Refreshed token blobs, keyed by account id. Collected from the
+        // snapshot WITHOUT holding it for the write: the exchanges below are
+        // network round trips taking seconds, and writing this stale node back
+        // afterwards would discard any connection an admin added meanwhile.
+        // The results are re-applied by id to a freshly-read node instead.
+        let mut refreshed: Vec<(String, String, i64)> = Vec::new();
+
         let mut changed = 0usize;
-        for acct in accounts.iter_mut() {
+        for acct in accounts.iter() {
+            let Some(account_id) = acct.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
             let expires_at = acct.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
             if !is_account_expiring(expires_at, now_secs, REFRESH_THRESHOLD_SECS) {
                 continue;
@@ -231,13 +241,11 @@ impl IntegrationTokenRefreshHandler {
                         "refresh_token": refresh_final,
                     });
                     if let Ok(reenc) = secret_box.encrypt_json(&blob) {
-                        if let Some(obj) = acct.as_object_mut() {
-                            obj.insert("tokens_encrypted".into(), Value::String(reenc));
-                            obj.insert(
-                                "expires_at".into(),
-                                Value::from(now_secs + expires_in.max(0)),
-                            );
-                        }
+                        refreshed.push((
+                            account_id.to_string(),
+                            reenc,
+                            now_secs + expires_in.max(0),
+                        ));
                         changed += 1;
                     }
                 }
@@ -251,14 +259,53 @@ impl IntegrationTokenRefreshHandler {
             return Ok(0);
         }
 
-        node.properties.insert(
+        // Re-read and patch by id. Anything that changed while we were talking
+        // to the provider — a connection added, another removed — survives,
+        // because we only touch the entries we actually refreshed. A whole-array
+        // write here is what used to silently delete a concurrently-added
+        // connection.
+        let mut fresh = match svc.get(&node.id).await? {
+            Some(n) => n,
+            // Connector deleted mid-refresh: nothing to write back.
+            None => return Ok(0),
+        };
+        let mut current = match fresh.properties.get("connected_accounts") {
+            Some(pv) => match serde_json::to_value(pv) {
+                Ok(Value::Array(a)) => a,
+                _ => return Ok(0),
+            },
+            None => return Ok(0),
+        };
+
+        let mut applied = 0usize;
+        for (account_id, blob, expires_at) in refreshed {
+            let Some(entry) = current
+                .iter_mut()
+                .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(account_id.as_str()))
+            else {
+                // Disconnected while we were refreshing it — dropping the new
+                // token is correct; re-adding the entry would resurrect it.
+                continue;
+            };
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("tokens_encrypted".into(), Value::String(blob));
+                obj.insert("expires_at".into(), Value::from(expires_at));
+                applied += 1;
+            }
+        }
+
+        if applied == 0 {
+            return Ok(0);
+        }
+
+        fresh.properties.insert(
             "connected_accounts".to_string(),
-            serde_json::from_value::<PropertyValue>(Value::Array(accounts)).map_err(|e| {
+            serde_json::from_value::<PropertyValue>(Value::Array(current)).map_err(|e| {
                 raisin_error::Error::Validation(format!("connected_accounts re-encode failed: {e}"))
             })?,
         );
-        svc.update_node(node).await?;
-        Ok(changed)
+        svc.update_node(fresh).await?;
+        Ok(applied)
     }
 
     /// POST the `refresh_token` grant and return `(access_token, new_refresh_token?, expires_in_secs)`.

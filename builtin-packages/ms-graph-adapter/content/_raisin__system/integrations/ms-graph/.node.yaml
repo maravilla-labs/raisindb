@@ -13,36 +13,68 @@ properties:
     3. On **Certificates & secrets**, create a **New client secret** and copy
        its value now (it is shown only once).
     4. On **API permissions**, add **Microsoft Graph → Delegated**:
-       `Mail.Read`, `Calendars.Read`, `Files.Read`, `offline_access`, then click
-       **Grant admin consent**.
+       `Mail.Read`, `Calendars.Read`, `Files.Read`, `offline_access`, `openid`,
+       `email`, `profile`, then click **Grant admin consent**. (The last three
+       are what let RaisinDB label the connected account with its mailbox
+       address instead of a bare `ms-graph`.)
     5. Copy the **Application (client) ID** and the client secret into the fields
        on this page. The secret is encrypted at rest.
-    6. Click **Connect account** and sign in. Then create a mount and set
-       **resource** to `mail`, `calendar`, or `files` (OneDrive).
+    6. **If your app registration is single-tenant** (the default), copy the
+       **Directory (tenant) ID** from the app's Overview page into the
+       *Microsoft directory (tenant) ID* box and click **Apply**. Leaving the
+       endpoints on `common` fails with `AADSTS50194` the moment you try to
+       connect.
+    7. Click **Connect account** and sign in. Then create a mount and set
+       **resource** to `mail`, `calendar`, or `files` (OneDrive), and pick the
+       matching **Mapping function** (`/mappers/ms-graph-mail`,
+       `-calendar`, or `-files`) — leaving it blank falls back to a generic
+       mapping that drops the provider-specific fields.
 
     **Push:** automatic. The engine registers the Graph subscription for you when
     a mount uses `mode: webhook` or `hybrid` — no manual webhook setup needed.
   # Adapter path inside the `functions` workspace (see content/functions/adapters).
   adapter_function: /adapters/ms-graph
+  # Config schemas the admin console renders dynamically. The connection schema
+  # carries `tenant_id`, which is what lets one Microsoft connector hold
+  # connections into several Entra directories.
+  config_type: msgraph:ConnectorConfig
+  connection_config_type: msgraph:ConnectionConfig
   # EXPERIMENTAL / PREVIEW. Disabled until an operator supplies client_id and
   # client_secret via the admin console. The client secret is NEVER stored here —
   # the console encrypts it into client_secret_encrypted (AES-256-GCM) on the node.
   enabled: false
   oauth_config:
-    # Microsoft identity platform (v2.0) endpoints. `common` accepts both work/
-    # school (Azure AD) and personal Microsoft accounts; swap for a tenant id to
-    # restrict to a single tenant.
+    # Microsoft identity platform (v2.0) endpoints. The path segment after the
+    # host is the AUTHORITY.
+    #
+    # `common` works only for app registrations that are explicitly MULTI-TENANT.
+    # A single-tenant app registered after 2018-10-15 is rejected with
+    #   AADSTS50194: Application '<id>' is not configured as a multi-tenant
+    #   application. Usage of the /common endpoint is not supported ...
+    # In that case replace `common` in BOTH URLs with your Directory (tenant) ID.
+    # The connector editor has a "Microsoft directory (tenant) ID" helper that
+    # rewrites both for you.
     auth_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
     token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
     # Least-privilege read scopes; offline_access yields a refresh token so the
     # engine can keep the mount synced without re-consent.
+    #
+    # openid/email/profile are what make Microsoft return an id_token, from
+    # which the callback reads the account's email to LABEL the connected
+    # account. Drop them and accounts show up as a bare "ms-graph".
     scopes:
       - offline_access
+      - openid
+      - email
+      - profile
       - Mail.Read
       - Calendars.Read
       - Files.Read
     # Filled in by the admin console to match the deployment's callback URL,
-    # e.g. https://<host>/api/integrations/oauth/callback
+    # e.g. https://<host>/api/integrations/<repo>/oauth/callback
+    # The <repo> segment is REQUIRED and the path must end in /callback --
+    # that is the only route the callback is registered on. Leave blank and
+    # the server derives it from RAISINDB_BASE_URL.
     redirect_uri: ""
     # Force the consent screen so Microsoft issues a refresh token.
     prompt: consent

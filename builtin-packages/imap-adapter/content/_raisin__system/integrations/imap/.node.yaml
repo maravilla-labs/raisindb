@@ -10,14 +10,19 @@ properties:
        and **TLS** (keep enabled). Defaults here are Gmail's `imap.gmail.com:993`.
     2. Choose an auth mode:
        - **App password** (recommended, no OAuth): if your provider enforces
-         2-factor auth, generate an app-specific password and use it as the
-         account password. Set `api_config.auth_mode: app_password`.
+         2-factor auth, generate an app-specific password. Leave
+         `api_config.auth` as `password`.
        - **XOAUTH2**: only for providers that issue OAuth access tokens. Set
-         `auth_mode: oauth`, fill `oauth_config`, register the **Redirect URI
-         shown above**, and add client id/secret.
-    3. Click **Connect account** and enter the username plus the app password
-       (or complete OAuth), then create a mount. On the mount you can override
-       host/port/tls/mailbox per connection.
+         `api_config.auth: xoauth2`, fill `oauth_config`, register the
+         **Redirect URI shown above**, and add client id/secret.
+    3. Click **Add connection** and fill in host, port, username and the app
+       password. (**Connect account** is the OAuth path and applies only in
+       XOAUTH2 mode.) The password is encrypted at rest and never displayed
+       again.
+    4. Add a connection per mailbox you want to sync — one connector can hold
+       several, each with its own server and credentials. Then create a mount,
+       pick the connection it should use, and optionally override the mailbox
+       on the mount itself.
 
     No OAuth client is needed for the app-password path.
   # Adapter path inside the `functions` workspace (see content/functions/adapters).
@@ -29,19 +34,28 @@ properties:
   # Non-OAuth configuration for the app-password path. The mailbox is reached
   # over a REAL IMAP connection (RFC 3501) with implicit TLS via the native
   # raisin.imap binding — not JMAP/HTTP.
+  # Per-connection configuration schema. The admin console renders this as the
+  # "Add connection" form: host/port/tls/mailbox/username plus a write-only
+  # password. Each connection stores its own values, so one IMAP connector can
+  # serve several mailboxes on different servers.
+  connection_config_type: imap:ConnectionConfig
   api_config:
     protocol: imap
-    # Default IMAP host/port used when a mount omits them. The mount's
-    # sync_config (host/port/tls/mailbox) is what the adapter actually reads;
-    # these are template defaults for the connect form.
+    # Fallback defaults for connections that omit a field, and for mounts
+    # authored before connection_config_type existed. Precedence is
+    # api_config < connector config < connection config < mount sync_config.
     host: imap.gmail.com
     port: 993
     tls: true
-    # Default mailbox to sync when a mount omits it (IMAP folder name).
+    # Default mailbox to sync when nothing more specific says otherwise.
     default_mailbox: INBOX
-    # "app_password" stores the app password as the account secret; "oauth"
-    # stores an XOAUTH2 access token used as the IMAP login secret instead.
-    auth_mode: app_password
+    # "password" uses the connection's stored app password; "xoauth2" uses an
+    # OAuth access token as the IMAP SASL secret instead.
+    #
+    # NOTE: the key is `auth`, not `auth_mode`. The adapter reads `auth`
+    # (connConfig()); the old `auth_mode: app_password` spelling here was never
+    # read by anything, so it silently did nothing.
+    auth: password
   # Optional OAuth path for providers that issue XOAUTH2 access tokens (e.g.
   # Gmail). Only used when api_config.auth_mode is "oauth"; the client secret is
   # stored ONLY as client_secret_encrypted (AES-256-GCM), never here. Endpoints

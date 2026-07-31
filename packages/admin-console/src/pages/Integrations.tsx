@@ -55,6 +55,21 @@ export default function Integrations() {
     }
   }, [searchParams, setSearchParams, load, showSuccess])
 
+  // ...and with ?oauth_error=<code> when the provider refused. The description
+  // carries the provider's own diagnostic (e.g. Microsoft's AADSTS50194,
+  // "not configured as a multi-tenant application"), which is what actually
+  // tells the operator what to change.
+  useEffect(() => {
+    const code = searchParams.get('oauth_error')
+    if (code) {
+      const detail = searchParams.get('oauth_error_description') || undefined
+      showError(`Connect failed: ${code}`, detail)
+      searchParams.delete('oauth_error')
+      searchParams.delete('oauth_error_description')
+      setSearchParams(searchParams, { replace: true })
+    }
+  }, [searchParams, setSearchParams, showError])
+
   function openNew() {
     setEditing(undefined)
     setShowEditor(true)

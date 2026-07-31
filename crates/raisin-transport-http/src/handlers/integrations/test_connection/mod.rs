@@ -54,6 +54,15 @@ pub struct TestConnectionRequest {
     /// Remote folder to probe. Defaults to the adapter's own root.
     #[serde(default)]
     pub remote_root: Option<String>,
+    /// Caller-supplied `sync_config` keys to forward into the probe's mount
+    /// snapshot (e.g. ms-graph's `resource`, a calendar `window`).
+    ///
+    /// Without this the probe always synthesized a bare `sync_config`, so
+    /// `resourceOf(mount)` fell back to `"mail"` and a calendar or OneDrive
+    /// mount could never be tested against the surface it actually syncs.
+    /// Engine-owned keys below still win, so a caller cannot widen the probe.
+    #[serde(default)]
+    pub sync_config: Option<serde_json::Value>,
 }
 
 /// The `capabilities` object cached on the integration node and echoed back to
@@ -161,6 +170,19 @@ pub async fn test_connection(
 
     // Resolve the credential (refresh_token stripped) and the base auth state.
     let (credential, base_auth) = match &req.account_id {
+        // No account was named. "not_required" is only true for adapters that
+        // genuinely need no credential; for anything OAuth-shaped, invoking with
+        // `credential: null` just pushes the failure into the adapter, where it
+        // used to surface as an opaque JS TypeError. Diagnose it here instead.
+        None if requires_credential(&node) => {
+            return Ok(Json(fail(
+                started,
+                "missing",
+                "missing_credential",
+                "this connector authenticates per account — connect an account and \
+                 select it before testing",
+            )));
+        }
         None => (None, "not_required"),
         Some(id) => match support::resolve_credential(&state, &node, &provider_type, id) {
             Some(cred) => (Some(cred), "valid"),
@@ -194,7 +216,7 @@ pub async fn test_connection(
         .get("api_config")
         .and_then(|pv| serde_json::to_value(pv).ok())
         .unwrap_or(serde_json::Value::Null);
-    let mount = support::mount_snapshot(&req.remote_root, &api_config);
+    let mount = support::mount_snapshot(&req.remote_root, &api_config, req.sync_config.as_ref());
     let outcome = match tokio::time::timeout(
         PROBE_TIMEOUT,
         probe::run_probe(
@@ -242,6 +264,19 @@ pub async fn test_connection(
     Err(ApiError::internal(
         "Connection test requires the RocksDB backend",
     ))
+}
+
+/// Whether this connector authenticates per connected account.
+///
+/// True when it declares an OAuth authorization endpoint or already has at
+/// least one connected account. Both signals matter: a freshly configured OAuth
+/// connector has no accounts yet, and a credential-based connector may have
+/// accounts without an `oauth_config`. Adapters that need nothing (a public
+/// API) declare neither and keep the `not_required` path.
+#[cfg(feature = "storage-rocksdb")]
+fn requires_credential(node: &raisin_models::nodes::Node) -> bool {
+    let has_auth_url = super::json_str(&super::oauth_config(node), "auth_url").is_some();
+    has_auth_url || !super::connected_accounts(node).is_empty()
 }
 
 /// Build a failed diagnostic response (still HTTP 200).

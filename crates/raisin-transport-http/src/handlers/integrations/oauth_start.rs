@@ -54,9 +54,11 @@ pub async fn start(
     let client_id = json_str(&cfg, "client_id").ok_or_else(|| {
         ApiError::validation_failed("integration oauth_config.client_id is missing")
     })?;
-    let redirect_uri = json_str(&cfg, "redirect_uri").ok_or_else(|| {
-        ApiError::validation_failed("integration oauth_config.redirect_uri is missing")
-    })?;
+    // Derived, not trusted: a stored value that does not point at the one route
+    // `oauth_callback` is registered on is repaired here, so consent never ends
+    // on a 404. `oauth_callback` resolves it the same way — the provider
+    // requires the authorize and token requests to match byte-for-byte.
+    let redirect_uri = super::resolve_redirect_uri(&cfg, &repo);
     let scopes = scopes_string(&cfg);
 
     let state_token = nanoid::nanoid!();

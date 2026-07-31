@@ -387,6 +387,55 @@ mod tests {
         assert_eq!(version.len(), 32); // MD5 hash is 32 hex characters
     }
 
+    /// The loader logs-and-skips a YAML file it cannot deserialize, so a typo in
+    /// one of these would silently drop the type rather than fail the build.
+    /// Assert the connector-config types load and that `raisin:Integration`
+    /// carries the schema-driven-config revision.
+    #[test]
+    fn connector_config_nodetypes_are_loadable() {
+        let nodetypes = load_global_nodetypes();
+        let by_name = |n: &str| nodetypes.iter().find(|nt| nt.name == n).cloned();
+
+        for name in ["raisin:ConnectorConfig", "raisin:ConnectionConfig"] {
+            let nt = by_name(name).unwrap_or_else(|| panic!("{name} failed to load"));
+            // Never instantiated as nodes; strictness would only trap subtypes
+            // that legitimately carry provider-specific keys.
+            assert_eq!(nt.strict, Some(false), "{name} must not be strict");
+        }
+
+        // The base connection type carries `label`, and its UI hints must survive
+        // deserialization — PropertyValueSchema drops top-level title/description,
+        // which is exactly why they live under `meta`.
+        let conn = by_name("raisin:ConnectionConfig").expect("loaded above");
+        let label = conn
+            .properties
+            .as_ref()
+            .and_then(|ps| ps.iter().find(|p| p.name.as_deref() == Some("label")))
+            .expect("raisin:ConnectionConfig should declare `label`");
+        assert!(
+            label.meta.as_ref().is_some_and(|m| m.contains_key("label")),
+            "UI hints must be carried in `meta` to survive the round trip"
+        );
+
+        let integration = by_name("raisin:Integration").expect("raisin:Integration must load");
+        assert_eq!(integration.version, Some(2));
+        for prop in [
+            "config_type",
+            "connection_config_type",
+            "config",
+            "config_secrets_encrypted",
+            "config_secret_fields",
+        ] {
+            assert!(
+                integration
+                    .properties
+                    .as_ref()
+                    .is_some_and(|ps| ps.iter().any(|p| p.name.as_deref() == Some(prop))),
+                "raisin:Integration is strict, so `{prop}` must be declared or writes are rejected"
+            );
+        }
+    }
+
     #[test]
     fn test_load_global_nodetypes() {
         let nodetypes = load_global_nodetypes();

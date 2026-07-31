@@ -70,6 +70,15 @@ function raiseForStatus(resp, context) {
 // { status, headers, body }.
 function driveFetch(credential, method, url, opts) {
   opts = opts || {};
+  // The engine passes `credential: null` when no account is selected; guard so
+  // that surfaces as a readable error rather than a TypeError. Plain Error on
+  // purpose — a coded "auth_expired" would be rewritten by the host into
+  // "credential is expired or was rejected", the wrong diagnosis here.
+  if (!credential || !credential.access_token) {
+    throw new Error(
+      "no account credential — connect a Google account and select it for this connector or mount"
+    );
+  }
   var headers = { Authorization: "Bearer " + credential.access_token };
   if (opts.headers) {
     for (var k in opts.headers) headers[k] = opts.headers[k];

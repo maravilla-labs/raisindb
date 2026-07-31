@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Activity, CheckCircle2, XCircle, Loader2, Clock } from 'lucide-react'
 import {
   integrationsApi,
+  deriveStages,
   type TestConnectionRequest,
   type TestConnectionResult,
   type TestConnectionStages,
@@ -57,7 +58,6 @@ export default function TestConnectionPanel({
       // result so the panel still shows a useful diagnostic.
       const synthetic: TestConnectionResult = {
         ok: false,
-        stages: { adapter_loaded: false, auth_valid: false, listing_succeeded: false },
         error: { code: e?.code, message: e?.message || 'Connection test failed' },
       }
       setResult(synthetic)
@@ -109,12 +109,21 @@ export default function TestConnectionPanel({
                 <Clock className="w-3 h-3" /> {result.latency_ms} ms
               </span>
             )}
+            {result.auth && (
+              <span
+                className="inline-flex items-center gap-1 text-xs text-zinc-400"
+                title="Credential state reported by the server"
+              >
+                auth: {result.auth}
+              </span>
+            )}
           </div>
 
-          {/* Stage breakdown — the first failing stage localizes the problem. */}
+          {/* Stage breakdown — the first failing stage localizes the problem.
+              Derived client-side: the server reports auth/probe/error, not stages. */}
           <ol className="space-y-1">
             {STAGE_LABELS.map(({ key, label }) => {
-              const passed = result.stages?.[key]
+              const passed = deriveStages(result)[key]
               return (
                 <li key={key} className="flex items-center gap-2 text-xs">
                   {passed ? (
@@ -144,13 +153,13 @@ export default function TestConnectionPanel({
             </div>
           )}
 
-          {result.sample && result.sample.length > 0 && (
+          {result.probe && result.probe.sample.length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
-                Probe sample ({result.sample.length})
+                Probe sample ({result.probe.sample.length} of {result.probe.items_seen})
               </div>
               <ul className="flex flex-wrap gap-1">
-                {result.sample.slice(0, 12).map((name, i) => (
+                {result.probe.sample.slice(0, 12).map((name, i) => (
                   <li
                     key={`${name}-${i}`}
                     className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[11px] text-zinc-300 truncate max-w-[160px]"

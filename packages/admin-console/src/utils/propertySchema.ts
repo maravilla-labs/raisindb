@@ -18,16 +18,59 @@ export function getSchemaType(schema: any): string {
   return 'string'
 }
 
+/**
+ * UI hints authored on a NodeType arrive under `meta`.
+ *
+ * The server's `PropertyValueSchema` has no `title`, `description`, `enum`,
+ * `label` or `placeholder` field and no catch-all, so serde silently DROPS
+ * those keys: they never reach `resolved_properties`. `meta` is the only
+ * free-form map that survives the round trip, which is why schema authors are
+ * told to put presentation hints there. These helpers therefore check the
+ * top-level key first (for schemas supplied inline by the client, where it does
+ * survive) and fall back to `meta`.
+ */
+function metaOf(schema: any): Record<string, any> {
+  return (schema?.meta as Record<string, any>) || {}
+}
+
 export function getSchemaLabel(name: string, schema: any): string {
-  return schema?.label || schema?.title || formatLabel(name)
+  const meta = metaOf(schema)
+  return schema?.label || schema?.title || meta.label || meta.title || formatLabel(name)
 }
 
 export function getSchemaPlaceholder(schema: any): string | undefined {
-  return schema?.placeholder || schema?.hint || schema?.descriptionPlaceholder
+  const meta = metaOf(schema)
+  return (
+    schema?.placeholder || schema?.hint || schema?.descriptionPlaceholder || meta.placeholder
+  )
 }
 
 export function getSchemaDescription(schema: any): string | undefined {
-  return schema?.description || schema?.help_text || schema?.helpText
+  const meta = metaOf(schema)
+  return schema?.description || schema?.help_text || schema?.helpText || meta.description
+}
+
+/**
+ * Whether this property holds a secret.
+ *
+ * Secret values are never sent to the browser — only the field NAME appears, in
+ * `secret_fields` / `config_secret_fields`. The form renders a write-only input
+ * and submits changes through the dedicated encrypting endpoints.
+ */
+export function isSecretField(schema: any): boolean {
+  return Boolean(schema?.secret ?? metaOf(schema).secret)
+}
+
+/** Optional grouping key, so related fields render together. */
+export function getFieldGroup(schema: any): string | undefined {
+  return schema?.group || metaOf(schema).group
+}
+
+/** Sort order within a group. Unordered fields sink to the bottom. */
+export function getFieldOrder(schema: any): number {
+  const raw = schema?.order ?? metaOf(schema).order
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER
 }
 
 export function getSchemaStructure(schema: any): Record<string, any> | undefined {
@@ -43,6 +86,10 @@ export function getSchemaEnum(schema: any): Array<string | { value: string; labe
   if (Array.isArray(schema?.options)) return schema.options
   if (Array.isArray(schema?.values)) return schema.values
   if (Array.isArray(schema?.allowed)) return schema.allowed
+  // Server-resolved schemas carry it here — see metaOf().
+  const meta = metaOf(schema)
+  if (Array.isArray(meta.enum)) return meta.enum
+  if (Array.isArray(meta.options)) return meta.options
   return undefined
 }
 

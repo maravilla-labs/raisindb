@@ -59,6 +59,23 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/oauth/client-secret",
                 post(integrations::set_client_secret),
             )
+            // Generic connector-level secrets (supersedes oauth/client-secret,
+            // which stays registered as the narrow legacy alias).
+            .route(
+                "/api/integrations/{repo}/config-secrets",
+                axum::routing::put(integrations::set_config_secrets),
+            )
+            // Connections: the non-OAuth path to a connected account, and what
+            // lets one connector hold several.
+            .route(
+                "/api/integrations/{repo}/connections",
+                get(integrations::list_connections).post(integrations::create_connection),
+            )
+            .route(
+                "/api/integrations/{repo}/connections/{account_id}",
+                axum::routing::patch(integrations::update_connection)
+                    .delete(integrations::delete_connection),
+            )
             .route(
                 "/api/integrations/{repo}/mounts/{mount_id}/sync",
                 post(integrations::sync_mount),

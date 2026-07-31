@@ -1,0 +1,33 @@
+name: raisin:ConnectionConfig
+description: >
+  Base type for a connector's PER-CONNECTION configuration schema. An adapter
+  package ships a subtype (e.g. imap:ConnectionConfig, msgraph:ConnectionConfig)
+  via `extends`, declaring the fields that differ between two connections of the
+  same connector - a second Entra tenant, a second IMAP mailbox. Values live on
+  each raisin:Integration.connected_accounts[] entry.
+icon: link
+version: 1
+
+# Not strict, never instantiated as a node - see raisin:ConnectorConfig for the
+# full authoring contract (in particular: UI hints go in `meta`, because
+# PropertyValueSchema drops top-level title/description/enum/placeholder).
+strict: false
+indexable: false
+versionable: false
+publishable: false
+auditable: false
+
+properties:
+  # Every connection is nameable, so a connector holding several can tell them
+  # apart in the account picker. Subtypes inherit this and typically add a field
+  # flagged `meta.identity: true` (a username, a mailbox) for a secondary line.
+  - name: label
+    type: String
+    required: false
+    meta:
+      label: Connection name
+      description: How this connection appears in pickers and mount lists.
+      placeholder: Support mailbox
+      order: 0
+
+allowed_children: []

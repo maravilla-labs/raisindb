@@ -15,7 +15,10 @@
 //!   cannot carry a bearer token — it is authenticated instead by the single-use,
 //!   TTL'd `state` parameter minted by the authenticated `start` call.
 
+mod accounts_lock;
 mod client_secret;
+mod config_secrets;
+mod connections;
 mod manage;
 mod notifications;
 mod oauth_callback;
@@ -25,6 +28,8 @@ pub mod state_store;
 mod test_connection;
 
 pub use client_secret::set_client_secret;
+pub use config_secrets::set_config_secrets;
+pub use connections::{create_connection, delete_connection, list_connections, update_connection};
 pub use manage::{disconnect, sync_mount};
 pub use notifications::notify;
 pub use oauth_callback::callback;
@@ -113,6 +118,59 @@ pub(crate) fn scopes_string(cfg: &Value) -> String {
     }
 }
 
+/// Resolve the OAuth `redirect_uri` for a repo, repairing a misconfigured one.
+///
+/// The provider redirects the browser to whatever we send here, and
+/// `oauth_callback` is routed on exactly one path
+/// ([`setup_info::oauth_callback_path`]). A stored value pointing anywhere else
+/// — the shipped templates once hinted at a URL missing the `{repo}` segment —
+/// sends the user to a 404 *after* they have consented, which is both confusing
+/// and unfixable from the provider's side.
+///
+/// Resolution order:
+/// 1. Empty/absent → the canonical URI.
+/// 2. Stored value whose path is already canonical → used verbatim (its host may
+///    legitimately differ from `RAISINDB_BASE_URL`: proxy, custom domain).
+/// 3. Stored value with a wrong path → its scheme+host are kept and the path is
+///    corrected. This repairs the exact production misconfiguration in place.
+/// 4. Unparseable → the canonical URI.
+///
+/// Both `oauth/start` and `oauth/callback` must call this, because the provider
+/// requires the two to match byte-for-byte.
+pub(crate) fn resolve_redirect_uri(cfg: &Value, repo: &str) -> String {
+    let (base, _) = setup_info::base_or_placeholder();
+    resolve_redirect_uri_with_base(cfg, repo, &base)
+}
+
+/// [`resolve_redirect_uri`] with the base URL injected.
+///
+/// Split out so the resolution rules are testable without touching
+/// `RAISINDB_BASE_URL`: env vars are process-global, and several other handlers
+/// in this crate (`oauth_as::helpers`, `repo_sign`, `mcp`) read that same
+/// variable, so a test that set it raced their tests inside the shared test
+/// binary.
+fn resolve_redirect_uri_with_base(cfg: &Value, repo: &str, base: &str) -> String {
+    let canonical = setup_info::oauth_redirect_uri(base, repo);
+    let want_path = setup_info::oauth_callback_path(repo);
+
+    let Some(stored) = json_str(cfg, "redirect_uri") else {
+        return canonical;
+    };
+    match url::Url::parse(&stored) {
+        Ok(mut u) => {
+            if u.path().trim_end_matches('/') == want_path {
+                stored
+            } else {
+                u.set_path(&want_path);
+                u.set_query(None);
+                u.set_fragment(None);
+                u.to_string()
+            }
+        }
+        Err(_) => canonical,
+    }
+}
+
 /// Decrypt an integration node's `client_secret_encrypted` (base64 of the
 /// standard wire format) if present. Returns `None` for public clients.
 pub(crate) fn decrypt_client_secret(node: &Node, master_key: &[u8; 32]) -> Option<String> {
@@ -144,4 +202,82 @@ pub(crate) fn set_connected_accounts(
         .map_err(|e| ApiError::internal(format!("failed to encode connected_accounts: {e}")))?;
     node.properties.insert("connected_accounts".to_string(), pv);
     Ok(())
+}
+
+#[cfg(test)]
+mod redirect_uri_tests {
+    use super::*;
+    use serde_json::json;
+
+    const BASE: &str = "https://solutas.rdb.maravilla.cloud";
+
+    /// Pure resolver — no `RAISINDB_BASE_URL` mutation, so these are safe to run
+    /// in parallel with the other handlers that read that same variable.
+    fn resolve(cfg: &Value, repo: &str) -> String {
+        resolve_redirect_uri_with_base(cfg, repo, BASE)
+    }
+
+    #[test]
+    fn missing_redirect_uri_falls_back_to_canonical() {
+        assert_eq!(
+            resolve(&json!({}), "studio"),
+            "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback"
+        );
+    }
+
+    /// The exact production misconfiguration: the stored value dropped the
+    /// trailing `callback`, so the provider redirected to a path that 404s.
+    #[test]
+    fn wrong_path_is_repaired_in_place() {
+        let cfg = json!({
+            "redirect_uri": "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/"
+        });
+        assert_eq!(
+            resolve(&cfg, "studio"),
+            "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback"
+        );
+    }
+
+    /// A missing `{repo}` segment is also a wrong path — this is what the
+    /// shipped template hint comments used to suggest.
+    #[test]
+    fn missing_repo_segment_is_repaired() {
+        let cfg = json!({ "redirect_uri": "https://example.test/api/integrations/oauth/callback" });
+        assert_eq!(
+            resolve(&cfg, "studio"),
+            "https://example.test/api/integrations/studio/oauth/callback"
+        );
+    }
+
+    /// A correct URI on a host that differs from the configured base (proxy,
+    /// custom domain) must be preserved verbatim — rewriting it to the
+    /// configured base would break a working deployment.
+    #[test]
+    fn correct_path_on_a_different_host_is_preserved() {
+        let cfg = json!({ "redirect_uri": "https://public.example/api/integrations/studio/oauth/callback" });
+        assert_eq!(
+            resolve(&cfg, "studio"),
+            "https://public.example/api/integrations/studio/oauth/callback"
+        );
+    }
+
+    #[test]
+    fn unparseable_value_falls_back_to_canonical() {
+        let cfg = json!({ "redirect_uri": "not a url" });
+        assert_eq!(
+            resolve(&cfg, "studio"),
+            "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback"
+        );
+    }
+
+    /// Repair must drop any query/fragment so the provider sees exactly the
+    /// registered redirect URI.
+    #[test]
+    fn repair_strips_query_and_fragment() {
+        let cfg = json!({ "redirect_uri": "https://example.test/wrong?a=1#f" });
+        assert_eq!(
+            resolve(&cfg, "studio"),
+            "https://example.test/api/integrations/studio/oauth/callback"
+        );
+    }
 }

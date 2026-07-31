@@ -129,8 +129,16 @@ pub async fn setup_urls_mount(
 
 /// Build the OAuth redirect URI (frozen shape — this is what the provider calls
 /// back and what `oauth_callback` is routed on).
-fn oauth_redirect_uri(base: &str, repo: &str) -> String {
+pub(crate) fn oauth_redirect_uri(base: &str, repo: &str) -> String {
     format!("{base}/api/integrations/{repo}/oauth/callback")
+}
+
+/// The one path `oauth_callback` is actually routed on, for a given repo.
+///
+/// `routes/integrations.rs` registers exactly one GET under `oauth/`; any other
+/// path 404s. Kept next to [`oauth_redirect_uri`] so the two cannot drift.
+pub(crate) fn oauth_callback_path(repo: &str) -> String {
+    format!("/api/integrations/{repo}/oauth/callback")
 }
 
 /// Build the per-mount push notification URL (frozen shape — the notifications
@@ -199,7 +207,7 @@ fn configured_base_url() -> Option<String> {
 
 /// Resolve the base for URL construction: `(base, configured)`. Falls back to the
 /// `{base}` placeholder (never fails) so the UI still gets a usable path.
-fn base_or_placeholder() -> (String, bool) {
+pub(crate) fn base_or_placeholder() -> (String, bool) {
     match configured_base_url() {
         Some(b) => (b, true),
         None => (BASE_PLACEHOLDER.to_string(), false),

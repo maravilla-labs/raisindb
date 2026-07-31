@@ -79,6 +79,19 @@ fn scope() -> MountScope {
     }
 }
 
+/// Minimal `IntegrationConfig` carrying just an `api_config`, for snapshot tests.
+fn test_integration(api_config: Value) -> super::config::IntegrationConfig {
+    super::config::IntegrationConfig {
+        provider_type: "test".to_string(),
+        adapter_function: None,
+        accounts: Vec::new(),
+        api_config,
+        config: Value::Null,
+        connection_config_type: None,
+        credential_fields: Vec::new(),
+    }
+}
+
 fn mk_mount(sync: SyncConfig) -> MountConfig {
     MountConfig {
         mount_id: MOUNT_ID.to_string(),
@@ -230,7 +243,7 @@ fn ctx<'a>(
         lock_manager: None,
         lock_key: "k".to_string(),
         credential: None,
-        mount_snapshot: super::build_mount_snapshot(mount, &Value::Null),
+        mount_snapshot: super::build_mount_snapshot(mount, &test_integration(Value::Null), None),
     }
 }
 
@@ -923,7 +936,7 @@ fn mount_snapshot_forwards_full_sync_config_and_api_config() {
     });
     let api_config = json!({ "auth_mode": "xoauth2", "default_mailbox": "INBOX" });
 
-    let snap = super::build_mount_snapshot(&mount, &api_config);
+    let snap = super::build_mount_snapshot(&mount, &test_integration(api_config), None);
 
     // The full sync_config is forwarded verbatim, including the non-whitelisted key.
     let sc = snap.get("sync_config").unwrap();
@@ -958,11 +971,10 @@ fn credential_carries_connected_account_subject_as_username() {
     let account = ConnectedAccount {
         id: "acct-1".to_string(),
         subject: Some("user@example.com".to_string()),
-        expires_at: None,
-        tokens_encrypted: None,
+        ..Default::default()
     };
     let tokens = json!({ "access_token": "at", "refresh_token": "rt" });
-    let cred = super::build_credential("imap", &account.id, account.subject.as_deref(), &tokens);
+    let cred = super::build_credential("imap", &account, Some(&tokens), None, &[]);
 
     assert_eq!(
         cred.get("username").and_then(|v| v.as_str()),
@@ -1134,4 +1146,103 @@ async fn read_state_token(env: &Env) -> Option<String> {
         .get("last_sync_token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+// ---- per-connection config + credential resolution ----
+
+/// The mount snapshot must layer all four config sources, with the mount's own
+/// `sync_config` winning. `api_config` and `sync_config` stay byte-identical so
+/// adapters written against them keep working.
+#[test]
+fn mount_snapshot_exposes_merged_config_without_disturbing_legacy_keys() {
+    use raisin_models::nodes::integrations::ConnectedAccount;
+
+    let mut mount = mk_mount(SyncConfig::default());
+    mount.sync_config_raw = json!({ "mailbox": "Archive" });
+
+    let mut integration = test_integration(json!({
+        "host": "imap.default.test",
+        "port": 993,
+        "mailbox": "INBOX",
+    }));
+    integration.config = json!({ "host": "imap.connector.test" });
+
+    let account = ConnectedAccount {
+        id: "conn-2".to_string(),
+        config: Some(json!({ "host": "imap.account.test", "username": "ops@example.com" })),
+        ..Default::default()
+    };
+
+    let snap = super::build_mount_snapshot(&mount, &integration, Some(&account));
+    let cfg = snap.get("config").unwrap();
+
+    // Per-connection beats connector beats api_config...
+    assert_eq!(
+        cfg.get("host").and_then(|v| v.as_str()),
+        Some("imap.account.test")
+    );
+    // ...the mount still wins over all of them...
+    assert_eq!(cfg.get("mailbox").and_then(|v| v.as_str()), Some("Archive"));
+    // ...and a key only api_config sets survives.
+    assert_eq!(cfg.get("port").and_then(|v| v.as_i64()), Some(993));
+
+    // Legacy views are untouched, so existing adapters see exactly what they did.
+    assert_eq!(
+        snap.get("api_config")
+            .unwrap()
+            .get("host")
+            .and_then(|v| v.as_str()),
+        Some("imap.default.test")
+    );
+    assert_eq!(
+        snap.get("sync_config")
+            .unwrap()
+            .get("mailbox")
+            .and_then(|v| v.as_str()),
+        Some("Archive")
+    );
+}
+
+/// With no connection selected there is simply no per-connection layer — this
+/// is the credential-free adapter case and must not error.
+#[test]
+fn mount_snapshot_without_an_account_still_merges() {
+    let mount = mk_mount(SyncConfig::default());
+    let integration = test_integration(json!({ "host": "api.test" }));
+    let snap = super::build_mount_snapshot(&mount, &integration, None);
+    assert_eq!(
+        snap.get("config")
+            .unwrap()
+            .get("host")
+            .and_then(|v| v.as_str()),
+        Some("api.test")
+    );
+}
+
+/// A connector holding two connections must refuse to guess.
+#[test]
+fn account_for_refuses_to_guess_between_two_connections() {
+    use raisin_models::nodes::integrations::{AccountSelectionError, ConnectedAccount};
+
+    let mut integration = test_integration(Value::Null);
+    integration.accounts = vec![
+        ConnectedAccount {
+            id: "a".into(),
+            ..Default::default()
+        },
+        ConnectedAccount {
+            id: "b".into(),
+            ..Default::default()
+        },
+    ];
+
+    assert!(matches!(
+        integration.account_for(None),
+        Err(AccountSelectionError::Ambiguous { .. })
+    ));
+    assert_eq!(integration.account_for(Some("b")).unwrap().id, "b");
+    assert!(matches!(
+        integration.account_for(Some("gone")),
+        Err(AccountSelectionError::NotFound { .. })
+    ));
 }

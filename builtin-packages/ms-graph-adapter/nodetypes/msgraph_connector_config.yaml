@@ -1,0 +1,28 @@
+name: msgraph:ConnectorConfig
+description: >
+  Connector-level settings shared by every Microsoft 365 connection: the Entra
+  app registration this deployment authenticates as.
+extends: raisin:ConnectorConfig
+version: 1
+
+strict: false
+indexable: false
+versionable: false
+publishable: false
+auditable: false
+
+properties:
+  - name: default_tenant_id
+    type: String
+    required: false
+    default: common
+    meta:
+      label: Default directory (tenant) ID
+      description: >
+        Authority used by connections that do not set their own tenant id.
+        `common` works ONLY for multi-tenant app registrations; a single-tenant
+        app must use its directory GUID or sign-in fails with AADSTS50194.
+      group: microsoft
+      order: 10
+
+allowed_children: []

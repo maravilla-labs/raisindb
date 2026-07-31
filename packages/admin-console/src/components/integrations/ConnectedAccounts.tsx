@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: BSL-1.1
 
-import { useRef, useState } from 'react'
-import { LinkIcon, Unlink, Loader2, UserCircle } from 'lucide-react'
-import { integrationsApi, type Integration, type ConnectedAccount } from '../../api/integrations'
+import { useEffect, useRef, useState } from 'react'
+import { LinkIcon, Unlink, Loader2, UserCircle, Plus, Pencil } from 'lucide-react'
+import {
+  integrationsApi,
+  type Integration,
+  type ConnectedAccount,
+  type Connection,
+} from '../../api/integrations'
+import ConnectionEditor from './ConnectionEditor'
 
 interface ConnectedAccountsProps {
   repo: string
@@ -11,6 +17,24 @@ interface ConnectedAccountsProps {
   onChanged: () => void
   onError: (title: string, message?: string) => void
   onSuccess: (title: string, message?: string) => void
+}
+
+/**
+ * Secondary line for a connection.
+ *
+ * A credential-based connection has no token expiry, so showing one would be
+ * nonsense; display its identity field instead (the schema marks one
+ * `meta.identity`, conventionally a username or host).
+ */
+function subtitleFor(account: ConnectedAccount, connection?: Connection): string {
+  if (connection?.auth_kind === 'config') {
+    const cfg = connection.config || {}
+    const identity = ['username', 'host', 'tenant_id']
+      .map((k) => cfg[k])
+      .find((v) => typeof v === 'string' && v.length > 0)
+    return (identity as string) || 'credential connection'
+  }
+  return expiryLabel(account)
 }
 
 function expiryLabel(account: ConnectedAccount): string {
@@ -37,8 +61,37 @@ export default function ConnectedAccounts({
   const [connecting, setConnecting] = useState(false)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const pollRef = useRef<number | null>(null)
+  // Editing state for credential-based connections.
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editing, setEditing] = useState<Connection | undefined>()
+  // Read connections from the dedicated endpoint rather than off the node: the
+  // node carries token/secret ciphertext, this projection does not.
+  const [connections, setConnections] = useState<Connection[]>([])
 
   const accounts = integration.connected_accounts || []
+  // "Add connection" only makes sense once the connector declares what a
+  // connection looks like.
+  const supportsConnections = !!integration.connection_config_type
+  // OAuth is only offered when the connector actually has an authorize endpoint.
+  const supportsOauth = !!integration.oauth_config?.auth_url
+
+  useEffect(() => {
+    if (!integration.path || !supportsConnections) return
+    let cancelled = false
+    integrationsApi
+      .listConnections(repo, integration.path)
+      .then((c) => !cancelled && setConnections(c))
+      .catch(() => {
+        /* Non-fatal: the account list below still renders from the node. */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [repo, integration.path, supportsConnections, accounts.length])
+
+  function connectionFor(id: string): Connection | undefined {
+    return connections.find((c) => c.id === id)
+  }
 
   function stopPolling() {
     if (pollRef.current !== null) {
@@ -103,20 +156,42 @@ export default function ConnectedAccounts({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-white">Connected accounts</h3>
-        <button
-          type="button"
-          onClick={handleConnect}
-          disabled={connecting || !integration.path}
-          className="flex items-center gap-2 px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <LinkIcon className="w-4 h-4" />}
-          Connect account
-        </button>
+        <h3 className="text-sm font-semibold text-white">Connections</h3>
+        <div className="flex items-center gap-2">
+          {supportsConnections && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(undefined)
+                setEditorOpen(true)
+              }}
+              disabled={!integration.path}
+              title="Add a connection using a username and password"
+              className="flex items-center gap-2 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Plus className="w-4 h-4" />
+              Add connection
+            </button>
+          )}
+          {supportsOauth && (
+            <button
+              type="button"
+              onClick={handleConnect}
+              disabled={connecting || !integration.path}
+              className="flex items-center gap-2 px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <LinkIcon className="w-4 h-4" />}
+              Connect account
+            </button>
+          )}
+        </div>
       </div>
 
       {accounts.length === 0 ? (
-        <p className="text-zinc-500 text-sm">No accounts connected yet.</p>
+        <p className="text-zinc-500 text-sm">
+          No connections yet.
+          {supportsConnections && ' Use "Add connection" to enter a username and password.'}
+        </p>
       ) : (
         <ul className="space-y-2">
           {accounts.map((account) => (
@@ -130,9 +205,26 @@ export default function ConnectedAccounts({
                   <div className="text-white text-sm truncate">
                     {account.label || account.subject || account.id}
                   </div>
-                  <div className="text-zinc-500 text-xs truncate">{expiryLabel(account)}</div>
+                  <div className="text-zinc-500 text-xs truncate">
+                    {subtitleFor(account, connectionFor(account.id))}
+                  </div>
                 </div>
               </div>
+              <div className="flex items-center gap-1">
+              {connectionFor(account.id)?.auth_kind === 'config' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditing(connectionFor(account.id))
+                    setEditorOpen(true)
+                  }}
+                  title="Edit this connection"
+                  className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-white/10 rounded transition-colors"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  Edit
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => handleDisconnect(account)}
@@ -146,9 +238,22 @@ export default function ConnectedAccounts({
                 )}
                 Disconnect
               </button>
+              </div>
             </li>
           ))}
         </ul>
+      )}
+
+      {editorOpen && (
+        <ConnectionEditor
+          repo={repo}
+          integration={integration}
+          connection={editing}
+          onClose={() => setEditorOpen(false)}
+          onSaved={onChanged}
+          onError={onError}
+          onSuccess={onSuccess}
+        />
       )}
     </div>
   )

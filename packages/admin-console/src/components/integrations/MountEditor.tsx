@@ -14,6 +14,7 @@ import { capabilitiesUnknown } from './CapabilityChips'
 import TestConnectionPanel from './TestConnectionPanel'
 import CopyableUrlField from './CopyableUrlField'
 import type { SetupUrls } from '../../api/integrations'
+import { FunctionPicker } from '../../pages/functions/components/editor/FunctionPicker'
 
 interface MountEditorProps {
   repo: string
@@ -28,6 +29,40 @@ interface MountEditorProps {
 
 const field =
   'w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-primary-500'
+
+/**
+ * Mapper each connector's package ships, keyed by `provider_type` (and by
+ * `sync_config.resource` where one connector has several surfaces).
+ *
+ * When `mapping_function` is empty the engine falls back to a GENERIC built-in
+ * Rust mapping (folders → `raisin:Folder`, everything else → `raisin:Node` plus
+ * a `meta` object) — *not* the mapper the package ships. So an unset field
+ * silently yields shapeless nodes: a mail mount loses from/to/date/unread.
+ *
+ * This lives here because the package manifest cannot declare per-resource
+ * default mappers today (`provides` carries only functions/content/nodetypes);
+ * the connector config schema is its proper home.
+ */
+const DEFAULT_MAPPERS: Record<string, string | Record<string, string>> = {
+  'ms-graph': {
+    mail: '/mappers/ms-graph-mail',
+    calendar: '/mappers/ms-graph-calendar',
+    files: '/mappers/ms-graph-files',
+  },
+  'google-drive': '/mappers/google-drive-default',
+  'google-calendar': '/mappers/google-calendar-default',
+  imap: '/mappers/imap-default',
+  gmail: '/mappers/imap-default',
+}
+
+/** Every shipped mapper path, for the free-text field's autocomplete. */
+const ALL_MAPPERS = [
+  ...new Set(
+    Object.values(DEFAULT_MAPPERS).flatMap((v) =>
+      typeof v === 'string' ? [v] : Object.values(v),
+    ),
+  ),
+].sort()
 const labelCls = 'block text-white text-sm font-medium mb-1.5'
 
 export default function MountEditor({
@@ -99,6 +134,20 @@ export default function MountEditor({
   const windowDaysAhead = sync.window?.days_ahead ?? 90
   const windowDaysBack = sync.window?.days_back ?? 7
 
+  const suggestedMapper = useMemo(() => {
+    const entry = providerType ? DEFAULT_MAPPERS[providerType] : undefined
+    if (!entry) return ''
+    if (typeof entry === 'string') return entry
+    return entry[sync.resource || 'mail'] || ''
+  }, [providerType, sync.resource])
+
+  const [showMapperPicker, setShowMapperPicker] = useState(false)
+
+  // With several connections the engine refuses to guess which one a mount
+  // means (it used to silently take the first, syncing an arbitrary mailbox),
+  // so pin one here. With exactly one there is nothing to get wrong.
+  const accountRequired = accounts.length > 1
+
   // Capability-driven form state. Absent capabilities => unknown => conservative.
   const caps = selectedIntegration?.capabilities
   const capsUnknown = capabilitiesUnknown(caps)
@@ -144,10 +193,22 @@ export default function MountEditor({
       onError('Missing fields', 'Name, title, connector, workspace and mount path are required.')
       return
     }
+    if (accountRequired && !accountRef) {
+      onError(
+        'Pick a connection',
+        'This connector has several connections, so the mount must say which one to sync. ' +
+          'Leaving it unset would make the sync fail as misconfigured.',
+      )
+      return
+    }
     setSaving(true)
     try {
       const lines = (t: string) => t.split(/[\n,]/).map((s) => s.trim()).filter(Boolean)
       const model: VirtualMount = {
+        // Carry the server's property bag so the save merges rather than
+        // replaces — otherwise the engine-owned `state` (sync cursor, push
+        // subscription) is deleted on every mount edit.
+        _raw: mount?._raw,
         name: name.trim(),
         title: title.trim(),
         integration_ref: integrationRef,
@@ -219,9 +280,13 @@ export default function MountEditor({
               </select>
             </div>
             <div>
-              <label className={labelCls}>Account</label>
+              <label className={labelCls}>
+                Connection{accountRequired ? ' *' : ''}
+              </label>
               <select className={field} value={accountRef} onChange={(e) => setAccountRef(e.target.value)} disabled={!integrationRef}>
-                <option value="">Default / none</option>
+                <option value="">
+                  {accountRequired ? 'Select a connection…' : accounts.length === 1 ? 'Use the only connection' : 'Default / none'}
+                </option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.label || a.subject || a.id}
@@ -266,9 +331,53 @@ export default function MountEditor({
             </div>
             <div>
               <label className={labelCls}>Mapping function</label>
-              <input className={field} value={mappingFn} onChange={(e) => setMappingFn(e.target.value)} placeholder="/mappers/…" />
+              <div className="flex gap-2">
+                <input
+                  className={field}
+                  value={mappingFn}
+                  onChange={(e) => setMappingFn(e.target.value)}
+                  placeholder={suggestedMapper || '/mappers/… (built-in default)'}
+                  list="mount-mapper-options"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowMapperPicker(true)}
+                  className="px-3 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm rounded-lg whitespace-nowrap"
+                >
+                  Browse…
+                </button>
+              </div>
+              <datalist id="mount-mapper-options">
+                {ALL_MAPPERS.map((p) => (
+                  <option key={p} value={p} />
+                ))}
+              </datalist>
+              {!mappingFn.trim() && suggestedMapper && (
+                <p className="mt-1 text-xs text-amber-400">
+                  Leaving this empty uses the generic built-in mapping, not this connector's
+                  mapper — synced items become plain nodes.{' '}
+                  <button
+                    type="button"
+                    className="underline hover:text-amber-300"
+                    onClick={() => setMappingFn(suggestedMapper)}
+                  >
+                    Use {suggestedMapper}
+                  </button>
+                </p>
+              )}
             </div>
           </div>
+
+          {showMapperPicker && (
+            <FunctionPicker
+              currentFunctionPath={mappingFn || undefined}
+              onSelect={(p) => {
+                setMappingFn(p)
+                setShowMapperPicker(false)
+              }}
+              onClose={() => setShowMapperPicker(false)}
+            />
+          )}
 
           <fieldset className="border border-white/10 rounded-lg p-4 space-y-4">
             <legend className="px-2 text-sm font-semibold text-zinc-300">Sync</legend>
@@ -482,6 +591,9 @@ export default function MountEditor({
                   integration_path: selectedIntegration.path,
                   account_id: accountRef || undefined,
                   remote_root: remoteRoot.trim() || undefined,
+                  // Forward the surface selector so a calendar/files mount is
+                  // probed against what it actually syncs, not the mailbox.
+                  sync_config: sync,
                 }}
                 onError={onError}
               />

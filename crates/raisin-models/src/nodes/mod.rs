@@ -11,6 +11,7 @@
 // by the Apache License, Version 2.0.
 
 pub mod audit_log;
+pub mod integrations;
 pub mod types;
 pub mod version;
 

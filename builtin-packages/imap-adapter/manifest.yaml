@@ -32,6 +32,9 @@ builtin: true
 auto_install: false
 
 provides:
+  # Config schema rendered by the admin console's "Add connection" form.
+  nodetypes:
+    - imap:ConnectionConfig
   functions:
     - /functions/adapters/imap
     - /functions/mappers/imap-default

@@ -1,0 +1,49 @@
+name: raisin:ConnectorConfig
+description: >
+  Base type for a connector's CONNECTOR-LEVEL configuration schema. An adapter
+  package ships a subtype (e.g. imap:ConnectorConfig) via `extends`, declaring
+  the fields shared by every connection of that connector; the admin console
+  renders those fields dynamically and stores their values in
+  raisin:Integration.config.
+icon: settings
+version: 1
+
+# Deliberately NOT strict, and deliberately property-less.
+#
+# These types are never instantiated as nodes - their "instances" are plain
+# Objects living inside raisin:Integration.config and connected_accounts[].config.
+# The type exists so every connector's schema shares an ancestor the console can
+# assert on, and so shared fields can be added here later. Marking it strict
+# would only trap subtypes that legitimately carry provider-specific keys.
+strict: false
+indexable: false
+versionable: false
+publishable: false
+auditable: false
+
+# ---------------------------------------------------------------------------
+# Authoring contract for subtypes
+# ---------------------------------------------------------------------------
+# Each property is a normal PropertyValueSchema, but note that
+# PropertyValueSchema DROPS top-level `title`, `description`, `enum`, `label`
+# and `placeholder` on deserialization - they never reach the resolver, so a
+# form built from them would render bare snake_case names. `meta` is the only
+# free-form field that survives the round trip, so ALL presentation and
+# handling hints go there:
+#
+#   meta:
+#     secret: true        # never stored or returned in cleartext; written only
+#                         #   via the config-secrets / connections endpoints
+#     credential: true    # forward into the adapter `credential` object
+#                         #   (per-connection only). Defaults to true for secret
+#                         #   per-connection fields, false for connector-level.
+#     identity: true      # display this field as the connection's identity
+#     label: "IMAP host"  # form label
+#     description: "..."  # help text
+#     placeholder: "..."
+#     enum: [a, b]        # renders a select
+#     group: server       # groups fields in the form
+#     order: 10           # sort order within the group
+properties: []
+
+allowed_children: []

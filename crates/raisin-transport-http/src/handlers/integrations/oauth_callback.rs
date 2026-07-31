@@ -28,6 +28,19 @@ pub struct CallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
+    /// Provider-supplied human-readable detail (Microsoft puts the `AADSTS…`
+    /// code here). Surfaced to the console; never trusted as markup.
+    pub error_description: Option<String>,
+}
+
+/// Clamp a provider string to `max` chars so a hostile or verbose provider
+/// cannot blow up the redirect URL. Char-based, so it never splits UTF-8.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
+    }
 }
 
 /// Exchange the authorization code for tokens, persist an encrypted account
@@ -37,9 +50,15 @@ pub async fn callback(
     Path(repo): Path<String>,
     Query(q): Query<CallbackQuery>,
 ) -> Result<Redirect, ApiError> {
+    // A provider-side refusal is a normal outcome of a user-facing flow, not a
+    // server fault. Returning an ApiError rendered a raw JSON blob inside the
+    // popup; redirect back to the console instead so the operator sees the
+    // provider's own code (e.g. AADSTS50194) in context.
     if let Some(err) = q.error {
-        return Err(ApiError::validation_failed(format!(
-            "provider returned an error: {err}"
+        return Ok(Redirect::to(&format!(
+            "/{repo}/integrations?oauth_error={}&oauth_error_description={}",
+            urlencoding::encode(&err),
+            urlencoding::encode(&truncate(q.error_description.as_deref().unwrap_or(""), 300)),
         )));
     }
     let code = q
@@ -81,9 +100,9 @@ pub async fn callback(
     let client_id = json_str(&cfg, "client_id").ok_or_else(|| {
         ApiError::validation_failed("integration oauth_config.client_id is missing")
     })?;
-    let redirect_uri = json_str(&cfg, "redirect_uri").ok_or_else(|| {
-        ApiError::validation_failed("integration oauth_config.redirect_uri is missing")
-    })?;
+    // Must resolve identically to `oauth/start` — the provider rejects a token
+    // exchange whose redirect_uri differs from the authorize request's.
+    let redirect_uri = super::resolve_redirect_uri(&cfg, &repo);
     let client_secret = decrypt_client_secret(&node, &master_key);
     let provider_type = node
         .properties

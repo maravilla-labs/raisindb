@@ -1,0 +1,89 @@
+name: imap:ConnectionConfig
+description: >
+  Per-connection settings for one IMAP mailbox. Each connection on the IMAP
+  connector carries its own copy, which is what lets a single connector serve
+  several mailboxes on different servers.
+extends: raisin:ConnectionConfig
+version: 1
+
+# Not strict: providers differ, and an operator may need a key this schema does
+# not anticipate. Never instantiated as a node — these values live inside
+# raisin:Integration.connected_accounts[].config.
+strict: false
+indexable: false
+versionable: false
+publishable: false
+auditable: false
+
+# UI hints live under `meta` because PropertyValueSchema drops top-level
+# title/description/enum/placeholder on deserialization.
+properties:
+  - name: host
+    type: String
+    required: true
+    default: imap.gmail.com
+    meta:
+      label: IMAP host
+      description: Hostname of the IMAP server.
+      placeholder: imap.example.com
+      group: server
+      order: 10
+
+  - name: port
+    type: Number
+    required: false
+    default: 993
+    meta:
+      label: Port
+      description: 993 for implicit TLS, 143 for plaintext.
+      group: server
+      order: 20
+
+  - name: tls
+    type: Boolean
+    required: false
+    default: true
+    meta:
+      label: Implicit TLS
+      description: Keep enabled unless the server genuinely requires plaintext.
+      group: server
+      order: 30
+
+  - name: mailbox
+    type: String
+    required: false
+    default: INBOX
+    meta:
+      label: Mailbox
+      description: IMAP folder to sync. A mount may override this.
+      group: server
+      order: 40
+
+  - name: username
+    type: String
+    required: true
+    meta:
+      label: Username
+      description: Usually the full email address.
+      placeholder: ops@example.com
+      group: auth
+      order: 50
+      # Forwarded into the adapter credential rather than the mount config.
+      credential: true
+      # Shown as this connection's identity in pickers and mount lists.
+      identity: true
+
+  - name: password
+    type: String
+    required: true
+    meta:
+      label: App password
+      description: >
+        App-specific password. Providers enforcing 2FA require one of these
+        rather than the account password. Encrypted at rest and never displayed.
+      group: auth
+      order: 60
+      secret: true
+      credential: true
+
+allowed_children: []

@@ -5,6 +5,7 @@
 //! adapters return, and provides the built-in Rust default mapping and the
 //! include/exclude glob filter.
 
+use raisin_models::nodes::integrations::{AccountSelection, AccountSelectionError};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use serde::{Deserialize, Serialize};
@@ -258,18 +259,14 @@ impl MountConfig {
     }
 }
 
-/// One entry in a `raisin:Integration.connected_accounts` array.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectedAccount {
-    pub id: String,
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(default)]
-    pub expires_at: Option<i64>,
-    /// base64 AES-256-GCM of `{ access_token, refresh_token }`.
-    #[serde(default)]
-    pub tokens_encrypted: Option<String>,
-}
+/// One entry in a `raisin:Integration.connected_accounts` array — one
+/// *connection*.
+///
+/// Defined once in `raisin-models` and re-exported here. It used to be declared
+/// separately in this crate AND in `raisin-transport-http`'s connection-test
+/// support module; the two drifted, which is exactly the failure mode this
+/// codebase hits most often. One definition, two consumers.
+pub use raisin_models::nodes::integrations::ConnectedAccount;
 
 /// A fully-parsed `raisin:Integration` node (only the fields the engine needs).
 #[derive(Debug, Clone)]
@@ -278,37 +275,51 @@ pub struct IntegrationConfig {
     pub adapter_function: Option<String>,
     pub accounts: Vec<ConnectedAccount>,
     /// The integration's `api_config` object, retained verbatim (default
-    /// [`Value::Null`]). This carries provider connection settings (host/port/
-    /// tls/mailbox/auth mode, etc.) that adapters read from the mount snapshot;
-    /// the engine itself does not interpret it.
+    /// [`Value::Null`]). Legacy provider connection settings (host/port/tls/
+    /// mailbox/auth mode) that adapters read from the mount snapshot; the engine
+    /// itself does not interpret it. Lowest layer of the config merge.
     pub api_config: Value,
+    /// Connector-level values declared by `config_type`.
+    pub config: Value,
+    /// NodeType naming the per-connection config schema, if any.
+    pub connection_config_type: Option<String>,
+    /// Names of per-connection config fields flagged `meta.credential`, i.e.
+    /// those that belong in the adapter credential rather than the mount config
+    /// (an IMAP `username`). Resolved by the caller from the config NodeType;
+    /// empty when no schema is declared, which is the pre-v2 behaviour.
+    pub credential_fields: Vec<String>,
 }
 
 impl IntegrationConfig {
     /// Parse a `raisin:Integration` node.
     pub fn from_node(node: &Node) -> Result<Self, String> {
-        let provider_type = req_string(node, "provider_type")?;
-        let accounts = match node.properties.get("connected_accounts") {
-            Some(pv) => serde_json::to_value(pv)
-                .ok()
-                .and_then(|v| serde_json::from_value::<Vec<ConnectedAccount>>(v).ok())
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let shared = raisin_models::nodes::integrations::IntegrationConfig::from_node(node)?;
         Ok(Self {
-            provider_type,
-            adapter_function: opt_string(node, "adapter_function"),
-            accounts,
-            api_config: raw_value(node, "api_config"),
+            provider_type: shared.provider_type,
+            adapter_function: shared.adapter_function,
+            accounts: shared.accounts,
+            api_config: shared.api_config,
+            config: shared.config,
+            connection_config_type: shared.connection_config_type,
+            // Populated out-of-band: resolving a NodeType needs storage, and
+            // this parse must stay synchronous and I/O-free (it runs on the
+            // replication apply path).
+            credential_fields: Vec::new(),
         })
     }
 
-    /// Pick the account referenced by `account_ref`, falling back to the first.
-    pub fn account_for(&self, account_ref: Option<&str>) -> Option<&ConnectedAccount> {
-        match account_ref {
-            Some(id) => self.accounts.iter().find(|a| a.id == id),
-            None => self.accounts.first(),
-        }
+    /// Pick the connection a mount should use.
+    ///
+    /// Delegates to the shared truth table: an explicit `account_ref` must
+    /// match; with no ref, exactly one connection resolves and anything else is
+    /// an error. Notably this no longer silently falls back to `accounts[0]`
+    /// when several exist — that quietly synced an arbitrary mailbox the moment
+    /// a second connection was added.
+    pub fn account_for(
+        &self,
+        account_ref: Option<&str>,
+    ) -> Result<&ConnectedAccount, AccountSelectionError> {
+        AccountSelection::resolve(&self.accounts, account_ref)
     }
 }
 

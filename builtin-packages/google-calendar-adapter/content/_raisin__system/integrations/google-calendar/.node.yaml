@@ -36,7 +36,10 @@ properties:
     scopes:
       - https://www.googleapis.com/auth/calendar.readonly
     # Filled in by the admin console to match the deployment's callback URL,
-    # e.g. https://<host>/api/integrations/oauth/callback
+    # e.g. https://<host>/api/integrations/<repo>/oauth/callback
+    # The <repo> segment is REQUIRED and the path must end in /callback --
+    # that is the only route the callback is registered on. Leave blank and
+    # the server derives it from RAISINDB_BASE_URL.
     redirect_uri: ""
     # Request a refresh token and force the consent screen so offline sync works.
     access_type: offline

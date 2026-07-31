@@ -119,6 +119,30 @@ export interface Integration {
   setup_instructions?: string
   /** Optional link to the provider's setup / OAuth docs. */
   docs_url?: string
+  /**
+   * NodeType declaring this connector's connector-level config fields. When set,
+   * the editor renders it dynamically instead of relying on hardcoded fields.
+   */
+  config_type?: string
+  /** NodeType declaring the per-connection config fields ("Add connection"). */
+  connection_config_type?: string
+  /** Connector-level non-secret config values, validated against `config_type`. */
+  config?: Record<string, unknown>
+  /** Names only of the connector-level secrets that are stored. */
+  config_secret_fields?: string[]
+  /**
+   * The node's full property bag exactly as read from the server.
+   *
+   * `PUT /api/repository/...` **replaces** the whole property map
+   * (`NodeUpdateBuilder::save` does `node.properties = props`), so a save that
+   * omits a key deletes it. Rebuilding properties from the typed fields above
+   * therefore used to drop `connected_accounts`, `client_secret_encrypted`,
+   * `capabilities` and `api_config` on every edit. We keep the raw bag on read
+   * and merge the edited fields over it on write.
+   *
+   * Internal — never sent as-is, never rendered.
+   */
+  _raw?: Record<string, unknown>
 }
 
 /** Calendar sync window (days relative to now). Read by calendar connectors. */
@@ -206,6 +230,12 @@ export interface VirtualMount {
   write_config?: WriteConfig
   state?: MountState
   enabled: boolean
+  /**
+   * The node's full property bag as read from the server. See `Integration._raw`
+   * — a save replaces the whole map, so this is what keeps the engine-owned
+   * `state` alive across an edit. Internal; never rendered.
+   */
+  _raw?: Record<string, unknown>
 }
 
 /** Adapter package discovered via the packages catalogue. */
@@ -240,18 +270,33 @@ function nodeToIntegration(node: Node): Integration {
     capabilities_checked_at: (p.capabilities_checked_at as string) || undefined,
     setup_instructions: (p.setup_instructions as string) || undefined,
     docs_url: (p.docs_url as string) || undefined,
+    config_type: (p.config_type as string) || undefined,
+    connection_config_type: (p.connection_config_type as string) || undefined,
+    config: (p.config as Record<string, unknown>) || undefined,
+    config_secret_fields: (p.config_secret_fields as string[]) || [],
+    _raw: p,
   }
 }
 
 function integrationToProperties(i: Integration): Record<string, unknown> {
   // Never include the plaintext client secret here — it is written only via the
   // dedicated encrypting endpoint (setClientSecret).
+  //
+  // `_raw` first: the PUT replaces the whole property map, so anything omitted
+  // is deleted. Spreading the server's own bag underneath preserves engine- and
+  // server-owned properties (connected_accounts, client_secret_encrypted,
+  // capabilities, capabilities_checked_at, api_config) plus anything a future
+  // connector adds, while the typed fields below still win.
   return {
+    ...(i._raw || {}),
     title: i.title,
     provider_type: i.provider_type,
     adapter_function: i.adapter_function,
     oauth_config: i.oauth_config || {},
     ...(i.api_config ? { api_config: i.api_config } : {}),
+    // Schema-driven connector config. Secrets never travel here — they go
+    // through setConfigSecrets, which encrypts them server-side.
+    ...(i.config ? { config: i.config } : {}),
     enabled: i.enabled,
     // Round-trip the author-supplied provider setup docs so editing a connector
     // in the UI never drops instructions shipped by its template.
@@ -279,12 +324,18 @@ function nodeToMount(node: Node): VirtualMount {
     write_config: (p.write_config as WriteConfig) || {},
     state: (p.state as MountState) || {},
     enabled: p.enabled !== false,
+    _raw: p,
   }
 }
 
 function mountToProperties(m: VirtualMount): Record<string, unknown> {
-  // `state` is engine-owned; never write it from the UI.
+  // `state` is engine-owned and the UI never *edits* it — but the PUT replaces
+  // the whole property map, so omitting it DELETES it, losing the sync cursor
+  // (`last_sync_token`) and orphaning the push subscription
+  // (`push_subscription_id` / `push_mount_token`) on every mount edit. Spread
+  // the server's own bag underneath so it survives untouched.
   return {
+    ...(m._raw || {}),
     title: m.title,
     integration_ref: m.integration_ref,
     ...(m.account_ref ? { account_ref: m.account_ref } : {}),
@@ -338,12 +389,23 @@ export interface TestConnectionRequest {
   integration_path: string
   account_id?: string
   remote_root?: string
+  /**
+   * Mount `sync_config` keys to forward into the probe — notably ms-graph's
+   * `resource`, without which the probe always tests the mailbox and a calendar
+   * or OneDrive mount can never be verified. The server layers these *under*
+   * its own probe limits, so this cannot widen the probe.
+   */
+  sync_config?: SyncConfig
 }
 
 /**
- * The three ordered stages of a connection test. The engine loads the adapter,
- * validates the account credential, then runs a bounded probe `list`. The first
- * `false` is where the failure occurred.
+ * The three ordered stages of a connection test — a presentation-only view.
+ *
+ * The server does NOT send stages; it reports `auth`, `probe` and `error`
+ * (`handlers/integrations/test_connection/mod.rs`). Derive these with
+ * {@link deriveStages} rather than reading them off the response: the previous
+ * type declared a `stages` field that never existed, so every stage rendered as
+ * a red cross even on a successful test.
  */
 export interface TestConnectionStages {
   adapter_loaded: boolean
@@ -351,22 +413,80 @@ export interface TestConnectionStages {
   listing_succeeded: boolean
 }
 
+/** Result of the bounded probe `list`. Item names only — never URLs or tokens. */
+export interface TestConnectionProbe {
+  items_seen: number
+  sample: string[]
+}
+
 /**
  * Diagnostic report returned by the connection test. Mirrors the engine's
  * `capabilities` probe + bounded probe `list`; the engine also refreshes the
  * cached `capabilities` on the connector node as a side effect.
+ *
+ * This mirrors the server's `TestConnectionResponse` exactly.
  */
 export interface TestConnectionResult {
   ok: boolean
   /** Round-trip latency of the probe in milliseconds. */
   latency_ms?: number
-  stages: TestConnectionStages
+  /**
+   * Credential state: `valid`, `not_required` (adapter needs none), `missing`
+   * (no account selected / no decryptable token), or `expired`.
+   */
+  auth?: string
   /** Freshly probed capabilities (also cached on the connector node). */
   capabilities?: Capabilities
-  /** Sample of item names from the probe `list` (for a quick sanity check). */
-  sample?: string[]
+  /** Probe result — present only when the `list` probe succeeded. */
+  probe?: TestConnectionProbe
   /** Populated on failure — `code` mirrors the adapter error convention (§4). */
   error?: { code?: string; message: string }
+}
+
+/**
+ * Reconstruct the three-stage breakdown from what the server actually returns.
+ *
+ * - `adapter_loaded` — false only for errors raised before the adapter ran.
+ * - `auth_valid` — the credential was accepted, or the adapter needs none.
+ * - `listing_succeeded` — the bounded probe `list` returned items.
+ */
+export function deriveStages(r: TestConnectionResult): TestConnectionStages {
+  const code = r.error?.code
+  return {
+    adapter_loaded: code !== 'adapter_not_found' && code !== 'invocation_failed',
+    auth_valid: r.auth === 'valid' || r.auth === 'not_required',
+    listing_succeeded: r.ok && !!r.probe,
+  }
+}
+
+/**
+ * One connection on a connector, as projected by the connections endpoint.
+ *
+ * Read connections through that endpoint rather than off the raw node: the node
+ * carries `tokens_encrypted` / `secrets_encrypted` ciphertext, and this shape
+ * deliberately does not.
+ */
+export interface Connection {
+  id: string
+  label: string
+  subject?: string
+  auth_kind: 'oauth' | 'config'
+  expires_at?: number
+  /** Per-connection non-secret configuration. */
+  config: Record<string, unknown>
+  /** Names only of the secret fields that are stored. */
+  secret_fields: string[]
+  created_at?: string
+}
+
+export interface UpsertConnectionBody {
+  label?: string
+  config?: Record<string, unknown>
+  /**
+   * Field → value. `null` clears the field; an omitted field is left unchanged,
+   * so an edit form never has to resend a secret it was not shown.
+   */
+  secrets?: Record<string, string | null>
 }
 
 export const integrationsApi = {
@@ -452,6 +572,58 @@ export const integrationsApi = {
       integration_path: integrationPath,
       client_secret: clientSecret,
     }),
+
+  /**
+   * Store (or clear) connector-level secrets declared by `config_type`.
+   *
+   * Generalizes `setClientSecret`. Values are encrypted server-side and never
+   * returned; pass `null` to clear a field, and omit a field to leave it alone.
+   */
+  setConfigSecrets: (
+    repo: string,
+    integrationPath: string,
+    secrets: Record<string, string | null>
+  ) =>
+    api.put<{ ok: boolean; secret_fields_set: string[] }>(
+      `/api/integrations/${repo}/config-secrets`,
+      { integration_path: integrationPath, secrets }
+    ),
+
+  // ---- Connections (per-account config + credentials) ----
+
+  listConnections: (repo: string, integrationPath: string) =>
+    api
+      .get<{ connections: Connection[] }>(
+        `/api/integrations/${repo}/connections?integration_path=${encodeURIComponent(
+          integrationPath
+        )}`
+      )
+      .then((r) => r.connections),
+
+  /** Create a credential-based connection (the non-OAuth path, e.g. IMAP). */
+  createConnection: (repo: string, integrationPath: string, body: UpsertConnectionBody) =>
+    api.post<Connection>(`/api/integrations/${repo}/connections`, {
+      integration_path: integrationPath,
+      ...body,
+    }),
+
+  updateConnection: (
+    repo: string,
+    integrationPath: string,
+    accountId: string,
+    body: UpsertConnectionBody
+  ) =>
+    api.patch<Connection>(`/api/integrations/${repo}/connections/${accountId}`, {
+      integration_path: integrationPath,
+      ...body,
+    }),
+
+  deleteConnection: (repo: string, integrationPath: string, accountId: string) =>
+    api.delete<{ deleted: boolean }>(
+      `/api/integrations/${repo}/connections/${accountId}?integration_path=${encodeURIComponent(
+        integrationPath
+      )}`
+    ),
 
   // ---- OAuth connect / disconnect ----
 

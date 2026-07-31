@@ -1,7 +1,7 @@
 name: raisin:Integration
 description: Tenant/repo-level configuration for an external system integration
 icon: plug
-version: 1
+version: 2
 strict: true
 indexable: true
 index_types: [Property]
@@ -43,16 +43,83 @@ properties:
     type: Object
     required: false
     title: API Configuration
-    description: Non-OAuth providers - endpoints and key references
+    description: |
+      Non-OAuth providers - endpoints and key references. LEGACY: predates
+      config_type. Kept forever (shipped templates use it) as the lowest layer
+      of the config merge; new connectors should declare config_type instead.
+
+  - name: config_type
+    type: String
+    required: false
+    title: Connector Config Type
+    description: |
+      NodeType declaring this connector's CONNECTOR-LEVEL configuration fields
+      (shared across all of its connections), e.g. "imap:ConnectorConfig".
+      Ships with the adapter package and extends raisin:ConnectorConfig. The
+      admin console renders it dynamically; values land in `config`, and any
+      property carrying `meta.secret: true` is written through the
+      config-secrets endpoint instead. Absent = the legacy hardcoded OAuth form.
+
+  - name: connection_config_type
+    type: String
+    required: false
+    title: Connection Config Type
+    description: |
+      NodeType declaring the PER-CONNECTION configuration fields, e.g.
+      "imap:ConnectionConfig" (host/port/username/password) or
+      "msgraph:ConnectionConfig" (tenant_id). Extends raisin:ConnectionConfig.
+      Its values live on each connected_accounts[] entry, which is what lets one
+      connector hold several independent connections.
+
+  - name: config
+    type: Object
+    required: false
+    title: Connector Configuration
+    description: |
+      Connector-level NON-SECRET configuration values, validated against
+      config_type. Secrets never appear here - see config_secrets_encrypted.
+
+  - name: config_secrets_encrypted
+    type: String
+    required: false
+    title: Encrypted Connector Secrets
+    description: |
+      base64 AES-256-GCM of a { field: value } map holding every connector-level
+      property flagged `meta.secret: true`. Write-only: set via the
+      config-secrets endpoint, never returned by any read.
+
+  - name: config_secret_fields
+    type: Array
+    required: false
+    title: Connector Secret Field Names
+    description: |
+      Names ONLY of the fields present in config_secrets_encrypted, so the UI can
+      render an "is set" indicator without decrypting anything.
 
   - name: connected_accounts
     type: Array
     required: false
     title: Connected Accounts
     description: |
-      List of connected accounts: [{ id, label, subject, expires_at, tokens_encrypted }].
+      The connector's connections. One entry per account/connection, which is how
+      a single connector holds several (two Entra tenants, two IMAP mailboxes):
+
+        {
+          id, label, subject, provider_type,
+          auth_kind: "oauth" | "config",   # how this connection authenticates
+          expires_at, tokens_encrypted,    # oauth only
+          config: { ... },                 # per-connection, validated against
+                                           #   connection_config_type
+          secrets_encrypted,               # base64 AES-256-GCM { field: value }
+          secret_fields: [ ... ],          # names only, for UI indicators
+          created_at
+        }
+
       tokens_encrypted holds base64 AES-256-GCM of { access_token, refresh_token }.
-      Refresh tokens never appear in plaintext; subject and expires_at stay plaintext.
+      Refresh tokens and per-connection secrets never appear in plaintext; label,
+      subject, auth_kind, config, secret_fields and expires_at stay plaintext.
+      All fields beyond id are optional, so pre-existing OAuth-only entries keep
+      working unchanged.
 
   - name: capabilities
     type: Object

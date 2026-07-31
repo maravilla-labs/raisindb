@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use thiserror::Error;
 
+use raisin_models::nodes::integrations::{build_credential, merge_config, ConnectedAccount};
+
 use super::materializer::MountScope;
 use crate::jobs::handlers::function_execution::FunctionExecutorCallback;
 
@@ -185,60 +187,75 @@ pub fn build_input(
 /// Build the read-only `mount` snapshot passed to adapters.
 ///
 /// The full authored `sync_config` is forwarded verbatim (not a whitelist) so
-/// adapters receive every provider-specific key, and the integration's
-/// `api_config` is attached under `api_config` so connection settings
-/// (host/port/tls/mailbox/auth) reach the adapter as well.
-pub fn build_mount_snapshot(mount: &super::config::MountConfig, api_config: &Value) -> Value {
+/// adapters receive every provider-specific key, and `api_config` is attached
+/// so legacy connection settings (host/port/tls/mailbox/auth) reach the adapter
+/// as well. Both are byte-identical to what they have always been — adapters
+/// that read them keep working untouched.
+///
+/// `config` is the additional, resolved view: `api_config` < connector `config`
+/// < connection `config` < `sync_config`, merged per top-level key. New adapters
+/// should read `config` and ignore the other two.
+pub fn build_mount_snapshot(
+    mount: &super::config::MountConfig,
+    integration: &super::config::IntegrationConfig,
+    account: Option<&ConnectedAccount>,
+) -> Value {
+    let account_config = account.map(|a| a.config_or_empty()).unwrap_or(Value::Null);
+    let merged = merge_config(
+        &integration.api_config,
+        &integration.config,
+        &account_config,
+        &mount.sync_config_raw,
+    );
     json!({
         "mount_id": mount.mount_id,
         "remote_root": mount.remote_root,
         "mount_path": mount.mount_path,
         "sync_config": mount.sync_config_raw,
-        "api_config": api_config,
+        "api_config": integration.api_config,
+        "config": merged,
     })
 }
 
-/// Build the `credential` object handed to an adapter from a decrypted token
-/// blob. **The `refresh_token` is never included.** When the connected account
-/// has a verified `subject` it is forwarded as `username` (adapters that use
-/// password/basic-style auth key on it).
-pub fn build_credential(
-    provider_type: &str,
-    account_id: &str,
-    username: Option<&str>,
-    tokens: &Value,
-) -> Value {
-    let mut cred = json!({
-        "access_token": tokens.get("access_token").and_then(|v| v.as_str()).unwrap_or(""),
-        "account_id": account_id,
-        "provider_type": provider_type,
-    });
-    if let Some(name) = username {
-        cred["username"] = Value::String(name.to_string());
-    }
-    cred
-}
-
-/// Decrypt a mount's connected-account tokens into an adapter credential,
-/// stripping the refresh token. Returns `None` when no key/account/tokens are
-/// available. Shared by the sync run, the push-subscription lifecycle, and the
-/// renewal scan so all adapter invocations build the credential identically.
+/// Decrypt a mount's chosen connection into an adapter credential.
+///
+/// Handles both connection shapes: OAuth (a `tokens_encrypted` blob) and
+/// credential-based (a `secrets_encrypted` map — an IMAP app password). The
+/// previous implementation returned `None` the moment `tokens_encrypted` was
+/// absent, which is precisely why a password-only connection could never work.
+///
+/// Returns `None` only when no connection can be resolved or no master key is
+/// configured. Shared by the sync run, the push-subscription lifecycle and the
+/// renewal scan so every adapter invocation builds the credential identically.
 pub fn build_mount_credential(
     mount: &super::config::MountConfig,
     integration: &super::config::IntegrationConfig,
 ) -> Option<Value> {
-    let account = integration.account_for(mount.account_ref.as_deref())?;
-    let enc = account.tokens_encrypted.as_deref()?;
+    let account = integration.account_for(mount.account_ref.as_deref()).ok()?;
     let key = raisin_crypto::master_key_with_embedding_fallback()
         .ok()
         .flatten()?;
     let secret_box = raisin_crypto::SecretBox::new(&key);
-    let tokens = secret_box.decrypt_json(enc).ok()?;
+
+    // Either half may be absent; a connection with neither is unusable.
+    let tokens = account
+        .tokens_encrypted
+        .as_deref()
+        .and_then(|enc| secret_box.decrypt_json(enc).ok());
+    let secrets = account
+        .secrets_encrypted
+        .as_deref()
+        .and_then(|enc| secret_box.decrypt_json(enc).ok());
+    if tokens.is_none() && secrets.is_none() {
+        return None;
+    }
+
     Some(build_credential(
         &integration.provider_type,
-        &account.id,
-        account.subject.as_deref(),
-        &tokens,
+        account,
+        tokens.as_ref(),
+        secrets.as_ref(),
+        &integration.credential_fields,
     ))
 }
 
@@ -318,8 +335,14 @@ mod tests {
 
     #[test]
     fn credential_never_contains_refresh_token() {
+        // The exhaustive rules live with the builder in raisin-models; this
+        // pins the engine's own wiring of it.
+        let account = ConnectedAccount {
+            id: "acct1".to_string(),
+            ..Default::default()
+        };
         let tokens = json!({ "access_token": "at", "refresh_token": "rt" });
-        let cred = build_credential("google-drive", "acct1", None, &tokens);
+        let cred = build_credential("google-drive", &account, Some(&tokens), None, &[]);
         assert_eq!(cred.get("access_token").unwrap(), "at");
         assert!(cred.get("refresh_token").is_none());
         assert!(cred.get("username").is_none());

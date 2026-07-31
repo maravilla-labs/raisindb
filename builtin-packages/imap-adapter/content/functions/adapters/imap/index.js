@@ -47,22 +47,30 @@ function imapCall(fn) {
   }
 }
 
-// Resolve the effective connection settings by layering the integration's
-// api_config (template defaults) under the mount's sync_config (per-mount
-// override), so sync_config wins whenever it supplies a value. api_config names
-// the mailbox `default_mailbox`; sync_config names it `mailbox`.
+// Resolve the effective connection settings.
+//
+// `mount.config` is the engine's pre-merged view — api_config < connector
+// config < CONNECTION config < sync_config — and is what carries per-connection
+// settings, so one connector can serve several mailboxes on different servers.
+// It is preferred; api_config and sync_config remain as fallbacks so this
+// adapter keeps working against an older engine that sends neither.
+//
+// api_config names the mailbox `default_mailbox`; everywhere else it is `mailbox`.
 function connConfig(mount) {
   var api = (mount && mount.api_config) || {};
   var sync = (mount && mount.sync_config) || {};
+  var merged = (mount && mount.config) || {};
   function pick(key) {
+    if (merged[key] !== undefined) return merged[key];
     return sync[key] !== undefined ? sync[key] : api[key];
   }
+  var mailbox = pick("mailbox");
   return {
     host: pick("host"),
     port: pick("port"),
     tls: pick("tls"),
     auth: pick("auth"),
-    mailbox: sync.mailbox !== undefined ? sync.mailbox : api.default_mailbox,
+    mailbox: mailbox !== undefined ? mailbox : api.default_mailbox,
     username: pick("username"),
   };
 }

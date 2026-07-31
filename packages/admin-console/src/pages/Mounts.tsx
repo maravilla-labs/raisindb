@@ -307,6 +307,9 @@ export default function Mounts() {
                   integration_path: integrationFor(testTarget)?.path || testTarget.integration_ref,
                   account_id: testTarget.account_ref || undefined,
                   remote_root: testTarget.remote_root || undefined,
+                  // Probe the surface this mount actually syncs (mail/calendar/
+                  // files), not the adapter's default.
+                  sync_config: testTarget.sync_config,
                 }}
                 onTested={load}
                 onError={showError}

@@ -33,6 +33,11 @@ builtin: true
 auto_install: false
 
 provides:
+  # Config schemas rendered by the admin console. `msgraph:` (no hyphen) because
+  # NodeType names may not contain one; provider_type stays `ms-graph`.
+  nodetypes:
+    - msgraph:ConnectorConfig
+    - msgraph:ConnectionConfig
   functions:
     - /functions/adapters/ms-graph
     - /functions/mappers/ms-graph-mail

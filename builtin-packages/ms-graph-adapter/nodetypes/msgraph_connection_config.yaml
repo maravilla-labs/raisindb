@@ -1,0 +1,49 @@
+name: msgraph:ConnectionConfig
+description: >
+  Per-connection settings for one Microsoft 365 connection. Holding the
+  directory (tenant) id here is what lets a single Microsoft connector serve
+  several Entra tenants side by side.
+extends: raisin:ConnectionConfig
+version: 1
+
+strict: false
+indexable: false
+versionable: false
+publishable: false
+auditable: false
+
+# NOTE the type name is `msgraph:`, not `ms-graph:` — NodeType names must match
+# ^[a-zA-Z]+:(?:[A-Z][a-z]*)+$, which allows no hyphens. The connector's
+# provider_type stays `ms-graph`; only the schema type name differs.
+properties:
+  - name: tenant_id
+    type: String
+    required: false
+    meta:
+      label: Directory (tenant) ID
+      description: >
+        The Entra directory this connection signs into. Leave blank to use the
+        connector's configured authority. Microsoft rejects the shared `common`
+        authority for single-tenant app registrations with AADSTS50194.
+      placeholder: 00000000-0000-0000-0000-000000000000
+      group: microsoft
+      order: 10
+      identity: true
+
+  - name: resource
+    type: String
+    required: false
+    default: mail
+    meta:
+      label: Default resource
+      description: >
+        Graph surface this connection targets when a mount does not say. A mount
+        may override it.
+      enum:
+        - mail
+        - calendar
+        - files
+      group: microsoft
+      order: 20
+
+allowed_children: []

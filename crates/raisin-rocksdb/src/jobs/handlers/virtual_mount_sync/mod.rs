@@ -26,9 +26,11 @@ mod subscription;
 mod tests;
 
 pub use adapter::{
-    build_credential, build_input, build_mount_snapshot, AdapterError, AdapterInvoker,
-    AdapterInvokerHandle, Capabilities, FunctionAdapterInvoker,
+    build_input, build_mount_snapshot, AdapterError, AdapterInvoker, AdapterInvokerHandle,
+    Capabilities, FunctionAdapterInvoker,
 };
+// Credential assembly lives in raisin-models so the sync engine and the HTTP
+// connection-test handler cannot drift apart.
 pub use config::{
     default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount, ExternalItem,
     IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig, WriteConfig,
@@ -37,6 +39,7 @@ pub use config::{
 pub use materializer::{
     MountScope, NodeMaterializer, RocksDbMaterializer, VirtualMeta, VirtualNodeRef,
 };
+pub use raisin_models::nodes::integrations::build_credential;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +49,7 @@ use raisin_core::services::node_service::NodeService;
 use raisin_error::{Error, Result};
 use raisin_locks::LockManagerHandle;
 use raisin_models::auth::AuthContext;
+use raisin_models::nodes::integrations::AccountSelectionError;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
 use raisin_storage::transactional::TransactionalStorage;
 use raisin_storage::{BranchRepository, RepositoryManagementRepository, Storage};
@@ -182,6 +186,49 @@ impl VirtualMountSyncHandler {
             return Ok(());
         };
 
+        // Guard against syncing the WRONG connection. Two cases are unsafe:
+        //
+        //  - Ambiguous: several connections exist and the mount names none. The
+        //    old rule took `accounts[0]`, so adding a second connection silently
+        //    repointed every unpinned mount at an arbitrary mailbox — wrong data,
+        //    no error anywhere.
+        //  - NotFound: the mount names a connection that has been disconnected.
+        //
+        // `NoAccounts` is deliberately NOT an error: an adapter over a public
+        // API needs no credential at all, and those mounts must keep syncing.
+        // Their credential simply resolves to `None`, exactly as before.
+        if let Some(integ_node) = self.load_integration_node(&svc, &mount).await? {
+            if let Ok(cfg) = IntegrationConfig::from_node(&integ_node) {
+                if let Err(err) = cfg.account_for(mount.account_ref.as_deref()) {
+                    if matches!(err, AccountSelectionError::NoAccounts) {
+                        tracing::debug!(
+                            mount_id = %mount_id,
+                            "connector has no connections; syncing without a credential"
+                        );
+                    } else {
+                        tracing::warn!(
+                            mount_id = %mount_id,
+                            error = %err,
+                            "mount does not resolve to a single connection; marking misconfigured"
+                        );
+                        let mut state = mount.state.clone();
+                        state.status = Some("misconfigured".to_string());
+                        state.last_error = Some(err.to_string());
+                        let _ = persist_mount_state(
+                            &self.storage,
+                            &tenant,
+                            &repo,
+                            &config_branch,
+                            &mount_id,
+                            &state,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         // Resolve integration + adapter path + credential + scope + snapshot.
         let CtxParts {
             integ_node_id,
@@ -189,7 +236,9 @@ impl VirtualMountSyncHandler {
             credential,
             mount_snapshot,
             scope,
-        } = self.build_ctx_parts(&svc, &tenant, &repo, &mount).await?;
+        } = self
+            .build_ctx_parts(&svc, &tenant, &repo, &config_branch, &mount)
+            .await?;
 
         // Acquire the per-mount lease (cluster safety). Keyed on the config
         // branch — that is the identity the periodic scan enqueues against.
@@ -349,6 +398,79 @@ impl VirtualMountSyncHandler {
         adapter::build_mount_credential(mount, integration)
     }
 
+    /// Names of the connector's per-connection config fields flagged
+    /// `meta.credential: true` — those that belong in the adapter credential
+    /// rather than the mount config.
+    ///
+    /// Resolved through [`NodeTypeResolver`] so `extends`/mixins are honoured.
+    /// Returns empty when the connector declares no `connection_config_type`
+    /// (every pre-v2 connector), which is exactly the previous behaviour.
+    async fn resolve_credential_fields(
+        &self,
+        tenant: &str,
+        repo: &str,
+        config_branch: &str,
+        integration: &IntegrationConfig,
+    ) -> Vec<String> {
+        use raisin_core::services::node_type_resolver::NodeTypeResolver;
+
+        let Some(type_name) = integration.connection_config_type.as_deref() else {
+            return Vec::new();
+        };
+        let resolver = NodeTypeResolver::new(
+            self.storage.clone(),
+            tenant.to_string(),
+            repo.to_string(),
+            // Config types live alongside the connector, on the config branch.
+            config_branch.to_string(),
+        );
+        match resolver.resolve(type_name).await {
+            Ok(resolved) => resolved
+                .resolved_properties
+                .iter()
+                .filter(|p| {
+                    p.meta
+                        .as_ref()
+                        .and_then(|m| m.get("credential"))
+                        .is_some_and(|v| {
+                            matches!(
+                                v,
+                                raisin_models::nodes::properties::PropertyValue::Boolean(true)
+                            )
+                        })
+                })
+                .filter_map(|p| p.name.clone())
+                .collect(),
+            Err(e) => {
+                // A connector referencing a type its package never installed is
+                // a misconfiguration, not a reason to stop syncing: the mount
+                // still works, minus the credential-flagged fields.
+                tracing::warn!(
+                    config_type = %type_name,
+                    error = %e,
+                    "could not resolve connection config type; credential fields unavailable"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Load a mount's backing `raisin:Integration` node.
+    ///
+    /// `integration_ref` may be either a path or a node id, so both are tried.
+    /// Shared by the pre-flight connection check and [`Self::build_ctx_parts`]
+    /// so the two can never disagree about which connector a mount points at.
+    async fn load_integration_node(
+        &self,
+        svc: &NodeService<RocksDBStorage>,
+        mount: &MountConfig,
+    ) -> Result<Option<raisin_models::nodes::Node>> {
+        Ok(svc
+            .get_by_path(&mount.integration_ref)
+            .await?
+            .or(svc.get(&mount.integration_ref).await.unwrap_or_default()))
+    }
+
     /// Resolve everything needed to invoke a mount's adapter: the integration
     /// node id (for capability caching), adapter path, decrypted credential,
     /// mount snapshot, and materialization scope. Shared by the sync run, the
@@ -359,28 +481,36 @@ impl VirtualMountSyncHandler {
         svc: &NodeService<RocksDBStorage>,
         tenant: &str,
         repo: &str,
+        config_branch: &str,
         mount: &MountConfig,
     ) -> Result<CtxParts> {
-        // `integration_ref` may be a path or a node id.
-        let integ_node = svc
-            .get_by_path(&mount.integration_ref)
-            .await?
-            .or(svc.get(&mount.integration_ref).await.unwrap_or_default());
-        let Some(integ_node) = integ_node else {
+        let Some(integ_node) = self.load_integration_node(svc, mount).await? else {
             return Err(Error::Validation(format!(
                 "integration not found: {}",
                 mount.integration_ref
             )));
         };
-        let integration = IntegrationConfig::from_node(&integ_node)
+        let mut integration = IntegrationConfig::from_node(&integ_node)
             .map_err(|e| Error::Validation(format!("invalid integration: {e}")))?;
+        // Resolve which per-connection config fields belong in the credential
+        // rather than the mount config (an IMAP `username`). This needs storage,
+        // so it cannot live in the synchronous `from_node` parse; doing it here
+        // keeps that parse callable from the replication apply path.
+        integration.credential_fields = self
+            .resolve_credential_fields(tenant, repo, config_branch, &integration)
+            .await;
         let adapter_path = mount
             .adapter_function
             .clone()
             .or_else(|| integration.adapter_function.clone())
             .ok_or_else(|| Error::Validation("no adapter_function configured".to_string()))?;
         let credential = self.build_credential(mount, &integration);
-        let mount_snapshot = build_mount_snapshot(mount, &integration.api_config);
+        // The snapshot carries the merged config, so it needs the chosen
+        // connection. A selection error is not fatal here — the mount still gets
+        // a snapshot (with no per-connection layer) and the missing credential
+        // is what surfaces the problem, with `finalize` recording the reason.
+        let account = integration.account_for(mount.account_ref.as_deref()).ok();
+        let mount_snapshot = build_mount_snapshot(mount, &integration, account);
         let scope = MountScope {
             tenant: tenant.to_string(),
             repo: repo.to_string(),
@@ -414,7 +544,10 @@ impl VirtualMountSyncHandler {
         let Some(invoker) = self.invoker.clone() else {
             return;
         };
-        let Ok(parts) = self.build_ctx_parts(svc, tenant, repo, mount).await else {
+        let Ok(parts) = self
+            .build_ctx_parts(svc, tenant, repo, config_branch, mount)
+            .await
+        else {
             return;
         };
         let ctx = subscription::adapter_ctx(
@@ -493,7 +626,10 @@ impl VirtualMountSyncHandler {
                     {
                         continue;
                     }
-                    let Ok(parts) = self.build_ctx_parts(&svc, &tenant, &repo, &mount).await else {
+                    let Ok(parts) = self
+                        .build_ctx_parts(&svc, &tenant, &repo, &config_branch, &mount)
+                        .await
+                    else {
                         continue;
                     };
                     let ctx = subscription::adapter_ctx(

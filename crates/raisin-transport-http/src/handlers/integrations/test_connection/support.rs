@@ -154,22 +154,38 @@ pub(super) fn resolve_credential(
 /// Minimal read-only `mount` snapshot for a one-off probe. Forwards the
 /// integration's `api_config` (where connectors like IMAP/Gmail keep host/port/
 /// tls/auth) so the probe reaches the provider the same way a real sync would.
+///
+/// `caller_sync` carries the mount's own `sync_config` keys — most importantly
+/// ms-graph's `resource` — layered *under* the probe-owned keys so a caller can
+/// select the surface to test but never widen the probe (`max_items_per_sync`
+/// stays capped, `ephemeral` stays off).
 #[cfg(feature = "storage-rocksdb")]
-pub(super) fn mount_snapshot(remote_root: &Option<String>, api_config: &Value) -> Value {
+pub(super) fn mount_snapshot(
+    remote_root: &Option<String>,
+    api_config: &Value,
+    caller_sync: Option<&Value>,
+) -> Value {
+    let mut sync = serde_json::Map::new();
+    if let Some(Value::Object(given)) = caller_sync {
+        for (k, v) in given {
+            sync.insert(k.clone(), v.clone());
+        }
+    }
+    // Probe-owned keys always win.
+    sync.insert("mode".into(), json!("poll"));
+    sync.insert("interval_seconds".into(), json!(300));
+    sync.insert("include_patterns".into(), json!([]));
+    sync.insert("exclude_patterns".into(), json!([]));
+    sync.insert("ephemeral".into(), json!(false));
+    sync.insert("ttl_seconds".into(), Value::Null);
+    sync.insert("max_items_per_sync".into(), json!(PROBE_LIMIT));
+
     json!({
         "mount_id": "connection-test",
         "remote_root": remote_root,
         "mount_path": "/",
         "api_config": api_config,
-        "sync_config": {
-            "mode": "poll",
-            "interval_seconds": 300,
-            "include_patterns": [],
-            "exclude_patterns": [],
-            "ephemeral": false,
-            "ttl_seconds": null,
-            "max_items_per_sync": PROBE_LIMIT,
-        },
+        "sync_config": Value::Object(sync),
     })
 }
 
@@ -273,6 +289,28 @@ mod tests {
         assert!(caps.can_read);
         assert!(!caps.can_write);
         assert!(!caps.supports_changes);
+    }
+
+    #[cfg(feature = "storage-rocksdb")]
+    #[test]
+    fn mount_snapshot_forwards_resource_but_caps_the_probe() {
+        let caller = json!({ "resource": "calendar", "max_items_per_sync": 100_000 });
+        let snap = mount_snapshot(&Some("cal-1".into()), &Value::Null, Some(&caller));
+        let sync = &snap["sync_config"];
+        // The surface selector reaches the adapter...
+        assert_eq!(sync["resource"], "calendar");
+        // ...but probe-owned keys are not overridable.
+        assert_eq!(sync["max_items_per_sync"], json!(PROBE_LIMIT));
+        assert_eq!(sync["ephemeral"], json!(false));
+        assert_eq!(snap["remote_root"], "cal-1");
+    }
+
+    #[cfg(feature = "storage-rocksdb")]
+    #[test]
+    fn mount_snapshot_without_caller_sync_keeps_defaults() {
+        let snap = mount_snapshot(&None, &Value::Null, None);
+        assert_eq!(snap["sync_config"]["mode"], "poll");
+        assert!(snap["sync_config"].get("resource").is_none());
     }
 
     #[test]
