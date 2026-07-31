@@ -103,12 +103,20 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// SHA-256 hex digest of an arbitrary string.
+///
+/// Shared by the client-secret hash and the refresh-token hash so both sides
+/// store a digest rather than a usable credential.
+pub(super) fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hex_encode(&hasher.finalize())
+}
+
 /// SHA-256 hex digest of a presented client secret, for comparison against the
 /// stored hash.
 pub fn hash_client_secret(secret: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    hex_encode(&hasher.finalize())
+    sha256_hex(secret)
 }
 
 /// Process a dynamic client registration request for `tenant_id`.

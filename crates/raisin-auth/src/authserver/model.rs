@@ -129,6 +129,62 @@ impl AuthorizationCode {
     }
 }
 
+/// A persisted refresh token, stored as a **hash** of the value handed to the
+/// client (the raw value is never written down, mirroring `OAuthClient`).
+///
+/// Tokens are chained into a *family*: every rotation issues a successor with
+/// the same `family_id`. Presenting an already-consumed token means the chain
+/// leaked, so the whole family is revoked (OAuth 2.1 §4.14.2 refresh-token
+/// replay detection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshToken {
+    /// SHA-256 hex digest of the opaque token value.
+    pub token_hash: String,
+    /// Identifier shared by every token in this rotation chain.
+    pub family_id: String,
+    /// Client the token was issued to.
+    pub client_id: String,
+    /// Tenant context.
+    pub tenant_id: String,
+    /// The resource owner's identity id.
+    pub identity_id: String,
+    /// The resource owner's email.
+    pub email: String,
+    /// The repository the resource lives under.
+    pub repository: String,
+    /// The branch the resource lives under.
+    pub branch: String,
+    /// The resource indicator the refreshed access token will target.
+    pub resource: String,
+    /// The scopes this token may refresh (space-delimited).
+    pub scope: String,
+    /// Issuance time (Unix seconds).
+    pub issued_at: i64,
+    /// Expiry (Unix seconds).
+    pub expires_at: i64,
+    /// When the token was redeemed, if it has been. A second presentation of a
+    /// consumed token is a replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<i64>,
+}
+
+impl RefreshToken {
+    /// Whether the token has passed its expiry instant.
+    pub fn is_expired(&self, now: i64) -> bool {
+        now >= self.expires_at
+    }
+
+    /// Whether the token has already been redeemed.
+    pub fn is_consumed(&self) -> bool {
+        self.consumed_at.is_some()
+    }
+
+    /// The scopes this token may refresh, as a slice of tokens.
+    pub fn scopes(&self) -> Vec<&str> {
+        self.scope.split_whitespace().collect()
+    }
+}
+
 /// The successful token-endpoint response (RFC 6749 §5.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {

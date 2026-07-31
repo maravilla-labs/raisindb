@@ -145,12 +145,18 @@ pub struct AppState {
 
 /// The store backing the OAuth authorization server.
 ///
-/// The in-memory implementation is a complete, real store suitable for
-/// single-node servers, the CLI dev server, and tests. A managed deployment can
-/// swap in a persistent implementation of the same store traits without
-/// changing the protocol logic.
+/// Durable, because RFC 7591 clients MUST outlive the process: an MCP host
+/// (ChatGPT, Claude, Cursor) caches the `client_id` it was issued indefinitely,
+/// so a store that empties on restart answers every subsequent `/authorize`
+/// with `invalid_client: unknown client_id '…'` and the only user-visible
+/// remedy is deleting and re-adding the connector.
+///
+/// `raisin_auth`'s `InMemoryAuthServerStore` remains available for that crate's
+/// own tests, but is deliberately not reachable from here — the authorization
+/// server only exists under `storage-rocksdb` in the first place, so there is
+/// no configuration in which the volatile store would be the right choice.
 #[cfg(feature = "storage-rocksdb")]
-pub(crate) type OAuthStore = raisin_auth::authserver::InMemoryAuthServerStore;
+pub(crate) type OAuthStore = raisin_rocksdb::RocksDbOAuthStore;
 
 impl AppState {
     /// Get access to the RaisinConnection for transaction API
@@ -442,11 +448,17 @@ pub fn router_with_bin_and_audit(
         None
     };
 
-    // The authorization server holds OAuth clients + codes in process. Codes are
-    // single-use and short-lived; clients persist for the server's lifetime.
+    // Back the authorization server with RocksDB whenever we have it. Clients
+    // registered via RFC 7591 MUST outlive the process: an MCP host caches its
+    // `client_id` indefinitely, so an in-memory store turns every restart into
+    // `invalid_client` for every previously-connected client.
+    // Derived from `storage` rather than the optional `rocksdb_storage`
+    // parameter on purpose: several callers (the test router included) pass
+    // `None` there, and durability here must not depend on a caller
+    // remembering to thread a handle through.
     #[cfg(feature = "storage-rocksdb")]
     let oauth_server = Arc::new(raisin_auth::authserver::AuthorizationServer::new(Arc::new(
-        raisin_auth::authserver::InMemoryAuthServerStore::new(),
+        raisin_rocksdb::RocksDbOAuthStore::new(Arc::clone(storage.db())),
     )));
 
     let state = AppState {

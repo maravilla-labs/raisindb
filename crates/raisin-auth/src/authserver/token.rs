@@ -65,6 +65,19 @@ pub struct TokenGrant {
     pub client_id: String,
 }
 
+/// What a successful token request yields: the access-token grant plus the
+/// refresh token to hand back, when the client is registered for that grant.
+///
+/// The refresh value is present exactly once — here — because only the hash is
+/// persisted.
+#[derive(Debug, Clone)]
+pub struct IssuedGrant {
+    /// The grant the resource server signs into an access token.
+    pub grant: TokenGrant,
+    /// The opaque refresh token, if one was issued.
+    pub refresh_token: Option<String>,
+}
+
 /// Authenticate a client against its registration for a token request.
 ///
 /// Public clients (no secret) are authenticated solely by the PKCE proof, so

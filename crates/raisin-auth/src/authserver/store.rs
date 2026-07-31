@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use super::error::{AuthServerError, AuthServerResult};
-use super::model::{AuthorizationCode, OAuthClient};
+use super::model::{AuthorizationCode, OAuthClient, RefreshToken};
 
 /// Storage for registered OAuth clients, scoped by tenant.
 pub trait ClientStore: Send + Sync {
@@ -64,16 +64,62 @@ pub trait AuthCodeStore: Send + Sync {
     ) -> impl std::future::Future<Output = AuthServerResult<Option<AuthorizationCode>>> + Send;
 }
 
-/// In-process, thread-safe implementation of both store traits.
+/// Storage for refresh tokens, scoped by tenant.
+///
+/// Records are keyed by the **hash** of the token value, never the value
+/// itself. [`consume_refresh_token`](RefreshTokenStore::consume_refresh_token)
+/// marks rather than deletes, because replay detection needs to distinguish a
+/// token that was already redeemed from one that never existed — see
+/// [`super::refresh`].
+pub trait RefreshTokenStore: Send + Sync {
+    /// Persist a freshly issued refresh token.
+    fn put_refresh_token(
+        &self,
+        token: RefreshToken,
+    ) -> impl std::future::Future<Output = AuthServerResult<()>> + Send;
+
+    /// Atomically mark a token consumed and return it **as it was before the
+    /// mark**.
+    ///
+    /// Returning the prior state is what makes replay detectable: a record
+    /// whose `consumed_at` was already set means the caller is the second
+    /// presenter. Implementations MUST make the read-and-mark atomic against
+    /// concurrent callers, or two racing redemptions both see an unconsumed
+    /// token and neither is flagged.
+    fn consume_refresh_token(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+        now: i64,
+    ) -> impl std::future::Future<Output = AuthServerResult<Option<RefreshToken>>> + Send;
+
+    /// Revoke every token in a rotation family, returning how many were
+    /// removed. Called when a replay is detected.
+    fn revoke_refresh_family(
+        &self,
+        tenant_id: &str,
+        family_id: &str,
+    ) -> impl std::future::Future<Output = AuthServerResult<usize>> + Send;
+}
+
+/// In-process, thread-safe implementation of all three store traits.
 ///
 /// Backed by `RwLock<HashMap>` maps keyed by `{tenant}\0{id}`. Expired codes
 /// are swept lazily on access and can be purged eagerly via
-/// [`InMemoryAuthServerStore::sweep_expired`]. This is the default store used
-/// when no persistent backend is wired in.
+/// [`InMemoryAuthServerStore::sweep_expired`].
+///
+/// **This store does not survive a restart.** Registered clients live only as
+/// long as the process, so a client that registered via RFC 7591 and cached its
+/// `client_id` — which is what ChatGPT, Claude and other MCP hosts do — gets
+/// `invalid_client` after any redeploy or crash, with no way to recover except
+/// removing and re-adding the connector. Use it for tests, the CLI dev server,
+/// and single-node throwaway instances; any deployment a real MCP client
+/// connects to wants a persistent implementation of the same traits.
 #[derive(Default)]
 pub struct InMemoryAuthServerStore {
     clients: RwLock<HashMap<String, OAuthClient>>,
     codes: RwLock<HashMap<String, AuthorizationCode>>,
+    refresh_tokens: RwLock<HashMap<String, RefreshToken>>,
 }
 
 impl InMemoryAuthServerStore {
@@ -167,6 +213,53 @@ impl AuthCodeStore for InMemoryAuthServerStore {
     }
 }
 
+impl RefreshTokenStore for InMemoryAuthServerStore {
+    async fn put_refresh_token(&self, token: RefreshToken) -> AuthServerResult<()> {
+        let key = Self::key(&token.tenant_id, &token.token_hash);
+        self.refresh_tokens
+            .write()
+            .map_err(|_| {
+                AuthServerError::ServerError("refresh token store lock poisoned".to_string())
+            })?
+            .insert(key, token);
+        Ok(())
+    }
+
+    async fn consume_refresh_token(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+        now: i64,
+    ) -> AuthServerResult<Option<RefreshToken>> {
+        let key = Self::key(tenant_id, token_hash);
+        // A write lock across the read and the mark makes the pair atomic.
+        let mut tokens = self.refresh_tokens.write().map_err(|_| {
+            AuthServerError::ServerError("refresh token store lock poisoned".to_string())
+        })?;
+        let Some(entry) = tokens.get_mut(&key) else {
+            return Ok(None);
+        };
+        let before = entry.clone();
+        if entry.consumed_at.is_none() {
+            entry.consumed_at = Some(now);
+        }
+        Ok(Some(before))
+    }
+
+    async fn revoke_refresh_family(
+        &self,
+        tenant_id: &str,
+        family_id: &str,
+    ) -> AuthServerResult<usize> {
+        let mut tokens = self.refresh_tokens.write().map_err(|_| {
+            AuthServerError::ServerError("refresh token store lock poisoned".to_string())
+        })?;
+        let before = tokens.len();
+        tokens.retain(|_, t| !(t.tenant_id == tenant_id && t.family_id == family_id));
+        Ok(before - tokens.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +338,99 @@ mod tests {
 
         let taken = store.take_code("tenant-a", "old").await.unwrap();
         assert!(taken.is_none());
+    }
+
+    fn sample_refresh(hash: &str, family: &str) -> RefreshToken {
+        RefreshToken {
+            token_hash: hash.to_string(),
+            family_id: family.to_string(),
+            client_id: "client-1".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            identity_id: "id-1".to_string(),
+            email: "u@example.com".to_string(),
+            repository: "repo".to_string(),
+            branch: "main".to_string(),
+            resource: "https://h/mcp/repo/main/srv".to_string(),
+            scope: "reader".to_string(),
+            issued_at: 0,
+            expires_at: i64::MAX,
+            consumed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_returns_prior_state_so_replay_is_visible() {
+        let store = InMemoryAuthServerStore::new();
+        store
+            .put_refresh_token(sample_refresh("h1", "fam-1"))
+            .await
+            .unwrap();
+
+        let first = store
+            .consume_refresh_token("tenant-a", "h1", 100)
+            .await
+            .unwrap()
+            .expect("token exists");
+        assert!(!first.is_consumed(), "first redemption sees it unconsumed");
+
+        let second = store
+            .consume_refresh_token("tenant-a", "h1", 200)
+            .await
+            .unwrap()
+            .expect("record is retained, not deleted");
+        assert_eq!(
+            second.consumed_at,
+            Some(100),
+            "replay must observe the original consumption"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_family_drops_every_member() {
+        let store = InMemoryAuthServerStore::new();
+        store
+            .put_refresh_token(sample_refresh("h1", "fam-1"))
+            .await
+            .unwrap();
+        store
+            .put_refresh_token(sample_refresh("h2", "fam-1"))
+            .await
+            .unwrap();
+        store
+            .put_refresh_token(sample_refresh("h3", "fam-2"))
+            .await
+            .unwrap();
+
+        let revoked = store
+            .revoke_refresh_family("tenant-a", "fam-1")
+            .await
+            .unwrap();
+        assert_eq!(revoked, 2);
+        assert!(store
+            .consume_refresh_token("tenant-a", "h1", 1)
+            .await
+            .unwrap()
+            .is_none());
+        // A different family is untouched.
+        assert!(store
+            .consume_refresh_token("tenant-a", "h3", 1)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn refresh_tokens_are_tenant_scoped() {
+        let store = InMemoryAuthServerStore::new();
+        store
+            .put_refresh_token(sample_refresh("h1", "fam-1"))
+            .await
+            .unwrap();
+        assert!(store
+            .consume_refresh_token("tenant-b", "h1", 1)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -185,3 +185,97 @@ async fn authorize_rejects_a_non_mcp_resource() {
     let body = json_body(response).await;
     assert_eq!(body["error"].as_str(), Some("invalid_target"));
 }
+
+/// POST a form to `/token` and return the response.
+async fn post_token(app: &axum::Router, host: &str, form: &str) -> axum::response::Response {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header("host", host)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(form.to_string()))
+        .unwrap();
+    app.clone().oneshot(request).await.unwrap()
+}
+
+/// The regression test for the production failure: a connector that registered
+/// before a restart must still be recognised after it.
+///
+/// An MCP host caches the `client_id` it received from Dynamic Client
+/// Registration indefinitely, so when the client store lived only in process
+/// memory every redeploy answered the next `/authorize` with
+/// `invalid_client: unknown client_id '…'`, and the only user-visible fix was
+/// deleting and re-adding the connector.
+#[tokio::test]
+async fn a_registered_client_survives_a_server_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("restart");
+    let path = path.to_str().unwrap();
+    let resource = "https://db.example.com/mcp/studio/main/studio";
+
+    // First boot: register, as ChatGPT would on first connect.
+    let client_id = {
+        let store = RocksDBStorage::new(path).unwrap();
+        let app = raisin_transport_http::router(Arc::new(store));
+        let client_id = register_client(&app, "db.example.com").await;
+
+        // Sanity: it works while the process is up.
+        let response = authorize_get(&app, "db.example.com", &client_id, resource).await;
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the freshly registered client must be accepted"
+        );
+        client_id
+    }; // storage dropped — the server process has exited
+
+    // Second boot over the same data directory.
+    let store = RocksDBStorage::new(path).unwrap();
+    let app = raisin_transport_http::router(Arc::new(store));
+
+    let response = authorize_get(&app, "db.example.com", &client_id, resource).await;
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_ne!(
+        body["error"].as_str(),
+        Some("invalid_client"),
+        "the client must outlive the process, got {status}: {body}"
+    );
+}
+
+/// The `refresh_token` grant must actually be routed. Before it was
+/// implemented the endpoint accepted only `authorization_code`, so a client
+/// following the advertised metadata (which has always listed `refresh_token`
+/// in `grant_types_supported`) got `unsupported_grant_type` and fell back to a
+/// full re-authorization every hour.
+#[tokio::test]
+async fn refresh_grant_is_routed_not_rejected_as_unsupported() {
+    let (app, _dir) = app("refresh-routed");
+    let client_id = register_client(&app, "db.example.com").await;
+
+    let form =
+        format!("grant_type=refresh_token&client_id={client_id}&refresh_token=rt_not_a_real_token");
+    let response = post_token(&app, "db.example.com", &form).await;
+    let body = json_body(response).await;
+
+    // The token is nonsense, so invalid_grant is the right answer — the point
+    // is that the grant type itself was understood.
+    assert_eq!(
+        body["error"].as_str(),
+        Some("invalid_grant"),
+        "the refresh grant must be handled, got {body}"
+    );
+}
+
+/// A grant type the server does not implement must be reported as such.
+#[tokio::test]
+async fn unknown_grant_type_is_rejected() {
+    let (app, _dir) = app("grant-unknown");
+    let client_id = register_client(&app, "db.example.com").await;
+
+    let form = format!("grant_type=client_credentials&client_id={client_id}");
+    let response = post_token(&app, "db.example.com", &form).await;
+    let body = json_body(response).await;
+
+    assert_eq!(body["error"].as_str(), Some("unsupported_grant_type"));
+}

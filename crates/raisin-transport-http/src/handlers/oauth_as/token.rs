@@ -3,12 +3,20 @@
 // RaisinDB - Git-like hierarchical multi model database
 // Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
 
-//! Token endpoint (RFC 6749 §4.1.3, OAuth 2.1 profile): `POST /token`.
+//! Token endpoint (RFC 6749 §4.1.3 and §6, OAuth 2.1 profile): `POST /token`.
 //!
-//! Accepts the `application/x-www-form-urlencoded` `authorization_code` grant,
-//! authenticates the client, verifies the PKCE `code_verifier`, and mints a
-//! resource-bound JWT access token (audience = the MCP resource, `scope` = the
-//! consented scopes) using the resource server's existing JWT machinery.
+//! Accepts two `application/x-www-form-urlencoded` grants:
+//!
+//! - `authorization_code` — authenticates the client, verifies the PKCE
+//!   `code_verifier`, and mints a resource-bound JWT access token (audience =
+//!   the MCP resource, `scope` = the consented scopes).
+//! - `refresh_token` — exchanges a rotating refresh token for a new access
+//!   token without another `/authorize` round trip.
+//!
+//! Both mint the JWT through the resource server's existing signing machinery,
+//! and both return a **new** refresh token when the client registered for that
+//! grant: rotation is mandatory under OAuth 2.1, so the value returned here is
+//! always the one the client must store for next time.
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -16,30 +24,36 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form, Json};
 use serde::Deserialize;
 
-use raisin_auth::authserver::{AuthServerError, AuthorizationCodeTokenRequest, TokenResponse};
+use raisin_auth::authserver::{
+    AuthServerError, AuthorizationCodeTokenRequest, IssuedGrant, RefreshTokenRequest, TokenResponse,
+};
 
 use super::helpers::oauth_error_response;
 use crate::middleware::TenantInfo;
 use crate::state::AppState;
 
-/// The `POST /token` form body.
+/// The `POST /token` form body, covering both supported grants.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenForm {
-    /// The grant type — only `authorization_code` is supported here.
+    /// The grant type — `authorization_code` or `refresh_token`.
     pub grant_type: String,
-    /// The authorization code to redeem.
+    /// The authorization code to redeem (`authorization_code`).
     pub code: Option<String>,
-    /// The redirect URI bound to the code.
+    /// The redirect URI bound to the code (`authorization_code`).
     pub redirect_uri: Option<String>,
     /// The client id (also accepted via HTTP Basic auth).
     pub client_id: Option<String>,
     /// The client secret (confidential clients; also via HTTP Basic auth).
     pub client_secret: Option<String>,
-    /// The PKCE verifier.
+    /// The PKCE verifier (`authorization_code`).
     pub code_verifier: Option<String>,
+    /// The refresh token to redeem (`refresh_token`).
+    pub refresh_token: Option<String>,
+    /// An optional narrowing of the granted scopes (`refresh_token`).
+    pub scope: Option<String>,
 }
 
-/// `POST /token` — redeem an authorization code for an access token.
+/// `POST /token` — redeem an authorization code or a refresh token.
 #[cfg(feature = "storage-rocksdb")]
 pub async fn token(
     State(state): State<AppState>,
@@ -53,31 +67,56 @@ pub async fn token(
         Err(err) => return oauth_error_response(&err),
     };
 
-    let code = match form.code.clone() {
-        Some(c) => c,
-        None => {
-            return oauth_error_response(&AuthServerError::InvalidRequest(
-                "code is required".to_string(),
-            ))
+    let issued = match form.grant_type.as_str() {
+        "authorization_code" => {
+            let Some(code) = form.code.clone() else {
+                return oauth_error_response(&AuthServerError::InvalidRequest(
+                    "code is required".to_string(),
+                ));
+            };
+            let req = AuthorizationCodeTokenRequest {
+                grant_type: form.grant_type.clone(),
+                code,
+                redirect_uri: form.redirect_uri.clone(),
+                client_id,
+                client_secret,
+                code_verifier: form.code_verifier.clone(),
+            };
+            state
+                .oauth_server
+                .redeem_authorization_code(&tenant_info.tenant_id, &req)
+                .await
+        }
+        "refresh_token" => {
+            let Some(refresh_token) = form.refresh_token.clone() else {
+                return oauth_error_response(&AuthServerError::InvalidRequest(
+                    "refresh_token is required".to_string(),
+                ));
+            };
+            let req = RefreshTokenRequest {
+                grant_type: form.grant_type.clone(),
+                refresh_token,
+                client_id,
+                client_secret,
+                scope: form.scope.clone(),
+            };
+            state
+                .oauth_server
+                .redeem_refresh_token(&tenant_info.tenant_id, &req)
+                .await
+        }
+        other => {
+            return oauth_error_response(&AuthServerError::UnsupportedGrantType(format!(
+                "grant_type '{other}' is not supported"
+            )))
         }
     };
 
-    let req = AuthorizationCodeTokenRequest {
-        grant_type: form.grant_type.clone(),
-        code,
-        redirect_uri: form.redirect_uri.clone(),
-        client_id,
-        client_secret,
-        code_verifier: form.code_verifier.clone(),
-    };
-
-    // Redeem the code: load + authenticate client, consume code, verify PKCE.
-    let grant = match state
-        .oauth_server
-        .redeem_authorization_code(&tenant_info.tenant_id, &req)
-        .await
-    {
-        Ok(grant) => grant,
+    let IssuedGrant {
+        grant,
+        refresh_token,
+    } = match issued {
+        Ok(issued) => issued,
         Err(err) => return oauth_error_response(&err),
     };
 
@@ -103,7 +142,7 @@ pub async fn token(
         access_token,
         token_type: "Bearer".to_string(),
         expires_in,
-        refresh_token: None,
+        refresh_token,
         scope: grant.scope,
     };
 
@@ -191,6 +230,8 @@ mod tests {
             client_id: Some("client-1".to_string()),
             client_secret: None,
             code_verifier: None,
+            refresh_token: None,
+            scope: None,
         };
         let (id, secret) = resolve_client_credentials(&headers, &form).unwrap();
         assert_eq!(id, "client-1");
@@ -207,6 +248,8 @@ mod tests {
             client_id: None,
             client_secret: None,
             code_verifier: None,
+            refresh_token: None,
+            scope: None,
         };
         let err = resolve_client_credentials(&headers, &form).unwrap_err();
         assert_eq!(err.code(), "invalid_client");
