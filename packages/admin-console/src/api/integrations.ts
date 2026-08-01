@@ -14,21 +14,61 @@ import { nodesApi, type Node } from './nodes'
 import { sqlApi } from './sql'
 
 /**
- * `/integrations` and `/mounts` only exist once something has been installed
- * or created under them. Before that, listing their children 404s ("Parent
- * node not found") even though the correct answer is just an empty list.
+ * List every node of a type in a workspace, by TYPE rather than by walking a
+ * parent folder.
+ *
+ * Listing children of `/mounts` looked equivalent and was not: creating a node
+ * under a parent path does NOT create the parent folder node, so
+ * `POST .../raisin:system/mounts` returns 201 while `GET .../raisin:system/mounts/`
+ * returns 404 "Parent node not found" forever after. The old helper swallowed
+ * that 404 as an empty list, so a repo full of working mounts rendered "No
+ * mounts yet" — invisible in the console while the engine synced them happily,
+ * because the engine finds them by TYPE (`list_by_type`), which is what this
+ * now mirrors. Same source of truth, no dependency on a folder that may never
+ * have existed.
  */
-async function listChildrenOrEmpty(
-  repo: string,
-  branch: string,
-  workspace: string,
-  parentPath: string
-): Promise<Node[]> {
+async function listByNodeType(repo: string, workspace: string, nodeType: string): Promise<Node[]> {
+  // nodeType is a compile-time constant, never user input.
+  const sql = `SELECT id, name, path, properties FROM "${workspace}" WHERE node_type = '${nodeType}'`
   try {
-    return await nodesApi.listChildrenAtHead(repo, branch, workspace, parentPath)
+    const res = await sqlApi.executeQuery(repo, sql, [])
+    return (res.rows || []).map((r: any) => ({
+      id: r.id,
+      name: r.name,
+      path: r.path,
+      node_type: nodeType,
+      properties: r.properties || {},
+    })) as Node[]
   } catch (e) {
+    // A fresh repo with no such nodes (or no workspace yet) is an empty list,
+    // not an error worth surfacing to the page.
     if (e instanceof ApiError && e.status === 404) return []
     throw e
+  }
+}
+
+/**
+ * Ensure a config root folder exists before creating a child under it.
+ *
+ * Without this the child is created but the folder is not, which is how the
+ * mounts list broke in the first place (see [[listByNodeType]]).
+ */
+async function ensureConfigRoot(repo: string, branch: string, workspace: string, root: string) {
+  try {
+    await nodesApi.getAtHead(repo, branch, workspace, root)
+    return
+  } catch (e) {
+    if (!(e instanceof ApiError) || e.status !== 404) throw e
+  }
+  try {
+    await nodesApi.create(repo, branch, workspace, '/', {
+      name: root.replace(/^\//, ''),
+      node_type: 'raisin:Folder',
+      properties: { title: root.replace(/^\//, '') },
+    })
+  } catch {
+    // Racing another tab, or a repo that disallows the write — the child create
+    // below still succeeds either way, so this must never be fatal.
   }
 }
 
@@ -549,10 +589,8 @@ export const integrationsApi = {
   // ---- Integration config CRUD ----
 
   listIntegrations: async (repo: string): Promise<Integration[]> => {
-    const nodes = await listChildrenOrEmpty(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, INTEGRATIONS_ROOT)
-    return nodes
-      .filter((n) => n.node_type === 'raisin:Integration')
-      .map(nodeToIntegration)
+    const nodes = await listByNodeType(repo, SYSTEM_WORKSPACE, 'raisin:Integration')
+    return nodes.map(nodeToIntegration)
   },
 
   getIntegration: async (repo: string, name: string): Promise<Integration> => {
@@ -566,6 +604,7 @@ export const integrationsApi = {
   },
 
   createIntegration: async (repo: string, i: Integration): Promise<Integration> => {
+    await ensureConfigRoot(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, INTEGRATIONS_ROOT)
     const node = await nodesApi.create(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, INTEGRATIONS_ROOT, {
       name: i.name,
       node_type: 'raisin:Integration',
@@ -680,10 +719,8 @@ export const integrationsApi = {
   // ---- Mount config CRUD ----
 
   listMounts: async (repo: string): Promise<VirtualMount[]> => {
-    const nodes = await listChildrenOrEmpty(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, MOUNTS_ROOT)
-    return nodes
-      .filter((n) => n.node_type === 'raisin:VirtualMount')
-      .map(nodeToMount)
+    const nodes = await listByNodeType(repo, SYSTEM_WORKSPACE, 'raisin:VirtualMount')
+    return nodes.map(nodeToMount)
   },
 
   getMount: async (repo: string, name: string): Promise<VirtualMount> => {
@@ -697,6 +734,7 @@ export const integrationsApi = {
   },
 
   createMount: async (repo: string, m: VirtualMount): Promise<VirtualMount> => {
+    await ensureConfigRoot(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, MOUNTS_ROOT)
     const node = await nodesApi.create(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, MOUNTS_ROOT, {
       name: m.name,
       node_type: 'raisin:VirtualMount',
