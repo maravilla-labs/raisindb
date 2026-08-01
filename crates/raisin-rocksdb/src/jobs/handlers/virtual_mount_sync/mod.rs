@@ -214,6 +214,15 @@ impl VirtualMountSyncHandler {
                         let mut state = mount.state.clone();
                         state.status = Some("misconfigured".to_string());
                         state.last_error = Some(err.to_string());
+                        // Stamp the attempt here too. This path returns BEFORE
+                        // `finalize`, so without it `last_attempt_at` stays null
+                        // and `is_due` keeps the mount permanently due — the
+                        // same defect the backoff fix addressed, surviving in
+                        // the one branch that skips finalize. Harmless for the
+                        // provider (it fails before any call), but it re-scans
+                        // and rewrites this node on every 60s tick forever.
+                        state.last_attempt_at = Some(Utc::now().timestamp());
+                        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
                         let _ = persist_mount_state(
                             &self.storage,
                             &tenant,
@@ -235,6 +244,7 @@ impl VirtualMountSyncHandler {
             adapter_path,
             credential,
             mount_snapshot,
+            public_origin,
             scope,
         } = self
             .build_ctx_parts(&svc, &tenant, &repo, &config_branch, &mount)
@@ -268,6 +278,7 @@ impl VirtualMountSyncHandler {
         // materialization; mount/integration config and mount state stay on the
         // config branch (`ctx.config_branch`).
         let mut ctx = SyncCtx {
+            public_origin,
             storage: self.storage.clone(),
             scope: scope.clone(),
             config_branch: config_branch.clone(),
@@ -585,6 +596,7 @@ impl VirtualMountSyncHandler {
             force_rewrite: false,
         };
         Ok(CtxParts {
+            public_origin: integration.public_origin.clone(),
             integ_node_id: integ_node.id,
             adapter_path,
             credential,
@@ -625,6 +637,7 @@ impl VirtualMountSyncHandler {
             self.materializer.as_ref(),
             parts.credential,
             parts.mount_snapshot,
+            parts.public_origin,
         );
         let mut state = mount.state.clone();
         subscription::teardown(&ctx, &mut state).await;
@@ -707,6 +720,7 @@ impl VirtualMountSyncHandler {
                         self.materializer.as_ref(),
                         parts.credential,
                         parts.mount_snapshot,
+                        parts.public_origin,
                     );
                     let mut state = mount.state.clone();
                     if subscription::renew(&ctx, &mut state).await {
@@ -794,6 +808,7 @@ struct CtxParts {
     credential: Option<Value>,
     mount_snapshot: Value,
     scope: MountScope,
+    public_origin: Option<String>,
 }
 
 /// Everything a delta/full run needs. Borrows the invoker + materializer.
@@ -812,6 +827,10 @@ pub struct SyncCtx<'a> {
     pub lock_key: String,
     pub credential: Option<Value>,
     pub mount_snapshot: Value,
+    /// Public origin for this connector's callback URLs, taken from the
+    /// operator's stored OAuth `redirect_uri`. See
+    /// [`IntegrationConfig::public_origin`].
+    pub public_origin: Option<String>,
 }
 
 impl SyncCtx<'_> {

@@ -91,6 +91,7 @@ fn remap_scope() -> MountScope {
 /// Minimal `IntegrationConfig` carrying just an `api_config`, for snapshot tests.
 fn test_integration(api_config: Value) -> super::config::IntegrationConfig {
     super::config::IntegrationConfig {
+        public_origin: None,
         provider_type: "test".to_string(),
         adapter_function: None,
         accounts: Vec::new(),
@@ -259,6 +260,7 @@ fn ctx<'a>(
     mat: &'a dyn NodeMaterializer,
 ) -> SyncCtx<'a> {
     SyncCtx {
+        public_origin: None,
         storage: env.storage.clone(),
         scope: scope(),
         config_branch: "main".to_string(),
@@ -573,6 +575,59 @@ async fn remap_reapplies_node_type_and_path_to_already_synced_items() {
         "node moved into the new hierarchy, got {}",
         node.path
     );
+}
+
+/// The connector's public origin comes from its stored OAuth redirect_uri.
+///
+/// `RAISINDB_BASE_URL` cannot serve a multi-tenant deployment — every org has
+/// its own `{handle}.{base}` host — so it is left unset and push could never be
+/// wired. The redirect_uri is the one public URL per connector that is already
+/// verified correct, because the provider rejects a mismatched OAuth exchange.
+#[test]
+fn public_origin_is_derived_from_the_oauth_redirect_uri() {
+    use raisin_models::nodes::properties::PropertyValue;
+
+    let node_with = |redirect: &str| {
+        let mut n = Node {
+            id: "i1".into(),
+            node_type: "raisin:Integration".into(),
+            name: "ms-graph".into(),
+            path: "/integrations/ms-graph".into(),
+            ..Default::default()
+        };
+        n.properties.insert(
+            "provider_type".into(),
+            PropertyValue::String("ms-graph".into()),
+        );
+        n.properties.insert(
+            "oauth_config".into(),
+            serde_json::from_value(json!({ "redirect_uri": redirect })).unwrap(),
+        );
+        n
+    };
+
+    // Only the ORIGIN is taken; the callback path is irrelevant to push.
+    let cfg = super::config::IntegrationConfig::from_node(&node_with(
+        "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback",
+    ))
+    .unwrap();
+    assert_eq!(
+        cfg.public_origin.as_deref(),
+        Some("https://solutas.rdb.maravilla.cloud")
+    );
+
+    // A non-default port is preserved.
+    let cfg = super::config::IntegrationConfig::from_node(&node_with(
+        "http://localhost:8080/api/integrations/studio/oauth/callback",
+    ))
+    .unwrap();
+    assert_eq!(cfg.public_origin.as_deref(), Some("http://localhost:8080"));
+
+    // Unset or unparseable falls back to None, so the caller uses the env var.
+    let cfg = super::config::IntegrationConfig::from_node(&node_with("")).unwrap();
+    assert_eq!(cfg.public_origin, None);
+    let cfg = super::config::IntegrationConfig::from_node(&node_with("not a url")).unwrap();
+    assert_eq!(cfg.public_origin, None);
 }
 
 #[test]

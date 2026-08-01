@@ -55,11 +55,24 @@ sync:
       mode: merge
 
     # Integration template in the system workspace
+    # skip, NOT merge. This node is the operator's LIVE connector config: it holds
+    # client_id, the encrypted client secret, connected_accounts and the tenant
+    # authority. `merge` re-applied the shipped template over it and reset every
+    # one of those to the packaged defaults — observed in production as a
+    # configured Microsoft connector reverting to client_id: "", no secret, zero
+    # accounts and auth_url back to `common`, which silently killed every mount
+    # that depended on it. `skip` is documented for exactly this ("preserve
+    # tenant-owned content across updates"): the template lands once, on first
+    # install, and is never written again.
+    #
+    # Deliberately scoped to the integration node only. The adapter and mapper
+    # functions above stay `merge` — those are OUR code and MUST keep updating,
+    # which is what gets a connector fix to a running deployment.
     - root: /integrations/google-calendar
       workspace: raisin:system
       include:
         - "**"
-      mode: merge
+      mode: skip
 
 # Workspace configuration for auto-created folders
 workspace_patches:

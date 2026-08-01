@@ -78,8 +78,10 @@ pub fn adapter_ctx<'a>(
     materializer: &'a dyn NodeMaterializer,
     credential: Option<Value>,
     mount_snapshot: Value,
+    public_origin: Option<String>,
 ) -> SyncCtx<'a> {
     SyncCtx {
+        public_origin,
         storage,
         scope,
         config_branch,
@@ -132,14 +134,26 @@ pub async fn ensure(ctx: &SyncCtx<'_>, state: &mut MountState, caps: &Capabiliti
         return; // idempotent: a live subscription already exists
     }
 
-    let Some(base) = configured_base_url() else {
+    // Prefer the connector's own public origin, derived from the operator's
+    // stored OAuth redirect_uri, and fall back to the global env var.
+    //
+    // `RAISINDB_BASE_URL` cannot express a multi-tenant deployment: every org is
+    // served at its own `{handle}.{base}` host, so one static value is wrong for
+    // all but one of them and the var is simply left unset — which meant push
+    // could never be wired at all. The redirect_uri is the one public URL per
+    // connector the operator already has to get right, because the provider
+    // rejects an OAuth exchange that does not match what is registered. Reusing
+    // it means no second thing to configure and no second thing to get wrong.
+    let Some(base) = ctx.public_origin.clone().or_else(configured_base_url) else {
         state.push_status = Some("failed".to_string());
         state.push_last_error = Some(
-            "RAISINDB_BASE_URL is not configured; cannot build a push notification_url".to_string(),
+            "no public URL for this connector: set the OAuth Redirect URI on the connector (its \
+             origin is reused for push notifications), or set RAISINDB_BASE_URL"
+                .to_string(),
         );
         tracing::warn!(
             mount_id = %mount_id,
-            "cannot wire push: RAISINDB_BASE_URL unset (no public URL to hand the provider)"
+            "cannot wire push: no connector redirect_uri origin and RAISINDB_BASE_URL unset"
         );
         return;
     };
