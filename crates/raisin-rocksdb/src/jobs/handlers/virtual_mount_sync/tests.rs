@@ -76,6 +76,15 @@ fn scope() -> MountScope {
         workspace: TARGET_WS.to_string(),
         mount_id: MOUNT_ID.to_string(),
         mount_path: MOUNT_PATH.to_string(),
+        force_rewrite: false,
+    }
+}
+
+/// The same scope with remap semantics (etag ignored, re-path allowed).
+fn remap_scope() -> MountScope {
+    MountScope {
+        force_rewrite: true,
+        ..scope()
     }
 }
 
@@ -129,6 +138,9 @@ enum Reply {
 struct MockAdapter {
     changes: Mutex<VecDeque<Reply>>,
     lists: Mutex<HashMap<String, Value>>,
+    /// Pages keyed by the CURSOR that requests them, so a paginated walk
+    /// can be simulated (and a resume verified to send the right cursor).
+    paged: Mutex<HashMap<String, Value>>,
     calls: Mutex<Vec<String>>,
     caps: Mutex<Option<Value>>,
     sub_reply: Mutex<Option<Value>>,
@@ -147,6 +159,10 @@ impl MockAdapter {
             .lock()
             .unwrap()
             .insert(folder_id.to_string(), page);
+    }
+    /// Page returned when `list` is called with this cursor ("" = first page).
+    fn set_page(&self, cursor: &str, page: Value) {
+        self.paged.lock().unwrap().insert(cursor.to_string(), page);
     }
     fn set_caps(&self, caps: Value) {
         *self.caps.lock().unwrap() = Some(caps);
@@ -193,8 +209,18 @@ impl AdapterInvoker for MockAdapter {
                 None => Ok(json!({ "items": [], "next_token": null })),
             },
             "list" => {
-                let folder = input
-                    .get("params")
+                let params = input.get("params");
+                let cursor = params
+                    .and_then(|p| p.get("cursor"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                // Cursor-keyed pages win when configured; otherwise fall back to
+                // the per-folder single page.
+                if let Some(page) = self.paged.lock().unwrap().get(&cursor).cloned() {
+                    return Ok(page);
+                }
+                let folder = params
                     .and_then(|p| p.get("folder_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -479,6 +505,232 @@ async fn failure_backoff_and_interval() {
     assert_eq!(m.effective_interval_secs(), 300 * 8);
     m.state.consecutive_failures = 10; // capped at 2^5
     assert_eq!(m.effective_interval_secs(), 300 * 32);
+}
+
+/// Remap re-applies the CURRENT mapper to already-synced items.
+///
+/// The etag skip-write returns before the mapper's output is applied, so a
+/// changed mapper — a new node type, a new folder hierarchy — is invisible to
+/// everything already synced. Without a remap the only migration was
+/// delete-and-reimport, which throws away node ids, history and local edits.
+#[tokio::test(flavor = "multi_thread")]
+async fn remap_reapplies_node_type_and_path_to_already_synced_items() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+
+    let virt = |etag: &str| VirtualMeta {
+        mount_id: MOUNT_ID.to_string(),
+        external_id: "M1".to_string(),
+        etag: Some(etag.to_string()),
+        synced_at: Utc::now().to_rfc3339(),
+    };
+
+    // Synced by the OLD mapper: generic type, flat path.
+    let old = super::config::MappedNode {
+        node_type: "raisin:Node".to_string(),
+        name: Some("M1".to_string()),
+        properties: serde_json::from_value(json!({ "title": "Hello" })).unwrap(),
+    };
+    assert!(mat.upsert(&scope(), "M1", old, virt("v1")).await.unwrap());
+    let before = &mat.list_virtual(&scope()).await.unwrap()[0];
+    let original_id = before.id.clone();
+
+    // The NEW mapper: different node type, and a threaded path. The provider
+    // item is unchanged, so the etag is identical — an ordinary sync skips it.
+    let new = || super::config::MappedNode {
+        node_type: "raisin:Mail".to_string(),
+        name: Some("M1".to_string()),
+        properties: serde_json::from_value(json!({ "subject": "Hello" })).unwrap(),
+    };
+    assert!(
+        !mat.upsert(&scope(), "T7/M1", new(), virt("v1"))
+            .await
+            .unwrap(),
+        "an ordinary sync must still skip an unchanged item"
+    );
+
+    // Remap applies it.
+    assert!(mat
+        .upsert(&remap_scope(), "T7/M1", new(), virt("v1"))
+        .await
+        .unwrap());
+
+    let after = mat.list_virtual(&scope()).await.unwrap();
+    assert_eq!(after.len(), 1, "remap must not duplicate the node");
+    assert_eq!(
+        after[0].id, original_id,
+        "remap must preserve the node id, so history and local edits survive"
+    );
+
+    let node = all_nodes(&env, TARGET_WS)
+        .await
+        .into_iter()
+        .find(|n| n.id == original_id)
+        .expect("node still present");
+    assert_eq!(node.node_type, "raisin:Mail", "node type re-applied");
+    assert!(
+        node.path.ends_with("/T7/M1"),
+        "node moved into the new hierarchy, got {}",
+        node.path
+    );
+}
+
+#[test]
+fn path_template_groups_by_a_metadata_field() {
+    let item: super::config::ExternalItem = serde_json::from_value(json!({
+        "external_id": "MSG1",
+        "name": "MSG1",
+        "metadata": { "conversation_id": "THREAD7", "date": "2026-08-01T09:15:00Z" },
+    }))
+    .unwrap();
+
+    assert_eq!(
+        super::config::resolve_path_template("{conversation_id}/{name}", &item).unwrap(),
+        "THREAD7/MSG1"
+    );
+    assert_eq!(
+        super::config::resolve_path_template("{date:%Y}/{date:%m}/{name}", &item).unwrap(),
+        "2026/08/MSG1"
+    );
+}
+
+/// An empty template means "keep the provider's own path" — the caller falls
+/// back, so this must not return a stray empty segment.
+#[test]
+fn path_template_empty_means_no_hierarchy() {
+    let item: super::config::ExternalItem =
+        serde_json::from_value(json!({ "external_id": "A", "name": "a.txt" })).unwrap();
+    assert!(super::config::resolve_path_template("", &item).is_none());
+    assert!(super::config::resolve_path_template("   ", &item).is_none());
+}
+
+/// Fail CLOSED. A half-resolved template would scatter items into folders named
+/// after the literal placeholder, and because the materializer preserves an
+/// existing node's path, that is not undone by simply re-syncing.
+#[test]
+fn path_template_falls_back_when_a_placeholder_is_missing() {
+    let item: super::config::ExternalItem = serde_json::from_value(json!({
+        "external_id": "A", "name": "a.txt", "metadata": { "other": "x" },
+    }))
+    .unwrap();
+    assert!(super::config::resolve_path_template("{conversation_id}/{name}", &item).is_none());
+    // Unparseable date for a formatted placeholder.
+    let bad: super::config::ExternalItem = serde_json::from_value(json!({
+        "external_id": "A", "name": "a.txt", "metadata": { "date": "not-a-date" },
+    }))
+    .unwrap();
+    assert!(super::config::resolve_path_template("{date:%Y}/{name}", &bad).is_none());
+}
+
+/// Resolved values are untrusted provider text. A `/` inside one would invent
+/// hierarchy; a NUL would corrupt the storage key encoding.
+#[test]
+fn path_template_sanitizes_separators_inside_a_value() {
+    let item: super::config::ExternalItem = serde_json::from_value(json!({
+        "external_id": "A",
+        "name": "a.txt",
+        "metadata": { "folder": "in/box", "nul": "a\u{0000}b" },
+    }))
+    .unwrap();
+    let out = super::config::resolve_path_template("{folder}/{name}", &item).unwrap();
+    assert_eq!(
+        out, "in-box/a.txt",
+        "a slash in a value must not add a level"
+    );
+
+    let out2 = super::config::resolve_path_template("{nul}/{name}", &item).unwrap();
+    assert!(!out2.contains('\0'));
+}
+
+/// Empty segments collapse, so a template with a stray or leading slash still
+/// yields a clean relative path.
+#[test]
+fn path_template_collapses_empty_segments() {
+    let item: super::config::ExternalItem = serde_json::from_value(json!({
+        "external_id": "A", "name": "a.txt", "metadata": { "c": "T1" },
+    }))
+    .unwrap();
+    assert_eq!(
+        super::config::resolve_path_template("/{c}//{name}/", &item).unwrap(),
+        "T1/a.txt"
+    );
+}
+
+/// A mailbox larger than `max_items_per_sync` must import COMPLETELY, across
+/// as many runs as it takes.
+///
+/// Before the resumable cursor, the walk rebuilt its stack from the root and
+/// started its page cursor at None on every run, so a provider with more items
+/// than the cap re-imported the same first N forever and the remainder was
+/// never fetched — a production-sized mailbox simply could not be synced.
+#[tokio::test(flavor = "multi_thread")]
+async fn backfill_resumes_across_runs_until_every_item_is_imported() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig {
+        max_items_per_sync: 2,
+        ..SyncConfig::default()
+    });
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = MockAdapter::default();
+
+    // Three pages of two, two and one item, chained by cursor.
+    mock.set_page(
+        "",
+        json!({ "items": [ext_item("A", "a", false, "v1"), ext_item("B", "b", false, "v1")],
+                "next_cursor": "c1" }),
+    );
+    mock.set_page(
+        "c1",
+        json!({ "items": [ext_item("C", "c", false, "v1"), ext_item("D", "d", false, "v1")],
+                "next_cursor": "c2" }),
+    );
+    mock.set_page(
+        "c2",
+        json!({ "items": [ext_item("E", "e", false, "v1")], "next_cursor": null }),
+    );
+
+    let mut state = MountState::default();
+
+    // Run 1 — first two items, then out of budget.
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(mat.list_virtual(&scope()).await.unwrap().len(), 2);
+    assert_eq!(state.backfill_cursor.as_deref(), Some("c1"));
+    assert!(!state.backfill_complete, "walk is not finished yet");
+
+    // Run 2 — resumes at c1 rather than restarting at the top.
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(mat.list_virtual(&scope()).await.unwrap().len(), 4);
+    assert_eq!(state.backfill_cursor.as_deref(), Some("c2"));
+
+    // Run 3 — final page; the walk completes and the resume point is cleared.
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+    assert!(state.backfill_complete);
+    assert!(state.backfill_cursor.is_none());
+    assert!(state.backfill_stack.is_empty());
+
+    // All five survive. The final chunk only "saw" E, so a reconcile pass here
+    // would have deleted A-D — everything the backfill had just imported.
+    let ids: Vec<String> = mat
+        .list_virtual(&scope())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.external_id)
+        .collect();
+    assert_eq!(
+        ids.len(),
+        5,
+        "resumed backfill must not delete earlier chunks"
+    );
+    for want in ["A", "B", "C", "D", "E"] {
+        assert!(ids.iter().any(|i| i == want), "missing {want}");
+    }
 }
 
 /// An empty provider listing must NOT empty the mount by default.

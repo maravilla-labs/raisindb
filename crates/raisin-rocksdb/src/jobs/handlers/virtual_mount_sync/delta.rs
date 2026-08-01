@@ -74,7 +74,14 @@ async fn apply_change(
         return Ok(());
     }
 
-    let rel_path = if change.relative_path.is_empty() {
+    // Same resolution as the full walk — both paths MUST agree, or an item would
+    // sit at one location after a backfill and another after a delta, and the
+    // materializer would keep whichever it saw first.
+    let templated =
+        super::config::resolve_path_template(&ctx.mount.sync_config.path_template, &change.item);
+    let rel_path = if let Some(p) = templated {
+        p
+    } else if change.relative_path.is_empty() {
         change.item.name.clone()
     } else {
         change.relative_path.clone()

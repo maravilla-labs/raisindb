@@ -126,6 +126,19 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
         return !mount.state.has_active_push(now)
             && mount.state.push_status.as_deref() != Some("unsupported");
     }
+    // An unfinished backfill is due as soon as the previous chunk finished,
+    // rather than after the poll interval: a mailbox imported 500 items per run
+    // at one run every 5 minutes would take days. Chunks therefore run
+    // back-to-back — and because each run does its delta pass FIRST (see
+    // `run_sync`), new items keep arriving throughout. Still gated on
+    // consecutive_failures below via the normal path when the mount is failing,
+    // so a broken backfill cannot spin.
+    let backfill_pending =
+        !mount.state.backfill_stack.is_empty() || mount.state.backfill_cursor.is_some();
+    if backfill_pending && mount.state.consecutive_failures == 0 {
+        return true;
+    }
+
     // Measure from the last ATTEMPT, not the last success. `last_sync_at` only
     // advances when a sync succeeds, so scheduling on it alone left a failing
     // mount permanently "due": the backoff in `effective_interval_secs` was

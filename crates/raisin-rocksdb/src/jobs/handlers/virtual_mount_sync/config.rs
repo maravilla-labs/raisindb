@@ -47,6 +47,20 @@ pub struct SyncConfig {
     pub ttl_seconds: Option<u64>,
     #[serde(default = "default_max_items")]
     pub max_items_per_sync: u64,
+    /// Folder hierarchy for materialized items, as a template over the item's
+    /// fields — e.g. `"{conversation_id}/{name}"` groups mail into one folder
+    /// per thread, `"{date:%Y}/{date:%m}/{name}"` into year/month.
+    ///
+    /// Empty (the default) keeps the flat provider-derived path, which for mail
+    /// meant every message landing directly under the mount path named after its
+    /// opaque provider id — unusable in a tree once a mailbox is real-sized.
+    ///
+    /// Placeholders resolve against the item's `metadata` object, plus the
+    /// built-ins `{name}` and `{external_id}`. `{key:FMT}` formats an ISO-8601
+    /// metadata value with a strftime pattern. An unresolvable placeholder falls
+    /// back to the flat path rather than producing a half-built one.
+    #[serde(default)]
+    pub path_template: String,
     /// Allow a full reconcile to delete the ENTIRE mount subtree when the
     /// provider returns zero items.
     ///
@@ -84,6 +98,7 @@ impl Default for SyncConfig {
             ephemeral: false,
             ttl_seconds: None,
             max_items_per_sync: default_max_items(),
+            path_template: String::new(),
             allow_empty_reconcile: false,
         }
     }
@@ -108,6 +123,32 @@ pub struct MountState {
     /// config hammered the provider indefinitely.
     #[serde(default)]
     pub last_attempt_at: Option<i64>,
+    /// Resume point for an in-progress full walk ("backfill").
+    ///
+    /// `Some` means the last full pass stopped at `max_items_per_sync` without
+    /// exhausting the provider. Without this the walk restarted from the top on
+    /// every run, so a mailbox larger than the cap re-imported its first N items
+    /// forever and never reached the rest — the reason a production-sized
+    /// mailbox could not be imported at all.
+    ///
+    /// Holds the remaining folder stack as `(folder_id, path_prefix)` pairs plus
+    /// the page cursor within the folder currently being walked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backfill_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backfill_stack: Vec<(Option<String>, String)>,
+    /// Items materialized so far by the CURRENT full walk / backfill / remap.
+    ///
+    /// Cumulative across the chunks of one walk and reset when a fresh walk
+    /// starts, so the console can show "1,240 imported" while a multi-hour
+    /// import is running instead of a spinner with no end in sight.
+    #[serde(default)]
+    pub backfill_items_done: u64,
+    /// True once a full walk has reached the end at least once. Reconcile
+    /// deletes are only safe after this: before it, "not seen" merely means
+    /// "not reached yet".
+    #[serde(default)]
+    pub backfill_complete: bool,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -464,6 +505,93 @@ pub fn default_mapping(item: &ExternalItem) -> MappedNode {
 /// Apply include/exclude globs to a relative path. Exclude wins over include.
 /// An empty `include` list includes everything; a non-empty one requires a
 /// match.
+/// Characters that may not appear inside a single path SEGMENT.
+///
+/// A resolved value is untrusted provider text (a subject line, a folder name),
+/// so a `/` in it would silently invent hierarchy and a `\0` would corrupt the
+/// storage key encoding. Both are replaced rather than rejected: dropping the
+/// item would be a worse outcome than a slightly-renamed folder.
+fn sanitize_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .to_string()
+}
+
+/// Resolve a [`SyncConfig::path_template`] against one item.
+///
+/// Returns `None` when the template is empty or any placeholder cannot be
+/// resolved, so the caller keeps the flat provider path. Failing closed matters:
+/// a half-resolved template would scatter items across folders named after the
+/// literal `{conversation_id}`, and because the materializer matches an existing
+/// node by `__external_id` and keeps its current path, undoing that afterwards
+/// is not a simple re-sync.
+pub fn resolve_path_template(template: &str, item: &ExternalItem) -> Option<String> {
+    if template.trim().is_empty() {
+        return None;
+    }
+    let meta = item.metadata.as_ref();
+    let mut out = String::with_capacity(template.len() + 32);
+    let mut rest = template;
+
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let end = rest[start..].find('}')? + start;
+        let token = &rest[start + 1..end];
+        rest = &rest[end + 1..];
+
+        // `{key:FMT}` formats an ISO-8601 value with a strftime pattern.
+        let (key, fmt) = match token.split_once(':') {
+            Some((k, f)) => (k, Some(f)),
+            None => (token, None),
+        };
+
+        let raw = match key {
+            "name" => Some(item.name.clone()),
+            "external_id" => Some(item.external_id.clone()),
+            _ => meta.and_then(|m| m.get(key)).and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                Value::Bool(b) => Some(b.to_string()),
+                _ => None,
+            }),
+        }?;
+
+        let value = match fmt {
+            Some(f) => chrono::DateTime::parse_from_rfc3339(&raw)
+                .ok()
+                .map(|dt| dt.format(f).to_string())?,
+            None => raw,
+        };
+        let cleaned = sanitize_segment(&value);
+        if cleaned.is_empty() {
+            return None;
+        }
+        out.push_str(&cleaned);
+    }
+    out.push_str(rest);
+
+    // Collapse accidental empty segments (`a//b`, a leading slash) so the result
+    // is always a clean relative path.
+    let joined = out
+        .split('/')
+        .filter(|seg| !seg.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 pub fn passes_filters(rel_path: &str, include: &[String], exclude: &[String]) -> bool {
     for pat in exclude {
         if glob_matches(pat, rel_path) {

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { HardDrive, Plus, RefreshCw, CheckCircle, Loader2, ShieldAlert, AlertTriangle, Activity, Webhook, X } from 'lucide-react'
+import { HardDrive, Plus, RefreshCw, CheckCircle, Loader2, ShieldAlert, AlertTriangle, Activity, Webhook, X, Wand2 } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { ItemTable, type TableColumn } from '../components/ItemTable'
@@ -39,6 +39,23 @@ const STATUS_META: Record<StatusKind, { label: string; cls: string; Icon: typeof
 }
 
 /**
+ * Progress of an in-flight full walk (first sync, backfill or remap).
+ *
+ * A large mailbox imports over many chunked runs and can take hours, so the row
+ * has to show movement — otherwise a working import is indistinguishable from a
+ * stalled one and the natural response is to hit Sync again.
+ */
+function backfillProgress(state?: MountState): { text: string; done: boolean } | null {
+  const inFlight = !!state?.backfill_cursor
+  const count = state?.backfill_items_done ?? 0
+  if (!inFlight && !count) return null
+  const n = count.toLocaleString()
+  return inFlight
+    ? { text: `Importing… ${n} items so far`, done: false }
+    : { text: `Imported ${n} items`, done: true }
+}
+
+/**
  * Compact read-only descriptor of a mount's push (webhook) subscription, derived
  * from the engine-managed `state.push_*` fields. Returns null when the mount has
  * no push subscription (poll-only or never subscribed).
@@ -72,6 +89,7 @@ export default function Mounts() {
   const [deleteTarget, setDeleteTarget] = useState<VirtualMount | null>(null)
   const [syncingId, setSyncingId] = useState<string | null>(null)
   const [testTarget, setTestTarget] = useState<VirtualMount | null>(null)
+  const [remapTarget, setRemapTarget] = useState<VirtualMount | null>(null)
   /** Set when the mounts list itself failed, so "broken" never renders as "empty". */
   const [loadError, setLoadError] = useState<string | null>(null)
   const { toasts, error: showError, success: showSuccess, closeToast } = useToast()
@@ -119,6 +137,17 @@ export default function Mounts() {
     load()
   }, [load])
 
+  // Poll while any mount has a walk in flight. A chunked import runs for
+  // minutes to hours, and a progress number that only moves on manual refresh
+  // is not progress. Polling stops as soon as nothing is running, so an idle
+  // page costs nothing.
+  const anyRunning = mounts.some((m) => !!m.state?.backfill_cursor)
+  useEffect(() => {
+    if (!anyRunning) return
+    const t = window.setInterval(load, 5000)
+    return () => window.clearInterval(t)
+  }, [anyRunning, load])
+
   async function handleSync(m: VirtualMount) {
     if (!repo || !m.id) return
     setSyncingId(m.id)
@@ -136,6 +165,25 @@ export default function Mounts() {
       setTimeout(load, 1200)
     } catch (e: any) {
       showError('Sync failed', e?.message)
+    } finally {
+      setSyncingId(null)
+    }
+  }
+
+  async function confirmRemap() {
+    if (!repo || !remapTarget?.id) return
+    const target = remapTarget
+    setRemapTarget(null)
+    setSyncingId(target.id!)
+    try {
+      await integrationsApi.syncMount(repo, target.id!, 'remap')
+      showSuccess(
+        'Remap queued',
+        'Every item will be re-imported through the current mapping. Progress appears in the row.',
+      )
+      setTimeout(load, 1200)
+    } catch (e: any) {
+      showError('Remap failed', e?.message)
     } finally {
       setSyncingId(null)
     }
@@ -198,6 +246,15 @@ export default function Mounts() {
                 {push.text}
               </span>
             )}
+            {(() => {
+              const p = backfillProgress(m.state)
+              if (!p) return null
+              return (
+                <span className={`text-[10px] ${p.done ? 'text-zinc-500' : 'text-blue-400'}`}>
+                  {p.text}
+                </span>
+              )
+            })()}
             {m.state?.last_sync_at && (
               <span className="text-[10px] text-zinc-500">
                 synced {new Date(m.state.last_sync_at).toLocaleString()}
@@ -230,17 +287,28 @@ export default function Mounts() {
     {
       key: 'sync',
       header: 'Sync',
-      width: '110px',
+      width: '170px',
       render: (m) => (
-        <button
-          onClick={() => handleSync(m)}
-          disabled={syncingId === m.id}
-          className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-300 hover:text-primary-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50"
-          title="Sync now"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${syncingId === m.id ? 'animate-spin' : ''}`} />
-          Sync now
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => handleSync(m)}
+            disabled={syncingId === m.id}
+            className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-300 hover:text-primary-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50"
+            title="Sync now"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingId === m.id ? 'animate-spin' : ''}`} />
+            Sync now
+          </button>
+          <button
+            onClick={() => setRemapTarget(m)}
+            disabled={syncingId === m.id}
+            className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-400 hover:text-amber-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50"
+            title="Re-import every item through the current mapping function and folder hierarchy"
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            Remap
+          </button>
+        </div>
       ),
     },
   ]
@@ -372,6 +440,23 @@ export default function Mounts() {
         confirmText="Delete"
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+      <ConfirmDialog
+        open={remapTarget !== null}
+        title="Remap this mount"
+        message={
+          `Re-import every item in “${remapTarget?.title}” through the current mapping function ` +
+          `and folder hierarchy.\n\n` +
+          `Existing nodes are updated in place — ids, revision history and anything you added ` +
+          `locally are kept — and moved if the hierarchy changed. Use this after changing the ` +
+          `mapping function or the folder hierarchy; ordinary syncs skip unchanged items and ` +
+          `will not pick those changes up.\n\n` +
+          `A large mailbox runs in chunks over several minutes or hours. New items keep arriving ` +
+          `throughout, and progress is shown in the row.`
+        }
+        confirmText="Remap"
+        onConfirm={confirmRemap}
+        onCancel={() => setRemapTarget(null)}
       />
       <ToastContainer toasts={toasts} onClose={closeToast} />
     </div>

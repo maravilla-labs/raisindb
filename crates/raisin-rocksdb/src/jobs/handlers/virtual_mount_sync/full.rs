@@ -28,11 +28,36 @@ pub async fn run(
     let mut truncated = false;
 
     // Explicit stack of (folder_id, rel_prefix) to avoid async recursion.
-    let root = ctx.mount.remote_root.clone();
-    let mut stack: Vec<(Option<String>, String)> = vec![(root, String::new())];
+    //
+    // RESUMED from mount state when a previous pass ran out of budget. Before
+    // this, the stack was rebuilt from the root on every run and the page cursor
+    // was a local starting at None, so a provider with more items than
+    // `max_items_per_sync` (default 500) re-walked its first 500 forever and the
+    // remainder was never imported — a production mailbox could not be synced at
+    // all. `resume_cursor` applies only to the first folder popped, which is the
+    // one the previous pass was in the middle of.
+    let resuming = !state.backfill_stack.is_empty() || state.backfill_cursor.is_some();
+    let mut stack: Vec<(Option<String>, String)> = if resuming {
+        state.backfill_stack.clone()
+    } else {
+        vec![(ctx.mount.remote_root.clone(), String::new())]
+    };
+    let mut resume_cursor = state.backfill_cursor.take();
+    // A fresh walk restarts the progress count; a resumed one continues it, so
+    // the console shows total-so-far rather than just this chunk.
+    if !resuming {
+        state.backfill_items_done = 0;
+    }
+    if resuming {
+        tracing::info!(
+            mount_id = %ctx.mount.mount_id,
+            folders_pending = stack.len(),
+            "resuming backfill walk from the persisted cursor"
+        );
+    }
 
     'outer: while let Some((folder_id, prefix)) = stack.pop() {
-        let mut cursor: Option<String> = None;
+        let mut cursor: Option<String> = resume_cursor.take();
         loop {
             let params = json!({
                 "folder_id": folder_id,
@@ -44,10 +69,16 @@ pub async fn run(
                 .map_err(|e| AdapterError::Transient(format!("bad list response: {e}")))?;
 
             for item in &page.items {
-                let rel_path = if prefix.is_empty() {
-                    item.name.clone()
-                } else {
-                    format!("{}/{}", prefix, item.name)
+                // A configured hierarchy replaces the provider-derived path;
+                // an unresolvable template falls back to it (see
+                // `resolve_path_template`).
+                let rel_path = match super::config::resolve_path_template(
+                    &ctx.mount.sync_config.path_template,
+                    item,
+                ) {
+                    Some(p) => p,
+                    None if prefix.is_empty() => item.name.clone(),
+                    None => format!("{}/{}", prefix, item.name),
                 };
                 if super::passes_filters(&rel_path, include, exclude) {
                     materialize_item(ctx, item, &rel_path).await?;
@@ -60,47 +91,88 @@ pub async fn run(
             }
 
             ctx.renew_lease(state.last_fencing_token).await;
+            // Publish progress as we go. A chunk can run for minutes; without
+            // this the console sees nothing move until the whole chunk lands.
+            {
+                let mut snapshot = state.clone();
+                snapshot.backfill_items_done =
+                    snapshot.backfill_items_done.saturating_add(processed);
+                let _ = persist_state(ctx, &snapshot).await;
+            }
             match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
                 _ => break,
             }
             if processed >= max {
                 truncated = true;
+                // Save the resume point: this folder is unfinished, so it goes
+                // back on the stack with the cursor that continues it.
+                stack.push((folder_id.clone(), prefix.clone()));
+                state.backfill_cursor = cursor.clone();
                 break 'outer;
             }
         }
     }
 
+    // Persist (or clear) the resume point. `backfill_complete` is what makes
+    // reconcile deletes safe: before the first end-to-end pass, "not seen"
+    // only means "not reached yet".
+    state.backfill_items_done = state.backfill_items_done.saturating_add(processed);
+
+    if truncated {
+        state.backfill_stack = stack.clone();
+        state.backfill_complete = false;
+        tracing::info!(
+            mount_id = %ctx.mount.mount_id,
+            processed,
+            folders_pending = stack.len(),
+            "backfill chunk complete; will resume on the next run"
+        );
+    } else {
+        state.backfill_stack.clear();
+        state.backfill_cursor = None;
+        state.backfill_complete = true;
+    }
+
     // Reconcile deletes: remove mount-owned nodes not seen this pass.
     //
-    // "Not seen" only means "deleted upstream" when this pass actually SAW
-    // everything. Two ways that is false, and both used to delete real content:
+    // "Not seen" only means "deleted upstream" when THIS RUN saw everything.
+    // Three ways that is false, each of which deletes real content:
     //
     //  1. The walk hit `max_items_per_sync` (default 500) and stopped early. A
     //     mailbox larger than the cap would have every message past item 500
-    //     deleted on each full sync, then re-created by the next one — churn,
-    //     a trigger storm, and destroyed local edits, forever.
-    //  2. The provider answered with an empty listing (a silent hiccup, an
+    //     deleted and recreated on every full sync — churn, a trigger storm,
+    //     and destroyed local edits, forever.
+    //  2. The walk RESUMED a chunked backfill. `seen` then holds only the final
+    //     chunk, so reconciling would delete everything the earlier chunks
+    //     imported — the whole point of the backfill. `seen` is per-run and
+    //     cannot be accumulated across runs without persisting every external
+    //     id, so a resumed pass simply never reconciles.
+    //  3. The provider answered with an empty listing (a silent hiccup, an
     //     emptied-then-refilled folder, a permissions change that reads as
     //     "no items" rather than an error). Deleting the entire mount subtree
     //     on the strength of one empty response is never the right trade.
     //
-    // In both cases the safe action is to skip reconciliation entirely: a stale
-    // extra node is recoverable on the next clean pass, deleted content is not.
+    // The safe action in all three is to skip reconciliation: a stale extra node
+    // is recoverable on the next clean pass, deleted content is not. Deletes
+    // therefore only ever run on a single-run, start-to-finish walk — and
+    // upstream deletions still propagate promptly through the delta path.
     let existing = ctx
         .materializer
         .list_virtual(&ctx.scope)
         .await
         .map_err(|e| AdapterError::Transient(format!("list_virtual failed: {e}")))?;
 
-    if truncated {
-        tracing::warn!(
+    if truncated || resuming {
+        tracing::info!(
             mount_id = %ctx.mount.mount_id,
             processed,
+            resumed = resuming,
+            truncated,
             max_items_per_sync = max,
             existing = existing.len(),
-            "full sync hit max_items_per_sync; skipping reconcile deletes because the listing is \
-             incomplete. Raise max_items_per_sync above the item count for deletes to be applied."
+            "skipping reconcile deletes: this pass did not walk the provider end to end in one \
+             run, so 'not seen' does not mean 'deleted upstream'"
         );
     } else if seen.is_empty()
         && !existing.is_empty()

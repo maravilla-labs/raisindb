@@ -129,6 +129,15 @@ pub async fn sync_mount(
     let mode = body
         .and_then(|Json(b)| b.mode)
         .unwrap_or_else(|| "delta".to_string());
+    // Validated rather than passed through: the engine treats any unrecognised
+    // mode as `delta`, so a typo would quietly run the wrong kind of sync and
+    // report success — particularly bad for `remap`, where the operator is
+    // waiting for a migration that never happens.
+    if !matches!(mode.as_str(), "delta" | "full" | "remap") {
+        return Err(ApiError::validation_failed(format!(
+            "unknown sync mode '{mode}'; expected one of: delta, full, remap"
+        )));
+    }
 
     let job_registry = rocksdb.job_registry();
     let job_data_store = rocksdb.job_data_store();

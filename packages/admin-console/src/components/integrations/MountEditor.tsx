@@ -209,6 +209,20 @@ export default function MountEditor({
     return entry[sync.resource || 'mail'] || ''
   }, [providerType, sync.resource])
 
+  /**
+   * Hierarchy each connector wants by default, keyed the same way as
+   * DEFAULT_MAPPERS. Mail groups by thread: a mailbox flattened under one
+   * folder is unusable in a tree, and `conversation_id` is the grouping people
+   * actually read mail by. Suggested only — always overridable, and an empty
+   * value keeps the provider's own structure (right for Drive/OneDrive, which
+   * already has real folders worth mirroring).
+   */
+  const suggestedPathTemplate = useMemo(() => {
+    if (isMsGraph && (sync.resource || 'mail') === 'mail') return '{conversation_id}/{name}'
+    if (providerType === 'imap' || providerType === 'gmail') return '{conversation_id}/{name}'
+    return ''
+  }, [providerType, isMsGraph, sync.resource])
+
   const [showMapperPicker, setShowMapperPicker] = useState(false)
 
   // With several connections the engine refuses to guess which one a mount
@@ -423,6 +437,40 @@ export default function MountEditor({
                   Mounting at the workspace root mixes synced items in with all your other
                   content, and mount-owned deletes then operate at the top level. A dedicated
                   subfolder is strongly preferred.
+                </p>
+              )}
+            </div>
+            <div>
+              <label className={labelCls}>Folder hierarchy</label>
+              <input
+                className={field}
+                value={sync.path_template ?? ''}
+                onChange={(e) => setSync({ ...sync, path_template: e.target.value })}
+                placeholder={suggestedPathTemplate || 'flat — keep the provider’s own structure'}
+              />
+              <p className="mt-1 text-xs text-zinc-500">
+                Where each item is filed under the mount path. Placeholders read the item&rsquo;s
+                fields: <code className="font-mono">{'{conversation_id}/{name}'}</code> gives one
+                folder per mail thread, <code className="font-mono">{'{date:%Y}/{date:%m}/{name}'}</code>{' '}
+                groups by year and month. Leave blank to keep the provider&rsquo;s own structure.
+                {suggestedPathTemplate && !sync.path_template && (
+                  <>
+                    {' '}
+                    <button
+                      type="button"
+                      className="underline hover:text-zinc-300"
+                      onClick={() => setSync({ ...sync, path_template: suggestedPathTemplate })}
+                    >
+                      Use {suggestedPathTemplate}
+                    </button>
+                  </>
+                )}
+              </p>
+              {isEdit && (sync.path_template ?? '') !== (mount?.sync_config?.path_template ?? '') && (
+                <p className="mt-1 text-xs text-amber-400">
+                  Changing this only affects items synced from now on. Already-synced nodes keep
+                  their current path — the engine matches them by external id and updates them in
+                  place, so it will not move them.
                 </p>
               )}
             </div>

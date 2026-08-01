@@ -267,7 +267,7 @@ impl VirtualMountSyncHandler {
         // `scope` (built by `build_ctx_parts`) targets `mount.target_branch` for
         // materialization; mount/integration config and mount state stay on the
         // config branch (`ctx.config_branch`).
-        let ctx = SyncCtx {
+        let mut ctx = SyncCtx {
             storage: self.storage.clone(),
             scope: scope.clone(),
             config_branch: config_branch.clone(),
@@ -337,10 +337,42 @@ impl VirtualMountSyncHandler {
         // Choose the sync path. Full reconcile is forced on the first sync, an
         // explicit `mode: "full"`, or when the adapter cannot serve a changes
         // feed (`supports_changes: false`) even if a cursor happens to exist.
-        let use_full =
-            mode == "full" || state.last_sync_token.is_none() || !capabilities.supports_changes;
+        // A remap re-materializes everything through the CURRENT mapper and path
+        // template, ignoring etags — the migration path for a connector whose
+        // mapping changed (a new node type, a new folder hierarchy) while the
+        // provider's items did not. It is a full walk by definition: the delta
+        // feed only reports what changed upstream, which for a remap is nothing.
+        let remap = mode == "remap";
+        if remap {
+            ctx.scope.force_rewrite = true;
+        }
+        let use_full = remap
+            || mode == "full"
+            || state.last_sync_token.is_none()
+            || !capabilities.supports_changes;
+
+        // An unfinished backfill resumes on subsequent runs even when the mount
+        // is otherwise on the delta path.
+        let backfill_pending = !state.backfill_stack.is_empty() || state.backfill_cursor.is_some();
+
         let result = if use_full {
             full::run(&ctx, &mut state).await
+        } else if backfill_pending {
+            // DELTA FIRST, then one backfill chunk — in that order, deliberately.
+            //
+            // Importing a large mailbox takes hours of chunked walking. Running
+            // the backfill first (or on its own job) would mean new mail waited
+            // for the whole import to finish. Doing the incremental pass first
+            // on every run keeps new items arriving within one interval while
+            // history fills in behind them, and because both share this run's
+            // single lease there is no second writer to race the mount state.
+            let delta_outcome = delta::run(&ctx, &mut state).await;
+            match delta_outcome {
+                Ok(()) => full::run(&ctx, &mut state).await,
+                // A failing delta must not be masked by a successful backfill
+                // chunk: surface it and leave the resume point untouched.
+                Err(e) => Err(e),
+            }
         } else {
             delta::run(&ctx, &mut state).await
         };
@@ -548,6 +580,9 @@ impl VirtualMountSyncHandler {
             workspace: mount.target_workspace.clone(),
             mount_id: mount.mount_id.clone(),
             mount_path: mount.mount_path.clone(),
+            // Off for every ordinary path. `run_sync` turns it on for a remap;
+            // the teardown and renew callers must never rewrite content.
+            force_rewrite: false,
         };
         Ok(CtxParts {
             integ_node_id: integ_node.id,

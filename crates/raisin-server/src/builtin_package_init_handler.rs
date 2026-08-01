@@ -486,7 +486,20 @@ where
             );
         } else {
             tx.set_message(&format!("Create builtin package node: {}", manifest.name))?;
-            tx.add_node("packages", &node).await?;
+            // upsert, not add. The `existing` probe above and `add_node`'s own
+            // uniqueness check do not always agree — observed in production as
+            // `get_node` returning None for `package-{name}` while `add_node`
+            // rejected the very same id with "Node with id 'package-X' already
+            // exists", on every boot, for several packages and tenants. Whatever
+            // makes the two disagree (a tombstoned id still held in the index is
+            // the leading suspect), the retry could never succeed, so builtin
+            // package content stopped reaching those repos entirely — which is
+            // how an adapter fix ships to a server and still does not run.
+            //
+            // The write is idempotent either way: this node is system-owned and
+            // rebuilt from the embedded manifest on every pass, so replacing an
+            // unexpected occupant is the intended outcome rather than a loss.
+            tx.upsert_node("packages", &node).await?;
             tx.commit().await?;
             info!(
                 package_name = %manifest.name,

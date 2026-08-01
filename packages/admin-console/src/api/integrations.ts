@@ -160,6 +160,21 @@ export interface SyncConfig {
   ttl_seconds?: number | null
   max_items_per_sync?: number
   /**
+   * Folder hierarchy for materialized items, as a template over the item's
+   * fields — e.g. `{conversation_id}/{name}` groups mail one folder per thread,
+   * `{date:%Y}/{date:%m}/{name}` by year and month. Empty keeps the flat
+   * provider path. An unresolvable placeholder falls back to flat rather than
+   * producing a half-built path.
+   */
+  path_template?: string
+  /**
+   * Let a full reconcile delete the whole mount subtree when the provider
+   * returns zero items. Off by default: an empty listing is more often a
+   * hiccup or a permissions change than a genuinely emptied folder, and
+   * deleted content is not recoverable.
+   */
+  allow_empty_reconcile?: boolean
+  /**
    * ms-graph connector: which resource to materialize. Absent/`mail` syncs the
    * mailbox; `calendar` syncs events; `files` syncs OneDrive. Ignored by other
    * connectors.
@@ -195,6 +210,12 @@ export interface MountState {
   last_attempt_at?: string
   last_error?: string
   consecutive_failures?: number
+  /** Items materialized so far by the current full walk / backfill / remap. */
+  backfill_items_done?: number
+  /** True once a full walk has reached the end at least once. */
+  backfill_complete?: boolean
+  /** Present while a walk is mid-flight (resume point for the next chunk). */
+  backfill_cursor?: string
   /**
    * False when the mount requested write_through but the engine cannot honour
    * it. v1 has no write-through implementation, so the engine sets this false
@@ -699,7 +720,7 @@ export const integrationsApi = {
     nodesApi.delete(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, `${MOUNTS_ROOT}/${name}`),
 
   /** Enqueue a manual "sync now" for a mount. `mountId` is the mount node id. */
-  syncMount: (repo: string, mountId: string, mode: 'delta' | 'full' = 'delta') =>
+  syncMount: (repo: string, mountId: string, mode: 'delta' | 'full' | 'remap' = 'delta') =>
     api.post<SyncResponse>(`/api/integrations/${repo}/mounts/${mountId}/sync`, { mode }),
 
   /**

@@ -26,6 +26,16 @@ pub struct MountScope {
     pub mount_id: String,
     /// Path prefix inside the target workspace (e.g. `/documents/shared`).
     pub mount_path: String,
+    /// Re-materialize every item even when its etag is unchanged, and move it if
+    /// the mapper/template now resolves a different path ("remap").
+    ///
+    /// Ordinary syncs must NOT do this: the etag skip-write is what stops a
+    /// re-sync creating a revision per unchanged item and re-firing every
+    /// downstream trigger. But that same skip returns before the mapper's output
+    /// is applied, so a changed mapper — a new node type, a renamed property, a
+    /// new folder hierarchy — is invisible to everything already synced. Remap
+    /// is the deliberate, operator-triggered exception.
+    pub force_rewrite: bool,
 }
 
 /// Reserved virtual metadata stamped on every synced node.
@@ -166,6 +176,37 @@ impl NodeMaterializer for RocksDbMaterializer {
         mapped: MappedNode,
         virt: VirtualMeta,
     ) -> Result<bool> {
+        let new_path = join_path(&scope.mount_path, rel_path);
+
+        // A remap may re-derive a different path (a new folder hierarchy). The
+        // relocation runs FIRST, in its own committed transaction, because a
+        // move and a write cannot be combined in one: the in-transaction read
+        // cache does not reflect the move, so writing after it collides on the
+        // id, and moving after a write relocates the pre-write version and
+        // discards the new mapping. Moving first leaves the ordinary upsert
+        // below to find the node at its destination and update it in place.
+        //
+        // The node id is preserved throughout, so revision history and anything
+        // added locally survive the migration — delete-and-recreate loses all of
+        // it.
+        if scope.force_rewrite {
+            let tx = self.begin(scope, "virtual mount sync: remap move").await?;
+            let all = tx.scan_nodes(&scope.workspace).await?;
+            let found = all.into_iter().find(|n| {
+                node_mount_id(n) == Some(scope.mount_id.as_str())
+                    && node_external_id(n) == Some(virt.external_id.as_str())
+                    && under(&scope.mount_path, &n.path)
+            });
+            if let Some(node) = found {
+                if node.path != new_path {
+                    ensure_folder_chain(tx.as_ref(), &scope.workspace, &new_path).await?;
+                    tx.move_node_tree(&scope.workspace, &node.id, &new_path)
+                        .await?;
+                    tx.commit().await?;
+                }
+            }
+        }
+
         let tx = self.begin(scope, "virtual mount sync: upsert").await?;
 
         // 1. Match by __external_id within the mount subtree (survives renames).
@@ -176,16 +217,29 @@ impl NodeMaterializer for RocksDbMaterializer {
                 && under(&scope.mount_path, &n.path)
         });
 
-        let new_path = join_path(&scope.mount_path, rel_path);
-
         let (id, path) = match existing {
             Some(node) => {
-                // Etag skip-write: unchanged item → no revision churn.
-                if virt.etag.is_some() && node_str_prop(&node, "__etag") == virt.etag {
+                // Etag skip-write: unchanged item → no revision churn. Bypassed
+                // by a remap, which exists precisely to re-apply a mapper whose
+                // output changed while the provider's item did not.
+                if !scope.force_rewrite
+                    && virt.etag.is_some()
+                    && node_str_prop(&node, "__etag") == virt.etag
+                {
                     return Ok(false);
                 }
-                // Update in place, preserving id + current path (avoids dupes on
-                // rename; a provider-side rename updates this node).
+                // Normally: update in place, preserving id + current path (avoids
+                // dupes on rename; a provider-side rename updates this node).
+                //
+                // On a remap the resolved path may have changed (a new folder
+                // hierarchy), and it cannot simply be written: `upsert_node`
+                // matches by PATH, so writing this id at a new path takes the
+                // create branch and collides on the id. Move it explicitly,
+                // which preserves the node id, its history and anything added
+                // locally, then write at the new location.
+                // A remap that re-derives a different path has already moved
+                // the node (below, in its own committed transaction), so by now
+                // `node.path` IS the destination.
                 (node.id, node.path)
             }
             None => {
@@ -228,6 +282,7 @@ impl NodeMaterializer for RocksDbMaterializer {
         // Deep upsert auto-creates any missing parent folders.
         tx.upsert_deep_node(&scope.workspace, &node, "raisin:Folder")
             .await?;
+
         tx.commit().await?;
         Ok(true)
     }
@@ -287,4 +342,43 @@ mod tests {
         assert!(!under("/docs", "/documents"));
         assert!(under("/", "/anything"));
     }
+}
+
+/// Create any missing ancestor folders of `path`.
+///
+/// Only the MISSING ones: an `upsert_deep_node` on an existing folder matches by
+/// path and would overwrite that folder's properties with an empty stub, which
+/// on a conversation folder would wipe the thread subject the hierarchy exists
+/// to display.
+async fn ensure_folder_chain(
+    tx: &dyn raisin_storage::transactional::TransactionalContext,
+    workspace: &str,
+    path: &str,
+) -> Result<()> {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if segments.len() < 2 {
+        return Ok(()); // no ancestors beyond the workspace root
+    }
+    let mut current = String::new();
+    // All but the last segment: the last one is the node itself.
+    for seg in &segments[..segments.len() - 1] {
+        if seg.is_empty() {
+            continue;
+        }
+        current.push('/');
+        current.push_str(seg);
+        if tx.get_node_by_path(workspace, &current).await?.is_some() {
+            continue;
+        }
+        let folder = Node {
+            id: nanoid::nanoid!(),
+            node_type: "raisin:Folder".to_string(),
+            name: (*seg).to_string(),
+            path: current.clone(),
+            workspace: Some(workspace.to_string()),
+            ..Default::default()
+        };
+        tx.add_node(workspace, &folder).await?;
+    }
+    Ok(())
 }
