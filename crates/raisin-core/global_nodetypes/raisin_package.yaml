@@ -119,6 +119,19 @@ properties:
     title: Installed At
     description: When the package was installed
 
+  - name: content_hash
+    type: String
+    required: false
+    title: Content Hash
+    description: >
+      Hash of the embedded package content this node was registered from. The
+      boot-time registrar compares it against the current build to decide
+      whether a builtin package needs re-registering. Without it, an
+      `auto_install: false` package (the provider connectors) was skipped on
+      every boot once registered, so a rebuilt adapter never reached the repo —
+      a connector fix could ship to a server and still not run.
+    index: [Property]
+
   - name: upload_state
     type: String
     required: false

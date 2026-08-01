@@ -273,13 +273,37 @@ where
                         PropertyValue::String(s) => Some(s.clone()),
                         _ => None,
                     });
+                // Compare CONTENT, not just presence. This used to skip whenever
+                // the node existed and its binary was fetchable, with no regard
+                // for whether the embedded package had changed — so a rebuilt
+                // opt-out package (every provider connector) never re-registered
+                // and its stale `.rap` stayed in the repo forever. A connector
+                // fix could ship to a server and still not run, which is exactly
+                // what happened to the Microsoft Graph adapter.
+                let registered_hash =
+                    existing_node
+                        .properties
+                        .get("content_hash")
+                        .and_then(|v| match v {
+                            PropertyValue::String(s) => Some(s.as_str()),
+                            _ => None,
+                        });
+                let content_unchanged = registered_hash == Some(content_hash);
                 if let Some(key) = resource_key {
-                    if self.binary_storage.get(&key).await.is_ok() {
+                    if content_unchanged && self.binary_storage.get(&key).await.is_ok() {
                         info!(
                             package_name = %manifest.name,
-                            "Builtin package already registered (auto-install opt-out), skipping"
+                            "Builtin package already registered and unchanged, skipping"
                         );
                         return Ok(());
+                    }
+                    if !content_unchanged {
+                        info!(
+                            package_name = %manifest.name,
+                            registered = registered_hash.unwrap_or("none"),
+                            current = %&content_hash[..8.min(content_hash.len())],
+                            "Builtin package content changed, re-registering"
+                        );
                     }
                 }
             }
@@ -446,6 +470,11 @@ where
 
         // Mark as builtin
         properties.insert("builtin".to_string(), PropertyValue::Boolean(true));
+        // What the skip check above compares against on the next boot.
+        properties.insert(
+            "content_hash".to_string(),
+            PropertyValue::String(content_hash.to_string()),
+        );
 
         // Set installed to false initially (will be set to true after job completes)
         properties.insert("installed".to_string(), PropertyValue::Boolean(false));
