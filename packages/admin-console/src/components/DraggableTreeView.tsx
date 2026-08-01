@@ -3,6 +3,7 @@ import { DragDropContext, Draggable, Droppable, DropResult } from '@hello-pangea
 import { ChevronRight, ChevronDown, Folder, FileText, Package, User, Calendar, Settings, Tag, Layout, Database, GripVertical } from 'lucide-react'
 import ContextMenu from './ContextMenu'
 import type { Node } from '../api/nodes'
+import { nodeLabel, nodeLabelShort } from '../utils/nodeDisplay'
 
 interface DraggableTreeViewProps {
   nodes: Node[]
@@ -138,7 +139,12 @@ function DraggableTreeNode({
 
                     {getNodeIcon()}
 
-                    <span className="flex-1 truncate font-medium">{node.name}</span>
+                    <span
+                      className="flex-1 truncate font-medium"
+                      title={nodeLabel(node)}
+                    >
+                      {nodeLabelShort(node)}
+                    </span>
 
                     <span className="text-xs text-zinc-500">{node.node_type}</span>
 

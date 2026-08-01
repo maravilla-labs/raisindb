@@ -47,6 +47,21 @@ pub struct SyncConfig {
     pub ttl_seconds: Option<u64>,
     #[serde(default = "default_max_items")]
     pub max_items_per_sync: u64,
+    /// Allow a full reconcile to delete the ENTIRE mount subtree when the
+    /// provider returns zero items.
+    ///
+    /// Off by default. An empty listing is ambiguous: it means either "the
+    /// folder really is empty now" or "something went wrong in a way that did
+    /// not raise an error" — a permissions change, a silently-failing filter, a
+    /// provider hiccup. Acting on the first reading destroys every synced node;
+    /// acting on the second leaves some stale ones, which the next good sync
+    /// cleans up. Deleted content is not recoverable, stale content is, so the
+    /// safe reading is the default.
+    ///
+    /// Turn it on for a mount whose source folder is legitimately emptied and
+    /// where that must propagate.
+    #[serde(default)]
+    pub allow_empty_reconcile: bool,
 }
 
 fn default_mode() -> String {
@@ -69,6 +84,7 @@ impl Default for SyncConfig {
             ephemeral: false,
             ttl_seconds: None,
             max_items_per_sync: default_max_items(),
+            allow_empty_reconcile: false,
         }
     }
 }
@@ -81,6 +97,17 @@ pub struct MountState {
     /// Unix epoch seconds of the last successful sync write.
     #[serde(default)]
     pub last_sync_at: Option<i64>,
+    /// Unix epoch seconds of the last sync ATTEMPT, successful or not.
+    ///
+    /// Separate from `last_sync_at` because the backoff has to be measured from
+    /// the last try, not the last success. Scheduling on `last_sync_at` alone
+    /// meant a mount that kept failing never advanced its clock, so
+    /// `last_sync_at + effective_interval <= now` stayed true forever and the
+    /// engine re-enqueued it on every 60s tick — the exponential backoff was
+    /// dead in exactly the case it exists for, and a mount broken by a bad
+    /// config hammered the provider indefinitely.
+    #[serde(default)]
+    pub last_attempt_at: Option<i64>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]

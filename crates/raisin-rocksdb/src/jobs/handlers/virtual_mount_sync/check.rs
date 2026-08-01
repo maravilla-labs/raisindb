@@ -126,7 +126,17 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
         return !mount.state.has_active_push(now)
             && mount.state.push_status.as_deref() != Some("unsupported");
     }
-    match mount.state.last_sync_at {
+    // Measure from the last ATTEMPT, not the last success. `last_sync_at` only
+    // advances when a sync succeeds, so scheduling on it alone left a failing
+    // mount permanently "due": the backoff in `effective_interval_secs` was
+    // computed against a timestamp frozen at the last good run and could never
+    // catch up to `now`. A mount with a bad remote root therefore retried on
+    // every tick, forever, against the provider's API.
+    let last_activity = match (mount.state.last_sync_at, mount.state.last_attempt_at) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    match last_activity {
         None => true,
         Some(last) => last + mount.effective_interval_secs() as i64 <= now,
     }
@@ -168,4 +178,96 @@ async fn enqueue_sync(
         )
         .await?;
     Ok(registered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jobs::handlers::virtual_mount_sync::config::{MountState, SyncConfig, WriteConfig};
+
+    const INTERVAL: u64 = 300;
+
+    fn mount() -> MountConfig {
+        MountConfig {
+            mount_id: "m1".into(),
+            integration_ref: "/integrations/ms-graph".into(),
+            account_ref: None,
+            target_workspace: "default".into(),
+            target_branch: "main".into(),
+            mount_path: "/mail".into(),
+            remote_root: None,
+            adapter_function: None,
+            mapping_function: None,
+            enabled: true,
+            sync_config: SyncConfig {
+                interval_seconds: INTERVAL,
+                ..Default::default()
+            },
+            sync_config_raw: serde_json::json!({}),
+            write_config: WriteConfig::default(),
+            state: MountState::default(),
+        }
+    }
+
+    #[test]
+    fn a_never_synced_mount_is_due() {
+        assert!(is_due(&mount(), 1_000_000));
+    }
+
+    #[test]
+    fn a_recent_success_is_not_due_until_the_interval_elapses() {
+        let mut m = mount();
+        m.state.last_sync_at = Some(1_000_000);
+        assert!(!is_due(&m, 1_000_000 + INTERVAL as i64 - 1));
+        assert!(is_due(&m, 1_000_000 + INTERVAL as i64));
+    }
+
+    /// The regression this whole change exists for. A mount that succeeded once
+    /// and then began failing kept a frozen `last_sync_at`, so the backed-off
+    /// interval was always already in the past and the scheduler re-enqueued it
+    /// on EVERY tick — observed in production as a broken mount retrying against
+    /// Microsoft Graph every couple of minutes, indefinitely.
+    #[test]
+    fn a_failing_mount_backs_off_from_its_last_attempt() {
+        let mut m = mount();
+        m.state.last_sync_at = Some(1_000_000); // last success: long ago
+        m.state.consecutive_failures = 5; // interval * 2^5
+        let now = 2_000_000; // far past last_sync_at + any backoff
+
+        // Attempted just now: must NOT be due again yet.
+        m.state.last_attempt_at = Some(now);
+        assert!(
+            !is_due(&m, now + 10),
+            "a mount that just failed must wait out its backoff"
+        );
+
+        // Once the backed-off interval has elapsed since the attempt, it is due.
+        let backoff = INTERVAL as i64 * 32;
+        assert!(is_due(&m, now + backoff));
+    }
+
+    /// Belt and braces: whichever timestamp is later wins, so an out-of-order
+    /// write cannot make a mount look permanently due.
+    #[test]
+    fn the_later_timestamp_wins() {
+        let mut m = mount();
+        m.state.last_sync_at = Some(5_000);
+        m.state.last_attempt_at = Some(1_000);
+        assert!(!is_due(&m, 5_000 + INTERVAL as i64 - 1));
+
+        m.state.last_sync_at = Some(1_000);
+        m.state.last_attempt_at = Some(5_000);
+        assert!(!is_due(&m, 5_000 + INTERVAL as i64 - 1));
+    }
+
+    #[test]
+    fn disabled_and_auth_required_mounts_are_never_due() {
+        let mut m = mount();
+        m.enabled = false;
+        assert!(!is_due(&m, 9_999_999));
+
+        let mut m = mount();
+        m.state.status = Some("auth_required".into());
+        assert!(!is_due(&m, 9_999_999));
+    }
 }

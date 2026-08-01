@@ -20,6 +20,13 @@ import type { Node, CreateNodeRequest } from '../api/nodes'
 import { nodeTypesApi, type ResolvedNodeType, type NodeType as NodeTypeDef } from '../api/nodetypes'
 import { archetypesApi, type ResolvedArchetype } from '../api/archetypes'
 import { translationsApi } from '../api/translations'
+import {
+  nodeLabel,
+  nodeLabelShort,
+  pathShort,
+  truncateMiddle,
+  labelDiffersFromName,
+} from '../utils/nodeDisplay'
 
 interface ContentViewProps {
   repo: string
@@ -253,9 +260,27 @@ export default function ContentView({
               <div className="p-2 bg-white/10 rounded-lg">
                 {getNodeIcon(node.node_type)}
               </div>
-              <div>
-                <h2 className="text-2xl font-bold text-white">{node.name}</h2>
-                <p className="text-sm text-zinc-400 mt-1">{node.path}</p>
+              {/* min-w-0 lets the children actually shrink: without it a long
+                  unbroken id (a mail item id) forces the flex row wider than the
+                  viewport instead of truncating. */}
+              <div className="min-w-0">
+                <h2
+                  className="text-2xl font-bold text-white break-words"
+                  title={nodeLabel(node)}
+                >
+                  {nodeLabelShort(node)}
+                </h2>
+                <p className="text-sm text-zinc-400 mt-1 truncate" title={node.path}>
+                  {pathShort(node.path)}
+                </p>
+                {/* When the heading is a title property, the real path segment
+                    is no longer visible anywhere — show it, clamped, so the
+                    node stays identifiable and its id copyable. */}
+                {labelDiffersFromName(node) && (
+                  <p className="text-xs text-zinc-500 mt-0.5 truncate" title={node.name}>
+                    {truncateMiddle(node.name, 60)}
+                  </p>
+                )}
                 <div className="flex items-center gap-2 mt-2 flex-wrap">
                   <span className="inline-flex items-center gap-1 px-2 py-1 bg-primary-500/20 text-primary-300 rounded text-xs">
                     {node.node_type}

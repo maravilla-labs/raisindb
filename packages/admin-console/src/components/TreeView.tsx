@@ -2,6 +2,7 @@ import { ChevronRight, ChevronDown, Folder, FileText, Package, User, Calendar, S
 import ContextMenu from './ContextMenu'
 import VirtualNodeBadge, { virtualMountId } from './VirtualNodeBadge'
 import type { Node } from '../api/nodes'
+import { nodeLabel, nodeLabelShort } from '../utils/nodeDisplay'
 
 interface TreeViewProps {
   nodes: Node[]
@@ -111,7 +112,12 @@ function TreeNode({
 
         {getNodeIcon()}
 
-        <span className="flex-1 truncate font-medium">{node.name}</span>
+        <span
+          className="flex-1 truncate font-medium"
+          title={nodeLabel(node)}
+        >
+          {nodeLabelShort(node)}
+        </span>
 
         <VirtualNodeBadge node={node} readOnly={isReadOnly} />
 

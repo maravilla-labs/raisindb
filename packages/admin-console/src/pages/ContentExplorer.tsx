@@ -22,6 +22,7 @@ import { repositoriesApi } from '../api/repositories'
 import MergeBranchDialog from '../components/MergeBranchDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast, ToastContainer } from '../components/Toast'
+import { nodeLabel, nodeLabelShort, breadcrumbSegments } from '../utils/nodeDisplay'
 
 type PendingCommit = {
   type: 'update' | 'create' | 'delete'
@@ -479,7 +480,10 @@ export default function ContentExplorer() {
     setQueryResults(null)
   }
 
-  const breadcrumbs = selectedNode ? selectedNode.path.split('/').filter(Boolean) : []
+  // Per-segment clamping, not whole-path: the LAST segment is the node you
+  // are looking at, and whole-path truncation drops exactly that one when an
+  // ancestor is long (a provider item id used as a path segment).
+  const breadcrumbs = selectedNode ? breadcrumbSegments(selectedNode.path) : []
 
   return (
     <div className="h-screen flex flex-col bg-gradient-to-br from-zinc-900 via-primary-950/20 to-black">
@@ -805,7 +809,12 @@ export default function ContentExplorer() {
                           className="p-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg cursor-pointer transition-colors"
                         >
                           <div className="flex items-center gap-2">
-                            <span className="font-medium text-white text-sm">{node.name}</span>
+                            <span
+                              className="font-medium text-white text-sm truncate max-w-[28rem]"
+                              title={nodeLabel(node)}
+                            >
+                              {nodeLabelShort(node, 70)}
+                            </span>
                             <VirtualNodeBadge
                               node={node}
                               readOnly={(() => {

@@ -200,6 +200,14 @@ export default function IntegrationEditor({
     baselineRef.current = snapshotRef.current
   }, [current, redirectUri])
 
+  // Azure shows the Secret ID (a GUID, with a working copy button) right next to
+  // the Value (shown in full only at creation, masked forever after), so the ID
+  // is the thing that actually gets copied. The provider then answers
+  // AADSTS7000215, which reads like a wrong secret rather than the wrong field.
+  // A GUID is never a plausible OAuth client secret, so flag it on sight.
+  const secretLooksLikeGuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientSecret.trim())
+
   const pendingSecrets =
     clientSecret.trim().length > 0 || Object.values(configSecretDrafts).some((v) => v !== undefined)
   const dirty = formSnapshot !== baselineRef.current
@@ -546,7 +554,17 @@ export default function IntegrationEditor({
                   </p>
                 )
               )}
-              {clientSecret.trim() && (
+              {secretLooksLikeGuid && (
+                <p className="mt-1 text-xs text-red-400">
+                  That looks like a <strong>Secret ID</strong>, not the secret{' '}
+                  <strong>Value</strong>. In Azure the ID is a GUID and the Value is a ~40
+                  character mixed-case string. The portal only shows the Value once, at
+                  creation — if you navigated away it can no longer be copied, so create a
+                  new secret and copy the Value column immediately. Sending the ID fails with{' '}
+                  <code className="font-mono">AADSTS7000215</code>.
+                </p>
+              )}
+              {clientSecret.trim() && !secretLooksLikeGuid && (
                 <p className="mt-1 text-xs text-amber-400">
                   Not saved yet — click Update to encrypt and store it.
                 </p>

@@ -1,0 +1,149 @@
+name: raisin:Mail
+description: >
+  A synced email message from a mail connector (Microsoft 365 / Graph, IMAP,
+  Gmail). Written by a mount's mapping function, never by hand.
+icon: mail
+version: 1
+
+# Global, not shipped inside one adapter package, because BOTH the Graph and the
+# IMAP connectors map onto it. A copy per package is the mirrored-definition
+# drift this codebase keeps getting bitten by: the two would diverge on a field
+# name, and a `GROUP BY conversation_id` would silently cover only one provider.
+indexable: true
+index_types: [Property, Fulltext]
+
+properties:
+  # ---- Fulltext: what you actually search --------------------------------
+  - name: subject
+    type: String
+    required: false
+    index: [Fulltext]
+    description: Message subject line
+
+  - name: body
+    type: String
+    required: false
+    index: [Fulltext]
+    description: >
+      Full message body. Populated only when the mount sets
+      sync_config.include_body — mail otherwise syncs link-only and just the
+      snippet is available. Carries markup when body_type is "html".
+
+  - name: body_type
+    type: String
+    required: false
+    description: '"html" or "text" — the format of `body`.'
+
+  - name: snippet
+    type: String
+    required: false
+    index: [Fulltext]
+    description: Short preview (Graph bodyPreview). Always present; body is not.
+
+  # ---- Property: what you filter, group and join on ----------------------
+  - name: from
+    type: String
+    required: false
+    index: [Property]
+    description: Sender, formatted "Name <address>" when the provider gives both
+
+  - name: from_address
+    type: String
+    required: false
+    index: [Property]
+    description: >
+      Bare sender address, no display name. Indexed separately because `from`
+      varies with the display name the sender happens to be using, which makes
+      it useless as a GROUP BY key.
+
+  - name: to
+    type: String
+    required: false
+    description: Comma-joined recipients (display form; not a grouping key)
+
+  - name: cc
+    type: String
+    required: false
+    description: Comma-joined CC recipients (display form)
+
+  - name: conversation_id
+    type: String
+    required: false
+    index: [Property]
+    description: >
+      Provider thread id. The grouping key for a conversation view —
+      GROUP BY properties->>'conversation_id'::String.
+
+  - name: message_id
+    type: String
+    required: false
+    index: [Property]
+    description: >
+      RFC 5322 Message-ID. Stable ACROSS providers and folders, unlike the
+      provider's own item id, so it is what deduplicates the same mail seen in
+      two mounts (e.g. an Inbox mount and a Sent Items mount).
+
+  - name: date
+    type: String
+    required: false
+    index: [Property]
+    description: Received (or sent) timestamp, ISO 8601, for ORDER BY / ranges
+
+  - name: unread
+    type: Boolean
+    required: false
+    index: [Property]
+    description: Whether the message is unread at the provider
+
+  - name: has_attachments
+    type: Boolean
+    required: false
+    index: [Property]
+    description: Whether the provider reports attachments
+
+  - name: importance
+    type: String
+    required: false
+    description: Provider importance hint ("low" | "normal" | "high")
+
+  - name: folder
+    type: String
+    required: false
+    index: [Property]
+    description: >
+      Source folder / mailbox this copy came from (e.g. "inbox", "sentitems").
+      Lets one query span several mail mounts and still tell them apart.
+
+  # ---- Provenance ---------------------------------------------------------
+  - name: provider
+    type: String
+    required: false
+    index: [Property]
+    description: '"ms-graph" | "imap" | "gmail" — which connector produced this'
+
+  - name: web_url
+    type: String
+    required: false
+    description: Deep link to the message in the provider's own UI
+
+  - name: mime_type
+    type: String
+    required: false
+    description: Always "message/rfc822"; present so generic tooling can branch
+
+  - name: provider_metadata
+    type: Object
+    required: false
+    description: >
+      The adapter's raw metadata, verbatim. Anything not promoted to a typed
+      property above stays reachable here rather than being dropped.
+
+# A message is a leaf. Attachments, when they arrive, will be raisin:Asset
+# children — added here when that ships rather than left open.
+allowed_children: []
+
+versionable: false
+publishable: false
+# Mail is synced content, not an editable record; the audit log would just
+# mirror the sync job. MVCC history is still available regardless.
+auditable: false

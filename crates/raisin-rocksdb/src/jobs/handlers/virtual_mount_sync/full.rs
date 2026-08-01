@@ -22,6 +22,10 @@ pub async fn run(
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut processed: u64 = 0;
+    // Set when the walk stops before exhausting the provider, which makes
+    // `seen` a PARTIAL picture and therefore unusable for deciding what to
+    // delete. See the reconcile guard below.
+    let mut truncated = false;
 
     // Explicit stack of (folder_id, rel_prefix) to avoid async recursion.
     let root = ctx.mount.remote_root.clone();
@@ -61,23 +65,75 @@ pub async fn run(
                 _ => break,
             }
             if processed >= max {
+                truncated = true;
                 break 'outer;
             }
         }
     }
 
     // Reconcile deletes: remove mount-owned nodes not seen this pass.
+    //
+    // "Not seen" only means "deleted upstream" when this pass actually SAW
+    // everything. Two ways that is false, and both used to delete real content:
+    //
+    //  1. The walk hit `max_items_per_sync` (default 500) and stopped early. A
+    //     mailbox larger than the cap would have every message past item 500
+    //     deleted on each full sync, then re-created by the next one — churn,
+    //     a trigger storm, and destroyed local edits, forever.
+    //  2. The provider answered with an empty listing (a silent hiccup, an
+    //     emptied-then-refilled folder, a permissions change that reads as
+    //     "no items" rather than an error). Deleting the entire mount subtree
+    //     on the strength of one empty response is never the right trade.
+    //
+    // In both cases the safe action is to skip reconciliation entirely: a stale
+    // extra node is recoverable on the next clean pass, deleted content is not.
     let existing = ctx
         .materializer
         .list_virtual(&ctx.scope)
         .await
         .map_err(|e| AdapterError::Transient(format!("list_virtual failed: {e}")))?;
-    for node in existing {
-        if !seen.contains(&node.external_id) {
-            ctx.materializer
-                .delete(&ctx.scope, &node.external_id)
-                .await
-                .map_err(|e| AdapterError::Transient(format!("reconcile delete failed: {e}")))?;
+
+    if truncated {
+        tracing::warn!(
+            mount_id = %ctx.mount.mount_id,
+            processed,
+            max_items_per_sync = max,
+            existing = existing.len(),
+            "full sync hit max_items_per_sync; skipping reconcile deletes because the listing is \
+             incomplete. Raise max_items_per_sync above the item count for deletes to be applied."
+        );
+    } else if seen.is_empty()
+        && !existing.is_empty()
+        && !ctx.mount.sync_config.allow_empty_reconcile
+    {
+        tracing::error!(
+            mount_id = %ctx.mount.mount_id,
+            existing = existing.len(),
+            "full sync returned NO items while {} mount-owned nodes exist; skipping reconcile \
+             deletes rather than emptying the mount. Check the mount's remote root and filters, \
+             or set sync_config.allow_empty_reconcile if the source really can be emptied.",
+            existing.len()
+        );
+    } else {
+        let mut deleted = 0usize;
+        for node in existing {
+            if !seen.contains(&node.external_id) {
+                ctx.materializer
+                    .delete(&ctx.scope, &node.external_id)
+                    .await
+                    .map_err(|e| {
+                        AdapterError::Transient(format!("reconcile delete failed: {e}"))
+                    })?;
+                deleted += 1;
+            }
+        }
+        if deleted > 0 {
+            tracing::info!(
+                mount_id = %ctx.mount.mount_id,
+                deleted,
+                seen = seen.len(),
+                "full sync reconcile removed nodes that are gone upstream"
+            );
         }
     }
 

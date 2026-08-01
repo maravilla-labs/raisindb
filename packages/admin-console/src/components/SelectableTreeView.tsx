@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { ChevronRight, ChevronDown, Folder, FileText, Package, User, Calendar, Settings, Tag, Layout, Database, Check, Minus } from 'lucide-react'
 import type { Node } from '../api/nodes'
+import { nodeLabel, nodeLabelShort } from '../utils/nodeDisplay'
 
 /**
  * Represents a selected path for package creation
@@ -201,7 +202,12 @@ function SelectableTreeNode({
         {getNodeIcon()}
 
         {/* Node name */}
-        <span className="flex-1 truncate font-medium">{node.name}</span>
+        <span
+          className="flex-1 truncate font-medium"
+          title={nodeLabel(node)}
+        >
+          {nodeLabelShort(node)}
+        </span>
 
         {/* Node type badge */}
         <span className="text-xs text-zinc-500">{node.node_type}</span>

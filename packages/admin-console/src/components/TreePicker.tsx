@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ChevronRight, ChevronDown, Folder, CheckCircle } from 'lucide-react'
 import type { Node } from '../api/nodes'
+import { nodeLabel, nodeLabelShort } from '../utils/nodeDisplay'
 
 interface TreePickerProps {
   nodes: Node[]
@@ -56,7 +57,12 @@ function TreePickerNode({ node, level, selectedPath, excludePath, onSelect, onEx
         )}
 
         <Folder className="w-4 h-4 text-yellow-400 flex-shrink-0" />
-        <span className="flex-1 truncate font-medium">{node.name}</span>
+        <span
+          className="flex-1 truncate font-medium"
+          title={nodeLabel(node)}
+        >
+          {nodeLabelShort(node)}
+        </span>
         {isSelected && <CheckCircle className="w-4 h-4 text-green-400" />}
       </div>
 

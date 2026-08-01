@@ -33,6 +33,18 @@ pub enum AdapterError {
     /// `code: "conflict"` — write-through optimistic-concurrency failure.
     #[error("adapter conflict: {0}")]
     Conflict(String),
+    /// `code: "config_error"` — the mount or connector is misconfigured and the
+    /// request can NEVER succeed as written (a malformed remote root, a folder
+    /// that does not exist, an unsupported resource).
+    ///
+    /// Distinct from [`Transient`] because retrying is not merely useless, it is
+    /// harmful: a mount with a bad remote root retried a Graph call that always
+    /// answered "Id is malformed", three times per job, on every scheduler tick,
+    /// indefinitely — which is how an OAuth app gets throttled. Treated as a
+    /// terminal outcome for the run: the state records it and the job returns
+    /// success, so the job layer does not retry on top of the scheduler.
+    #[error("adapter configuration error: {0}")]
+    Config(String),
     /// Anything else — a transient failure eligible for standard job retry.
     #[error("adapter transient error: {0}")]
     Transient(String),
@@ -48,10 +60,27 @@ impl AdapterError {
             AdapterError::AuthExpired
         } else if m.contains("rate_limited") {
             AdapterError::RateLimited
+        } else if m.contains("config_error") {
+            AdapterError::Config(message.to_string())
         } else if m.contains("conflict") {
             AdapterError::Conflict(message.to_string())
         } else {
             AdapterError::Transient(message.to_string())
+        }
+    }
+
+    /// Whether re-running the identical request could plausibly succeed.
+    ///
+    /// The single place this judgement is made, so the scheduler, the job-retry
+    /// decision and the mount status can never disagree about an error.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            AdapterError::RateLimited | AdapterError::Transient(_) => true,
+            // AuthExpired pauses the mount until reconnect; Config needs an
+            // operator edit; Conflict is resolved by the next sync's fresh read.
+            AdapterError::AuthExpired | AdapterError::Config(_) | AdapterError::Conflict(_) => {
+                false
+            }
         }
     }
 }

@@ -481,10 +481,53 @@ async fn failure_backoff_and_interval() {
     assert_eq!(m.effective_interval_secs(), 300 * 32);
 }
 
+/// An empty provider listing must NOT empty the mount by default.
+///
+/// The dangerous reading of "zero items" is that everything was deleted
+/// upstream; the likelier one is a permissions change, a bad remote root or a
+/// provider hiccup that did not raise an error. Deleted content is
+/// unrecoverable, stale content is not, so the default refuses.
+#[tokio::test(flavor = "multi_thread")]
+async fn full_reconcile_refuses_to_empty_the_mount_on_a_zero_item_listing() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig::default()); // allow_empty_reconcile = false
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+
+    let virt = VirtualMeta {
+        mount_id: MOUNT_ID.to_string(),
+        external_id: "X".to_string(),
+        etag: Some("v1".to_string()),
+        synced_at: Utc::now().to_rfc3339(),
+    };
+    let mapped = super::default_mapping(
+        &serde_json::from_value(ext_item("X", "synced", false, "v1")).unwrap(),
+    );
+    mat.upsert(&scope(), "synced", mapped, virt).await.unwrap();
+
+    let mock = MockAdapter::default(); // empty root list
+    let mut state = MountState::default();
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+
+    let remaining = mat.list_virtual(&scope()).await.unwrap();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "an empty listing must not delete mount-owned nodes by default"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn full_reconcile_never_deletes_non_virtual_nodes() {
     let env = setup().await;
-    let mount = mk_mount(SyncConfig::default());
+    // An empty listing normally SKIPS reconcile deletes (a provider hiccup must
+    // not empty the mount). This test is specifically about who owns a node, so
+    // it opts into the destructive reading to isolate that question.
+    let mount = mk_mount(SyncConfig {
+        allow_empty_reconcile: true,
+        ..SyncConfig::default()
+    });
     let mat = RocksDbMaterializer::new(env.storage.clone());
 
     // A user-created node under the mount path (no __mount_id).

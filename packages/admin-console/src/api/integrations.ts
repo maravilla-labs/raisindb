@@ -187,6 +187,12 @@ export interface MountState {
   status?: string
   last_sync_token?: string
   last_sync_at?: string
+  /**
+   * Last sync ATTEMPT, successful or not. The scheduler backs off from this,
+   * not from `last_sync_at`, so it is what tells you when a failing mount will
+   * next be tried.
+   */
+  last_attempt_at?: string
   last_error?: string
   consecutive_failures?: number
   /**

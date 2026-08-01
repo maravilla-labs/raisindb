@@ -361,12 +361,19 @@ impl VirtualMountSyncHandler {
         state: &mut MountState,
         result: std::result::Result<(), AdapterError>,
     ) -> Result<()> {
+        // Stamped on EVERY outcome, before the match, so no arm can forget it.
+        // This is what the scheduler backs off against; leaving it unset on the
+        // failure paths is what let a broken mount retry on every tick forever
+        // (see `MountState::last_attempt_at` and `check::is_due`).
+        let now = Utc::now().timestamp();
+        state.last_attempt_at = Some(now);
+
         match result {
             Ok(()) => {
                 state.status = Some("ok".to_string());
                 state.consecutive_failures = 0;
                 state.last_error = None;
-                state.last_sync_at = Some(Utc::now().timestamp());
+                state.last_sync_at = Some(now);
                 let _ = persist_state(ctx, state).await;
                 Ok(())
             }
@@ -379,11 +386,34 @@ impl VirtualMountSyncHandler {
             Err(e) => {
                 state.consecutive_failures += 1;
                 state.last_error = Some(e.to_string());
-                if state.consecutive_failures >= config::DEGRADE_THRESHOLD {
+
+                // A misconfigured mount gets its own status so the UI can say
+                // "fix this" rather than "it is flaky" — the operator action is
+                // completely different.
+                if matches!(e, AdapterError::Config(_)) {
+                    state.status = Some("misconfigured".to_string());
+                } else if state.consecutive_failures >= config::DEGRADE_THRESHOLD {
                     state.status = Some("degraded".to_string());
                 }
                 let _ = persist_state(ctx, state).await;
-                Err(Error::Backend(format!("virtual mount sync failed: {e}")))
+
+                // Returning Err makes the JOB layer retry the whole sync (3x)
+                // on top of the scheduler's own re-enqueue. That is right for a
+                // blip and wrong for anything that cannot succeed: it multiplies
+                // a permanent failure into four provider calls per tick. For a
+                // non-retryable error the run is complete — the state carries
+                // the diagnosis, and `last_attempt_at` backs the schedule off.
+                if e.is_retryable() {
+                    Err(Error::Backend(format!("virtual mount sync failed: {e}")))
+                } else {
+                    tracing::warn!(
+                        mount_id = %ctx.mount.mount_id,
+                        error = %e,
+                        status = state.status.as_deref().unwrap_or("degraded"),
+                        "virtual mount sync failed permanently; not retrying until the mount is changed"
+                    );
+                    Ok(())
+                }
             }
         }
     }

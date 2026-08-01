@@ -38,6 +38,26 @@ var MAIL_SELECT =
   "bodyPreview,isRead,hasAttachments,importance,conversationId,webLink," +
   "internetMessageId,createdDateTime,lastModifiedDateTime";
 
+// Whether this mount wants the FULL message body inline (sync_config.include_body).
+//
+// Off by default and deliberately so: mail syncs link-only, and adding `body`
+// to $select multiplies the delta payload by whole HTML documents on every page
+// of every run — on a mailbox-sized mount that is the difference between a few
+// hundred KB and tens of MB. Turn it on when you want fulltext over the body.
+function includeBody(mount) {
+  var merged = (mount && mount.config) || {};
+  var sc = (mount && mount.sync_config) || {};
+  var v = merged.include_body !== undefined ? merged.include_body : sc.include_body;
+  return v === true || v === "true";
+}
+
+// $select for one mail request, widened when the mount opted into bodies.
+// Kept as a function rather than a second constant so the flag is read at every
+// call site and the delta and list paths cannot disagree about it.
+function mailSelect(mount) {
+  return includeBody(mount) ? MAIL_SELECT + ",body" : MAIL_SELECT;
+}
+
 function coded(message, code) {
   var e = new Error(message);
   e.code = code;
@@ -60,6 +80,25 @@ function raiseForStatus(resp, context) {
   var msg =
     (body && body.error && body.error.message) ||
     "Microsoft Graph request failed (" + status + ")";
+
+  // 400 and 404 mean Graph rejected the REQUEST, not the moment: a malformed or
+  // unknown folder/calendar/drive id, or a resource this mailbox does not have.
+  // Retrying sends the identical request and gets the identical rejection, so
+  // these are reported as config errors — the engine records the diagnosis,
+  // stops retrying and marks the mount misconfigured, instead of hammering
+  // Graph on every scheduler tick.
+  //
+  // Deliberately NARROW. Other 4xx codes must stay retryable:
+  //   408 request timeout      — a blip
+  //   409 conflict             — resolved by the next sync's fresh read
+  //   410 Gone / resyncRequired — Graph EXPIRING A DELTA CURSOR, which is
+  //       normal operation and is answered by falling back to a full sync.
+  //       Marking that "misconfigured" would take a healthy mount offline and
+  //       demand an operator edit that has nothing to fix.
+  // (401/403 and 429 are already handled above as auth_expired / rate_limited.)
+  if (status === 400 || status === 404) {
+    throw coded(context + ": " + msg, "config_error");
+  }
   throw new Error(context + ": " + msg);
 }
 
@@ -166,10 +205,18 @@ function fmtAddrList(list) {
 
 // ---- ExternalItem builders ------------------------------------------------
 
+// Bare address with the display name stripped: `from` carries whatever name the
+// sender currently uses, which changes over time and makes it a poor grouping
+// key. The mapper indexes this one separately for GROUP BY / equality.
+function bareAddr(recip) {
+  return recip && recip.emailAddress ? recip.emailAddress.address || null : null;
+}
+
 function mailMeta(v) {
-  return {
+  var meta = {
     subject: v.subject || null,
     from: fmtAddr(v.from),
+    from_address: bareAddr(v.from),
     to: fmtAddrList(v.toRecipients),
     cc: fmtAddrList(v.ccRecipients),
     date: v.receivedDateTime || v.sentDateTime || null,
@@ -181,6 +228,14 @@ function mailMeta(v) {
     internet_message_id: v.internetMessageId || null,
     web_url: v.webLink || null,
   };
+  // Present only when the mount opted in; `body` is absent from $select
+  // otherwise, and an absent key is what tells the mapper to leave the property
+  // unset rather than write an empty string over a previously synced body.
+  if (v.body && typeof v.body.content === "string") {
+    meta.body = v.body.content;
+    meta.body_type = v.body.contentType === "html" ? "html" : "text";
+  }
+  return meta;
 }
 
 function calendarMeta(v) {
@@ -370,7 +425,7 @@ function opList(credential, mount, params) {
   } else {
     url =
       GRAPH + "/me/mailFolders/" + enc(mailFolderId(mount)) +
-      "/messages?$top=" + pageSize(params) + "&$select=" + enc(MAIL_SELECT);
+      "/messages?$top=" + pageSize(params) + "&$select=" + enc(mailSelect(mount));
   }
   var resp = graphFetch(credential, "GET", url, { context: "list" });
   var body = resp.body || {};
@@ -390,7 +445,7 @@ function opGet(credential, mount, params) {
   } else if (resource === "files") {
     url = GRAPH + "/me/drive/items/" + enc(params.item_id);
   } else {
-    url = GRAPH + "/me/messages/" + enc(params.item_id) + "?$select=" + enc(MAIL_SELECT);
+    url = GRAPH + "/me/messages/" + enc(params.item_id) + "?$select=" + enc(mailSelect(mount));
   }
   var resp = graphFetch(credential, "GET", url, { context: "get", rawStatusOk: true });
   if (resp.status === 404) return null;
@@ -446,7 +501,7 @@ function initialDeltaUrl(mount, resource) {
   }
   return (
     GRAPH + "/me/mailFolders/" + enc(mailFolderId(mount)) +
-    "/messages/delta?$select=" + enc(MAIL_SELECT)
+    "/messages/delta?$select=" + enc(mailSelect(mount))
   );
 }
 

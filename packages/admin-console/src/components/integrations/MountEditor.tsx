@@ -10,6 +10,7 @@ import {
   type WriteConfig,
 } from '../../api/integrations'
 import { branchesApi } from '../../api/branches'
+import { nodesApi } from '../../api/nodes'
 import { capabilitiesUnknown } from './CapabilityChips'
 import TestConnectionPanel from './TestConnectionPanel'
 import CopyableUrlField from './CopyableUrlField'
@@ -84,6 +85,11 @@ export default function MountEditor({
   const [targetBranch, setTargetBranch] = useState(mount?.target_branch || 'main')
   const [branches, setBranches] = useState<string[]>([])
   const [mountPath, setMountPath] = useState(mount?.mount_path || '/')
+  // Whether the mount path already exists in the target workspace. The engine
+  // materializes INTO this folder, so a missing one is a misconfiguration the
+  // operator only discovers as a failing sync — check it here instead.
+  const [mountPathState, setMountPathState] = useState<'unknown' | 'exists' | 'missing'>('unknown')
+  const [creatingPath, setCreatingPath] = useState(false)
   const [remoteRoot, setRemoteRoot] = useState(mount?.remote_root || '')
   const [mappingFn, setMappingFn] = useState(mount?.mapping_function || '')
   const [enabled, setEnabled] = useState(mount?.enabled ?? true)
@@ -133,6 +139,68 @@ export default function MountEditor({
   const isCalendar = providerType === 'google-calendar' || (isMsGraph && sync.resource === 'calendar')
   const windowDaysAhead = sync.window?.days_ahead ?? 90
   const windowDaysBack = sync.window?.days_back ?? 7
+
+  /** Mount path with a leading slash and no trailing one; '/' stays '/'. */
+  const normalizedMountPath = useMemo(() => {
+    const p = mountPath.trim()
+    if (!p || p === '/') return '/'
+    const withLead = p.startsWith('/') ? p : `/${p}`
+    return withLead.replace(/\/+$/, '') || '/'
+  }, [mountPath])
+
+  // Probe the target path as the operator types. Debounced, and cancelled on
+  // change so a slow response cannot overwrite the state of a newer path.
+  useEffect(() => {
+    if (!targetWorkspace || normalizedMountPath === '/') {
+      setMountPathState('unknown')
+      return
+    }
+    let cancelled = false
+    setMountPathState('unknown')
+    const timer = window.setTimeout(() => {
+      nodesApi
+        .getAtHead(repo, targetBranch || 'main', targetWorkspace, normalizedMountPath)
+        .then(() => !cancelled && setMountPathState('exists'))
+        .catch((e: any) => {
+          if (cancelled) return
+          // Only a 404 proves absence. A 403/500 means we do not know, and
+          // claiming "does not exist" would push the operator into creating a
+          // duplicate folder.
+          setMountPathState(e?.status === 404 ? 'missing' : 'unknown')
+        })
+    }, 400)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [repo, targetBranch, targetWorkspace, normalizedMountPath])
+
+  async function createMountPath() {
+    if (!targetWorkspace || normalizedMountPath === '/') return
+    setCreatingPath(true)
+    try {
+      const segments = normalizedMountPath.split('/').filter(Boolean)
+      const leaf = segments.pop() as string
+      const parent = segments.length ? `/${segments.join('/')}` : '/'
+      await nodesApi.create(repo, targetBranch || 'main', targetWorkspace, parent, {
+        name: leaf,
+        node_type: 'raisin:Folder',
+        properties: { title: leaf },
+      })
+      setMountPathState('exists')
+      onSuccess('Folder created', normalizedMountPath)
+    } catch (e: any) {
+      // The likeliest cause is an intermediate segment missing; say so rather
+      // than echoing a bare 404.
+      onError(
+        'Could not create the folder',
+        e?.message ||
+          `Create the parent folders of ${normalizedMountPath} in ${targetWorkspace} first.`,
+      )
+    } finally {
+      setCreatingPath(false)
+    }
+  }
 
   const suggestedMapper = useMemo(() => {
     const entry = providerType ? DEFAULT_MAPPERS[providerType] : undefined
@@ -324,6 +392,39 @@ export default function MountEditor({
             <div>
               <label className={labelCls}>Mount path *</label>
               <input className={field} value={mountPath} onChange={(e) => setMountPath(e.target.value)} placeholder="/documents/shared" />
+              <p className="mt-1 text-xs text-zinc-500">
+                The folder in <span className="font-mono">{targetWorkspace}</span> that synced
+                items are written <em>into</em> — the mount&rsquo;s root, not a node it creates.
+                Everything below it is owned by this mount: items that vanish upstream are
+                deleted here, so give the mount its own folder rather than pointing it at a
+                path you also edit by hand.
+              </p>
+              {mountPathState === 'missing' && (
+                <p className="mt-1 text-xs text-amber-400 flex items-start gap-1.5">
+                  <span>
+                    <span className="font-mono">{normalizedMountPath}</span> does not exist in{' '}
+                    <span className="font-mono">{targetWorkspace}</span> yet.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={createMountPath}
+                    disabled={creatingPath}
+                    className="underline hover:text-amber-300 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {creatingPath ? 'Creating…' : 'Create it'}
+                  </button>
+                </p>
+              )}
+              {mountPathState === 'exists' && normalizedMountPath !== '/' && (
+                <p className="mt-1 text-xs text-green-400">This folder exists.</p>
+              )}
+              {normalizedMountPath === '/' && (
+                <p className="mt-1 text-xs text-amber-400">
+                  Mounting at the workspace root mixes synced items in with all your other
+                  content, and mount-owned deletes then operate at the top level. A dedicated
+                  subfolder is strongly preferred.
+                </p>
+              )}
             </div>
             <div>
               <label className={labelCls}>Remote root</label>

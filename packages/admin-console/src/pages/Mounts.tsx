@@ -12,13 +12,18 @@ import TestConnectionPanel from '../components/integrations/TestConnectionPanel'
 import { integrationsApi, type VirtualMount, type Integration, type MountState } from '../api/integrations'
 import { workspacesApi } from '../api/workspaces'
 
-type StatusKind = 'ok' | 'syncing' | 'auth_required' | 'degraded' | 'idle'
+type StatusKind = 'ok' | 'syncing' | 'auth_required' | 'misconfigured' | 'degraded' | 'idle'
 
 function statusKind(state?: MountState): StatusKind {
   const s = (state?.status || '').toLowerCase()
   if (s === 'ok' || s === 'synced') return 'ok'
   if (s === 'syncing') return 'syncing'
   if (s === 'auth_required') return 'auth_required'
+  // Checked before 'degraded': the operator action is completely different.
+  // Degraded means "flaky, it may recover"; misconfigured means "it will never
+  // succeed until you change something", so it must not be diluted into the
+  // generic failure bucket.
+  if (s === 'misconfigured') return 'misconfigured'
   if (s === 'degraded' || s === 'error') return 'degraded'
   if ((state?.consecutive_failures || 0) > 0) return 'degraded'
   return 'idle'
@@ -28,6 +33,7 @@ const STATUS_META: Record<StatusKind, { label: string; cls: string; Icon: typeof
   ok: { label: 'OK', cls: 'bg-green-500/20 text-green-400', Icon: CheckCircle },
   syncing: { label: 'Syncing', cls: 'bg-blue-500/20 text-blue-400', Icon: Loader2 },
   auth_required: { label: 'Auth required', cls: 'bg-yellow-500/20 text-yellow-400', Icon: ShieldAlert },
+  misconfigured: { label: 'Misconfigured', cls: 'bg-orange-500/20 text-orange-400', Icon: AlertTriangle },
   degraded: { label: 'Degraded', cls: 'bg-red-500/20 text-red-400', Icon: AlertTriangle },
   idle: { label: 'Idle', cls: 'bg-gray-500/20 text-zinc-400', Icon: HardDrive },
 }
@@ -66,6 +72,8 @@ export default function Mounts() {
   const [deleteTarget, setDeleteTarget] = useState<VirtualMount | null>(null)
   const [syncingId, setSyncingId] = useState<string | null>(null)
   const [testTarget, setTestTarget] = useState<VirtualMount | null>(null)
+  /** Set when the mounts list itself failed, so "broken" never renders as "empty". */
+  const [loadError, setLoadError] = useState<string | null>(null)
   const { toasts, error: showError, success: showSuccess, closeToast } = useToast()
 
   /** The connector node backing a mount (matched by integration_ref path). */
@@ -74,20 +82,37 @@ export default function Mounts() {
   const load = useCallback(async () => {
     if (!repo) return
     setLoading(true)
-    try {
-      const [ms, ints, ws] = await Promise.all([
-        integrationsApi.listMounts(repo),
-        integrationsApi.listIntegrations(repo),
-        workspacesApi.list(repo),
-      ])
-      setMounts(ms)
-      setIntegrations(ints)
-      setWorkspaces(ws.map((w) => w.name))
-    } catch (e: any) {
-      showError('Failed to load mounts', e?.message)
-    } finally {
-      setLoading(false)
+    // allSettled, NOT all. The mounts list is the entire point of this page, and
+    // the other two calls only decorate it (connector names, the workspace
+    // dropdown in the editor). Under Promise.all a failure in either one
+    // rejected the whole batch, so `setMounts` never ran and the table rendered
+    // empty — indistinguishable from "no mounts configured", with only a
+    // transient toast to say otherwise. A mount you cannot see is a mount you
+    // cannot sync, disable or delete.
+    const [msR, intsR, wsR] = await Promise.allSettled([
+      integrationsApi.listMounts(repo),
+      integrationsApi.listIntegrations(repo),
+      workspacesApi.list(repo),
+    ])
+
+    if (msR.status === 'fulfilled') {
+      setMounts(msR.value)
+      setLoadError(null)
+    } else {
+      // Persistent, not a toast: this must never be mistaken for an empty list.
+      setLoadError(msR.reason?.message || 'The mounts list could not be loaded.')
     }
+    if (intsR.status === 'fulfilled') setIntegrations(intsR.value)
+    if (wsR.status === 'fulfilled') setWorkspaces(wsR.value.map((w) => w.name))
+
+    // Degraded, not fatal: say so, but keep the mounts on screen.
+    if (msR.status === 'fulfilled' && (intsR.status === 'rejected' || wsR.status === 'rejected')) {
+      showError(
+        'Some details could not be loaded',
+        'Connector names and the workspace list are unavailable; mounts are still shown and can be synced.',
+      )
+    }
+    setLoading(false)
   }, [repo])
 
   useEffect(() => {
@@ -240,6 +265,26 @@ export default function Mounts() {
 
       {loading ? (
         <div className="text-center text-zinc-400 py-12">Loading…</div>
+      ) : loadError ? (
+        // Never fall through to the "No mounts yet" card on a failure: a mount
+        // that exists but cannot be listed still syncs, and telling the operator
+        // it does not exist invites them to recreate it.
+        <GlassCard>
+          <div className="text-center py-12">
+            <AlertTriangle className="w-16 h-16 text-amber-400 mx-auto mb-4" />
+            <h3 className="text-xl font-semibold text-white mb-2">Could not load mounts</h3>
+            <p className="text-zinc-400 max-w-lg mx-auto">{loadError}</p>
+            <p className="text-zinc-500 text-sm mt-2">
+              Existing mounts keep syncing on the server regardless of this page.
+            </p>
+            <button
+              onClick={load}
+              className="mt-4 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm rounded-lg transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </GlassCard>
       ) : mounts.length === 0 ? (
         <GlassCard>
           <div className="text-center py-12">

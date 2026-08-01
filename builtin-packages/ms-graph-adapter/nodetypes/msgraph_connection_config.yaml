@@ -46,4 +46,19 @@ properties:
       group: microsoft
       order: 20
 
+  - name: include_body
+    type: Boolean
+    required: false
+    default: false
+    meta:
+      label: Sync full message bodies
+      description: >
+        Fetch each message's full body during sync, so it lands on the node as
+        `body` and is fulltext-indexed. Off by default: bodies are whole HTML
+        documents and including them multiplies the size of every delta page, so
+        a mailbox-sized mount gets substantially slower and heavier. Leave it off
+        if the `snippet` preview is enough. A mount may override it.
+      group: microsoft
+      order: 30
+
 allowed_children: []

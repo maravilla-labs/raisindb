@@ -4,7 +4,12 @@ allowed_node_types:
   - raisin:Folder
   - raisin:Page
   - raisin:Asset
+  # raisin:Event and raisin:Mail are what the calendar and mail connectors
+  # materialize. A workspace REJECTS a node type absent from this list
+  # ("Node type 'X' is not allowed in workspace 'default'"), so omitting one
+  # here does not degrade the mount gracefully — it fails every write.
   - raisin:Event
+  - raisin:Mail
   - raisin:Node
 allowed_root_node_types:
   - raisin:Folder
