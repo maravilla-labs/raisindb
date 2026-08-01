@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSL-1.1
 
 import { useEffect, useRef, useState } from 'react'
-import { LinkIcon, Unlink, Loader2, UserCircle, Plus, Pencil } from 'lucide-react'
+import { LinkIcon, Unlink, Loader2, UserCircle, Plus, Pencil, AlertTriangle } from 'lucide-react'
 import {
   integrationsApi,
   type Integration,
@@ -17,6 +17,16 @@ interface ConnectedAccountsProps {
   onChanged: () => void
   onError: (title: string, message?: string) => void
   onSuccess: (title: string, message?: string) => void
+  /**
+   * Why connecting is currently blocked, or undefined when it is allowed.
+   *
+   * OAuth starts from the SAVED connector node — the server reads client id,
+   * endpoints and client secret from storage, never from this form. Editing a
+   * field and pressing Connect without saving therefore authorizes against the
+   * previous configuration, and the failure surfaces much later as an opaque
+   * provider rejection.
+   */
+  blockedReason?: string
 }
 
 /**
@@ -57,6 +67,7 @@ export default function ConnectedAccounts({
   onChanged,
   onError,
   onSuccess,
+  blockedReason,
 }: ConnectedAccountsProps) {
   const [connecting, setConnecting] = useState(false)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
@@ -89,6 +100,10 @@ export default function ConnectedAccounts({
     }
   }, [repo, integration.path, supportsConnections, accounts.length])
 
+  // The dialog can be closed mid-connect; without this the interval keeps
+  // firing against an unmounted component.
+  useEffect(() => stopPolling, [])
+
   function connectionFor(id: string): Connection | undefined {
     return connections.find((c) => c.id === id)
   }
@@ -115,23 +130,48 @@ export default function ConnectedAccounts({
         return
       }
 
-      pollRef.current = window.setInterval(() => {
-        let sameOrigin = false
-        try {
-          // Throws while the popup is on the provider (cross-origin).
-          sameOrigin = !!popup.location.href && popup.location.host === window.location.host
-        } catch {
-          sameOrigin = false
-        }
+      // The outcome arrives as a postMessage from the console page the callback
+      // redirects the popup to (see Integrations.tsx). It is authoritative:
+      // reaching a same-origin URL means only that the flow ENDED, and this used
+      // to be read as success — so a refused grant reported "Account connected"
+      // and the operator was left with a connector that silently had no account.
+      let settled = false
+      const finish = (report: () => void) => {
+        if (settled) return
+        settled = true
+        stopPolling()
+        window.removeEventListener('message', onMessage)
+        if (!popup.closed) popup.close()
+        setConnecting(false)
+        report()
+        onChanged()
+      }
 
-        if (popup.closed || sameOrigin) {
-          stopPolling()
-          if (!popup.closed) popup.close()
-          setConnecting(false)
-          // The callback appended the account server-side; reload to reflect it.
-          onSuccess('Account connected', 'Refreshing connected accounts…')
-          onChanged()
-        }
+      function onMessage(ev: MessageEvent) {
+        if (ev.origin !== window.location.origin) return
+        if (ev.data?.type !== 'raisin-oauth-result') return
+        const { connected, error, description } = ev.data
+        finish(() =>
+          error
+            ? onError(`Connect failed: ${error}`, description || undefined)
+            : onSuccess('Account connected', connected || undefined),
+        )
+      }
+      window.addEventListener('message', onMessage)
+
+      // Fallback for a popup that never reports: the operator closed it, or it
+      // ended somewhere that cannot relay (an old server rendering a raw error
+      // body). Never claim success here — we genuinely do not know.
+      pollRef.current = window.setInterval(() => {
+        if (!popup.closed) return
+        finish(() =>
+          onError(
+            'Connect not completed',
+            'The connect window closed before reporting a result. If you did authorize, ' +
+              'check the connections list below — otherwise check the server log for the ' +
+              'provider’s error.',
+          ),
+        )
       }, 600)
     } catch (e: any) {
       setConnecting(false)
@@ -177,7 +217,8 @@ export default function ConnectedAccounts({
             <button
               type="button"
               onClick={handleConnect}
-              disabled={connecting || !integration.path}
+              disabled={connecting || !integration.path || !!blockedReason}
+              title={blockedReason}
               className="flex items-center gap-2 px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <LinkIcon className="w-4 h-4" />}
@@ -186,6 +227,13 @@ export default function ConnectedAccounts({
           )}
         </div>
       </div>
+
+      {supportsOauth && blockedReason && (
+        <p className="flex items-start gap-1.5 text-xs text-amber-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+          {blockedReason}
+        </p>
+      )}
 
       {accounts.length === 0 ? (
         <p className="text-zinc-500 text-sm">

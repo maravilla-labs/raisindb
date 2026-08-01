@@ -43,9 +43,40 @@ export default function Integrations() {
     load()
   }, [load])
 
-  // The OAuth callback redirects back with ?connected=<name>; surface a toast
+  // The OAuth callback lands HERE, and usually inside the connect popup opened
+  // by ConnectedAccounts. In that case this page must not render at all: it
+  // hands the outcome to the opener and closes.
+  //
+  // Relaying beats having the opener poll `popup.location.search`, because this
+  // very component strips those params from the URL a moment after mount — the
+  // opener would race a cleanup it cannot see, and read an empty query string
+  // as "no result". `window.name` is the name given to window.open(), and the
+  // target origin is pinned so the message cannot be read cross-origin.
+  const [relaying] = useState(
+    () => typeof window !== 'undefined' && !!window.opener && window.name === 'raisin-oauth',
+  )
+  useEffect(() => {
+    if (!relaying) return
+    const connected = searchParams.get('connected')
+    const error = searchParams.get('oauth_error')
+    if (!connected && !error) return
+    window.opener.postMessage(
+      {
+        type: 'raisin-oauth-result',
+        connected,
+        error,
+        description: searchParams.get('oauth_error_description'),
+      },
+      window.location.origin,
+    )
+    window.close()
+  }, [relaying, searchParams])
+
+  // Non-popup fallback (the operator navigated here directly, or the opener is
+  // gone): the callback redirects back with ?connected=<name>; surface a toast
   // and refresh once so the newly-connected account shows up.
   useEffect(() => {
+    if (relaying) return
     const connected = searchParams.get('connected')
     if (connected) {
       showSuccess('Account connected', connected)
@@ -53,13 +84,14 @@ export default function Integrations() {
       setSearchParams(searchParams, { replace: true })
       load()
     }
-  }, [searchParams, setSearchParams, load, showSuccess])
+  }, [relaying, searchParams, setSearchParams, load, showSuccess])
 
   // ...and with ?oauth_error=<code> when the provider refused. The description
   // carries the provider's own diagnostic (e.g. Microsoft's AADSTS50194,
   // "not configured as a multi-tenant application"), which is what actually
   // tells the operator what to change.
   useEffect(() => {
+    if (relaying) return
     const code = searchParams.get('oauth_error')
     if (code) {
       const detail = searchParams.get('oauth_error_description') || undefined
@@ -68,7 +100,7 @@ export default function Integrations() {
       searchParams.delete('oauth_error_description')
       setSearchParams(searchParams, { replace: true })
     }
-  }, [searchParams, setSearchParams, showError])
+  }, [relaying, searchParams, setSearchParams, showError])
 
   function openNew() {
     setEditing(undefined)

@@ -173,14 +173,37 @@ fn resolve_redirect_uri_with_base(cfg: &Value, repo: &str, base: &str) -> String
 
 /// Decrypt an integration node's `client_secret_encrypted` (base64 of the
 /// standard wire format) if present. Returns `None` for public clients.
+///
+/// A stored-but-undecryptable secret (`RAISIN_MASTER_KEY` rotated or differing
+/// between the node that stored it and the node reading it) also yields `None` —
+/// indistinguishable, at the call site, from a public client. That silence is
+/// how a master-key mismatch used to present as a bare `401` from the provider,
+/// so it is logged loudly here. The ciphertext and plaintext are never logged.
 pub(crate) fn decrypt_client_secret(node: &Node, master_key: &[u8; 32]) -> Option<String> {
-    let enc = match node.properties.get("client_secret_encrypted")? {
-        PropertyValue::String(s) if !s.is_empty() => s,
+    let enc = match node.properties.get("client_secret_encrypted") {
+        Some(PropertyValue::String(s)) if !s.is_empty() => s,
         _ => return None,
     };
-    let bytes = base64::engine::general_purpose::STANDARD.decode(enc).ok()?;
-    SecretBox::new(master_key).decrypt(&bytes).ok()
+    let decoded = base64::engine::general_purpose::STANDARD.decode(enc).ok();
+    let plaintext = decoded
+        .as_deref()
+        .and_then(|bytes| SecretBox::new(master_key).decrypt(bytes).ok());
+    if plaintext.is_none() {
+        tracing::error!(
+            node_path = %node.path,
+            "integration has a stored client_secret_encrypted that could not be decrypted; \
+             the OAuth exchange will proceed WITHOUT a client_secret and the provider will \
+             reject it (Microsoft: AADSTS7000218). This normally means RAISIN_MASTER_KEY \
+             differs from the key the secret was stored under — re-enter the client secret \
+             in the admin console, or restore the original key."
+        );
+    }
+    plaintext
 }
+
+// The token-endpoint error redactor is shared with the background refresh grant
+// in `raisin-rocksdb`; see `raisin_models::auth::oauth_error_detail`.
+pub(crate) use raisin_models::auth::oauth_error_parts;
 
 /// Read the `connected_accounts` array of a node as JSON (empty if unset).
 pub(crate) fn connected_accounts(node: &Node) -> Vec<Value> {

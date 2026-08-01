@@ -15,7 +15,7 @@ use base64::Engine as _;
 use raisin_core::services::node_service::NodeService;
 use raisin_crypto::SecretBox;
 use raisin_error::Result;
-use raisin_models::auth::AuthContext;
+use raisin_models::auth::{oauth_error_detail, AuthContext};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::jobs::{JobInfo, JobType};
@@ -338,10 +338,17 @@ impl IntegrationTokenRefreshHandler {
             })?;
 
         if !resp.status().is_success() {
+            // As in the OAuth callback: the RFC 6749 §5.2 `error` /
+            // `error_description` fields are diagnostic text, not credential
+            // material, and are the only way to tell an expired client secret
+            // from a revoked grant. Nothing else from the body is read.
             let status = resp.status();
-            return Err(raisin_error::Error::Backend(format!(
-                "token endpoint returned {status}"
-            )));
+            let detail = oauth_error_detail(&resp.text().await.unwrap_or_default());
+            return Err(raisin_error::Error::Backend(if detail.is_empty() {
+                format!("token endpoint returned {status}")
+            } else {
+                format!("token endpoint returned {status} — {detail}")
+            }));
         }
 
         let body: Value = resp

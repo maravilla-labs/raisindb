@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSL-1.1
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X, KeyRound, CheckCircle2, ExternalLink } from 'lucide-react'
 import { integrationsApi, type Integration, type OAuthConfig } from '../../api/integrations'
 import ConnectedAccounts from './ConnectedAccounts'
@@ -164,6 +164,54 @@ export default function IntegrationEditor({
       cancelled = true
     }
   }, [repo])
+
+  // --- Unsaved-edit detection -------------------------------------------
+  //
+  // "Connect account" and "Test connection" both run entirely server-side
+  // against the SAVED node: the server reads client id, endpoints and the
+  // encrypted client secret out of storage and never sees this form. Editing a
+  // field and connecting without pressing Update therefore authorizes against
+  // the PREVIOUS configuration, and the mismatch surfaces only as an opaque
+  // provider rejection at the token exchange (Microsoft: `invalid_client`) —
+  // with nothing on screen linking it back to the unsaved edit.
+  //
+  // A typed-but-unsaved client secret is the sharpest version: the connector
+  // stays a public client, RaisinDB sends no secret at all, and Microsoft
+  // answers 401 AADSTS7000218.
+  const formSnapshot = JSON.stringify({
+    name,
+    title,
+    providerType,
+    adapterFn,
+    enabled,
+    oauth,
+    scopesText,
+    setupInstructions,
+    docsUrl,
+    configValues,
+  })
+  const snapshotRef = useRef(formSnapshot)
+  snapshotRef.current = formSnapshot
+  const baselineRef = useRef(formSnapshot)
+  // Re-baseline whenever the saved node changes (mount, save, post-connect
+  // reload) and after the async redirect-URI prefill lands, so neither counts
+  // as an operator edit.
+  useEffect(() => {
+    baselineRef.current = snapshotRef.current
+  }, [current, redirectUri])
+
+  const pendingSecrets =
+    clientSecret.trim().length > 0 || Object.values(configSecretDrafts).some((v) => v !== undefined)
+  const dirty = formSnapshot !== baselineRef.current
+  const connectBlockedReason = !current?.path
+    ? 'Create this connector first.'
+    : pendingSecrets
+      ? 'You have entered a secret that is not saved yet. Click Update first — until you do, the ' +
+        'server still has the old secret (or none), and the provider will reject the connection.'
+      : dirty
+        ? 'You have unsaved changes. Connecting uses the saved configuration, not what is on ' +
+          'screen — click Update first.'
+        : undefined
 
   function patchOauth(patch: Partial<OAuthConfig>) {
     setOauth((prev) => ({ ...prev, ...patch }))
@@ -480,9 +528,27 @@ export default function IntegrationEditor({
                 onChange={(e) => setClientSecret(e.target.value)}
                 placeholder={secretSet ? '•••••••• (secret set — leave blank to keep)' : 'Enter to set'}
               />
-              {secretSet && (
+              {secretSet ? (
                 <p className="mt-1 text-xs text-green-400 flex items-center gap-1">
                   <CheckCircle2 className="w-3.5 h-3.5" /> A client secret is stored (never displayed).
+                </p>
+              ) : (
+                oauth.auth_url?.trim() && (
+                  // A confidential client with no stored secret authorizes fine
+                  // and then fails at the token exchange — the one step the
+                  // operator cannot see. Say so before they hit Connect.
+                  <p className="mt-1 text-xs text-amber-400">
+                    No client secret is stored. Sign-in will still succeed, but the token
+                    exchange afterwards will be rejected by any provider that issued you one
+                    (Microsoft: <code className="font-mono">AADSTS7000218</code>). Enter it here
+                    and click Update. Only omit it for a provider you registered as a{' '}
+                    <em>public</em> client.
+                  </p>
+                )
+              )}
+              {clientSecret.trim() && (
+                <p className="mt-1 text-xs text-amber-400">
+                  Not saved yet — click Update to encrypt and store it.
                 </p>
               )}
             </div>
@@ -552,7 +618,11 @@ export default function IntegrationEditor({
                 disabledReason={
                   needsAccount
                     ? 'Connect an account below first — this connector uses OAuth, so the test needs a credential.'
-                    : undefined
+                    : // Same staleness as connecting: the probe runs server-side
+                      // against the saved node, so unsaved edits are not in play.
+                      dirty || pendingSecrets
+                      ? 'You have unsaved changes. The test runs against the saved configuration — click Update first.'
+                      : undefined
                 }
                 onTested={reloadAccounts}
                 onError={onError}
@@ -568,6 +638,7 @@ export default function IntegrationEditor({
                 onChanged={reloadAccounts}
                 onError={onError}
                 onSuccess={onSuccess}
+                blockedReason={connectBlockedReason}
               />
             </div>
           )}

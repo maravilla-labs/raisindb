@@ -46,6 +46,7 @@ mod claims;
 mod config;
 mod context;
 mod identity;
+mod oauth_error;
 mod session;
 
 pub use access::*;
@@ -53,4 +54,5 @@ pub use claims::*;
 pub use config::*;
 pub use context::*;
 pub use identity::*;
+pub use oauth_error::{oauth_error_detail, oauth_error_parts};
 pub use session::*;
