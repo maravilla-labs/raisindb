@@ -105,18 +105,32 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         );
 
         if let Some(ref selection) = query.selection {
-            if let Some(node_type_name) = helpers::extract_node_type_from_expr(selection) {
-                if let Some(indexes) = helpers::load_compound_indexes(
-                    &*self.storage,
-                    &self.tenant_id,
-                    &self.repo_id,
-                    &self.branch,
-                    &node_type_name,
-                )
-                .await
-                {
-                    physical_planner.set_compound_indexes(indexes);
+            let compound = match helpers::extract_node_type_from_expr(selection) {
+                Some(node_type_name) => {
+                    helpers::load_compound_indexes(
+                        &*self.storage,
+                        &self.tenant_id,
+                        &self.repo_id,
+                        &self.branch,
+                        &node_type_name,
+                    )
+                    .await
                 }
+                // No `node_type =` in the WHERE clause. A hierarchy query is
+                // usually written without one, so fall back to every compound
+                // index on the branch rather than planning as if none existed.
+                None => {
+                    helpers::load_all_compound_indexes(
+                        &*self.storage,
+                        &self.tenant_id,
+                        &self.repo_id,
+                        &self.branch,
+                    )
+                    .await
+                }
+            };
+            if let Some(indexes) = compound {
+                physical_planner.set_compound_indexes(indexes);
             }
         }
 
@@ -246,18 +260,32 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             workspace.clone(),
         );
 
-        if let Some(node_type_name) = helpers::extract_node_type_from_expr(filter) {
-            if let Some(indexes) = helpers::load_compound_indexes(
-                &*self.storage,
-                &self.tenant_id,
-                &self.repo_id,
-                &self.branch,
-                &node_type_name,
-            )
-            .await
-            {
-                physical_planner.set_compound_indexes(indexes);
+        let compound = match helpers::extract_node_type_from_expr(filter) {
+            Some(node_type_name) => {
+                helpers::load_compound_indexes(
+                    &*self.storage,
+                    &self.tenant_id,
+                    &self.repo_id,
+                    &self.branch,
+                    &node_type_name,
+                )
+                .await
             }
+            // No `node_type =` in the WHERE clause. A hierarchy query is
+            // usually written without one, so fall back to every compound
+            // index on the branch rather than planning as if none existed.
+            None => {
+                helpers::load_all_compound_indexes(
+                    &*self.storage,
+                    &self.tenant_id,
+                    &self.repo_id,
+                    &self.branch,
+                )
+                .await
+            }
+        };
+        if let Some(indexes) = compound {
+            physical_planner.set_compound_indexes(indexes);
         }
 
         let physical_plan = physical_planner.plan(&optimized_plan)?;
@@ -336,18 +364,32 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             index_catalog,
         );
 
-        if let Some(node_type_name) = helpers::extract_node_type_from_analyzed(analyzed) {
-            if let Some(indexes) = helpers::load_compound_indexes(
-                &*self.storage,
-                &self.tenant_id,
-                &self.repo_id,
-                &self.branch,
-                &node_type_name,
-            )
-            .await
-            {
-                physical_planner.set_compound_indexes(indexes);
+        let compound = match helpers::extract_node_type_from_analyzed(analyzed) {
+            Some(node_type_name) => {
+                helpers::load_compound_indexes(
+                    &*self.storage,
+                    &self.tenant_id,
+                    &self.repo_id,
+                    &self.branch,
+                    &node_type_name,
+                )
+                .await
             }
+            // No `node_type =` in the WHERE clause. A hierarchy query is
+            // usually written without one, so fall back to every compound
+            // index on the branch rather than planning as if none existed.
+            None => {
+                helpers::load_all_compound_indexes(
+                    &*self.storage,
+                    &self.tenant_id,
+                    &self.repo_id,
+                    &self.branch,
+                )
+                .await
+            }
+        };
+        if let Some(indexes) = compound {
+            physical_planner.set_compound_indexes(indexes);
         }
 
         // Load schema statistics for data-driven selectivity estimation

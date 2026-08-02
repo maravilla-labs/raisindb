@@ -54,6 +54,101 @@ pub(crate) fn extract_node_type_from_expr(expr: &TypedExpr) -> Option<String> {
     }
 }
 
+/// Every compound index declared by ANY NodeType on this branch, cached.
+///
+/// Needed because a hierarchy query usually does not name a node type:
+/// `CHILD_OF('/inbox/2026/05') ORDER BY created_at LIMIT 50` is a complete,
+/// ordinary query, and gating index loading on a literal `node_type =` meant a
+/// `(__parent_path, ...)` index could never be found by the queries it exists
+/// to serve.
+///
+/// Loading every type's definitions is consistent with how the entries are
+/// actually keyed: a compound index key is
+/// `…cidx\0{index_name}\0{column values}…` — it carries the index NAME and no
+/// node type, so an index name already addresses a workspace-global keyspace.
+/// Scoping the lookup by node type was a fiction the storage layer never shared.
+///
+/// (Corollary worth knowing: two NodeTypes declaring the same index name with
+/// different columns share one keyspace and interleave incompatible entries.
+/// That is pre-existing and wants a validation check at NodeType upsert.)
+///
+/// Cached per branch with a short TTL. A per-query NodeType listing would be a
+/// fixed cost on every statement — the exact shape of overhead that made these
+/// queries slow in the first place. The TTL is deliberately short rather than
+/// the 5 minutes schema stats use: a definition removed from a NodeType stops
+/// being maintained immediately, so continuing to plan against it reads a
+/// keyspace nobody is writing.
+static COMPOUND_INDEX_CACHE: std::sync::OnceLock<
+    raisin_core::TtlCache<std::sync::Arc<Vec<CompoundIndexDefinition>>>,
+> = std::sync::OnceLock::new();
+
+fn compound_index_cache(
+) -> &'static raisin_core::TtlCache<std::sync::Arc<Vec<CompoundIndexDefinition>>> {
+    COMPOUND_INDEX_CACHE
+        .get_or_init(|| raisin_core::TtlCache::new(std::time::Duration::from_secs(30)))
+}
+
+pub(crate) async fn load_all_compound_indexes<S: Storage>(
+    storage: &S,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+) -> Option<Vec<CompoundIndexDefinition>> {
+    let scope_key = format!("{tenant_id}:{repo_id}:{branch}");
+
+    if let Some(cached) = compound_index_cache().get(&scope_key) {
+        return if cached.is_empty() {
+            None
+        } else {
+            Some((*cached).clone())
+        };
+    }
+
+    let node_types = match storage
+        .node_types()
+        .list(
+            raisin_storage::BranchScope::new(tenant_id, repo_id, branch),
+            None,
+        )
+        .await
+    {
+        Ok(types) => types,
+        Err(e) => {
+            tracing::warn!("   Failed to list NodeTypes for compound indexes: {}", e);
+            return None;
+        }
+    };
+
+    // Deduplicate by index name: the name IS the keyspace, so two types
+    // declaring the same one describe the same entries. First declaration wins,
+    // which keeps planning deterministic across list order.
+    let mut seen = std::collections::HashSet::new();
+    let mut all: Vec<CompoundIndexDefinition> = Vec::new();
+    for node_type in node_types {
+        if let Some(indexes) = node_type.compound_indexes {
+            for index in indexes {
+                if seen.insert(index.name.clone()) {
+                    all.push(index);
+                }
+            }
+        }
+    }
+
+    tracing::debug!(
+        "   Loaded {} compound indexes across all NodeTypes on '{}'",
+        all.len(),
+        branch
+    );
+
+    compound_index_cache().put(&scope_key, std::sync::Arc::new(all.clone()));
+
+    if all.is_empty() {
+        None
+    } else {
+        Some(all)
+    }
+}
+
 /// Load compound indexes from NodeType storage
 ///
 /// Fetches the NodeType definition and extracts its compound_indexes field.
