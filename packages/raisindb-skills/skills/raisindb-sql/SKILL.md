@@ -300,12 +300,61 @@ SELECT * FROM GRAPH_TABLE(
 
 | Pattern | Meaning |
 |---------|---------|
-| `(a:Article)` | Node with label `Article` |
+| `(a:Article)` | Node whose type ends in `:Article` (see below) |
+| ``(a:`news:Article`)`` | Node of exactly that type |
 | `-[:tagged-with]->` | Outgoing relation of type `tagged-with` |
 | `<-[:corrects]-` | Incoming relation |
 | `-[r:follows]-` | Any direction, bind to variable `r` |
-| `-[:continues*]->` | Variable-length (1-10 hops, default) |
-| `-[:follows*2..5]->` | 2 to 5 hops |
+| `-[:continues]->{1,3}` | 1 to 3 hops (canonical) |
+| `-[:continues*1..3]->` | same, deprecated spelling |
+
+### Labels are matched loosely -- quote to be exact
+
+A label matches when the node type **equals** it or **ends with** `:label`,
+case-insensitively. So `(a:Article)` matches `news:Article` *and*
+`studio:Article`.
+
+That is deliberate -- it lets you name a type without hardcoding its package.
+When two packages share a local name and you need one, backtick-quote the full
+type (backticks make an identifier accept any character):
+
+```sql
+MATCH (a:Article)              -- every namespace
+MATCH (a:`news:Article`)       -- exactly one
+MATCH (a:news:Article)         -- parse error: quote it
+```
+
+`WHERE a.node_type = 'news:Article'` works too.
+
+### Quantifiers, selectors, restrictors
+
+The canonical quantifier is the brace form **after** the arrow: `->{2}`,
+`->{1,3}`, `->{2,}`, `->*` (`{0,}`), `->+` (`{1,}`), `->?` (`{0,1}`). The old
+in-bracket form (`*1..3`) still works but warns; note `*` means `{1,}` there and
+`{0,}` in the canonical form.
+
+An **unbounded** quantifier (`*`, `+`, `{m,}`) must sit under a selector or a
+restrictor, or it is a parse error. Bounded ones need neither. Unbounded is
+capped at 10 hops.
+
+| | |
+|---|---|
+| Selectors | `ANY`, `ANY SHORTEST`, `ALL SHORTEST`, `ANY CHEAPEST` (needs `COST`) |
+| Restrictors | `WALK`, `TRAIL`, `ACYCLIC` (**default**) |
+| Path accessors | `path_length(p)`, `nodes(p)`, `edges(p)`, `path_first(p)`, `path_last(p)`, `element_id(p)`, `is_trail(p)`, `is_acyclic(p)` |
+
+```sql
+-- Cheapest route, not the shortest. COST needs a BOUND edge variable, and a
+-- relation has no arbitrary properties -- the weight field is `r.weight`.
+SELECT * FROM GRAPH_TABLE(
+  MATCH ANY CHEAPEST p = (a:Stop)-[r:route COST r.weight]->{1,8}(b:Stop)
+  COLUMNS (path_length(p) AS hops)
+)
+```
+
+A path variable is not selectable on its own -- `COLUMNS (p)` is an error naming
+the accessors. Note also that a single-node pattern (`MATCH (n)`) resolves from
+the relation index, so it returns only nodes that have at least one relation.
 
 ### Find tags for an article
 

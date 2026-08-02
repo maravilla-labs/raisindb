@@ -103,6 +103,14 @@ fn public_pgq_doc_examples_parse() {
     rejected("GRAPH_TABLE(MATCH (n:Page WHERE n.status = 'published') COLUMNS (n.title))");
     ok("GRAPH_TABLE(MATCH (n:Page) WHERE n.status = 'published' COLUMNS (n.title))");
 
+    // From packages/raisindb-skills/skills/raisindb-sql/SKILL.md — a skill that
+    // teaches syntax the parser rejects is the same failure as a doc that does.
+    ok("GRAPH_TABLE(MATCH (a:`news:Article`) COLUMNS (a.title))");
+    ok("GRAPH_TABLE(MATCH ANY CHEAPEST p = (a:Stop)-[r:route COST r.weight]->{1,8}(b:Stop) \
+        COLUMNS (path_length(p) AS hops))");
+    ok("GRAPH_TABLE(MATCH (a:Article)-[:continues]->{1,3}(b:Article) COLUMNS (b.title))");
+    ok("GRAPH_TABLE(MATCH (a:Article)-[:continues*1..3]->(b:Article) COLUMNS (b.title))");
+
     // NOTE: `COLUMNS (p)` deliberately PARSES. A bare path variable is rejected
     // later, at validation, by `path_accessors::path_is_not_selectable`, whose
     // message names the accessors — proven end to end by

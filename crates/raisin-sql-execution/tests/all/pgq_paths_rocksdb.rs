@@ -455,25 +455,25 @@ async fn the_default_restrictor_does_not_revisit_nodes() {
 // Label namespacing — a collision with no way out
 // ---------------------------------------------------------------------------
 
-/// Two node types sharing a local name collide, and cannot be told apart.
+/// A bare label spans namespaces; a quoted one pins exactly one.
 ///
 /// `matches_label` accepts a label when the node type equals it OR ends with
-/// `":" + label`, case-insensitively. Node types are namespaced by convention
-/// (`news:Article`, `studio:Article`), so a bare `(n:Article)` matches **every**
-/// namespace at once.
+/// `":" + label`, case-insensitively. Node types are namespaced by convention,
+/// so a bare `(n:Article)` deliberately matches `news:Article` AND
+/// `studio:Article` — that suffix arm is what lets a query be written without
+/// hardcoding a package prefix.
 ///
-/// The obvious fix a user would reach for — naming the namespace — does not
-/// parse: `(n:news:Article)` reads `news` as the label and then hits an
-/// unexpected `:`. So there is currently NO spelling that selects one of two
-/// same-named types.
+/// The precise form is available in the label position: identifiers may be
+/// backtick-quoted, so ``(n:`news:Article`)`` reaches the exact-match arm and
+/// selects a single namespace. The UNQUOTED qualified spelling is the only one
+/// that fails — `(n:news:Article)` reads `news` as the label and then hits an
+/// unexpected `:` — which is a lexing consequence, not a missing capability.
 ///
-/// This test pins the CURRENT behaviour, deliberately. It documents a real gap
-/// rather than asserting the behaviour is right: a multi-package repository
-/// (which is the normal case — `raisin:`, `news:`, `studio:` all coexist) gets
-/// silently merged results. If the grammar later accepts a qualified label,
-/// this test fails and is the prompt to update it and the public reference.
+/// All four facts are asserted together because each is load-bearing for the
+/// public reference, and because "there is no way to qualify a label" is an easy
+/// and wrong conclusion to draw from the unquoted form alone.
 #[tokio::test]
-async fn a_bare_label_matches_every_namespace_and_cannot_be_qualified() {
+async fn a_bare_label_matches_every_namespace_and_a_quoted_one_does_not() {
     let (storage, _tmp) = storage().await;
 
     // Two nodes, same local type name, different namespaces.
@@ -563,7 +563,25 @@ async fn a_bare_label_matches_every_namespace_and_cannot_be_qualified() {
     assert_eq!(
         just_news,
         vec!["news-a".to_string()],
-        "filtering on the full node type is the only way to disambiguate, and \
-         the reference recommends it — so it has to work",
+        "filtering on the full node type disambiguates, and the reference \
+         recommends it — so it has to work",
+    );
+
+    // And the label position CAN carry a qualified name after all: identifiers
+    // may be backtick-quoted, and `matches_label`'s exact-match arm then selects
+    // one namespace.
+    let backticked = col(
+        &engine,
+        "SELECT * FROM GRAPH_TABLE(MATCH (n:`news:Article`) COLUMNS (n.name AS who))",
+        "who",
+    )
+    .await
+    .expect("a backtick-quoted qualified label must parse");
+
+    assert_eq!(
+        backticked,
+        vec!["news-a".to_string()],
+        "a backtick-quoted label is matched EXACTLY against the node type, so it \
+         selects a single namespace",
     );
 }
