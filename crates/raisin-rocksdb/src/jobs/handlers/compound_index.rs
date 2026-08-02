@@ -162,7 +162,7 @@ impl CompoundIndexJobHandler {
                 let mut column_values = Vec::with_capacity(index_def.columns.len());
 
                 for column_def in &index_def.columns {
-                    match Self::extract_compound_column_value(
+                    match crate::repositories::NodeRepositoryImpl::extract_compound_column_value(
                         node,
                         &column_def.property,
                         &column_def.column_type,
@@ -292,80 +292,5 @@ impl CompoundIndexJobHandler {
         }
 
         Ok(nodes)
-    }
-
-    /// Extract a compound column value from a node based on the property name
-    ///
-    /// Handles both system properties (like __node_type, __created_at) and regular properties.
-    ///
-    /// # Arguments
-    /// * `node` - The node to extract from
-    /// * `property` - Property name (e.g., "category", "__node_type", "__created_at")
-    /// * `column_type` - Expected column type for proper encoding
-    ///
-    /// # Returns
-    /// Some(CompoundColumnValue) if the property exists, None otherwise
-    fn extract_compound_column_value(
-        node: &Node,
-        property: &str,
-        column_type: &raisin_models::nodes::properties::schema::CompoundColumnType,
-    ) -> Option<CompoundColumnValue> {
-        use raisin_models::nodes::properties::schema::CompoundColumnType;
-        use raisin_models::nodes::properties::PropertyValue;
-
-        match property {
-            // System property: node_type
-            "__node_type" => Some(CompoundColumnValue::String(node.node_type.clone())),
-
-            // System property: created_at
-            "__created_at" => node.created_at.map(|dt| {
-                let timestamp_micros = dt.timestamp_micros();
-                match column_type {
-                    CompoundColumnType::Timestamp => {
-                        CompoundColumnValue::TimestampDesc(timestamp_micros)
-                    }
-                    _ => CompoundColumnValue::TimestampAsc(timestamp_micros),
-                }
-            }),
-
-            // System property: updated_at
-            "__updated_at" => node.updated_at.map(|dt| {
-                let timestamp_micros = dt.timestamp_micros();
-                match column_type {
-                    CompoundColumnType::Timestamp => {
-                        CompoundColumnValue::TimestampDesc(timestamp_micros)
-                    }
-                    _ => CompoundColumnValue::TimestampAsc(timestamp_micros),
-                }
-            }),
-
-            // Regular property from properties map
-            prop_name => {
-                let prop_value = node.properties.get(prop_name)?;
-
-                // Convert PropertyValue to CompoundColumnValue based on column_type
-                match (column_type, prop_value) {
-                    (CompoundColumnType::String, PropertyValue::String(s)) => {
-                        Some(CompoundColumnValue::String(s.clone()))
-                    }
-                    (CompoundColumnType::Integer, PropertyValue::Integer(i)) => {
-                        Some(CompoundColumnValue::Integer(*i))
-                    }
-                    (CompoundColumnType::Boolean, PropertyValue::Boolean(b)) => {
-                        Some(CompoundColumnValue::Boolean(*b))
-                    }
-                    _ => {
-                        // Type mismatch or unsupported conversion
-                        tracing::warn!(
-                            "Type mismatch for compound index column '{}': expected {:?}, got {:?}",
-                            prop_name,
-                            column_type,
-                            prop_value
-                        );
-                        None
-                    }
-                }
-            }
-        }
     }
 }

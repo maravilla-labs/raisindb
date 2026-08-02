@@ -168,7 +168,14 @@ impl NodeRepositoryImpl {
     ///
     /// # Returns
     /// Some(CompoundColumnValue) if the property exists, None otherwise
-    fn extract_compound_column_value(
+    /// ONE implementation, shared with the rebuild job.
+    ///
+    /// The rebuild carried its own copy, which silently diverged the moment a
+    /// column was added here: a rebuild would then write entries WITHOUT that
+    /// column, leaving an index the planner matches and the data does not
+    /// support. Associated fn on the impl only for call-site convenience — it
+    /// reads nothing from `self`.
+    pub(crate) fn extract_compound_column_value(
         node: &Node,
         property: &str,
         column_type: &raisin_models::nodes::properties::schema::CompoundColumnType,
