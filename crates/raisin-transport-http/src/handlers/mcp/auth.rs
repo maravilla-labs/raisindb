@@ -223,21 +223,11 @@ mod tests {
         let (_dir, svc) = service();
 
         // Minted at /authorize from one spelling of the origin ...
-        let minted = mcp_resource_url(
-            "https://Solutas.RDB.Maravilla.Cloud:443/",
-            "studio",
-            "main",
-            "studio",
-        );
+        let minted = mcp_resource_url("https://RDB.Example.Test:443/", "studio", "main", "studio");
         let (token, _) = svc.mint_oauth_access_token(&grant(&minted)).unwrap();
 
         // ... verified at the MCP endpoint from another.
-        let expected = mcp_resource_url(
-            "https://solutas.rdb.maravilla.cloud",
-            "studio",
-            "main",
-            "studio",
-        );
+        let expected = mcp_resource_url("https://rdb.example.test", "studio", "main", "studio");
         let claims = svc
             .validate_resource_token(&token, &expected)
             .expect("canonicalization makes both spellings agree");

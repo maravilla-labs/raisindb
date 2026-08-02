@@ -334,14 +334,14 @@ mod tests {
     fn canonical_origin_normalizes_case_default_port_and_slash() {
         // Every spelling below is the same origin and must canonicalize alike.
         for spelling in [
-            "https://Solutas.RDB.Maravilla.Cloud",
-            "https://solutas.rdb.maravilla.cloud/",
-            "https://solutas.rdb.maravilla.cloud:443",
-            "HTTPS://solutas.rdb.maravilla.cloud:443/",
+            "https://RDB.Example.Test",
+            "https://rdb.example.test/",
+            "https://rdb.example.test:443",
+            "HTTPS://rdb.example.test:443/",
         ] {
             assert_eq!(
                 canonical_origin(spelling),
-                "https://solutas.rdb.maravilla.cloud",
+                "https://rdb.example.test",
                 "failed for {spelling}"
             );
         }

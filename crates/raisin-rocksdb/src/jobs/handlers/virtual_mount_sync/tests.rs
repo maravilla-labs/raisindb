@@ -608,12 +608,12 @@ fn public_origin_is_derived_from_the_oauth_redirect_uri() {
 
     // Only the ORIGIN is taken; the callback path is irrelevant to push.
     let cfg = super::config::IntegrationConfig::from_node(&node_with(
-        "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback",
+        "https://rdb.example.test/api/integrations/studio/oauth/callback",
     ))
     .unwrap();
     assert_eq!(
         cfg.public_origin.as_deref(),
-        Some("https://solutas.rdb.maravilla.cloud")
+        Some("https://rdb.example.test")
     );
 
     // A non-default port is preserved.
