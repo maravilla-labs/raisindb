@@ -31,7 +31,24 @@ use crate::transaction::RocksDBTransaction;
 /// Ok(()) on success, Error on validation or storage failure
 pub async fn upsert_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> Result<()> {
     // 1. Check if node exists at PATH (not by ID) - uses read-your-writes cache
-    let existing = super::read::get_node_by_path(tx, workspace, &node.path).await?;
+    //
+    // The probe is HEAD-bounded, but the CREATE it routes to validates path
+    // and id uniqueness UNBOUNDED (`validate_for_create`). A node whose latest
+    // revision sits ABOVE the branch HEAD ("stranded" — residue of the
+    // pre-v0.1.60 branch-HEAD regression) is invisible here yet still rejects
+    // that CREATE, leaving it PERMANENTLY unwritable. Resolve identity over
+    // the whole revision history so the write becomes an UPDATE of the same
+    // node; its fresh revision then advances HEAD past the stranded one, which
+    // is the self-heal. Adopting the existing id is also what keeps a second,
+    // duplicate node from appearing at the same path once HEAD catches up.
+    //
+    // NOTE: switching this probe's callee from `add_node` to `upsert_node`
+    // (as `builtin_package_init_handler` once did) does NOT fix this — the
+    // upsert probe was HEAD-bounded too.
+    let existing = match super::read::get_node_by_path(tx, workspace, &node.path).await? {
+        Some(found) => Some(found),
+        None => super::read::get_node_by_path_ignoring_head(tx, workspace, &node.path).await?,
+    };
 
     tracing::info!(
         "UPSERT_NODE: workspace={}, path={}, input_id={}, existing_id={}",

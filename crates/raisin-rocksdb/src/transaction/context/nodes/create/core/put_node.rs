@@ -31,8 +31,25 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
     // 3. Extract metadata (tenant, repo, branch)
     let (tenant_id, repo_id, branch) = metadata::extract_metadata(tx)?;
 
-    // 4. Check if this is a create or update operation
-    let existing_node = super::super::super::read::get_node(tx, workspace, &node.id).await?;
+    // 4. Check if this is a create or update operation.
+    //
+    // IMPORTANT: the create-vs-update decision must resolve identity over the
+    // branch's WHOLE revision history, not just its HEAD-visible prefix. The
+    // uniqueness check this routes into (`validate_for_create` ->
+    // `get_impl`) resolves the latest revision UNBOUNDED, so a node whose
+    // latest revision sits ABOVE the branch HEAD ("stranded", the residue of
+    // the pre-v0.1.60 branch-HEAD regression) is invisible to the bounded
+    // probe yet still rejects the CREATE it routes to. That node would be
+    // PERMANENTLY unwritable: the only write that would advance HEAD past it
+    // is the write that keeps failing.
+    //
+    // A node above HEAD is the SAME node, so the correct answer is UPDATE.
+    // Falling through to update supersedes it with a fresh revision, and the
+    // commit advances HEAD past it — that is the self-heal.
+    let existing_node = match super::super::super::read::get_node(tx, workspace, &node.id).await? {
+        Some(found) => Some(found),
+        None => super::super::super::read::get_node_ignoring_head(tx, workspace, &node.id).await?,
+    };
 
     tracing::info!(
         node_id = %normalized_node.id,

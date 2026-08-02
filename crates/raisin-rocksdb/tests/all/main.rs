@@ -58,6 +58,7 @@ mod spatial_compaction_test;
 mod spatial_index_test;
 mod spatial_policy_change_test;
 mod storage_5ktest;
+mod stranded_above_head_write_test;
 mod subtree_document_order_test;
 mod test_graph_algorithms;
 mod test_nodetype_operation_msgpack;

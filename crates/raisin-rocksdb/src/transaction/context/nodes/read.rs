@@ -170,6 +170,44 @@ pub async fn get_node(
     workspace: &str,
     node_id: &str,
 ) -> Result<Option<Node>> {
+    get_node_bounded(tx, workspace, node_id, true).await
+}
+
+/// Resolve a node by ID **ignoring the branch HEAD bound**.
+///
+/// Identical to [`get_node`] (same read-your-writes cache, same tombstone
+/// handling, same RLS check) except that it does not skip revisions newer
+/// than the branch HEAD.
+///
+/// # Why this exists
+///
+/// A node whose latest revision sits ABOVE the branch HEAD ("stranded") is
+/// invisible to every HEAD-bounded read, but it still *occupies* its id and
+/// path: the create-time uniqueness checks in
+/// `NodeRepositoryImpl::validate_for_create` resolve the latest revision
+/// unbounded and reject the write as a Conflict. A HEAD-bounded probe
+/// therefore routes such a write to CREATE, which then always fails — and
+/// the node can never self-heal, because the only write that would advance
+/// HEAD past it is the write that keeps failing.
+///
+/// Callers deciding CREATE-vs-UPDATE must resolve identity over the branch's
+/// whole revision history, not just its HEAD-visible prefix. **This is not a
+/// read API** — never use it to serve reads, or committed-but-not-yet-visible
+/// revisions leak into query results.
+pub async fn get_node_ignoring_head(
+    tx: &RocksDBTransaction,
+    workspace: &str,
+    node_id: &str,
+) -> Result<Option<Node>> {
+    get_node_bounded(tx, workspace, node_id, false).await
+}
+
+async fn get_node_bounded(
+    tx: &RocksDBTransaction,
+    workspace: &str,
+    node_id: &str,
+    bound_to_head: bool,
+) -> Result<Option<Node>> {
     // Check read cache first for read-your-writes semantics
     {
         let cache = tx
@@ -250,8 +288,10 @@ pub async fn get_node(
         let revision = keys::decode_descending_revision(rev_bytes)
             .map_err(|e| raisin_error::Error::storage(format!("Revision decode error: {}", e)))?;
 
-        // Only consider revisions at or before HEAD
-        if revision > head_revision {
+        // Only consider revisions at or before HEAD. `bound_to_head == false`
+        // is the deliberate identity-resolution path (see
+        // `get_node_ignoring_head`), which must see stranded revisions.
+        if bound_to_head && revision > head_revision {
             continue;
         }
 
@@ -352,6 +392,28 @@ pub async fn get_node_by_path(
     workspace: &str,
     path: &str,
 ) -> Result<Option<Node>> {
+    get_node_by_path_bounded(tx, workspace, path, true).await
+}
+
+/// Resolve a node by PATH **ignoring the branch HEAD bound**.
+///
+/// The by-path sibling of [`get_node_ignoring_head`] — see its doc comment for
+/// why identity resolution must be unbounded while reads must not be. **This is
+/// not a read API.**
+pub async fn get_node_by_path_ignoring_head(
+    tx: &RocksDBTransaction,
+    workspace: &str,
+    path: &str,
+) -> Result<Option<Node>> {
+    get_node_by_path_bounded(tx, workspace, path, false).await
+}
+
+async fn get_node_by_path_bounded(
+    tx: &RocksDBTransaction,
+    workspace: &str,
+    path: &str,
+    bound_to_head: bool,
+) -> Result<Option<Node>> {
     // Check read cache first for read-your-writes semantics
     let cached_node_id = {
         let cache = tx
@@ -365,7 +427,7 @@ pub async fn get_node_by_path(
     if let Some(node_id_opt) = cached_node_id {
         if let Some(node_id) = node_id_opt {
             // Path found, now get the node (which will also check cache)
-            return get_node(tx, workspace, &node_id).await;
+            return get_node_bounded(tx, workspace, &node_id, bound_to_head).await;
         } else {
             // Path was explicitly deleted in this transaction
             return Ok(None);
@@ -436,8 +498,9 @@ pub async fn get_node_by_path(
             }
         };
 
-        // Skip entries with revision > HEAD (not yet visible)
-        if revision > head_revision {
+        // Skip entries with revision > HEAD (not yet visible). Skipped for the
+        // identity-resolution path (see `get_node_by_path_ignoring_head`).
+        if bound_to_head && revision > head_revision {
             tracing::debug!(
                 "TX get_node_by_path: skipping entry with revision {} > head {}",
                 revision,
@@ -474,7 +537,7 @@ pub async fn get_node_by_path(
         );
 
         // Now get the actual node
-        return get_node(tx, workspace, &node_id).await;
+        return get_node_bounded(tx, workspace, &node_id, bound_to_head).await;
     }
 
     tracing::debug!("TX get_node_by_path: no node found for path={}", path);
