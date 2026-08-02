@@ -655,3 +655,80 @@ async fn forking_an_empty_embedding_set_yields_an_empty_one() -> Result<()> {
     assert!(env.embedded_ids(FORK).is_empty());
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// GRAPH_PROJECTION — correctly NOT copied
+// ---------------------------------------------------------------------------
+
+/// A fork keeps its projection CONFIGS and drops the derived projection.
+///
+/// The CF registry classified `GRAPH_PROJECTION` as a "KNOWN GAP: this is
+/// configuration, not a cache, so a fork loses its projection configs". Both
+/// halves of that were wrong, and this test is what pins the correction:
+///
+/// * A projection **config** is a `raisin:GraphAlgorithmConfig` NODE under
+///   `/raisin:access_control/graph-config/` (`graph/config/mod.rs`). Nodes fork,
+///   so configs already survive — nothing is lost.
+/// * The `GRAPH_PROJECTION` CF holds a `PersistedProjection`: a node list, an
+///   edge list, weights and a `stale` flag. That is derived adjacency, not
+///   configuration, and `recompute_for_branch` does a **full build** when the
+///   load misses — a miss is never an empty answer.
+///
+/// So skipping it is right, and copying it would only spend fork time (and the
+/// size of a whole edge list) on data the next recompute rebuilds anyway.
+#[tokio::test]
+async fn a_fork_inherits_graph_configs_but_not_the_derived_projection() -> Result<()> {
+    use raisin_rocksdb::cf;
+
+    let env = Env::new().await?;
+
+    // The config: an ordinary node, so it rides the NODES copy.
+    let mut config = member("pagerank-config", "eng", "cfg@example.test");
+    config.path = "/graph-config-pagerank".to_string();
+    env.create(MAIN, config).await?;
+
+    // The derived projection, written straight to the CF the way the background
+    // compute persists it.
+    let projection_key =
+        raisin_rocksdb::keys::graph_projection_key(TENANT, REPO, MAIN, "pagerank");
+    let handle = env
+        .storage
+        .db()
+        .cf_handle(cf::GRAPH_PROJECTION)
+        .expect("GRAPH_PROJECTION cf");
+    env.storage
+        .db()
+        .put_cf(&handle, &projection_key, b"{\"nodes\":[],\"edges\":[]}")
+        .expect("persist projection");
+
+    env.fork(MAIN, FORK).await?;
+
+    // The config forked, because it is a node.
+    let forked_config = env
+        .storage
+        .nodes()
+        .get_by_path(env.scope(FORK), "/graph-config-pagerank", None)
+        .await?;
+    assert!(
+        forked_config.is_some(),
+        "a projection config is a NODE and must fork — losing it would be the \
+         gap the registry described",
+    );
+
+    // The derived projection did not, and must not.
+    let forked_projection = env
+        .storage
+        .db()
+        .get_cf(
+            &handle,
+            raisin_rocksdb::keys::graph_projection_key(TENANT, REPO, FORK, "pagerank"),
+        )
+        .expect("read projection");
+    assert!(
+        forked_projection.is_none(),
+        "the derived projection must NOT be copied — a miss triggers a full \
+         rebuild, so copying only costs fork time for data that is regenerated",
+    );
+
+    Ok(())
+}

@@ -811,9 +811,23 @@ caller fed that back into `get_embedding` as a node id, so an HNSW rebuild repop
 index. Fixed by routing through `parse_key`, the parser `get_embedding` already shares. Unrelated
 to forking; the fork test is simply what exercised the listing path.
 
-**Also open, deliberately not fixed:** `GRAPH_PROJECTION` is *configuration*, not a derived cache,
-so a fork loses its projection configs. Its branch component sits at key part 3 while the copier
-rewrites part 2. Classified in the registry with this reason.
+**`GRAPH_PROJECTION`: NOT a gap — the earlier note was wrong on both counts.** It was recorded here
+as "*configuration*, not a derived cache, so a fork loses its projection configs". Investigated and
+disproved:
+
+* A projection **config** is a `raisin:GraphAlgorithmConfig` NODE under
+  `/raisin:access_control/graph-config/` (`graph/config/mod.rs` loads them from there). Nodes fork,
+  so configs already survive a fork. Nothing was being lost.
+* The CF itself stores a `PersistedProjection` — node list, edge list, optional weights, revision,
+  `stale` flag. That is derived adjacency. `BackgroundCompute::recompute_for_branch` does a **full
+  build** whenever the load misses or the revision does not match HEAD, so an absent projection is
+  never an empty answer, only a recompute.
+
+Skipping it is therefore correct on the merits, not a compromise forced by the part-3 key layout.
+Copying it would spend fork time and the size of a whole edge list on data the next recompute
+regenerates. Both halves are pinned by
+`branch_fork_index_copies_test::a_fork_inherits_graph_configs_but_not_the_derived_projection`,
+and the registry entry now records the real reason.
 
 **Judgement call recorded:** `EMBEDDINGS` was added to the copy set on correctness grounds. It is
 the one entry that materially increases fork cost on an embedding-heavy repo. Flipping it to
