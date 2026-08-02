@@ -811,3 +811,61 @@ rewrites part 2. Classified in the registry with this reason.
 **Judgement call recorded:** `EMBEDDINGS` was added to the copy set on correctness grounds. It is
 the one entry that materially increases fork cost on an embedding-heavy repo. Flipping it to
 `SkippedOnPurpose` is a one-line registry change if that trade is wrong.
+
+### 2.103 [P2] Connectors cannot authenticate as the application (no `client_credentials`)
+
+Every outbound integration authenticates as a **user**: `oauth_start` / `oauth_callback`
+implement the authorization-code grant only, and `connected_accounts` entries carry
+`auth_kind: "oauth" | "config"` with a refresh token driving the lifecycle. There is no
+`client_credentials` path anywhere in `handlers/integrations/`.
+
+**Why it matters:** a company-wide mount that no individual owns — a shared mailbox, an
+org SharePoint library — currently depends on some human's account holding the access and
+staying employed. Delegated access with the `.Shared` / `.All` scopes covers this when an
+admin has Full Access (shipped, see the ms-graph adapter), but it is a workaround: the
+mount dies with that account.
+
+**What it needs:**
+
+- A third `auth_kind` (`app`) on `connected_accounts`, holding an access token and **no**
+  refresh token.
+- A token path that mints from `client_id` + client secret against the tenant token
+  endpoint and **re-mints on expiry**. This is the real work — the engine's credential
+  lifecycle assumes refresh-token semantics throughout.
+- Application-permission scopes (Microsoft: the `.default` scope) plus, for Exchange, an
+  **ApplicationAccessPolicy**. Without that policy an app-only Microsoft connector can read
+  *every mailbox in the tenant*; the setup instructions must be loud about it, and arguably
+  the console should refuse to enable such a connector until one is declared.
+- `principal` becomes required rather than optional for ms-graph, since there is no `/me`.
+
+Deliberately deferred: delegated + `.Shared` ships first and is independently useful.
+
+### 2.104 [P3] Self-service mounting is admin-only, so end users cannot connect their own accounts
+
+Every route in `routes/integrations.rs` is behind `require_admin`, so connecting an account
+and creating a mount are both operator actions. There is no supported way for a *non-admin*
+user of a client application to connect their own mailbox or drive against a connector an
+operator has already registered — "the company Microsoft connector exists; let each user
+mount their own inbox under their own path".
+
+**The gap is authorization, not UI.** Any client application built on RaisinDB hits the same
+wall, so this belongs in the API surface rather than in one consumer of it.
+
+What it would need, recorded before anyone starts:
+
+- A non-admin endpoint to run OAuth against an **already-registered** connector and attach
+  the resulting `connected_accounts` entry, without exposing connector credentials
+  (`client_id`, the encrypted secret, or other users' tokens) to the caller. Gate it on a
+  distinct permission — an operator must be able to register a connector *without* opening
+  it to self-service.
+- Mount creation restricted to a workspace + path prefix the caller already has write access
+  to, plus an owner field on `raisin:VirtualMount` and RLS on mount listing and sync
+  triggering. Without all of these, self-service mounting becomes a way to materialize
+  someone else's mailbox into a shared workspace — a data-exfiltration path, not a feature
+  gap.
+- A per-user quota or mount cap: an unbounded self-service surface is also an unbounded
+  scheduler and storage cost.
+- The `browse` operation (§2.10 of the adapter contract) is what makes such a flow usable at
+  all; it is shipped, admin-gated today, and would need the same non-admin treatment.
+
+Revisit once `browse` has settled in the admin console.
