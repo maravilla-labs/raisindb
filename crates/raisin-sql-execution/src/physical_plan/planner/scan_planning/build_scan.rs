@@ -16,6 +16,13 @@ use std::sync::Arc;
 struct OrderKeyset {
     column: &'static str,
     cursor: OrderCursor,
+    /// The comparison this cursor came from, and therefore the only one it
+    /// enforces. A cursor is a START POSITION, not a range bound, so its
+    /// direction must match the scan's: `>` resumes a forward walk, `<` resumes
+    /// a backward one. Absorbing the wrong one would silently discard a genuine
+    /// range filter — `__order < x ORDER BY __order ASC` is an upper bound the
+    /// scan cannot enforce by seeking.
+    op: ComparisonOp,
 }
 
 impl OrderKeyset {
@@ -29,10 +36,11 @@ impl OrderKeyset {
             predicate,
             CanonicalPredicate::RangeCompare {
                 column,
-                op: ComparisonOp::Gt,
+                op,
                 value,
                 ..
-            } if column.eq_ignore_ascii_case(self.column)
+            } if *op == self.op
+                && column.eq_ignore_ascii_case(self.column)
                 && matches!(&value.expr, Expr::Literal(Literal::Text(text)) if text == expected)
         )
     }
@@ -239,26 +247,43 @@ impl PhysicalPlanner {
     /// inclusive (`>=`) or reverse (`<`) bound stays a row-level filter rather
     /// than being approximated — a keyset cursor that quietly shifted by one row
     /// would silently drop or duplicate a record.
+    /// Lift a keyset cursor for `column` out of the WHERE clause.
+    ///
+    /// `descending` is the direction the scan will actually walk, and it selects
+    /// which comparison counts as a cursor: a forward walk resumes from
+    /// `column > cursor`, a backward walk from `column < cursor`. The storage
+    /// layer has always understood both — `OrderedScanStart::After` compares
+    /// `candidate < label` when descending — so this is purely about the planner
+    /// recognising the backward form and seeking instead of filtering.
     fn extract_order_keyset(
         canonical: &[CanonicalPredicate],
         column: &'static str,
+        descending: bool,
     ) -> Option<OrderKeyset> {
+        let wanted = if descending {
+            ComparisonOp::Lt
+        } else {
+            ComparisonOp::Gt
+        };
         canonical.iter().find_map(|predicate| match predicate {
             CanonicalPredicate::RangeCompare {
                 column: predicate_column,
-                op: ComparisonOp::Gt,
+                op,
                 value,
                 ..
-            } if predicate_column.eq_ignore_ascii_case(column) => match &value.expr {
-                Expr::Literal(Literal::Text(text)) => Some(OrderKeyset {
-                    column,
-                    cursor: match column {
-                        "__tree_order" => OrderCursor::TreeOrder(text.clone()),
-                        _ => OrderCursor::Label(text.clone()),
-                    },
-                }),
-                _ => None,
-            },
+            } if *op == wanted && predicate_column.eq_ignore_ascii_case(column) => {
+                match &value.expr {
+                    Expr::Literal(Literal::Text(text)) => Some(OrderKeyset {
+                        column,
+                        cursor: match column {
+                            "__tree_order" => OrderCursor::TreeOrder(text.clone()),
+                            _ => OrderCursor::Label(text.clone()),
+                        },
+                        op: wanted,
+                    }),
+                    _ => None,
+                }
+            }
             _ => None,
         })
     }
@@ -275,9 +300,34 @@ impl PhysicalPlanner {
         projection: Option<Vec<String>>,
         context: &PlanContext,
     ) -> Result<PhysicalPlan, Error> {
+        // The scan emits editorial order. It can therefore claim the query's
+        // ORDER BY when that ORDER BY is `__order` (either direction), or when
+        // there is no ORDER BY at all — in which case editorial order is exactly
+        // the documented default for CHILD_OF.
+        //
+        // This is resolved BEFORE the cursor is lifted, because a keyset cursor
+        // is a start position rather than a range bound: which comparison counts
+        // as a cursor depends on which way the walk runs.
+        let (claims_editorial_order, order_descending) = match &context.order_by {
+            Some((column, ascending)) if column.eq_ignore_ascii_case("__order") => {
+                (true, !*ascending)
+            }
+            // No ORDER BY: editorial order is the documented default for
+            // CHILD_OF, so the scan's own order is what the caller expects.
+            None => (true, false),
+            Some(_) => (false, false),
+        };
+
         // A CHILD_OF scan walks the editorial-order index, so it can absorb an
-        // `__order` keyset cursor directly into the seek.
-        let order_cursor = Self::extract_order_keyset(canonical, "__order");
+        // `__order` keyset cursor directly into the seek — forward from
+        // `__order > cursor`, backward from `__order < cursor`. Only meaningful
+        // when the scan is actually emitting editorial order; under some other
+        // ORDER BY the bound is a plain filter.
+        let order_cursor = if claims_editorial_order {
+            Self::extract_order_keyset(canonical, "__order", order_descending)
+        } else {
+            None
+        };
 
         // Remove only the predicates this scan actually guarantees. A ChildOf
         // over a DIFFERENT parent must stay a row-level filter, and an `__order`
@@ -297,20 +347,6 @@ impl PhysicalPlanner {
             "/".to_string()
         } else {
             format!("{}/", parent_path.trim_end_matches('/'))
-        };
-
-        // The scan emits editorial order. It can therefore claim the query's
-        // ORDER BY when that ORDER BY is `__order` (either direction), or when
-        // there is no ORDER BY at all — in which case editorial order is exactly
-        // the documented default for CHILD_OF.
-        let (claims_editorial_order, order_descending) = match &context.order_by {
-            Some((column, ascending)) if column.eq_ignore_ascii_case("__order") => {
-                (true, !*ascending)
-            }
-            // No ORDER BY: editorial order is the documented default for
-            // CHILD_OF, so the scan's own order is what the caller expects.
-            None => (true, false),
-            Some(_) => (false, false),
         };
 
         // LIMIT may only ride into the scan when the scan's order is the
@@ -363,7 +399,9 @@ impl PhysicalPlanner {
     ) -> Result<PhysicalPlan, Error> {
         // A subtree scan walks in document order, so it can absorb an
         // `__tree_order` keyset cursor directly into the traversal resume.
-        let order_cursor = Self::extract_order_keyset(canonical, "__tree_order");
+        // Always forward: a subtree walk is forward-only (`order_descending` is
+        // hardcoded false below), so only `__tree_order > cursor` resumes it.
+        let order_cursor = Self::extract_order_keyset(canonical, "__tree_order", false);
 
         // Remove only the DescendantOf predicate this scan guarantees (matching
         // parent path AND depth; the depth bound is re-added as a filter below).

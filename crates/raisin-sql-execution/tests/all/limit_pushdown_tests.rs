@@ -498,3 +498,185 @@ async fn descendant_of_with_max_depth_is_still_correct() {
         "depth 1 must exclude the grandchildren; got {names:?}"
     );
 }
+
+/// Keyset pagination must stay bounded: the `__order > cursor` predicate is
+/// absorbed into the index seek and dropped from the residual filter, so the
+/// LIMIT still reaches the scan. If it were left as a residual filter the scan
+/// would go unbounded and every page would cost a full folder read.
+#[tokio::test]
+async fn keyset_pagination_keeps_the_limit_pushed_down() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 40).await;
+    let engine = engine(storage.clone());
+
+    // Page 1: no cursor.
+    let first = query_column(
+        &engine,
+        "SELECT name, __order FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order LIMIT 5",
+        "__order",
+    )
+    .await;
+    assert_eq!(first.len(), 5);
+    let cursor = first.last().unwrap().clone();
+
+    // Page 2: cursor form must still push the limit into the scan.
+    let plan = explain(
+        &engine,
+        &format!(
+            "EXPLAIN SELECT name, __order FROM 'menu' WHERE CHILD_OF('/menu') \
+             AND __order > '{cursor}' ORDER BY __order LIMIT 5"
+        ),
+    )
+    .await;
+    assert!(
+        plan.contains("limit=5"),
+        "keyset page must stay bounded; plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Filter"),
+        "the cursor predicate must be absorbed into the seek, not left as a \
+         residual Filter (a residual filter disables limit pushdown); plan:\n{plan}"
+    );
+
+    // And it must actually page correctly: no gaps, no repeats.
+    let names_p1 = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order LIMIT 5",
+        "name",
+    )
+    .await;
+    let names_p2 = query_column(
+        &engine,
+        &format!(
+            "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') AND __order > '{cursor}' \
+             ORDER BY __order LIMIT 5"
+        ),
+        "name",
+    )
+    .await;
+    let all = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order LIMIT 10",
+        "name",
+    )
+    .await;
+    let mut paged = names_p1.clone();
+    paged.extend(names_p2.clone());
+    assert_eq!(paged, all, "two keyset pages must equal one LIMIT 10");
+}
+
+/// DESCENDING keyset pagination — the newest-first inbox case.
+///
+/// The storage layer has always understood a backward cursor
+/// (`OrderedScanStart::After` compares `candidate < label` when descending), but
+/// the planner only ever lifted `__order > cursor`. A `__order < cursor` bound
+/// was therefore left as a residual filter, which disabled limit pushdown and
+/// made every newest-first page a full folder read.
+#[tokio::test]
+async fn descending_keyset_pagination_is_absorbed_and_bounded() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 40).await;
+    let engine = engine(storage.clone());
+
+    // Page 1, newest first.
+    let cursors = query_column(
+        &engine,
+        "SELECT name, __order FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order DESC LIMIT 5",
+        "__order",
+    )
+    .await;
+    assert_eq!(cursors.len(), 5);
+    let cursor = cursors.last().unwrap().clone();
+
+    let plan = explain(
+        &engine,
+        &format!(
+            "EXPLAIN SELECT name, __order FROM 'menu' WHERE CHILD_OF('/menu') \
+             AND __order < '{cursor}' ORDER BY __order DESC LIMIT 5"
+        ),
+    )
+    .await;
+    assert!(
+        plan.contains("limit=5"),
+        "descending keyset page must stay bounded; plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Filter"),
+        "the `<` cursor must be absorbed into the seek, not left as a residual \
+         Filter; plan:\n{plan}"
+    );
+
+    // Two descending pages must equal one descending LIMIT 10.
+    let p1 = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order DESC LIMIT 5",
+        "name",
+    )
+    .await;
+    let p2 = query_column(
+        &engine,
+        &format!(
+            "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') AND __order < '{cursor}' \
+             ORDER BY __order DESC LIMIT 5"
+        ),
+        "name",
+    )
+    .await;
+    let ten = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order DESC LIMIT 10",
+        "name",
+    )
+    .await;
+
+    let mut paged = p1.clone();
+    paged.extend(p2.clone());
+    assert_eq!(paged, ten, "two descending pages must equal one LIMIT 10");
+
+    // And descending really is the reverse of ascending.
+    let asc = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order LIMIT 40",
+        "name",
+    )
+    .await;
+    let mut reversed = asc.clone();
+    reversed.reverse();
+    assert_eq!(ten, reversed[..10].to_vec(), "DESC must mirror ASC");
+}
+
+/// A cursor whose direction does NOT match the walk is a genuine range filter,
+/// not a start position, and must NOT be swallowed by the seek.
+#[tokio::test]
+async fn mismatched_cursor_direction_is_kept_as_a_filter() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 20).await;
+    let engine = engine(storage.clone());
+
+    let orders = query_column(
+        &engine,
+        "SELECT name, __order FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order LIMIT 20",
+        "__order",
+    )
+    .await;
+    let midpoint = orders[10].clone();
+
+    // `__order < x` under an ASCENDING walk is an upper bound. Absorbing it as a
+    // cursor would return the rows at the END of the order instead of the start.
+    let names = query_column(
+        &engine,
+        &format!(
+            "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') AND __order < '{midpoint}' \
+             ORDER BY __order"
+        ),
+        "name",
+    )
+    .await;
+
+    assert_eq!(
+        names.len(),
+        10,
+        "an ascending walk with `__order < x` must return the FIRST ten rows, \
+         not resume from x; got {names:?}"
+    );
+}
