@@ -210,18 +210,23 @@ impl Dispatcher {
     }
 
     /// The SEP-1865 `_meta.ui` object for a widget RESOURCE (csp, permissions,
-    /// prefersBorder). When the binding declares no CSP, the server's own
-    /// origin is declared for connect/resource so same-instance images and API
-    /// calls work under the host's sandbox.
+    /// prefersBorder).
+    ///
+    /// The server's own origin is ALWAYS declared for connect/resource, whether
+    /// or not the binding declares a CSP of its own. A widget that cannot reach
+    /// the instance it was served from is broken by construction — it loads its
+    /// images and makes its API calls there — and the origin is not knowable at
+    /// authoring time, since the same package is installed on every deployment.
+    /// This used to be an either/or: declaring any `csp:` replaced the default
+    /// and silently dropped the server origin, so a binding that listed only
+    /// dev origins worked locally and could reach nothing once deployed.
     fn ui_resource_meta(&self, ui: &UiBinding) -> Value {
         let mut meta = serde_json::Map::new();
-        let csp_value = match &ui.csp {
-            Some(csp) if !csp.is_empty() => Some(serde_json::to_value(csp).unwrap_or(Value::Null)),
-            _ => self
-                .public_base
-                .as_ref()
-                .map(|base| json!({ "connectDomains": [base], "resourceDomains": [base] })),
+        let declared = match &ui.csp {
+            Some(csp) if !csp.is_empty() => serde_json::to_value(csp).unwrap_or(Value::Null),
+            _ => Value::Null,
         };
+        let csp_value = csp_with_own_origin(declared, self.public_base.as_deref());
         if let Some(csp) = csp_value {
             meta.insert("csp".into(), csp);
         }
@@ -313,7 +318,7 @@ impl Dispatcher {
             let mut entry = json!({
                 "uri": uri,
                 "name": ui.name.clone().unwrap_or_else(|| tool.name.clone()),
-                "mimeType": "text/html;profile=mcp-app",
+                "mimeType": ui_mime_type(ui.mode),
             });
             if let Some(description) = &ui.description {
                 entry["description"] = json!(description);
@@ -362,23 +367,17 @@ impl Dispatcher {
         uri: &str,
         rest: &str,
     ) -> Result<Value> {
-        let Some(assets) = self.assets.as_ref() else {
-            return Err(McpError::not_found("ui resources are not enabled"));
-        };
         let (rest, _fragment) = split_entry(rest);
         let (workspace, path) = rest
             .split_once('/')
             .ok_or_else(|| McpError::not_found(format!("malformed ui resource uri: {uri}")))?;
-        let asset = assets
-            .read_asset(identity, workspace, &format!("/{path}"))
-            .await?;
-        let html = String::from_utf8_lossy(&asset.bytes).into_owned();
-        let mut content = json!({
-            "uri": uri,
-            "mimeType": "text/html;profile=mcp-app",
-            "text": html,
-        });
-        // Attach the declaring binding's resource metadata, matched by URI.
+
+        // Resolve the declaring binding FIRST: it carries the mode, which
+        // decides what this resource even is. Serving every binding inline
+        // regardless of mode is what made `mode: uri-list` a silent no-op —
+        // a multi-file widget was handed to the host as `srcdoc`, where its
+        // relative `./assets/*.js` URLs resolve against a null origin and load
+        // nothing.
         let canonical = {
             let (bare, _fragment) = split_entry(uri);
             bare.to_string()
@@ -389,6 +388,50 @@ impl Dispatcher {
             .into_iter()
             .filter_map(|t| t.ui)
             .find(|ui| self.ui_uri_for(identity, ui) == canonical);
+        let mode = binding.as_ref().map_or(UiMode::Html, |ui| ui.mode);
+
+        let mut content = match mode {
+            UiMode::Html => {
+                let Some(assets) = self.assets.as_ref() else {
+                    return Err(McpError::not_found("ui resources are not enabled"));
+                };
+                let asset = assets
+                    .read_asset(identity, workspace, &format!("/{path}"))
+                    .await?;
+                let html = String::from_utf8_lossy(&asset.bytes).into_owned();
+                let html = inject_server_origin(html, self.public_base.as_deref());
+                json!({
+                    "uri": uri,
+                    "mimeType": ui_mime_type(UiMode::Html),
+                    "text": html,
+                })
+            }
+            // The host iframes this URL with a real `src=`, so the widget is
+            // same-origin with the server and its relative asset URLs resolve.
+            // An absolute URL is required: the host is not on our origin, so a
+            // relative path would resolve against the host's.
+            UiMode::UriList => {
+                let base = self.public_base.as_deref().ok_or_else(|| {
+                    McpError::not_found(
+                        "a uri-list widget needs the server's public base URL; set RAISINDB_BASE_URL"
+                            .to_string(),
+                    )
+                })?;
+                let url = format!(
+                    "{base}/resources/{}/{}/{workspace}/{path}",
+                    identity.repo, identity.branch
+                );
+                json!({
+                    "uri": uri,
+                    "mimeType": ui_mime_type(UiMode::UriList),
+                    "text": url,
+                })
+            }
+        };
+
+        // Binding metadata (csp/permissions/prefersBorder) rides on the content
+        // item — the spec-preferred location, which takes precedence over the
+        // listing's copy.
         if let Some(ui) = binding {
             let meta = self.ui_resource_meta(&ui);
             if meta.as_object().is_some_and(|m| !m.is_empty()) {
@@ -462,4 +505,246 @@ mod ui_tests {
             "ui://assets/widgets/x/index.html"
         );
     }
+
+    #[test]
+    fn each_mode_declares_its_own_mime_type() {
+        // Both modes must be served AND listed as what they are. `uri-list`
+        // used to be parsed and then ignored: every binding was served inline
+        // as html, so a multi-file widget reached the host as `srcdoc` and its
+        // relative asset URLs resolved against a null origin.
+        assert_eq!(ui_mime_type(UiMode::Html), "text/html;profile=mcp-app");
+        assert_eq!(ui_mime_type(UiMode::UriList), "text/uri-list");
+        assert_ne!(ui_mime_type(UiMode::Html), ui_mime_type(UiMode::UriList));
+    }
+
+    #[test]
+    fn server_origin_is_defined_before_the_first_script() {
+        let html = "<!doctype html><html><head><meta charset=\"utf-8\" />\
+                    <script type=\"module\">boot()</script></head><body></body></html>";
+        let out = inject_server_origin(
+            html.to_string(),
+            Some("https://solutas.rdb.maravilla.cloud"),
+        );
+
+        let global = out.find("__RAISIN_SERVER_ORIGIN__").unwrap();
+        let boot = out.find("boot()").unwrap();
+        assert!(global < boot, "widget code must not run before the global");
+        assert!(out
+            .contains(r#"window.__RAISIN_SERVER_ORIGIN__="https://solutas.rdb.maravilla.cloud";"#));
+    }
+
+    #[test]
+    fn server_origin_precedes_a_head_less_fragment() {
+        // Bundlers emit documents with no <head>; appending would define the
+        // global after the code that reads it.
+        let out = inject_server_origin(
+            "<script>boot()</script>".to_string(),
+            Some("https://x.test"),
+        );
+        assert!(out.find("__RAISIN_SERVER_ORIGIN__").unwrap() < out.find("boot()").unwrap());
+    }
+
+    #[test]
+    fn header_tag_is_not_mistaken_for_head() {
+        let out = inject_server_origin("<header>hi</header>".to_string(), Some("https://x.test"));
+        assert!(out.starts_with("<script>window.__RAISIN_SERVER_ORIGIN__"));
+    }
+
+    #[test]
+    fn origin_is_escaped_and_absent_base_changes_nothing() {
+        let out = inject_server_origin(
+            "<head></head>".to_string(),
+            Some("https://x.test/\"</script>"),
+        );
+        // The injected <script> must contain exactly one `</script>` — its own
+        // terminator. JSON quoting alone does NOT achieve this: the HTML parser
+        // finds `</script` before JS is tokenized, so an origin carrying one
+        // would close the element early and spill the rest as markup.
+        assert_eq!(out.matches("</script>").count(), 1);
+        assert!(out.contains("\\u003C/script\\u003E"), "must be \\u-escaped");
+
+        let html = "<head></head><script>boot()</script>";
+        assert_eq!(inject_server_origin(html.to_string(), None), html);
+    }
+
+    #[test]
+    fn own_origin_is_added_alongside_declared_domains() {
+        // The regression: a binding that declares any csp used to REPLACE the
+        // default, dropping the server's own origin. A package authored against
+        // localhost then shipped to a deployment whose widget could reach
+        // nothing — every image and API call blocked by the host's sandbox.
+        let declared = json!({
+            "connectDomains": ["http://localhost:5173"],
+            "resourceDomains": ["http://localhost:8080"],
+            "frameDomains": ["http://localhost:5173"],
+        });
+        let merged =
+            csp_with_own_origin(declared, Some("https://solutas.rdb.maravilla.cloud")).unwrap();
+
+        assert_eq!(
+            merged["connectDomains"],
+            json!([
+                "http://localhost:5173",
+                "https://solutas.rdb.maravilla.cloud"
+            ])
+        );
+        assert_eq!(
+            merged["resourceDomains"],
+            json!([
+                "http://localhost:8080",
+                "https://solutas.rdb.maravilla.cloud"
+            ])
+        );
+        // frameDomains is NOT widened: framing the server's own origin is not
+        // implied by serving the widget, and granting it would be a privilege
+        // the author never asked for.
+        assert_eq!(merged["frameDomains"], json!(["http://localhost:5173"]));
+    }
+
+    #[test]
+    fn own_origin_is_not_duplicated() {
+        let declared = json!({ "connectDomains": ["https://example.test"] });
+        let merged = csp_with_own_origin(declared, Some("https://example.test")).unwrap();
+        assert_eq!(merged["connectDomains"], json!(["https://example.test"]));
+    }
+
+    #[test]
+    fn undeclared_csp_still_gets_the_server_origin() {
+        let merged = csp_with_own_origin(Value::Null, Some("https://example.test")).unwrap();
+        assert_eq!(merged["connectDomains"], json!(["https://example.test"]));
+        assert_eq!(merged["resourceDomains"], json!(["https://example.test"]));
+    }
+
+    #[test]
+    fn no_base_and_no_declaration_says_nothing() {
+        assert!(csp_with_own_origin(Value::Null, None).is_none());
+        // ...but a declaration alone is still passed through verbatim.
+        let declared = json!({ "connectDomains": ["https://example.test"] });
+        assert_eq!(
+            csp_with_own_origin(declared.clone(), None).unwrap(),
+            declared
+        );
+    }
+}
+
+/// The resource mime type a widget of `mode` is served as.
+///
+/// `html` is the MCP Apps profile the host renders via `srcdoc`; `uri-list` is
+/// a URL the host iframes with a real `src=`. Both must be declared
+/// consistently in `resources/list` and `resources/read` — a host that
+/// prefetched one type and received the other has to discard it.
+///
+/// Note `text/uri-list` corresponds to the spec's `externalUrl` content type,
+/// which SEP-1865 explicitly DEFERS from the MVP ("Content Types (deferred from
+/// MVP): `externalUrl`"). Hosts are therefore not obliged to render it; prefer
+/// `mode: html` unless the widget genuinely needs multi-file serving.
+fn ui_mime_type(mode: UiMode) -> &'static str {
+    match mode {
+        UiMode::Html => "text/html;profile=mcp-app",
+        UiMode::UriList => "text/uri-list",
+    }
+}
+
+/// Inline `window.__RAISIN_SERVER_ORIGIN__` into a widget document.
+///
+/// A widget is authored once and installed on every deployment, so it cannot
+/// know at build time which instance will serve it. Hardcoding one is the trap:
+/// the Studio widget shipped with `http://localhost:8080` baked in, worked for
+/// its author, and on every real deployment probed an origin that was not the
+/// server — reporting itself unreachable while the MCP session underneath was
+/// perfectly healthy. The server DOES know its origin (it derives one for the
+/// CSP already), so it states it here rather than leaving each widget to guess.
+///
+/// The global is defined before any other script in the document, so a widget
+/// may read it synchronously at module scope. It is `const`-free and idempotent
+/// on re-read since the document is re-served per read.
+///
+/// Returns `html` untouched when no public base is known — a widget that has
+/// its own fallback keeps working exactly as before.
+fn inject_server_origin(html: String, base: Option<&str>) -> String {
+    let Some(base) = base else {
+        return html;
+    };
+    // JSON-encode for the JS string, THEN escape the HTML-significant
+    // characters as `\uXXXX`. JSON alone is not enough: the HTML parser looks
+    // for the literal `</script` before JavaScript is ever tokenized, so a
+    // `</script>` inside a correctly-quoted JS string still closes the element
+    // and everything after it becomes markup. `base` can come from the request's
+    // Host header when the deployment trusts forwarded headers, so treat it as
+    // untrusted. `<` is the same string value to JS, and inert to HTML.
+    let literal = serde_json::to_string(base)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('<', "\\u003C")
+        .replace('>', "\\u003E")
+        .replace('&', "\\u0026");
+    let snippet = format!("<script>window.__RAISIN_SERVER_ORIGIN__={literal};</script>");
+
+    // Insert immediately after <head...>, else before the first <script>, else
+    // prepend. The middle case matters for widgets built without a <head>
+    // (bundlers emit bare fragments), where appending would land the global
+    // AFTER the code that reads it.
+    if let Some(pos) = find_tag_end(&html, "<head") {
+        let mut out = String::with_capacity(html.len() + snippet.len());
+        out.push_str(&html[..pos]);
+        out.push_str(&snippet);
+        out.push_str(&html[pos..]);
+        return out;
+    }
+    match html.to_ascii_lowercase().find("<script") {
+        Some(pos) => {
+            let mut out = String::with_capacity(html.len() + snippet.len());
+            out.push_str(&html[..pos]);
+            out.push_str(&snippet);
+            out.push_str(&html[pos..]);
+            out
+        }
+        None => format!("{snippet}{html}"),
+    }
+}
+
+/// Byte offset just past the closing `>` of the first `tag` (e.g. `<head`),
+/// tolerating attributes. `None` when the tag is absent or unterminated.
+fn find_tag_end(html: &str, tag: &str) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find(tag)?;
+    // Reject `<header>` and friends: the char after the tag name must end the
+    // name, not continue it.
+    let after_name = html.as_bytes().get(start + tag.len())?;
+    if after_name.is_ascii_alphanumeric() || *after_name == b'-' {
+        return None;
+    }
+    let close = html[start..].find('>')? + start;
+    Some(close + 1)
+}
+
+/// Merge the server's own origin into a widget CSP's connect/resource lists,
+/// preserving whatever the binding declared and never duplicating.
+///
+/// `declared` is the serialized [`UiCsp`], or `Value::Null` when the binding
+/// declared none. Returns `None` only when there is nothing to say at all — no
+/// declared CSP and no known public base.
+fn csp_with_own_origin(declared: Value, base: Option<&str>) -> Option<Value> {
+    let Some(base) = base else {
+        return match declared {
+            Value::Null => None,
+            other => Some(other),
+        };
+    };
+
+    let mut csp = match declared {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    for key in ["connectDomains", "resourceDomains"] {
+        let list = csp
+            .entry(key.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let Some(domains) = list.as_array_mut() else {
+            continue;
+        };
+        if !domains.iter().any(|d| d.as_str() == Some(base)) {
+            domains.push(json!(base));
+        }
+    }
+    Some(Value::Object(csp))
 }

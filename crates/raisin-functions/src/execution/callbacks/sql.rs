@@ -86,7 +86,7 @@ where
             engine = engine.with_auth(auth);
 
             // 3. Substitute parameters into SQL
-            let final_sql = substitute_params(&sql, &params);
+            let final_sql = substitute_params(&sql, &params)?;
 
             tracing::debug!(final_sql = %final_sql, "Executing substituted SQL");
 
@@ -167,7 +167,7 @@ where
             engine = engine.with_auth(auth);
 
             // 3. Substitute parameters into SQL
-            let final_sql = substitute_params(&sql, &params);
+            let final_sql = substitute_params(&sql, &params)?;
 
             tracing::debug!(final_sql = %final_sql, "Executing substituted SQL");
 
@@ -219,29 +219,7 @@ where
 ///
 /// This is a simple string-based substitution. For production use,
 /// consider proper prepared statement support.
-fn substitute_params(sql: &str, params: &[Value]) -> String {
-    let mut result = sql.to_string();
-    for (i, param) in params.iter().enumerate() {
-        let placeholder = format!("${}", i + 1);
-        let value_str = match param {
-            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "NULL".to_string(),
-            Value::Array(arr) => {
-                // Convert array to SQL array literal
-                let items: Vec<String> = arr.iter().map(json_value_to_sql).collect();
-                format!("ARRAY[{}]", items.join(", "))
-            }
-            Value::Object(_) => {
-                // Convert object to JSON string
-                format!("'{}'", param.to_string().replace('\'', "''"))
-            }
-        };
-        result = result.replace(&placeholder, &value_str);
-    }
-    result
-}
+use crate::execution::callbacks::sql_params::substitute_params;
 
 /// Convert a JSON value to SQL literal string
 fn json_value_to_sql(val: &Value) -> String {

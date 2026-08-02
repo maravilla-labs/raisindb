@@ -30,6 +30,7 @@ pub mod resources;
 pub mod scheduler;
 pub mod sql;
 pub mod sql_generator;
+pub(crate) mod sql_params;
 pub mod tasks;
 pub mod transaction;
 

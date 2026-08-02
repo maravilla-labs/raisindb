@@ -65,7 +65,7 @@ pub use logical_plan::{LogicalPlan, PlanBuilder, PlanError};
 pub use optimizer::{Optimizer, OptimizerConfig};
 
 // Re-export parameter substitution
-pub use params::substitute_params;
+pub use params::{substitute_params, substitute_params_with};
 
 /// Complete query plan with analyzed statement, logical plan, and optimized plan
 #[derive(Debug, Clone)]

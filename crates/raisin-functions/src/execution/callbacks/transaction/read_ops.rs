@@ -43,7 +43,7 @@ where
             })?;
 
             let stmt = sql_generator::generate_select_by_id(&workspace, &id);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params);
+            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
             let mut stream = engine_guard.execute(&final_sql).await?;
@@ -77,7 +77,7 @@ where
             })?;
 
             let stmt = sql_generator::generate_select_by_path(&workspace, &path);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params);
+            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
             let mut stream = engine_guard.execute(&final_sql).await?;
@@ -112,7 +112,7 @@ where
                 })?;
 
                 let stmt = sql_generator::generate_select_children(&workspace, &parent_path, None);
-                let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
                 let engine_guard = engine.lock().await;
                 let mut stream = engine_guard.execute(&final_sql).await?;

@@ -50,7 +50,7 @@ where
 
                 // Get existing node
                 let get_stmt = sql_generator::generate_select_by_path(&workspace, &path);
-                let get_sql = substitute_params(&get_stmt.sql, &get_stmt.params);
+                let get_sql = substitute_params(&get_stmt.sql, &get_stmt.params)?;
                 let mut stream = engine_guard.execute(&get_sql).await?;
 
                 let existing_node = if let Some(result) = stream.next().await {
@@ -87,7 +87,7 @@ where
                 // Execute UPDATE
                 let stmt =
                     sql_generator::generate_update_properties(&workspace, &path, &node.properties);
-                let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
                 let mut update_stream = engine_guard.execute(&final_sql).await?;
                 while update_stream.next().await.is_some() {}
 
@@ -126,7 +126,7 @@ where
                     &property_path,
                     &prop_value,
                 );
-                let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
                 let engine_guard = engine.lock().await;
                 let mut stream = engine_guard.execute(&final_sql).await?;

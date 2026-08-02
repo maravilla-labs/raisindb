@@ -127,7 +127,7 @@ where
     /// The engine will automatically commit the transaction after execution.
     pub async fn execute_query(&self, stmt: &SqlStatement) -> Result<Vec<Value>, Error> {
         let engine = self.create_engine().await?;
-        let final_sql = substitute_params(&stmt.sql, &stmt.params);
+        let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
         tracing::debug!(sql = %final_sql, "Executing SQL query via QueryContext");
 
@@ -157,7 +157,7 @@ where
     /// Suitable for INSERT, UPDATE, DELETE operations.
     pub async fn execute_statement(&self, stmt: &SqlStatement) -> Result<i64, Error> {
         let engine = self.create_engine().await?;
-        let final_sql = substitute_params(&stmt.sql, &stmt.params);
+        let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
         tracing::debug!(sql = %final_sql, "Executing SQL statement via QueryContext");
 
@@ -208,44 +208,7 @@ where
     }
 }
 
-/// Substitute $1, $2, etc. with actual parameter values.
-///
-/// This is a simple string-based substitution. The parameters are properly
-/// escaped to prevent SQL injection.
-fn substitute_params(sql: &str, params: &[Value]) -> String {
-    let mut result = sql.to_string();
-    for (i, param) in params.iter().enumerate() {
-        let placeholder = format!("${}", i + 1);
-        let value_str = match param {
-            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "NULL".to_string(),
-            Value::Array(arr) => {
-                // Convert array to SQL array literal
-                let items: Vec<String> = arr.iter().map(json_value_to_sql).collect();
-                format!("ARRAY[{}]", items.join(", "))
-            }
-            Value::Object(_) => {
-                // Convert object to JSON string
-                format!("'{}'", param.to_string().replace('\'', "''"))
-            }
-        };
-        result = result.replace(&placeholder, &value_str);
-    }
-    result
-}
-
-/// Convert a JSON value to SQL literal string
-fn json_value_to_sql(val: &Value) -> String {
-    match val {
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "NULL".to_string(),
-        _ => format!("'{}'", val.to_string().replace('\'', "''")),
-    }
-}
+use crate::execution::callbacks::sql_params::substitute_params;
 
 /// Convert PropertyValue to JSON Value
 fn property_value_to_json(pv: PropertyValue) -> Value {
@@ -279,48 +242,4 @@ fn property_value_to_json(pv: PropertyValue) -> Value {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_substitute_params_string() {
-        let sql = "SELECT * FROM content WHERE path = $1";
-        let params = vec![Value::String("/articles/post1".to_string())];
-        let result = substitute_params(sql, &params);
-        assert_eq!(
-            result,
-            "SELECT * FROM content WHERE path = '/articles/post1'"
-        );
-    }
-
-    #[test]
-    fn test_substitute_params_number() {
-        let sql = "SELECT * FROM content LIMIT $1";
-        let params = vec![Value::Number(10.into())];
-        let result = substitute_params(sql, &params);
-        assert_eq!(result, "SELECT * FROM content LIMIT 10");
-    }
-
-    #[test]
-    fn test_substitute_params_multiple() {
-        let sql = "SELECT * FROM content WHERE path = $1 AND id = $2";
-        let params = vec![
-            Value::String("/test".to_string()),
-            Value::String("abc123".to_string()),
-        ];
-        let result = substitute_params(sql, &params);
-        assert_eq!(
-            result,
-            "SELECT * FROM content WHERE path = '/test' AND id = 'abc123'"
-        );
-    }
-
-    #[test]
-    fn test_substitute_params_escapes_quotes() {
-        let sql = "INSERT INTO content (path) VALUES ($1)";
-        let params = vec![Value::String("It's a test".to_string())];
-        let result = substitute_params(sql, &params);
-        assert_eq!(result, "INSERT INTO content (path) VALUES ('It''s a test')");
-    }
-}
+// Substitution tests live with the substitution, in `super::sql_params`.

@@ -43,7 +43,7 @@ where
             })?;
 
             let stmt = sql_generator::generate_delete_cascade(&workspace, &path);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params);
+            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
             let mut stream = engine_guard.execute(&final_sql).await?;
@@ -119,7 +119,7 @@ where
                 );
 
                 let stmt = sql_generator::generate_move(&workspace, &node_path, &new_path);
-                let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
                 let engine_guard = engine.lock().await;
                 let mut stream = engine_guard.execute(&final_sql).await?;
@@ -127,7 +127,7 @@ where
 
                 // Fetch and return the moved node
                 let get_stmt = sql_generator::generate_select_by_path(&workspace, &new_path);
-                let get_sql = substitute_params(&get_stmt.sql, &get_stmt.params);
+                let get_sql = substitute_params(&get_stmt.sql, &get_stmt.params)?;
                 let mut get_stream = engine_guard.execute(&get_sql).await?;
 
                 let result = if let Some(row_result) = get_stream.next().await {
