@@ -1,6 +1,6 @@
 ---
 title: Tracking moving objects
-description: How to configure a high-frequency position property — what it costs per update, what degrades over time, and what is not yet fixed.
+description: How to configure a high-frequency position property — what it costs per update, and how the spatial compaction filter keeps a hot cell constant instead of growing with update count.
 ---
 
 # Tracking moving objects
@@ -49,44 +49,70 @@ If wide-radius fleet queries matter, add a coarse precision (`(8, 6, 4)`,
 `cover = centroid` (the default) is right for a tracked point; `extent` would
 multiply cells per precision for no benefit on a point.
 
-## What degrades over time — read this before deploying
+## Why a tracking workload used to degrade, and what bounds it now
 
-**Superseded index entries are never removed.** The revision is part of the index
-key, so an update writes a *new* key rather than overwriting an old one, and
-RocksDB compaction has nothing to collapse. A radius query prefix-iterates each
-scanned cell and visits **every** key in it, including every superseded revision
-and every tombstone.
+The revision is part of the index key, so an update writes a *new* key rather
+than overwriting the old one. A radius query prefix-iterates each scanned cell
+and visits **every** key in it, so superseded revisions are read cost.
 
 The distribution is counter-intuitive:
 
 * At a **coarse** precision a vehicle circulating one airport stays inside the
   **same cell** across every update, so that one prefix accumulates roughly two
-  entries per position update, indefinitely.
+  entries per position update.
 * At a **fine** precision the vehicle moves between cells and the entries spread
   thin.
 
-**Coarse cells are where read cost concentrates.** One vehicle at 1 update/second
-for 24 h is ~86,400 updates and on the order of 1.7 × 10⁵ entries in its
-precision-6 prefix; 200 vehicles share ~3 × 10⁷. A query that is single-digit
-milliseconds on day one is seconds by day two.
+**Coarse cells are where read cost concentrates.** Left unbounded, one vehicle at
+1 update/second for 24 h is ~86,400 updates and on the order of 1.7 × 10⁵ entries
+in its precision-6 prefix — a query that was single-digit milliseconds on day one
+became seconds by day two.
 
-A per-cell scan budget bounds the damage: past 250,000 entries in one cell the
-scan refuses to answer from a partial read and errors, with a log line naming the
-cell and the property. That is a guardrail, not a fix.
+### The compaction filter bounds it
 
-Fewer precisions reduce the **rate** of accumulation. Nothing today **bounds**
-it.
+A stateful RocksDB compaction filter on the spatial column family drops
+superseded entries: the descending revision sits immediately after the geohash
+in the key, so the filter can identify them. It is **on by default**.
 
-### The real fix, and its status
+Measured over 500 position updates of one vehicle:
 
-A RocksDB compaction filter on the spatial column family can drop superseded
-entries (the descending revision sits immediately after the geohash in the key,
-so the filter can tell). That is the mechanism that makes this workload
-sustainable, it is self-contained work, and it is **not implemented** — see
-`docs/OPEN-ITEMS.md`.
+| | before | after |
+|---|---|---|
+| precision-6 cell prefix | 501 entries | **1** |
+| whole spatial CF | 4,122 entries | **8** |
+| 1 km radius query | 1.50 ms | **0.21 ms** |
 
-A rebuild does **not** prune: it writes *more* tombstones. Do not schedule
-periodic rebuilds as a mitigation.
+Those figures are with maximum reclamation (`keep_revisions = 1`). The shipped
+default is `keep_revisions = 8`, `retention_secs = 3600`, which lands at 8 entries
+in the same test — a hot cell becomes a **constant** rather than a function of
+update count.
+
+The **newest entry per node per cell is never droppable**, so a read at HEAD is
+bit-identical with the filter on or off. Tombstones are dropped only during a
+full compaction, once aged out of the retention window: partial visibility means
+the filter can only ever keep too much, never drop a live entry, so pruning is
+incremental and converges as levels merge.
+
+Configure it via `RocksDBConfig::spatial_compaction`; environment overrides let
+an operator widen retention or disable it on a running deployment.
+
+:::note Historical reads
+Because pruning discards old revisions, a spatial read behind the retention
+window would be approximate. The planner handles this rather than letting it be
+silently wrong: a `__revision`-scoped spatial predicate is routed to a full scan
+instead of the index, and `EXPLAIN` names the pruning as the reason. HEAD queries
+still take the index.
+:::
+
+A rebuild does **not** prune — it writes *more* tombstones. Do not schedule
+periodic rebuilds as a mitigation; the filter is the mechanism.
+
+### The per-cell scan budget
+
+Past 250,000 entries in a single cell (`DEFAULT_SPATIAL_MAX_ENTRIES_PER_CELL`)
+the index scan will not answer from a partial read. It raises a typed signal and
+the executor **degrades to the fallback row scan** — slow and exact — rather than
+failing the query. Fewer precisions still reduce the rate of accumulation.
 
 ## Modelling pattern
 
@@ -105,7 +131,8 @@ INSERT INTO 'fleet' (id, path, node_type, properties)
 VALUES ($1, $2, 'fleet:Ping', $3::JSONB);   -- geometry property: track_point
 ```
 
-Stated honestly: on its own this does **not** bound the current-position cell
-prefix. What it buys is that the unbounded thing — history — lives in a property
-namespace that proximity queries over `position` never scan, so the two workloads
-stop competing.
+Splitting them this way is still worth it with the compaction filter on. The
+filter bounds `position`, whose old revisions are genuinely superseded; an
+append-only history is *not* superseded data and should not be pruned. Keeping it
+under a different property name means proximity queries over `position` never
+scan it, so the two workloads stop competing.

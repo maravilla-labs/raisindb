@@ -72,6 +72,8 @@ mod tests;
 #[cfg(test)]
 mod tests_cost;
 #[cfg(test)]
+mod tests_docs_examples;
+#[cfg(test)]
 mod tests_paths;
 #[cfg(test)]
 mod tests_quantifiers;
