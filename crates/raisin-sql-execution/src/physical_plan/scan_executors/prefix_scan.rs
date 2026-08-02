@@ -390,93 +390,126 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
 
             if let Some(parent) = parent_node {
                 let parent_id = parent.id.clone();
-                // Paged, document-order walk: each node carries its
-                // `__tree_order`, and a `__tree_order > cursor` predicate
-                // resumes the walk without re-traversing what came before.
-                let nodes = storage
-                    .nodes()
-                    .scan_descendants_ordered_page(
-                        StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                        &parent.id,
-                        order_cursor.as_ref().and_then(|c| c.tree_order()),
-                        // The traversal root is emitted but filtered out below,
-                        // so leave room for it when bounding the walk.
-                        scan_limit.map(|lim| lim.saturating_add(1)),
-                        if let Some(rev) = max_revision.as_ref() {
-                            raisin_storage::ListOptions::at_revision(*rev)
-                        } else {
-                            raisin_storage::ListOptions::for_sql()
-                        },
-                    )
-                    .await?;
 
-                tracing::info!("   PrefixScan found {} nodes in tree order", nodes.len());
-
+                // Paged refill, as on the direct-children path: the walk is now
+                // bounded by the query's exact limit, but RLS and the skipped
+                // traversal root can drop rows above it, so a single page could
+                // come up short. Resume from the last `__tree_order` seen —
+                // `seed_resumed_traversal` descends the spine in O(depth), it
+                // does not re-walk what came before.
+                let page_size = scan_limit.map(|lim| lim.saturating_add(1));
+                let mut page_cursor: Option<String> = order_cursor
+                    .as_ref()
+                    .and_then(|c| c.tree_order())
+                    .map(|cursor| cursor.to_string());
                 let mut emitted = 0usize;
 
-                for (node, tree_order) in nodes {
-                    // The traversal yields its ROOT too, but the root's path
-                    // does not start with '{parent_path}/', so it is NOT part
-                    // of the prefix match (`path LIKE '/parent/%'` must not
-                    // return '/parent' itself).
-                    if node.id == parent_id {
-                        continue;
+                'subtree: loop {
+                    let nodes = storage
+                        .nodes()
+                        .scan_descendants_ordered_page(
+                            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                            &parent.id,
+                            page_cursor.as_deref(),
+                            // The traversal root is emitted but filtered out below,
+                            // so leave room for it when bounding the walk.
+                            page_size,
+                            if let Some(rev) = max_revision.as_ref() {
+                                raisin_storage::ListOptions::at_revision(*rev)
+                            } else {
+                                raisin_storage::ListOptions::for_sql()
+                            },
+                        )
+                        .await?;
+
+                    let fetched = nodes.len();
+                    tracing::info!("   PrefixScan found {} nodes in tree order", fetched);
+
+                    if fetched == 0 {
+                        break 'subtree;
                     }
-                    if let Some(lim) = limit {
-                        if emitted >= lim {
-                            tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                            break;
+
+                    for (node, tree_order) in nodes {
+                        // Advance the cursor for every node examined, including the
+                        // ones skipped below, or a page that yields nothing would be
+                        // requested forever.
+                        page_cursor = Some(tree_order.clone());
+                        // The traversal yields its ROOT too, but the root's path
+                        // does not start with '{parent_path}/', so it is NOT part
+                        // of the prefix match (`path LIKE '/parent/%'` must not
+                        // return '/parent' itself).
+                        if node.id == parent_id {
+                            continue;
                         }
-                    }
-
-                    safety_scanned += 1;
-
-                    if safety_scanned > SCAN_COUNT_CEILING {
-                        tracing::warn!("PrefixScan count limit reached: {} nodes checked", safety_scanned);
-                        break;
-                    }
-
-                    if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
-                        tracing::warn!("PrefixScan time limit reached: {:?} elapsed, {} nodes checked",
-                                       start_time.elapsed(), safety_scanned);
-                        break;
-                    }
-
-                    if node.path == "/" {
-                        continue;
-                    }
-
-                    let node = if let Some(ref auth) = ctx_clone.auth_context {
-                        let scope = PermissionScope::new(&workspace, &branch);
-                        match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision.as_ref()).await {
-                            Some(n) => n,
-                            None => continue,
-                        }
-                    } else {
-                        node
-                    };
-
-                    let order_ctx = OrderContext {
-                        order_label: None,
-                        tree_order: Some(&tree_order),
-                    };
-
-                    for locale in &locales_to_use {
-                        let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
-                            Some(n) => n,
-                            None => continue,
-                        };
-
-                        let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
-                        yield row;
-                        emitted += 1;
                         if let Some(lim) = limit {
                             if emitted >= lim {
                                 tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                                break;
+                                break 'subtree;
+                            }
+                        }
+
+                        safety_scanned += 1;
+
+                        if safety_scanned > SCAN_COUNT_CEILING {
+                            tracing::warn!("PrefixScan count limit reached: {} nodes checked", safety_scanned);
+                            break 'subtree;
+                        }
+
+                        if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
+                            tracing::warn!("PrefixScan time limit reached: {:?} elapsed, {} nodes checked",
+                                           start_time.elapsed(), safety_scanned);
+                            break 'subtree;
+                        }
+
+                        if node.path == "/" {
+                            continue;
+                        }
+
+                        let node = if let Some(ref auth) = ctx_clone.auth_context {
+                            let scope = PermissionScope::new(&workspace, &branch);
+                            match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision.as_ref()).await {
+                                Some(n) => n,
+                                None => continue,
+                            }
+                        } else {
+                            node
+                        };
+
+                        let order_ctx = OrderContext {
+                            order_label: None,
+                            tree_order: Some(&tree_order),
+                        };
+
+                        for locale in &locales_to_use {
+                            let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                                Some(n) => n,
+                                None => continue,
+                            };
+
+                            let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
+                            yield row;
+                            emitted += 1;
+                            if let Some(lim) = limit {
+                                if emitted >= lim {
+                                    tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
+                                    break;
+                                }
                             }
                         }
                     }
+
+                    // Resume the walk only when the query is bounded, we are still
+                    // short of that bound, and the page came back full. A short page
+                    // means the subtree is exhausted.
+                    match (limit, page_size) {
+                        (Some(lim), Some(size)) if emitted < lim && fetched >= size => {
+                            tracing::debug!(
+                                "PrefixScan subtree refill: {} of {} rows survived filtering, resuming walk",
+                                emitted, lim
+                            );
+                        }
+                        _ => break 'subtree,
+                }
                 }
             } else {
                 tracing::warn!("   Parent node not found at path '{}', returning 0 rows", parent_path);

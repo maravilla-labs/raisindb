@@ -331,3 +331,170 @@ async fn limit_offset_pages_cover_every_child_exactly_once() {
         unique.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// DESCENDANT_OF
+//
+// A subtree walk costs ~2 RocksDB seeks per node, so an unbounded walk under a
+// LIMIT is far more expensive than the equivalent CHILD_OF. `DESCENDANT_OF`
+// nevertheless refused to claim its own order unless the query said
+// `ORDER BY __tree_order ASC` explicitly, while `CHILD_OF` accepted the
+// no-ORDER-BY case — so `DESCENDANT_OF('/x') LIMIT 10` walked everything.
+// ---------------------------------------------------------------------------
+
+/// Two levels under `/tree`: parents in editorial (creation) order, each with
+/// one child. Names DESCEND as editorial position ascends, so document order and
+/// alphabetical order disagree everywhere.
+///
+/// Document order (pre-order DFS) is:
+///   item-{n-1}, sub-{n-1}, item-{n-2}, sub-{n-2}, ...
+/// Alphabetical is:
+///   item-00 .. item-{n-1}, sub-00 .. sub-{n-1}   ('i' < 's')
+async fn seed_tree(storage: &Arc<raisin_rocksdb::RocksDBStorage>, n: usize) {
+    create_node(storage, node("tree", "/tree", "/")).await;
+    for i in 0..n {
+        let label = format!("{:02}", n - 1 - i);
+        let parent_id = format!("p{i:02}");
+        create_node(
+            storage,
+            node(&parent_id, &format!("/tree/item-{label}"), "tree"),
+        )
+        .await;
+        create_node(
+            storage,
+            node(
+                &format!("c{i:02}"),
+                &format!("/tree/item-{label}/sub-{label}"),
+                &parent_id,
+            ),
+        )
+        .await;
+    }
+}
+
+/// The regression: a bare `DESCENDANT_OF(..) LIMIT 10` must bound the walk.
+#[tokio::test]
+async fn descendant_of_limit_reaches_the_scan_exactly() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_tree(&storage, 40).await;
+    let engine = engine(storage.clone());
+
+    let plan = explain(
+        &engine,
+        "EXPLAIN SELECT name FROM 'menu' WHERE DESCENDANT_OF('/tree') LIMIT 10",
+    )
+    .await;
+
+    assert!(
+        plan.contains("limit=10"),
+        "LIMIT 10 must bound the subtree walk; plan:\n{plan}"
+    );
+}
+
+/// A bounded subtree walk must return the first k nodes in DOCUMENT order —
+/// the same rows the unbounded query's first k would be.
+#[tokio::test]
+async fn descendant_of_limit_returns_the_document_order_prefix() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_tree(&storage, 20).await;
+    let engine = engine(storage.clone());
+
+    let all = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE DESCENDANT_OF('/tree')",
+        "name",
+    )
+    .await;
+    let bounded = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE DESCENDANT_OF('/tree') LIMIT 6",
+        "name",
+    )
+    .await;
+
+    assert_eq!(all.len(), 40, "20 parents + 20 children");
+    assert_eq!(bounded.len(), 6, "LIMIT 6 must return exactly six rows");
+    assert_eq!(
+        bounded,
+        all[..6].to_vec(),
+        "the bounded walk must be a prefix of the unbounded one"
+    );
+}
+
+/// Bounding must not leak into ordering: `ORDER BY name LIMIT k` over a subtree
+/// must return the alphabetically first k, not the first k in document order.
+#[tokio::test]
+async fn descendant_of_order_by_name_limit_is_not_truncated_in_walk_order() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_tree(&storage, 20).await;
+    let engine = engine(storage.clone());
+
+    let names = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE DESCENDANT_OF('/tree') ORDER BY name LIMIT 4",
+        "name",
+    )
+    .await;
+
+    assert_eq!(
+        names,
+        vec![
+            "item-00".to_string(),
+            "item-01".to_string(),
+            "item-02".to_string(),
+            "item-03".to_string(),
+        ],
+        "ORDER BY name LIMIT 4 must return the alphabetically first four"
+    );
+}
+
+/// `ORDER BY __tree_order LIMIT k` — the ordering the walk natively satisfies —
+/// must stay correct now that the no-ORDER-BY case also claims that order.
+#[tokio::test]
+async fn descendant_of_order_by_tree_order_limit_matches_document_order() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_tree(&storage, 15).await;
+    let engine = engine(storage.clone());
+
+    let explicit = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE DESCENDANT_OF('/tree') ORDER BY __tree_order LIMIT 5",
+        "name",
+    )
+    .await;
+    let implicit = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE DESCENDANT_OF('/tree') LIMIT 5",
+        "name",
+    )
+    .await;
+
+    assert_eq!(explicit.len(), 5);
+    assert_eq!(
+        explicit, implicit,
+        "an explicit ORDER BY __tree_order and no ORDER BY must agree — both are document order"
+    );
+}
+
+/// A depth-bounded subtree query adds a residual depth filter, so the walk is
+/// deliberately NOT bounded (the filter would eat the budget). It must still
+/// return the right rows.
+#[tokio::test]
+async fn descendant_of_with_max_depth_is_still_correct() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_tree(&storage, 10).await;
+    let engine = engine(storage.clone());
+
+    let names = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE DESCENDANT_OF('/tree', 1) LIMIT 4",
+        "name",
+    )
+    .await;
+
+    assert_eq!(names.len(), 4, "LIMIT 4 must still return four rows");
+    assert!(
+        names.iter().all(|n| n.starts_with("item-")),
+        "depth 1 must exclude the grandchildren; got {names:?}"
+    );
+}

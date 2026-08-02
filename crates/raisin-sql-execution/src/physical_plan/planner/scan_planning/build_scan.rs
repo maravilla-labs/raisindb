@@ -429,10 +429,22 @@ impl PhysicalPlanner {
         // The traversal emits document order, so it satisfies
         // `ORDER BY __tree_order ASC` natively. Ascending only — see
         // `order_descending` below.
+        //
+        // With NO ORDER BY at all, document order is the documented default for
+        // a subtree scan (pre-order depth-first, matching table scans), so the
+        // walk's own order is exactly what the caller expects and it is free to
+        // bound itself. This mirrors `build_child_of_scan`, which has always
+        // accepted the no-ORDER-BY case; without it a bare
+        // `DESCENDANT_OF('/x') LIMIT 10` walked the ENTIRE subtree at ~2 RocksDB
+        // seeks per node and threw all but ten rows away.
+        //
+        // `has_no_ordering` rather than `order_by.is_none()`: an ORDER BY whose
+        // key is not a plain column name (e.g. `ST_DISTANCE(...)`) leaves
+        // `order_by` empty but must still prevent the walk from truncating.
         let claims_editorial_order = matches!(
             context.order_by.as_ref(),
             Some((column, true)) if column.eq_ignore_ascii_case("__tree_order")
-        );
+        ) || context.has_no_ordering();
 
         // As in build_child_of_scan: only bound the walk when its order is the
         // requested order and no residual filter can consume the budget.

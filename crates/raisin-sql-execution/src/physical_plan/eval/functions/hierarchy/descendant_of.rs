@@ -93,6 +93,12 @@ impl SqlFunction for DescendantOfFunction {
             let depth_lit = eval_expr(&args[1], row)?;
             match depth_lit {
                 Literal::Null => None, // NULL means unlimited
+                // Both integer widths must be accepted. `build_descendant_of_scan`
+                // re-adds the depth bound as a residual row filter built with
+                // `Literal::BigInt`, so rejecting BigInt here made every
+                // depth-limited subtree query fail at execution with
+                // "second argument must be an integer" — the planner and the
+                // evaluator disagreeing about the same predicate they both own.
                 Literal::Int(n) => {
                     if n < 1 {
                         return Err(Error::Validation(
@@ -100,6 +106,14 @@ impl SqlFunction for DescendantOfFunction {
                         ));
                     }
                     Some(n as i64)
+                }
+                Literal::BigInt(n) => {
+                    if n < 1 {
+                        return Err(Error::Validation(
+                            "DESCENDANT_OF max_depth must be >= 1".to_string(),
+                        ));
+                    }
+                    Some(n)
                 }
                 _ => {
                     return Err(Error::Validation(
