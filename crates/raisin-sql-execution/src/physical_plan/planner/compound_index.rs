@@ -13,6 +13,24 @@ use super::{
 /// iteration order be relied upon (e.g. for LIMIT pushdown under an ORDER BY).
 pub type CompoundIndexMatch = (String, Vec<(String, String)>, bool, bool);
 
+/// Normalise a `CHILD_OF` argument to the exact string the index writer stores
+/// for `__parent_path`.
+///
+/// The writer uses `Node::parent_path()`, which yields no trailing slash and
+/// `"/"` for a root-level node. ONE implementation, called from both the match
+/// (which builds the equality value) and the residual-filter pruning (which
+/// decides whether a ChildOf is already guaranteed) — if those two normalised
+/// differently the index would either never match, or would drop a predicate it
+/// does not actually enforce.
+pub(in crate::physical_plan::planner) fn normalize_parent_path(parent_path: &str) -> &str {
+    let trimmed = parent_path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed
+    }
+}
+
 impl PhysicalPlanner {
     /// Extract a string literal argument for table functions
     pub(super) fn extract_string_literal(
@@ -105,6 +123,22 @@ impl PhysicalPlanner {
                         _ => continue,
                     };
                     equality_map.insert(key.clone(), value_str);
+                }
+                // CHILD_OF is an EQUALITY on the containing directory, which is
+                // what lets hierarchy lead a sorted index and still leave the
+                // trailing column free to serve the ORDER BY. DESCENDANT_OF is
+                // deliberately absent: a subtree is a path RANGE, and a range
+                // cannot precede an order column in any sorted index — within
+                // each distinct path the order column is sorted, but not across
+                // the range. Serving that needs a materialised ancestor column.
+                //
+                // Normalised to match the writer, which stores
+                // `Node::parent_path()`: no trailing slash, and root is "/".
+                CanonicalPredicate::ChildOf { parent_path } => {
+                    equality_map.insert(
+                        "__parent_path".to_string(),
+                        normalize_parent_path(parent_path).to_string(),
+                    );
                 }
                 _ => {}
             }

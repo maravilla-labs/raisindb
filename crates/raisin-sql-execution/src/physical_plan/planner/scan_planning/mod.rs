@@ -447,6 +447,15 @@ impl PhysicalPlanner {
             .map(|(prop, _)| prop.clone())
             .collect();
 
+        // The parent path this scan is pinned to, if `__parent_path` was one of
+        // the matched columns. Only the ChildOf that produced it may be dropped;
+        // a ChildOf over a DIFFERENT parent is not guaranteed by the index and
+        // must stay a row-level filter.
+        let matched_parent_path: Option<&str> = equality_columns
+            .iter()
+            .find(|(prop, _)| prop == "__parent_path")
+            .map(|(_, value)| value.as_str());
+
         let remaining: Vec<_> = canonical
             .iter()
             .filter(|p| match p {
@@ -459,6 +468,16 @@ impl PhysicalPlanner {
                     !used_props.contains(prop)
                 }
                 CanonicalPredicate::JsonPropertyEq { key, .. } => !used_props.contains(key),
+                // A ChildOf consumed as the `__parent_path` column is guaranteed
+                // exactly by the index: the key stores the raw parent path, so
+                // there is no hashing and no collision to re-verify. Keeping it
+                // would also put a Filter between the Sort and the scan, which
+                // blocks sort elision — the index would be matched and then not
+                // used for what it was matched for.
+                CanonicalPredicate::ChildOf { parent_path } => {
+                    matched_parent_path
+                        != Some(super::compound_index::normalize_parent_path(parent_path))
+                }
                 _ => true,
             })
             .cloned()

@@ -263,6 +263,39 @@ impl NodeRepositoryImpl {
                 tenant_id, repo_id, branch, workspace, &node.id, &revision,
             );
             batch.put_cf(cf_node_path, node_path_key, node_new_path.as_bytes());
+
+            // Re-key compound indexes.
+            //
+            // A move changes `__parent_path`, which is a compound-index COLUMN,
+            // so an entry keyed on the old parent would keep matching
+            // `CHILD_OF(old)` forever and never match `CHILD_OF(new)` — a
+            // silently wrong result set with no error. Tombstone against the old
+            // path, then write against the new one.
+            //
+            // Compound indexes are the one family NOT covered by
+            // `add_node_indexes_to_batch` (they need an async NodeType load,
+            // which that sync, replication-safe path cannot do), so every write
+            // path has to remember them individually. This is the fifth such
+            // site; the same omission has already shipped twice — once for
+            // spatial (see indexing/mod.rs) and once for the SQL DML path (see
+            // transaction/.../indexing.rs). `move_tree_compound_reindex_test`
+            // pins it.
+            self.add_compound_tombstones_to_batch(
+                &mut batch, node, tenant_id, repo_id, branch, workspace,
+            )?;
+
+            let mut moved_node = node.clone();
+            moved_node.path = node_new_path.clone();
+            self.add_compound_indexes_to_batch(
+                &mut batch,
+                &moved_node,
+                tenant_id,
+                repo_id,
+                branch,
+                workspace,
+                &revision,
+            )
+            .await?;
         }
 
         // Most of a move is index-only — a descendant's stored blob stays valid

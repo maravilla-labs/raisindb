@@ -180,6 +180,28 @@ impl NodeRepositoryImpl {
             // System property: node_type
             "__node_type" => Some(CompoundColumnValue::String(node.node_type.clone())),
 
+            // System property: the containing directory.
+            //
+            // This is what makes `CHILD_OF(p) ORDER BY <col>` a seek: hierarchy
+            // enters the index as an EQUALITY on the leading column, which is the
+            // only shape a sorted index can combine with a trailing order column.
+            // (A subtree is a path RANGE, and a range cannot precede an order
+            // column — that needs a materialised ancestor column instead.)
+            //
+            // Derived from `node.path`, not `node.parent`: the planner sees
+            // `CHILD_OF('/a/b')` as a PATH and cannot resolve it to a parent id
+            // without an async lookup. The trade is that a subtree move rewrites
+            // descendants' entries — but `move_node_tree_impl` already rewrites
+            // PATH_INDEX and NODE_PATH per descendant, so this rides along with
+            // work that is already O(subtree).
+            // Uses the canonical `Node::parent_path()` rather than re-deriving
+            // it: the planner normalises `CHILD_OF(p)` to the same string, and
+            // if the two sides ever disagreed the index would simply never match
+            // — correct results, permanently unused index, no error anywhere.
+            // Root nodes yield `None` and are not indexed under this column,
+            // which is right: nothing is CHILD_OF a node's own root.
+            "__parent_path" => node.parent_path().map(CompoundColumnValue::String),
+
             // System property: created_at
             "__created_at" => node.created_at.map(|dt| {
                 let timestamp_micros = dt.timestamp_micros();

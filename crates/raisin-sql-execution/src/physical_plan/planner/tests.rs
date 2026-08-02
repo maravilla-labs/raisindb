@@ -874,3 +874,123 @@ fn test_compound_index_does_not_elide_a_sort_it_cannot_serve() {
          be sorted; plan:\n{explain}"
     );
 }
+
+// ── Hierarchy as a compound-index column ────────────────────────────────────
+
+/// `(__parent_path, __created_at)` — the shape that makes a folder listing
+/// ordered by time a seek instead of a read-everything-and-sort.
+fn planner_with_parent_path_index() -> PhysicalPlanner {
+    use raisin_models::nodes::properties::schema::{
+        CompoundColumnType, CompoundIndexColumn, CompoundIndexDefinition,
+    };
+    let mut planner = PhysicalPlanner::new();
+    planner.set_compound_indexes(vec![CompoundIndexDefinition {
+        name: "folder_time".to_string(),
+        columns: vec![
+            CompoundIndexColumn {
+                property: "__parent_path".to_string(),
+                column_type: CompoundColumnType::String,
+                ascending: None,
+            },
+            CompoundIndexColumn {
+                property: "__created_at".to_string(),
+                column_type: CompoundColumnType::Timestamp,
+                ascending: None,
+            },
+        ],
+        has_order_column: true,
+    }]);
+    planner
+}
+
+fn child_of(path: &str) -> TypedExpr {
+    use raisin_sql::analyzer::{Expr, FunctionCategory, FunctionSignature};
+    TypedExpr::new(
+        Expr::Function {
+            name: "CHILD_OF".to_string(),
+            args: vec![TypedExpr::literal(Literal::Path(path.to_string()))],
+            signature: FunctionSignature {
+                name: "CHILD_OF".to_string(),
+                params: vec![DataType::Path],
+                return_type: DataType::Boolean,
+                is_deterministic: true,
+                category: FunctionCategory::Hierarchy,
+            },
+            filter: None,
+        },
+        DataType::Boolean,
+    )
+}
+
+/// CHILD_OF must be usable as the leading EQUALITY column of a compound index,
+/// and the trailing order column must then elide the sort. This is the whole
+/// point of the column: hierarchy is the one dimension a hierarchical database
+/// filters on constantly, and it could not previously participate in an index
+/// that also served an ORDER BY.
+#[test]
+fn test_child_of_drives_a_compound_index_and_elides_the_sort() {
+    let planner = planner_with_parent_path_index();
+
+    let filter = LogicalPlan::Filter {
+        input: Box::new(scan_nodes("nodes")),
+        predicate: FilterPredicate::from_expr(child_of("/senol/inbox/2026/05")),
+    };
+    let sort = LogicalPlan::Sort {
+        input: Box::new(filter),
+        sort_exprs: vec![SortExpr {
+            expr: TypedExpr::new(
+                Expr::Column {
+                    table: "nodes".to_string(),
+                    column: "created_at".to_string(),
+                },
+                DataType::TimestampTz,
+            ),
+            ascending: false,
+            nulls_first: true,
+        }],
+    };
+    let logical = LogicalPlan::Limit {
+        input: Box::new(sort),
+        limit: 50,
+        offset: 0,
+    };
+
+    let physical = planner.plan(&logical).unwrap();
+    let explain = physical.explain();
+
+    assert!(
+        explain.contains("CompoundIndexScan"),
+        "CHILD_OF should drive the compound index; plan:\n{explain}"
+    );
+    assert!(
+        explain.contains("__parent_path=/senol/inbox/2026/05"),
+        "the parent path should be the leading equality value; plan:\n{explain}"
+    );
+    assert!(
+        !explain.contains("Sort") && !explain.contains("TopN"),
+        "the trailing order column serves the ORDER BY, so the sort must be \
+         elided; plan:\n{explain}"
+    );
+    assert!(
+        !explain.contains("Filter"),
+        "the ChildOf is guaranteed exactly by the index and must not remain a \
+         residual filter (it would block elision); plan:\n{explain}"
+    );
+}
+
+/// A trailing slash must normalise to the same key the writer stores, or the
+/// index silently never matches.
+#[test]
+fn test_child_of_trailing_slash_normalizes_to_the_same_column_value() {
+    let planner = planner_with_parent_path_index();
+    let filter = LogicalPlan::Filter {
+        input: Box::new(scan_nodes("nodes")),
+        predicate: FilterPredicate::from_expr(child_of("/senol/inbox/2026/05/")),
+    };
+    let physical = planner.plan(&filter).unwrap();
+    let explain = physical.explain();
+    assert!(
+        explain.contains("__parent_path=/senol/inbox/2026/05"),
+        "trailing slash must be trimmed to match Node::parent_path(); plan:\n{explain}"
+    );
+}

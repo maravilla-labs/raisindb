@@ -34,6 +34,7 @@ mod fulltext_job_store_integration;
 mod hnsw_integration_test;
 mod index_parity_test;
 mod integration_tests;
+mod move_tree_compound_reindex_test;
 mod multi_node_crdt_integration;
 mod oplog_write_read_test;
 mod ordered_children_keyset_test;
