@@ -31,7 +31,7 @@ use crate::physical_plan::executor::ExecutionContext;
 /// throughout the scan executors; without it, graph-relationship RLS conditions
 /// fail closed. Relations are evaluated at `max_revision` (or latest when None).
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn rls_filter_node_graph<S: Storage>(
+pub(crate) async fn rls_filter_node_graph<S: Storage>(
     storage: &S,
     node: Node,
     auth: &AuthContext,

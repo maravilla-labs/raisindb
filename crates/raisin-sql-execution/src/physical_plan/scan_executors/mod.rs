@@ -27,7 +27,7 @@
 
 mod compound_scan;
 mod count_scan;
-mod helpers;
+pub(crate) mod helpers;
 mod neighbors_scan;
 mod node_to_row;
 mod point_lookup;

@@ -9,6 +9,7 @@ use super::scan_executors::node_to_row;
 use async_stream::try_stream;
 use raisin_error::Error;
 use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::permissions::PermissionScope;
 use raisin_storage::fulltext::{FullTextSearchQuery, IndexingEngine};
 use raisin_storage::{NodeRepository, Storage, StorageScope};
 
@@ -112,6 +113,33 @@ pub async fn execute_fulltext_scan<S: Storage + 'static>(
                 if node.path == "/" {
                     continue;
                 }
+
+                // Row-level security. The full-text index is not permission-aware
+                // — it answers "which nodes contain these terms", not "which may
+                // this caller read" — so every hit must be filtered exactly as
+                // the scan executors filter theirs. Without this a search
+                // returned rows the caller has no read access to, which is a
+                // disclosure, not a ranking quirk.
+                let node = if let Some(ref auth) = ctx_clone.auth_context {
+                    let scope = PermissionScope::new(&workspace, &branch);
+                    match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(
+                        &*storage,
+                        node,
+                        auth,
+                        &scope,
+                        &tenant_id,
+                        &repo_id,
+                        &branch,
+                        ctx_clone.max_revision.as_ref(),
+                    )
+                    .await
+                    {
+                        Some(n) => n,
+                        None => continue,
+                    }
+                } else {
+                    node
+                };
 
                 let mut row = node_to_row(&node, &qualifier, &workspace, &projection, &ctx_clone, "en", None,).await?;
 
