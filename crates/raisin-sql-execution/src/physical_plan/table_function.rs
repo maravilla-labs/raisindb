@@ -158,115 +158,29 @@ pub async fn execute_table_function<S: Storage + 'static>(
             let max_revision = *max_revision;
 
             if function_name.eq_ignore_ascii_case("CYPHER") {
-                tracing::info!("🔵 CYPHER table function invoked");
+                // Withdrawn from SQL.
+                //
+                // The Cypher executor applies NO row-level security — it has no
+                // auth context at all — so `SELECT * FROM CYPHER('...')` was a
+                // complete RLS bypass for any caller who could issue SQL. It is
+                // also already deprecated in favour of GRAPH_TABLE, which is
+                // strictly more capable, so there is nothing to preserve at the
+                // SQL surface.
+                //
+                // The `physical_plan::cypher` module deliberately stays: its
+                // graph algorithms and matching code are reused elsewhere and
+                // are wanted for future work. Only this entrypoint is closed, so
+                // GRAPH_TABLE is the one graph query language reachable from SQL
+                // and there is exactly ONE surface to enforce RLS on.
+                return Err(ExecutionError::Validation(
+                    "CYPHER(...) is no longer available from SQL. Use GRAPH_TABLE, \
+                     which supports the same patterns and enforces row-level \
+                     security. See the raisindb-sql skill, § GRAPH_TABLE."
+                        .to_string(),
+                ));
+            }
 
-                let query_expr = args.first().ok_or_else(|| {
-                    ExecutionError::Validation(
-                        "CYPHER table function expects at least one argument".to_string(),
-                    )
-                })?;
-
-                let cypher_query = extract_string_literal(query_expr, &function_name, 0)?;
-                tracing::debug!("   Cypher query: {}", cypher_query);
-
-                let workspace_name =
-                    workspace_override.unwrap_or_else(|| ctx.workspace.to_string());
-                let branch = branch_override.unwrap_or_else(|| ctx.branch.to_string());
-                let revision = max_revision.or(ctx.max_revision);
-
-                tracing::debug!(
-                    "   Context: workspace={}, branch={}, revision={:?}",
-                    workspace_name,
-                    branch,
-                    revision
-                );
-
-                let storage = ctx.storage.clone();
-                let tenant_id = ctx.tenant_id.to_string();
-                let repo_id = ctx.repo_id.to_string();
-
-                let param_map = if let Some(params_expr) = args.get(1) {
-                    let json_value = extract_json_argument(params_expr, &function_name, 1)?;
-                    if let Some(json_value) = json_value {
-                        json_to_params_map(json_value, &function_name)?
-                    } else {
-                        HashMap::new()
-                    }
-                } else {
-                    HashMap::new()
-                };
-
-                let cypher_stream = crate::physical_plan::cypher::execute_cypher(
-                    storage,
-                    workspace_name,
-                    tenant_id,
-                    repo_id,
-                    branch,
-                    revision,
-                    &cypher_query,
-                    param_map,
-                );
-
-                let output_schema = Arc::clone(&schema);
-                // Use alias if provided, otherwise use function name (e.g., "cypher")
-                let table_name = alias
-                    .clone()
-                    .unwrap_or_else(|| function_name.to_lowercase());
-
-                let row_stream = cypher_stream.map(move |row_result| {
-                    row_result.map(|cypher_row| {
-                        tracing::debug!(
-                            "   📋 Converting CypherRow: {} columns, {} values",
-                            cypher_row.columns.len(),
-                            cypher_row.values.len()
-                        );
-                        tracing::debug!("      Columns: {:?}", cypher_row.columns);
-
-                        let mut columns: IndexMap<String, PropertyValue> = IndexMap::new();
-
-                        if !cypher_row.columns.is_empty() {
-                            for (idx, column_name) in cypher_row.columns.iter().enumerate() {
-                                if let Some(value) = cypher_row.values.get(idx) {
-                                    // Use table-qualified name: "cypher.result"
-                                    let qualified_name = format!("{}.{}", table_name, column_name);
-                                    tracing::debug!(
-                                        "      Inserting column '{}' with value type: {:?}",
-                                        qualified_name,
-                                        std::mem::discriminant(value)
-                                    );
-                                    columns.insert(qualified_name, value.clone());
-                                }
-                            }
-                        } else {
-                            for (idx, column_def) in output_schema.columns.iter().enumerate() {
-                                if let Some(value) = cypher_row.values.get(idx) {
-                                    let qualified_name =
-                                        format!("{}.{}", table_name, column_def.name);
-                                    columns.insert(qualified_name, value.clone());
-                                }
-                            }
-
-                            if columns.is_empty()
-                                && !output_schema.columns.is_empty()
-                                && !cypher_row.values.is_empty()
-                            {
-                                let qualified_name =
-                                    format!("{}.{}", table_name, output_schema.columns[0].name);
-                                columns.insert(qualified_name, cypher_row.values[0].clone());
-                            }
-                        }
-
-                        tracing::debug!(
-                            "      Created Row with {} columns: {:?}",
-                            columns.len(),
-                            columns.keys().collect::<Vec<_>>()
-                        );
-                        Row::from_map(columns)
-                    })
-                });
-
-                Ok(Box::pin(row_stream))
-            } else if function_name.eq_ignore_ascii_case("GRAPH_TABLE") {
+            if function_name.eq_ignore_ascii_case("GRAPH_TABLE") {
                 tracing::info!("🔵 GRAPH_TABLE table function invoked");
 
                 // Extract PGQ query string argument (required)
