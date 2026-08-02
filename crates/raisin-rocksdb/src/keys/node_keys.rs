@@ -147,20 +147,35 @@ pub fn path_index_key_prefix(
 }
 
 /// Decode HLC from path_index key
+///
+/// The descending HLC is a FIXED 16-byte trailer, and it may itself contain
+/// `0x00` bytes: `encode_descending` stores `!timestamp_ms`, so any timestamp
+/// byte equal to `0xFF` becomes a NUL (and `!counter` is all-NUL at
+/// `u64::MAX`). Locating it by searching for the last separator therefore
+/// truncated it for ~2% of revisions, the decode returned `None`, and the
+/// caller SKIPPED that index entry — a live node silently vanished from
+/// `path LIKE 'prefix%'` scans. Take the fixed-width suffix instead, and only
+/// require that the byte in front of it is the separator.
 pub fn decode_revision_from_path_index_key(key: &[u8]) -> Option<HLC> {
-    let last_sep = key.iter().rposition(|&b| b == 0)?;
-    let hlc_bytes = &key[last_sep + 1..];
-    if hlc_bytes.len() == 16 {
-        HLC::decode_descending(hlc_bytes).ok()
-    } else {
-        None
+    let sep_pos = key.len().checked_sub(17)?;
+    if key[sep_pos] != 0 {
+        return None;
     }
+    HLC::decode_descending(&key[sep_pos + 1..]).ok()
 }
 
 /// Decode path from path_index key
+///
+/// Strips the fixed 16-byte HLC trailer BEFORE splitting: the HLC can contain
+/// `0x00` bytes (see [`decode_revision_from_path_index_key`]), so splitting the
+/// whole key produces a variable number of trailing parts.
 pub fn decode_path_from_path_index_key(key: &[u8]) -> Option<String> {
-    let parts: Vec<&[u8]> = key.split(|&b| b == 0).collect();
-    if parts.len() >= 7 && parts[4] == b"path" {
+    let sep_pos = key.len().checked_sub(17)?;
+    if key[sep_pos] != 0 {
+        return None;
+    }
+    let parts: Vec<&[u8]> = key[..sep_pos].split(|&b| b == 0).collect();
+    if parts.len() >= 6 && parts[4] == b"path" {
         return String::from_utf8(parts[5].to_vec()).ok();
     }
     None
@@ -225,6 +240,36 @@ mod tests {
         let key = path_index_key_versioned("t1", "r1", "main", "ws1", "/foo", &hlc);
         let decoded = decode_revision_from_path_index_key(&key);
         assert_eq!(decoded, Some(hlc));
+    }
+
+    /// A descending HLC whose encoding CONTAINS `0x00` bytes must still decode,
+    /// and the path must still parse. `!timestamp_ms` turns every `0xFF`
+    /// timestamp byte into a NUL, so this is ~2% of real revisions — locating
+    /// the trailer by the last separator dropped them, and the scan then
+    /// skipped a live node.
+    #[test]
+    fn decodes_path_index_key_whose_hlc_contains_nul_bytes() {
+        // timestamp byte 0xFF -> NUL after negation; counter u64::MAX -> 8 NULs.
+        let hlc = HLC::new(0x0000_01FF_00FF_FF00, u64::MAX);
+        let encoded = hlc.encode_descending();
+        assert!(encoded.contains(&0), "fixture must exercise embedded NULs");
+
+        let key = path_index_key_versioned("t1", "r1", "main", "ws1", "/joba/t-000", &hlc);
+        assert_eq!(decode_revision_from_path_index_key(&key), Some(hlc));
+        assert_eq!(
+            decode_path_from_path_index_key(&key),
+            Some("/joba/t-000".to_string())
+        );
+    }
+
+    #[test]
+    fn test_decode_path_from_path_index_key() {
+        let hlc = HLC::new(1705843009213693952, 42);
+        let key = path_index_key_versioned("t1", "r1", "main", "ws1", "/foo/bar", &hlc);
+        assert_eq!(
+            decode_path_from_path_index_key(&key),
+            Some("/foo/bar".to_string())
+        );
     }
 
     #[test]

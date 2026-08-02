@@ -24,8 +24,13 @@ use raisin_storage::{
 use std::sync::Arc;
 use tempfile::TempDir;
 
-const TENANT: &str = "test_tenant";
-const REPO: &str = "test_repo";
+// Scope constants must be UNIQUE to this module — see the note in
+// `dml_index_and_predicate_maintenance.rs`. Compound-index definitions are
+// memoised process-globally by `{tenant}:{repo}:{branch}` while each module owns
+// its own TempDir storage, so a shared scope key lets one module's index
+// declarations steer another module's plans into an empty keyspace.
+const TENANT: &str = "t_path_like";
+const REPO: &str = "r_path_like";
 const BRANCH: &str = "main";
 const WS: &str = "items";
 

@@ -18,8 +18,16 @@ use raisin_storage::{
 use std::sync::Arc;
 use tempfile::TempDir;
 
-const TENANT: &str = "test_tenant";
-const REPO: &str = "test_repo";
+// Scope constants must be UNIQUE to this module. The compound-index definitions
+// the planner uses are memoised in a PROCESS-GLOBAL cache keyed only by
+// `{tenant}:{repo}:{branch}` (`engine/helpers.rs`, `COMPOUND_INDEX_CACHE`), and
+// every test module in this binary shares that process while owning a *different*
+// TempDir storage. This module declares a `status_expiry` compound index leading
+// with `status`; under a shared scope key another module's `status = ...` query
+// would plan a CompoundIndexScan over a keyspace that is empty in ITS storage and
+// silently return zero rows.
+const TENANT: &str = "t_dml_index";
+const REPO: &str = "r_dml_index";
 const BRANCH: &str = "main";
 const WS: &str = "items";
 
