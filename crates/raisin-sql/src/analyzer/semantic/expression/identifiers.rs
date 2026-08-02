@@ -5,13 +5,57 @@
 //! - Compound identifiers (table.column references)
 
 use crate::analyzer::{
-    catalog::ColumnDef,
+    catalog::{ColumnDef, TableDef},
     error::AnalysisError,
     semantic::{types::TableRef, AnalyzerContext, Result},
     typed_expr::TypedExpr,
     types::DataType,
 };
 use sqlparser::ast::Ident;
+
+/// Resolve an identifier that is not a declared column of `table`.
+///
+/// Node-backed tables (`nodes`, workspace tables, and the search/graph table
+/// functions) carry a dynamic property bag in their `properties` JSONB column,
+/// so a bare identifier that names no declared column names a *property*:
+/// `SELECT user_id FROM nodes` means `properties->>'user_id'`.
+///
+/// This is not a convenience — it is the contract the rest of the engine already
+/// implements. The scan layer materialises an unrecognised projection column out
+/// of `node.properties` (`node_to_row/fields.rs::insert_property_fields`), scan
+/// planning maps a bare column name straight to a property name
+/// (`planner/scan_planning/build_scan.rs`), and row evaluation looks the
+/// qualified name up in the row (`eval/core/mod.rs::eval_column`). Only the
+/// analyzer rejected it, so the whole capability was unreachable — qualified
+/// (`u.user_id`) *and* unqualified alike.
+///
+/// The type is `Unknown` because a property's type is not known until the row is
+/// read; `Unknown` coerces to and from everything, which is what lets
+/// `user_id = 5` and `user_id = 'abc'` both analyze.
+fn dynamic_property_column(table: &TableDef, col_name: &str) -> Option<ColumnDef> {
+    // Only tables that actually carry a property bag. A table without a
+    // `properties` column (pg_catalog, a CTE, a subquery, information_schema)
+    // keeps strict column resolution and still errors on a typo.
+    if !matches!(
+        table.get_column("properties").map(|c| &c.data_type),
+        Some(DataType::JsonB)
+    ) {
+        return None;
+    }
+
+    // `__`-prefixed names are engine pseudo-columns (`__branch`, `__workspace`,
+    // `__order`, …), not user properties. Leave them to whatever declares them.
+    if col_name.starts_with("__") {
+        return None;
+    }
+
+    Some(ColumnDef {
+        name: col_name.to_string(),
+        data_type: DataType::Unknown,
+        nullable: true,
+        generated: None,
+    })
+}
 
 impl<'a> AnalyzerContext<'a> {
     /// Analyze a simple identifier (column reference)
@@ -23,6 +67,10 @@ impl<'a> AnalyzerContext<'a> {
 
         // Search for column in all current tables
         let mut found_columns: Vec<(TableRef, ColumnDef)> = Vec::new();
+        // Node-backed tables that could supply this name as a JSON property.
+        // Only consulted when NO table declares the column, so a real column of a
+        // joined CTE/subquery is never made ambiguous by a property fallback.
+        let mut property_candidates: Vec<(TableRef, ColumnDef)> = Vec::new();
 
         for table_ref in &self.current_tables {
             // Check if this is a LATERAL function - it exposes a single virtual column
@@ -62,7 +110,13 @@ impl<'a> AnalyzerContext<'a> {
                         generated: None,
                     },
                 ));
+            } else if let Some(prop_col) = dynamic_property_column(&table, col_name) {
+                property_candidates.push((table_ref.clone(), prop_col));
             }
+        }
+
+        if found_columns.is_empty() {
+            found_columns = property_candidates;
         }
 
         match found_columns.len() {
@@ -153,6 +207,14 @@ impl<'a> AnalyzerContext<'a> {
                         table_ref.name().to_string(),
                         col_name.clone(),
                         DataType::Text,
+                    ));
+                } else if let Some(prop_col) = dynamic_property_column(&table, col_name) {
+                    // Not a declared column of a node-backed table: a JSON
+                    // property, qualified by the table name or alias.
+                    return Ok(TypedExpr::column(
+                        table_ref.name().to_string(),
+                        prop_col.name,
+                        prop_col.data_type,
                     ));
                 }
             }

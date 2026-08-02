@@ -3082,3 +3082,37 @@ fn test_copy_with_new_name() {
 
     assert_eq!(copy.new_name, Some("senol-copy".to_string()));
 }
+
+/// A JSON property resolves as a bare column on node-backed tables — plain,
+/// aliased, and alias-qualified inside a JOIN. The engine already materialises
+/// such a column out of `node.properties` at scan time; before this the
+/// analyzer rejected it, so the capability was unreachable.
+#[test]
+fn test_unknown_column_resolves_as_json_property() {
+    let analyzer = Analyzer::new();
+
+    for sql in [
+        "SELECT user_id FROM nodes",
+        "SELECT user_id FROM nodes u",
+        "SELECT u.user_id FROM nodes u",
+        "SELECT u.user_id, o.order_id FROM nodes u JOIN nodes o ON u.user_id = o.user_id",
+        // Untyped, so it compares against any literal type.
+        "SELECT id FROM nodes WHERE user_id = 5",
+        "SELECT id FROM nodes WHERE user_id = 'abc'",
+    ] {
+        assert!(
+            analyzer.analyze(sql).is_ok(),
+            "should resolve property column: {sql}"
+        );
+    }
+}
+
+/// The fallback is scoped to tables that carry a `properties` bag. A table
+/// without one keeps strict resolution, so a typo is still an error.
+#[test]
+fn test_unknown_column_still_errors_without_property_bag() {
+    let analyzer = Analyzer::new();
+    assert!(analyzer
+        .analyze("SELECT no_such_column FROM pg_class")
+        .is_err());
+}
