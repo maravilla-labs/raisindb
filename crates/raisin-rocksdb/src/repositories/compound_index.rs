@@ -238,20 +238,41 @@ impl CompoundIndexRepository for CompoundIndexRepositoryImpl {
 
                     results.push(CompoundIndexScanEntry { node_id, timestamp });
 
-                    // Check limit
-                    if let Some(lim) = limit {
-                        if results.len() >= lim {
-                            break;
+                    // Only a FORWARD scan may stop at the limit. Descending
+                    // results are produced by reversing below, so truncating
+                    // here would keep the k SMALLEST and then reverse them —
+                    // i.e. `ORDER BY col DESC LIMIT k` would return the k oldest
+                    // rows, newest-first among themselves, which never overlaps
+                    // the correct answer.
+                    if ascending {
+                        if let Some(lim) = limit {
+                            if results.len() >= lim {
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
 
-        // For descending order, reverse the results
-        // (prefix iterator always scans forward in lexicographic order)
+        // For descending order, reverse the results.
+        //
+        // The iterator deliberately stays FORWARD even here. The key ends
+        // `…{~revision}\0{node_id}`, so forward traversal meets each node's
+        // NEWEST revision first, which is what both the `seen_nodes` dedup and
+        // the `tombstoned_nodes` shadowing rely on. A reverse iterator would
+        // meet the oldest revision first and resurrect superseded entries.
+        //
+        // The cost is that a descending scan reads the whole equality group
+        // before truncating. The O(k) way to get newest-first is to store the
+        // column already inverted — `CompoundColumnType::Timestamp` encodes
+        // `__created_at` / `__updated_at` as `TimestampDesc`, so "newest first"
+        // becomes a FORWARD scan that bounds properly.
         if !ascending {
             results.reverse();
+            if let Some(lim) = limit {
+                results.truncate(lim);
+            }
         }
 
         tracing::debug!("CompoundIndex: Scan returned {} results", results.len());

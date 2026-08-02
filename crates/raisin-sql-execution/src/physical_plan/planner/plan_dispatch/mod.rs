@@ -453,10 +453,6 @@ impl PhysicalPlanner {
         let editorial_column = Self::extract_column_name(&sort.expr)
             .filter(|c| matches!(c.as_str(), "__order" | "__tree_order"));
 
-        if editorial_column.is_none() && !wants_distance_order {
-            return false;
-        }
-
         let mut node = input;
         loop {
             match node {
@@ -465,6 +461,16 @@ impl PhysicalPlanner {
                     claims_editorial_order,
                     ..
                 } => return editorial_column.is_some() && *claims_editorial_order,
+                // A compound index whose trailing column IS the ORDER BY column
+                // emits the requested order directly. `pre_sorted` is set only on
+                // a FULL equality match where that trailing column matched the
+                // sort key, and the requested direction is already folded into
+                // the scan's `ascending`, so the flag alone is the answer.
+                //
+                // This was previously set by the planner and discarded by the
+                // executor, which is why a perfectly matching compound index
+                // still paid for a Sort over the whole result.
+                PhysicalPlan::CompoundIndexScan { pre_sorted, .. } => return *pre_sorted,
                 PhysicalPlan::SpatialDistanceScan {
                     property_name,
                     center_lon,

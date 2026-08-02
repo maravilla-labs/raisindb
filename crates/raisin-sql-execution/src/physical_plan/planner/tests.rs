@@ -779,3 +779,98 @@ fn test_name_in_expands_to_union_of_property_scans() {
     assert!(explain.contains("__name=a"), "{}", explain);
     assert!(explain.contains("__name=b"), "{}", explain);
 }
+
+/// A compound index whose trailing column IS the ORDER BY column emits the
+/// requested order, so the Sort/TopN above it is pure cost and must be elided.
+///
+/// The planner has always computed this (`pre_sorted: claims_order`) and the
+/// executor has always thrown it away (`_pre_sorted`), so a perfectly matching
+/// compound index still materialised and re-sorted the whole result — which is
+/// why compound indexes stopped paying off for `ORDER BY ... LIMIT`.
+#[test]
+fn test_compound_index_order_elides_the_sort() {
+    let planner = planner_with_compound_index();
+
+    let filter = LogicalPlan::Filter {
+        input: Box::new(scan_nodes("nodes")),
+        predicate: FilterPredicate::from_expr(and(
+            json_eq("nodes", "group", "/g1"),
+            json_eq("nodes", "status", "open"),
+        )),
+    };
+    let sort = LogicalPlan::Sort {
+        input: Box::new(filter),
+        sort_exprs: vec![SortExpr {
+            expr: TypedExpr::new(
+                Expr::Column {
+                    table: "nodes".to_string(),
+                    column: "created_at".to_string(),
+                },
+                DataType::TimestampTz,
+            ),
+            ascending: false,
+            nulls_first: true,
+        }],
+    };
+    let logical = LogicalPlan::Limit {
+        input: Box::new(sort),
+        limit: 20,
+        offset: 0,
+    };
+
+    let physical = planner.plan(&logical).unwrap();
+    let explain = physical.explain();
+
+    assert!(
+        explain.contains("CompoundIndexScan"),
+        "the compound index should drive the scan; plan:\n{explain}"
+    );
+    assert!(
+        !explain.contains("Sort") && !explain.contains("TopN"),
+        "the trailing order column matches the ORDER BY, so the sort must be \
+         elided; plan:\n{explain}"
+    );
+}
+
+/// The mirror case: an ORDER BY the index does NOT serve must still be sorted.
+/// `pre_sorted` is false there, and eliding would silently return index order.
+#[test]
+fn test_compound_index_does_not_elide_a_sort_it_cannot_serve() {
+    let planner = planner_with_compound_index();
+
+    let filter = LogicalPlan::Filter {
+        input: Box::new(scan_nodes("nodes")),
+        predicate: FilterPredicate::from_expr(and(
+            json_eq("nodes", "group", "/g1"),
+            json_eq("nodes", "status", "open"),
+        )),
+    };
+    let sort = LogicalPlan::Sort {
+        input: Box::new(filter),
+        sort_exprs: vec![SortExpr {
+            expr: TypedExpr::new(
+                Expr::Column {
+                    table: "nodes".to_string(),
+                    column: "name".to_string(),
+                },
+                DataType::Text,
+            ),
+            ascending: true,
+            nulls_first: false,
+        }],
+    };
+    let logical = LogicalPlan::Limit {
+        input: Box::new(sort),
+        limit: 20,
+        offset: 0,
+    };
+
+    let physical = planner.plan(&logical).unwrap();
+    let explain = physical.explain();
+
+    assert!(
+        explain.contains("Sort") || explain.contains("TopN"),
+        "`ORDER BY name` is not the index's trailing column, so it must still \
+         be sorted; plan:\n{explain}"
+    );
+}
