@@ -780,29 +780,36 @@ and worth reading before filing a bug.
   instance to `waiting` first. Both are documented in `docs/workflows.md`
   §6.2.
 
-### 2.102 [P1] Three branch-fork index copies are wired but not proven
+### 2.102 [DONE] Three branch-fork index copies are wired but not proven
 
-The fork audit (`repositories/branches/cf_registry.rs`) found **four** column families that a
-branch fork silently failed to copy. All four are now in the copy set, but only `SPATIAL_INDEX`
-is proven end to end.
+**Shipped:** `crates/raisin-rocksdb/tests/all/branch_fork_index_copies_test.rs`, ten tests shaped
+like `branch_fork_spatial_index_test.rs`. Each asserts the index FUNCTIONS on the fork, not that
+bytes were copied.
 
 | CF | locator unit test | e2e fork test | failure mode if the copy is subtly wrong |
 |---|---|---|---|
 | `SPATIAL_INDEX` | yes | **yes** (`tests/all/branch_fork_spatial_index_test.rs`) | — |
-| `COMPOUND_INDEX` | yes | **no** | compound-index `ORDER BY` + filter returns nothing on a fork |
-| `UNIQUE_INDEX` | yes | **no** | **duplicates silently accepted — data integrity, not missing rows** |
-| `EMBEDDINGS` | **no** | **no** | vector search returns nothing on a fork |
+| `COMPOUND_INDEX` | yes | **yes** | compound-index `ORDER BY` + filter returns nothing on a fork |
+| `UNIQUE_INDEX` | yes | **yes** | **duplicates silently accepted — data integrity, not missing rows** |
+| `EMBEDDINGS` | no | **yes** | vector search returns nothing on a fork |
 
-**What to do:** one test module shaped like `branch_fork_spatial_index_test.rs` — fork a branch and
-assert each index actually FUNCTIONS on the fork (a compound-index query returns rows; a duplicate
-insert is REJECTED; a vector search finds the parent's embedding), plus independence in both
-directions.
+**All three copies were already correct** — the fork rejects a duplicate of a value claimed on the
+parent, answers compound scans with the parent's rows, and returns the parent's vector. What the
+tests add is a guard: this file has silently dropped index types **twice**
+(`ARCHETYPES`/`ELEMENT_TYPES`, which broke branch publish, then `SPATIAL_INDEX`), and the
+`cf_registry` guard prevents a *fourth omission* without proving the copies it does perform.
 
-`UNIQUE_INDEX` is the priority: its failure mode is corruption rather than absence, and a
-revision-locator unit test cannot catch a semantic mistake in the copy. Note this file has now
-silently dropped index types **twice** — `ARCHETYPES`/`ELEMENT_TYPES` (broke branch publish), then
-`SPATIAL_INDEX`. The `cf_registry` guard prevents a *fourth* omission, but it cannot prove the
-copies it does perform are correct.
+Coverage per CF: inheritance from the parent, independence in BOTH directions (a key-rewrite bug
+that left entries under the source prefix passes the first assertion and fails the second), and an
+empty fork staying empty. `UNIQUE_INDEX` additionally pins that the inherited conflict names the
+original owner (a copy that lost the VALUE still rejects, so a bare `is_err()` would not catch it)
+and that a fork-side delete tombstone does not release the value on the parent.
+
+**Found while writing this:** `list_embeddings` was reading the source id from key part 4 — the
+node_id slot in the LEGACY layout, but the embedder hash in the v2 layout actually written. Every
+caller fed that back into `get_embedding` as a node id, so an HNSW rebuild repopulated an EMPTY
+index. Fixed by routing through `parse_key`, the parser `get_embedding` already shares. Unrelated
+to forking; the fork test is simply what exercised the listing path.
 
 **Also open, deliberately not fixed:** `GRAPH_PROJECTION` is *configuration*, not a derived cache,
 so a fork loses its projection configs. Its branch component sits at key part 3 while the copier
