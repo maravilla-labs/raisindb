@@ -207,10 +207,15 @@ pub(crate) const BRANCH_CF_REGISTRY: &[(&str, BranchScope)] = &[
     (
         cf::GRAPH_PROJECTION,
         BranchScope::SkippedOnPurpose(
-            "KNOWN GAP: this is configuration, not a cache, so a fork loses its \
-             projection configs. Not fixed here because the branch sits at key \
-             part 3 ({tenant}\0{repo}\0graph_projection\0{branch}\0{config}) and \
-             the copier only rewrites part 2.",
+            "Derived adjacency (node list, edge list, weights, stale flag), NOT \
+             configuration: a projection CONFIG is a `raisin:GraphAlgorithmConfig` \
+             NODE, so it forks with the nodes. `recompute_for_branch` does a full \
+             build when the load misses, so a miss is never an empty answer — \
+             copying would only spend fork time on an edge list the next \
+             recompute regenerates. (It also keys the branch at part 3, which the \
+             copier's part-2 rewrite could not handle anyway.) Proven by \
+             `branch_fork_index_copies_test::\
+             a_fork_inherits_graph_configs_but_not_the_derived_projection`.",
         ),
     ),
     (

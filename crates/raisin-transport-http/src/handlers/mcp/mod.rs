@@ -332,17 +332,21 @@ async fn dispatch(
     let assets: Arc<dyn raisin_mcp::AssetReader> =
         Arc::new(HttpAssetReader::new(state.clone(), tenant_id, repo));
 
+    // Admit every workspace the descriptor exposes, not just the active one —
+    // `resources/list` advertises a root for each, so anything narrower makes
+    // the server refuse resources it just offered.
     let resources = NodeResourceProvider::new(backend)
         .with_events(events)
-        .with_asset_reader(assets.clone());
+        .with_asset_reader(assets.clone())
+        .with_exposed_workspaces(descriptor.data_policy.workspaces.clone());
 
     let dispatcher = Dispatcher::new(descriptor, registry)
         .with_resources(resources)
         .with_asset_reader(assets)
         .with_public_base(public_base);
 
-    // `resources/subscribe` upgrades to an SSE stream of update notifications.
-    if request.method == "resources/subscribe" && request.id.is_some() {
+    // `subscriptions/listen` upgrades to an SSE stream of notifications.
+    if request.method == "subscriptions/listen" && request.id.is_some() {
         return subscribe_sse(dispatcher, identity, request, state.shutdown_signal());
     }
 
@@ -374,35 +378,78 @@ fn subscribe_sse(
     request: JsonRpcRequest,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<Response, McpError> {
-    use raisin_mcp::SubscribeResourceParams;
+    use raisin_mcp::{SubscriptionsListenParams, META_SUBSCRIPTION_ID};
 
     let id = request.id.clone().unwrap_or(Value::Null);
-    let params: SubscribeResourceParams = request.decode_params()?;
-    let uri = params.uri.clone();
+    let params: SubscriptionsListenParams = request.decode_params()?;
 
-    // Confirm the subscription up front, then stream updates.
-    let stream = dispatcher.subscribe_resource(&identity, &uri)?;
+    // Validate every requested URI before the stream opens, so a bad one is a
+    // JSON-RPC error rather than a silent stream that never emits.
+    let mut streams = Vec::new();
+    let mut granted = Vec::new();
+    for uri in &params.notifications.resource_subscriptions {
+        streams.push(dispatcher.subscribe_resource(&identity, uri)?);
+        granted.push(uri.clone());
+    }
 
-    let ack = JsonRpcResponse::success(id, serde_json::json!({ "subscribed": true, "uri": uri }));
+    // This server emits no list-changed notifications, so the acknowledgement
+    // reports only the resource subscriptions. The spec requires the server to
+    // report the subset it will actually honour — promising a stream that never
+    // arrives is worse than declining it, because the client waits forever.
+    let ack = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/subscriptions/acknowledged",
+        "params": {
+            "_meta": { META_SUBSCRIPTION_ID: id.clone() },
+            "notifications": { "resourceSubscriptions": granted },
+        },
+    });
+    // Sent only when the subscription is torn down gracefully; an abrupt
+    // transport close carries no response.
+    let closed = JsonRpcResponse::success(
+        id.clone(),
+        serde_json::json!({
+            "resultType": "complete",
+            "_meta": { META_SUBSCRIPTION_ID: id.clone() },
+        }),
+    );
+    let stream_id = id.clone();
 
     let sse_stream = async_stream::stream! {
-        // First frame: the JSON-RPC subscribe acknowledgement.
+        // MUST be the first message carrying this subscription's id: the client
+        // correlates everything after it against this acknowledgement.
         if let Ok(data) = serde_json::to_string(&ack) {
             yield Ok::<SseEvent, std::convert::Infallible>(
                 SseEvent::default().event("message").data(data),
             );
         }
 
-        futures::pin_mut!(stream);
-        while let Some(notification) = stream.next().await {
+        let merged = futures::stream::select_all(streams.into_iter().map(Box::pin));
+        futures::pin_mut!(merged);
+        while let Some(notification) = merged.next().await {
+            // Every notification delivered on a listen stream MUST carry the
+            // subscription id, so a client multiplexing several streams over
+            // one stdio channel can tell them apart.
+            let mut params = serde_json::to_value(&notification)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(object) = params.as_object_mut() {
+                object.insert(
+                    "_meta".to_string(),
+                    serde_json::json!({ META_SUBSCRIPTION_ID: stream_id.clone() }),
+                );
+            }
             let frame = serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/resources/updated",
-                "params": notification,
+                "params": params,
             });
             if let Ok(data) = serde_json::to_string(&frame) {
                 yield Ok(SseEvent::default().event("message").data(data));
             }
+        }
+
+        if let Ok(data) = serde_json::to_string(&closed) {
+            yield Ok(SseEvent::default().event("message").data(data));
         }
     };
 

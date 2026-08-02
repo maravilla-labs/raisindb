@@ -309,6 +309,39 @@ export function getInitialRoute(): string {
   return hash.startsWith('#') ? hash.slice(1) : hash;
 }
 
+/**
+ * Origin of the RaisinDB instance that served this view
+ * (`https://host[:port]`), or `undefined` when it did not say.
+ *
+ * Correct in BOTH widget modes, which learn it differently:
+ * - `mode: html` — the view is rendered via `srcdoc` and has no useful
+ *   `location`, so the engine defines `window.__RAISIN_SERVER_ORIGIN__` in the
+ *   document before any other script. Safe to read at module scope; no
+ *   handshake required.
+ * - `mode: uri-list` — the host iframes a real URL on the server's own origin,
+ *   so `location.origin` already IS the answer and is used as the fallback.
+ *
+ * ALWAYS prefer this over a hardcoded origin for image URLs, `/resources`
+ * paths and reachability probes. A widget is authored once and installed on
+ * every deployment, so a baked-in origin is correct on exactly one of them:
+ * the Studio widget shipped with `http://localhost:8080` compiled in, worked
+ * for its author, and on the deployed instance probed something that was not
+ * the server — reporting itself unreachable while the MCP session underneath
+ * was healthy. The server's own origin is also always present in the widget's
+ * CSP `connectDomains`/`resourceDomains`, so requests to it are permitted.
+ */
+export function getServerOrigin(): string | undefined {
+  const win = widgetWindow() as
+    | (Window & { __RAISIN_SERVER_ORIGIN__?: unknown })
+    | undefined;
+  const declared = win?.__RAISIN_SERVER_ORIGIN__;
+  if (typeof declared === 'string' && declared) return declared;
+  // uri-list mode: same-origin with the server. `srcdoc` views report the
+  // opaque origin "null", which is not a usable base — reject it.
+  const own = win?.location?.origin;
+  return typeof own === 'string' && own && own !== 'null' ? own : undefined;
+}
+
 /** The complete tool-call arguments, once `ui/notifications/tool-input` arrived. */
 export function getToolInput(): Record<string, unknown> | undefined {
   return lastToolInput;

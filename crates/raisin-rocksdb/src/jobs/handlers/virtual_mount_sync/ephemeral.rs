@@ -32,10 +32,7 @@ pub async fn cleanup_expired(
     }
     batcher.flush().await?;
     if deleted > 0 {
-        tracing::info!(
-            deleted,
-            "ephemeral cleanup removed expired virtual nodes"
-        );
+        tracing::info!(deleted, "ephemeral cleanup removed expired virtual nodes");
     }
     Ok(deleted)
 }

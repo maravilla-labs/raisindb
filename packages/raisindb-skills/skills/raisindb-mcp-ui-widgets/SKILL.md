@@ -52,9 +52,23 @@ properties:
       name: order_card
       description: Show an order as a card.
       ui:
-        mode: html                          # html = Apps view. uri-list is
-                                            # reserved (spec's deferred
-                                            # externalUrl content type).
+        mode: html                          # html     = single file, served
+                                            #            inline; host renders
+                                            #            it via srcdoc.
+                                            # uri-list = multi-file app; host
+                                            #            iframes a real URL on
+                                            #            this server's origin,
+                                            #            so relative ./app.js
+                                            #            requests resolve.
+                                            # PREFER html: uri-list maps to the
+                                            # spec's `externalUrl`, which
+                                            # SEP-1865 DEFERS from the MVP, so
+                                            # a host may decline to render it.
+                                            # uri-list needs the server's
+                                            # public base (RAISINDB_BASE_URL or
+                                            # the request Host header) and a
+                                            # raisin:StaticSiteFolder ancestor
+                                            # for /resources to serve it.
         workspace: assets                   # workspace the entry resolves in;
                                             # defaults to the session workspace
                                             # (FIRST entry of data.workspaces)
@@ -62,10 +76,12 @@ properties:
         name: Order Card                    # resources/list display name
         description: Renders an order.
         prefersBorder: true
-        # csp: declare external origins the view needs. When OMITTED, the
-        # engine declares this server's own origin (derived from
-        # RAISINDB_BASE_URL or the request Host header) for connect+resource,
-        # so same-instance images/API calls work out of the box.
+        # csp: declare EXTERNAL origins the view needs. This server's own
+        # origin (from RAISINDB_BASE_URL or the request Host header) is ALWAYS
+        # added to connectDomains + resourceDomains — declaring a csp adds to
+        # that, it does not replace it. Never list your dev server here and
+        # expect it to mean "the server": it is one deployment's origin, and
+        # the same package installs on all of them.
         # csp:
         #   connectDomains: ["https://api.example.com"]
         #   resourceDomains: ["https://cdn.example.com"]
@@ -92,6 +108,7 @@ dist with `npm run build` there).
 | `onToolResult(cb)` | every `CallToolResult` the host delivers (initiating tool + view-initiated calls) |
 | `onToolInput(cb)` / `getToolInput()` | the initiating call's arguments |
 | `getInitiatingToolName()` | from `hostContext.toolInfo` — see pull fallback |
+| `getServerOrigin()` | origin of the RaisinDB instance serving this view. **Use this for every image URL, `/resources` path and reachability probe — NEVER hardcode one.** Works in both modes (engine-injected global under `html`, `location.origin` under `uri-list`) and needs no handshake, so it is safe at module scope |
 | `callTool(name, args)` | `tools/call` through the host; result also fans out to `onToolResult` |
 | `updateModelContext(content)` | push what the user did back into the conversation |
 | `openLink(url)` / `sendMessage(text)` | `ui/open-link` / `ui/message` |

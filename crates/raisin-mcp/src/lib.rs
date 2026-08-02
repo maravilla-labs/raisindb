@@ -90,10 +90,14 @@ pub use dispatch::Dispatcher;
 pub use error::{McpError, Result};
 pub use identity::{McpIdentity, TenantMode, DEFAULT_BRANCH, DEFAULT_WORKSPACE};
 pub use protocol::{
-    CallToolParams, CallToolResult, ContentBlock, InitializeParams, InitializeResult, JsonRpcError,
-    JsonRpcRequest, JsonRpcResponse, ListResourcesResult, ListToolsResult, ReadResourceParams,
-    ReadResourceResult, RequestId, ResourceUpdatedNotification, ServerCapabilities, ServerInfo,
-    SubscribeResourceParams, JSONRPC_VERSION, PROTOCOL_VERSION,
+    is_legacy_handshake, CallToolParams, CallToolResult, ContentBlock, DiscoverResult,
+    InitializeParams, InitializeResult, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    ListResourcesResult, ListToolsResult, ReadResourceParams, ReadResourceResult, RequestId,
+    RequestMeta, ResourceUpdatedNotification, ServerCapabilities, ServerInfo,
+    SubscribeResourceParams, SubscriptionFilter, SubscriptionsListenParams, CACHE_SCOPE_PRIVATE,
+    JSONRPC_VERSION, META_CLIENT_CAPABILITIES, META_CLIENT_INFO, META_PROTOCOL_VERSION,
+    META_SERVER_INFO, META_SUBSCRIPTION_ID, PROTOCOL_VERSION, RESULT_TYPE_COMPLETE,
+    SUPPORTED_PROTOCOL_VERSIONS, UI_EXTENSION_ID, UI_MIME_TYPE,
 };
 pub use registry::{
     assemble_for_slug, assemble_registry, discover_function_tools, resolve_server_descriptor,

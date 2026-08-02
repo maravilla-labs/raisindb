@@ -45,7 +45,7 @@ where
 
                 let node = parse_node_create_data(&parent_path, data)?;
                 let stmt = sql_generator::generate_insert(&workspace, &node);
-                let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
                 let engine_guard = engine.lock().await;
                 let mut stream = engine_guard.execute(&final_sql).await?;
@@ -80,7 +80,7 @@ where
 
             let node = parse_node_full_data(data)?;
             let stmt = sql_generator::generate_insert(&workspace, &node);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params);
+            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
             let mut stream = engine_guard.execute(&final_sql).await?;
@@ -108,7 +108,7 @@ where
 
             let node = parse_node_full_data(data)?;
             let stmt = sql_generator::generate_upsert(&workspace, &node);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params);
+            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
             let mut stream = engine_guard.execute(&final_sql).await?;
@@ -136,7 +136,7 @@ where
 
             let node = parse_node_full_data(data)?;
             let stmt = sql_generator::generate_upsert(&workspace, &node);
-            let final_sql = substitute_params(&stmt.sql, &stmt.params);
+            let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
 
             let engine_guard = engine.lock().await;
             let mut stream = engine_guard.execute(&final_sql).await?;

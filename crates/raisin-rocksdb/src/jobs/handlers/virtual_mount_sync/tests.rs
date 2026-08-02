@@ -474,16 +474,35 @@ async fn etag_skip_write_avoids_revision() {
         synced_at: Utc::now().to_rfc3339(),
     };
     let mut index = mat.load_index(&scope()).await.unwrap();
-    let wrote = upsert_one(&mat, &scope(), &mut index, "a", mapped.clone(), virt.clone()).await;
+    let wrote = upsert_one(
+        &mat,
+        &scope(),
+        &mut index,
+        "a",
+        mapped.clone(),
+        virt.clone(),
+    )
+    .await;
     assert!(wrote, "first upsert writes");
-    let again = upsert_one(&mat, &scope(), &mut index, "a", mapped.clone(), virt.clone()).await;
+    let again = upsert_one(
+        &mat,
+        &scope(),
+        &mut index,
+        "a",
+        mapped.clone(),
+        virt.clone(),
+    )
+    .await;
     assert!(!again, "same etag must skip the write");
 
     // The skip must also hold for an index freshly re-read from storage, not
     // just for the in-memory one this run mutated.
     let mut reloaded = mat.load_index(&scope()).await.unwrap();
     let third = upsert_one(&mat, &scope(), &mut reloaded, "a", mapped, virt).await;
-    assert!(!third, "same etag must still skip after reloading the index");
+    assert!(
+        !third,
+        "same etag must still skip after reloading the index"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1730,7 +1749,11 @@ async fn items_sharing_a_parent_folder_create_it_once() {
         .iter()
         .filter(|n| n.path == format!("{MOUNT_PATH}/thread-7"))
         .collect();
-    assert_eq!(folders.len(), 1, "the shared parent must exist exactly once");
+    assert_eq!(
+        folders.len(),
+        1,
+        "the shared parent must exist exactly once"
+    );
 }
 
 /// Siblings written in ONE transaction share one revision HLC, so the editorial
@@ -1761,7 +1784,11 @@ async fn siblings_in_one_batch_each_get_their_own_ordered_child_entry() {
     let mut ids: Vec<&str> = children.iter().map(|n| n.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 50, "no child may be duplicated by a label collision");
+    assert_eq!(
+        ids.len(),
+        50,
+        "no child may be duplicated by a label collision"
+    );
 }
 
 /// One bad item must not cost the batch.
@@ -1916,7 +1943,10 @@ async fn a_resync_of_unchanged_items_writes_nothing() {
 
     let after_first = sync_revision_count(&env).await;
     let mut reloaded = mat.load_index(&scope()).await.unwrap();
-    let stats = mat.apply_batch(&scope(), &mut reloaded, ops()).await.unwrap();
+    let stats = mat
+        .apply_batch(&scope(), &mut reloaded, ops())
+        .await
+        .unwrap();
 
     assert_eq!(stats.written, 0);
     assert_eq!(stats.skipped, 40);
@@ -2020,7 +2050,6 @@ async fn import_throughput() {
         n as f64 / elapsed.as_secs_f64()
     );
 }
-
 
 /// The BEFORE number for [`import_throughput`], reproducing the shape the engine
 /// had: one transaction per item, and a fresh full workspace read to locate each

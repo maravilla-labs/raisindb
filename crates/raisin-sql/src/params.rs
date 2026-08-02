@@ -33,6 +33,28 @@ use serde_json::Value as JsonValue;
 /// // Result: SELECT * FROM nodes WHERE id = 'abc123' AND name = 'John''s Document'
 /// ```
 pub fn substitute_params(sql: &str, params: &[JsonValue]) -> Result<String, Error> {
+    substitute_params_with(sql, params, &format_param_value)
+}
+
+/// [`substitute_params`] with caller-supplied literal formatting.
+///
+/// The placeholder SCANNER lives here and nowhere else. It reads `$` followed
+/// by every consecutive digit, so `$10` is one placeholder rather than `$1`
+/// followed by `0` — the distinction a naive `str::replace` per index gets
+/// wrong, because replacing `$1` first also rewrites the prefix of `$10`..`$19`
+/// and leaves a stray digit in the SQL. That failure is invisible below ten
+/// parameters, so it survives most test suites and only shows up in production
+/// on a long `IN (...)` list.
+///
+/// Only the rendering of a single value differs between callers (the functions
+/// runtime emits `ARRAY[...]` for a JSON array where the SQL layer emits a
+/// quoted JSON string), which is why the formatter is a parameter instead of
+/// each caller owning a copy of the scan.
+pub fn substitute_params_with(
+    sql: &str,
+    params: &[JsonValue],
+    format_value: &dyn Fn(&JsonValue) -> String,
+) -> Result<String, Error> {
     let mut result = String::with_capacity(sql.len() + params.len() * 20);
     let mut chars = sql.chars().peekable();
 
@@ -73,7 +95,7 @@ pub fn substitute_params(sql: &str, params: &[JsonValue]) -> Result<String, Erro
                 }
 
                 // Substitute the parameter value
-                let value_str = format_param_value(&params[array_idx]);
+                let value_str = format_value(&params[array_idx]);
                 result.push_str(&value_str);
             } else {
                 // Not a parameter, just a dollar sign

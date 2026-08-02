@@ -72,9 +72,9 @@ pub mod physical_plan;
 
 // Re-export commonly used items from raisin-sql
 pub use raisin_sql::{
-    parse_sql, substitute_params, AnalyzedQuery, AnalyzedStatement, Analyzer, Catalog, DataType,
-    LogicalPlan, Optimizer, OptimizerConfig, ParseError, PlanBuilder, PlanError, QueryPlan,
-    RaisinDialect, StaticCatalog,
+    parse_sql, substitute_params, substitute_params_with, AnalyzedQuery, AnalyzedStatement,
+    Analyzer, Catalog, DataType, LogicalPlan, Optimizer, OptimizerConfig, ParseError, PlanBuilder,
+    PlanError, QueryPlan, RaisinDialect, StaticCatalog,
 };
 
 // Re-export query engine and batch utilities

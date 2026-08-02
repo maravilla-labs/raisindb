@@ -63,7 +63,7 @@ where
                     // Check if parent exists
                     let check_stmt =
                         sql_generator::generate_select_by_path(&workspace, &current_path);
-                    let check_sql = substitute_params(&check_stmt.sql, &check_stmt.params);
+                    let check_sql = substitute_params(&check_stmt.sql, &check_stmt.params)?;
                     let mut stream = engine_guard.execute(&check_sql).await?;
 
                     let mut exists = false;
@@ -85,7 +85,7 @@ where
                             ..Default::default()
                         };
                         let insert_stmt = sql_generator::generate_insert(&workspace, &parent_node);
-                        let insert_sql = substitute_params(&insert_stmt.sql, &insert_stmt.params);
+                        let insert_sql = substitute_params(&insert_stmt.sql, &insert_stmt.params)?;
                         let mut insert_stream = engine_guard.execute(&insert_sql).await?;
                         while insert_stream.next().await.is_some() {}
                     }
@@ -93,7 +93,7 @@ where
 
                 // Create the actual node
                 let stmt = sql_generator::generate_insert(&workspace, &node);
-                let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
                 let mut stream = engine_guard.execute(&final_sql).await?;
                 while stream.next().await.is_some() {}
 
@@ -137,7 +137,7 @@ where
                         // Check if parent exists
                         let check_stmt =
                             sql_generator::generate_select_by_path(&workspace, &current_path);
-                        let check_sql = substitute_params(&check_stmt.sql, &check_stmt.params);
+                        let check_sql = substitute_params(&check_stmt.sql, &check_stmt.params)?;
                         let mut stream = engine_guard.execute(&check_sql).await?;
 
                         let mut exists = false;
@@ -161,7 +161,7 @@ where
                             let insert_stmt =
                                 sql_generator::generate_insert(&workspace, &parent_node);
                             let insert_sql =
-                                substitute_params(&insert_stmt.sql, &insert_stmt.params);
+                                substitute_params(&insert_stmt.sql, &insert_stmt.params)?;
                             let mut insert_stream = engine_guard.execute(&insert_sql).await?;
                             while insert_stream.next().await.is_some() {}
                         }
@@ -169,14 +169,14 @@ where
 
                     // Upsert the actual node
                     let stmt = sql_generator::generate_upsert(&workspace, &node);
-                    let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                    let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
                     let mut stream = engine_guard.execute(&final_sql).await?;
                     while stream.next().await.is_some() {}
                 } else {
                     // No parent needed, just upsert
                     let engine_guard = engine.lock().await;
                     let stmt = sql_generator::generate_upsert(&workspace, &node);
-                    let final_sql = substitute_params(&stmt.sql, &stmt.params);
+                    let final_sql = substitute_params(&stmt.sql, &stmt.params)?;
                     let mut stream = engine_guard.execute(&final_sql).await?;
                     while stream.next().await.is_some() {}
                 }

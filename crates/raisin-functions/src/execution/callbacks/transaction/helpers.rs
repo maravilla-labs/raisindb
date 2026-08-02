@@ -20,38 +20,7 @@ use raisin_models::nodes::Node;
 use raisin_sql_execution::Row;
 use serde_json::Value;
 
-/// Substitute $1, $2, etc. with actual parameter values.
-pub(crate) fn substitute_params(sql: &str, params: &[Value]) -> String {
-    let mut result = sql.to_string();
-    for (i, param) in params.iter().enumerate() {
-        let placeholder = format!("${}", i + 1);
-        let value_str = match param {
-            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "NULL".to_string(),
-            Value::Array(arr) => {
-                let items: Vec<String> = arr.iter().map(json_value_to_sql).collect();
-                format!("ARRAY[{}]", items.join(", "))
-            }
-            Value::Object(_) => {
-                format!("'{}'", param.to_string().replace('\'', "''"))
-            }
-        };
-        result = result.replace(&placeholder, &value_str);
-    }
-    result
-}
-
-fn json_value_to_sql(val: &Value) -> String {
-    match val {
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "NULL".to_string(),
-        _ => format!("'{}'", val.to_string().replace('\'', "''")),
-    }
-}
+pub(crate) use crate::execution::callbacks::sql_params::substitute_params;
 
 /// Convert a SQL Row to a JSON object, stripping workspace prefixes from column names.
 ///

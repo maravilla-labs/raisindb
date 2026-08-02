@@ -115,6 +115,7 @@ pub struct NodeResourceProvider {
     backend: Arc<dyn FunctionApi>,
     events: Option<SharedEventSource>,
     assets: Option<SharedAssetReader>,
+    exposed_workspaces: Vec<String>,
 }
 
 impl NodeResourceProvider {
@@ -124,7 +125,28 @@ impl NodeResourceProvider {
             backend,
             events: None,
             assets: None,
+            exposed_workspaces: Vec::new(),
         }
+    }
+
+    /// The workspaces this server exposes as resources — the server
+    /// descriptor's `data.workspaces`.
+    ///
+    /// Without this the provider admits only the session's ACTIVE workspace,
+    /// which is `data.workspaces` first entry. `resources/list` advertises a
+    /// root for EVERY declared workspace, so every root after the first was
+    /// advertised and then refused on read:
+    ///
+    /// ```text
+    /// Unauthorized: workspace mismatch: resource `assets` not in session scope `stories`
+    /// ```
+    ///
+    /// A server must not offer what it will not serve. Leaving this empty keeps
+    /// the old active-workspace-only behaviour, so a caller that does not set it
+    /// is unaffected.
+    pub fn with_exposed_workspaces(mut self, workspaces: Vec<String>) -> Self {
+        self.exposed_workspaces = workspaces;
+        self
     }
 
     /// Attach an event source, enabling [`subscribe`](Self::subscribe).
@@ -177,10 +199,37 @@ impl NodeResourceProvider {
 
     /// Read a single resource by URI for the given identity.
     ///
-    /// The URI's workspace must match the caller's active workspace.
+    /// The URI's workspace must be one this server exposes (see
+    /// [`check_workspace`](Self::check_workspace)).
+    ///
+    /// A workspace ROOT (`raisin://{ws}/`) reads as a LISTING of its top-level
+    /// children, not as a node. There is no node at `/`, so the plain
+    /// `node_get` this used to do could only ever 404 — while `resources/list`
+    /// advertises exactly those roots, describing them as "Browse nodes in the
+    /// `{ws}` workspace by path". Every advertised root was therefore
+    /// unopenable: the resource showed up in the client and failed when
+    /// clicked. Listing is what "browse" was already promising.
     pub async fn read(&self, identity: &McpIdentity, uri: &str) -> Result<ResourceContents> {
         let (workspace, path) = parse_resource_uri(uri)?;
         self.check_workspace(identity, &workspace)?;
+
+        if is_root_path(&path) {
+            let children = self
+                .backend
+                .node_get_children(&workspace, "/", CHILDREN_PAGE_LIMIT)
+                .await?;
+            let listing = serde_json::json!({
+                "workspace": workspace,
+                "path": "/",
+                "children": children,
+            });
+            return Ok(ResourceContents {
+                uri: uri.to_string(),
+                mime_type: "application/json".to_string(),
+                text: Some(serde_json::to_string(&listing)?),
+                blob: None,
+            });
+        }
 
         let node: Option<Value> = self.backend.node_get(&workspace, &path).await?;
         let value =
@@ -228,16 +277,44 @@ impl NodeResourceProvider {
         }))
     }
 
-    /// Reject reads / subscriptions that cross out of the session's workspace.
+    /// Reject reads / subscriptions for workspaces this server does not expose.
+    ///
+    /// Permitted set = the declared `data.workspaces` (see
+    /// [`with_exposed_workspaces`](Self::with_exposed_workspaces)), falling back
+    /// to the session's active workspace when none were declared. RLS still
+    /// applies underneath every read; this gate only decides which workspaces
+    /// the SERVER offers, and it must agree with what `resources/list`
+    /// advertises or the server refuses its own listing.
     fn check_workspace(&self, identity: &McpIdentity, workspace: &str) -> Result<()> {
-        if workspace != identity.workspace {
+        let permitted = if self.exposed_workspaces.is_empty() {
+            workspace == identity.workspace
+        } else {
+            self.exposed_workspaces.iter().any(|w| w == workspace)
+        };
+        if !permitted {
+            let scope = if self.exposed_workspaces.is_empty() {
+                identity.workspace.clone()
+            } else {
+                self.exposed_workspaces.join(", ")
+            };
             return Err(McpError::unauthorized(format!(
-                "workspace mismatch: resource `{workspace}` not in session scope `{}`",
-                identity.workspace
+                "workspace mismatch: resource `{workspace}` not in session scope `{scope}`"
             )));
         }
         Ok(())
     }
+}
+
+/// How many children a workspace-root listing returns.
+///
+/// A root read is a browse entry point, not a bulk export; an unbounded listing
+/// of a large workspace would be both slow and useless in a client that renders
+/// it as one blob. Callers that need more use the data tools, which paginate.
+const CHILDREN_PAGE_LIMIT: Option<u32> = Some(200);
+
+/// Whether `path` addresses the workspace root rather than a node.
+fn is_root_path(path: &str) -> bool {
+    path.is_empty() || path == "/"
 }
 
 /// Normalize a path into a prefix used for subtree matching (no trailing slash).
@@ -258,5 +335,63 @@ fn change_path_matches(change: &NodeChange, prefix: &str) -> bool {
     match change.path.as_deref() {
         Some(path) => path == prefix || path.starts_with(&format!("{prefix}/")),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod exposure_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn backend() -> Arc<dyn FunctionApi> {
+        Arc::new(raisin_functions::api::MockFunctionApi::new(
+            serde_json::json!({}),
+        ))
+    }
+
+    fn provider(exposed: &[&str]) -> NodeResourceProvider {
+        // `check_workspace` and `is_root_path` are pure; the backend is never
+        // reached by these assertions, so the mock API is enough to pin the
+        // gate itself.
+        NodeResourceProvider::new(backend())
+            .with_exposed_workspaces(exposed.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn every_declared_workspace_is_readable_not_just_the_active_one() {
+        // The regression: `resources/list` advertises a root per declared
+        // workspace while reads admitted only `identity.workspace`, which is
+        // `data.workspaces` FIRST entry — so Studio advertised stories/tags/
+        // assets and refused two of the three with
+        // "workspace mismatch: resource `assets` not in session scope `stories`".
+        let identity = McpIdentity::anonymous("repo").with_workspace("stories");
+        let p = provider(&["stories", "tags", "assets"]);
+        for ws in ["stories", "tags", "assets"] {
+            assert!(
+                p.check_workspace(&identity, ws).is_ok(),
+                "{ws} must be readable"
+            );
+        }
+        assert!(
+            p.check_workspace(&identity, "secrets").is_err(),
+            "an undeclared workspace must still be refused"
+        );
+    }
+
+    #[test]
+    fn no_declaration_falls_back_to_the_active_workspace() {
+        let identity = McpIdentity::anonymous("repo").with_workspace("stories");
+        let p = NodeResourceProvider::new(backend());
+        assert!(p.check_workspace(&identity, "stories").is_ok());
+        assert!(p.check_workspace(&identity, "tags").is_err());
+    }
+
+    #[test]
+    fn workspace_roots_are_recognised_as_listings() {
+        // A root has no node behind it, so reading one as a node could only
+        // 404 — which is what made every advertised root unopenable.
+        assert!(is_root_path("/"));
+        assert!(is_root_path(""));
+        assert!(!is_root_path("/blueprints"));
     }
 }

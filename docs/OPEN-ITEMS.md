@@ -811,9 +811,23 @@ caller fed that back into `get_embedding` as a node id, so an HNSW rebuild repop
 index. Fixed by routing through `parse_key`, the parser `get_embedding` already shares. Unrelated
 to forking; the fork test is simply what exercised the listing path.
 
-**Also open, deliberately not fixed:** `GRAPH_PROJECTION` is *configuration*, not a derived cache,
-so a fork loses its projection configs. Its branch component sits at key part 3 while the copier
-rewrites part 2. Classified in the registry with this reason.
+**`GRAPH_PROJECTION`: NOT a gap — the earlier note was wrong on both counts.** It was recorded here
+as "*configuration*, not a derived cache, so a fork loses its projection configs". Investigated and
+disproved:
+
+* A projection **config** is a `raisin:GraphAlgorithmConfig` NODE under
+  `/raisin:access_control/graph-config/` (`graph/config/mod.rs` loads them from there). Nodes fork,
+  so configs already survive a fork. Nothing was being lost.
+* The CF itself stores a `PersistedProjection` — node list, edge list, optional weights, revision,
+  `stale` flag. That is derived adjacency. `BackgroundCompute::recompute_for_branch` does a **full
+  build** whenever the load misses or the revision does not match HEAD, so an absent projection is
+  never an empty answer, only a recompute.
+
+Skipping it is therefore correct on the merits, not a compromise forced by the part-3 key layout.
+Copying it would spend fork time and the size of a whole edge list on data the next recompute
+regenerates. Both halves are pinned by
+`branch_fork_index_copies_test::a_fork_inherits_graph_configs_but_not_the_derived_projection`,
+and the registry entry now records the real reason.
 
 **Judgement call recorded:** `EMBEDDINGS` was added to the copy set on correctness grounds. It is
 the one entry that materially increases fork cost on an embedding-heavy repo. Flipping it to
@@ -977,3 +991,31 @@ admin login now emits a replication operation. That is acceptable — logins are
 human-rate event, unlike API-key validation, which is why `last_used_at`
 deliberately stays node-local (§2.106) — but `last_login` is a LWW register and
 will flap if the same account signs in on two nodes.
+
+### 2.117 [P2] A filtered SELECT on a schema table silently returns zero rows
+
+`SELECT ... FROM Archetypes WHERE name = 'news:ArticlePage'` returns **nothing**,
+with no error. The same query without the `WHERE` returns every row.
+
+Only `PhysicalPlan::TableScan` dispatches into `execute_schema_table_scan`
+(`scan_executors/table_scan.rs`), which is what reads the type registry. The
+physical planner has no notion of a schema table, so any predicate it can serve
+from an index diverts the read: an equality on `name` — the primary key of all
+four schema tables — plans a `PropertyIndexScan` on `__name` against the
+**content** property index, which holds nothing for a type registry.
+
+Confirmed by
+`planner::tests::schema_table_equality_on_primary_key_diverts_off_the_schema_reader`,
+which pins the current behaviour precisely because the public reference
+documents it as a rule ("full-table SELECTs only"). That test fails the moment
+the planner is fixed, which is the prompt to delete the rule from
+`docs/reference/sql/schema-tables.md` in the website repo.
+
+**The fix** is to make the planner schema-table aware — `SchemaTableKind::from_table_name(table).is_some()`
+forces a `TableScan` and leaves the predicate as a pushed-down filter, which
+`execute_schema_table_scan` already evaluates per row (it takes a `filter`
+argument and applies it against the full row). So only the planner side is
+missing; the executor has supported this all along.
+
+Not fixed here because it changes plan selection for a reserved table name, and
+the documented workaround (read all, filter client-side) is correct today.

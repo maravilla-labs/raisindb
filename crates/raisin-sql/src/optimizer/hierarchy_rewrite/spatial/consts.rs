@@ -46,6 +46,22 @@ pub fn const_geometry(expr: &TypedExpr) -> Option<Value> {
                 "ST_GEOMFROMGEOJSON" | "ST_GEOMFROMTEXT" if args.len() == 1 => {
                     const_geometry(&args[0])
                 }
+                // Altitude does not move a position horizontally, and both FORCE
+                // functions preserve x/y and the SRID — so for the purpose of
+                // picking an access path they fold to their inner geometry.
+                //
+                // This is what makes `ST_3DDWITHIN(g, ST_FORCE3D(ST_POINT(..), z), d)`
+                // index-eligible: `ST_FORCE3D` is the ONLY way to write a 3-D
+                // constant point, because `ST_POINT` / `ST_MAKEPOINT` both reject
+                // a third argument at run time. Without folding it the centre is
+                // not a constant geometry and the whole predicate falls back to a
+                // full scan.
+                //
+                // Dropping the Z here is safe precisely because the 2-D ring is
+                // only ever a candidate filter: `ST_3DDWITHIN` is never marked
+                // exact, so the altitude test is always re-applied per row.
+                "ST_FORCE2D" if args.len() == 1 => const_geometry(&args[0]),
+                "ST_FORCE3D" if args.len() == 2 => const_geometry(&args[0]),
                 // Metadata-only on the coordinates — but the LABEL matters, and
                 // dropping it here was a silent-wrong-answer bug: the spatial
                 // index is keyed on WGS84 lon/lat, so

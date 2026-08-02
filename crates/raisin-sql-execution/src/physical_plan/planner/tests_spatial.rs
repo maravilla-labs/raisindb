@@ -1163,3 +1163,74 @@ fn a_projection_without_the_spatial_columns_plans_no_annotation() {
         plan.describe()
     );
 }
+
+// ── ST_3DDWITHIN takes the 2-D access path, but never exactly ──────────────
+
+/// `ST_3DDWITHIN(g, <const>, d)` with a 3-ordinate centre.
+fn dwithin_3d(property: &str, lon: f64, lat: f64, z: f64, radius: f64) -> TypedExpr {
+    let center = func(
+        "ST_FORCE3D",
+        vec![st_point(lon, lat), TypedExpr::literal(Literal::Double(z))],
+        DataType::Geometry,
+    );
+    func(
+        "ST_3DDWITHIN",
+        vec![
+            geom_source(property),
+            center,
+            TypedExpr::literal(Literal::Double(radius)),
+        ],
+        DataType::Boolean,
+    )
+}
+
+/// A 3D proximity test must narrow through the 2-D index.
+///
+/// Horizontal distance is never greater than 3D distance, so the cell ring of
+/// radius `d` is a conservative superset — it cannot drop a row the 3D predicate
+/// would have kept. Before this, `ST_3DDWITHIN` was not recognised at all and a
+/// tracking query over altitude read the whole workspace.
+#[test]
+fn a_3d_proximity_test_still_drives_the_spatial_scan() {
+    let planner = planner_with(ready(vec![11, 10, 9, 8, 7, 6, 4, 2]));
+    let plan = planner
+        .plan(&filtered(dwithin_3d("position", 8.54, 47.37, 400.0, 500.0)))
+        .unwrap();
+
+    assert!(
+        matches!(leaf(&plan), PhysicalPlan::SpatialDistanceScan { .. }),
+        "ST_3DDWITHIN should narrow through the 2-D index, got {}",
+        plan.describe()
+    );
+}
+
+/// ...and the predicate must SURVIVE, because the index cannot answer altitude.
+///
+/// This is the half that makes the narrowing safe. Stripping it would return
+/// every row within `d` on the ground regardless of altitude — silently wrong
+/// results, which is strictly worse than the full scan it replaced.
+#[test]
+fn a_3d_proximity_test_is_never_stripped_from_the_plan() {
+    let planner = planner_with(ready(vec![11, 10, 9, 8, 7, 6, 4, 2]));
+    let plan = planner
+        .plan(&filtered(dwithin_3d("position", 8.54, 47.37, 400.0, 500.0)))
+        .unwrap();
+
+    assert!(
+        has_spatial_residual_filter(&plan),
+        "ST_3DDWITHIN must be re-applied above the scan — the 2-D index cannot \
+         answer the altitude component: {}",
+        plan.describe()
+    );
+}
+
+/// A plain 2-D `ST_DWITHIN` must still be strippable — the 3D change must not
+/// pessimise the common case into always carrying a residual filter.
+#[test]
+fn the_2d_predicate_is_still_exact_after_the_3d_change() {
+    let planner = planner_with(ready(vec![11, 10, 9, 8, 7, 6, 4, 2]));
+    let plan = planner
+        .plan(&filtered(dwithin("location", 8.54, 47.37, 500.0)))
+        .unwrap();
+    assert!(!has_spatial_residual_filter(&plan));
+}

@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::batch::SyncBatcher;
 use super::config::{ChangesPage, MountState};
-use super::{stage_item, persist_state, AdapterError, SyncCtx};
+use super::{persist_state, stage_item, AdapterError, SyncCtx};
 
 /// Run a delta sync, updating `state.last_sync_token` as pages complete.
 pub async fn run(
