@@ -24,7 +24,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use raisin_binary::BinaryStorage;
-use raisin_core::definitions::{DefinitionResolver, PackageSource};
+use raisin_core::definitions::{DefinitionResolver, PackageDefinition, PackageSource};
 use raisin_events::{Event, EventHandler, RepositoryEventKind};
 use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
@@ -101,9 +101,22 @@ where
             "Found repositories to scan for builtin packages"
         );
 
+        // Resolve the definition stack ONCE for the whole scan. `packages()`
+        // walks the embedded package tree and SHA256s every byte of it (~16 MB,
+        // dominated by ai-tools' static assets), so calling it per repository
+        // multiplied that hashing by the repository count for no benefit — the
+        // embedded/overlay content cannot change mid-scan. Mirrors
+        // `resync_system_definitions`, which already hoists `nodetypes()` /
+        // `workspaces()` out of its per-repo loop.
+        let builtin_packages = self.definitions.packages();
+
         for repo_info in repos {
             if let Err(e) = self
-                .install_builtin_packages(&repo_info.tenant_id, &repo_info.repo_id)
+                .install_resolved_packages(
+                    &builtin_packages,
+                    &repo_info.tenant_id,
+                    &repo_info.repo_id,
+                )
                 .await
             {
                 error!(
@@ -120,20 +133,35 @@ where
         Ok(())
     }
 
-    /// Install all builtin packages for a repository
+    /// Install all builtin packages for a repository.
+    ///
+    /// Resolves the definition stack for this one repository. Callers that loop
+    /// over many repositories should resolve once and use
+    /// [`Self::install_resolved_packages`] instead — resolution re-hashes the
+    /// whole embedded package tree.
     async fn install_builtin_packages(&self, tenant_id: &str, repo_id: &str) -> Result<()> {
+        // Resolved builtin packages with their content hashes — an overlay copy
+        // of a package shadows the embedded one by name.
+        let builtin_packages = self.definitions.packages();
+        self.install_resolved_packages(&builtin_packages, tenant_id, repo_id)
+            .await
+    }
+
+    /// Install an already-resolved set of builtin packages into a repository.
+    async fn install_resolved_packages(
+        &self,
+        builtin_packages: &[PackageDefinition],
+        tenant_id: &str,
+        repo_id: &str,
+    ) -> Result<()> {
         info!(
             tenant_id = tenant_id,
             repo_id = repo_id,
             "Installing builtin packages"
         );
 
-        // Resolved builtin packages with their content hashes — an overlay copy
-        // of a package shadows the embedded one by name.
-        let builtin_packages = self.definitions.packages();
-
         for package in builtin_packages {
-            let package_info = package.info;
+            let package_info = &package.info;
             // Opt-out packages (e.g. the heavy provider connector adapters) are
             // still REGISTERED on boot — so they appear in the Integrations
             // gallery and can be installed on demand — but their content is NOT
