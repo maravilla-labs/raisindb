@@ -1019,3 +1019,53 @@ missing; the executor has supported this all along.
 
 Not fixed here because it changes plan selection for a reserved table name, and
 the documented workaround (read all, filter client-side) is correct today.
+
+### 2.118 [Docs] A PGQ label is a loose selector unless you quote it
+
+**Not a defect. Recorded because the behaviour is easy to misread.**
+
+`matches_label` (`raisin-sql-execution/.../pgq/matching/mod.rs`) accepts a label
+when the node type equals it OR ends with `":" + label`, case-insensitively. The
+suffix arm is deliberate ("Support both exact match and suffix match") and is
+what lets a query name a local type without hardcoding a package prefix.
+
+Node types are namespaced, so in a repository holding both `news:Article` and
+`studio:Article`:
+
+| spelling | result |
+|---|---|
+| `(n:Article)` | matches BOTH — the suffix arm |
+| ``(n:`news:Article`)`` | matches exactly one — backtick-quoted identifiers reach the exact-match arm |
+| `(n:news:Article)` | parse error — `news` lexes as the label, the second `:` is unexpected |
+| `(n:Article) WHERE n.node_type = 'news:Article'` | matches exactly one |
+
+So the precise form IS available in the label position; only the *unquoted*
+qualified spelling fails, which is a lexing consequence rather than a missing
+capability. `parse_identifier` already accepts backtick-quoted identifiers
+containing anything but a backtick.
+
+A proposal to infer the namespace from a PascalCase run (`NewsArticle` →
+`news:Article`) was considered and rejected: it is ambiguous against a genuine
+multi-word local type. `news:ArticlePage` is legitimately written `(n:ArticlePage)`
+today, and the heuristic would re-read that as `article:Page`, breaking working
+queries to add a capability backticks already provide unambiguously.
+
+Pinned by
+`pgq_paths_rocksdb::a_bare_label_matches_every_namespace_and_a_quoted_one_does_not`,
+which asserts all four rows of that table.
+
+### 2.119 [P3] A single-node PGQ pattern cannot see an isolated node
+
+`MATCH (n)` and `MATCH (n:Label)` are documented as "match all nodes". They do
+not: `match_single_node` (`pgq/matching/single_node.rs`) scans the RELATION
+index and collects nodes from the source and target positions of the relations
+it finds, so a node participating in no relationship is invisible.
+
+Found while writing 2.118 — two freshly created nodes returned zero rows until
+an edge was added between them, which looked like a label bug and was not.
+
+For a graph query this is defensible (a node with no edges is arguably not in
+the graph), but "match all nodes" is the wrong description of it, in the code
+comment and in the public reference. Either the docs should say "every node that
+participates in at least one relationship", or the pattern should fall back to a
+node scan when it carries no relationship element.

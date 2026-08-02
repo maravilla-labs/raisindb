@@ -92,6 +92,35 @@ fn public_pgq_doc_examples_parse() {
         ));
     }
 
+    // Node patterns: a label is the node type's LOCAL name. The namespaced
+    // spelling is a parse error, which the reference now warns about.
+    ok("GRAPH_TABLE(MATCH (n:Article) COLUMNS (n.title))");
+    rejected("GRAPH_TABLE(MATCH (n:news:Article) COLUMNS (n.title))");
+
+    // Inline WHERE inside a pattern is rejected on purpose — it used to parse
+    // into a field nothing read, so the predicate vanished and the query
+    // returned unfiltered rows. The reference documents the MATCH-level form.
+    rejected("GRAPH_TABLE(MATCH (n:Page WHERE n.status = 'published') COLUMNS (n.title))");
+    ok("GRAPH_TABLE(MATCH (n:Page) WHERE n.status = 'published' COLUMNS (n.title))");
+
+    // From packages/raisindb-skills/skills/raisindb-sql/SKILL.md — a skill that
+    // teaches syntax the parser rejects is the same failure as a doc that does.
+    ok("GRAPH_TABLE(MATCH (a:`news:Article`) COLUMNS (a.title))");
+    ok("GRAPH_TABLE(MATCH ANY CHEAPEST p = (a:Stop)-[r:route COST r.weight]->{1,8}(b:Stop) \
+        COLUMNS (path_length(p) AS hops))");
+    ok("GRAPH_TABLE(MATCH (a:Article)-[:continues]->{1,3}(b:Article) COLUMNS (b.title))");
+    ok("GRAPH_TABLE(MATCH (a:Article)-[:continues*1..3]->(b:Article) COLUMNS (b.title))");
+
+    // From the studio-getting-started skill: the "related via shared tag" shape
+    // that is the reason to reach for GRAPH_TABLE at all.
+    ok("GRAPH_TABLE(MATCH (a:Article)-[:`tagged-with`]->(t:Tag)<-[:`tagged-with`]-(b:Article) \
+        COLUMNS (b.name))");
+
+    // A hyphenated relation type MUST be backticked: the regular identifier
+    // rule is alphanumeric + underscore, so `tagged-with` would stop at the
+    // hyphen. Both skills carried the unbackticked spelling in places.
+    rejected("GRAPH_TABLE(MATCH (a:Article)-[:tagged-with]->(t:Tag) COLUMNS (t.name))");
+
     // NOTE: `COLUMNS (p)` deliberately PARSES. A bare path variable is rejected
     // later, at validation, by `path_accessors::path_is_not_selectable`, whose
     // message names the accessors — proven end to end by

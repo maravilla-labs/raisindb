@@ -30,6 +30,7 @@ mod limit_pushdown_tests;
 mod locks_sql_test;
 mod pagination_navigation_tests;
 mod path_like_prefix_scan;
+mod pgq_paths_rocksdb;
 mod pgq_rls;
 mod profiling_test;
 mod references_compose_tests;

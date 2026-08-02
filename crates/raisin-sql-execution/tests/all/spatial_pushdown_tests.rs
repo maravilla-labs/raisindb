@@ -38,22 +38,23 @@
 //!
 //! # A note on the geometry-argument spelling
 //!
-//! These queries write the geometry argument as
-//! `CAST(properties->>'location' AS GEOMETRY)`, because that is the only one of
-//! the three spellings that survives ANALYSIS today:
+//! All THREE spellings of the geometry argument analyse and return the same
+//! rows today, proven by `both_geometry_spellings_return_the_same_rows`:
 //!
-//! * `ST_DWITHIN(properties->>'location', ...)` fails with
-//!   `Function not found: ST_DWITHIN(TEXT?, GEOMETRY, DOUBLE)` — `Text -> Geometry`
-//!   is in the explicit-cast table but not in the implicit coercion ladder, and no
-//!   registered `ST_*` signature accepts `Text`.
-//! * `ST_DWITHIN(location, ...)` — the spelling the website documents — fails with
-//!   `Column not found: <ws>.location`, because a geometry stored in `properties`
-//!   is not a declared column of the workspace schema.
+//! * `CAST(properties->>'location' AS GEOMETRY)` — explicit, used by most tests
+//!   in this module;
+//! * `properties->>'location'` — the JSON extraction with no cast;
+//! * `location` — the bare name, which is what the public reference and the
+//!   `raisindb-sql` skill use throughout.
 //!
-//! Both are signature/analysis gaps, not planner gaps: the planner's
-//! `extract_geometry_source` handles all three forms identically. They are worth
-//! fixing, because a documented spelling that does not analyse is its own kind of
-//! silent failure.
+//! This header previously stated that only the CAST form survived analysis and
+//! that the other two failed. That was true when written and is not now. It is
+//! called out because the claim was load-bearing: it made the documented
+//! spelling look broken, and a stale "the docs are wrong" note is its own kind
+//! of trap.
+//!
+//! The planner's `extract_geometry_source` has always handled all three
+//! identically.
 
 use futures::StreamExt;
 use raisin_models::nodes::properties::PropertyValue;
@@ -748,4 +749,368 @@ async fn a_revision_scoped_spatial_query_avoids_the_pruned_index() {
          nothing has changed"
     );
     assert_eq!(head_rows, vec!["mid".to_string(), "near".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// ST_3DDWITHIN — the ROWS, not the plan
+// ---------------------------------------------------------------------------
+//
+// `ST_3DDWITHIN` now reuses the 2-D `ST_DWITHIN` access path: the cell ring of
+// radius `d` is a conservative superset, because horizontal distance is never
+// greater than 3D distance. That narrowing is only safe while the predicate
+// SURVIVES as a residual filter, so the altitude component is still applied per
+// candidate row.
+//
+// `planner/tests_spatial.rs` asserts the plan keeps the filter. It cannot
+// assert that the filter then EXCLUDES anything — which is the half that turns
+// "we now use the index" into "we now return the wrong rows". These tests are
+// that half.
+//
+// These run against the REAL index path, not the fallback: `QueryEngine` wires
+// `storage.spatial_state()` into the catalog, and a SQL insert of a geometry
+// calls `ensure_for_write`, which creates the state record. So the planner sees
+// a built index and picks `SpatialDistanceScan` — which
+// `st_3ddwithin_uses_the_index_and_still_excludes_by_altitude` asserts via
+// EXPLAIN in the same test that checks the rows, so the access path and the
+// answer are pinned together rather than in two tests that could drift.
+
+/// Insert a sensor carrying a 3-D geometry: `[lon, lat, altitude]`.
+async fn insert_sensor(
+    engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>,
+    name: &str,
+    lon: f64,
+    lat: f64,
+    altitude: f64,
+) {
+    let sql = format!(
+        "INSERT INTO '{WS}' (id, path, node_type, properties) VALUES \
+         ('{name}','/{name}','test:Shop', \
+          '{{\"location\":{{\"type\":\"Point\",\"coordinates\":[{lon},{lat},{altitude}]}},\
+             \"floor\":\"L1\"}}'::JSONB)"
+    );
+    let mut stream = engine
+        .execute(&sql)
+        .await
+        .unwrap_or_else(|e| panic!("insert failed [{sql}]: {e}"));
+    while let Some(row) = stream.next().await {
+        row.unwrap_or_else(|e| panic!("insert row error: {e}"));
+    }
+}
+
+/// Three sensors at the SAME horizontal position, differing only in altitude.
+///
+/// Horizontally every one of them is a candidate for any radius, so whatever
+/// separates them in the result set can only be the altitude component.
+async fn seed_altitudes(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>) {
+    insert_sensor(engine, "ground", CENTER_LON, CENTER_LAT, 0.0).await;
+    insert_sensor(engine, "low", CENTER_LON, CENTER_LAT, 100.0).await;
+    insert_sensor(engine, "high", CENTER_LON, CENTER_LAT, 5_000.0).await;
+}
+
+/// THE regression this guards. All three sensors are horizontally identical, so
+/// a 3D radius of 200 m must keep exactly the two within 200 m vertically.
+///
+/// If the predicate were stripped once the index was chosen, every row inside
+/// the horizontal ring would come back and `high` — 5 km straight up — would
+/// appear. That is the silent-wrong-answer this pairing exists to prevent.
+#[tokio::test]
+async fn st_3ddwithin_excludes_rows_that_are_only_far_in_altitude() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let rows = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+        ),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        rows,
+        vec!["ground".to_string(), "low".to_string()],
+        "altitude must still filter after the 2-D index narrows the candidates \
+         — 'high' is 5 km up and horizontally identical, so its presence would \
+         mean the residual filter was dropped",
+    );
+}
+
+/// The 2-D and 3-D predicates must disagree exactly where altitude says so.
+///
+/// Same centre, same radius, same rows on the ground: `ST_DWITHIN` takes all
+/// three, `ST_3DDWITHIN` takes two. If they ever agreed here, the 3D predicate
+/// would be doing nothing.
+#[tokio::test]
+async fn the_3d_predicate_is_strictly_stronger_than_the_2d_one() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let flat = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_POINT({CENTER_LON}, {CENTER_LAT}), 200)"
+        ),
+    )
+    .await
+    .expect("2D query must not error");
+
+    let solid = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+        ),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        flat,
+        vec!["ground".to_string(), "high".to_string(), "low".to_string()],
+        "horizontally all three are within 200 m",
+    );
+    assert!(
+        solid.len() < flat.len(),
+        "the 3D predicate must be strictly stronger than the 2-D one, got \
+         2D={flat:?} 3D={solid:?}",
+    );
+}
+
+/// Raising the query altitude changes WHICH rows match — the altitude of the
+/// centre is genuinely read, not ignored.
+///
+/// A centre at 5000 m must select `high` and reject the two near the ground:
+/// the exact inverse of the ground-level query over identical data.
+#[tokio::test]
+async fn the_query_altitude_selects_a_different_row_set() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let rows = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 5000), 200)"
+        ),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        rows,
+        vec!["high".to_string()],
+        "a centre 5 km up must match only the sensor at that altitude — if the \
+         centre's Z were dropped this would return the ground-level rows",
+    );
+}
+
+/// A 2-D geometry has no altitude, and must not be silently treated as z = 0.
+///
+/// This pins the mixed-dimension case: the rows are the ordinary 2-D shops, and
+/// the query is a 3D one. Whatever the answer is, it must not error and must not
+/// return a row the plain 2-D predicate would exclude.
+#[tokio::test]
+async fn a_3d_predicate_over_2d_data_stays_within_the_2d_answer() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed(&engine).await;
+
+    let flat = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("2D query must not error");
+
+    let solid = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 500)"
+        ),
+    )
+    .await
+    .expect("3D query over 2-D data must not error");
+
+    for name in &solid {
+        assert!(
+            flat.contains(name),
+            "the 3D predicate returned {name}, which the 2-D predicate excludes \
+             — the horizontal ring is supposed to be a SUPERSET of the answer, \
+             so this direction can never be wider: 2D={flat:?} 3D={solid:?}",
+        );
+    }
+}
+
+/// THE gap this closes: the index path and the answer, pinned in ONE test.
+///
+/// Everything else about `ST_3DDWITHIN` is proven in two halves that can drift.
+/// `planner/tests_spatial.rs` says the plan is a `SpatialDistanceScan` carrying
+/// a residual filter; the row tests above say altitude excludes the right
+/// sensors. Neither says those two things happen *at the same time* — and the
+/// dangerous state is exactly the one where the index is chosen and the filter
+/// is not applied, because that returns a superset silently.
+///
+/// So: assert EXPLAIN picked the index, then assert the rows, over the same
+/// engine and the same data.
+#[tokio::test]
+async fn st_3ddwithin_uses_the_index_and_still_excludes_by_altitude() {
+    let (storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    // Precondition: the geometry write built the index state the planner reads.
+    // Without this the assertions below would pass for the wrong reason — a
+    // fallback scan also returns the right rows.
+    assert!(
+        !spatial_precisions(&storage, "location").is_empty(),
+        "the SQL insert must have created the spatial state record, otherwise \
+         this test silently degrades into a fallback-scan test",
+    );
+
+    let predicate = format!(
+        "ST_3DDWITHIN(CAST(properties->>'location' AS GEOMETRY), \
+         ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+    );
+
+    let plan = explain(
+        &engine,
+        &format!("EXPLAIN SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await;
+    assert!(
+        plan.contains("SpatialDistanceScan"),
+        "ST_3DDWITHIN must narrow through the 2-D index — the horizontal ring is \
+         a conservative superset, so there is no reason to scan. Plan was:\n{plan}"
+    );
+
+    let rows = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        rows,
+        vec!["ground".to_string(), "low".to_string()],
+        "the index was used AND altitude still excluded the sensor 5 km up. \
+         Returning 'high' here would be the silent superset: index chosen, \
+         residual filter dropped. Plan was:\n{plan}"
+    );
+}
+
+/// The index path and the fallback path must agree on the same data.
+///
+/// A differential check: the same 3D question asked with the index available
+/// and asked at a historical revision (which the planner routes off the index)
+/// must produce identical rows. This is the shape that catches an index that is
+/// subtly *incomplete* rather than absent — the fallback is the reference
+/// answer.
+#[tokio::test]
+async fn the_3d_index_path_agrees_with_the_fallback_path() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let predicate = format!(
+        "ST_3DDWITHIN(CAST(properties->>'location' AS GEOMETRY), \
+         ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+    );
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+
+    let indexed = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await
+    .expect("indexed query");
+
+    // A revision-scoped read is deliberately routed off the pruned index.
+    let scanned = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE __revision = {now_ms} AND {predicate}"),
+    )
+    .await
+    .expect("fallback query");
+
+    assert_eq!(
+        indexed, scanned,
+        "the index path and the row scan must agree — everything was seeded \
+         before this revision, so only the ACCESS PATH differs",
+    );
+    assert_eq!(indexed, vec!["ground".to_string(), "low".to_string()]);
+}
+
+/// The geometry-argument spelling: both forms work, and must AGREE.
+///
+/// The module header above says only `CAST(properties->>'…' AS GEOMETRY)`
+/// survives analysis and that a bare column fails. That is no longer true — the
+/// bare `location` spelling, which the RaisinDB SQL skill and the website both
+/// use throughout, analyses fine.
+///
+/// What matters is that it returns the SAME rows. A spelling that analysed but
+/// resolved to NULL would return zero rows silently, which is the worst outcome
+/// and precisely what this module exists to catch.
+#[tokio::test]
+async fn both_geometry_spellings_return_the_same_rows() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed(&engine).await;
+
+    let cast_form = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("the CAST spelling must analyse");
+
+    let bare_form = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' \
+             WHERE ST_DWITHIN(location, ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("the bare-column spelling must analyse — it is what the docs use");
+
+    assert_eq!(
+        bare_form, cast_form,
+        "the two documented spellings must return identical rows; a bare column \
+         that resolved to NULL would return zero rows with no error",
+    );
+    assert_eq!(cast_form, vec!["mid".to_string(), "near".to_string()]);
+
+    // The third spelling: the JSON extraction with no cast.
+    let uncast = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               properties->>'location', ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("the uncast spelling analyses too");
+
+    assert_eq!(
+        uncast, cast_form,
+        "all three spellings must agree; the module header used to claim only \
+         the CAST form analysed, and that is no longer true",
+    );
 }

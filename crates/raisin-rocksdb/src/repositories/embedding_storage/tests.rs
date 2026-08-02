@@ -280,3 +280,97 @@ fn test_job_lifecycle() {
     let retrieved = job_store.get(&job.job_id).unwrap();
     assert!(retrieved.is_none());
 }
+
+/// An embedding for `source_id`, so a test can seed several distinct nodes.
+fn embedding_for(source_id: &str, vector: Vec<f32>) -> EmbeddingData {
+    EmbeddingData {
+        source_id: source_id.to_string(),
+        vector,
+        ..create_test_embedding()
+    }
+}
+
+/// THE contract every caller depends on: what `list_embeddings` returns must be
+/// feedable straight back into `get_embedding`.
+///
+/// `list_embeddings` used to read the source id out of key part 4 with its own
+/// hand-rolled split. That is the node_id slot in the LEGACY key layout, but in
+/// the v2 layout `store_embedding` actually writes, part 4 is the EMBEDDER HASH.
+/// So it returned a list of embedder hashes, and this round trip returned `None`
+/// for every entry.
+///
+/// That is not a cosmetic bug: `management/vector.rs` rebuilds the HNSW index by
+/// walking exactly this list and calling `get_embedding` on each id, so the
+/// rebuild re-added NOTHING and left an empty index behind — silently, since a
+/// miss is indistinguishable from "no embedding for this node".
+#[test]
+fn listed_ids_can_be_fetched_back() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+    let revision = HLC::now();
+
+    for (id, vector) in [
+        ("node-a", vec![0.1, 0.2, 0.3]),
+        ("node-b", vec![0.4, 0.5, 0.6]),
+    ] {
+        storage
+            .store_embedding("t", "r", "main", "ws", id, &revision, &embedding_for(id, vector))
+            .unwrap();
+    }
+
+    let listed = storage.list_embeddings("t", "r", "main", "ws").unwrap();
+
+    let mut ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["node-a".to_string(), "node-b".to_string()],
+        "list_embeddings must return NODE IDS — a list of embedder hashes would \
+         also be non-empty, which is why the rebuild failed silently",
+    );
+
+    for (node_id, revision) in &listed {
+        let fetched = storage
+            .get_embedding("t", "r", "main", "ws", node_id, Some(revision))
+            .unwrap();
+        assert!(
+            fetched.is_some(),
+            "'{node_id}' came out of list_embeddings but get_embedding cannot \
+             find it — this is exactly the round trip the HNSW rebuild performs",
+        );
+    }
+}
+
+/// One row per node, not one per embedder.
+///
+/// The old dedup compared each key with the PREVIOUS one, which only works if
+/// every entry for a node is adjacent. Two embedders sort into separate key
+/// ranges, so the same node reappears far apart — and because the id being
+/// compared was the embedder hash, a whole workspace collapsed to one row per
+/// embedder instead.
+#[test]
+fn a_node_embedded_by_two_embedders_is_listed_once() {
+    let db = create_test_db();
+    let storage = RocksDBEmbeddingStorage::new(db);
+    let revision = HLC::now();
+
+    let mut first = embedding_for("node-a", vec![0.1, 0.2, 0.3]);
+    first.embedder_id = raisin_ai::config::EmbedderId::new("openai", "model-one", 3);
+    let mut second = embedding_for("node-a", vec![0.4, 0.5, 0.6]);
+    second.embedder_id = raisin_ai::config::EmbedderId::new("ollama", "model-two", 3);
+
+    storage
+        .store_embedding("t", "r", "main", "ws", "node-a", &revision, &first)
+        .unwrap();
+    storage
+        .store_embedding("t", "r", "main", "ws", "node-a", &revision, &second)
+        .unwrap();
+
+    let listed = storage.list_embeddings("t", "r", "main", "ws").unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "one node embedded twice must appear once, got {listed:?}",
+    );
+    assert_eq!(listed[0].0, "node-a");
+}
