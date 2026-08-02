@@ -382,13 +382,18 @@ async fn a_rebuild_stamps_entries_at_the_node_revision_not_the_job_revision() ->
 
     // Exactly what the enqueuer stamps: wall-clock now, which is AHEAD of the head
     // because the head only moves when something is written.
-    let job_revision = HLC::new(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64,
-        0,
-    );
+    //
+    // Clamped to at least one millisecond past the head. An HLC compares by
+    // (timestamp_ms, counter), and this literal carries counter 0 — so whenever
+    // the setup writes above landed in the SAME millisecond as this call, the
+    // head holds a higher counter and the precondition loses a race it was never
+    // meant to run. That made the test fail on roughly half of fast-machine runs
+    // and, worse, skip the behaviour it exists to check.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let job_revision = HLC::new(now_ms.max(head.timestamp_ms + 1), 0);
     assert!(
         job_revision > head,
         "precondition: the job revision is ahead of the branch head ({job_revision:?} vs {head:?})"
