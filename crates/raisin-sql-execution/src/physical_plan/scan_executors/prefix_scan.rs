@@ -148,12 +148,6 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
             // Goes through the editorial-order index so each row carries its
             // `__order` label, and so a `__order > cursor` keyset filter and a
             // LIMIT can be pushed all the way down into the index seek.
-            let list_options = if let Some(rev) = max_revision.as_ref() {
-                raisin_storage::ListOptions::at_revision(*rev)
-            } else {
-                raisin_storage::ListOptions::for_sql()
-            };
-
             // The ordering index keys root-level children under "/" rather than
             // under a node id.
             let parent_id = if parent_dir == "/" {
@@ -174,84 +168,129 @@ pub async fn execute_prefix_scan<S: Storage + 'static>(
                 }
             };
 
-            let nodes = match parent_id {
-                Some(parent_id) => {
-                    tracing::debug!(
-                        "   Listing direct children of parent '{}' (cursor={:?}, limit={:?}, descending={})",
-                        parent_id, order_cursor, scan_limit, order_descending
-                    );
-                    storage
-                        .nodes()
-                        .list_by_parent_page(
-                            StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
-                            &parent_id,
-                            order_cursor.as_ref().and_then(|c| c.label()),
-                            scan_limit,
-                            order_descending,
-                            list_options,
-                        )
-                        .await?
-                }
-                None => Vec::new(),
-            };
-
-            tracing::info!("   PrefixScan found {} direct children", nodes.len());
-
+            // Paged refill.
+            //
+            // `scan_limit` is now the query's EXACT limit, not a 200k buffer, so
+            // the index seek stops after that many children. But rows can still
+            // be dropped ABOVE the seek — RLS denies a node, a node fails to
+            // load, `path == "/"` is skipped — and a bounded page would then
+            // return short. So when a full page comes back and we are still
+            // under the limit, fetch the next one, driving the cursor from the
+            // last order label seen. This is the contract documented on
+            // `list_by_parent_paged_impl`: page size is not a row count.
+            let mut page_cursor: Option<String> = order_cursor
+                .as_ref()
+                .and_then(|c| c.label())
+                .map(|label| label.to_string());
             let mut emitted = 0usize;
 
-            for (node, order_label) in nodes {
-                if let Some(lim) = limit {
-                    if emitted >= lim {
-                        tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                        break;
-                    }
-                }
-
-                safety_scanned += 1;
-
-                if safety_scanned > SCAN_COUNT_CEILING {
-                    tracing::warn!("PrefixScan count limit reached: {} nodes checked", safety_scanned);
-                    break;
-                }
-
-                if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
-                    tracing::warn!("PrefixScan time limit reached: {:?} elapsed, {} nodes checked",
-                                   start_time.elapsed(), safety_scanned);
-                    break;
-                }
-
-                if node.path == "/" {
-                    continue;
-                }
-
-                // Apply RLS filtering
-                let node = if let Some(ref auth) = ctx_clone.auth_context {
-                    let scope = PermissionScope::new(&workspace, &branch);
-                    match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision.as_ref()).await {
-                        Some(n) => n,
-                        None => continue,
-                    }
+            'pages: while parent_id.is_some() {
+                let list_options = if let Some(rev) = max_revision.as_ref() {
+                    raisin_storage::ListOptions::at_revision(*rev)
                 } else {
-                    node
+                    raisin_storage::ListOptions::for_sql()
                 };
 
-                let order_ctx = OrderContext::label(&order_label);
+                let nodes = match parent_id.as_ref() {
+                    Some(parent_id) => {
+                        tracing::debug!(
+                            "   Listing direct children of parent '{}' (cursor={:?}, limit={:?}, descending={})",
+                            parent_id, page_cursor, scan_limit, order_descending
+                        );
+                        storage
+                            .nodes()
+                            .list_by_parent_page(
+                                StorageScope::new(&tenant_id, &repo_id, &branch, &workspace),
+                                parent_id,
+                                page_cursor.as_deref(),
+                                scan_limit,
+                                order_descending,
+                                list_options,
+                            )
+                            .await?
+                    }
+                    None => Vec::new(),
+                };
 
-                for locale in &locales_to_use {
-                    let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
-                        Some(n) => n,
-                        None => continue,
-                    };
+                let fetched = nodes.len();
+                tracing::info!("   PrefixScan found {} direct children", fetched);
 
-                    let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
-                    yield row;
-                    emitted += 1;
+                if fetched == 0 {
+                    break 'pages;
+                }
+
+                for (node, order_label) in nodes {
                     if let Some(lim) = limit {
                         if emitted >= lim {
                             tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
-                            break;
+                            break 'pages;
                         }
                     }
+
+                    // Advance the cursor for every entry examined, including ones
+                    // filtered out below — otherwise a page whose rows are all
+                    // denied would re-request the same page forever.
+                    page_cursor = Some(order_label.clone());
+
+                    safety_scanned += 1;
+
+                    if safety_scanned > SCAN_COUNT_CEILING {
+                        tracing::warn!("PrefixScan count limit reached: {} nodes checked", safety_scanned);
+                        break 'pages;
+                    }
+
+                    if safety_scanned % TIME_CHECK_INTERVAL == 0 && start_time.elapsed() > SCAN_TIME_LIMIT {
+                        tracing::warn!("PrefixScan time limit reached: {:?} elapsed, {} nodes checked",
+                                       start_time.elapsed(), safety_scanned);
+                        break 'pages;
+                    }
+
+                    if node.path == "/" {
+                        continue;
+                    }
+
+                    // Apply RLS filtering
+                    let node = if let Some(ref auth) = ctx_clone.auth_context {
+                        let scope = PermissionScope::new(&workspace, &branch);
+                        match crate::physical_plan::scan_executors::helpers::rls_filter_node_graph(&*storage, node, auth, &scope, &tenant_id, &repo_id, &branch, max_revision.as_ref()).await {
+                            Some(n) => n,
+                            None => continue,
+                        }
+                    } else {
+                        node
+                    };
+
+                    let order_ctx = OrderContext::label(&order_label);
+
+                    for locale in &locales_to_use {
+                        let translated_node = match resolve_node_for_locale(node.clone(), &ctx_clone, locale).await? {
+                            Some(n) => n,
+                            None => continue,
+                        };
+
+                        let row = node_to_row(&translated_node, &qualifier, &workspace, &projection, &ctx_clone, locale, Some(&order_ctx)).await?;
+                        yield row;
+                        emitted += 1;
+                        if let Some(lim) = limit {
+                            if emitted >= lim {
+                                tracing::debug!("PrefixScan early termination: reached limit of {}", lim);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Another page is worth fetching only when the query is bounded,
+                // we came up short of that bound, and this page was full. A short
+                // page means the index is exhausted, so stop regardless.
+                match (limit, scan_limit) {
+                    (Some(lim), Some(page_size)) if emitted < lim && fetched >= page_size => {
+                        tracing::debug!(
+                            "PrefixScan refill: {} of {} rows survived filtering, fetching next page",
+                            emitted, lim
+                        );
+                    }
+                    _ => break 'pages,
                 }
             }
         } else if !is_directory_prefix {

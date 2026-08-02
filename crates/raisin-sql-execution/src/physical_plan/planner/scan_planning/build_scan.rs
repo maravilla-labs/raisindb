@@ -192,6 +192,16 @@ impl PhysicalPlanner {
             };
             let remaining_filter = self.combine_canonical_predicates(&remaining);
 
+            // This scan emits in property-index key order, which satisfies no
+            // ORDER BY the query might have asked for, and a residual filter can
+            // discard rows above it. Bounding it in either case truncates the
+            // wrong rows or returns short. See `build_reference_scan`.
+            let pushed_limit = if context.has_no_ordering() && remaining_filter.is_none() {
+                context.limit
+            } else {
+                None
+            };
+
             let mut scan = PhysicalPlan::PropertyIndexScan {
                 tenant_id: self.default_tenant_id.to_string(),
                 repo_id: self.default_repo_id.to_string(),
@@ -202,7 +212,7 @@ impl PhysicalPlanner {
                 property_name: prop_name,
                 property_value: prop_value,
                 projection,
-                limit: context.limit,
+                limit: pushed_limit,
             };
 
             if let Some(filter_expr) = remaining_filter {
@@ -490,6 +500,23 @@ impl PhysicalPlanner {
 
         let remaining_filter = self.combine_canonical_predicates(&remaining);
 
+        // The reverse-reference index is ordered by SOURCE NODE ID, which is
+        // arbitrary with respect to any ORDER BY the query asked for. Bounding
+        // this scan is therefore only safe when nothing above it re-orders or
+        // discards rows:
+        //
+        //   * an ORDER BY means the top-k must be chosen AFTER sorting, so
+        //     truncating here returns an arbitrary subset (this is how
+        //     `REFERENCES(..) ORDER BY published_at DESC LIMIT 200` came to
+        //     return 200 referrers in UUID order rather than the newest 200);
+        //   * a residual filter (DESCENDANT_OF, node_type, ...) discards rows
+        //     above the scan, so an exact bound returns short.
+        let pushed_limit = if context.has_no_ordering() && remaining_filter.is_none() {
+            context.limit
+        } else {
+            None
+        };
+
         let mut scan = PhysicalPlan::ReferenceIndexScan {
             tenant_id: self.default_tenant_id.to_string(),
             repo_id: self.default_repo_id.to_string(),
@@ -500,7 +527,7 @@ impl PhysicalPlanner {
             target_workspace: target_workspace.to_string(),
             target_path: target_path.to_string(),
             projection,
-            limit: context.limit,
+            limit: pushed_limit,
         };
 
         if let Some(filter_expr) = remaining_filter {
@@ -704,7 +731,19 @@ impl PhysicalPlanner {
             lower_bound,
             upper_bound,
             ascending,
-            limit: context.limit,
+            // Emits in property-index order, which no ORDER BY above is known to
+            // accept — a Sort/TopN would then re-sort a truncated, arbitrary set.
+            //
+            // NOTE: the executor passes this straight to `scan_property_range`,
+            // so it bounds the FETCH, before the residual filter and RLS run.
+            // A residual filter can therefore still return short here. That is
+            // pre-existing and is fixed by the over-fetch-and-refill work, not
+            // by this guard.
+            limit: if context.has_no_ordering() {
+                context.limit
+            } else {
+                None
+            },
         };
 
         Ok(scan)
@@ -758,7 +797,13 @@ impl PhysicalPlanner {
             lower_bound: Some((lower_value, true)),
             upper_bound: Some((upper_value, false)),
             ascending: true,
-            limit: context.limit,
+            // See build_property_range_scan: prefix order satisfies no ORDER BY
+            // the query asked for, so bounding under one truncates arbitrarily.
+            limit: if context.has_no_ordering() {
+                context.limit
+            } else {
+                None
+            },
         };
 
         Ok(scan)

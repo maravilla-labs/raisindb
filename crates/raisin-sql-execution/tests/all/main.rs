@@ -25,6 +25,7 @@ mod group_by_json_extraction;
 mod hash_join_integration_tests;
 mod is_distinct_from;
 mod join_property_tests;
+mod limit_pushdown_tests;
 mod locks_sql_test;
 mod pagination_navigation_tests;
 mod path_like_prefix_scan;

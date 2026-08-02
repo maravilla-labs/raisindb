@@ -1,0 +1,333 @@
+//! LIMIT must bound the scan, and must never truncate in the wrong order.
+//!
+//! Two defects motivated these tests, both invisible to the existing suites:
+//!
+//!  1. `set_scan_limit` overwrote the planner's exact limit with a 200_000
+//!     constant, so `LIMIT 10` asked storage for 200_000 children. The pushdown
+//!     that `CHILD_OF` planning computes was therefore inert.
+//!  2. `plan_limit` planned the child of an `ORDER BY … LIMIT` with a context
+//!     whose `order_by` was `None`. A scan then believed there was no ORDER BY,
+//!     claimed its OWN order, bounded itself in that order, and the TopN above
+//!     sorted the wrong k rows.
+//!
+//! (2) is a correctness bug: it returns wrong rows, not just slowly. The
+//! existing coverage missed both because it only ever ran ordered queries over
+//! fixtures smaller than the limit, where truncation cannot be observed.
+
+use futures::StreamExt;
+use raisin_models::nodes::Node;
+use raisin_sql_execution::{QueryEngine, StaticCatalog};
+use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tempfile::TempDir;
+
+const TENANT: &str = "test_tenant";
+const REPO: &str = "test_repo";
+const BRANCH: &str = "main";
+const WS: &str = "menu";
+
+async fn create_test_storage() -> (Arc<raisin_rocksdb::RocksDBStorage>, TempDir) {
+    use raisin_storage::BranchRepository;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let storage = raisin_rocksdb::RocksDBStorage::new(temp_dir.path())
+        .expect("Failed to create RocksDB storage");
+
+    let _ = storage
+        .branches()
+        .create_branch(TENANT, REPO, BRANCH, "test-user", None, None, false, false)
+        .await;
+
+    (Arc::new(storage), temp_dir)
+}
+
+fn engine(
+    storage: Arc<raisin_rocksdb::RocksDBStorage>,
+) -> QueryEngine<raisin_rocksdb::RocksDBStorage> {
+    let mut catalog = StaticCatalog::default_nodes_schema();
+    catalog.register_workspace(WS.to_string());
+    QueryEngine::new(
+        storage,
+        TENANT.to_string(),
+        REPO.to_string(),
+        BRANCH.to_string(),
+    )
+    .with_catalog(Arc::new(catalog))
+}
+
+fn scope() -> StorageScope<'static> {
+    StorageScope::new(TENANT, REPO, BRANCH, WS)
+}
+
+async fn create_node(storage: &Arc<raisin_rocksdb::RocksDBStorage>, node: Node) {
+    storage
+        .nodes()
+        .create(
+            scope(),
+            node,
+            CreateNodeOptions {
+                validate_parent_allows_child: false,
+                validate_workspace_allows_type: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Failed to create node");
+}
+
+fn node(id: &str, path: &str, parent: &str) -> Node {
+    Node {
+        id: id.to_string(),
+        path: path.to_string(),
+        name: path.rsplit('/').next().unwrap_or(path).to_string(),
+        parent: Some(parent.to_string()),
+        node_type: "raisin:Folder".to_string(),
+        properties: HashMap::new(),
+        ..Default::default()
+    }
+}
+
+/// `/menu` with children created in editorial order `item-00 .. item-{n-1}`,
+/// but NAMED so that alphabetical order is the exact REVERSE of editorial order.
+///
+/// That inversion is what makes the ORDER BY bug observable: a scan that bounds
+/// in editorial order and then sorts by name yields the alphabetically LAST
+/// items, never the first.
+async fn seed_inverted(storage: &Arc<raisin_rocksdb::RocksDBStorage>, n: usize) {
+    create_node(storage, node("menu", "/menu", "/")).await;
+    for i in 0..n {
+        // Editorial position i ⇒ name descends as i ascends.
+        let name = format!("item-{:02}", n - 1 - i);
+        create_node(
+            storage,
+            node(&format!("item{i:02}"), &format!("/menu/{name}"), "menu"),
+        )
+        .await;
+    }
+}
+
+async fn query_column(
+    engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>,
+    sql: &str,
+    column: &str,
+) -> Vec<String> {
+    let mut stream = engine.execute(sql).await.expect("query should execute");
+    let mut out = Vec::new();
+    while let Some(row) = stream.next().await {
+        let row = row.expect("row should decode");
+        let value = row
+            .columns
+            .iter()
+            .find(|(key, _)| key.rsplit('.').next() == Some(column))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "column '{column}' missing; row keys: {:?}",
+                    row.columns.keys().collect::<Vec<_>>()
+                )
+            });
+        out.push(match value {
+            raisin_models::nodes::properties::PropertyValue::String(s) => s,
+            other => format!("{other:?}"),
+        });
+    }
+    out
+}
+
+async fn explain(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>, sql: &str) -> String {
+    let mut stream = engine.execute(sql).await.expect("explain should execute");
+    let row = stream
+        .next()
+        .await
+        .expect("explain should yield a row")
+        .expect("explain row should decode");
+    match row.columns.get("QUERY PLAN") {
+        Some(raisin_models::nodes::properties::PropertyValue::String(plan)) => plan.clone(),
+        other => panic!("unexpected EXPLAIN output: {other:?}"),
+    }
+}
+
+/// The regression: `LIMIT 10` must reach the scan as 10, not as a 200_000
+/// constant. A `CHILD_OF` scan with no ORDER BY emits editorial order, which is
+/// the documented default, so nothing above it can reorder or discard rows and
+/// the exact bound is safe.
+#[tokio::test]
+async fn child_of_limit_reaches_the_scan_exactly() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 50).await;
+    let engine = engine(storage.clone());
+
+    let plan = explain(
+        &engine,
+        "EXPLAIN SELECT name FROM 'menu' WHERE CHILD_OF('/menu') LIMIT 10",
+    )
+    .await;
+
+    assert!(
+        plan.contains("limit=10"),
+        "LIMIT 10 must be pushed into the PrefixScan as 10; plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("200000"),
+        "the scan must not be bounded by the SCAN_LIMIT_BUFFER constant; plan:\n{plan}"
+    );
+}
+
+/// An unbounded query must stay unbounded — the pushdown must not invent a limit.
+#[tokio::test]
+async fn child_of_without_limit_is_not_bounded() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 20).await;
+    let engine = engine(storage.clone());
+
+    let names = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu')",
+        "name",
+    )
+    .await;
+
+    assert_eq!(
+        names.len(),
+        20,
+        "every child must be returned without a LIMIT"
+    );
+}
+
+/// Correctness: `ORDER BY name LIMIT k` must return the k alphabetically-first
+/// children, NOT the first k in editorial order re-sorted among themselves.
+///
+/// The fixture inverts the two orderings, so the buggy plan returns the
+/// alphabetically LAST k — a result that can never overlap the correct answer.
+#[tokio::test]
+async fn order_by_name_limit_returns_the_alphabetically_first_rows() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 50).await;
+    let engine = engine(storage.clone());
+
+    let names = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY name LIMIT 5",
+        "name",
+    )
+    .await;
+
+    assert_eq!(
+        names,
+        vec![
+            "item-00".to_string(),
+            "item-01".to_string(),
+            "item-02".to_string(),
+            "item-03".to_string(),
+            "item-04".to_string(),
+        ],
+        "ORDER BY name LIMIT 5 must return the alphabetically first five"
+    );
+}
+
+/// The same hazard in the other direction: `ORDER BY name DESC LIMIT k`.
+#[tokio::test]
+async fn order_by_name_desc_limit_returns_the_alphabetically_last_rows() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 50).await;
+    let engine = engine(storage.clone());
+
+    let names = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY name DESC LIMIT 3",
+        "name",
+    )
+    .await;
+
+    assert_eq!(
+        names,
+        vec![
+            "item-49".to_string(),
+            "item-48".to_string(),
+            "item-47".to_string(),
+        ],
+        "ORDER BY name DESC LIMIT 3 must return the alphabetically last three"
+    );
+}
+
+/// `ORDER BY __order LIMIT k` — the one ordering a CHILD_OF scan genuinely
+/// satisfies — must still return the first k in editorial order, and should not
+/// need a Sort above the scan.
+#[tokio::test]
+async fn order_by_editorial_order_limit_is_bounded_and_correct() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 30).await;
+    let engine = engine(storage.clone());
+
+    let names = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') ORDER BY __order LIMIT 4",
+        "name",
+    )
+    .await;
+
+    // Editorial order is creation order, and the fixture names descend as
+    // editorial position ascends.
+    assert_eq!(
+        names,
+        vec![
+            "item-29".to_string(),
+            "item-28".to_string(),
+            "item-27".to_string(),
+            "item-26".to_string(),
+        ],
+        "ORDER BY __order LIMIT 4 must return the first four in editorial order"
+    );
+}
+
+/// A LIMIT larger than the child count must return everything, not pad or
+/// truncate — the refill loop must terminate when the index is exhausted.
+#[tokio::test]
+async fn limit_larger_than_child_count_returns_all_rows() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 7).await;
+    let engine = engine(storage.clone());
+
+    let names = query_column(
+        &engine,
+        "SELECT name FROM 'menu' WHERE CHILD_OF('/menu') LIMIT 100",
+        "name",
+    )
+    .await;
+
+    assert_eq!(names.len(), 7, "LIMIT above the row count returns all rows");
+}
+
+/// Paging with LIMIT/OFFSET over a bounded scan must not drop or duplicate rows.
+/// The scan is bounded to `limit + offset`, so an off-by-one in the refill loop
+/// shows up here as a short or overlapping page.
+#[tokio::test]
+async fn limit_offset_pages_cover_every_child_exactly_once() {
+    let (storage, _tmp) = create_test_storage().await;
+    seed_inverted(&storage, 25).await;
+    let engine = engine(storage.clone());
+
+    let mut seen = Vec::new();
+    for offset in (0..25).step_by(5) {
+        let page = query_column(
+            &engine,
+            &format!("SELECT name FROM 'menu' WHERE CHILD_OF('/menu') LIMIT 5 OFFSET {offset}"),
+            "name",
+        )
+        .await;
+        assert_eq!(page.len(), 5, "page at offset {offset} should be full");
+        seen.extend(page);
+    }
+
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        25,
+        "paging must cover all 25 children exactly once; got {} rows, {} unique",
+        seen.len(),
+        unique.len()
+    );
+}

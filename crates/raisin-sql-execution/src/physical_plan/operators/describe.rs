@@ -37,8 +37,17 @@ impl PhysicalPlan {
                     format!("TableFunction: {}", name)
                 }
             }
-            PhysicalPlan::PrefixScan { path_prefix, .. } => {
-                format!("PrefixScan: prefix={}", path_prefix)
+            PhysicalPlan::PrefixScan {
+                path_prefix, limit, ..
+            } => {
+                // Surface the bound the scan actually got. Without it an
+                // unbounded scan and a `LIMIT 10` scan render identically, which
+                // is precisely how a LIMIT that never reached storage stayed
+                // invisible in EXPLAIN.
+                match limit {
+                    Some(n) => format!("PrefixScan: prefix={} limit={}", path_prefix, n),
+                    None => format!("PrefixScan: prefix={}", path_prefix),
+                }
             }
             PhysicalPlan::PropertyIndexScan {
                 property_name,

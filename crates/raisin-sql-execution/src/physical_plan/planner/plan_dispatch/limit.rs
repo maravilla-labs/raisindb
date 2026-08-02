@@ -51,9 +51,39 @@ impl PhysicalPlanner {
                 }
 
                 // Use TopN optimization (fallback for ORDER BY ... LIMIT)
-                let topn_context = PlanContext::with_limit(limit);
+                //
+                // The child MUST be planned with the ORDER BY still in context.
+                // A bare `with_limit` tells every scan below "there is no ORDER
+                // BY", so a scan claims its OWN order, bounds itself in that
+                // order, and the TopN above then sorts the wrong k rows — e.g.
+                // `CHILD_OF('/x') ORDER BY name LIMIT 10` would return the first
+                // ten children in EDITORIAL order, sorted by name. This mirrors
+                // the propagation in the `LogicalPlan::Sort` arm, which exists
+                // for exactly this reason.
+                let mut topn_context = PlanContext::with_limit(limit);
+                if let Some(first_sort) = sort_exprs.first() {
+                    let is_asc = first_sort.ascending;
+                    topn_context = topn_context.with_order_by_expr(first_sort.expr.clone(), is_asc);
+                    if let Some(column_name) = Self::extract_column_name(&first_sort.expr) {
+                        topn_context = topn_context.with_order_by(column_name, is_asc);
+                    }
+                }
+
+                let input_plan = self.plan_with_context(sort_input, &topn_context)?;
+
+                // The scan already emits the requested order, so re-sorting is
+                // pure cost. A plain Limit preserves both the order and the bound.
+                if Self::sort_is_satisfied_by_scan(sort_exprs, &input_plan) {
+                    tracing::info!("⚡ Eliding TopN: scan already emits the requested order");
+                    return Ok(PhysicalPlan::Limit {
+                        input: Box::new(input_plan),
+                        limit,
+                        offset: 0,
+                    });
+                }
+
                 return Ok(PhysicalPlan::TopN {
-                    input: Box::new(self.plan_with_context(sort_input, &topn_context)?),
+                    input: Box::new(input_plan),
                     sort_exprs: sort_exprs.clone(),
                     limit,
                 });
@@ -96,7 +126,7 @@ impl PhysicalPlanner {
     /// Returns `Some(Limit { ... })` when the pushdown succeeded, `None` when
     /// no pushable scan was found (the caller should emit a regular Limit).
     fn try_push_limit_into_scan(plan: &mut PhysicalPlan, limit: usize) -> Option<PhysicalPlan> {
-        if Self::set_scan_limit(plan, limit) {
+        if Self::set_scan_limit(plan, limit, false) {
             // Take ownership through a swap so we can wrap in Limit
             let mut owned = PhysicalPlan::Empty;
             std::mem::swap(plan, &mut owned);
@@ -109,10 +139,21 @@ impl PhysicalPlanner {
         None
     }
 
-    /// Attempt to set `SCAN_LIMIT_BUFFER` on a scan operator anywhere in the
-    /// physical plan subtree (direct scan, filter-wrapped, or
-    /// project-wrapped).  Returns `true` if a scan was found and mutated.
-    fn set_scan_limit(plan: &mut PhysicalPlan, limit: usize) -> bool {
+    /// Attempt to bound a scan operator anywhere in the physical plan subtree
+    /// (direct scan, filter-wrapped, or project-wrapped).  Returns `true` if a
+    /// scan was found and mutated.
+    ///
+    /// `filtered` becomes true once the walk crosses a `Filter`, i.e. rows can be
+    /// discarded ABOVE the scan. An exact bound is unsafe there — the scan would
+    /// hand up fewer rows than the query asked for — so those keep the
+    /// conservative buffer. With no filter in between, the query's own `limit`
+    /// IS the correct bound.
+    ///
+    /// This must never RAISE a bound the planner already chose. `build_child_of_scan`
+    /// and friends compute an exact, order-aware limit; overwriting it with a
+    /// large constant is what made LIMIT pushdown inert — the planner asked
+    /// storage for 10 children and this function changed it to 200_000.
+    fn set_scan_limit(plan: &mut PhysicalPlan, limit: usize, filtered: bool) -> bool {
         match plan {
             // Pattern 1: Direct scans
             PhysicalPlan::PropertyIndexScan {
@@ -131,27 +172,34 @@ impl PhysicalPlanner {
                 limit: ref mut scan_limit,
                 ..
             } => {
-                *scan_limit = Some(SCAN_LIMIT_BUFFER);
+                let candidate = if filtered { SCAN_LIMIT_BUFFER } else { limit };
+                let bounded = match *scan_limit {
+                    Some(existing) => existing.min(candidate),
+                    None => candidate,
+                };
+                *scan_limit = Some(bounded);
                 tracing::debug!(
-                    "Pushed LIMIT {} (buffered to {}) into {} (direct)",
+                    "Bounded scan to {} (query LIMIT {}, filtered={})",
+                    bounded,
                     limit,
-                    SCAN_LIMIT_BUFFER,
-                    plan.describe()
+                    filtered
                 );
                 true
             }
 
-            // Pattern 2: Project-wrapped scans (including Project { Filter { Scan } })
+            // Pattern 2: Project-wrapped scans (including Project { Filter { Scan } }).
+            // A projection never discards rows, so an exact bound stays exact.
             PhysicalPlan::Project {
                 input: project_input,
                 ..
-            } => Self::set_scan_limit(project_input, limit),
+            } => Self::set_scan_limit(project_input, limit, filtered),
 
-            // Pattern 3: Filter-wrapped scans
+            // Pattern 3: Filter-wrapped scans. Rows can be dropped above the
+            // scan, so from here down only the buffer is safe.
             PhysicalPlan::Filter {
                 input: filter_input,
                 ..
-            } => Self::set_scan_limit(filter_input, limit),
+            } => Self::set_scan_limit(filter_input, limit, true),
 
             _ => false,
         }
