@@ -38,22 +38,23 @@
 //!
 //! # A note on the geometry-argument spelling
 //!
-//! These queries write the geometry argument as
-//! `CAST(properties->>'location' AS GEOMETRY)`, because that is the only one of
-//! the three spellings that survives ANALYSIS today:
+//! All THREE spellings of the geometry argument analyse and return the same
+//! rows today, proven by `both_geometry_spellings_return_the_same_rows`:
 //!
-//! * `ST_DWITHIN(properties->>'location', ...)` fails with
-//!   `Function not found: ST_DWITHIN(TEXT?, GEOMETRY, DOUBLE)` — `Text -> Geometry`
-//!   is in the explicit-cast table but not in the implicit coercion ladder, and no
-//!   registered `ST_*` signature accepts `Text`.
-//! * `ST_DWITHIN(location, ...)` — the spelling the website documents — fails with
-//!   `Column not found: <ws>.location`, because a geometry stored in `properties`
-//!   is not a declared column of the workspace schema.
+//! * `CAST(properties->>'location' AS GEOMETRY)` — explicit, used by most tests
+//!   in this module;
+//! * `properties->>'location'` — the JSON extraction with no cast;
+//! * `location` — the bare name, which is what the public reference and the
+//!   `raisindb-sql` skill use throughout.
 //!
-//! Both are signature/analysis gaps, not planner gaps: the planner's
-//! `extract_geometry_source` handles all three forms identically. They are worth
-//! fixing, because a documented spelling that does not analyse is its own kind of
-//! silent failure.
+//! This header previously stated that only the CAST form survived analysis and
+//! that the other two failed. That was true when written and is not now. It is
+//! called out because the claim was load-bearing: it made the documented
+//! spelling look broken, and a stale "the docs are wrong" note is its own kind
+//! of trap.
+//!
+//! The planner's `extract_geometry_source` has always handled all three
+//! identically.
 
 use futures::StreamExt;
 use raisin_models::nodes::properties::PropertyValue;
@@ -1051,4 +1052,65 @@ async fn the_3d_index_path_agrees_with_the_fallback_path() {
          before this revision, so only the ACCESS PATH differs",
     );
     assert_eq!(indexed, vec!["ground".to_string(), "low".to_string()]);
+}
+
+/// The geometry-argument spelling: both forms work, and must AGREE.
+///
+/// The module header above says only `CAST(properties->>'…' AS GEOMETRY)`
+/// survives analysis and that a bare column fails. That is no longer true — the
+/// bare `location` spelling, which the RaisinDB SQL skill and the website both
+/// use throughout, analyses fine.
+///
+/// What matters is that it returns the SAME rows. A spelling that analysed but
+/// resolved to NULL would return zero rows silently, which is the worst outcome
+/// and precisely what this module exists to catch.
+#[tokio::test]
+async fn both_geometry_spellings_return_the_same_rows() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed(&engine).await;
+
+    let cast_form = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("the CAST spelling must analyse");
+
+    let bare_form = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' \
+             WHERE ST_DWITHIN(location, ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("the bare-column spelling must analyse — it is what the docs use");
+
+    assert_eq!(
+        bare_form, cast_form,
+        "the two documented spellings must return identical rows; a bare column \
+         that resolved to NULL would return zero rows with no error",
+    );
+    assert_eq!(cast_form, vec!["mid".to_string(), "near".to_string()]);
+
+    // The third spelling: the JSON extraction with no cast.
+    let uncast = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               properties->>'location', ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("the uncast spelling analyses too");
+
+    assert_eq!(
+        uncast, cast_form,
+        "all three spellings must agree; the module header used to claim only \
+         the CAST form analysed, and that is no longer true",
+    );
 }

@@ -457,7 +457,18 @@ LIMIT 20
 
 ## 14. Geospatial Functions
 
-RaisinDB supports 49 PostGIS-compatible geospatial functions. Coordinates use WGS84 (EPSG:4326) in GeoJSON `[longitude, latitude]` order.
+RaisinDB registers **62** PostGIS-compatible geospatial functions. Coordinates
+use WGS84 (EPSG:4326) in GeoJSON `[longitude, latitude]` order -- longitude
+FIRST. An unambiguously reversed pair is rejected naming the corrected call.
+
+**Units differ from PostGIS on 4326, deliberately.** `ST_DISTANCE`, `ST_LENGTH`,
+`ST_AREA`, and the `d`/`t` arguments of `ST_DWITHIN` / `ST_BUFFER` /
+`ST_SIMPLIFY` are all **metres**, where PostGIS `geometry` gives degrees. So
+`ST_SIMPLIFY(boundary, 25)` is a 25 m tolerance, not 25 degrees.
+
+A geometry argument may be written three ways -- `location`,
+`properties->>'location'`, or `CAST(properties->>'location' AS GEOMETRY)`. All
+three work and return the same rows.
 
 ### Creating Geometries
 
@@ -540,11 +551,68 @@ FROM zones a, zones b WHERE a.id = $1 AND b.id = $2
 
 ```sql
 SELECT ST_GEOMETRYTYPE(location),  -- 'ST_Point'
-       ST_NUMPOINTS(boundary),     -- coordinate count
+       ST_NUMPOINTS(boundary),     -- vertex count, for ANY type (PostGIS: LineString only)
        ST_ISVALID(boundary),       -- true/false
        ST_SRID(location)           -- 4326
 FROM regions LIMIT 1
 ```
+
+### Nested geometry
+
+A geometry may sit anywhere in the property tree, and the string you write IS
+the index key -- so name the dot path:
+
+| where it sits | how to query it |
+|---|---|
+| top level | `properties->>'location'` |
+| inside an object | `properties->>'venue.geo'` |
+| inside a section element | `properties->>'hero.map_pin'` |
+| one array element | `properties->>'stops.0.geo'` |
+| every array element | `properties->>'stops[].geo'` -- correct, but a row scan, never indexed |
+
+Two opt-in columns say HOW a spatial predicate was satisfied. Name them
+explicitly; `SELECT *` does not expand them.
+
+```sql
+SELECT name, __distance, __matched_path FROM 'places'
+WHERE ST_DWITHIN(CAST(properties->>'stops[].geo' AS GEOMETRY),
+                 ST_POINT($1, $2), 500)
+```
+
+`__distance` is metres (the MINIMUM over a node's matched geometries) and
+`__matched_path` is the concrete path that achieved it (`stops.3.geo`). A node
+matching via several geometries is returned **once**, so `LIMIT k` means k nodes.
+
+### Altitude (3D)
+
+A position may carry a third ordinate. `ST_NDIMS` reports 3 when any position
+has one; `ST_Z` is Point-only, so use `ST_ZMIN` / `ST_ZMAX` for other types.
+`ST_FORCE3D(geom, z)` fills a missing Z (it does not overwrite -- drop with
+`ST_FORCE2D` first).
+
+```sql
+-- Within 500 m in space, not just on the ground. Narrows through the 2-D
+-- index and re-checks altitude per candidate row.
+SELECT callsign FROM 'flights'
+WHERE ST_3DDWITHIN(CAST(properties->>'position' AS GEOMETRY),
+                   ST_FORCE3D(ST_POINT($1, $2), $3), 500)
+```
+
+`ST_FORCE3D` is the only way to write a 3-D constant point -- `ST_POINT` and
+`ST_MAKEPOINT` both reject a third argument.
+
+### High-frequency positions
+
+For a tracked object, cut the indexed precisions -- each one costs a write plus
+a tombstone per update:
+
+```sql
+ALTER SPATIAL INDEX FOR 'fleet' PROPERTY 'position' SET PRECISIONS = (8, 6);
+```
+
+That takes the default 8 precisions (16 writes/update) down to 2 (4/update).
+Superseded entries are pruned by a compaction filter, on by default, so a hot
+cell stays constant rather than growing with update count.
 
 ## 15. Pagination & Prev/Next Navigation
 
