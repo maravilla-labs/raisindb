@@ -175,6 +175,27 @@ pub struct PhysicalPlanner {
 }
 
 impl PhysicalPlanner {
+    /// Full-pipeline EXPLAIN: everything [`raisin_sql::QueryPlan::explain`]
+    /// renders (SQL, analyzed statement, logical plan, optimized logical plan),
+    /// plus the PHYSICAL plan this planner produces for it.
+    ///
+    /// `QueryPlan` lives in `raisin-sql`, which cannot see physical plans at
+    /// all, so its own `explain()` structurally stops at the logical level.
+    /// Every decision that actually determines how a query runs — the join
+    /// algorithm, the scan chosen, a pushed-down limit — is invisible there,
+    /// which is how a wrong scan limit stayed hidden behind a plausible-looking
+    /// EXPLAIN. Use this when diagnosing a plan.
+    ///
+    /// (The `EXPLAIN <stmt>` SQL statement already renders the physical plan;
+    /// this is the equivalent for callers holding a `QueryPlan` directly.)
+    pub fn explain_query_plan(&self, plan: &raisin_sql::QueryPlan) -> Result<String, Error> {
+        let mut output = plan.explain();
+        let physical = self.plan(&plan.optimized)?;
+        output.push_str("\n=== Physical Execution Plan ===\n");
+        output.push_str(&physical.explain());
+        Ok(output)
+    }
+
     /// Create a new physical planner with default context and RocksDB catalog
     pub fn new() -> Self {
         use super::catalog::RocksDBIndexCatalog;

@@ -234,8 +234,12 @@ mod integration_properties {
     fn create_row(cols: Vec<(&str, f64)>) -> Row {
         let mut map = IndexMap::new();
         for (name, value) in cols {
-            if name.contains("name") || name.contains("value") && value == value.floor() {
-                // If it looks like a string-ish column, use the number as indicator
+            // Only columns that are literally a "name" are string-ish; every
+            // other column (id, value, a, b, ...) stays numeric. Note the
+            // grouping: the original `a || b && c` parsed as `a || (b && c)`,
+            // which silently turned every `value` column into a String and made
+            // it compare unequal to the Float the assertions expect.
+            if name.contains("name") {
                 map.insert(
                     name.to_string(),
                     PropertyValue::String(format!("value{}", value)),

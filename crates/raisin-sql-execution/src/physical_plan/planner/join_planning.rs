@@ -172,105 +172,104 @@ impl PhysicalPlanner {
     /// # Supported Patterns
     ///
     /// - Simple equality: `a.id = b.id`
-    /// - Expression keys: `a.properties->>'ref_id' = b.id`, `CAST(a.x AS text) = b.y`
+    /// - Expression keys: `a.properties->>'ref_id' = b.id`, `CAST(a.x AS text) = b.y`,
+    ///   `JSON_GET_DOUBLE(a.properties, 'k') = JSON_GET_DOUBLE(b.properties, 'k')`
     /// - Multiple equalities (AND): `a.id = b.id AND a.name = b.name`
+    /// - Equality keys mixed with single-side FILTER conjuncts:
+    ///   `a.id = b.id AND b.node_type = 'order'`. The filter conjuncts are
+    ///   returned separately as residuals; the caller decides whether it may
+    ///   push them into that input (see [`JoinKeyExtraction`]).
     ///
     /// `left_qualifiers` / `right_qualifiers` are the table names/aliases produced by
     /// each join input, used to assign each operand to a side.
     ///
     /// # Returns
     ///
-    /// `Some((left_keys, right_keys))` if the condition is a valid equality join,
-    /// `None` otherwise (OR conditions, non-equality comparisons, operands mixing
-    /// both sides, or operands referencing no columns).
+    /// `Some(JoinKeyExtraction)` if the condition yields at least one equality
+    /// join key, `None` otherwise (OR conditions, a conjunct that is neither a
+    /// join key nor assignable to exactly one side, or no key at all).
     pub(super) fn extract_equality_join_keys(
         condition: &Option<TypedExpr>,
         left_qualifiers: &std::collections::HashSet<String>,
         right_qualifiers: &std::collections::HashSet<String>,
-    ) -> Option<(Vec<TypedExpr>, Vec<TypedExpr>)> {
+    ) -> Option<JoinKeyExtraction> {
         let condition = condition.as_ref()?;
 
-        let mut left_keys = Vec::new();
-        let mut right_keys = Vec::new();
+        let mut extraction = JoinKeyExtraction::default();
 
         Self::collect_equality_keys(
-            &condition.expr,
+            condition,
             left_qualifiers,
             right_qualifiers,
-            &mut left_keys,
-            &mut right_keys,
+            &mut extraction,
         )?;
 
-        if left_keys.is_empty() {
+        if extraction.left_keys.is_empty() {
             return None;
         }
 
-        Some((left_keys, right_keys))
+        Some(extraction)
     }
 
-    /// Recursively collect equality join keys from an expression
+    /// Recursively collect equality join keys from a join condition.
     ///
     /// Handles:
-    /// - BinaryOp::Eq: each operand must reference columns from exactly one side
-    /// - BinaryOp::And: Recursively process both sides
-    /// - Other operators: Return None (not supported for HashJoin)
+    /// - `BinaryOp::And`: recurse into both conjuncts
+    /// - `BinaryOp::Eq` whose operands land on opposite sides: an equality join key
+    /// - any other conjunct: a residual, provided every column it references
+    ///   belongs to a single side. Anything else (an OR, a conjunct straddling
+    ///   both sides, a subquery) returns `None` so the caller falls back to
+    ///   `NestedLoopJoin`, which evaluates the condition verbatim.
     fn collect_equality_keys(
-        expr: &Expr,
+        expr: &TypedExpr,
         left_qualifiers: &std::collections::HashSet<String>,
         right_qualifiers: &std::collections::HashSet<String>,
-        left_keys: &mut Vec<TypedExpr>,
-        right_keys: &mut Vec<TypedExpr>,
+        out: &mut JoinKeyExtraction,
     ) -> Option<()> {
-        match expr {
-            Expr::BinaryOp { left, op, right } => match op {
+        if let Expr::BinaryOp { left, op, right } = &expr.expr {
+            match op {
+                BinaryOperator::And => {
+                    Self::collect_equality_keys(left, left_qualifiers, right_qualifiers, out)?;
+                    Self::collect_equality_keys(right, left_qualifiers, right_qualifiers, out)?;
+                    return Some(());
+                }
                 BinaryOperator::Eq => {
-                    // Which side of the join does each operand belong to?
-                    let lhs_side = Self::expr_side(left, left_qualifiers, right_qualifiers)?;
-                    let rhs_side = Self::expr_side(right, left_qualifiers, right_qualifiers)?;
+                    // Which side of the join does each operand belong to? A
+                    // `None` here (constant operand, or one straddling both
+                    // sides) just means "not a join key" — the whole conjunct is
+                    // then considered as a residual below.
+                    let lhs_side = Self::expr_side(left, left_qualifiers, right_qualifiers);
+                    let rhs_side = Self::expr_side(right, left_qualifiers, right_qualifiers);
 
                     match (lhs_side, rhs_side) {
-                        (JoinSide::Left, JoinSide::Right) => {
-                            left_keys.push(left.as_ref().clone());
-                            right_keys.push(right.as_ref().clone());
-                            Some(())
+                        (Some(JoinSide::Left), Some(JoinSide::Right)) => {
+                            out.left_keys.push(left.as_ref().clone());
+                            out.right_keys.push(right.as_ref().clone());
+                            return Some(());
                         }
-                        (JoinSide::Right, JoinSide::Left) => {
-                            left_keys.push(right.as_ref().clone());
-                            right_keys.push(left.as_ref().clone());
-                            Some(())
+                        (Some(JoinSide::Right), Some(JoinSide::Left)) => {
+                            out.left_keys.push(right.as_ref().clone());
+                            out.right_keys.push(left.as_ref().clone());
+                            return Some(());
                         }
-                        // Same-side equality (a.x = a.y) or unknown — not a join key
-                        _ => None,
+                        // Same-side equality or a constant operand: fall through
+                        // and try to treat the conjunct as a single-side filter.
+                        _ => {}
                     }
                 }
-                BinaryOperator::And => {
-                    // For AND, we can collect keys from both sides
-                    Self::collect_equality_keys(
-                        &left.expr,
-                        left_qualifiers,
-                        right_qualifiers,
-                        left_keys,
-                        right_keys,
-                    )?;
-                    Self::collect_equality_keys(
-                        &right.expr,
-                        left_qualifiers,
-                        right_qualifiers,
-                        left_keys,
-                        right_keys,
-                    )?;
-                    Some(())
-                }
-                _ => {
-                    // Other operators (OR, <, >, etc.) not supported for HashJoin
-                    None
-                }
-            },
-            _ => {
-                // Other expression types not supported
-                None
+                // OR (and every other operator) cannot be split into keys and
+                // per-side filters; fall through to the residual test, which
+                // rejects anything referencing both sides.
+                _ => {}
             }
         }
+
+        // Not a join key: it is usable only if it filters exactly one input.
+        match Self::expr_side(expr, left_qualifiers, right_qualifiers)? {
+            JoinSide::Left => out.left_residuals.push(expr.clone()),
+            JoinSide::Right => out.right_residuals.push(expr.clone()),
+        }
+        Some(())
     }
 
     /// Determine which join side an operand belongs to: it must reference at
@@ -379,6 +378,28 @@ impl PhysicalPlanner {
             // Subqueries and window functions cannot be hash-join keys.
             Expr::InSubquery { .. } | Expr::Window { .. } => false,
         }
+    }
+}
+
+/// What [`PhysicalPlanner::extract_equality_join_keys`] found in an ON clause:
+/// the equality join keys, plus any conjunct that is not a join key but filters
+/// exactly one input.
+///
+/// A residual is NOT unconditionally pushable. Pushing a filter into an input of
+/// an OUTER join is only equivalent when that input is the *nullable* side —
+/// filtering the preserved side would drop rows the join must keep (padded with
+/// NULLs). The caller applies that rule; see the join dispatch.
+#[derive(Debug, Default)]
+pub(super) struct JoinKeyExtraction {
+    pub left_keys: Vec<TypedExpr>,
+    pub right_keys: Vec<TypedExpr>,
+    pub left_residuals: Vec<TypedExpr>,
+    pub right_residuals: Vec<TypedExpr>,
+}
+
+impl JoinKeyExtraction {
+    pub fn has_residuals(&self) -> bool {
+        !self.left_residuals.is_empty() || !self.right_residuals.is_empty()
     }
 }
 

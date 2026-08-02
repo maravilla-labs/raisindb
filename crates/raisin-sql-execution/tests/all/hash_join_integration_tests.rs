@@ -8,21 +8,45 @@
 
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
-use raisin_sql_execution::physical_plan::{execute_plan, ExecutionContext, PhysicalPlan};
+use raisin_sql_execution::physical_plan::{execute_plan, ExecutionContext};
 use raisin_sql_execution::{Analyzer, PhysicalPlanner, QueryPlan, StaticCatalog};
-use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope};
-use raisin_storage_memory::InMemoryStorage;
+use raisin_storage::{BranchRepository, CreateNodeOptions, NodeRepository, Storage, StorageScope};
 use std::sync::Arc;
+use tempfile::TempDir;
 
-/// Helper to create a test storage with sample data
-async fn create_test_storage() -> Arc<InMemoryStorage> {
-    let storage = Arc::new(InMemoryStorage::default());
+/// Helper to create a test storage with sample data.
+///
+/// RocksDB rather than the in-memory backend: the in-memory backend serves no
+/// rows for these scans at all, so every execution assertion below was reading
+/// an empty table regardless of what the join did.
+///
+/// The returned `TempDir` must be kept alive for the duration of the test.
+async fn create_test_storage() -> (Arc<raisin_rocksdb::RocksDBStorage>, TempDir) {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let storage = Arc::new(
+        raisin_rocksdb::RocksDBStorage::new(temp_dir.path()).expect("open rocksdb storage"),
+    );
+
+    // Reads are bounded by the branch HEAD; without a branch nothing is visible.
+    let _ = storage
+        .branches()
+        .create_branch(
+            "test_tenant",
+            "test_repo",
+            "main",
+            "test-user",
+            None,
+            None,
+            false,
+            false,
+        )
+        .await;
 
     // Create users
     for i in 1..=100 {
         let user = Node {
             id: format!("user{}", i),
-            path: format!("/users/user{}", i),
+            path: format!("/user{}", i),
             name: format!("User {}", i),
             node_type: "user".to_string(),
             archetype: Some("user".to_string()),
@@ -42,7 +66,7 @@ async fn create_test_storage() -> Arc<InMemoryStorage> {
             children: Vec::new(),
             order_key: String::new(),
             has_children: None,
-            parent: Some("users".to_string()),
+            parent: None,
             version: 1,
             created_at: Some(chrono::Utc::now()),
             updated_at: Some(chrono::Utc::now()),
@@ -62,7 +86,11 @@ async fn create_test_storage() -> Arc<InMemoryStorage> {
             .create(
                 StorageScope::new("test_tenant", "test_repo", "main", "default"),
                 user,
-                CreateNodeOptions::default(),
+                CreateNodeOptions {
+                    validate_parent_allows_child: false,
+                    validate_workspace_allows_type: false,
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -73,7 +101,7 @@ async fn create_test_storage() -> Arc<InMemoryStorage> {
         for order_num in 1..=5 {
             let order = Node {
                 id: format!("order_{}_{}", user_id, order_num),
-                path: format!("/orders/order_{}_{}", user_id, order_num),
+                path: format!("/order_{}_{}", user_id, order_num),
                 name: format!("Order {} for User {}", order_num, user_id),
                 node_type: "order".to_string(),
                 archetype: Some("order".to_string()),
@@ -100,7 +128,7 @@ async fn create_test_storage() -> Arc<InMemoryStorage> {
                 children: Vec::new(),
                 order_key: String::new(),
                 has_children: None,
-                parent: Some("orders".to_string()),
+                parent: None,
                 version: 1,
                 created_at: Some(chrono::Utc::now()),
                 updated_at: Some(chrono::Utc::now()),
@@ -120,21 +148,30 @@ async fn create_test_storage() -> Arc<InMemoryStorage> {
                 .create(
                     StorageScope::new("test_tenant", "test_repo", "main", "default"),
                     order,
-                    CreateNodeOptions::default(),
+                    CreateNodeOptions {
+                        validate_parent_allows_child: false,
+                        validate_workspace_allows_type: false,
+                        ..Default::default()
+                    },
                 )
                 .await
                 .unwrap();
         }
     }
 
-    storage
+    (storage, temp_dir)
 }
 
 #[tokio::test]
 async fn test_hash_join_is_selected_for_equality_join() {
     // Test that equality joins use HashJoin, not NestedLoopJoin
     let catalog = StaticCatalog::default_nodes_schema();
-    let planner = PhysicalPlanner::new();
+    let planner = PhysicalPlanner::with_context(
+        "test_tenant".to_string(),
+        "test_repo".to_string(),
+        "main".to_string(),
+        "default".to_string(),
+    );
 
     // Parse and analyze query
     let sql = "SELECT u.user_id, o.order_id
@@ -170,7 +207,7 @@ async fn test_hash_join_is_selected_for_equality_join() {
 #[tokio::test]
 async fn test_hash_join_inner_join_correctness() {
     // Test that HashJoin INNER JOIN produces correct results
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let catalog = StaticCatalog::default_nodes_schema();
 
     let sql = "SELECT JSON_GET_DOUBLE(u.properties, 'user_id') as user_id,
@@ -189,7 +226,12 @@ async fn test_hash_join_inner_join_correctness() {
     assert!(plan_result.is_ok(), "Planning should succeed");
 
     let query_plan = plan_result.unwrap();
-    let planner = PhysicalPlanner::new();
+    let planner = PhysicalPlanner::with_context(
+        "test_tenant".to_string(),
+        "test_repo".to_string(),
+        "main".to_string(),
+        "default".to_string(),
+    );
     let physical_plan = planner
         .plan(&query_plan.optimized)
         .expect("Physical planning should succeed");
@@ -236,7 +278,7 @@ async fn test_hash_join_inner_join_correctness() {
 #[tokio::test]
 async fn test_hash_join_left_join() {
     // Test LEFT JOIN - should include users without orders
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let catalog = StaticCatalog::default_nodes_schema();
 
     let sql = "SELECT JSON_GET_DOUBLE(u.properties, 'user_id') as user_id,
@@ -254,7 +296,12 @@ async fn test_hash_join_left_join() {
     assert!(plan_result.is_ok(), "Planning should succeed");
 
     let query_plan = plan_result.unwrap();
-    let planner = PhysicalPlanner::new();
+    let planner = PhysicalPlanner::with_context(
+        "test_tenant".to_string(),
+        "test_repo".to_string(),
+        "main".to_string(),
+        "default".to_string(),
+    );
     let physical_plan = planner
         .plan(&query_plan.optimized)
         .expect("Physical planning should succeed");
@@ -299,7 +346,7 @@ async fn test_hash_join_left_join() {
 #[tokio::test]
 async fn test_hash_join_multi_column_keys() {
     // Test join with multiple equality conditions (multi-column join keys)
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let catalog = StaticCatalog::default_nodes_schema();
 
     // This query joins on two columns: user_id AND a constant status
@@ -320,7 +367,12 @@ async fn test_hash_join_multi_column_keys() {
     assert!(plan_result.is_ok(), "Planning should succeed");
 
     let query_plan = plan_result.unwrap();
-    let planner = PhysicalPlanner::new();
+    let planner = PhysicalPlanner::with_context(
+        "test_tenant".to_string(),
+        "test_repo".to_string(),
+        "main".to_string(),
+        "default".to_string(),
+    );
     let physical_plan = planner
         .plan(&query_plan.optimized)
         .expect("Physical planning should succeed");
@@ -357,7 +409,12 @@ async fn test_hash_join_multi_column_keys() {
 async fn test_nested_loop_join_fallback_for_non_equality() {
     // Test that non-equality conditions fall back to NestedLoopJoin
     let catalog = StaticCatalog::default_nodes_schema();
-    let planner = PhysicalPlanner::new();
+    let planner = PhysicalPlanner::with_context(
+        "test_tenant".to_string(),
+        "test_repo".to_string(),
+        "main".to_string(),
+        "default".to_string(),
+    );
 
     // Use a non-equality join condition (greater than)
     let sql = "SELECT u.user_id, o.order_id
@@ -394,6 +451,12 @@ async fn test_nested_loop_join_fallback_for_non_equality() {
 async fn test_hash_join_explain_plan() {
     // Test that EXPLAIN shows HashJoin in the plan
     let catalog = StaticCatalog::default_nodes_schema();
+    let planner = PhysicalPlanner::with_context(
+        "test_tenant".to_string(),
+        "test_repo".to_string(),
+        "main".to_string(),
+        "default".to_string(),
+    );
 
     let sql = "SELECT u.user_id, o.order_id
                FROM nodes u
@@ -407,7 +470,11 @@ async fn test_hash_join_explain_plan() {
     assert!(plan_result.is_ok(), "Planning should succeed");
 
     let query_plan = plan_result.unwrap();
-    let explain_output = query_plan.explain();
+    // `QueryPlan::explain()` stops at the logical level — `raisin-sql` cannot
+    // see physical plans. Ask the physical planner for the full pipeline.
+    let explain_output = planner
+        .explain_query_plan(&query_plan)
+        .expect("EXPLAIN should succeed");
 
     // Verify explain output mentions HashJoin
     assert!(

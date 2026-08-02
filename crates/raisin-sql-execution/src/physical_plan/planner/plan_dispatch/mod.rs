@@ -224,9 +224,57 @@ impl PhysicalPlanner {
                 Self::collect_plan_qualifiers(right, &mut right_qualifiers);
 
                 // Analyze condition to choose between HashJoin, IndexLookupJoin, and NestedLoopJoin
-                if let Some((left_keys, right_keys)) =
-                    Self::extract_equality_join_keys(condition, &left_qualifiers, &right_qualifiers)
-                {
+                let extraction = Self::extract_equality_join_keys(
+                    condition,
+                    &left_qualifiers,
+                    &right_qualifiers,
+                )
+                .filter(|e| {
+                    // A residual may only be pushed into an input that the join
+                    // does not preserve. For an outer join, filtering the
+                    // preserved side would drop rows that must survive with
+                    // NULLs — so bail to NestedLoopJoin, which evaluates the
+                    // whole ON clause verbatim.
+                    let (may_push_left, may_push_right) = match join_type {
+                        raisin_sql::analyzer::JoinType::Inner => (true, true),
+                        raisin_sql::analyzer::JoinType::Left => (false, true),
+                        raisin_sql::analyzer::JoinType::Right => (true, false),
+                        raisin_sql::analyzer::JoinType::Full
+                        | raisin_sql::analyzer::JoinType::Cross => (false, false),
+                    };
+                    (e.left_residuals.is_empty() || may_push_left)
+                        && (e.right_residuals.is_empty() || may_push_right)
+                });
+
+                if let Some(extraction) = extraction {
+                    let (left_keys, right_keys) =
+                        (extraction.left_keys.clone(), extraction.right_keys.clone());
+
+                    if extraction.has_residuals() {
+                        // ON carried per-side filters (`… AND o.node_type = 'order'`).
+                        // Apply them to their input and hash-join the results.
+                        // IndexLookupJoin is skipped: its shape test requires a
+                        // bare TableScan on the inner side, which a Filter is not.
+                        let wrap =
+                            |plan: PhysicalPlan, preds: Vec<raisin_sql::analyzer::TypedExpr>| {
+                                if preds.is_empty() {
+                                    plan
+                                } else {
+                                    PhysicalPlan::Filter {
+                                        input: Box::new(plan),
+                                        predicates: preds,
+                                    }
+                                }
+                            };
+                        return Ok(PhysicalPlan::HashJoin {
+                            left: Box::new(wrap(left_plan, extraction.left_residuals)),
+                            right: Box::new(wrap(right_plan, extraction.right_residuals)),
+                            join_type: join_type.clone(),
+                            left_keys,
+                            right_keys,
+                        });
+                    }
+
                     // Check if we can use IndexLookupJoin (O(n) vs O(n+m) for HashJoin)
                     if matches!(
                         join_type,

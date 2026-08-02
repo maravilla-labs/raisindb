@@ -9,8 +9,10 @@
 //!
 //! The output will show timing breakdown for each operator and expression.
 
+use raisin_models::nodes::properties::PropertyValue;
+use raisin_models::nodes::Node;
 use raisin_sql_execution::QueryEngine;
-use raisin_storage_memory::InMemoryStorage;
+use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope};
 use std::sync::Arc;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -32,15 +34,20 @@ async fn profile_complex_json_projection() {
     tracing::info!("Starting profiling test: Complex JSON projection query");
     tracing::info!("========================================");
 
-    // Create in-memory storage for testing
-    let storage = Arc::new(InMemoryStorage::default());
+    // Storage for the fixture. RocksDB (a temp dir) rather than the in-memory
+    // backend: the engine bounds reads at the branch HEAD and the in-memory
+    // backend does not advance it, so every seeded node reads back invisible.
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let storage = Arc::new(
+        raisin_rocksdb::RocksDBStorage::new(temp_dir.path()).expect("open rocksdb storage"),
+    );
 
     // Create engine
     let engine = QueryEngine::new(storage.clone(), "tenant1", "repo1", "main");
 
     // Setup test data
     tracing::info!("Setting up test data...");
-    setup_test_data(&engine).await;
+    setup_test_data(&storage).await;
 
     tracing::info!("========================================");
     tracing::info!("Running query with complex JSON projections");
@@ -125,64 +132,102 @@ async fn profile_complex_json_projection() {
     }
 }
 
-/// Setup test data with JSON properties
-async fn setup_test_data(engine: &QueryEngine<InMemoryStorage>) {
-    // Insert test users with JSON properties
-    for i in 1..=100 {
-        let insert_sql = format!(
-            r#"
-            INSERT INTO nodes (id, name, node_type, properties) VALUES (
-                'user_{}',
-                'User {}',
-                'user',
-                '{{
-                    "username": "user{}",
-                    "email": "user{}@example.com",
-                    "displayName": "User {} Display",
-                    "avatar": "https://example.com/avatars/{}.jpg",
-                    "bio": "This is user {} bio",
-                    "location": "Location {}",
-                    "website": "https://user{}.example.com",
-                    "twitter": "@user{}",
-                    "github": "user{}",
-                    "status": "active",
-                    "role": "member",
-                    "department": "Engineering",
-                    "title": "Software Engineer",
-                    "phone": "+1-555-0{:03}",
-                    "mobile": "+1-555-1{:03}",
-                    "address": "{} Main St",
-                    "city": "San Francisco",
-                    "country": "USA",
-                    "timezone": "America/Los_Angeles",
-                    "language": "en",
-                    "theme": "dark",
-                    "notifications": "enabled",
-                    "privacy": "public",
-                    "subscription": "premium",
-                    "verified": "true",
-                    "last_login": "2024-01-{:02}T10:00:00Z"
-                }}'
-            )
-            "#,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i,
-            i % 30 + 1
-        );
+/// Setup test data with JSON properties.
+///
+/// Seeds through the storage layer rather than `INSERT INTO nodes` — DML is not
+/// supported on the `nodes` pseudo-table, so the SQL form silently failed and
+/// left the fixture empty. Every write is asserted so this cannot rot silently
+/// again.
+async fn setup_test_data(storage: &Arc<raisin_rocksdb::RocksDBStorage>) {
+    use raisin_storage::BranchRepository;
 
-        let _ = engine.execute(&insert_sql).await;
+    let scope = StorageScope::new("tenant1", "repo1", "main", "default");
+
+    // The branch must exist before any write, or its HEAD never advances.
+    let _ = storage
+        .branches()
+        .create_branch(
+            "tenant1",
+            "repo1",
+            "main",
+            "test-user",
+            None,
+            None,
+            false,
+            false,
+        )
+        .await;
+
+    for i in 1..=100 {
+        let mut props = std::collections::HashMap::new();
+        let mut put = |k: &str, v: String| {
+            props.insert(k.to_string(), PropertyValue::String(v));
+        };
+        put("username", format!("user{}", i));
+        put("email", format!("user{}@example.com", i));
+        put("displayName", format!("User {} Display", i));
+        put("avatar", format!("https://example.com/avatars/{}.jpg", i));
+        put("bio", format!("This is user {} bio", i));
+        put("location", format!("Location {}", i));
+        put("website", format!("https://user{}.example.com", i));
+        put("twitter", format!("@user{}", i));
+        put("github", format!("user{}", i));
+        put("status", "active".to_string());
+        put("role", "member".to_string());
+        put("department", "Engineering".to_string());
+        put("title", "Software Engineer".to_string());
+        put("phone", format!("+1-555-0{:03}", i));
+        put("mobile", format!("+1-555-1{:03}", i));
+        put("address", format!("{} Main St", i));
+        put("city", "San Francisco".to_string());
+        put("country", "USA".to_string());
+        put("timezone", "America/Los_Angeles".to_string());
+        put("language", "en".to_string());
+        put("theme", "dark".to_string());
+        put("notifications", "enabled".to_string());
+        put("privacy", "public".to_string());
+        put("subscription", "premium".to_string());
+        put("verified", "true".to_string());
+        put("last_login", format!("2024-01-{:02}T10:00:00Z", i % 30 + 1));
+
+        let node = Node {
+            id: format!("user_{}", i),
+            path: format!("/user_{}", i),
+            name: format!("User {}", i),
+            node_type: "user".to_string(),
+            archetype: Some("user".to_string()),
+            properties: props,
+            children: Vec::new(),
+            order_key: String::new(),
+            has_children: None,
+            parent: None,
+            version: 1,
+            created_at: Some(chrono::Utc::now()),
+            updated_at: Some(chrono::Utc::now()),
+            published_at: None,
+            published_by: None,
+            updated_by: None,
+            created_by: None,
+            translations: None,
+            tenant_id: None,
+            workspace: None,
+            owner_id: None,
+            relations: Vec::new(),
+        };
+
+        storage
+            .nodes()
+            .create(
+                scope,
+                node,
+                CreateNodeOptions {
+                    validate_parent_allows_child: false,
+                    validate_workspace_allows_type: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("seeding user_{} failed: {:?}", i, e));
     }
 
     tracing::info!("Inserted 100 test user nodes with JSON properties");
