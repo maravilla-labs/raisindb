@@ -8,6 +8,7 @@
 
 use super::super::OperationApplicator;
 use super::db_helpers::{delete_key, serialize_and_write_compact};
+use crate::admin_user_store::AdminUserStore;
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_models::admin_user::DatabaseAdminUser;
@@ -29,17 +30,13 @@ pub(super) async fn apply_update_user(
         op.cluster_node_id
     );
 
-    // Use username instead of user_id to match AdminUserStore.build_key() format
-    let key = keys::admin_user_key(tenant_id, &user.username);
-    let cf = cf_handle(&applicator.db, cf::ADMIN_USERS)?;
-
-    let value = rmp_serde::to_vec(&user)
-        .map_err(|e| raisin_error::Error::storage(format!("Serialization error: {}", e)))?;
-
-    applicator
-        .db
-        .put_cf(cf, key, value)
-        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+    // Through the store, not a second copy of its key layout and encoding.
+    // These used to be mirrored here with a comment asking the reader to keep
+    // them in sync by hand; they agreed, but nothing enforced it, and a replica
+    // that keyed or encoded users even slightly differently would silently fail
+    // to find users it holds. Constructed without capture, so applying cannot
+    // re-emit.
+    AdminUserStore::new(applicator.db().clone()).put_replicated(user)?;
 
     tracing::info!("✅ User applied successfully: {}/{}", tenant_id, user_id);
     Ok(())
@@ -59,14 +56,9 @@ pub(super) async fn apply_delete_user(
         op.cluster_node_id
     );
 
-    // Note: user_id parameter is actually the username (passed from capture_delete_user)
-    let key = keys::admin_user_key(tenant_id, user_id);
-    let cf = cf_handle(&applicator.db, cf::ADMIN_USERS)?;
-
-    applicator
-        .db
-        .delete_cf(cf, key)
-        .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+    // `user_id` here is actually the username — that is what `capture_delete_user`
+    // sends, and what the store keys by.
+    AdminUserStore::new(applicator.db().clone()).delete_replicated(tenant_id, user_id)?;
 
     tracing::info!("✅ User deleted successfully: {}/{}", tenant_id, user_id);
     Ok(())

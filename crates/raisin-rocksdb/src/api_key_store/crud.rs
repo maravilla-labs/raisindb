@@ -51,7 +51,43 @@ impl ApiKeyStore {
             .put_cf(cf, &hash_index_key, hash_index_value.as_bytes())
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
+        self.replicate(&api_key);
+
         Ok((api_key, raw_token))
+    }
+
+    /// Write a key received from another node.
+    ///
+    /// Writes the record **and** the hash index. The index
+    /// (`sys\0api_key_hash\0{hash}`) is deliberately not tenant-scoped — it is
+    /// the token→tenant lookup `validate_api_key` starts from — so a replica
+    /// that stored only the record would authenticate nothing.
+    ///
+    /// Does not capture: this IS the replication apply path, and re-emitting
+    /// would loop.
+    pub fn put_replicated(&self, api_key: &ApiKey) -> Result<()> {
+        let cf = self.db.cf_handle(cf::ADMIN_USERS).ok_or_else(|| {
+            raisin_error::Error::Backend("admin_users column family not found".to_string())
+        })?;
+
+        let key = Self::build_key(&api_key.tenant_id, &api_key.user_id, &api_key.key_id);
+        let value = rmp_serde::to_vec(api_key).map_err(|e| {
+            raisin_error::Error::Backend(format!("Failed to serialize API key: {}", e))
+        })?;
+        self.db
+            .put_cf(cf, &key, &value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        let hash_index_key = Self::build_hash_index_key(&api_key.key_hash);
+        let hash_index_value = format!(
+            "{}\0{}\0{}",
+            api_key.tenant_id, api_key.user_id, api_key.key_id
+        );
+        self.db
+            .put_cf(cf, &hash_index_key, hash_index_value.as_bytes())
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+
+        Ok(())
     }
 
     /// Get an API key by ID
@@ -137,6 +173,10 @@ impl ApiKeyStore {
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
         // Note: We don't delete the hash index - the validation will check is_active
+
+        // Revocation replicates as an upsert of the flipped record; there is no
+        // separate revoke operation, because `is_active` IS the revocation.
+        self.replicate(&api_key);
 
         Ok(())
     }

@@ -12,10 +12,10 @@
 
 //! Durable storage for the OAuth 2.1 authorization server.
 //!
-//! Implements [`ClientStore`](raisin_auth::authserver::ClientStore),
-//! [`AuthCodeStore`](raisin_auth::authserver::AuthCodeStore) and
+//! Implements [`ClientStore`](raisin_auth::authserver::ClientStore) and
 //! [`RefreshTokenStore`](raisin_auth::authserver::RefreshTokenStore) on top of
-//! RocksDB, replacing the in-process default.
+//! RocksDB, replacing the in-process default. Authorization codes are not
+//! stored at all — they carry their own grant (`raisin_auth::authserver::code_codec`).
 //!
 //! # Why this has to be persistent
 //!
@@ -36,7 +36,6 @@
 //!
 //! ```text
 //! sys\0{tenant}\0oauth_client\0{client_id}
-//! sys\0{tenant}\0oauth_code\0{code}
 //! sys\0{tenant}\0oauth_refresh\0{token_hash}
 //! sys\0{tenant}\0oauth_refresh_fam\0{family_id}\0{token_hash}   (family index)
 //! ```
@@ -46,18 +45,20 @@
 //!
 //! # Atomicity
 //!
-//! `take_code` and `consume_refresh_token` are read-then-write pairs that MUST
-//! NOT interleave, or a code could be redeemed twice and a replayed refresh
-//! token would go undetected. The underlying handle is a plain `rocksdb::DB`
-//! with no compare-and-swap, so both are serialized per key through a
-//! [`KeyedMutex`]. **That is a single-process guarantee**: a multi-replica
-//! deployment fronted by a load balancer can still interleave two redemptions
-//! of the same code across replicas. PKCE binding and the 60-second code
-//! lifetime keep the exposure small, but a clustered deployment that wants a
-//! hard guarantee needs the shared `[locks]` Redis backend here too.
+//! `consume_refresh_token` is a read-then-write pair that must not interleave.
+//! The underlying handle is a plain `rocksdb::DB` with no compare-and-swap, so
+//! it is serialized per key through a [`KeyedMutex`]. That is a single-process
+//! guarantee and only covers this node's own copy of the record.
+//!
+//! **Cluster-wide replay detection does not live here.** It is the lock lease
+//! the authorization server takes before calling in (see
+//! `AuthorizationServer::claim_once`), which is visible on every node the
+//! moment it is taken instead of waiting for the replicated `consumed_at` to
+//! converge. This store's `consumed_at` is the durable backstop for when that
+//! backend is degraded.
 
 mod clients;
-mod codes;
+
 mod refresh;
 #[cfg(test)]
 mod tests;
@@ -76,8 +77,11 @@ use crate::jobs::KeyedMutex;
 #[derive(Clone)]
 pub struct RocksDbOAuthStore {
     db: Arc<DB>,
-    /// Serializes the read-modify-write pairs (`take_code`,
-    /// `consume_refresh_token`) within this process.
+    /// Emits replication operations so clients and refresh tokens reach every
+    /// node. `None` when replication is off (single node, tests).
+    capture: Option<Arc<crate::OperationCapture>>,
+    /// Serializes `consume_refresh_token`'s read-modify-write within this
+    /// process. Cluster-wide exclusion is the caller's lock lease.
     locks: Arc<KeyedMutex<Vec<u8>>>,
 }
 
@@ -86,8 +90,20 @@ impl RocksDbOAuthStore {
     pub fn new(db: Arc<DB>) -> Self {
         Self {
             db,
+            capture: None,
             locks: Arc::new(KeyedMutex::new()),
         }
+    }
+
+    /// Attach operation capture so writes replicate to the other nodes.
+    pub fn with_capture(mut self, capture: Arc<crate::OperationCapture>) -> Self {
+        self.capture = Some(capture);
+        self
+    }
+
+    /// The capture handle, when replication is on and enabled.
+    pub(super) fn capture(&self) -> Option<&Arc<crate::OperationCapture>> {
+        self.capture.as_ref().filter(|c| c.is_enabled())
     }
 
     /// Resolve the column family the records live in.

@@ -10,8 +10,10 @@
 //! - `schema_ops` - Convenience methods for schema and registry operations
 //! - `workspace_ops` - Convenience methods for workspace operations
 
+mod blocking;
 mod core;
 mod node_ops;
+mod oauth_ops;
 mod schema_ops;
 mod workspace_ops;
 
@@ -19,3 +21,4 @@ mod workspace_ops;
 mod tests;
 
 pub use self::core::OperationCapture;
+pub(crate) use blocking::run_capture;

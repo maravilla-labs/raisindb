@@ -134,8 +134,11 @@ pub struct AppState {
     /// Atomic locks / inventory manager. `None` when the subsystem is disabled.
     pub(crate) lock_manager: Option<raisin_locks::LockManagerHandle>,
     /// OAuth 2.1 authorization server backing the `/authorize`, `/token`,
-    /// `/register`, and discovery endpoints. Holds registered clients and
-    /// short-lived authorization codes in-process via the default store.
+    /// `/register`, and discovery endpoints.
+    ///
+    /// Clients and refresh tokens are persisted (and replicated) through
+    /// [`OAuthStore`]; authorization codes are sealed rather than stored, so
+    /// any node can redeem one another node issued.
     #[cfg(feature = "storage-rocksdb")]
     pub(crate) oauth_server: Arc<raisin_auth::authserver::AuthorizationServer<OAuthStore>>,
     /// Live system-definition stack. Defaults to embedded-only; the server
@@ -515,9 +518,56 @@ pub fn router_with_bin_and_audit(
     // `None` there, and durability here must not depend on a caller
     // remembering to thread a handle through.
     #[cfg(feature = "storage-rocksdb")]
-    let oauth_server = Arc::new(raisin_auth::authserver::AuthorizationServer::new(Arc::new(
-        raisin_rocksdb::RocksDbOAuthStore::new(Arc::clone(storage.db())),
-    )));
+    let oauth_server = {
+        // Authorization codes are sealed with the deployment master key rather
+        // than stored, so any node can redeem a code any other node issued.
+        // Without a configured key we fall back to a per-process random one:
+        // that keeps dev servers and tests working, but codes then die with the
+        // process and never cross nodes — hence the warning.
+        let configured = match raisin_crypto::master_key_with_embedding_fallback() {
+            Ok(key) => key,
+            Err(e) => {
+                // A present-but-malformed key is an operator error. This
+                // constructor is infallible, so surface it loudly and fall back
+                // rather than serving with a key we cannot trust.
+                tracing::error!(
+                    error = %e,
+                    "RAISIN_MASTER_KEY is set but invalid; OAuth codes will use an ephemeral key"
+                );
+                None
+            }
+        };
+        let codec = match configured {
+            Some(key) => raisin_auth::authserver::SealedCodeCodec::new(&key),
+            None => {
+                tracing::warn!(
+                    "RAISIN_MASTER_KEY is not set: OAuth authorization codes will be sealed \
+                     with an ephemeral per-process key. In-flight logins will fail after a \
+                     restart, and a multi-node deployment will fail every token exchange \
+                     that lands on a different node than the one that issued the code."
+                );
+                raisin_auth::authserver::SealedCodeCodec::ephemeral()
+            }
+        };
+
+        // One lock manager, always. The shared configured one when `[locks]` is
+        // enabled — which is what makes replay detection cluster-wide — else a
+        // process-local one, so the single-node guarantee holds with no config.
+        let locks: raisin_locks::LockManagerHandle = lock_manager.clone().unwrap_or_else(|| {
+            Arc::new(raisin_locks::InProcessLockManager::with_reaper(
+                std::time::Duration::from_secs(30),
+            ))
+        });
+
+        Arc::new(raisin_auth::authserver::AuthorizationServer::new(
+            Arc::new(
+                raisin_rocksdb::RocksDbOAuthStore::new(Arc::clone(storage.db()))
+                    .with_capture(Arc::clone(storage.operation_capture())),
+            ),
+            Arc::new(codec),
+            locks,
+        ))
+    };
 
     let state = AppState {
         storage,

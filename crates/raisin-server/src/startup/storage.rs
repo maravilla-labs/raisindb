@@ -85,7 +85,13 @@ pub fn init_auth_service(
 
     tracing::info!("Initializing authentication service...");
 
-    let admin_user_store = AdminUserStore::new(storage.db().clone());
+    // Capture-backed, so admin users replicate. `AdminUserStore` has always
+    // called `capture_user_operation` on create/update/delete, but this call
+    // site constructed it without a capture handle, which made every one of
+    // those calls a silent no-op — admin users existed only on the node that
+    // created them.
+    let admin_user_store =
+        AdminUserStore::new_with_capture(storage.db().clone(), storage.operation_capture().clone());
     let jwt_secret = std::env::var("JWT_SECRET")
         .unwrap_or_else(|_| "default_jwt_secret_change_in_production".to_string());
 
@@ -100,5 +106,11 @@ pub fn init_auth_service(
         }
     }
 
-    Arc::new(AuthService::new(admin_user_store, jwt_secret))
+    // Likewise for API keys: one that exists only where it was minted fails
+    // authentication everywhere else in the cluster.
+    Arc::new(AuthService::new_with_capture(
+        admin_user_store,
+        jwt_secret,
+        storage.operation_capture().clone(),
+    ))
 }

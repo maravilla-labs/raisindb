@@ -14,6 +14,8 @@ use super::RocksDbOAuthStore;
 const REFRESH_KIND: &str = "oauth_refresh";
 /// Key discriminator for the family index.
 pub(super) const FAMILY_KIND: &str = "oauth_refresh_fam";
+/// Key discriminator for the revoked-family tombstone.
+const REVOKED_FAMILY_KIND: &str = "oauth_rt_revoked";
 
 impl RocksDbOAuthStore {
     /// The family-index key for one member of a rotation chain.
@@ -26,13 +28,38 @@ impl RocksDbOAuthStore {
 
 impl RefreshTokenStore for RocksDbOAuthStore {
     async fn put_refresh_token(&self, token: RefreshToken) -> AuthServerResult<()> {
+        // Refuse to (re)create a member of a family that was revoked.
+        let tombstone = Self::build_key(&token.tenant_id, REVOKED_FAMILY_KIND, &token.family_id);
+        if self.get_record::<String>(&tombstone)?.is_some() {
+            return Err(raisin_auth::authserver::AuthServerError::InvalidGrant(
+                "refresh token family has been revoked".to_string(),
+            ));
+        }
+
         let key = Self::build_key(&token.tenant_id, REFRESH_KIND, &token.token_hash);
         let index_key =
             Self::family_member_key(&token.tenant_id, &token.family_id, &token.token_hash);
 
         self.put_record(&key, &token)?;
         // The index value is unused — membership is carried by the key itself.
-        self.put_record(&index_key, &())
+        self.put_record(&index_key, &())?;
+
+        if let Some(capture) = self.capture() {
+            if let Err(e) = capture
+                .capture_upsert_oauth_refresh_token(
+                    token.tenant_id.clone(),
+                    token.clone(),
+                    "system".to_string(),
+                )
+                .await
+            {
+                tracing::error!(
+                    error = %e,
+                    "failed to capture refresh token for replication; it exists on this node only"
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn consume_refresh_token(
@@ -94,11 +121,41 @@ impl RefreshTokenStore for RocksDbOAuthStore {
             hashes.push(hash);
         }
 
+        // Tombstone the family BEFORE removing members. A rotation captured
+        // moments before the replay was noticed can still be in flight; the
+        // tombstone is what stops it from resurrecting the family when it
+        // lands, here and on every other node (see `oauth_operations.rs`).
+        self.put_record(
+            &Self::build_key(tenant_id, REVOKED_FAMILY_KIND, family_id),
+            &family_id.to_string(),
+        )?;
+
         let mut revoked = 0;
         for hash in &hashes {
             self.delete_record(&Self::build_key(tenant_id, REFRESH_KIND, hash))?;
             self.delete_record(&Self::family_member_key(tenant_id, family_id, hash))?;
             revoked += 1;
+        }
+
+        if let Some(capture) = self.capture() {
+            if let Err(e) = capture
+                .capture_revoke_oauth_refresh_family(
+                    tenant_id.to_string(),
+                    family_id.to_string(),
+                    "system".to_string(),
+                )
+                .await
+            {
+                // A revocation that does not replicate leaves a leaked token
+                // usable on the other nodes, so this is louder than the others.
+                tracing::error!(
+                    error = %e,
+                    tenant_id,
+                    family_id,
+                    "failed to replicate refresh-family revocation; \
+                     the leaked family may remain usable on other nodes"
+                );
+            }
         }
         Ok(revoked)
     }

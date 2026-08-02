@@ -34,12 +34,58 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ApiKeyStore {
     pub(super) db: Arc<DB>,
+    /// Emits replication operations on create and revoke so a key minted on one
+    /// node authenticates on all of them. `None` when replication is off.
+    pub(super) operation_capture: Option<Arc<crate::OperationCapture>>,
 }
 
 impl ApiKeyStore {
     /// Create a new API key store
     pub fn new(db: Arc<DB>) -> Self {
-        Self { db }
+        Self {
+            db,
+            operation_capture: None,
+        }
+    }
+
+    /// Attach operation capture so keys replicate to the other nodes.
+    pub fn new_with_capture(db: Arc<DB>, operation_capture: Arc<crate::OperationCapture>) -> Self {
+        Self {
+            db,
+            operation_capture: Some(operation_capture),
+        }
+    }
+
+    /// Replicate a key's current state.
+    ///
+    /// Called from create and revoke ONLY. Deliberately not called from
+    /// [`validate_api_key`](Self::validate_api_key), which rewrites the record
+    /// on every successful authentication to stamp `last_used_at`: capturing
+    /// there would emit an operation per authenticated connection, and
+    /// `last_used_at` would become a last-writer-wins register flapping between
+    /// nodes. That field stays node-local on purpose.
+    pub(super) fn replicate(&self, api_key: &raisin_models::api_key::ApiKey) {
+        let Some(capture) = self
+            .operation_capture
+            .as_ref()
+            .filter(|c| c.is_enabled())
+            .cloned()
+        else {
+            return;
+        };
+        let key = api_key.clone();
+        let tenant_id = api_key.tenant_id.clone();
+        let key_id = api_key.key_id.clone();
+
+        crate::replication::run_capture("upsert_api_key", async move {
+            let out = capture
+                .capture_upsert_api_key(tenant_id, key, "system".to_string())
+                .await;
+            if out.is_err() {
+                tracing::error!(key_id = %key_id, "API key exists on this node only");
+            }
+            out
+        });
     }
 
     /// Build storage key for an API key

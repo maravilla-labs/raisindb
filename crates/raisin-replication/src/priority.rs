@@ -38,6 +38,11 @@ impl OperationPriority {
             | OpType::CreateSession { .. }
             | OpType::RevokeSession { .. }
             | OpType::RevokeAllIdentitySessions { .. }
+            | OpType::UpsertOAuthClient { .. }
+            | OpType::DeleteOAuthClient { .. }
+            | OpType::UpsertOAuthRefreshToken { .. }
+            | OpType::RevokeOAuthRefreshFamily { .. }
+            | OpType::UpsertApiKey { .. }
             | OpType::RotateRefreshToken { .. } => OperationPriority::Critical,
 
             // High: Schema and workspace structure

@@ -869,3 +869,104 @@ What it would need, recorded before anyone starts:
   all; it is shipped, admin-gated today, and would need the same non-admin treatment.
 
 Revisit once `browse` has settled in the admin console.
+
+### 2.105 [P2] Cluster-wide auth guarantees depend on the Redis lock backend
+
+The OAuth 2.1 authorization server enforces one-shot redemption of authorization
+codes and refresh tokens by taking a lock lease and never releasing it — a held
+lease *is* the "already used" marker, and its TTL retires it exactly when the
+credential expires (`raisin-auth/src/authserver/mod.rs::claim_once`).
+
+There is always a lock manager: the shared one when `[locks]` is enabled,
+otherwise a process-local `InProcessLockManager` built for the purpose. **But
+`inprocess` coordinates nothing across nodes.** With it, or with `[locks]`
+disabled entirely (the default), the guarantees are:
+
+| | single node | cluster |
+|---|---|---|
+| code redeemed once | yes | **no** — once per node |
+| refresh replay detected | yes | only after `consumed_at` replicates |
+
+A multi-node deployment therefore needs `[locks]` with `backend = "redis"`,
+exactly as ticket-sale inventory does. The server already warns when `inprocess`
+is paired with replication; it does not warn about `[locks]` being *disabled*
+while replication is on, which is the more likely misconfiguration.
+
+Additionally, a lock-backend **error** deliberately degrades rather than fails:
+a Redis outage would otherwise take authentication down entirely, which is worse
+than the narrow replay window it would close (PKCE still binds the code to the
+client). The degrade is logged at WARN.
+
+### 2.106 [P3] Replicated auth records converge asynchronously
+
+OAuth clients, refresh tokens and API keys now replicate
+(`replication/application/oauth_operations.rs`). Convergence is asynchronous, so:
+
+- **A revoked API key keeps working on other nodes until the revocation lands.**
+  This matches the existing `DeleteUser` / `RevokeSession` guarantee and is
+  accepted rather than overlooked, but it is a real window on a security-relevant
+  operation.
+- **A newly registered OAuth client is briefly unknown elsewhere.** In practice
+  the user then walks through a consent screen, which is far longer than the
+  window, so this has not been worth engineering around.
+- **`last_used_at` on an API key is node-local by design.** It is stamped on
+  every successful validation, so capturing it would emit one replication
+  operation per authenticated connection; as a replicated LWW register it would
+  also flap between nodes. It is telemetry, not authority.
+
+Refresh-token replay detection deliberately does *not* wait for convergence — see
+§2.105 — because relying on the replicated `consumed_at` alone would let node B
+accept a token node A had just rotated and then, once they converge, revoke a
+family that was never leaked.
+
+### 2.107 [P2] Two deployment secrets must be identical on every node
+
+- `RAISIN_MASTER_KEY` — authorization codes are sealed with it
+  (`raisin-auth/src/authserver/code_codec.rs`). A code sealed on node A is
+  undecryptable on node B without the same key, so every token exchange that
+  crosses a node fails. When it is unset the server falls back to a random
+  per-process key and logs a WARN; that is fine for a dev server and wrong for
+  anything else.
+- `JWT_SECRET` — access tokens are signed with it and validated on whichever
+  node serves the MCP request.
+
+Neither is checked for agreement across the cluster; a mismatch presents as
+"login always fails at the last step" with nothing obviously wrong in either
+node's logs.
+
+
+### 2.108 [FIXED] `AdminUserStore` was constructed without operation capture
+
+`AdminUserStore::new_with_capture` existed and `crud.rs` called
+`capture_user_operation` on create/update/delete, but the production wiring in
+`raisin-server/src/startup/storage.rs` used plain `AdminUserStore::new` — so
+every one of those capture calls was a silent no-op, and admin users existed
+only on the node that created them.
+
+Now constructed with capture, alongside the API-key store. Three things had to
+change with it:
+
+- **`put_replicated` / `delete_replicated`** (`admin_user_store/crud.rs`).
+  `capture_user_operation` emits `OpType::UpdateUser` for creates as well as
+  updates, and `update_user` rejects a user that does not exist — so the apply
+  path would have failed on exactly the operation meant to introduce them.
+  `delete_replicated` is idempotent for the same reason: an `Err` on a
+  redelivered delete would wedge the queue.
+- **The apply handlers delegate to the store** rather than mirroring its key
+  layout and encoding. `user_operations.rs` previously rebuilt both by hand,
+  under a comment asking the reader to keep them in sync manually. They did
+  agree, but nothing enforced it.
+- **Capture no longer panics off the multi-threaded runtime**
+  (`operation_capture/blocking.rs`). The `block_in_place` + `Handle::current`
+  pattern panics with no reactor at all, or on a current-thread runtime. That
+  was harmless while capture was never enabled for these stores; with it on, a
+  panic would take down an admin login rather than lose a replication op. It now
+  degrades — spawning (with a warning that capture ordering is no longer
+  guaranteed) on a current-thread runtime, logging and skipping when there is no
+  runtime.
+
+Note that `authenticate` stamps `last_login` through `update_user`, so every
+admin login now emits a replication operation. That is acceptable — logins are a
+human-rate event, unlike API-key validation, which is why `last_used_at`
+deliberately stays node-local (§2.106) — but `last_login` is a LWW register and
+will flap if the same account signs in on two nodes.

@@ -72,6 +72,15 @@ impl OperationApplicator {
         }
     }
 
+    /// Borrow the database handle.
+    ///
+    /// Lets an apply handler construct the same store the live write path uses,
+    /// instead of re-deriving that store's key layout (see
+    /// `application/oauth_operations.rs`).
+    pub fn db(&self) -> &Arc<DB> {
+        &self.db
+    }
+
     /// Extract the revision HLC from an operation
     pub(super) fn op_revision(op: &Operation) -> Result<HLC> {
         if let Some(rev) = op.revision {
@@ -463,6 +472,56 @@ impl OperationApplicator {
                     &op.branch,
                     node_id,
                     revision,
+                    op,
+                )
+                .await
+            }
+
+            // ========== OAuth authorization server & API keys ==========
+            OpType::UpsertOAuthClient { client_id, client } => {
+                super::oauth_operations::apply_upsert_oauth_client(
+                    self,
+                    &op.tenant_id,
+                    client_id,
+                    client,
+                    op,
+                )
+                .await
+            }
+            OpType::DeleteOAuthClient { client_id } => {
+                super::oauth_operations::apply_delete_oauth_client(
+                    self,
+                    &op.tenant_id,
+                    client_id,
+                    op,
+                )
+                .await
+            }
+            OpType::UpsertOAuthRefreshToken { token_hash, token } => {
+                super::oauth_operations::apply_upsert_oauth_refresh_token(
+                    self,
+                    &op.tenant_id,
+                    token_hash,
+                    token,
+                    op,
+                )
+                .await
+            }
+            OpType::RevokeOAuthRefreshFamily { family_id } => {
+                super::oauth_operations::apply_revoke_oauth_refresh_family(
+                    self,
+                    &op.tenant_id,
+                    family_id,
+                    op,
+                )
+                .await
+            }
+            OpType::UpsertApiKey { key_id, api_key } => {
+                super::oauth_operations::apply_upsert_api_key(
+                    self,
+                    &op.tenant_id,
+                    key_id,
+                    api_key,
                     op,
                 )
                 .await

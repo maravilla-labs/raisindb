@@ -59,6 +59,7 @@
 //! exactly the operations the identity is entitled to.
 
 pub mod authorize;
+pub mod code_codec;
 pub mod error;
 pub mod metadata;
 pub mod model;
@@ -71,10 +72,13 @@ pub mod token;
 
 use std::sync::Arc;
 
+use raisin_locks::LockManagerHandle;
+
 pub use authorize::{
     issue_authorization_code, validate_authorization_request, AuthorizationRequest, ResourceOwner,
     ValidatedAuthorizationRequest, AUTH_CODE_TTL_SECONDS,
 };
+pub use code_codec::{AuthorizationCodeCodec, SealedCodeCodec};
 pub use error::{AuthServerError, AuthServerResult, OAuthErrorBody};
 pub use metadata::{AuthorizationServerMetadata, ProtectedResourceMetadata};
 pub use model::{
@@ -88,42 +92,92 @@ pub use refresh::{
 };
 pub use registration::{hash_client_secret, register_client, RegistrationOutcome};
 pub use scope::{grant_scopes, parse_scope, IdentityGrants};
-pub use store::{AuthCodeStore, ClientStore, InMemoryAuthServerStore, RefreshTokenStore};
+pub use store::{ClientStore, InMemoryAuthServerStore, RefreshTokenStore};
 pub use token::{
     authenticate_client, exchange_authorization_code, AuthorizationCodeTokenRequest, IssuedGrant,
     TokenGrant,
 };
 
-/// The authorization server: a thin orchestrator over the stores and the
-/// transport-agnostic protocol logic in the sibling modules.
+/// The authorization server: a thin orchestrator over the store, the code
+/// codec, the lock manager, and the transport-agnostic protocol logic in the
+/// sibling modules.
 ///
-/// It is generic over a single store type implementing all three storage traits
-/// (client, auth-code, refresh-token), kept behind an `Arc` so it can be shared
-/// across request tasks.
+/// It is generic over a single store type implementing both persistent storage
+/// traits (client, refresh-token), kept behind an `Arc` so it can be shared
+/// across request tasks. Authorization codes are not stored at all — see
+/// [`code_codec`].
 pub struct AuthorizationServer<S> {
     store: Arc<S>,
+    codec: Arc<dyn AuthorizationCodeCodec>,
+    /// Enforces one-shot redemption of codes and refresh tokens. Always
+    /// present: the shared configured manager when the `[locks]` subsystem is
+    /// enabled, otherwise a process-local one. See [`Self::claim_once`].
+    locks: LockManagerHandle,
 }
 
 impl<S> Clone for AuthorizationServer<S> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
+            codec: Arc::clone(&self.codec),
+            locks: Arc::clone(&self.locks),
         }
     }
 }
 
 impl<S> AuthorizationServer<S>
 where
-    S: ClientStore + AuthCodeStore + RefreshTokenStore,
+    S: ClientStore + RefreshTokenStore,
 {
-    /// Create a server backed by the given store.
-    pub fn new(store: Arc<S>) -> Self {
-        Self { store }
+    /// Create a server backed by the given store, code codec and lock manager.
+    pub fn new(
+        store: Arc<S>,
+        codec: Arc<dyn AuthorizationCodeCodec>,
+        locks: LockManagerHandle,
+    ) -> Self {
+        Self {
+            store,
+            codec,
+            locks,
+        }
     }
 
-    /// Borrow the underlying store (e.g. for sweeping expired codes).
+    /// Borrow the underlying store.
     pub fn store(&self) -> &Arc<S> {
         &self.store
+    }
+
+    /// Claim a one-shot credential, returning `false` if it was already claimed.
+    ///
+    /// The lease is acquired and **never released**: for a credential that may
+    /// be used once, a held lease is precisely an "already used" marker, and its
+    /// TTL retires it exactly when the credential itself expires. Releasing it
+    /// would re-open the credential to replay.
+    ///
+    /// `try_acquire` refusing on contention — the awkward half of the lease API
+    /// when you want queueing — is the desired behaviour here: a second
+    /// presentation of a one-use credential *is* a replay.
+    ///
+    /// A backend **error** (Redis unreachable) degrades to `true` with a
+    /// warning rather than failing the request. Refusing every redemption
+    /// during a cache outage would take authentication down entirely, which is
+    /// a worse failure than the narrow replay window it would close — and PKCE
+    /// still binds the code to the client.
+    async fn claim_once(&self, key: &str, owner: &str, ttl_seconds: i64) -> bool {
+        let ttl = std::time::Duration::from_secs(ttl_seconds.max(1) as u64);
+        match self.locks.try_acquire(key, owner, ttl).await {
+            Ok(Some(_guard)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    key,
+                    "lock backend unavailable while claiming a one-shot credential; \
+                     proceeding without cluster-wide replay protection"
+                );
+                true
+            }
+        }
     }
 
     /// Build RFC 8414 authorization-server metadata for `issuer`.
@@ -172,18 +226,22 @@ where
         Ok((client, validated))
     }
 
-    /// Issue and persist a single-use authorization code for a validated request
-    /// and an authenticated resource owner. Returns the opaque code value.
+    /// Issue a single-use authorization code for a validated request and an
+    /// authenticated resource owner.
+    ///
+    /// Returns the sealed, opaque value to put in the redirect. Nothing is
+    /// written: the code carries its own grant, so the `/token` call can land
+    /// on any node in the cluster. Single use is enforced at redemption via
+    /// [`Self::claim_once`] on the code's jti.
     pub async fn complete_authorization(
         &self,
         tenant_id: &str,
         validated: &ValidatedAuthorizationRequest,
         owner: &ResourceOwner,
-    ) -> AuthServerResult<AuthorizationCode> {
+    ) -> AuthServerResult<String> {
         let now = chrono::Utc::now().timestamp();
         let code = issue_authorization_code(validated, owner, tenant_id, now);
-        self.store.put_code(code.clone()).await?;
-        Ok(code)
+        self.codec.seal(&code)
     }
 
     /// Redeem an `authorization_code` token request: load + authenticate the
@@ -206,18 +264,34 @@ where
             })?;
         authenticate_client(&client, &req.client_id, req.client_secret.as_deref())?;
 
-        // Consume the code first so a concurrent replay cannot also redeem it.
-        let code = self
-            .store
-            .take_code(tenant_id, &req.code)
-            .await?
-            .ok_or_else(|| {
-                AuthServerError::InvalidGrant(
-                    "authorization code is unknown, expired, or already used".to_string(),
-                )
-            })?;
-
+        // The code carries its own grant; nothing is looked up.
+        let code = self.codec.open(&req.code)?;
         let now = chrono::Utc::now().timestamp();
+
+        // A code sealed for another tenant must not be redeemable here, even
+        // though it decrypts fine — one master key covers the whole deployment.
+        if code.tenant_id != tenant_id {
+            return Err(AuthServerError::InvalidGrant(
+                "authorization code was issued for a different tenant".to_string(),
+            ));
+        }
+
+        // Claim it before doing anything else with it, so a concurrent replay
+        // loses the race rather than being served in parallel. The lease lives
+        // as long as the code could have, so it retires itself.
+        let ttl = (code.expires_at - now).max(1);
+        let key = raisin_locks::scoped_key(
+            tenant_id,
+            &code.repository,
+            &code.branch,
+            &format!("oauth:code:{}", code.code),
+        );
+        if !self.claim_once(&key, &req.client_id, ttl).await {
+            return Err(AuthServerError::InvalidGrant(
+                "authorization code has already been used".to_string(),
+            ));
+        }
+
         let grant = exchange_authorization_code(req, &code, now)?;
         let refresh_token = self
             .mint_refresh_token(&client, &grant, refresh::new_family_id(), now)
@@ -236,6 +310,14 @@ where
     /// leaked, so the entire family is revoked — the legitimate client then has
     /// to re-authorize, which is the intended outcome of a detected replay
     /// (OAuth 2.1 §4.14.2).
+    ///
+    /// Consumption is marked by a **lock lease**, not by the persisted
+    /// `consumed_at`. The stored flag converges asynchronously across a
+    /// cluster, so node B could accept a token node A had just rotated and then
+    /// — once the two converge — see a "replay" that never happened and revoke a
+    /// family that was never leaked, logging the user out for no reason. The
+    /// lease is visible on every node the moment it is taken. `consumed_at` is
+    /// still written, as the durable backstop for a degraded lock backend.
     pub async fn redeem_refresh_token(
         &self,
         tenant_id: &str,
@@ -260,8 +342,21 @@ where
                 AuthServerError::InvalidGrant("refresh token is unknown or revoked".to_string())
             })?;
 
-        // Replay: the token had already been redeemed. Burn the whole chain.
-        if record.is_consumed() {
+        // Claim the token cluster-wide. The lease outlives the token, so it
+        // stands in for "consumed" on every node immediately; the persisted
+        // flag below is the backstop when the backend is degraded.
+        let claim_key = raisin_locks::scoped_key(
+            tenant_id,
+            &record.repository,
+            &record.branch,
+            &format!("oauth:rt:{hash}"),
+        );
+        let claimed = self
+            .claim_once(&claim_key, &req.client_id, (record.expires_at - now).max(1))
+            .await;
+
+        // Replay: the token had already been redeemed, per either signal.
+        if !claimed || record.is_consumed() {
             let revoked = self
                 .store
                 .revoke_refresh_family(tenant_id, &record.family_id)
@@ -327,7 +422,11 @@ mod tests {
     use crate::strategies::OidcStrategy;
 
     fn server() -> AuthorizationServer<InMemoryAuthServerStore> {
-        AuthorizationServer::new(Arc::new(InMemoryAuthServerStore::new()))
+        AuthorizationServer::new(
+            Arc::new(InMemoryAuthServerStore::new()),
+            Arc::new(SealedCodeCodec::new(&[42u8; 32])),
+            Arc::new(raisin_locks::InProcessLockManager::new()),
+        )
     }
 
     fn registration() -> ClientRegistrationRequest {
@@ -383,7 +482,7 @@ mod tests {
 
         let token_req = AuthorizationCodeTokenRequest {
             grant_type: "authorization_code".to_string(),
-            code: code.code.clone(),
+            code: code.clone(),
             redirect_uri: Some("http://127.0.0.1:9000/cb".to_string()),
             client_id: client_id.clone(),
             client_secret: None,
@@ -440,7 +539,7 @@ mod tests {
 
         let token_req = AuthorizationCodeTokenRequest {
             grant_type: "authorization_code".to_string(),
-            code: code.code,
+            code,
             redirect_uri: Some("http://127.0.0.1:9000/cb".to_string()),
             client_id,
             client_secret: None,
@@ -486,7 +585,7 @@ mod tests {
                 "tenant-a",
                 &AuthorizationCodeTokenRequest {
                     grant_type: "authorization_code".to_string(),
-                    code: code.code,
+                    code,
                     redirect_uri: Some("http://127.0.0.1:9000/cb".to_string()),
                     client_id: client_id.clone(),
                     client_secret: None,
@@ -576,6 +675,152 @@ mod tests {
             .redeem_refresh_token("tenant-a", &refresh_request(&client_id, "rt_nonsense"))
             .await
             .expect_err("unknown token must fail");
+        assert_eq!(err.code(), "invalid_grant");
+    }
+
+    /// Two nodes: separate stores (each has its own RocksDB), a shared master
+    /// key, and a shared lock manager (the Redis backend).
+    fn cluster_pair() -> (
+        AuthorizationServer<InMemoryAuthServerStore>,
+        AuthorizationServer<InMemoryAuthServerStore>,
+    ) {
+        let key = [9u8; 32];
+        let shared_locks: raisin_locks::LockManagerHandle =
+            Arc::new(raisin_locks::InProcessLockManager::new());
+        let build = || {
+            AuthorizationServer::new(
+                Arc::new(InMemoryAuthServerStore::new()),
+                Arc::new(SealedCodeCodec::new(&key)),
+                Arc::clone(&shared_locks),
+            )
+        };
+        (build(), build())
+    }
+
+    /// The cluster case that a stored authorization code could not serve:
+    /// `/authorize` lands on node A (the user's browser) and `/token` on node B
+    /// (the MCP host's backend). The sealed code carries its own grant, so node
+    /// B needs nothing from node A's storage.
+    #[tokio::test]
+    async fn a_code_issued_on_one_node_is_redeemable_on_another() {
+        let (node_a, node_b) = cluster_pair();
+
+        // The client is replicated, so both nodes know it.
+        let reg = node_a
+            .register_client("tenant-a", registration())
+            .await
+            .unwrap();
+        let client_id = reg.client_id;
+        let client = node_a
+            .store()
+            .get_client("tenant-a", &client_id)
+            .await
+            .unwrap()
+            .unwrap();
+        node_b.store().put_client(client).await.unwrap();
+
+        let verifier = OidcStrategy::generate_code_verifier();
+        let challenge = OidcStrategy::generate_code_challenge(&verifier);
+
+        // Node A authorizes.
+        let (_c, validated) = node_a
+            .begin_authorization("tenant-a", &auth_request(&client_id, &challenge))
+            .await
+            .unwrap();
+        let owner = ResourceOwner {
+            identity_id: "id-1".to_string(),
+            email: "u@example.com".to_string(),
+            repository: "repo".to_string(),
+            branch: "main".to_string(),
+            granted_scopes: vec!["reader".to_string()],
+        };
+        let code = node_a
+            .complete_authorization("tenant-a", &validated, &owner)
+            .await
+            .unwrap();
+
+        // Node B redeems, having never seen the code.
+        let token_req = |code: String| AuthorizationCodeTokenRequest {
+            grant_type: "authorization_code".to_string(),
+            code,
+            redirect_uri: Some("http://127.0.0.1:9000/cb".to_string()),
+            client_id: client_id.clone(),
+            client_secret: None,
+            code_verifier: Some(verifier.clone()),
+        };
+        let issued = node_b
+            .redeem_authorization_code("tenant-a", &token_req(code.clone()))
+            .await
+            .expect("a sealed code must redeem on any node");
+        assert_eq!(issued.grant.identity_id, "id-1");
+
+        // And single use holds ACROSS nodes: replaying on node A must fail,
+        // because the lease taken by node B is shared state.
+        let err = node_a
+            .redeem_authorization_code("tenant-a", &token_req(code))
+            .await
+            .expect_err("a code redeemed on node B must not work on node A");
+        assert_eq!(err.code(), "invalid_grant");
+    }
+
+    /// One master key covers the deployment, so a code must still be pinned to
+    /// the tenant it was issued for.
+    #[tokio::test]
+    async fn a_code_cannot_be_redeemed_under_another_tenant() {
+        let server = server();
+        let reg = server
+            .register_client("tenant-a", registration())
+            .await
+            .unwrap();
+        let client_id = reg.client_id;
+        let verifier = OidcStrategy::generate_code_verifier();
+        let challenge = OidcStrategy::generate_code_challenge(&verifier);
+        let (_c, validated) = server
+            .begin_authorization("tenant-a", &auth_request(&client_id, &challenge))
+            .await
+            .unwrap();
+        let owner = ResourceOwner {
+            identity_id: "id-1".to_string(),
+            email: "u@example.com".to_string(),
+            repository: "repo".to_string(),
+            branch: "main".to_string(),
+            granted_scopes: vec!["reader".to_string()],
+        };
+        let code = server
+            .complete_authorization("tenant-a", &validated, &owner)
+            .await
+            .unwrap();
+
+        // Give tenant-b the same client id so the lookup is not what fails.
+        let client = server
+            .store()
+            .get_client("tenant-a", &client_id)
+            .await
+            .unwrap()
+            .unwrap();
+        server
+            .store()
+            .put_client(OAuthClient {
+                tenant_id: "tenant-b".to_string(),
+                ..client
+            })
+            .await
+            .unwrap();
+
+        let err = server
+            .redeem_authorization_code(
+                "tenant-b",
+                &AuthorizationCodeTokenRequest {
+                    grant_type: "authorization_code".to_string(),
+                    code,
+                    redirect_uri: Some("http://127.0.0.1:9000/cb".to_string()),
+                    client_id,
+                    client_secret: None,
+                    code_verifier: Some(verifier),
+                },
+            )
+            .await
+            .expect_err("cross-tenant redemption must fail");
         assert_eq!(err.code(), "invalid_grant");
     }
 

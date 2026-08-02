@@ -16,6 +16,7 @@ pub use change_tracker::{
 };
 pub use checkpoint_server::CheckpointServer;
 pub use integration::{start_replication, RocksDbCheckpointIngestor, RocksDbOperationLogStorage};
+pub(crate) use operation_capture::run_capture;
 pub use operation_capture::OperationCapture;
 pub use operation_queue::{OperationQueue, QueueStats, QueueStatsSnapshot, QueuedOperation};
 pub use persistent_idempotency::PersistentIdempotencyTracker;

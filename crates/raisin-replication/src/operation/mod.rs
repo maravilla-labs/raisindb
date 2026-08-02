@@ -136,6 +136,14 @@ pub enum OperationTarget {
     Permission(String),
     Identity(String),
     Session(String),
+    /// A registered OAuth client.
+    OAuthClient(String),
+    /// A single refresh token, keyed by its hash.
+    OAuthRefreshToken(String),
+    /// A refresh-token rotation family (revocation).
+    OAuthRefreshFamily(String),
+    /// An API key.
+    ApiKey(String),
     /// A single committed revision (branch + head HLC). Revisions are
     /// cumulative deltas, NOT convergent register states: every distinct
     /// ApplyRevision must be applied, so each gets its own target and is
@@ -160,6 +168,10 @@ impl std::fmt::Display for OperationTarget {
             Self::Permission(id) => write!(f, "permission:{}", id),
             Self::Identity(id) => write!(f, "identity:{}", id),
             Self::Session(id) => write!(f, "session:{}", id),
+            Self::OAuthClient(id) => write!(f, "oauth_client:{}", id),
+            Self::OAuthRefreshToken(id) => write!(f, "oauth_refresh_token:{}", id),
+            Self::OAuthRefreshFamily(id) => write!(f, "oauth_refresh_family:{}", id),
+            Self::ApiKey(id) => write!(f, "api_key:{}", id),
             Self::Revision(id) => write!(f, "revision:{}", id),
         }
     }

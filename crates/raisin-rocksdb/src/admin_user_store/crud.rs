@@ -137,6 +137,42 @@ impl AdminUserStore {
         Ok(None)
     }
 
+    /// Write a user received from another node.
+    ///
+    /// Unlike [`update_user`](Self::update_user) this does **not** require the
+    /// user to exist: `capture_user_operation` emits `OpType::UpdateUser` for
+    /// creates as well as updates, so on a node that has never seen the user
+    /// the existence check would reject exactly the operation that is supposed
+    /// to introduce them.
+    ///
+    /// Does not capture — this IS the replication apply path, and re-emitting
+    /// would loop.
+    pub fn put_replicated(&self, user: &DatabaseAdminUser) -> Result<()> {
+        let cf = self.db.cf_handle(cf::ADMIN_USERS).ok_or_else(|| {
+            raisin_error::Error::Backend("admin_users column family not found".to_string())
+        })?;
+        let value = rmp_serde::to_vec(user).map_err(|e| {
+            raisin_error::Error::Backend(format!("Failed to serialize admin user: {}", e))
+        })?;
+        self.db
+            .put_cf(cf, Self::build_key(&user.tenant_id, &user.username), &value)
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))
+    }
+
+    /// Delete a user on behalf of another node.
+    ///
+    /// Idempotent: a delete for a user this node never had is a no-op, not an
+    /// error, so a replicated delete cannot wedge the operation queue by
+    /// redelivering forever.
+    pub fn delete_replicated(&self, tenant_id: &str, username: &str) -> Result<()> {
+        let cf = self.db.cf_handle(cf::ADMIN_USERS).ok_or_else(|| {
+            raisin_error::Error::Backend("admin_users column family not found".to_string())
+        })?;
+        self.db
+            .delete_cf(cf, Self::build_key(tenant_id, username))
+            .map_err(|e| raisin_error::Error::storage(e.to_string()))
+    }
+
     /// Update an existing admin user
     pub fn update_user(&self, user: &DatabaseAdminUser) -> Result<()> {
         let cf = self.db.cf_handle(cf::ADMIN_USERS).ok_or_else(|| {
@@ -199,22 +235,25 @@ impl AdminUserStore {
             .map_err(|e| raisin_error::Error::storage(e.to_string()))?;
 
         // Capture operation for replication
-        if let Some(ref operation_capture) = self.operation_capture {
-            if operation_capture.is_enabled() {
-                let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        operation_capture
-                            .capture_delete_user(
-                                tenant_id.to_string(),
-                                "system".to_string(),
-                                "main".to_string(),
-                                username.to_string(),
-                                username.to_string(), // actor
-                            )
-                            .await
-                    })
-                });
-            }
+        if let Some(capture) = self
+            .operation_capture
+            .as_ref()
+            .filter(|c| c.is_enabled())
+            .cloned()
+        {
+            let (tenant, user) = (tenant_id.to_string(), username.to_string());
+            let actor = user.clone();
+            crate::replication::run_capture("delete_user", async move {
+                capture
+                    .capture_delete_user(
+                        tenant,
+                        "system".to_string(),
+                        "main".to_string(),
+                        user,
+                        actor,
+                    )
+                    .await
+            });
         }
 
         Ok(())
@@ -275,26 +314,29 @@ impl AdminUserStore {
 
     /// Helper: Capture a user update/create operation for replication
     fn capture_user_operation(&self, user: &DatabaseAdminUser, _is_create: bool) {
-        if let Some(ref operation_capture) = self.operation_capture {
-            if operation_capture.is_enabled() {
-                let user_value =
-                    serde_json::to_value(user).unwrap_or_else(|_| serde_json::json!({}));
+        let Some(capture) = self
+            .operation_capture
+            .as_ref()
+            .filter(|c| c.is_enabled())
+            .cloned()
+        else {
+            return;
+        };
+        let user_value = serde_json::to_value(user).unwrap_or_else(|_| serde_json::json!({}));
+        let (tenant_id, username) = (user.tenant_id.clone(), user.username.clone());
+        let actor = username.clone();
 
-                let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        operation_capture
-                            .capture_update_user(
-                                user.tenant_id.clone(),
-                                "system".to_string(),
-                                "main".to_string(),
-                                user.username.clone(),
-                                user_value,
-                                user.username.clone(),
-                            )
-                            .await
-                    })
-                });
-            }
-        }
+        crate::replication::run_capture("update_user", async move {
+            capture
+                .capture_update_user(
+                    tenant_id,
+                    "system".to_string(),
+                    "main".to_string(),
+                    username,
+                    user_value,
+                    actor,
+                )
+                .await
+        });
     }
 }

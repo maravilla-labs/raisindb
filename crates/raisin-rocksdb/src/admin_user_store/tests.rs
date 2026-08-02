@@ -189,3 +189,75 @@ fn test_has_users_is_strictly_tenant_scoped() {
     // And the populated tenant must still report true.
     assert!(store.has_users("z-later-tenant").unwrap());
 }
+
+// ---------------------------------------------------------------------------
+// Replication apply path
+//
+// `apply_update_user` / `apply_delete_user` delegate to the two methods below
+// instead of re-deriving this store's key layout and encoding, so what needs
+// proving is that a record written the replica way is readable the normal way.
+// ---------------------------------------------------------------------------
+
+fn sample_user(username: &str) -> DatabaseAdminUser {
+    DatabaseAdminUser::new(
+        format!("id-{username}"),
+        username.to_string(),
+        Some(format!("{username}@example.com")),
+        "hash".to_string(),
+        "default".to_string(),
+    )
+}
+
+/// A user replicated from another node must be readable through the normal
+/// lookup — same key, same encoding.
+#[test]
+fn a_replicated_user_is_readable_by_the_normal_lookup() {
+    let (_dir, db) = create_test_db();
+    let store = AdminUserStore::new(db);
+
+    store.put_replicated(&sample_user("alice")).unwrap();
+
+    let loaded = store
+        .get_user("default", "alice")
+        .unwrap()
+        .expect("the replicated user must resolve");
+    assert_eq!(loaded.user_id, "id-alice");
+    assert_eq!(loaded.email.as_deref(), Some("alice@example.com"));
+}
+
+/// `capture_user_operation` emits `UpdateUser` for creates too, so the apply
+/// path must not require the user to already exist — `update_user` does, which
+/// is why it cannot be reused here.
+#[test]
+fn a_replicated_create_does_not_require_a_pre_existing_user() {
+    let (_dir, db) = create_test_db();
+    let store = AdminUserStore::new(db);
+
+    assert!(
+        store.update_user(&sample_user("bob")).is_err(),
+        "update_user requires an existing user — the reason put_replicated exists"
+    );
+    store
+        .put_replicated(&sample_user("bob"))
+        .expect("the apply path must accept a user it has never seen");
+    assert!(store.get_user("default", "bob").unwrap().is_some());
+}
+
+/// A replicated delete for a user this node never had must be a no-op, not an
+/// error: returning `Err` would make the operation redeliver forever.
+#[test]
+fn a_replicated_delete_is_idempotent() {
+    let (_dir, db) = create_test_db();
+    let store = AdminUserStore::new(db);
+
+    store
+        .delete_replicated("default", "never-existed")
+        .expect("deleting an absent user must not error");
+
+    store.put_replicated(&sample_user("carol")).unwrap();
+    store.delete_replicated("default", "carol").unwrap();
+    assert!(store.get_user("default", "carol").unwrap().is_none());
+    store
+        .delete_replicated("default", "carol")
+        .expect("a redelivered delete must stay a no-op");
+}

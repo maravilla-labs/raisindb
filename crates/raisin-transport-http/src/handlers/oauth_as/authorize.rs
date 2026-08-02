@@ -248,7 +248,7 @@ pub async fn authorize_post(
     // Redirect back to the client with the code (and state, if supplied).
     let mut redirect = url::Url::parse(&validated.redirect_uri)
         .expect("redirect_uri was validated against the client registration");
-    redirect.query_pairs_mut().append_pair("code", &code.code);
+    redirect.query_pairs_mut().append_pair("code", &code);
     if let Some(state_val) = &validated.state {
         redirect.query_pairs_mut().append_pair("state", state_val);
     }

@@ -125,6 +125,17 @@ impl Operation {
                 resource_id,
                 ..
             } => OperationTarget::Permission(format!("{}:{}", subject_id, resource_id)),
+            OpType::UpsertOAuthClient { client_id, .. }
+            | OpType::DeleteOAuthClient { client_id } => {
+                OperationTarget::OAuthClient(client_id.clone())
+            }
+            OpType::UpsertOAuthRefreshToken { token_hash, .. } => {
+                OperationTarget::OAuthRefreshToken(token_hash.clone())
+            }
+            OpType::RevokeOAuthRefreshFamily { family_id } => {
+                OperationTarget::OAuthRefreshFamily(family_id.clone())
+            }
+            OpType::UpsertApiKey { key_id, .. } => OperationTarget::ApiKey(key_id.clone()),
             OpType::UpsertIdentity { identity_id, .. } | OpType::DeleteIdentity { identity_id } => {
                 OperationTarget::Identity(identity_id.clone())
             }
@@ -162,6 +173,8 @@ impl Operation {
                 | OpType::DeleteIdentity { .. }
                 | OpType::RevokeSession { .. }
                 | OpType::RevokeAllIdentitySessions { .. }
+                | OpType::DeleteOAuthClient { .. }
+                | OpType::RevokeOAuthRefreshFamily { .. }
         )
     }
 

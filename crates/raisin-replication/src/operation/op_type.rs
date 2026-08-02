@@ -1,7 +1,8 @@
 use raisin_context::Branch;
 use raisin_hlc::HLC;
 use raisin_models::admin_user::DatabaseAdminUser;
-use raisin_models::auth::{Identity, Session};
+use raisin_models::api_key::ApiKey;
+use raisin_models::auth::{Identity, OAuthClient, RefreshToken, Session};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::types::archetype::Archetype;
 use raisin_models::nodes::types::node_type::NodeType;
@@ -325,6 +326,56 @@ pub enum OpType {
     /// Bulk session revocation, typically used when deactivating an identity
     /// or when password is changed.
     RevokeAllIdentitySessions { identity_id: String },
+
+    // =========================================================================
+    // OAuth 2.1 authorization-server & API-key operations
+    // =========================================================================
+    /// Create or update a registered OAuth client (RFC 7591).
+    ///
+    /// These MUST reach every node. An MCP host registers once and then caches
+    /// the issued `client_id` indefinitely, so a node that has never seen the
+    /// registration answers `/authorize` with `invalid_client` and the user's
+    /// only recourse is deleting and re-adding the connector. Clients are
+    /// write-once and long-lived, so LWW is a natural fit.
+    UpsertOAuthClient {
+        client_id: String,
+        client: OAuthClient,
+    },
+
+    /// Delete a registered OAuth client.
+    DeleteOAuthClient { client_id: String },
+
+    /// Create or update a refresh token.
+    ///
+    /// Targeted by token hash, NOT by rotation family: every token in a family
+    /// is a distinct record, and grouping them under one target would LWW-merge
+    /// the family down to a single surviving member.
+    UpsertOAuthRefreshToken {
+        token_hash: String,
+        token: RefreshToken,
+    },
+
+    /// Revoke an entire refresh-token rotation family (replay detected).
+    ///
+    /// Writes a tombstone as well as deleting, because the revoke and a
+    /// concurrent rotation of the same family are *different* replication
+    /// targets and therefore have no ordering between them. Without the
+    /// tombstone a successor token minted just before the replay was noticed
+    /// can arrive afterwards and silently resurrect the family the server
+    /// believed it had burned.
+    RevokeOAuthRefreshFamily { family_id: String },
+
+    /// Create or update an API key.
+    ///
+    /// Captured on create and revoke only — never on validation, which stamps
+    /// `last_used_at` on every call and would otherwise emit one operation per
+    /// authenticated connection. `last_used_at` therefore rides along only when
+    /// one of those two events happens; it is telemetry, not authority.
+    ///
+    /// Revocation needs no separate operation: the local store revokes by
+    /// clearing `is_active` and rewriting the record, so the flipped record is
+    /// the revocation.
+    UpsertApiKey { key_id: String, api_key: ApiKey },
 
     /// Rotate refresh token (increment generation counter)
     ///

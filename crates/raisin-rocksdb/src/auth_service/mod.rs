@@ -58,7 +58,10 @@ pub struct AuthService {
 }
 
 impl AuthService {
-    /// Create a new authentication service
+    /// Create a new authentication service.
+    ///
+    /// API keys created through this service stay node-local; use
+    /// [`new_with_capture`](Self::new_with_capture) in a cluster.
     pub fn new(store: AdminUserStore, jwt_secret: String) -> Self {
         let api_key_store = ApiKeyStore::new(store.db());
         Self {
@@ -66,6 +69,24 @@ impl AuthService {
             api_key_store,
             jwt_secret,
             token_expiry_hours: 24, // Default: 24 hours
+        }
+    }
+
+    /// Create an authentication service whose API keys replicate.
+    ///
+    /// Without this, a key minted on one node authenticates only against that
+    /// node — the same class of failure as an unreplicated OAuth client.
+    pub fn new_with_capture(
+        store: AdminUserStore,
+        jwt_secret: String,
+        operation_capture: std::sync::Arc<crate::OperationCapture>,
+    ) -> Self {
+        let api_key_store = ApiKeyStore::new_with_capture(store.db(), operation_capture);
+        Self {
+            store,
+            api_key_store,
+            jwt_secret,
+            token_expiry_hours: 24,
         }
     }
 

@@ -31,6 +31,7 @@ mod schema_operations;
 // Domain-specific operation modules
 mod identity_operations;
 mod node_operations;
+mod oauth_operations;
 mod relation_operations;
 mod tag_operations;
 mod tenant_operations;

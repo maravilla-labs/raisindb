@@ -11,6 +11,10 @@ authors = ["SOLUTAS GmbH"]
 # Internal crates
 raisin-error = { path = "../raisin-error" }
 raisin-models = { path = "../raisin-models" }
+# AES-256-GCM for sealing authorization codes, and the shared lock manager that
+# enforces their single use across a cluster.
+raisin-crypto = { path = "../raisin-crypto" }
+raisin-locks = { path = "../raisin-locks" }
 
 # Async runtime
 tokio = { workspace = true, features = ["sync"] }
