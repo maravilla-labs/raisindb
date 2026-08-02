@@ -2,8 +2,9 @@
 
 //! SSE streaming for conversation events.
 
+use crate::state::AppState;
 use axum::{
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     response::sse::{Event, KeepAlive, Sse},
     Json,
 };
@@ -34,10 +35,11 @@ pub struct ConversationEventsBody {
 /// - `message_saved`: A message was persisted
 /// - `done`: The conversation turn is complete (stream closes)
 pub async fn stream_conversation_events(
+    State(state): State<AppState>,
     Path(repo): Path<String>,
     Query(query): Query<ConversationEventsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    stream_conversation_events_inner(repo, query.channel).await
+    stream_conversation_events_inner(repo, query.channel, state.shutdown_signal()).await
 }
 
 /// Stream conversation events for a specific conversation via SSE (POST).
@@ -48,16 +50,22 @@ pub async fn stream_conversation_events(
 /// Identical to the GET variant but avoids exposing the conversation path
 /// in URL parameters / server logs.
 pub async fn stream_conversation_events_post(
+    State(state): State<AppState>,
     Path(repo): Path<String>,
     Json(body): Json<ConversationEventsBody>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    stream_conversation_events_inner(repo, body.channel).await
+    stream_conversation_events_inner(repo, body.channel, state.shutdown_signal()).await
 }
 
 /// Shared SSE implementation for both GET and POST variants.
+///
+/// `shutdown` ends the stream when the server starts shutting down: the turn
+/// normally ends it on `Done`, but a stalled model turn would otherwise leave an
+/// open connection that `axum::serve`'s graceful shutdown waits on forever.
 async fn stream_conversation_events_inner(
     repo: String,
     channel: String,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let subscription_key = channel;
 
@@ -115,6 +123,8 @@ async fn stream_conversation_events_inner(
             }
         }
     };
+
+    let stream = futures::StreamExt::take_until(stream, shutdown);
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()

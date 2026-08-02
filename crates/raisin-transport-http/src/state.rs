@@ -141,6 +141,42 @@ pub struct AppState {
     /// Live system-definition stack. Defaults to embedded-only; the server
     /// replaces it at startup via [`AppState::configure_system_definitions`].
     pub(crate) definitions: Arc<tokio::sync::RwLock<SystemDefinitionsState>>,
+    /// Server-wide shutdown signal, fired first thing on SIGTERM/SIGINT.
+    ///
+    /// Empty unless the server installs one via
+    /// [`AppState::configure_shutdown_token`], so every other constructor —
+    /// tests included — keeps working and simply never cancels.
+    ///
+    /// Long-lived responses (SSE) MUST observe this. `axum::serve`'s graceful
+    /// shutdown waits for every OPEN connection, and an SSE response ends only
+    /// when its stream does, so one open admin-console tab holds the drain
+    /// exactly as an idle WebSocket did — until systemd's `TimeoutStopSec`
+    /// turns into SIGKILL, and a SIGKILL skips the RocksDB WAL flush.
+    ///
+    /// Held in a `OnceLock` behind an `Arc` on purpose: the state is cloned
+    /// into the router at construction time, but the token is only created
+    /// once the server is about to serve, so a plain field could never be
+    /// installed after the fact.
+    pub(crate) shutdown: Arc<std::sync::OnceLock<tokio_util::sync::CancellationToken>>,
+}
+
+/// Await a server shutdown signal, or never resolve if there is none.
+///
+/// The "never" arm is what keeps a token-less `AppState` (tests, embedded
+/// users) behaving exactly as before: the stream is simply never truncated.
+///
+/// Boxed so the resulting `TakeUntil` stays `Unpin` for an `Unpin` stream —
+/// otherwise every caller has to pin it by hand. One allocation per long-lived
+/// connection is not worth optimising.
+pub fn shutdown_or_never(
+    token: Option<tokio_util::sync::CancellationToken>,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        match token {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    })
 }
 
 /// The store backing the OAuth authorization server.
@@ -167,6 +203,28 @@ impl AppState {
     /// Get access to the underlying storage for NodeType operations
     pub fn storage(&self) -> &Arc<Store> {
         &self.storage
+    }
+
+    /// Install the process-wide shutdown token.
+    ///
+    /// Called once at startup, after the router is built — the state is shared
+    /// by `Arc`, so the token is visible to every handler that already holds a
+    /// clone. Idempotent: a second call is ignored.
+    pub fn configure_shutdown_token(&self, token: tokio_util::sync::CancellationToken) {
+        let _ = self.shutdown.set(token);
+    }
+
+    /// The process-wide shutdown token, if one was installed.
+    pub fn shutdown_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        self.shutdown.get().cloned()
+    }
+
+    /// A future that resolves when the server starts shutting down.
+    ///
+    /// Suitable for `StreamExt::take_until`: when no token was installed it
+    /// never resolves, so the stream is unaffected.
+    pub fn shutdown_signal(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        shutdown_or_never(self.shutdown_token())
     }
 
     /// Install the server's configured system-definition stack.
@@ -497,6 +555,9 @@ pub fn router_with_bin_and_audit(
         #[cfg(feature = "storage-rocksdb")]
         oauth_server,
         definitions: Arc::new(tokio::sync::RwLock::new(SystemDefinitionsState::default())),
+        // Installed later by the server via `configure_shutdown_token`; every
+        // other caller leaves it empty and never cancels.
+        shutdown: Arc::new(std::sync::OnceLock::new()),
     };
 
     // NOTE: Global CorsLayer has been removed in favor of unified_cors_middleware
@@ -507,6 +568,55 @@ pub fn router_with_bin_and_audit(
         .merge(crate::routes::routes(state.clone()));
 
     (router, state)
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::shutdown_or_never;
+    use futures::StreamExt;
+    use tokio_util::sync::CancellationToken;
+
+    /// The composition every SSE handler uses: a stream that would otherwise
+    /// run forever must END when the token fires — ending the response body
+    /// normally, which is what releases axum's graceful drain.
+    ///
+    /// (`AppState` itself needs a live storage backend to construct, so this
+    /// exercises the helper the handlers call rather than a full router.)
+    #[tokio::test]
+    async fn stream_ends_when_token_is_cancelled() {
+        let token = CancellationToken::new();
+        let (tx, rx) = tokio::sync::mpsc::channel::<u32>(8);
+
+        let mut stream = tokio_stream::wrappers::ReceiverStream::new(rx)
+            .take_until(shutdown_or_never(Some(token.clone())));
+
+        tx.send(1).await.unwrap();
+        assert_eq!(stream.next().await, Some(1));
+
+        token.cancel();
+
+        // The sender is still alive and the channel still has items queued —
+        // only the token ends this. Anything else would keep the connection
+        // open through the drain.
+        tx.send(2).await.unwrap();
+        assert_eq!(stream.next().await, None, "stream must end on cancellation");
+    }
+
+    /// No token installed (tests, embedded use) must behave exactly as before:
+    /// the stream is never truncated.
+    #[tokio::test]
+    async fn stream_is_unaffected_without_a_token() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<u32>(8);
+        let mut stream =
+            tokio_stream::wrappers::ReceiverStream::new(rx).take_until(shutdown_or_never(None));
+
+        tx.send(7).await.unwrap();
+        assert_eq!(stream.next().await, Some(7));
+
+        // Still open: only dropping the sender ends it.
+        drop(tx);
+        assert_eq!(stream.next().await, None);
+    }
 }
 
 /// Helper function to extract RocksDB from AppState (RocksDB only)

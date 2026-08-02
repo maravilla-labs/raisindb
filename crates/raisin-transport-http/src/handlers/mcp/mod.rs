@@ -343,7 +343,7 @@ async fn dispatch(
 
     // `resources/subscribe` upgrades to an SSE stream of update notifications.
     if request.method == "resources/subscribe" && request.id.is_some() {
-        return subscribe_sse(dispatcher, identity, request);
+        return subscribe_sse(dispatcher, identity, request, state.shutdown_signal());
     }
 
     let is_notification = request.id.is_none();
@@ -363,11 +363,16 @@ async fn dispatch(
 
 /// Open an SSE stream that confirms the subscription, then forwards every
 /// `notifications/resources/updated` frame for the subscribed URI.
+///
+/// A subscription lasts as long as the client keeps it, so the stream also ends
+/// on `shutdown` — otherwise the open response holds `axum::serve`'s graceful
+/// drain until the supervisor SIGKILLs the process.
 #[cfg(feature = "storage-rocksdb")]
 fn subscribe_sse(
     dispatcher: raisin_mcp::Dispatcher,
     identity: McpIdentity,
     request: JsonRpcRequest,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<Response, McpError> {
     use raisin_mcp::SubscribeResourceParams;
 
@@ -400,6 +405,8 @@ fn subscribe_sse(
             }
         }
     };
+
+    let sse_stream = futures::StreamExt::take_until(sse_stream, shutdown);
 
     Ok(Sse::new(sse_stream)
         .keep_alive(

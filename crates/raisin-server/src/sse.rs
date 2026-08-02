@@ -2,6 +2,18 @@
 //!
 //! This module provides SSE endpoints that stream real-time job status updates
 //! to connected clients, enabling live UI updates without polling.
+//!
+//! # Shutdown
+//!
+//! Every stream here is unbounded — it ends only when the client disconnects.
+//! An SSE response is an open HTTP connection, and `axum::serve`'s graceful
+//! shutdown waits for every open connection, so one admin-console tab used to
+//! hold the drain until systemd escalated to SIGKILL — which skips
+//! `RocksDBStorage::flush_and_close()` and leaves the WAL for the next boot to
+//! replay. Each stream therefore ends on
+//! [`ManagementState::shutdown_signal`], which finishes the response body
+//! cleanly (normal connection close, no error frame), so browsers just
+//! reconnect after the restart.
 
 use crate::management::ManagementState;
 use async_trait::async_trait;
@@ -112,6 +124,7 @@ pub async fn job_events_stream_rocksdb(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let storage = state.storage.clone();
     let tenant_id = tenant_info.tenant_id.clone();
+    let shutdown = state.shutdown_signal();
 
     tracing::debug!(
         tenant_id = %tenant_id,
@@ -191,6 +204,9 @@ pub async fn job_events_stream_rocksdb(
                 Ok(Event::default().event("job-log").data(data))
             }
         });
+    // End the response when the server starts shutting down, so this
+    // connection stops holding axum's graceful drain.
+    let stream = futures::StreamExt::take_until(stream, shutdown);
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -209,6 +225,7 @@ pub async fn job_events_stream<S>(
 where
     S: raisin_storage::BackgroundJobs + Send + Sync + 'static,
 {
+    let shutdown = state.shutdown_signal();
     let storage = state.storage;
     // Create a channel for this client
     let (tx, rx) = mpsc::channel::<SseEvent>(100);
@@ -247,6 +264,8 @@ where
             Ok(Event::default().event("job-log").data(data))
         }
     });
+    // See the module docs: an open SSE response holds axum's drain.
+    let stream = futures::StreamExt::take_until(stream, shutdown);
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -471,6 +490,7 @@ where
     S: raisin_storage::ManagementOps + Send + Sync + 'static,
 {
     let tenant_id = tenant_info.tenant_id.clone();
+    let shutdown = state.shutdown_signal();
     tracing::debug!(
         tenant_id = %tenant_id,
         "Health SSE stream opened (tenant-filtered)"
@@ -501,6 +521,9 @@ where
         }
     };
 
+    // Infinite by construction — end it on shutdown or it holds the drain.
+    let stream = futures::StreamExt::take_until(stream, shutdown);
+
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(30))
@@ -519,6 +542,7 @@ where
     S: raisin_storage::ManagementOps + Send + Sync + 'static,
 {
     let tenant_id = tenant_info.tenant_id.clone();
+    let shutdown = state.shutdown_signal();
     tracing::debug!(
         tenant_id = %tenant_id,
         "Metrics SSE stream opened (tenant-filtered)"
@@ -548,6 +572,9 @@ where
                 .data(data));
         }
     };
+
+    // Infinite by construction — end it on shutdown or it holds the drain.
+    let stream = futures::StreamExt::take_until(stream, shutdown);
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()

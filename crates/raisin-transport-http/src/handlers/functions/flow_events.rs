@@ -2,8 +2,9 @@
 
 //! SSE streaming for flow instance execution events.
 
+use crate::state::AppState;
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::stream::Stream;
@@ -19,9 +20,16 @@ use std::time::Duration;
 /// - `flow_waiting`: Flow is waiting for external input
 /// - `flow_completed`: Flow has completed successfully
 /// - `flow_failed`: Flow has failed
+///
+/// The stream ends by itself once the flow reaches a terminal state — but a
+/// flow parked on a human task can stay live for days, and an open SSE response
+/// is an open connection that `axum::serve`'s graceful shutdown waits for. So
+/// it also ends on the server shutdown signal.
 pub async fn stream_flow_events(
+    State(state): State<AppState>,
     Path((repo, instance_id)): Path<(String, String)>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let shutdown = state.shutdown_signal();
     tracing::debug!(
         repo = %repo,
         instance_id = %instance_id,
@@ -80,6 +88,8 @@ pub async fn stream_flow_events(
             }
         }
     };
+
+    let stream = futures::StreamExt::take_until(stream, shutdown);
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()

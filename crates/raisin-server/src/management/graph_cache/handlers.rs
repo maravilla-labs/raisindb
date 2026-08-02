@@ -296,7 +296,7 @@ pub async fn mark_stale(
 /// from the background computation task. Falls back to local countdown if no
 /// shared state is available.
 pub async fn graph_cache_events_stream(
-    State(_state): State<ManagementState<RocksDBStorage>>,
+    State(state): State<ManagementState<RocksDBStorage>>,
     Extension(tenant_info): Extension<TenantInfo>,
     graph_state: Option<axum::Extension<Arc<GraphCacheState>>>,
     Path(repo_id): Path<String>,
@@ -307,6 +307,9 @@ pub async fn graph_cache_events_stream(
         "Graph cache SSE stream opened"
     );
     let tick_interval = DEFAULT_TICK_INTERVAL_SECS;
+    // This loop never ends on its own; without this the open response holds
+    // axum's graceful drain on shutdown (see `crate::sse` module docs).
+    let shutdown = state.shutdown_signal();
 
     // Try to get the shared state for real tick updates
     let shared_state = graph_state.map(|ext| ext.0);
@@ -373,6 +376,8 @@ pub async fn graph_cache_events_stream(
             }
         }
     };
+
+    let stream = futures::StreamExt::take_until(stream, shutdown);
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()

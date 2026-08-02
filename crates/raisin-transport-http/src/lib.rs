@@ -100,3 +100,6 @@ pub mod identity_provisioning {
 #[cfg(not(feature = "s3"))]
 pub use state::router;
 pub use state::router_with_bin_and_audit;
+/// Await the process-wide shutdown signal, or never, when none is installed.
+/// Long-lived responses use this with `StreamExt::take_until`.
+pub use state::shutdown_or_never;

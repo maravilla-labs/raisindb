@@ -59,11 +59,16 @@ pub fn management_router(
 
     // Get data_dir before storage is moved into state
     let data_dir = storage.config().path.to_string_lossy().to_string();
+    // The shutdown token rides along from the HTTP state so the SSE handlers
+    // mounted below can end their streams instead of holding the drain.
+    let shutdown = app_state.shutdown_token();
     let state = ManagementState {
         storage: storage.clone(),
+        shutdown: shutdown.clone(),
     };
     let state_for_admin = ManagementState {
         storage: storage.clone(),
+        shutdown,
     };
     drop(storage);
 
@@ -369,7 +374,10 @@ pub fn management_router<S>(storage: Arc<S>) -> Router
 where
     S: ManagementOps + BackgroundJobs + Clone + Send + Sync + 'static,
 {
-    let state = ManagementState { storage };
+    let state = ManagementState {
+        storage,
+        shutdown: None,
+    };
 
     Router::new()
         // Per-tenant health (server-wide is operator-only).

@@ -947,6 +947,24 @@ async fn main() {
     #[cfg(feature = "storage-rocksdb")]
     let ws_hnsw_engine = hnsw_engine.clone();
 
+    // Shutdown signal for every long-lived connection.
+    //
+    // `axum::serve(...).with_graceful_shutdown(...)` waits for every OPEN
+    // connection, and two kinds never end on their own: an upgraded WebSocket,
+    // and an SSE response (whose body ends only when its stream does). Either
+    // one — a single idle Studio tab, a single open admin console — held the
+    // drain until systemd's timeout fired SIGKILL, and a SIGKILL leaves
+    // RocksDB's WAL unflushed for the next boot to replay (observed: ~350 MB vs
+    // 192 KB after a clean stop). Cancelling this token tells WebSocket tasks to
+    // finish in-flight work and close, and tells SSE streams to end.
+    //
+    // Created here, before the routers, because both the HTTP `AppState` and the
+    // management state need it.
+    //
+    // Separate from the job system's `shutdown_token`, which is `None` when
+    // background jobs are disabled — this one must always fire.
+    let conn_shutdown = tokio_util::sync::CancellationToken::new();
+
     let (api_router, app_state) = http::router_with_bin_and_audit(
         storage.clone(),
         ws_svc.clone(),
@@ -976,6 +994,12 @@ async fn main() {
         Some(schema_stats_cache.clone()),
         lock_manager.clone(),
     );
+
+    // Let the HTTP layer's long-lived responses (SSE) observe the shutdown
+    // signal. Installed here rather than passed as yet another positional
+    // argument, and before the management router is built below — that router
+    // reads the token back out of `app_state`.
+    app_state.configure_shutdown_token(conn_shutdown.clone());
 
     // Hand the HTTP layer the same definition stack the startup resync used, so
     // the pending/apply endpoints and the overlay-reload endpoint all operate on
@@ -1022,20 +1046,9 @@ async fn main() {
     // WebSocket transport
     // ========================================================================
 
-    // Shutdown signal for WebSocket connections.
-    //
-    // `axum::serve(...).with_graceful_shutdown(...)` waits for every OPEN
-    // connection, and an upgraded WebSocket never closes on its own — so a
-    // single idle Studio tab held the drain until systemd's timeout fired
-    // SIGKILL, and a SIGKILL leaves RocksDB's WAL unflushed for the next boot
-    // to replay (observed: ~350 MB vs 192 KB after a clean stop). Cancelling
-    // this token tells each connection task to finish the requests it has
-    // already started, send a 1001 Close frame and return.
-    //
-    // Separate from the job system's `shutdown_token`, which is `None` when
-    // background jobs are disabled — this one must always fire.
-    let ws_shutdown = tokio_util::sync::CancellationToken::new();
-
+    // WebSocket connections observe `conn_shutdown` (created above, shared with
+    // the HTTP/SSE layer): each task finishes the requests it has already
+    // started, sends a 1001 Close frame and returns.
     #[cfg(feature = "websocket")]
     let app = {
         tracing::info!("Initializing WebSocket transport...");
@@ -1094,7 +1107,7 @@ async fn main() {
                 lock_manager.clone(),
                 audit_repo.clone(),
             )
-            .with_shutdown(ws_shutdown.clone()),
+            .with_shutdown(conn_shutdown.clone()),
         );
 
         let ws_router = Router::new()
@@ -1228,7 +1241,7 @@ async fn main() {
     let batch_token: Option<tokio_util::sync::CancellationToken> = None;
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(batch_token, ws_shutdown))
+        .with_graceful_shutdown(shutdown_signal(batch_token, conn_shutdown))
         .await
         .expect("Failed to serve HTTP application");
 
@@ -1274,12 +1287,15 @@ async fn main() {
 /// Wait for SIGINT (Ctrl-C) or SIGTERM, then release everything that would
 /// otherwise hold the drain open:
 ///
-/// 1. `ws_shutdown` — WebSocket connections. `axum::serve`'s graceful shutdown
-///    waits for every open connection, and an upgraded WebSocket never ends on
-///    its own, so without this ONE idle browser tab keeps the process alive
-///    until the supervisor SIGKILLs it (and a SIGKILL means an unflushed WAL
-///    that the next boot has to replay). Each connection finishes the requests
-///    it has already started, then sends a 1001 Close frame and returns.
+/// 1. `conn_shutdown` — WebSocket connections AND SSE streams. `axum::serve`'s
+///    graceful shutdown waits for every open connection, and neither an
+///    upgraded WebSocket nor an SSE response ever ends on its own, so without
+///    this ONE idle browser tab keeps the process alive until the supervisor
+///    SIGKILLs it (and a SIGKILL means an unflushed WAL that the next boot has
+///    to replay). Each WebSocket finishes the requests it has already started,
+///    then sends a 1001 Close frame and returns; each SSE stream ends, which
+///    completes its response body normally so the browser reconnects rather
+///    than reporting an error.
 /// 2. The batch aggregator's shutdown token, so its background flush task
 ///    drains the in-memory pending map (and the persisted CF) before exit.
 ///
@@ -1288,7 +1304,7 @@ async fn main() {
 /// `batch_aggregator::persistence`).
 async fn shutdown_signal(
     batch_shutdown: Option<tokio_util::sync::CancellationToken>,
-    ws_shutdown: tokio_util::sync::CancellationToken,
+    conn_shutdown: tokio_util::sync::CancellationToken,
 ) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -1320,7 +1336,7 @@ async fn shutdown_signal(
     // upgraded WebSocket never ends on its own — so unless the sockets are
     // told to close, the drain below never completes and the process is
     // eventually SIGKILLed with an unflushed WAL.
-    ws_shutdown.cancel();
+    conn_shutdown.cancel();
     tracing::info!("Signalled WebSocket connections to drain in-flight work and close");
 
     if let Some(token) = batch_shutdown {
