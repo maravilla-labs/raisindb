@@ -7,7 +7,7 @@ mod compound_indexes;
 pub(crate) mod property_indexes;
 pub(crate) mod reference_indexes;
 mod relation_indexes;
-mod unique_indexes;
+pub(crate) mod unique_indexes;
 
 use super::super::storage_node::StorageNode;
 use super::super::NodeRepositoryImpl;

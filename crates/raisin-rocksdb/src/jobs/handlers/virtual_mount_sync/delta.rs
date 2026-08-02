@@ -7,13 +7,25 @@
 
 use serde_json::json;
 
+use super::batch::SyncBatcher;
 use super::config::{ChangesPage, MountState};
-use super::{materialize_item, persist_state, AdapterError, SyncCtx};
+use super::{stage_item, persist_state, AdapterError, SyncCtx};
 
 /// Run a delta sync, updating `state.last_sync_token` as pages complete.
 pub async fn run(
     ctx: &SyncCtx<'_>,
     state: &mut MountState,
+) -> std::result::Result<(), AdapterError> {
+    let mut batcher = SyncBatcher::new(ctx).await?;
+    run_with(ctx, state, &mut batcher).await
+}
+
+/// Delta sync against an already-open batcher, so a run that also does a
+/// backfill chunk shares one index and one write buffer.
+pub async fn run_with(
+    ctx: &SyncCtx<'_>,
+    state: &mut MountState,
+    batcher: &mut SyncBatcher<'_>,
 ) -> std::result::Result<(), AdapterError> {
     let max = ctx.mount.sync_config.max_items_per_sync;
     let include = &ctx.mount.sync_config.include_patterns;
@@ -31,9 +43,12 @@ pub async fn run(
             .map_err(|e| AdapterError::Transient(format!("bad get_changes response: {e}")))?;
 
         for change in &page.items {
-            apply_change(ctx, change, include, exclude).await?;
+            stage_change(ctx, batcher, change, include, exclude).await?;
             processed += 1;
         }
+        // The cursor below claims this page landed, so the buffer must be empty
+        // before it is written.
+        batcher.flush().await?;
 
         // Persist the cursor after the whole page materialized — but ONLY when
         // the adapter actually returned one. A `None` next_token means "no more
@@ -56,21 +71,24 @@ pub async fn run(
         }
         token = next;
     }
+    batcher.flush().await?;
     Ok(())
 }
 
-/// Apply one change: delete tombstones, upsert created/updated (after filters).
-async fn apply_change(
+/// Stage one change: delete tombstones, upsert created/updated (after filters).
+///
+/// Deletes go into the SAME ordered buffer as upserts. Applying them eagerly
+/// while upserts were buffered would reorder the page, so a `created X` followed
+/// by `deleted X` would leave X alive.
+async fn stage_change(
     ctx: &SyncCtx<'_>,
+    batcher: &mut SyncBatcher<'_>,
     change: &super::config::Change,
     include: &[String],
     exclude: &[String],
 ) -> std::result::Result<(), AdapterError> {
     if change.kind == "deleted" {
-        ctx.materializer
-            .delete(&ctx.scope, &change.item.external_id)
-            .await
-            .map_err(|e| AdapterError::Transient(format!("delete failed: {e}")))?;
+        batcher.stage_delete(&change.item.external_id).await?;
         return Ok(());
     }
 
@@ -89,6 +107,6 @@ async fn apply_change(
     if !super::passes_filters(&rel_path, include, exclude) {
         return Ok(());
     }
-    materialize_item(ctx, &change.item, &rel_path).await?;
+    stage_item(ctx, batcher, &change.item, &rel_path).await?;
     Ok(())
 }

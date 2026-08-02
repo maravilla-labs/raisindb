@@ -218,8 +218,14 @@ impl NodeRepositoryImpl {
     }
 }
 
-/// Extract property names that have `unique: true` from a NodeType
-fn extract_unique_property_names(node_type: &raisin_models::nodes::NodeType) -> Vec<String> {
+/// Extract property names that have `unique: true` from a NodeType.
+///
+/// The ONE implementation: the virtual-mount batch writer needs the same answer
+/// to guard against two items in a single transaction claiming the same unique
+/// value (`check_unique_constraints` reads the COMMITTED index, so it cannot see
+/// a sibling in the same batch). A second copy of this walk would be free to
+/// drift from the one the write path enforces.
+pub(crate) fn extract_unique_property_names(node_type: &raisin_models::nodes::NodeType) -> Vec<String> {
     match node_type.properties {
         Some(ref props) => props
             .iter()

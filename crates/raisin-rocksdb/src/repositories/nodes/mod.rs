@@ -12,7 +12,7 @@
 //! - `helpers`: Utility functions
 //! - `trait_impl`: NodeRepository trait delegation to internal methods
 
-mod crud; // This is now a directory with sub-modules
+pub(crate) mod crud; // This is now a directory with sub-modules
 pub mod helpers;
 mod mvcc;
 mod ordering;

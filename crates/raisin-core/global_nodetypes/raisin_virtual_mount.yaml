@@ -78,8 +78,21 @@ properties:
         mode: "poll" | "webhook" | "hybrid",
         interval_seconds: 300,
         include_patterns: [], exclude_patterns: [],
-        ephemeral: false, ttl_seconds: null, max_items_per_sync: 500
+        ephemeral: false, ttl_seconds: null, max_items_per_sync: 500,
+        batch_size: 1000, batch_max_bytes: 4194304
       }
+
+      batch_size / batch_max_bytes bound how many items share one transaction
+      during an import. A batch commits as ONE revision, so this is what turns a
+      per-item write (one revision, one branch-HEAD bump, one snapshot job and
+      one replication record EACH) into one of each per batch.
+
+      A batch flushes when EITHER bound is reached. Keep the byte budget: the
+      replication layer stores a batch as a single record holding a full snapshot
+      of every node in it, and one larger than the 10 MB transport frame cap
+      would wedge a peer's sync. 1000 items with 20 KB mail bodies would be
+      ~20 MB — the byte budget is what makes a large batch_size safe, so raise
+      the two together or not at all.
 
   - name: write_config
     type: Object

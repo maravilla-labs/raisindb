@@ -19,8 +19,11 @@ use raisin_storage::jobs::{JobContext, JobId, JobInfo, JobStatus, JobType};
 use raisin_storage::transactional::TransactionalStorage;
 use serde_json::{json, Value};
 
-use super::config::{MountConfig, MountState, SyncConfig, WriteConfig};
-use super::materializer::{MountScope, NodeMaterializer, RocksDbMaterializer, VirtualMeta};
+use super::config::{MappedNode, MountConfig, MountState, SyncConfig, WriteConfig};
+use super::materializer::{
+    BatchOp, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,
+    VirtualNodeRef,
+};
 use super::{AdapterError, AdapterInvoker, SyncCtx, VirtualMountSyncHandler};
 use crate::RocksDBStorage;
 
@@ -306,6 +309,46 @@ fn virtual_assets(nodes: &[Node]) -> Vec<&Node> {
         .collect()
 }
 
+// ---- materializer helpers ----
+
+/// Write ONE item through the batch API — a one-op batch is exactly what the
+/// single-item replay path does, so this exercises the real code.
+async fn upsert_one(
+    mat: &RocksDbMaterializer,
+    scope: &MountScope,
+    index: &mut SyncIndex,
+    rel_path: &str,
+    mapped: MappedNode,
+    virt: VirtualMeta,
+) -> bool {
+    let stats = mat
+        .apply_batch(
+            scope,
+            index,
+            vec![BatchOp::Upsert {
+                rel_path: rel_path.to_string(),
+                mapped,
+                virt,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats.failed, 0, "unexpected item-level rejection");
+    stats.written == 1
+}
+
+/// Mount-owned nodes as the run's index sees them.
+fn virtual_refs(index: &SyncIndex) -> Vec<VirtualNodeRef> {
+    index.virtual_nodes()
+}
+
+/// Mount-owned nodes re-read from storage. Stronger than asking a live index:
+/// it proves the writes actually landed, not just that the in-memory view was
+/// updated.
+async fn list_virtual(mat: &RocksDbMaterializer, scope: &MountScope) -> Vec<VirtualNodeRef> {
+    mat.load_index(scope).await.unwrap().virtual_nodes()
+}
+
 // ---- tests ----
 
 #[tokio::test(flavor = "multi_thread")]
@@ -430,13 +473,17 @@ async fn etag_skip_write_avoids_revision() {
         etag: Some("v1".to_string()),
         synced_at: Utc::now().to_rfc3339(),
     };
-    let wrote = mat
-        .upsert(&scope(), "a", mapped.clone(), virt.clone())
-        .await
-        .unwrap();
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    let wrote = upsert_one(&mat, &scope(), &mut index, "a", mapped.clone(), virt.clone()).await;
     assert!(wrote, "first upsert writes");
-    let again = mat.upsert(&scope(), "a", mapped, virt).await.unwrap();
+    let again = upsert_one(&mat, &scope(), &mut index, "a", mapped.clone(), virt.clone()).await;
     assert!(!again, "same etag must skip the write");
+
+    // The skip must also hold for an index freshly re-read from storage, not
+    // just for the in-memory one this run mutated.
+    let mut reloaded = mat.load_index(&scope()).await.unwrap();
+    let third = upsert_one(&mat, &scope(), &mut reloaded, "a", mapped, virt).await;
+    assert!(!third, "same etag must still skip after reloading the index");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -476,11 +523,16 @@ async fn ephemeral_ttl_cleanup_removes_stale() {
     };
     let mapped =
         super::default_mapping(&serde_json::from_value(ext_item("X", "a", false, "v1")).unwrap());
-    mat.upsert(&scope(), "a", mapped, virt).await.unwrap();
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    upsert_one(&mat, &scope(), &mut index, "a", mapped, virt).await;
     assert_eq!(virtual_assets(&all_nodes(&env, TARGET_WS).await).len(), 1);
 
     // TTL of 1 hour → the 2-hour-old node is expired.
-    let deleted = super::ephemeral::cleanup_expired(&mat, &scope(), 3600, Utc::now().timestamp())
+    let mount = mk_mount(SyncConfig::default());
+    let mock = MockAdapter::default();
+    let ctx = ctx(&env, &mount, &mock, &mat);
+    let mut batcher = super::batch::SyncBatcher::new(&ctx).await.unwrap();
+    let deleted = super::ephemeral::cleanup_expired(&mut batcher, 3600, Utc::now().timestamp())
         .await
         .unwrap();
     assert_eq!(deleted, 1);
@@ -533,9 +585,9 @@ async fn remap_reapplies_node_type_and_path_to_already_synced_items() {
         name: Some("M1".to_string()),
         properties: serde_json::from_value(json!({ "title": "Hello" })).unwrap(),
     };
-    assert!(mat.upsert(&scope(), "M1", old, virt("v1")).await.unwrap());
-    let before = &mat.list_virtual(&scope()).await.unwrap()[0];
-    let original_id = before.id.clone();
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    assert!(upsert_one(&mat, &scope(), &mut index, "M1", old, virt("v1")).await);
+    let original_id = virtual_refs(&index)[0].id.clone();
 
     // The NEW mapper: different node type, and a threaded path. The provider
     // item is unchanged, so the etag is identical — an ordinary sync skips it.
@@ -545,19 +597,14 @@ async fn remap_reapplies_node_type_and_path_to_already_synced_items() {
         properties: serde_json::from_value(json!({ "subject": "Hello" })).unwrap(),
     };
     assert!(
-        !mat.upsert(&scope(), "T7/M1", new(), virt("v1"))
-            .await
-            .unwrap(),
+        !upsert_one(&mat, &scope(), &mut index, "T7/M1", new(), virt("v1")).await,
         "an ordinary sync must still skip an unchanged item"
     );
 
     // Remap applies it.
-    assert!(mat
-        .upsert(&remap_scope(), "T7/M1", new(), virt("v1"))
-        .await
-        .unwrap());
+    assert!(upsert_one(&mat, &remap_scope(), &mut index, "T7/M1", new(), virt("v1")).await);
 
-    let after = mat.list_virtual(&scope()).await.unwrap();
+    let after = virtual_refs(&index);
     assert_eq!(after.len(), 1, "remap must not duplicate the node");
     assert_eq!(
         after[0].id, original_id,
@@ -750,7 +797,7 @@ async fn backfill_resumes_across_runs_until_every_item_is_imported() {
     super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
         .await
         .unwrap();
-    assert_eq!(mat.list_virtual(&scope()).await.unwrap().len(), 2);
+    assert_eq!(list_virtual(&mat, &scope()).await.len(), 2);
     assert_eq!(state.backfill_cursor.as_deref(), Some("c1"));
     assert!(!state.backfill_complete, "walk is not finished yet");
 
@@ -758,7 +805,7 @@ async fn backfill_resumes_across_runs_until_every_item_is_imported() {
     super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
         .await
         .unwrap();
-    assert_eq!(mat.list_virtual(&scope()).await.unwrap().len(), 4);
+    assert_eq!(list_virtual(&mat, &scope()).await.len(), 4);
     assert_eq!(state.backfill_cursor.as_deref(), Some("c2"));
 
     // Run 3 — final page; the walk completes and the resume point is cleared.
@@ -771,10 +818,8 @@ async fn backfill_resumes_across_runs_until_every_item_is_imported() {
 
     // All five survive. The final chunk only "saw" E, so a reconcile pass here
     // would have deleted A-D — everything the backfill had just imported.
-    let ids: Vec<String> = mat
-        .list_virtual(&scope())
+    let ids: Vec<String> = list_virtual(&mat, &scope())
         .await
-        .unwrap()
         .into_iter()
         .map(|n| n.external_id)
         .collect();
@@ -809,7 +854,8 @@ async fn full_reconcile_refuses_to_empty_the_mount_on_a_zero_item_listing() {
     let mapped = super::default_mapping(
         &serde_json::from_value(ext_item("X", "synced", false, "v1")).unwrap(),
     );
-    mat.upsert(&scope(), "synced", mapped, virt).await.unwrap();
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    upsert_one(&mat, &scope(), &mut index, "synced", mapped, virt).await;
 
     let mock = MockAdapter::default(); // empty root list
     let mut state = MountState::default();
@@ -817,7 +863,7 @@ async fn full_reconcile_refuses_to_empty_the_mount_on_a_zero_item_listing() {
         .await
         .unwrap();
 
-    let remaining = mat.list_virtual(&scope()).await.unwrap();
+    let remaining = list_virtual(&mat, &scope()).await;
     assert_eq!(
         remaining.len(),
         1,
@@ -863,7 +909,8 @@ async fn full_reconcile_never_deletes_non_virtual_nodes() {
     let mapped = super::default_mapping(
         &serde_json::from_value(ext_item("X", "synced", false, "v1")).unwrap(),
     );
-    mat.upsert(&scope(), "synced", mapped, virt).await.unwrap();
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    upsert_one(&mat, &scope(), &mut index, "synced", mapped, virt).await;
 
     // Full reconcile that sees NOTHING: the virtual node is removed, the user
     // node survives.
@@ -1595,4 +1642,423 @@ fn account_for_refuses_to_guess_between_two_connections() {
         integration.account_for(Some("gone")),
         Err(AccountSelectionError::NotFound { .. })
     ));
+}
+
+// ---- batched import ----
+//
+// The engine used to write ONE item per transaction, and to find that item it
+// re-listed the ENTIRE target workspace. Importing a real mailbox was O(items ×
+// workspace) and got quadratically slower as it went. These tests pin down the
+// batching that replaced it, and the hazards batching introduces.
+
+/// Sync-actor revisions on the target branch, newest first.
+async fn sync_revision_count(env: &Env) -> usize {
+    use raisin_storage::RevisionRepository;
+    env.storage
+        .revisions()
+        .list_revisions(TENANT, REPO, 10_000, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.actor == super::SYNC_ACTOR)
+        .count()
+}
+
+fn upsert_op(ext: &str, rel_path: &str, etag: &str) -> BatchOp {
+    BatchOp::Upsert {
+        rel_path: rel_path.to_string(),
+        mapped: super::default_mapping(
+            &serde_json::from_value(ext_item(ext, rel_path, false, etag)).unwrap(),
+        ),
+        virt: VirtualMeta {
+            mount_id: MOUNT_ID.to_string(),
+            external_id: ext.to_string(),
+            etag: Some(etag.to_string()),
+            synced_at: Utc::now().to_rfc3339(),
+        },
+    }
+}
+
+/// The core win: N items cost ONE revision, not N.
+///
+/// One revision also means one branch-HEAD bump, one RocksDB write, one snapshot
+/// job and one replication record — the per-item versions of which were the
+/// import's actual cost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_of_items_costs_one_revision_not_one_per_item() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    let before = sync_revision_count(&env).await;
+    let ops: Vec<BatchOp> = (0..250)
+        .map(|i| upsert_op(&format!("X{i}"), &format!("f{i}.txt"), "v1"))
+        .collect();
+    let stats = mat.apply_batch(&scope(), &mut index, ops).await.unwrap();
+
+    assert_eq!(stats.written, 250);
+    assert_eq!(stats.failed, 0);
+    assert_eq!(
+        sync_revision_count(&env).await - before,
+        1,
+        "250 items must commit as ONE revision"
+    );
+    assert_eq!(virtual_assets(&all_nodes(&env, TARGET_WS).await).len(), 250);
+    assert_eq!(list_virtual(&mat, &scope()).await.len(), 250);
+}
+
+/// 500 items under one parent create that parent ONCE.
+///
+/// `upsert_deep_node` auto-creates missing ancestors, and inside a shared
+/// transaction the read cache is what stops the 2nd..500th item re-creating the
+/// same folder. Without it a threaded mailbox would write 500 copies of every
+/// conversation folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn items_sharing_a_parent_folder_create_it_once() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    let ops: Vec<BatchOp> = (0..200)
+        .map(|i| upsert_op(&format!("M{i}"), &format!("thread-7/m{i}.txt"), "v1"))
+        .collect();
+    let stats = mat.apply_batch(&scope(), &mut index, ops).await.unwrap();
+    assert_eq!(stats.written, 200);
+
+    let nodes = all_nodes(&env, TARGET_WS).await;
+    let folders: Vec<&Node> = nodes
+        .iter()
+        .filter(|n| n.path == format!("{MOUNT_PATH}/thread-7"))
+        .collect();
+    assert_eq!(folders.len(), 1, "the shared parent must exist exactly once");
+}
+
+/// Siblings written in ONE transaction share one revision HLC, so the editorial
+/// order index must still hold a distinct entry per child.
+///
+/// The ORDERED_CHILDREN key embeds the revision, and its label is minted from a
+/// per-transaction cache precisely so 50 siblings at one revision do not collide.
+/// A collision does not error — it silently drops or duplicates children, which
+/// `list_children` is what surfaces.
+#[tokio::test(flavor = "multi_thread")]
+async fn siblings_in_one_batch_each_get_their_own_ordered_child_entry() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    let ops: Vec<BatchOp> = (0..50)
+        .map(|i| upsert_op(&format!("S{i:03}"), &format!("s{i:03}.txt"), "v1"))
+        .collect();
+    mat.apply_batch(&scope(), &mut index, ops).await.unwrap();
+
+    let tx = begin(&env).await;
+    let children = tx.list_children(TARGET_WS, MOUNT_PATH).await.unwrap();
+    assert_eq!(
+        children.len(),
+        50,
+        "every sibling must appear exactly once in editorial order"
+    );
+    let mut ids: Vec<&str> = children.iter().map(|n| n.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 50, "no child may be duplicated by a label collision");
+}
+
+/// One bad item must not cost the batch.
+///
+/// A foreign (user-created) node sitting at a target path is refused — that guard
+/// predates batching and must survive it — but the other 199 items still land.
+/// Losing the whole batch to one rejected item would stall an import forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_item_does_not_lose_the_rest_of_the_batch() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+
+    // A user-created node (no __mount_id) occupying one of the target paths.
+    let tx = begin(&env).await;
+    tx.upsert_deep_node(
+        TARGET_WS,
+        &Node {
+            id: nanoid::nanoid!(),
+            node_type: "raisin:Node".to_string(),
+            name: "f7.txt".to_string(),
+            path: format!("{MOUNT_PATH}/f7.txt"),
+            workspace: Some(TARGET_WS.to_string()),
+            ..Default::default()
+        },
+        "raisin:Folder",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    let ops: Vec<BatchOp> = (0..200)
+        .map(|i| upsert_op(&format!("X{i}"), &format!("f{i}.txt"), "v1"))
+        .collect();
+    let stats = mat.apply_batch(&scope(), &mut index, ops).await.unwrap();
+
+    assert_eq!(stats.written, 199, "the other 199 items must land");
+    assert_eq!(stats.skipped, 1, "the foreign-owned path is skipped");
+    assert_eq!(virtual_assets(&all_nodes(&env, TARGET_WS).await).len(), 199);
+}
+
+/// A duplicated `external_id` in one page must converge on ONE node.
+///
+/// If both occurrences were written and they resolved to different paths, the
+/// mount would hold two nodes claiming the same external id; the next sync would
+/// match one arbitrarily and the other would be orphaned forever — invisible to
+/// reconcile, because its external id IS in `seen`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicated_external_id_in_one_page_yields_one_node() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    let stats = mat
+        .apply_batch(
+            &scope(),
+            &mut index,
+            vec![
+                upsert_op("DUP", "first.txt", "v1"),
+                upsert_op("DUP", "second.txt", "v2"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(stats.written, 1);
+    let nodes = list_virtual(&mat, &scope()).await;
+    assert_eq!(nodes.len(), 1, "one external id must own one node");
+    assert_eq!(
+        nodes[0].etag.as_deref(),
+        Some("v2"),
+        "the later occurrence is the newer state and wins"
+    );
+}
+
+/// Two DIFFERENT items resolving to the same path collapse to one node, and only
+/// one of them may claim it — otherwise both would be re-imported every sync,
+/// each overwriting the other's `__external_id` forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_items_at_the_same_resolved_path_keep_a_single_owner() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    let stats = mat
+        .apply_batch(
+            &scope(),
+            &mut index,
+            vec![
+                upsert_op("A", "clash.txt", "v1"),
+                upsert_op("B", "clash.txt", "v1"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(stats.written, 1);
+    let nodes = list_virtual(&mat, &scope()).await;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].external_id, "B", "the last item wins the path");
+}
+
+/// Deletes and upserts share ONE ordered queue.
+///
+/// A delta page that creates an item and then deletes it must end with the item
+/// gone. Buffering only the upserts and applying deletes eagerly would reorder
+/// the page and leave it alive.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_then_delete_in_one_batch_leaves_nothing_behind() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    mat.apply_batch(
+        &scope(),
+        &mut index,
+        vec![
+            upsert_op("KEEP", "keep.txt", "v1"),
+            upsert_op("GONE", "gone.txt", "v1"),
+            BatchOp::Delete {
+                external_id: "GONE".to_string(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+
+    let ids: Vec<String> = list_virtual(&mat, &scope())
+        .await
+        .into_iter()
+        .map(|n| n.external_id)
+        .collect();
+    assert_eq!(ids, vec!["KEEP".to_string()]);
+}
+
+/// The etag skip survives batching AND is decided before the mapper runs.
+///
+/// A re-sync of an unchanged mailbox must produce no revision at all: that is
+/// what stops every downstream trigger re-firing on every poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resync_of_unchanged_items_writes_nothing() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    let ops = || -> Vec<BatchOp> {
+        (0..40)
+            .map(|i| upsert_op(&format!("X{i}"), &format!("f{i}.txt"), "v1"))
+            .collect()
+    };
+    mat.apply_batch(&scope(), &mut index, ops()).await.unwrap();
+
+    let after_first = sync_revision_count(&env).await;
+    let mut reloaded = mat.load_index(&scope()).await.unwrap();
+    let stats = mat.apply_batch(&scope(), &mut reloaded, ops()).await.unwrap();
+
+    assert_eq!(stats.written, 0);
+    assert_eq!(stats.skipped, 40);
+    assert_eq!(
+        sync_revision_count(&env).await,
+        after_first,
+        "an unchanged re-sync must not create a revision"
+    );
+}
+
+/// A full sync through the real driver batches, and the reconcile pass reads the
+/// run's index instead of re-listing the workspace.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_sync_page_commits_as_one_revision() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig {
+        max_items_per_sync: 500,
+        ..SyncConfig::default()
+    });
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = MockAdapter::default();
+    let items: Vec<Value> = (0..120)
+        .map(|i| ext_item(&format!("X{i}"), &format!("f{i}.txt"), false, "v1"))
+        .collect();
+    mock.set_list("root", json!({ "items": items, "next_cursor": null }));
+
+    let before = sync_revision_count(&env).await;
+    let mut state = MountState::default();
+    super::full::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+
+    assert_eq!(virtual_assets(&all_nodes(&env, TARGET_WS).await).len(), 120);
+    assert_eq!(
+        sync_revision_count(&env).await - before,
+        1,
+        "a 120-item page must be one revision, not 120"
+    );
+}
+
+/// Unrelated content the import must not be slowed down by. Its size is the
+/// whole point of the benchmark: the old path re-listed EVERY node once per
+/// imported item, so its cost scaled with this number.
+async fn seed_workspace(env: &Env, seed: usize) {
+    let tx = begin(env).await;
+    for i in 0..seed {
+        tx.add_node(
+            TARGET_WS,
+            &Node {
+                id: nanoid::nanoid!(),
+                node_type: "raisin:Node".to_string(),
+                name: format!("seed{i}"),
+                path: format!("/seed/seed{i}"),
+                workspace: Some(TARGET_WS.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+}
+
+/// Throughput guard for the change this batching exists for.
+///
+/// Pre-seeding the workspace is the whole point: the old path re-listed EVERY
+/// node once per imported item, so its cost scaled with workspace size while the
+/// batched path does not. Run before/after to see the difference.
+///
+/// `BENCH_N=2000 cargo test -p raisin-rocksdb --lib
+///  virtual_mount_sync::tests::import_throughput -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn import_throughput() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let n: usize = std::env::var("BENCH_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let seed: usize = std::env::var("BENCH_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000);
+
+    seed_workspace(&env, seed).await;
+
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    let ops: Vec<BatchOp> = (0..n)
+        .map(|i| upsert_op(&format!("X{i}"), &format!("f{i}.txt"), "v1"))
+        .collect();
+
+    let start = std::time::Instant::now();
+    let stats = mat.apply_batch(&scope(), &mut index, ops).await.unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(stats.written, n);
+    println!(
+        "import: {n} items into a {seed}-node workspace in {:?} ({:.0} items/sec)",
+        elapsed,
+        n as f64 / elapsed.as_secs_f64()
+    );
+}
+
+
+/// The BEFORE number for [`import_throughput`], reproducing the shape the engine
+/// had: one transaction per item, and a fresh full workspace read to locate each
+/// one. Kept as a test rather than a comment so the claim stays checkable.
+///
+/// `BENCH_N=500 cargo test -p raisin-rocksdb --lib
+///  virtual_mount_sync::tests::import_throughput_unbatched -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn import_throughput_unbatched() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let n: usize = std::env::var("BENCH_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    let seed: usize = std::env::var("BENCH_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000);
+    seed_workspace(&env, seed).await;
+
+    let start = std::time::Instant::now();
+    for i in 0..n {
+        // A fresh index per item IS the old per-item `scan_nodes`.
+        let mut index = mat.load_index(&scope()).await.unwrap();
+        mat.apply_batch(
+            &scope(),
+            &mut index,
+            vec![upsert_op(&format!("X{i}"), &format!("f{i}.txt"), "v1")],
+        )
+        .await
+        .unwrap();
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "unbatched: {n} items into a {seed}-node workspace in {:?} ({:.0} items/sec)",
+        elapsed,
+        n as f64 / elapsed.as_secs_f64()
+    );
 }

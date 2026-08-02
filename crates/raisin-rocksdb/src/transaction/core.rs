@@ -33,7 +33,7 @@ use raisin_events::EventBus;
 use raisin_hlc::HLC;
 use raisin_storage::{RevisionRepository, Transaction};
 use rocksdb::{WriteBatch, DB};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::change_types::{SharedChangedNodes, SharedChangedTranslations};
@@ -117,7 +117,12 @@ pub struct RocksDBTransaction {
     /// or on drop (abandoned transaction).
     pub(super) path_reservation_owner: u64,
     /// Reservation keys currently held by this transaction.
-    pub(super) reserved_create_paths: Arc<Mutex<Vec<String>>>,
+    ///
+    /// A set, not a list: a batched write holds one reservation per created path
+    /// AND per auto-created ancestor folder for the whole transaction, so a
+    /// thousand-item batch accumulates thousands of keys. The dedup check below
+    /// runs on every reservation, and a linear scan over that made it quadratic.
+    pub(super) reserved_create_paths: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RocksDBTransaction {
@@ -179,7 +184,7 @@ impl RocksDBTransaction {
             storage,
             validate_schema: Arc::new(Mutex::new(true)), // Default: validation enabled
             path_reservation_owner,
-            reserved_create_paths: Arc::new(Mutex::new(Vec::new())),
+            reserved_create_paths: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -209,9 +214,7 @@ impl RocksDBTransaction {
             .reserved_create_paths
             .lock()
             .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
-        if !reserved.contains(&key) {
-            reserved.push(key);
-        }
+        reserved.insert(key);
         Ok(())
     }
 
@@ -222,8 +225,8 @@ impl RocksDBTransaction {
     /// rollback, and on drop.
     pub(super) fn release_create_path_reservations(&self) {
         let keys: Vec<String> = match self.reserved_create_paths.lock() {
-            Ok(mut guard) => guard.drain(..).collect(),
-            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+            Ok(mut guard) => guard.drain().collect(),
+            Err(poisoned) => poisoned.into_inner().drain().collect(),
         };
         if !keys.is_empty() {
             self.node_repo

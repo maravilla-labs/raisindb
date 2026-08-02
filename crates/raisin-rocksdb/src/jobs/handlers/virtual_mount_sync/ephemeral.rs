@@ -4,35 +4,35 @@
 //! `ttl_seconds` are deleted. Runs at the start of every sync of an ephemeral
 //! mount, giving auto-cleanup without a dedicated job type.
 
-use raisin_error::Result;
-
-use super::materializer::{MountScope, NodeMaterializer};
+use super::batch::SyncBatcher;
+use super::AdapterError;
 
 /// Delete mount-owned nodes whose `__synced_at + ttl_seconds < now`.
 ///
 /// `now_secs` is unix epoch seconds. Returns the number of nodes deleted.
 /// Nodes without a parseable `__synced_at` are left alone (fail-safe).
+///
+/// Reads the run's prefetched index rather than re-listing the workspace, and
+/// stages the deletes so an expired mailbox is cleared in a handful of
+/// transactions instead of one per node.
 pub async fn cleanup_expired(
-    materializer: &dyn NodeMaterializer,
-    scope: &MountScope,
+    batcher: &mut SyncBatcher<'_>,
     ttl_seconds: u64,
     now_secs: i64,
-) -> Result<usize> {
-    let nodes = materializer.list_virtual(scope).await?;
+) -> std::result::Result<usize, AdapterError> {
     let mut deleted = 0usize;
-    for node in nodes {
+    for node in batcher.virtual_nodes() {
         let Some(synced) = node.synced_secs else {
             continue;
         };
         if synced + ttl_seconds as i64 <= now_secs {
-            if materializer.delete(scope, &node.external_id).await? {
-                deleted += 1;
-            }
+            batcher.stage_delete(&node.external_id).await?;
+            deleted += 1;
         }
     }
+    batcher.flush().await?;
     if deleted > 0 {
         tracing::info!(
-            mount_id = %scope.mount_id,
             deleted,
             "ephemeral cleanup removed expired virtual nodes"
         );

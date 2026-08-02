@@ -11,7 +11,7 @@ mod fulltext_job_store;
 mod garbage_collection;
 mod identity;
 mod node_types;
-mod nodes;
+pub(crate) mod nodes;
 mod oplog;
 mod processing_rules;
 mod property_index;
@@ -45,6 +45,10 @@ pub use garbage_collection::GarbageCollectionRepositoryImpl;
 pub use identity::IdentityRepository;
 pub use node_types::NodeTypeRepositoryImpl;
 pub use nodes::NodeRepositoryImpl;
+// Re-exported so the virtual-mount batch writer reuses the SAME unique-property
+// walk the write path enforces, rather than mirroring it. (`hash_property_value`
+// is already re-exported below.)
+pub(crate) use nodes::crud::indexing::unique_indexes::extract_unique_property_names;
 pub use oplog::{OpLogRepository, OpLogStats};
 pub use processing_rules::{ProcessingRulesRepositoryImpl, CF_PROCESSING_RULES};
 pub use property_index::PropertyIndexRepositoryImpl;

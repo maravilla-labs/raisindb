@@ -8,13 +8,25 @@ use std::collections::HashSet;
 
 use serde_json::json;
 
+use super::batch::SyncBatcher;
 use super::config::{ListPage, MountState};
-use super::{materialize_item, persist_state, AdapterError, SyncCtx};
+use super::{stage_item, persist_state, AdapterError, SyncCtx};
 
 /// Run a full reconcile.
 pub async fn run(
     ctx: &SyncCtx<'_>,
     state: &mut MountState,
+) -> std::result::Result<(), AdapterError> {
+    let mut batcher = SyncBatcher::new(ctx).await?;
+    run_with(ctx, state, &mut batcher).await
+}
+
+/// Full reconcile against an already-open batcher, so a run that also does a
+/// delta pass shares one index and one write buffer.
+pub async fn run_with(
+    ctx: &SyncCtx<'_>,
+    state: &mut MountState,
+    batcher: &mut SyncBatcher<'_>,
 ) -> std::result::Result<(), AdapterError> {
     let max = ctx.mount.sync_config.max_items_per_sync;
     let include = &ctx.mount.sync_config.include_patterns;
@@ -81,7 +93,7 @@ pub async fn run(
                     None => format!("{}/{}", prefix, item.name),
                 };
                 if super::passes_filters(&rel_path, include, exclude) {
-                    materialize_item(ctx, item, &rel_path).await?;
+                    stage_item(ctx, batcher, item, &rel_path).await?;
                     seen.insert(item.external_id.clone());
                     processed += 1;
                 }
@@ -90,6 +102,10 @@ pub async fn run(
                 }
             }
 
+            // Flush before publishing progress or a resume point. Both claim the
+            // page landed, and a buffer that is still holding it would be dropped
+            // silently on the next run's fresh start.
+            batcher.flush().await?;
             ctx.renew_lease(state.last_fencing_token).await;
             // Publish progress as we go. A chunk can run for minutes; without
             // this the console sees nothing move until the whole chunk lands.
@@ -157,11 +173,9 @@ pub async fn run(
     // is recoverable on the next clean pass, deleted content is not. Deletes
     // therefore only ever run on a single-run, start-to-finish walk — and
     // upstream deletions still propagate promptly through the delta path.
-    let existing = ctx
-        .materializer
-        .list_virtual(&ctx.scope)
-        .await
-        .map_err(|e| AdapterError::Transient(format!("list_virtual failed: {e}")))?;
+    // Served from the run's prefetched index, kept current by every flush above —
+    // this used to be another full workspace scan.
+    let existing = batcher.virtual_nodes();
 
     if truncated || resuming {
         tracing::info!(
@@ -190,15 +204,11 @@ pub async fn run(
         let mut deleted = 0usize;
         for node in existing {
             if !seen.contains(&node.external_id) {
-                ctx.materializer
-                    .delete(&ctx.scope, &node.external_id)
-                    .await
-                    .map_err(|e| {
-                        AdapterError::Transient(format!("reconcile delete failed: {e}"))
-                    })?;
+                batcher.stage_delete(&node.external_id).await?;
                 deleted += 1;
             }
         }
+        batcher.flush().await?;
         if deleted > 0 {
             tracing::info!(
                 mount_id = %ctx.mount.mount_id,

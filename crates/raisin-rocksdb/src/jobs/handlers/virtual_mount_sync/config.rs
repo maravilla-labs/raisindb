@@ -28,6 +28,19 @@ pub const DEFAULT_MAX_ITEMS: u64 = 500;
 /// Default poll interval (seconds) when a mount omits `interval_seconds`.
 pub const DEFAULT_INTERVAL_SECS: u64 = 300;
 
+/// Default number of items written per transaction.
+pub const DEFAULT_BATCH_SIZE: usize = 1000;
+
+/// Default byte budget for one batch.
+///
+/// A batch commits as ONE revision, which the replication layer captures as a
+/// single un-decomposed `ApplyRevision` holding a full snapshot of every node in
+/// it. No catch-up/replay path decomposes a stored operation, so a record larger
+/// than the 10 MB transport frame cap would permanently wedge a peer's sync.
+/// 1000 mail items with 20 KB bodies would be ~20 MB — this budget is what makes
+/// a large `batch_size` safe, so raise the two together or not at all.
+pub const DEFAULT_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 /// Parsed `sync_config` object of a `raisin:VirtualMount`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
@@ -47,6 +60,20 @@ pub struct SyncConfig {
     pub ttl_seconds: Option<u64>,
     #[serde(default = "default_max_items")]
     pub max_items_per_sync: u64,
+    /// Items written per transaction during an import.
+    ///
+    /// One batch is one revision, one branch-HEAD bump, one RocksDB write, one
+    /// snapshot job and one replication record — instead of one of each per item,
+    /// which is what made importing a real mailbox unusably slow.
+    ///
+    /// A batch also flushes when `batch_max_bytes` is reached, so this is an
+    /// upper bound rather than the actual size; see [`DEFAULT_BATCH_MAX_BYTES`]
+    /// for why the byte budget is the one that must not be removed.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Byte budget for one batch (see [`DEFAULT_BATCH_MAX_BYTES`]).
+    #[serde(default = "default_batch_max_bytes")]
+    pub batch_max_bytes: usize,
     /// Folder hierarchy for materialized items, as a template over the item's
     /// fields — e.g. `"{conversation_id}/{name}"` groups mail into one folder
     /// per thread, `"{date:%Y}/{date:%m}/{name}"` into year/month.
@@ -87,6 +114,12 @@ fn default_interval() -> u64 {
 fn default_max_items() -> u64 {
     DEFAULT_MAX_ITEMS
 }
+fn default_batch_size() -> usize {
+    DEFAULT_BATCH_SIZE
+}
+fn default_batch_max_bytes() -> usize {
+    DEFAULT_BATCH_MAX_BYTES
+}
 
 impl Default for SyncConfig {
     fn default() -> Self {
@@ -98,6 +131,8 @@ impl Default for SyncConfig {
             ephemeral: false,
             ttl_seconds: None,
             max_items_per_sync: default_max_items(),
+            batch_size: default_batch_size(),
+            batch_max_bytes: default_batch_max_bytes(),
             path_template: String::new(),
             allow_empty_reconcile: false,
         }

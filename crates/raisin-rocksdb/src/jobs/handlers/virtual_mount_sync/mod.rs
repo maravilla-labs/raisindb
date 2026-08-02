@@ -14,6 +14,7 @@
 //! cluster-safe; without it the engine falls back to dedup-key-only semantics.
 
 mod adapter;
+mod batch;
 pub mod check;
 mod config;
 mod delta;
@@ -36,8 +37,10 @@ pub use config::{
     IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig, WriteConfig,
     SYNC_ACTOR, SYSTEM_WORKSPACE,
 };
+pub use batch::SyncBatcher;
 pub use materializer::{
-    MountScope, NodeMaterializer, RocksDbMaterializer, VirtualMeta, VirtualNodeRef,
+    BatchOp, BatchStats, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,
+    VirtualNodeRef,
 };
 pub use raisin_models::nodes::integrations::build_credential;
 
@@ -292,16 +295,41 @@ impl VirtualMountSyncHandler {
             mount_snapshot,
         };
 
+        // A remap re-materializes everything through the CURRENT mapper and path
+        // template, ignoring etags — the migration path for a connector whose
+        // mapping changed (a new node type, a new folder hierarchy) while the
+        // provider's items did not.
+        //
+        // Set BEFORE the batcher is built: the batcher snapshots the scope, and a
+        // remap that reached it as `force_rewrite: false` would silently degrade
+        // into an ordinary sync where every etag matches and nothing is rewritten.
+        let remap = mode == "remap";
+        if remap {
+            ctx.scope.force_rewrite = true;
+        }
+
+        // ONE batcher for the whole run: it owns the prefetched index that
+        // replaced the per-item workspace scan, so every phase below — TTL
+        // cleanup, delta, backfill — shares one read of the workspace and one
+        // write buffer.
+        let mut batcher = match batch::SyncBatcher::new(&ctx).await {
+            Ok(b) => b,
+            Err(e) => {
+                let mut state = mount.state.clone();
+                state.last_fencing_token = fencing_token;
+                let outcome = self.finalize(&ctx, &mut state, Err(e)).await;
+                if let (Some(lm), Some(token)) = (&self.lock_manager, guard_token) {
+                    let _ = lm.release(&lock_key, token).await;
+                }
+                return outcome;
+            }
+        };
+
         // Ephemeral TTL cleanup up front.
         if mount.sync_config.ephemeral {
             if let Some(ttl) = mount.sync_config.ttl_seconds {
-                let _ = ephemeral::cleanup_expired(
-                    self.materializer.as_ref(),
-                    &scope,
-                    ttl,
-                    Utc::now().timestamp(),
-                )
-                .await;
+                let _ =
+                    ephemeral::cleanup_expired(&mut batcher, ttl, Utc::now().timestamp()).await;
             }
         }
 
@@ -348,15 +376,8 @@ impl VirtualMountSyncHandler {
         // Choose the sync path. Full reconcile is forced on the first sync, an
         // explicit `mode: "full"`, or when the adapter cannot serve a changes
         // feed (`supports_changes: false`) even if a cursor happens to exist.
-        // A remap re-materializes everything through the CURRENT mapper and path
-        // template, ignoring etags — the migration path for a connector whose
-        // mapping changed (a new node type, a new folder hierarchy) while the
-        // provider's items did not. It is a full walk by definition: the delta
-        // feed only reports what changed upstream, which for a remap is nothing.
-        let remap = mode == "remap";
-        if remap {
-            ctx.scope.force_rewrite = true;
-        }
+        // A remap (flagged above) is a full walk by definition: the delta feed
+        // only reports what changed upstream, which for a remap is nothing.
         let use_full = remap
             || mode == "full"
             || state.last_sync_token.is_none()
@@ -367,7 +388,7 @@ impl VirtualMountSyncHandler {
         let backfill_pending = !state.backfill_stack.is_empty() || state.backfill_cursor.is_some();
 
         let result = if use_full {
-            full::run(&ctx, &mut state).await
+            full::run_with(&ctx, &mut state, &mut batcher).await
         } else if backfill_pending {
             // DELTA FIRST, then one backfill chunk — in that order, deliberately.
             //
@@ -377,16 +398,26 @@ impl VirtualMountSyncHandler {
             // on every run keeps new items arriving within one interval while
             // history fills in behind them, and because both share this run's
             // single lease there is no second writer to race the mount state.
-            let delta_outcome = delta::run(&ctx, &mut state).await;
+            let delta_outcome = delta::run_with(&ctx, &mut state, &mut batcher).await;
             match delta_outcome {
-                Ok(()) => full::run(&ctx, &mut state).await,
+                Ok(()) => full::run_with(&ctx, &mut state, &mut batcher).await,
                 // A failing delta must not be masked by a successful backfill
                 // chunk: surface it and leave the resume point untouched.
                 Err(e) => Err(e),
             }
         } else {
-            delta::run(&ctx, &mut state).await
+            delta::run_with(&ctx, &mut state, &mut batcher).await
         };
+
+        let counts = batcher.stats();
+        tracing::info!(
+            mount_id = %mount_id,
+            written = counts.written,
+            skipped = counts.skipped,
+            deleted = counts.deleted,
+            failed = counts.failed,
+            "virtual mount sync finished"
+        );
 
         let outcome = self.finalize(&ctx, &mut state, result).await;
 
@@ -914,25 +945,28 @@ pub async fn map_item(
     }))
 }
 
-/// Materialize one item (map → upsert) at `rel_path`. Returns whether written.
-pub async fn materialize_item(
+/// Stage one item (map → buffer) at `rel_path`. The batcher decides when the
+/// buffered work is actually written.
+///
+/// An item whose etag already matches what is stored is dropped BEFORE the
+/// mapper runs: the skip decision needs only `external_id` + `etag`, both of
+/// which the provider supplied, so mapping it first would spend a QuickJS
+/// invocation to produce a value that is immediately discarded. On a re-sync of
+/// an unchanged mailbox that was the entire cost of the run.
+pub async fn stage_item(
     ctx: &SyncCtx<'_>,
+    batcher: &mut batch::SyncBatcher<'_>,
     item: &ExternalItem,
     rel_path: &str,
-) -> std::result::Result<bool, AdapterError> {
+) -> std::result::Result<(), AdapterError> {
+    if batcher.can_skip_unmapped(item) {
+        batcher.note_unmapped_skip();
+        return Ok(());
+    }
     let Some(mapped) = map_item(ctx, item).await? else {
-        return Ok(false);
+        return Ok(());
     };
-    let virt = VirtualMeta {
-        mount_id: ctx.scope.mount_id.clone(),
-        external_id: item.external_id.clone(),
-        etag: item.etag.clone(),
-        synced_at: Utc::now().to_rfc3339(),
-    };
-    ctx.materializer
-        .upsert(&ctx.scope, rel_path, mapped, virt)
-        .await
-        .map_err(|e| AdapterError::Transient(format!("materialize failed: {e}")))
+    batcher.stage_upsert(item, rel_path, mapped).await
 }
 
 /// Persist the mount's `state` back to its `raisin:system` node, honoring the
