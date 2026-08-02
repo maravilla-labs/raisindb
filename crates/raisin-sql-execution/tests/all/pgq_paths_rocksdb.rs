@@ -450,3 +450,120 @@ async fn the_default_restrictor_does_not_revisit_nodes() {
          change the answer",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Label namespacing — a collision with no way out
+// ---------------------------------------------------------------------------
+
+/// Two node types sharing a local name collide, and cannot be told apart.
+///
+/// `matches_label` accepts a label when the node type equals it OR ends with
+/// `":" + label`, case-insensitively. Node types are namespaced by convention
+/// (`news:Article`, `studio:Article`), so a bare `(n:Article)` matches **every**
+/// namespace at once.
+///
+/// The obvious fix a user would reach for — naming the namespace — does not
+/// parse: `(n:news:Article)` reads `news` as the label and then hits an
+/// unexpected `:`. So there is currently NO spelling that selects one of two
+/// same-named types.
+///
+/// This test pins the CURRENT behaviour, deliberately. It documents a real gap
+/// rather than asserting the behaviour is right: a multi-package repository
+/// (which is the normal case — `raisin:`, `news:`, `studio:` all coexist) gets
+/// silently merged results. If the grammar later accepts a qualified label,
+/// this test fails and is the prompt to update it and the public reference.
+#[tokio::test]
+async fn a_bare_label_matches_every_namespace_and_cannot_be_qualified() {
+    let (storage, _tmp) = storage().await;
+
+    // Two nodes, same local type name, different namespaces.
+    for (id, node_type) in [("news-a", "news:Article"), ("studio-a", "studio:Article")] {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), PropertyValue::String(id.to_string()));
+        storage
+            .nodes()
+            .create(
+                scope(),
+                Node {
+                    id: id.to_string(),
+                    path: format!("/{id}"),
+                    name: id.to_string(),
+                    parent: Some("/".to_string()),
+                    node_type: node_type.to_string(),
+                    properties: props,
+                    ..Default::default()
+                },
+                CreateNodeOptions {
+                    validate_parent_allows_child: false,
+                    validate_workspace_allows_type: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("create {id}: {e}"));
+    }
+
+    // A single-node pattern reads the RELATION index, so an isolated node is
+    // invisible to it. Give the pair an edge, otherwise this test would be
+    // measuring that instead of the label rule.
+    let rel = RelationRef::new(
+        "studio-a".to_string(),
+        WS.to_string(),
+        "studio:Article".to_string(),
+        "cites".to_string(),
+        None,
+    );
+    storage
+        .relations()
+        .add_relation(scope(), "news-a", "news:Article", rel)
+        .await
+        .expect("link the two articles");
+
+    let engine = engine(&storage);
+
+    let both = col(
+        &engine,
+        "SELECT * FROM GRAPH_TABLE(MATCH (n:Article) COLUMNS (n.name AS who))",
+        "who",
+    )
+    .await
+    .expect("bare label must execute");
+
+    assert_eq!(
+        both,
+        vec!["news-a".to_string(), "studio-a".to_string()],
+        "a bare label matches EVERY namespace — this is the collision",
+    );
+
+    // And the disambiguating spelling is not available.
+    let qualified = col(
+        &engine,
+        "SELECT * FROM GRAPH_TABLE(MATCH (n:news:Article) COLUMNS (n.name AS who))",
+        "who",
+    )
+    .await;
+
+    assert!(
+        qualified.is_err(),
+        "a namespace-qualified label does not parse, so the collision above has \
+         no workaround in the query language",
+    );
+
+    // The workaround the public reference now recommends: filter on the FULL
+    // node type in the MATCH clause's WHERE. Documented, so it must be true.
+    let just_news = col(
+        &engine,
+        "SELECT * FROM GRAPH_TABLE(MATCH (n:Article) WHERE n.node_type = 'news:Article' \
+         COLUMNS (n.name AS who))",
+        "who",
+    )
+    .await
+    .expect("the documented workaround must execute");
+
+    assert_eq!(
+        just_news,
+        vec!["news-a".to_string()],
+        "filtering on the full node type is the only way to disambiguate, and \
+         the reference recommends it — so it has to work",
+    );
+}

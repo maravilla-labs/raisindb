@@ -1019,3 +1019,50 @@ missing; the executor has supported this all along.
 
 Not fixed here because it changes plan selection for a reserved table name, and
 the documented workaround (read all, filter client-side) is correct today.
+
+### 2.118 [P2] A PGQ label matches every namespace, and cannot be qualified
+
+`matches_label` (`raisin-sql-execution/.../pgq/matching/mod.rs`) accepts a label
+when the node type equals it OR ends with `":" + label`, case-insensitively:
+
+```rust
+node_type_lower == label_lower || node_type_lower.ends_with(&format!(":{}", label_lower))
+```
+
+Node types are namespaced by convention — `raisin:Folder`, `news:Article`,
+`studio:Article` all coexist in a normal multi-package repository. So
+`MATCH (n:Article)` matches **every** namespace at once and silently merges
+results from unrelated types.
+
+The spelling a user would reach for to disambiguate does not parse:
+`MATCH (n:news:Article)` reads `news` as the label and then fails on the
+unexpected `:`. There is currently **no** way to select one of two same-named
+types in GRAPH_TABLE.
+
+Pinned (as current behaviour, not as correct behaviour) by
+`pgq_paths_rocksdb::a_bare_label_matches_every_namespace_and_cannot_be_qualified`,
+which asserts both halves: the bare label returns both nodes, and the qualified
+form errors. Fixing the grammar to accept a qualified label will fail that test,
+which is the prompt to update it and the public reference.
+
+**Why the suffix rule exists at all:** it lets a query be written against a local
+type name without knowing the package prefix, which is convenient in a
+single-package repo and is what every example in the docs assumes. The rule is
+not wrong so much as unqualifiable — the fix is to ALSO accept the fully
+qualified form, not to remove the short one.
+
+### 2.119 [P3] A single-node PGQ pattern cannot see an isolated node
+
+`MATCH (n)` and `MATCH (n:Label)` are documented as "match all nodes". They do
+not: `match_single_node` (`pgq/matching/single_node.rs`) scans the RELATION
+index and collects nodes from the source and target positions of the relations
+it finds, so a node participating in no relationship is invisible.
+
+Found while writing 2.118 — two freshly created nodes returned zero rows until
+an edge was added between them, which looked like a label bug and was not.
+
+For a graph query this is defensible (a node with no edges is arguably not in
+the graph), but "match all nodes" is the wrong description of it, in the code
+comment and in the public reference. Either the docs should say "every node that
+participates in at least one relationship", or the pattern should fall back to a
+node scan when it carries no relationship element.
