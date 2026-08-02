@@ -4,6 +4,7 @@
 //! memos: one for graph algorithm results, one for the adjacency list itself.
 
 use raisin_hlc::HLC;
+use raisin_models::auth::AuthContext;
 use raisin_sql::ast::GraphTableQuery;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,11 @@ pub struct PgqContext {
     pub branch: String,
     /// Optional revision for point-in-time queries
     pub revision: Option<HLC>,
+    /// Caller identity for row-level security, or `None` for a system/internal
+    /// caller (no filtering at all — same convention as the scan executors).
+    ///
+    /// Only the nodes a query RETURNS are checked; see [`super::rls`].
+    pub auth_context: Option<AuthContext>,
     /// Relation types this query can possibly traverse; empty means "any".
     ///
     /// Pushed down into `scan_relations_global` so an algorithm invocation
@@ -70,6 +76,7 @@ impl std::fmt::Debug for PgqContext {
             .field("repo_id", &self.repo_id)
             .field("branch", &self.branch)
             .field("revision", &self.revision)
+            .field("has_auth_context", &self.auth_context.is_some())
             .field("relation_type_scope", &self.relation_type_scope)
             .finish()
     }
@@ -83,6 +90,7 @@ impl Clone for PgqContext {
             repo_id: self.repo_id.clone(),
             branch: self.branch.clone(),
             revision: self.revision,
+            auth_context: self.auth_context.clone(),
             relation_type_scope: self.relation_type_scope.clone(),
             algorithm_cache: Mutex::new(HashMap::new()), // fresh memos for clone
             adjacency_memo: Mutex::new(HashMap::new()),
@@ -105,10 +113,22 @@ impl PgqContext {
             repo_id,
             branch,
             revision,
+            auth_context: None,
             relation_type_scope: Vec::new(),
             algorithm_cache: Mutex::new(HashMap::new()),
             adjacency_memo: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Attach the caller's identity so projected endpoints are RLS-filtered.
+    ///
+    /// Leaving it unset means "system caller": no filtering. Every SQL surface
+    /// that has an [`AuthContext`] must pass it here — GRAPH_TABLE is the only
+    /// graph query language reachable from SQL, so this is the one place RLS
+    /// can be enforced for graph queries.
+    pub fn with_auth_context(mut self, auth: Option<AuthContext>) -> Self {
+        self.auth_context = auth;
+        self
     }
 
     /// Restrict which relation types this query's adjacency scans load.

@@ -13,6 +13,7 @@ use super::aggregation::{
 };
 use super::context::PgqContext;
 use super::filter::evaluate_expr;
+use super::rls::RlsGate;
 use super::types::{PgqRow, SqlValue, VariableBinding};
 use crate::physical_plan::executor::ExecutionError;
 
@@ -38,6 +39,10 @@ pub async fn project_columns<S: Storage>(
 /// Simple projection without aggregates
 ///
 /// Creates one row per binding. Bindings with missing nodes are skipped.
+///
+/// This is also where row-level security is enforced: every node the COLUMNS
+/// clause RETURNS must be readable by the caller, or the whole row is dropped.
+/// Nodes that are only traversed are not checked — see [`super::rls`].
 async fn project_simple<S: Storage>(
     columns: &ColumnsClause,
     bindings: &mut [VariableBinding],
@@ -46,8 +51,18 @@ async fn project_simple<S: Storage>(
 ) -> Result<Vec<PgqRow>> {
     let mut rows = Vec::with_capacity(bindings.len());
     let mut skipped_count = 0;
+    let mut denied_count = 0;
+    let mut gate = RlsGate::for_query(context, columns);
 
     for binding in bindings.iter_mut() {
+        // Row-level security on the projected endpoints only.
+        if let Some(gate) = gate.as_mut() {
+            if !gate.admit(binding, storage, context).await? {
+                denied_count += 1;
+                continue;
+            }
+        }
+
         // Check if any nodes in this binding are missing (tombstone/deleted)
         if binding.has_missing_nodes() {
             let missing_ids = binding.missing_node_ids();
@@ -87,6 +102,12 @@ async fn project_simple<S: Storage>(
             skipped_count
         );
     }
+    if denied_count > 0 {
+        tracing::debug!(
+            "PGQ: RLS denied {} rows (projected endpoint not readable)",
+            denied_count
+        );
+    }
 
     Ok(rows)
 }
@@ -96,27 +117,52 @@ async fn project_simple<S: Storage>(
 /// Currently supports simple aggregation over all bindings (no GROUP BY).
 /// Bindings with missing nodes are filtered out before aggregation.
 /// TODO: Add GROUP BY support for proper SQL semantics.
+///
+/// RLS is applied here too, and it must be: an aggregate is still a value
+/// computed from rows, so `COUNT(a)` over bindings whose `a` the caller cannot
+/// read would disclose exactly what the filter exists to hide. The same
+/// endpoints-only variable set is used — a variable that appears only as an
+/// aggregate argument is projected, an intermediate hop still is not.
 async fn project_with_aggregates<S: Storage>(
     columns: &ColumnsClause,
     bindings: &mut Vec<VariableBinding>,
     storage: &Arc<S>,
     context: &PgqContext,
 ) -> Result<Vec<PgqRow>> {
-    // Filter out bindings with missing nodes before aggregation
+    // Filter out bindings with missing nodes (and RLS-denied endpoints) before
+    // aggregation. Done as a sequential loop rather than `retain` because the
+    // permission check is async and mutates the binding it admits.
     let original_count = bindings.len();
-    bindings.retain(|binding| {
+    let mut gate = RlsGate::for_query(context, columns);
+    let mut denied_count = 0;
+    let mut kept: Vec<VariableBinding> = Vec::with_capacity(bindings.len());
+
+    for mut binding in std::mem::take(bindings) {
         if binding.has_missing_nodes() {
             tracing::warn!(
                 "PGQ: Filtering out binding with missing nodes before aggregation: {:?}",
                 binding.missing_node_ids()
             );
-            false
-        } else {
-            true
+            continue;
         }
-    });
+        if let Some(gate) = gate.as_mut() {
+            if !gate.admit(&mut binding, storage, context).await? {
+                denied_count += 1;
+                continue;
+            }
+        }
+        kept.push(binding);
+    }
+    *bindings = kept;
 
-    let filtered_count = original_count - bindings.len();
+    if denied_count > 0 {
+        tracing::debug!(
+            "PGQ: RLS denied {} bindings before aggregation (projected endpoint not readable)",
+            denied_count
+        );
+    }
+
+    let filtered_count = original_count - bindings.len() - denied_count;
     if filtered_count > 0 {
         tracing::info!(
             "PGQ: Filtered {} bindings with missing nodes before aggregation",

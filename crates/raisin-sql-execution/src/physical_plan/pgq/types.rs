@@ -307,6 +307,25 @@ impl NodeInfo {
         Ok(())
     }
 
+    /// Replace the cached data with an already-materialised node.
+    ///
+    /// Used by the RLS gate, which fetches the node to permission-check it and
+    /// gets back a *field-filtered* copy. Overwriting (rather than filling only
+    /// when empty) is deliberate: a binding loaded during WHERE evaluation
+    /// holds the unfiltered node, and emitting that would leak fields the
+    /// caller's permission excludes.
+    pub fn apply_loaded_node(&mut self, node: &Node) {
+        self.node_type = node.node_type.clone();
+        self.data = Some(NodeDataCache {
+            path: node.path.clone(),
+            name: node.name.clone(),
+            properties: node.properties.clone(),
+            created_at: node.created_at,
+            updated_at: node.updated_at,
+        });
+        self.is_missing = false;
+    }
+
     /// Get created_at timestamp (requires data to be loaded)
     pub fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.data.as_ref().and_then(|d| d.created_at)

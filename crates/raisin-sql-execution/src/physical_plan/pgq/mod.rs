@@ -41,6 +41,7 @@ mod executor;
 mod filter;
 mod matching;
 mod projection;
+mod rls;
 mod types;
 
 pub use context::PgqContext;
@@ -66,6 +67,9 @@ type Result<T> = std::result::Result<T, ExecutionError>;
 /// * `repo_id` - Repository identifier
 /// * `branch` - Branch name
 /// * `revision` - Optional revision (HLC timestamp) for point-in-time queries
+/// * `auth_context` - Caller identity for row-level security, or `None` for a
+///   system/internal caller (no filtering, exactly as in the scan executors).
+///   Only the nodes named by `COLUMNS(...)` are checked — see [`rls`].
 /// * `query` - Parsed GraphTableQuery AST
 ///
 /// # Example
@@ -88,6 +92,7 @@ type Result<T> = std::result::Result<T, ExecutionError>;
 ///     query,
 /// ).await;
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_graph_table<S: Storage + 'static>(
     storage: Arc<S>,
     workspace_id: String,
@@ -95,6 +100,7 @@ pub async fn execute_graph_table<S: Storage + 'static>(
     repo_id: String,
     branch: String,
     revision: Option<raisin_hlc::HLC>,
+    auth_context: Option<raisin_models::auth::AuthContext>,
     query: GraphTableQuery,
 ) -> Result<Vec<PgqRow>> {
     // Derive the relation-type scope from the query's own patterns so the
@@ -102,7 +108,8 @@ pub async fn execute_graph_table<S: Storage + 'static>(
     // restriction) as soon as any hop leaves its types open.
     let scope = context::relation_type_scope(&query);
     let context = PgqContext::new(workspace_id, tenant_id, repo_id, branch, revision)
-        .with_relation_type_scope(scope);
+        .with_relation_type_scope(scope)
+        .with_auth_context(auth_context);
 
     let executor = PgqExecutor::new(storage, context);
     executor.execute(query).await

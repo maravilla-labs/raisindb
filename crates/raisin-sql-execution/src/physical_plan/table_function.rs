@@ -227,6 +227,10 @@ pub async fn execute_table_function<S: Storage + 'static>(
                     repo_id,
                     branch,
                     revision,
+                    // Row-level security: the projected endpoints are filtered
+                    // with the caller's identity. `None` (system caller) stays
+                    // unfiltered, matching the scan executors.
+                    ctx.auth_context.clone(),
                     pgq_query,
                 )
                 .await?;
