@@ -3,9 +3,10 @@
 use super::manifest_types::PackageManifest;
 use super::types::{CollectedNode, PackageCreateFromSelectionResult, SelectedPath};
 use super::PackageCreateFromSelectionHandler;
+use raisin_core::package_registration;
 use raisin_error::{Error, Result};
 use raisin_models::nodes::properties::value::PropertyValue;
-use raisin_models::nodes::Node;
+use raisin_packages::Manifest;
 use raisin_storage::jobs::{JobContext, JobInfo, JobType};
 use raisin_storage::{CreateNodeOptions, NodeRepository, Storage, StorageScope, UpdateNodeOptions};
 use std::collections::HashMap;
@@ -231,52 +232,45 @@ impl PackageCreateFromSelectionHandler {
         package_size: usize,
     ) -> Result<()> {
         let node_repo = self.storage.nodes();
-        let node_id = format!("package-{}", package_name);
+        let scope = StorageScope::new(
+            &context.tenant_id,
+            &context.repo_id,
+            &context.branch,
+            package_registration::PACKAGES_WORKSPACE,
+        );
+        let package_path = package_registration::package_node_path(package_name);
 
-        let mut properties = HashMap::new();
-        properties.insert(
-            "name".to_string(),
-            PropertyValue::String(package_name.to_string()),
-        );
-        properties.insert(
-            "version".to_string(),
-            PropertyValue::String(package_version.to_string()),
-        );
-        properties.insert("installed".to_string(), PropertyValue::Boolean(false));
-        properties.insert(
-            "description".to_string(),
-            PropertyValue::String("Package created from selected content".to_string()),
-        );
+        // Probe by PATH and reuse whatever id is already there. Assuming
+        // `package-{name}` makes a re-generated package whose node came from
+        // the streaming upload endpoint (nanoid id) collide on the unique path
+        // instead of updating in place.
+        let existing = node_repo
+            .get_by_path(scope, &package_path, None)
+            .await
+            .ok()
+            .flatten();
 
-        // Add resource reference as Object
-        let mut resource_obj = HashMap::new();
-        resource_obj.insert(
-            "key".to_string(),
-            PropertyValue::String(blob_key.to_string()),
-        );
-        resource_obj.insert(
-            "url".to_string(),
-            PropertyValue::String(download_url.to_string()),
-        );
-        resource_obj.insert(
-            "mime_type".to_string(),
-            PropertyValue::String("application/zip".to_string()),
-        );
-        resource_obj.insert(
-            "size".to_string(),
-            PropertyValue::Integer(package_size as i64),
-        );
-        properties.insert("resource".to_string(), PropertyValue::Object(resource_obj));
-
-        let package_node = Node {
-            id: node_id,
-            node_type: "raisin:Package".to_string(),
+        // Synthetic manifest: a generated package has no `manifest.yaml` of its
+        // own, but the package NODE must look identical to every other one, so
+        // it goes through the same builder as uploads and builtins.
+        let manifest = Manifest {
             name: package_name.to_string(),
-            path: format!("/{}", package_name),
-            workspace: Some("packages".to_string()),
-            properties,
+            version: package_version.to_string(),
+            description: Some("Package created from selected content".to_string()),
             ..Default::default()
         };
+        let package_node = package_registration::build_package_node(
+            &package_registration::PackageRegistration {
+                manifest: &manifest,
+                resource: package_registration::PackageResource::new(
+                    blob_key,
+                    download_url,
+                    package_size,
+                ),
+                origin: package_registration::PackageOrigin::Generated,
+            },
+            existing.as_ref(),
+        );
 
         let create_options = CreateNodeOptions {
             validate_schema: false,
@@ -285,15 +279,9 @@ impl PackageCreateFromSelectionHandler {
             operation_meta: None,
         };
 
-        let package_path = format!("/{}", package_name);
         match node_repo
             .create_deep_node(
-                StorageScope::new(
-                    &context.tenant_id,
-                    &context.repo_id,
-                    &context.branch,
-                    "packages",
-                ),
+                scope,
                 &package_path,
                 package_node.clone(),
                 "raisin:Folder",
@@ -305,12 +293,7 @@ impl PackageCreateFromSelectionHandler {
             Err(e) if e.to_string().contains("already exists") => {
                 node_repo
                     .update(
-                        StorageScope::new(
-                            &context.tenant_id,
-                            &context.repo_id,
-                            &context.branch,
-                            "packages",
-                        ),
+                        scope,
                         package_node,
                         UpdateNodeOptions {
                             validate_schema: false,

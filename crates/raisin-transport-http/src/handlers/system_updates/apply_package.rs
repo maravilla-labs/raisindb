@@ -2,11 +2,14 @@
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use chrono::Utc;
-use raisin_binary::BinaryStorage;
 use raisin_core::definitions::PackageDefinition;
-use raisin_core::package_init::BuiltinPackageInfo;
-use raisin_models::nodes::properties::value::PropertyValue;
+use raisin_core::package_registration::{
+    self, PackageNodeStore, PackageOrigin, PackageRegistration, PackageResource, PACKAGES_WORKSPACE,
+};
+use raisin_models::nodes::Node;
+use raisin_packages::Manifest;
 use raisin_rocksdb::RocksDBStorage;
 use raisin_storage::system_updates::{AppliedDefinition, PendingUpdate, ResourceType};
 use raisin_storage::{NodeRepository, Storage, StorageScope, SystemUpdateRepository};
@@ -16,10 +19,70 @@ use crate::state::AppState;
 
 use super::map_storage_err;
 
+/// [`PackageNodeStore`] over the plain node repository.
+///
+/// The system-update apply endpoint has no transaction of its own; it writes
+/// through `storage().nodes()`. Only the write mechanism lives here — the node
+/// id, property shape and install mode are
+/// [`raisin_core::package_registration`]'s.
+struct RepoPackageStore<'a> {
+    state: &'a AppState,
+    tenant_id: &'a str,
+    repo_id: &'a str,
+    branch: &'a str,
+}
+
+impl<'a> RepoPackageStore<'a> {
+    fn scope(&self) -> StorageScope<'a> {
+        StorageScope::new(
+            self.tenant_id,
+            self.repo_id,
+            self.branch,
+            PACKAGES_WORKSPACE,
+        )
+    }
+}
+
+#[async_trait]
+impl PackageNodeStore for RepoPackageStore<'_> {
+    async fn get_package_node_by_path(&self, path: &str) -> anyhow::Result<Option<Node>> {
+        self.state
+            .storage()
+            .nodes()
+            .get_by_path(self.scope(), path, None)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn write_package_node(&self, node: Node, existing: Option<&Node>) -> anyhow::Result<()> {
+        let nodes = self.state.storage().nodes();
+        if existing.is_some() {
+            nodes
+                .update(
+                    self.scope(),
+                    node,
+                    raisin_storage::node_operations::UpdateNodeOptions::default(),
+                )
+                .await
+                .map_err(anyhow::Error::new)?;
+        } else {
+            nodes
+                .create(
+                    self.scope(),
+                    node,
+                    raisin_storage::node_operations::CreateNodeOptions::default(),
+                )
+                .await
+                .map_err(anyhow::Error::new)?;
+        }
+        Ok(())
+    }
+}
+
 /// Apply a single Package system update.
 ///
 /// Creates a ZIP from the package's files (embedded or overlay), stores the
-/// binary, creates or updates the package node, and queues an installation job.
+/// binary, registers the package node and queues an installation job.
 pub(super) async fn apply_package_update(
     state: &AppState,
     system_update_repo: &impl SystemUpdateRepository,
@@ -37,76 +100,62 @@ pub(super) async fn apply_package_update(
         return Ok(false);
     };
     let package_info = &package.info;
+    let manifest: &Manifest = &package_info.manifest;
 
+    let store = RepoPackageStore {
+        state,
+        tenant_id,
+        repo_id,
+        branch,
+    };
+
+    // No already-installed short-circuit here, deliberately. Unlike the boot
+    // scan — which runs unprompted for every package in every repo and must not
+    // re-zip the world — this path only runs for updates
+    // `check_pending_updates` has already flagged as pending, and only when an
+    // operator explicitly asked for them to be applied. Re-applying is the
+    // requested action.
     let zip_data = package
         .source
         .to_zip()
         .map_err(|e| ApiError::internal(format!("Failed to create package ZIP: {}", e)))?;
 
-    // Store the binary
-    let filename = format!(
-        "{}-{}.rap",
-        package_info.manifest.name, package_info.manifest.version
-    );
-    let stored = state
-        .bin
-        .put_bytes(
-            &zip_data,
-            Some("application/zip"),
-            Some("rap"),
-            Some(&filename),
-            None,
-        )
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to store package file: {}", e)))?;
+    // Store the `.rap`, always inside the tenant's blob namespace. This used to
+    // pass `None`, which put the blob outside the tenant prefix where it
+    // escapes per-tenant accounting and cleanup.
+    let stored = package_registration::store_package_blob(
+        state.bin.as_ref(),
+        tenant_id,
+        manifest,
+        &zip_data,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("Failed to store package file: {}", e)))?;
 
-    // Check if package already exists by path
-    let package_path = format!("/{}", package_info.manifest.name);
-    let existing = state
-        .storage()
-        .nodes()
-        .get_by_path(
-            StorageScope::new(tenant_id, repo_id, branch, "packages"),
-            &package_path,
-            None,
-        )
-        .await
-        .map_err(|e| map_storage_err("Failed to check existing package", e))?;
-
-    let node_id = existing
-        .as_ref()
-        .map(|n| n.id.clone())
-        .unwrap_or_else(|| format!("package-{}", package_info.manifest.name));
-
-    let install_mode = if existing.is_some() {
-        "overwrite"
-    } else {
-        "skip"
+    let registration = PackageRegistration {
+        manifest,
+        resource: PackageResource::from_stored(&stored, zip_data.len()),
+        origin: PackageOrigin::Builtin {
+            content_hash: package_info.content_hash.clone(),
+        },
     };
 
-    // Build package node properties
-    let properties =
-        build_package_properties(package_info, &stored.key, &stored.url, zip_data.len());
+    let registered = package_registration::register_package_node(&store, &registration)
+        .await
+        .map_err(|e| map_storage_err("Failed to register package node", storage_err(e)))?;
 
-    persist_package_node(
-        state,
-        tenant_id,
-        repo_id,
-        branch,
-        package_info,
-        existing,
-        &node_id,
-        properties,
-    )
-    .await?;
-
-    // Queue installation job
+    // Queue installation job. `sync` for a package already registered here,
+    // `skip` for a first install — deliberately never `overwrite`, which
+    // bypasses the package's own `manifest.yaml` `sync:` policy and
+    // deletes/replaces content the package author marked as user-owned. Forcing
+    // an overwrite stays an explicit operator action via
+    // `POST /packages/{name}/install?mode=overwrite`.
     let job_id = queue_install_job(
         rocksdb,
-        package_info,
-        &node_id,
+        manifest,
+        &registered.node_id,
         &stored.key,
-        install_mode,
+        registered.install_mode(),
         tenant_id,
         repo_id,
         branch,
@@ -119,7 +168,7 @@ pub(super) async fn apply_package_update(
             tenant_id,
             repo_id,
             ResourceType::Package,
-            &package_info.manifest.name,
+            &manifest.name,
             AppliedDefinition {
                 content_hash: package_info.content_hash.clone(),
                 applied_version: None, // Package version is a string, not i32
@@ -134,6 +183,8 @@ pub(super) async fn apply_package_update(
         tenant_id = %tenant_id,
         repo_id = %repo_id,
         package = %update.name,
+        node_id = %registered.node_id,
+        install_mode = %registered.install_mode(),
         job_id = %job_id,
         "Applied Package system update and queued installation job"
     );
@@ -141,167 +192,21 @@ pub(super) async fn apply_package_update(
     Ok(true)
 }
 
-/// Build the properties HashMap for a package node.
-fn build_package_properties(
-    package_info: &BuiltinPackageInfo,
-    resource_key: &str,
-    resource_url: &str,
-    zip_size: usize,
-) -> HashMap<String, PropertyValue> {
-    let mut properties = HashMap::new();
-    properties.insert(
-        "name".to_string(),
-        PropertyValue::String(package_info.manifest.name.clone()),
-    );
-    properties.insert(
-        "version".to_string(),
-        PropertyValue::String(package_info.manifest.version.clone()),
-    );
-
-    if let Some(title) = &package_info.manifest.title {
-        properties.insert("title".to_string(), PropertyValue::String(title.clone()));
+/// The store adapter surfaces `anyhow` errors; recover the original
+/// `raisin_error::Error` so `map_storage_err` can still turn a `NotFound` into
+/// a 404 rather than flattening it to an opaque 500.
+fn storage_err(e: anyhow::Error) -> raisin_error::Error {
+    match e.downcast::<raisin_error::Error>() {
+        Ok(inner) => inner,
+        Err(other) => raisin_error::Error::storage(other.to_string()),
     }
-    if let Some(description) = &package_info.manifest.description {
-        properties.insert(
-            "description".to_string(),
-            PropertyValue::String(description.clone()),
-        );
-    }
-    if let Some(author) = &package_info.manifest.author {
-        properties.insert("author".to_string(), PropertyValue::String(author.clone()));
-    }
-    if let Some(license) = &package_info.manifest.license {
-        properties.insert(
-            "license".to_string(),
-            PropertyValue::String(license.clone()),
-        );
-    }
-    properties.insert(
-        "icon".to_string(),
-        PropertyValue::String(package_info.manifest.icon.clone()),
-    );
-    properties.insert(
-        "color".to_string(),
-        PropertyValue::String(package_info.manifest.color.clone()),
-    );
-    if !package_info.manifest.keywords.is_empty() {
-        properties.insert(
-            "keywords".to_string(),
-            PropertyValue::Array(
-                package_info
-                    .manifest
-                    .keywords
-                    .iter()
-                    .map(|k| PropertyValue::String(k.clone()))
-                    .collect(),
-            ),
-        );
-    }
-    if let Some(category) = &package_info.manifest.category {
-        properties.insert(
-            "category".to_string(),
-            PropertyValue::String(category.clone()),
-        );
-    }
-
-    // Mark as builtin
-    properties.insert("builtin".to_string(), PropertyValue::Boolean(true));
-
-    // Set installed to false (will be set to true after installation job completes)
-    properties.insert("installed".to_string(), PropertyValue::Boolean(false));
-
-    // Add resource reference with the new ZIP key/url
-    let mut resource_obj = HashMap::new();
-    resource_obj.insert(
-        "key".to_string(),
-        PropertyValue::String(resource_key.to_string()),
-    );
-    resource_obj.insert(
-        "url".to_string(),
-        PropertyValue::String(resource_url.to_string()),
-    );
-    resource_obj.insert(
-        "mime_type".to_string(),
-        PropertyValue::String("application/zip".to_string()),
-    );
-    resource_obj.insert("size".to_string(), PropertyValue::Integer(zip_size as i64));
-    properties.insert("resource".to_string(), PropertyValue::Object(resource_obj));
-
-    properties
-}
-
-/// Create or update the package node in storage.
-async fn persist_package_node(
-    state: &AppState,
-    tenant_id: &str,
-    repo_id: &str,
-    branch: &str,
-    package_info: &BuiltinPackageInfo,
-    existing: Option<raisin_models::nodes::Node>,
-    node_id: &str,
-    properties: HashMap<String, PropertyValue>,
-) -> Result<(), ApiError> {
-    if let Some(existing_node) = existing {
-        // UPDATE existing node with new properties (including the new resource reference)
-        let updated_node = raisin_models::nodes::Node {
-            id: existing_node.id.clone(),
-            node_type: existing_node.node_type.clone(),
-            name: package_info.manifest.name.clone(),
-            path: format!("/{}", package_info.manifest.name),
-            workspace: Some("packages".to_string()),
-            properties,
-            created_at: existing_node.created_at,
-            updated_at: Some(Utc::now()),
-            ..Default::default()
-        };
-
-        state
-            .storage()
-            .nodes()
-            .update(
-                StorageScope::new(tenant_id, repo_id, branch, "packages"),
-                updated_node,
-                raisin_storage::node_operations::UpdateNodeOptions::default(),
-            )
-            .await
-            .map_err(|e| map_storage_err("Failed to update package node", e))?;
-
-        tracing::info!(
-            tenant_id = %tenant_id,
-            repo_id = %repo_id,
-            package = %package_info.manifest.name,
-            "Updated existing package node with new resource"
-        );
-    } else {
-        // CREATE new node
-        let node = raisin_models::nodes::Node {
-            id: node_id.to_string(),
-            node_type: "raisin:Package".to_string(),
-            name: package_info.manifest.name.clone(),
-            path: format!("/{}", package_info.manifest.name),
-            workspace: Some("packages".to_string()),
-            properties,
-            ..Default::default()
-        };
-
-        state
-            .storage()
-            .nodes()
-            .create(
-                StorageScope::new(tenant_id, repo_id, branch, "packages"),
-                node,
-                raisin_storage::node_operations::CreateNodeOptions::default(),
-            )
-            .await
-            .map_err(|e| map_storage_err("Failed to create package node", e))?;
-    }
-    Ok(())
 }
 
 /// Queue a package installation job via the unified job queue.
+#[allow(clippy::too_many_arguments)]
 async fn queue_install_job(
     rocksdb: &RocksDBStorage,
-    package_info: &BuiltinPackageInfo,
+    manifest: &Manifest,
     node_id: &str,
     resource_key: &str,
     install_mode: &str,
@@ -310,8 +215,8 @@ async fn queue_install_job(
     branch: &str,
 ) -> Result<String, ApiError> {
     let job_type = raisin_storage::JobType::PackageInstall {
-        package_name: package_info.manifest.name.clone(),
-        package_version: package_info.manifest.version.clone(),
+        package_name: manifest.name.clone(),
+        package_version: manifest.version.clone(),
         package_node_id: node_id.to_string(),
     };
 
@@ -329,7 +234,7 @@ async fn queue_install_job(
         tenant_id: tenant_id.to_string(),
         repo_id: repo_id.to_string(),
         branch: branch.to_string(),
-        workspace_id: "packages".to_string(),
+        workspace_id: PACKAGES_WORKSPACE.to_string(),
         revision: raisin_hlc::HLC::now(),
         metadata,
     };

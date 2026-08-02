@@ -6288,6 +6288,7 @@ dependencies = [
  "md5 0.8.0",
  "nanoid",
  "raisin-audit",
+ "raisin-binary",
  "raisin-context",
  "raisin-error",
  "raisin-events",
@@ -6985,7 +6986,9 @@ dependencies = [
 name = "raisin-transport-http"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-stream",
+ "async-trait",
  "axum",
  "axum-extra",
  "base64 0.22.1",

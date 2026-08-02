@@ -11,6 +11,7 @@ raisin-error = { path = "../raisin-error" }
 raisin-hlc = { path = "../raisin-hlc" }
 raisin-models = { path = "../raisin-models" }
 raisin-packages = { path = "../raisin-packages" }
+raisin-binary = { path = "../raisin-binary" }
 raisin-validation = { path = "../raisin-validation" }
 chrono = { workspace = true }
 raisin-audit = { path = "../raisin-audit" }
@@ -34,11 +35,11 @@ tokio = { workspace = true, features = ["full"] }
 dashmap = "6.1"
 zip = "2.1"
 reqwest = { workspace = true }
+async-trait = "0.1.89"
 
 [dev-dependencies]
 tokio = { workspace = true }
 toml = "0.9"
-async-trait = "0.1.89"
 raisin-storage-memory = { path = "../raisin-storage-memory" }
 raisin-rocksdb = { path = "../raisin-rocksdb" }
 tempfile = { workspace = true }

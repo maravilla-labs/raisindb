@@ -206,26 +206,6 @@ impl Manifest {
 
         Ok(())
     }
-
-    /// Convert manifest to properties for raisin:Package node
-    pub fn to_node_properties(&self) -> serde_json::Value {
-        serde_json::json!({
-            "name": self.name,
-            "version": self.version,
-            "title": self.title,
-            "description": self.description,
-            "author": self.author,
-            "license": self.license,
-            "icon": self.icon,
-            "color": self.color,
-            "keywords": self.keywords,
-            "category": self.category,
-            "dependencies": self.dependencies,
-            "provides": self.provides,
-            "workspace_patches": self.workspace_patches,
-            "installed": false,
-        })
-    }
 }
 
 #[cfg(test)]

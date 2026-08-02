@@ -30,6 +30,8 @@ raisin-hnsw = { path = "../raisin-hnsw", optional = true }
 # Future backends (placeholders):
 # raisin-storage-mongo = { path = "../raisin-storage-mongo", optional = true }
 raisin-core = { path = "../raisin-core" }
+anyhow = { workspace = true }
+async-trait = "0.1"
 raisin-context = { path = "../raisin-context" }
 raisin-error = { path = "../raisin-error" }
 raisin-crypto = { path = "../raisin-crypto" }

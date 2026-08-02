@@ -22,23 +22,61 @@
 //! packages workspace.
 
 use anyhow::Result;
+use async_trait::async_trait;
 use chrono::Utc;
 use raisin_binary::BinaryStorage;
 use raisin_core::definitions::{DefinitionResolver, PackageDefinition, PackageSource};
+use raisin_core::package_registration::{
+    self, PackageNodeStore, PackageOrigin, PackageRegistration, PackageResource, PACKAGES_WORKSPACE,
+};
 use raisin_events::{Event, EventHandler, RepositoryEventKind};
 use raisin_hlc::HLC;
 use raisin_models::auth::AuthContext;
-use raisin_models::nodes::properties::value::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_packages::Manifest;
 use raisin_rocksdb::{JobDataStore, SystemUpdateRepositoryImpl};
 use raisin_storage::jobs::{JobContext, JobId, JobRegistry, JobType};
 use raisin_storage::system_updates::{AppliedDefinition, ResourceType, SystemUpdateRepository};
-use raisin_storage::transactional::TransactionalStorage;
+use raisin_storage::transactional::{TransactionalContext, TransactionalStorage};
 use raisin_storage::{RepositoryManagementRepository, Storage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info};
+
+/// [`PackageNodeStore`] over an open transaction.
+///
+/// The transaction is what makes the builtin registration atomic and gives the
+/// revision its `builtin-package-init` actor and commit message; only the write
+/// mechanism lives here, every decision above it is
+/// [`raisin_core::package_registration`]'s.
+struct TxPackageStore<'a, B: BinaryStorage> {
+    tx: &'a dyn TransactionalContext,
+    binary_storage: &'a B,
+}
+
+#[async_trait]
+impl<B: BinaryStorage + Send + Sync> PackageNodeStore for TxPackageStore<'_, B> {
+    async fn get_package_node_by_path(&self, path: &str) -> Result<Option<Node>> {
+        Ok(self.tx.get_node_by_path(PACKAGES_WORKSPACE, path).await?)
+    }
+
+    async fn write_package_node(&self, node: Node, _existing: Option<&Node>) -> Result<()> {
+        // upsert, not add. `upsert_node` keys on PATH and preserves the
+        // occupant's id, which is what keeps this idempotent: the `existing`
+        // probe and `add_node`'s own uniqueness check do not always agree —
+        // observed in production as the probe returning None for
+        // `package-{name}` while `add_node` rejected the very same id as
+        // already existing, on every boot, so builtin package content stopped
+        // reaching those repos entirely. This node is system-owned and rebuilt
+        // from the manifest on every pass, so replacing an unexpected occupant
+        // is the intended outcome rather than a loss.
+        Ok(self.tx.upsert_node(PACKAGES_WORKSPACE, &node).await?)
+    }
+
+    async fn package_binary_exists(&self, key: &str) -> bool {
+        self.binary_storage.get(key).await.is_ok()
+    }
+}
 
 /// Event handler that installs builtin packages when a repository is created
 pub struct BuiltinPackageInitHandler<S, B>
@@ -272,298 +310,143 @@ where
             "Installing builtin package"
         );
 
-        // Create transaction with system auth context FIRST - all node operations must go through it
+        // Transaction FIRST, with the system auth context — every node
+        // operation below goes through it, which is also what stamps the
+        // revision's actor and commit message.
         let tx = self.storage.begin_context().await?;
         tx.set_tenant_repo(tenant_id, repo_id)?;
         tx.set_branch("main")?;
         tx.set_actor("builtin-package-init")?;
         tx.set_auth_context(AuthContext::system())?;
 
-        // Check if package already exists and determine if we need to update
-        let node_id = format!("package-{}", manifest.name);
-        let existing = tx.get_node("packages", &node_id).await?;
+        let store = TxPackageStore {
+            tx: tx.as_ref(),
+            binary_storage: self.binary_storage.as_ref(),
+        };
+
+        // Probe by PATH, never by the assumed `package-{name}` id. A package
+        // that arrived through the streaming upload endpoint carries a nanoid
+        // id, so an id probe reports it absent — which downgrades an update to
+        // a first install (`install_mode = "skip"`) and silently drops the new
+        // content into a repo that already has the old one.
+        let existing = store
+            .get_package_node_by_path(&package_registration::package_node_path(&manifest.name))
+            .await?;
 
         // Register-only idempotency: for opt-out packages we only need the
         // package node + its `.rap` bytes to exist so on-demand install works.
-        // If the node is already registered with a live binary, skip — otherwise
-        // every boot would needlessly re-zip and re-commit for each opt-out
-        // package in every repo (a self-inflicted write storm).
-        if !install_content {
-            if let Some(ref existing_node) = existing {
-                let resource_key = existing_node
-                    .properties
-                    .get("resource")
-                    .and_then(|v| match v {
-                        PropertyValue::Object(obj) => obj.get("key"),
-                        _ => None,
-                    })
-                    .and_then(|v| match v {
-                        PropertyValue::String(s) => Some(s.clone()),
-                        _ => None,
-                    });
-                // Compare CONTENT, not just presence. This used to skip whenever
-                // the node existed and its binary was fetchable, with no regard
-                // for whether the embedded package had changed — so a rebuilt
-                // opt-out package (every provider connector) never re-registered
-                // and its stale `.rap` stayed in the repo forever. A connector
-                // fix could ship to a server and still not run, which is exactly
-                // what happened to the Microsoft Graph adapter.
-                let registered_hash =
-                    existing_node
-                        .properties
-                        .get("content_hash")
-                        .and_then(|v| match v {
-                            PropertyValue::String(s) => Some(s.as_str()),
-                            _ => None,
-                        });
-                let content_unchanged = registered_hash == Some(content_hash);
-                if let Some(key) = resource_key {
-                    if content_unchanged && self.binary_storage.get(&key).await.is_ok() {
-                        info!(
-                            package_name = %manifest.name,
-                            "Builtin package already registered and unchanged, skipping"
-                        );
-                        return Ok(());
-                    }
-                    if !content_unchanged {
-                        info!(
-                            package_name = %manifest.name,
-                            registered = registered_hash.unwrap_or("none"),
-                            current = %&content_hash[..8.min(content_hash.len())],
-                            "Builtin package content changed, re-registering"
-                        );
-                    }
-                }
-            }
+        // Compare CONTENT, not just presence — this used to skip whenever the
+        // node existed and its binary was fetchable, so a rebuilt opt-out
+        // package (every provider connector) never re-registered and its stale
+        // `.rap` stayed in the repo forever.
+        if !install_content
+            && package_registration::package_registration_is_current(
+                &store,
+                existing.as_ref(),
+                content_hash,
+            )
+            .await
+        {
+            info!(
+                package_name = %manifest.name,
+                "Builtin package already registered and unchanged, skipping"
+            );
+            return Ok(());
         }
 
-        // Determine if this is an update vs new installation
-        let is_update = if let Some(ref existing_node) = existing {
-            // Check if package installation is incomplete (installed=false means job failed)
-            let is_installed = existing_node
-                .properties
-                .get("installed")
-                .and_then(|v| match v {
-                    PropertyValue::Boolean(b) => Some(*b),
-                    _ => None,
-                })
-                .unwrap_or(false);
+        // Full-install idempotency. Unlike the register-only check above this
+        // compares against the SYSTEM-UPDATE applied hash, not the hash on the
+        // node: the node records what was registered, the applied record what
+        // was actually installed, and only the latter proves the content in the
+        // repo is current.
+        if install_content {
+            if let Some(existing_node) = existing.as_ref() {
+                if !package_registration::package_is_installed(existing_node) {
+                    // Node exists but install never completed - broken.
+                    info!(
+                        package_name = %manifest.name,
+                        "Package exists but not installed (broken), reinstalling"
+                    );
+                } else {
+                    let applied = self
+                        .system_update_repo
+                        .get_applied(tenant_id, repo_id, ResourceType::Package, &manifest.name)
+                        .await?;
 
-            if !is_installed {
-                // Package node exists but install never completed - broken!
-                info!(
-                    package_name = %manifest.name,
-                    "Package exists but not installed (broken), reinstalling"
-                );
-                true
-            } else {
-                // Package is installed, check if content hash has changed
-                let applied = self
-                    .system_update_repo
-                    .get_applied(tenant_id, repo_id, ResourceType::Package, &manifest.name)
-                    .await?;
-
-                match applied {
-                    Some(applied) if applied.content_hash == content_hash => {
-                        // Hash matches, but verify binary actually exists (zombie detection)
-                        let resource_key = existing_node
-                            .properties
-                            .get("resource")
-                            .and_then(|v| match v {
-                                PropertyValue::Object(obj) => obj.get("key"),
-                                _ => None,
-                            })
-                            .and_then(|v| match v {
-                                PropertyValue::String(s) => Some(s.clone()),
-                                _ => None,
-                            });
-
-                        if let Some(key) = resource_key {
-                            // Try to fetch the binary - if it fails, the file was deleted
-                            if self.binary_storage.get(&key).await.is_err() {
-                                info!(
+                    match applied {
+                        Some(applied) if applied.content_hash == content_hash => {
+                            match package_registration::package_resource_key(existing_node) {
+                                Some(key) if store.package_binary_exists(&key).await => {
+                                    info!(
+                                        package_name = %manifest.name,
+                                        "Package unchanged and binary exists, skipping"
+                                    );
+                                    return Ok(());
+                                }
+                                Some(key) => info!(
                                     package_name = %manifest.name,
                                     resource_key = %key,
                                     "Package binary missing from storage (zombie), reinstalling"
-                                );
-                                true // force reinstall
-                            } else {
-                                // Binary exists, truly skip
-                                info!(package_name = %manifest.name, "Package unchanged and binary exists, skipping");
-                                return Ok(());
+                                ),
+                                None => info!(
+                                    package_name = %manifest.name,
+                                    "Package has no resource key (corrupted), reinstalling"
+                                ),
                             }
-                        } else {
-                            // No resource key - corrupted node, reinstall
-                            info!(
-                                package_name = %manifest.name,
-                                "Package has no resource key (corrupted), reinstalling"
-                            );
-                            true
                         }
-                    }
-                    Some(_) => {
-                        info!(
+                        Some(_) => info!(
                             package_name = %manifest.name,
                             "Package content updated, reinstalling"
-                        );
-                        true
-                    }
-                    None => {
-                        // No hash recorded but installed=true - legacy state, reinstall to be safe
-                        info!(
+                        ),
+                        // No hash recorded but installed=true - legacy state,
+                        // reinstall to be safe.
+                        None => info!(
                             package_name = %manifest.name,
                             "Package has no hash record, reinstalling"
-                        );
-                        true
+                        ),
                     }
                 }
             }
-        } else {
-            false // new installation
-        };
+        }
 
-        // Create ZIP from embedded files using shared function
+        // Create ZIP from the resolved package files and store it. Always
+        // tenant-scoped: the prefix is part of the blob key.
         let zip_data = package_source.to_zip()?;
+        let stored = package_registration::store_package_blob(
+            self.binary_storage.as_ref(),
+            tenant_id,
+            &manifest,
+            &zip_data,
+        )
+        .await?;
 
-        // Store the binary
-        let filename = format!("{}-{}.rap", manifest.name, manifest.version);
-        let stored = self
-            .binary_storage
-            .put_bytes(
-                &zip_data,
-                Some("application/zip"),
-                Some("rap"),
-                Some(&filename),
-                Some(tenant_id),
-            )
-            .await?;
-
-        // Create the raisin:Package node
-        let mut properties = HashMap::new();
-        properties.insert(
-            "name".to_string(),
-            PropertyValue::String(manifest.name.clone()),
-        );
-        properties.insert(
-            "version".to_string(),
-            PropertyValue::String(manifest.version.clone()),
-        );
-
-        if let Some(title) = &manifest.title {
-            properties.insert("title".to_string(), PropertyValue::String(title.clone()));
-        }
-        if let Some(description) = &manifest.description {
-            properties.insert(
-                "description".to_string(),
-                PropertyValue::String(description.clone()),
-            );
-        }
-        if let Some(author) = &manifest.author {
-            properties.insert("author".to_string(), PropertyValue::String(author.clone()));
-        }
-        if let Some(license) = &manifest.license {
-            properties.insert(
-                "license".to_string(),
-                PropertyValue::String(license.clone()),
-            );
-        }
-        // icon and color have defaults in Manifest
-        properties.insert(
-            "icon".to_string(),
-            PropertyValue::String(manifest.icon.clone()),
-        );
-        properties.insert(
-            "color".to_string(),
-            PropertyValue::String(manifest.color.clone()),
-        );
-        // keywords is Vec<String> (not Option)
-        if !manifest.keywords.is_empty() {
-            properties.insert(
-                "keywords".to_string(),
-                PropertyValue::Array(
-                    manifest
-                        .keywords
-                        .iter()
-                        .map(|k| PropertyValue::String(k.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        if let Some(category) = &manifest.category {
-            properties.insert(
-                "category".to_string(),
-                PropertyValue::String(category.clone()),
-            );
-        }
-
-        // Mark as builtin
-        properties.insert("builtin".to_string(), PropertyValue::Boolean(true));
-        // What the skip check above compares against on the next boot.
-        properties.insert(
-            "content_hash".to_string(),
-            PropertyValue::String(content_hash.to_string()),
-        );
-
-        // Set installed to false initially (will be set to true after job completes)
-        properties.insert("installed".to_string(), PropertyValue::Boolean(false));
-
-        // Add resource reference
-        let mut resource_obj = HashMap::new();
-        resource_obj.insert("key".to_string(), PropertyValue::String(stored.key.clone()));
-        resource_obj.insert("url".to_string(), PropertyValue::String(stored.url.clone()));
-        resource_obj.insert(
-            "mime_type".to_string(),
-            PropertyValue::String("application/zip".to_string()),
-        );
-        resource_obj.insert(
-            "size".to_string(),
-            PropertyValue::Integer(zip_data.len() as i64),
-        );
-        properties.insert("resource".to_string(), PropertyValue::Object(resource_obj));
-
-        let node = Node {
-            id: node_id.clone(),
-            node_type: "raisin:Package".to_string(),
-            name: manifest.name.clone(),
-            path: format!("/{}", manifest.name),
-            workspace: Some("packages".to_string()),
-            properties,
-            ..Default::default()
+        let registration = PackageRegistration {
+            manifest: &manifest,
+            resource: PackageResource::from_stored(&stored, zip_data.len()),
+            origin: PackageOrigin::Builtin {
+                content_hash: content_hash.to_string(),
+            },
         };
 
-        // Create or update the package node (transaction already created above)
-        if is_update {
-            tx.set_message(&format!("Update builtin package node: {}", manifest.name))?;
-            tx.upsert_node("packages", &node).await?;
-            tx.commit().await?;
-            info!(
-                package_name = %manifest.name,
-                node_id = %node_id,
-                "Updated package node, triggering reinstallation job"
-            );
-        } else {
-            tx.set_message(&format!("Create builtin package node: {}", manifest.name))?;
-            // upsert, not add. The `existing` probe above and `add_node`'s own
-            // uniqueness check do not always agree — observed in production as
-            // `get_node` returning None for `package-{name}` while `add_node`
-            // rejected the very same id with "Node with id 'package-X' already
-            // exists", on every boot, for several packages and tenants. Whatever
-            // makes the two disagree (a tombstoned id still held in the index is
-            // the leading suspect), the retry could never succeed, so builtin
-            // package content stopped reaching those repos entirely — which is
-            // how an adapter fix ships to a server and still does not run.
-            //
-            // The write is idempotent either way: this node is system-owned and
-            // rebuilt from the embedded manifest on every pass, so replacing an
-            // unexpected occupant is the intended outcome rather than a loss.
-            tx.upsert_node("packages", &node).await?;
-            tx.commit().await?;
-            info!(
-                package_name = %manifest.name,
-                node_id = %node_id,
-                "Created package node, triggering installation job"
-            );
-        }
+        tx.set_message(&format!(
+            "{} builtin package node: {}",
+            if existing.is_some() {
+                "Update"
+            } else {
+                "Create"
+            },
+            manifest.name
+        ))?;
+        let registered = package_registration::register_package_node(&store, &registration).await?;
+        tx.commit().await?;
+
+        let node_id = registered.node_id.clone();
+        info!(
+            package_name = %manifest.name,
+            node_id = %node_id,
+            existed = registered.existed,
+            "Registered builtin package node"
+        );
 
         // Register-only: the package node + `.rap` bytes are now persisted, so it
         // is listable and installable on demand, but we do NOT enqueue a content
@@ -584,9 +467,10 @@ where
             package_node_id: node_id.clone(),
         };
 
-        // Create job context with metadata
-        // Use "sync" mode for updates to update existing content, "skip" for new installations
-        let install_mode = if is_update { "sync" } else { "skip" };
+        // Create job context with metadata. "sync" for a package that was
+        // already registered here, "skip" for a first install — never
+        // "overwrite", which would bypass the package's own `sync:` policy.
+        let install_mode = registered.install_mode();
         let mut metadata = HashMap::new();
         metadata.insert(
             "resource_key".to_string(),
@@ -671,6 +555,7 @@ where
 mod tests {
     use super::*;
     use raisin_binary::FilesystemBinaryStorage;
+    use raisin_models::nodes::properties::value::PropertyValue;
     use raisin_rocksdb::{PackageInstallHandler, RocksDBStorage};
     use raisin_storage::jobs::JobInfo;
 

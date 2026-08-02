@@ -8,62 +8,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Package manifest structure (from manifest.yaml in .rap file)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageManifest {
-    pub name: String,
-    pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub license: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keywords: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dependencies: Option<Vec<PackageDependency>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provides: Option<PackageProvides>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_patches: Option<HashMap<String, WorkspacePatch>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageDependency {
-    pub name: String,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageProvides {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nodetypes: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspaces: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspacePatch {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_node_types: Option<AllowedNodeTypesPatch>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AllowedNodeTypesPatch {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub add: Option<Vec<String>>,
-}
+// The uploaded-package manifest is `raisin_packages::Manifest` — the same type
+// the installer and the definition stack use. A narrower copy used to live here
+// and only it emitted `dependencies` / `provides` / `workspace_patches`, so an
+// uploaded package node and a builtin one carried different properties for the
+// same package.
 
 /// Response for listing ZIP contents
 #[derive(Debug, Serialize)]

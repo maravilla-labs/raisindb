@@ -69,6 +69,7 @@ pub mod definitions;
 pub mod init;
 pub mod nodetype_init;
 pub mod package_init;
+pub mod package_registration;
 pub mod system_updates;
 pub mod workspace_init;
 pub mod workspace_structure_init;

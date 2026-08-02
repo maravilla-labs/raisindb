@@ -3,39 +3,62 @@
 //! Package upload handler.
 //!
 //! Handles uploading `.rap` package files via multipart form,
-//! extracting manifests, and creating `raisin:Package` nodes.
+//! extracting manifests, and registering `raisin:Package` nodes.
 
+use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{Extension, Path, State},
     Json,
 };
 use multer::Multipart;
-use raisin_binary::BinaryStorage;
-use raisin_models as models;
+use raisin_core::package_registration::{
+    self, PackageNodeStore, PackageOrigin, PackageRegistration, PackageResource, PACKAGES_WORKSPACE,
+};
+use raisin_core::services::node_service::NodeService;
 use raisin_models::auth::AuthContext;
-use raisin_models::nodes::properties::value::PropertyValue;
-use std::collections::HashMap;
+use raisin_models::nodes::Node;
+use raisin_packages::Manifest;
+use raisin_storage::transactional::TransactionalStorage;
+use raisin_storage::Storage;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
 use crate::{error::ApiError, middleware::TenantInfo, state::AppState};
 
-use super::types::{PackageManifest, UploadResponse};
+use super::types::UploadResponse;
 
-/// Upload a .rap package file (multipart form)
+/// [`PackageNodeStore`] over a `NodeService`.
 ///
-/// Creates a raisin:Package node in the packages workspace with:
-/// - Manifest properties extracted from manifest.yaml
-/// - ZIP binary stored in the `resource` property
-///
-/// POST /api/repos/{repo}/packages/upload
-///
-/// # Deprecated
-/// This endpoint is deprecated. Use the unified repository upload endpoint instead:
-/// ```
-/// POST /api/repository/{repo}/main/head/packages/{package-name}?node_type=raisin:Package
-/// ```
+/// The upload path already has a workspace-scoped service with the caller's
+/// auth context; only the write mechanism lives here, every decision above it
+/// is [`raisin_core::package_registration`]'s.
+struct NodeServicePackageStore<S: Storage + TransactionalStorage> {
+    node_service: NodeService<S>,
+}
+
+#[async_trait]
+impl<S> PackageNodeStore for NodeServicePackageStore<S>
+where
+    S: Storage + TransactionalStorage + Send + Sync + 'static,
+{
+    async fn get_package_node_by_path(&self, path: &str) -> anyhow::Result<Option<Node>> {
+        match self.node_service.get_by_path(path).await {
+            Ok(found) => Ok(found),
+            // A missing package is not an error here — it is a first upload.
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn write_package_node(&self, node: Node, _existing: Option<&Node>) -> anyhow::Result<()> {
+        self.node_service
+            .upsert(node)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+}
+
 #[deprecated(
     since = "0.1.0",
     note = "Use POST /api/repository/{repo}/main/head/packages/{name}?node_type=raisin:Package instead"
@@ -84,59 +107,52 @@ pub async fn upload_package(
 
     let manifest = extract_manifest(&file_data)?;
 
-    let ext = Some("rap");
-    let stored = state
-        .bin
-        .put_bytes(
-            &file_data,
-            Some("application/zip"),
-            ext,
-            Some(&file_name),
-            Some(tenant_id),
-        )
-        .await
-        .map_err(|e| ApiError::storage_error(format!("Failed to store package file: {}", e)))?;
+    // The `.rap` blob is always tenant-scoped: the tenant prefix is part of
+    // the generated key, so an unscoped store leaves it outside the tenant's
+    // namespace.
+    let stored = package_registration::store_package_blob(
+        state.bin.as_ref(),
+        tenant_id,
+        &manifest,
+        &file_data,
+    )
+    .await
+    .map_err(|e| ApiError::storage_error(format!("Failed to store package file: {}", e)))?;
 
-    let node_service =
-        state.node_service_for_context(tenant_id, &repo, branch, workspace, auth_context);
-
-    let properties = build_manifest_properties(&manifest, &stored, file_data.len());
-
-    // Re-uploads must land on the node already at this path: packages
-    // uploaded through the streaming endpoint carry nanoid ids, so an
-    // id-keyed upsert with the deterministic id would CREATE and fail on
-    // the path conflict — stranding the tenant on the stale bundle.
-    let node_id = match node_service
-        .get_by_path(&format!("/{}", manifest.name))
-        .await
-    {
-        Ok(Some(existing)) => existing.id,
-        _ => format!("package-{}", manifest.name),
-    };
-    let node = models::nodes::Node {
-        id: node_id.clone(),
-        node_type: "raisin:Package".to_string(),
-        name: manifest.name.clone(),
-        path: format!("/{}", manifest.name),
-        workspace: Some(workspace.to_string()),
-        properties,
-        ..Default::default()
+    let store = NodeServicePackageStore {
+        node_service: state.node_service_for_context(
+            tenant_id,
+            &repo,
+            branch,
+            PACKAGES_WORKSPACE,
+            auth_context,
+        ),
     };
 
-    node_service
-        .upsert(node)
+    let registration = PackageRegistration {
+        manifest: &manifest,
+        resource: PackageResource::from_stored(&stored, file_data.len()),
+        origin: PackageOrigin::Uploaded,
+    };
+
+    let registered = package_registration::register_package_node(&store, &registration)
         .await
         .map_err(|e| ApiError::storage_error(format!("Failed to create package node: {}", e)))?;
 
     Ok(Json(UploadResponse {
         package_name: manifest.name,
         version: manifest.version,
-        node_id,
+        node_id: registered.node_id,
     }))
 }
 
-/// Extract manifest.yaml from a .rap ZIP file.
-pub fn extract_manifest(zip_data: &[u8]) -> Result<PackageManifest, ApiError> {
+/// Extract `manifest.yaml` from a `.rap` ZIP file.
+///
+/// Parses into `raisin_packages::Manifest`, the canonical manifest type the
+/// package installer and the definition stack already use — a second,
+/// narrower manifest struct here is how the uploaded and builtin package nodes
+/// drifted apart in the first place.
+pub fn extract_manifest(zip_data: &[u8]) -> Result<Manifest, ApiError> {
     let cursor = Cursor::new(zip_data);
     let mut archive = ZipArchive::new(cursor)
         .map_err(|e| ApiError::validation_failed(format!("Invalid ZIP file: {}", e)))?;
@@ -150,157 +166,6 @@ pub fn extract_manifest(zip_data: &[u8]) -> Result<PackageManifest, ApiError> {
         .read_to_string(&mut manifest_content)
         .map_err(|e| ApiError::validation_failed(format!("Failed to read manifest.yaml: {}", e)))?;
 
-    serde_yaml::from_str(&manifest_content)
+    Manifest::from_yaml(&manifest_content)
         .map_err(|e| ApiError::validation_failed(format!("Invalid manifest.yaml format: {}", e)))
-}
-
-/// Build the properties map from a parsed manifest and stored binary.
-fn build_manifest_properties(
-    manifest: &PackageManifest,
-    stored: &raisin_binary::StoredObject,
-    file_size: usize,
-) -> HashMap<String, PropertyValue> {
-    let mut properties = HashMap::new();
-    properties.insert(
-        "name".to_string(),
-        PropertyValue::String(manifest.name.clone()),
-    );
-    properties.insert(
-        "version".to_string(),
-        PropertyValue::String(manifest.version.clone()),
-    );
-
-    if let Some(title) = &manifest.title {
-        properties.insert("title".to_string(), PropertyValue::String(title.clone()));
-    }
-    if let Some(description) = &manifest.description {
-        properties.insert(
-            "description".to_string(),
-            PropertyValue::String(description.clone()),
-        );
-    }
-    if let Some(author) = &manifest.author {
-        properties.insert("author".to_string(), PropertyValue::String(author.clone()));
-    }
-    if let Some(license) = &manifest.license {
-        properties.insert(
-            "license".to_string(),
-            PropertyValue::String(license.clone()),
-        );
-    }
-    if let Some(icon) = &manifest.icon {
-        properties.insert("icon".to_string(), PropertyValue::String(icon.clone()));
-    }
-    if let Some(color) = &manifest.color {
-        properties.insert("color".to_string(), PropertyValue::String(color.clone()));
-    }
-    if let Some(keywords) = &manifest.keywords {
-        properties.insert(
-            "keywords".to_string(),
-            PropertyValue::Array(
-                keywords
-                    .iter()
-                    .map(|k| PropertyValue::String(k.clone()))
-                    .collect(),
-            ),
-        );
-    }
-    if let Some(category) = &manifest.category {
-        properties.insert(
-            "category".to_string(),
-            PropertyValue::String(category.clone()),
-        );
-    }
-    if let Some(dependencies) = &manifest.dependencies {
-        let mut deps_map = HashMap::new();
-        for (i, dep) in dependencies.iter().enumerate() {
-            let mut dep_obj = HashMap::new();
-            dep_obj.insert("name".to_string(), PropertyValue::String(dep.name.clone()));
-            dep_obj.insert(
-                "version".to_string(),
-                PropertyValue::String(dep.version.clone()),
-            );
-            deps_map.insert(i.to_string(), PropertyValue::Object(dep_obj));
-        }
-        properties.insert("dependencies".to_string(), PropertyValue::Object(deps_map));
-    }
-    if let Some(provides) = &manifest.provides {
-        let mut provides_obj = HashMap::new();
-        if let Some(nodetypes) = &provides.nodetypes {
-            provides_obj.insert(
-                "nodetypes".to_string(),
-                PropertyValue::Array(
-                    nodetypes
-                        .iter()
-                        .map(|nt| PropertyValue::String(nt.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        if let Some(workspaces) = &provides.workspaces {
-            provides_obj.insert(
-                "workspaces".to_string(),
-                PropertyValue::Array(
-                    workspaces
-                        .iter()
-                        .map(|ws| PropertyValue::String(ws.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        if let Some(content) = &provides.content {
-            provides_obj.insert(
-                "content".to_string(),
-                PropertyValue::Array(
-                    content
-                        .iter()
-                        .map(|c| PropertyValue::String(c.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        properties.insert("provides".to_string(), PropertyValue::Object(provides_obj));
-    }
-    if let Some(workspace_patches) = &manifest.workspace_patches {
-        let mut patches_obj = HashMap::new();
-        for (ws_name, patch) in workspace_patches {
-            let mut patch_map = HashMap::new();
-            if let Some(allowed_node_types) = &patch.allowed_node_types {
-                let mut ant_map = HashMap::new();
-                if let Some(add) = &allowed_node_types.add {
-                    ant_map.insert(
-                        "add".to_string(),
-                        PropertyValue::Array(
-                            add.iter()
-                                .map(|nt| PropertyValue::String(nt.clone()))
-                                .collect(),
-                        ),
-                    );
-                }
-                patch_map.insert(
-                    "allowed_node_types".to_string(),
-                    PropertyValue::Object(ant_map),
-                );
-            }
-            patches_obj.insert(ws_name.clone(), PropertyValue::Object(patch_map));
-        }
-        properties.insert(
-            "workspace_patches".to_string(),
-            PropertyValue::Object(patches_obj),
-        );
-    }
-
-    properties.insert("installed".to_string(), PropertyValue::Boolean(false));
-
-    let mut resource_obj = HashMap::new();
-    resource_obj.insert("key".to_string(), PropertyValue::String(stored.key.clone()));
-    resource_obj.insert("url".to_string(), PropertyValue::String(stored.url.clone()));
-    resource_obj.insert(
-        "mime_type".to_string(),
-        PropertyValue::String("application/zip".to_string()),
-    );
-    resource_obj.insert("size".to_string(), PropertyValue::Integer(file_size as i64));
-    properties.insert("resource".to_string(), PropertyValue::Object(resource_obj));
-
-    properties
 }
