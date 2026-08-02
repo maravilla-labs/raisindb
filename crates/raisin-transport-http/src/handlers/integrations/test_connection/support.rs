@@ -71,7 +71,7 @@ pub(super) fn build_credential(
 
 /// Map an adapter error message to a stable diagnostic `code`. Mirrors the sync
 /// engine's `AdapterError::classify` reserved codes.
-pub(super) fn adapter_error_code(msg: &str) -> &'static str {
+pub(in crate::handlers::integrations) fn adapter_error_code(msg: &str) -> &'static str {
     let m = msg.to_ascii_lowercase();
     if m.contains("auth_expired") {
         "auth_expired"
@@ -94,7 +94,7 @@ pub(super) fn error_is_auth_expired(msg: &str) -> bool {
 /// Defensive scrub: never let a token-shaped substring leak into a diagnostic
 /// message. Tokens should never appear in an adapter error, but a misbehaving
 /// adapter could echo one — redact anything suspicious.
-pub(super) fn sanitize(msg: &str) -> String {
+pub(in crate::handlers::integrations) fn sanitize(msg: &str) -> String {
     let mut out = String::new();
     for word in msg.split_whitespace() {
         let lower = word.to_ascii_lowercase();
@@ -126,7 +126,7 @@ pub(super) fn string_prop(node: &Node, key: &str) -> Option<String> {
 /// refresh_token**. Returns `None` when the account is absent or has no
 /// decryptable access token.
 #[cfg(feature = "storage-rocksdb")]
-pub(super) fn resolve_credential(
+pub(in crate::handlers::integrations) fn resolve_credential(
     state: &crate::state::AppState,
     node: &Node,
     provider_type: &str,
@@ -151,18 +151,28 @@ pub(super) fn resolve_credential(
     ))
 }
 
-/// Minimal read-only `mount` snapshot for a one-off probe. Forwards the
-/// integration's `api_config` (where connectors like IMAP/Gmail keep host/port/
-/// tls/auth) so the probe reaches the provider the same way a real sync would.
+/// Read-only `mount` snapshot for a one-off adapter invocation (the connection
+/// test, the browse endpoint).
 ///
-/// `caller_sync` carries the mount's own `sync_config` keys — most importantly
-/// ms-graph's `resource` — layered *under* the probe-owned keys so a caller can
-/// select the surface to test but never widen the probe (`max_items_per_sync`
-/// stays capped, `ephemeral` stays off).
+/// **Must mirror the sync engine's `build_mount_snapshot`**
+/// (`raisin-rocksdb/.../virtual_mount_sync/adapter.rs`), including the resolved
+/// `config` key. It did not, and the gap was silent: `config` is the layer that
+/// carries connector- and CONNECTION-level settings, so a probe built without it
+/// saw only `api_config` and the caller's `sync_config`. An ms-graph connection
+/// holding `tenant_id`, or a `principal` naming a shared mailbox, was invisible
+/// to the probe — Test connection would read `/me` and report success while the
+/// real sync read a different mailbox entirely. Anything that says "this is what
+/// a sync would do" has to be built from the same layers a sync uses.
+///
+/// `caller_sync` carries the mount's own `sync_config` keys — the ms-graph
+/// `resource`, a calendar `window` — layered *under* the probe-owned keys so a
+/// caller can select the surface to test but never widen the probe
+/// (`max_items_per_sync` stays capped, `ephemeral` stays off).
 #[cfg(feature = "storage-rocksdb")]
-pub(super) fn mount_snapshot(
+pub(in crate::handlers::integrations) fn mount_snapshot(
     remote_root: &Option<String>,
-    api_config: &Value,
+    node: &Node,
+    account_id: Option<&str>,
     caller_sync: Option<&Value>,
 ) -> Value {
     let mut sync = serde_json::Map::new();
@@ -179,14 +189,45 @@ pub(super) fn mount_snapshot(
     sync.insert("ephemeral".into(), json!(false));
     sync.insert("ttl_seconds".into(), Value::Null);
     sync.insert("max_items_per_sync".into(), json!(PROBE_LIMIT));
+    let sync_config = Value::Object(sync);
+
+    let api_config = crate::handlers::integrations::json_prop(node, "api_config");
+    let connector_config = crate::handlers::integrations::json_prop(node, "config");
+    let account_config = account_id
+        .map(|id| account_config(node, id))
+        .unwrap_or(Value::Null);
+
+    // Same precedence, same function as the engine: api_config < connector <
+    // connection < sync_config.
+    let merged = raisin_models::nodes::integrations::merge_config(
+        &api_config,
+        &connector_config,
+        &account_config,
+        &sync_config,
+    );
 
     json!({
         "mount_id": "connection-test",
         "remote_root": remote_root,
         "mount_path": "/",
         "api_config": api_config,
-        "sync_config": Value::Object(sync),
+        "sync_config": sync_config,
+        "config": merged,
     })
+}
+
+/// The per-connection `config` object of one connected account (or `Null`).
+///
+/// This is the layer that distinguishes two connections on the same connector —
+/// two Entra tenants, two shared mailboxes — so a probe that omits it tests
+/// something other than what the operator selected.
+#[cfg(feature = "storage-rocksdb")]
+pub(super) fn account_config(node: &Node, account_id: &str) -> Value {
+    crate::handlers::integrations::connected_accounts(node)
+        .into_iter()
+        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(account_id))
+        .and_then(|a| a.get("config").cloned())
+        .unwrap_or(Value::Null)
 }
 
 /// Persist `capabilities` + `capabilities_checked_at` onto the integration node.
@@ -246,6 +287,64 @@ mod tests {
         assert!(!cred.to_string().contains("rt-secret"));
     }
 
+    /// An integration node carrying connector-level `config`, an `api_config`
+    /// and one connection whose own `config` names a shared mailbox.
+    #[cfg(feature = "storage-rocksdb")]
+    fn integration_node() -> Node {
+        serde_json::from_value(json!({
+            "name": "ms-graph",
+            "node_type": "raisin:Integration",
+            "properties": {
+                "api_config": { "legacy": "lowest", "resource": "mail" },
+                "config": { "default_tenant_id": "tenant-guid", "legacy": "connector" },
+                "connected_accounts": [{
+                    "id": "acct-1",
+                    "config": { "principal": "sales@contoso.com", "legacy": "connection" }
+                }]
+            }
+        }))
+        .expect("node")
+    }
+
+    /// The probe must see the same merged `config` a real sync would, or it
+    /// tests a different mailbox than the one the mount syncs.
+    #[cfg(feature = "storage-rocksdb")]
+    #[test]
+    fn mount_snapshot_merges_connector_and_connection_config() {
+        let node = integration_node();
+        let snap = mount_snapshot(
+            &Some("inbox".into()),
+            &node,
+            Some("acct-1"),
+            Some(&json!({ "resource": "calendar" })),
+        );
+        let cfg = snap.get("config").expect("merged config is present");
+
+        // Connection layer reaches the adapter — this is the shared mailbox.
+        assert_eq!(cfg.get("principal").unwrap(), "sales@contoso.com");
+        // Connector layer too.
+        assert_eq!(cfg.get("default_tenant_id").unwrap(), "tenant-guid");
+        // Caller's sync_config wins over the api_config default.
+        assert_eq!(cfg.get("resource").unwrap(), "calendar");
+        // Precedence across all four layers, highest wins.
+        assert_eq!(cfg.get("legacy").unwrap(), "connection");
+        // Probe-owned caps survive the merge and are not widened by the caller.
+        assert_eq!(cfg.get("max_items_per_sync").unwrap(), PROBE_LIMIT);
+        assert_eq!(cfg.get("ephemeral").unwrap(), false);
+    }
+
+    /// With no account selected there is no connection layer, but connector and
+    /// api config must still reach the adapter.
+    #[cfg(feature = "storage-rocksdb")]
+    #[test]
+    fn mount_snapshot_without_account_still_merges_connector_config() {
+        let snap = mount_snapshot(&None, &integration_node(), None, None);
+        let cfg = snap.get("config").expect("merged config is present");
+        assert_eq!(cfg.get("default_tenant_id").unwrap(), "tenant-guid");
+        assert!(cfg.get("principal").is_none());
+        assert_eq!(cfg.get("legacy").unwrap(), "connector");
+    }
+
     #[test]
     fn error_code_mapping() {
         assert_eq!(adapter_error_code("Error: auth_expired"), "auth_expired");
@@ -291,11 +390,18 @@ mod tests {
         assert!(!caps.supports_changes);
     }
 
+    /// An integration node with no config of its own.
+    #[cfg(feature = "storage-rocksdb")]
+    fn bare_node() -> Node {
+        serde_json::from_value(json!({ "name": "c", "node_type": "raisin:Integration" }))
+            .expect("node")
+    }
+
     #[cfg(feature = "storage-rocksdb")]
     #[test]
     fn mount_snapshot_forwards_resource_but_caps_the_probe() {
         let caller = json!({ "resource": "calendar", "max_items_per_sync": 100_000 });
-        let snap = mount_snapshot(&Some("cal-1".into()), &Value::Null, Some(&caller));
+        let snap = mount_snapshot(&Some("cal-1".into()), &bare_node(), None, Some(&caller));
         let sync = &snap["sync_config"];
         // The surface selector reaches the adapter...
         assert_eq!(sync["resource"], "calendar");
@@ -308,7 +414,7 @@ mod tests {
     #[cfg(feature = "storage-rocksdb")]
     #[test]
     fn mount_snapshot_without_caller_sync_keeps_defaults() {
-        let snap = mount_snapshot(&None, &Value::Null, None);
+        let snap = mount_snapshot(&None, &bare_node(), None, None);
         assert_eq!(snap["sync_config"]["mode"], "poll");
         assert!(snap["sync_config"].get("resource").is_none());
     }

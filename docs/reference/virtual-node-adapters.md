@@ -191,6 +191,7 @@ engine never calls them.
 | `subscribe` _(push, optional)_ | `{ notification_url }` | `{ subscription_id, secret?, expires_at?, resource? }` |
 | `renew` _(push, optional)_ | `{ subscription_id, notification_url }` | `{ subscription_id, expires_at? }` |
 | `unsubscribe` _(push, optional)_ | `{ subscription_id }` | `{ ok: true }` |
+| `browse` _(discovery, optional)_ | `{ kind?, parent_id?, query?, cursor?, limit? }` | `{ items: BrowseItem[], next_cursor: string \| null }` |
 
 The last three (`subscribe` / `renew` / `unsubscribe`) are the **push lifecycle** (§2.9),
 called only when the adapter advertises `supports_push: true` and the mount runs in
@@ -405,6 +406,43 @@ providers that authenticate the push itself with a **signed JWT** (e.g. Gmail Pu
   "unsupported"` and stops trying (it will neither poll nor push — reconfigure the mount).
 - Renewal runs on a periodic engine job; you only implement the three operations.
 
+### 2.10 `browse` — remote discovery for the mount editor _(optional)_
+
+Optional, and **never called during sync**. `browse` exists so a human configuring a mount can
+*pick* a remote container instead of pasting a provider id into a text box. The admin console
+calls it through `POST /api/integrations/{repo}/browse` (admin-gated, synchronous, bounded);
+the sync engine never calls it at all.
+
+Advertise it with `supports_browse: true` (§3.3). Adapters that do not implement it keep
+working unchanged — the console simply keeps its free-text input.
+
+| param | type | meaning |
+|-------|------|---------|
+| `kind` | String? | What class of thing to list. Adapter-defined; see below. Absent means the adapter's most useful default. |
+| `parent_id` | String? | List the children of this container. Absent means the top level for `kind`. |
+| `query` | String? | Free-text filter, when the provider supports search for that kind. |
+| `cursor` | String? | Opaque page cursor from a previous `next_cursor`. |
+| `limit` | Number? | Page size hint. The endpoint caps this regardless of what you honour. |
+
+Returns `{ items: BrowseItem[], next_cursor: string | null }` (§3.4).
+
+**`kind` is deliberately adapter-defined, not an enum.** Providers do not agree on what is
+selectable — Graph has mail folders, calendars, sites and drives; IMAP has only folders. A
+closed enum would have to be widened in the contract, the engine, the HTTP layer and every
+console control each time a connector added a container type, which is exactly the
+mirrored-code drift this codebase keeps getting bitten by. Validate the SHAPE, pass the slug
+through verbatim, and let the console label it from `kind` + `name`.
+
+The ms-graph adapter implements: `folder` (mail folders, hierarchical), `calendar`, `site`,
+`drive` (document libraries), `driveItem` (folders within a drive, hierarchical) and `mailbox`
+(directory users).
+
+**`browse` results are a convenience, not an authorization statement.** A provider may happily
+list a container the credential cannot actually read — Graph's directory listing is the
+standing example, since it enumerates users regardless of which mailboxes the account has been
+granted. Never treat a browsable item as a usable one; the console keeps manual entry available
+and `Test connection` remains the thing that proves access.
+
 ---
 
 ## 3. Data types
@@ -468,6 +506,7 @@ to show. Report every field honestly.
   supports_webhooks:   boolean,
   supports_search:     boolean,
   supports_push:       boolean,   // event-driven / push providers — gates the §2.9 push lifecycle
+  supports_browse:     boolean,   // implements §2.10 browse — gates the mount editor's pickers
   default_ttl:         number | null,  // suggested TTL (seconds) for ephemeral nodes
   max_file_size:       number | null   // bytes; engine skips larger items
 }
@@ -475,6 +514,26 @@ to show. Report every field honestly.
 
 `supports_changes` is the most load-bearing flag: `false` forces the engine onto the
 full-listing reconcile path for every sync.
+
+`supports_browse` affects only the admin UI: false (or absent) keeps the mount editor's
+free-text id inputs, true adds pickers backed by §2.10.
+
+### 3.4 `BrowseItem`
+
+Returned by `browse` (§2.10). Purely a UI affordance — none of it is persisted.
+
+```javascript
+{
+  id:           string,    // provider id; what the operator's choice writes into the mount
+  name:         string,    // human label
+  kind:         string,    // echoes the requested kind (or the actual kind, for mixed listings)
+  has_children: boolean,   // show an expander — the picker will browse with parent_id = id
+  hint:         string | null   // optional secondary line (address, path, item count)
+}
+```
+
+`id` must be the value the mount actually needs (a Graph folder id, a composite site id), not
+a display path — the picker writes it through verbatim.
 
 ---
 

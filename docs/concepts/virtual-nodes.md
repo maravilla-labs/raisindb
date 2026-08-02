@@ -131,7 +131,15 @@ function handler(input) {
 }
 ```
 
-The eight operations, the `ExternalItem` / `Change` / `Capabilities` shapes, the
+Beyond the core operations there are two optional groups, each gated on a capability
+flag and neither on the sync path: the **push lifecycle**
+(`subscribe` / `renew` / `unsubscribe`, `supports_push`) and **`browse`**
+(`supports_browse`), which lets the admin console list a provider's mail folders,
+calendars, SharePoint sites and drives so an operator *picks* a mount's remote root
+instead of pasting a provider id. An adapter that implements neither is fully
+supported; the console simply keeps its free-text inputs.
+
+The operations, the `ExternalItem` / `Change` / `Capabilities` / `BrowseItem` shapes, the
 `credential` shape (no `refresh_token`), and the error-`code` convention
 (`auth_expired`, `rate_limited`, `conflict`, else transient) are specified in full
 in the [adapter reference](../reference/virtual-node-adapters.md). Adapter authors

@@ -122,6 +122,12 @@ export interface Capabilities {
   supports_webhooks?: boolean
   supports_search?: boolean
   supports_push?: boolean
+  /**
+   * Adapter implements the optional `browse` operation, so the mount editor can
+   * offer pickers instead of free-text ids. Absent/false is a normal state, not
+   * an error — the editor keeps manual entry either way.
+   */
+  supports_browse?: boolean
   /** Suggested TTL (seconds) for ephemeral nodes. */
   default_ttl?: number | null
   /** Bytes; the engine skips larger items. */
@@ -216,10 +222,32 @@ export interface SyncConfig {
   allow_empty_reconcile?: boolean
   /**
    * ms-graph connector: which resource to materialize. Absent/`mail` syncs the
-   * mailbox; `calendar` syncs events; `files` syncs OneDrive. Ignored by other
+   * mailbox; `calendar` syncs events; `files` syncs a drive (OneDrive or a
+   * SharePoint document library — see `drive_scope`). Ignored by other
    * connectors.
    */
   resource?: 'mail' | 'calendar' | 'files'
+  /**
+   * ms-graph connector: WHOSE mailbox / calendar / OneDrive to read. Absent
+   * means the connected account's own (`/me`). An address makes this a SHARED
+   * MAILBOX mount, which additionally requires the `.Shared` delegated scopes
+   * on the app registration and Full Access in Exchange.
+   *
+   * May also be set once on the connection; the mount value wins.
+   */
+  principal?: string
+  /**
+   * ms-graph connector, `resource: 'files'` only: which drive to read.
+   * `me` = the connected account's OneDrive, `user` = the OneDrive of
+   * `principal`, `site` = a SharePoint document library (`site_id` required).
+   * Absent is inferred — a `site_id` implies `site`, a `principal` implies
+   * `user`, otherwise `me`.
+   */
+  drive_scope?: 'me' | 'user' | 'site'
+  /** ms-graph: composite SharePoint site id, `hostname,siteGuid,webGuid`. */
+  site_id?: string
+  /** ms-graph: document library within the site. Blank = the default library. */
+  drive_id?: string
   /**
    * Calendar connectors (google-calendar, ms-graph with `resource: 'calendar'`):
    * the time window of events to sync, in days relative to now.
@@ -533,6 +561,55 @@ export function deriveStages(r: TestConnectionResult): TestConnectionStages {
  * carries `tokens_encrypted` / `secrets_encrypted` ciphertext, and this shape
  * deliberately does not.
  */
+/**
+ * What class of remote container to list. Adapter-defined and deliberately open:
+ * providers do not agree on what is selectable, so the server passes the slug
+ * through verbatim. These are the kinds ms-graph implements.
+ */
+export type BrowseKind = 'folder' | 'calendar' | 'site' | 'drive' | 'driveItem' | 'mailbox'
+
+export interface BrowseRequest {
+  integration_path: string
+  account_id?: string
+  kind?: BrowseKind | string
+  /** List this container's children. Absent = the top level for `kind`. */
+  parent_id?: string
+  /** Free-text filter, where the provider supports one. */
+  query?: string
+  cursor?: string
+  limit?: number
+  /**
+   * Mount `sync_config` keys that select *what* to browse — ms-graph's
+   * `principal` (whose mail folders), `drive_scope`/`site_id` (which drive).
+   * Without it the picker lists the connected account's own containers while
+   * the mount syncs someone else's.
+   */
+  sync_config?: SyncConfig
+}
+
+export interface BrowseItem {
+  /** Provider id — written verbatim into the mount, never a display path. */
+  id: string
+  name: string
+  kind: string
+  /** Show an expander; browse again with `parent_id = id`. */
+  has_children: boolean
+  /** Optional secondary line (address, URL, item count). */
+  hint?: string | null
+}
+
+export interface BrowseResult {
+  ok: boolean
+  /**
+   * False when this connector's adapter has no `browse` operation. Fall back to
+   * manual entry — this is a supported state, not a failure to report.
+   */
+  supported: boolean
+  items: BrowseItem[]
+  next_cursor?: string | null
+  error?: { code: string; message: string } | null
+}
+
 export interface Connection {
   id: string
   label: string
@@ -770,4 +847,16 @@ export const integrationsApi = {
    */
   testConnection: (repo: string, req: TestConnectionRequest) =>
     api.post<TestConnectionResult>(`/api/integrations/${repo}/test`, req),
+
+  /**
+   * List what a connector can see remotely — mail folders, calendars, SharePoint
+   * sites, document libraries — so the operator picks a mount's remote root
+   * instead of pasting a provider id.
+   *
+   * A connector whose adapter has no `browse` operation answers
+   * `{ supported: false }` rather than failing; callers must fall back to manual
+   * entry on that, not surface it as an error.
+   */
+  browse: (repo: string, req: BrowseRequest) =>
+    api.post<BrowseResult>(`/api/integrations/${repo}/browse`, req),
 }

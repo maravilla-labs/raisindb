@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSL-1.1
 
-import { Eye, Pencil, Zap, Webhook, Search, HelpCircle } from 'lucide-react'
+import { Eye, Pencil, Zap, Webhook, Search, FolderTree, HelpCircle } from 'lucide-react'
 import type { Capabilities } from '../../api/integrations'
 
 interface CapabilityChipsProps {
@@ -23,6 +23,12 @@ const CHIPS: ChipDef[] = [
   { key: 'supports_changes', label: 'Delta', Icon: Zap, title: 'Has a real delta API (incremental sync)' },
   { key: 'supports_webhooks', label: 'Webhooks', Icon: Webhook, title: 'Supports push notifications' },
   { key: 'supports_search', label: 'Search', Icon: Search, title: 'Supports remote search' },
+  {
+    key: 'supports_browse',
+    label: 'Browse',
+    Icon: FolderTree,
+    title: 'Can list remote containers, so mounts offer pickers instead of raw ids',
+  },
 ]
 
 /** True when no capability probe has ever populated the object. */
@@ -33,7 +39,7 @@ export function capabilitiesUnknown(capabilities?: Capabilities): boolean {
 
 /**
  * Renders the connector's advertised capabilities as small chips
- * (Read / Write / Delta / Webhooks / Search). Chips are lit when the flag is
+ * (Read / Write / Delta / Webhooks / Search / Browse). Chips are lit when the flag is
  * true and muted when false. When capabilities were never probed, shows a
  * neutral "unknown" chip prompting a connection test.
  */

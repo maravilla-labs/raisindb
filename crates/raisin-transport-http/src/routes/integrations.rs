@@ -95,6 +95,13 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/test",
                 post(integrations::test_connection),
             )
+            // Remote discovery for the mount editor: list the provider's mail
+            // folders / calendars / sites / drives so an operator picks one
+            // instead of pasting an opaque id. Read-only, synchronous, bounded.
+            .route(
+                "/api/integrations/{repo}/browse",
+                post(integrations::browse),
+            )
             .layer(from_fn_with_state(state.clone(), require_auth_middleware));
 
         public.merge(guarded)

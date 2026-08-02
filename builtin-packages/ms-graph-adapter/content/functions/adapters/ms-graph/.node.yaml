@@ -7,10 +7,12 @@ properties:
     get_content, get_changes, subscribe, renew, unsubscribe) into Graph REST calls.
     The mount's sync_config.resource selects the surface ("mail" ->
     mailFolders/messages, "calendar" -> calendars/events + calendarView, "files" ->
-    OneDrive drive items + delta). Read-only. Push-capable: subscribe/renew/
-    unsubscribe manage a Graph subscription whose notifications are a pure
-    invalidation signal. Invoked directly by the sync engine with a decrypted bearer
-    token; owns no token-refresh logic.
+    drive items + delta). `principal` selects WHOSE mailbox/calendar (blank = the
+    connected account, an address = a shared mailbox), and for "files"
+    `drive_scope` picks OneDrive or a SharePoint document library. Read-only.
+    Push-capable: subscribe/renew/unsubscribe manage a Graph subscription whose
+    notifications are a pure invalidation signal. Invoked directly by the sync
+    engine with a decrypted bearer token; owns no token-refresh logic.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
@@ -48,9 +50,15 @@ properties:
       mount:
         type: object
         description: >
-          Read-only mount snapshot { mount_id, remote_root, mount_path, sync_config }.
-          sync_config.resource selects mail vs calendar; sync_config.window
-          { days_ahead, days_back } bounds the calendarView delta.
+          Read-only mount snapshot { mount_id, remote_root, mount_path,
+          sync_config, api_config, config }. `config` is the resolved merge
+          (api_config < connector < connection < sync_config) and is what the
+          adapter reads; sync_config is the fallback for an older engine.
+          Keys: resource (mail | calendar | files), principal (blank = the
+          connected account, else a mailbox/UPN — this is how a SHARED MAILBOX
+          is selected), drive_scope (me | user | site) with site_id/drive_id for
+          a SharePoint library, include_body, and window { days_ahead,
+          days_back } bounding the calendarView delta.
   output_schema:
     type: object
     description: Operation-specific result (ExternalItem, page, Capabilities, Change feed, ...)

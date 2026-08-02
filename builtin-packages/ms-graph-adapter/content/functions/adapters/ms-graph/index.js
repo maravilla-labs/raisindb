@@ -11,9 +11,15 @@
  *   input = { operation, params, credential, mount }
  *
  * `input.mount.sync_config.resource` selects the surface:
- *   - "mail"     (default) -> /me/mailFolders/{id}/messages
- *   - "calendar"           -> /me/calendars/{calId}/events + calendarView/delta
- *   - "files"              -> /me/drive/root/children + /me/drive/root/delta
+ *   - "mail"     (default) -> {principal}/mailFolders/{id}/messages
+ *   - "calendar"           -> {principal}/calendars/{calId}/events + calendarView/delta
+ *   - "files"              -> {drive}/root/children + {drive}/root/delta
+ *
+ * `{principal}` is `/me` by default and `/users/{upn}` when the mount or
+ * connection names a `principal` — that is what makes SHARED MAILBOXES work.
+ * `{drive}` additionally honours `drive_scope` (me | user | site), which is what
+ * makes a SharePoint document library mountable through the same `files`
+ * resource and the same mapper. See `principal()` / `driveBase()` below.
  *
  * Push (EXPERIMENTAL): mail/calendar/files are all push-capable. The engine calls
  * `subscribe`/`renew`/`unsubscribe` to manage a Microsoft Graph subscription whose
@@ -45,9 +51,7 @@ var MAIL_SELECT =
 // of every run — on a mailbox-sized mount that is the difference between a few
 // hundred KB and tens of MB. Turn it on when you want fulltext over the body.
 function includeBody(mount) {
-  var merged = (mount && mount.config) || {};
-  var sc = (mount && mount.sync_config) || {};
-  var v = merged.include_body !== undefined ? merged.include_body : sc.include_body;
+  var v = configValue(mount, "include_body");
   return v === true || v === "true";
 }
 
@@ -134,24 +138,129 @@ function enc(v) {
   return encodeURIComponent(v);
 }
 
+// A SharePoint site id is the COMPOSITE form `hostname,siteGuid,webGuid`, and
+// Microsoft documents it with literal commas. A comma is a sub-delim that RFC
+// 3986 permits unescaped in a path segment, and Graph's routing is happier with
+// the documented spelling than with %2C — so encode everything (a site id is
+// still operator-supplied input that must not smuggle a `/` or `?` into the
+// path) and then put the commas back.
+function encSiteId(v) {
+  return encodeURIComponent(v).split("%2C").join(",");
+}
+
 // ---- mount helpers --------------------------------------------------------
 
-// Which Graph surface this mount targets. Reads the engine's pre-merged
-// `mount.config` (api_config < connector < connection < sync_config) so a
-// connection can set a default resource, with sync_config as the fallback for
-// an older engine that does not send `config`.
-function resourceOf(mount) {
+// One config read, used by every helper below.
+//
+// Prefers the engine's pre-merged `mount.config`
+// (api_config < connector < connection < sync_config), so a value may be set
+// once on the CONNECTION ("this connection is the Sales shared mailbox") and
+// overridden per mount. Falls back to the raw `sync_config` for an older engine
+// that does not send `config`.
+//
+// Deliberately ONE function rather than the same two-line lookup repeated per
+// key: every setting must resolve through the same precedence, or a mount and
+// its push subscription can end up disagreeing about which mailbox they mean.
+function configValue(mount, key) {
   var merged = (mount && mount.config) || {};
   var sc = (mount && mount.sync_config) || {};
-  var resource = merged.resource !== undefined ? merged.resource : sc.resource;
+  return merged[key] !== undefined ? merged[key] : sc[key];
+}
+
+// Trim a config string, returning null for absent/blank. The admin console
+// writes "" for a cleared text field, and "" must mean "unset" (i.e. /me), not
+// "/users/".
+function configStr(mount, key) {
+  var v = configValue(mount, key);
+  if (typeof v !== "string") return null;
+  v = v.trim();
+  return v.length ? v : null;
+}
+
+// Which Graph surface this mount targets.
+function resourceOf(mount) {
+  var resource = configValue(mount, "resource");
   if (resource === "calendar") return "calendar";
   if (resource === "files") return "files";
   return "mail";
 }
 
-// OneDrive drive-item container id: mount.remote_root or the well-known "root".
+// The mailbox/calendar OWNER segment: "/me", or "/users/{upn}" when the mount or
+// connection names one.
+//
+// This is what makes a SHARED MAILBOX work: with `Mail.Read.Shared` granted and
+// the signed-in account holding Full Access in Exchange, the identical requests
+// against /users/{upn} read the shared mailbox. `principal` accepts a UPN, a
+// mailbox address or a directory object id — Graph takes any of them.
+//
+// EVERY Graph URL in this adapter goes through here. If you add a request, use
+// it; a request left on a literal /me syncs the wrong mailbox silently, with no
+// error anywhere, and that is doubly true of `subscriptionResource` — a push
+// subscription on the wrong mailbox looks healthy and delivers nothing.
+function principal(mount) {
+  var who = configStr(mount, "principal");
+  return who ? "/users/" + enc(who) : "/me";
+}
+
+// Where a `files` mount's drive lives. Three scopes, one code path, because all
+// three return driveItems and therefore share `filesMeta()` and the
+// `/mappers/ms-graph-files` mapper unchanged:
+//
+//   me    -> /me/drive                            (the signed-in user's OneDrive)
+//   user  -> /users/{principal}/drive             (someone else's OneDrive)
+//   site  -> /sites/{site_id}/drives/{drive_id}   (a SharePoint document library)
+//
+// `site` without a `drive_id` falls back to /sites/{id}/drive, the site's
+// DEFAULT library — the common case, and the one an operator can configure
+// without discovering a drive id first.
+//
+// The scope is inferred when unset so existing mounts and half-filled configs
+// still resolve: a site_id implies `site`, a principal implies `user`.
+function driveBase(mount) {
+  var scope = configStr(mount, "drive_scope");
+  var site = configStr(mount, "site_id");
+  var drive = configStr(mount, "drive_id");
+  if (!scope) scope = site ? "site" : configStr(mount, "principal") ? "user" : "me";
+
+  if (scope === "site") {
+    if (!site) {
+      // A config error, not a transient one: retrying sends the same
+      // incomplete request forever. Match `raiseForStatus`'s 400/404 handling
+      // so the engine marks the mount misconfigured and stops hammering.
+      throw coded(
+        "drive_scope 'site' requires a site_id (the SharePoint site to read)",
+        "config_error"
+      );
+    }
+    return drive
+      ? "/sites/" + encSiteId(site) + "/drives/" + enc(drive)
+      : "/sites/" + encSiteId(site) + "/drive";
+  }
+  if (scope === "user") {
+    var who = configStr(mount, "principal");
+    if (!who) {
+      throw coded(
+        "drive_scope 'user' requires a principal (whose OneDrive to read)",
+        "config_error"
+      );
+    }
+    return "/users/" + enc(who) + "/drive";
+  }
+  return "/me/drive";
+}
+
+// OneDrive/SharePoint drive-item container id: mount.remote_root or the
+// well-known "root".
 function driveRoot(mount) {
   return (mount && mount.remote_root) || null;
+}
+
+// The drive-item container a `files` mount is rooted at, as a full path segment.
+// Shared by list and delta so the two can never disagree about the root.
+function driveContainer(mount) {
+  var base = driveBase(mount);
+  var root = driveRoot(mount);
+  return root ? base + "/items/" + enc(root) : base + "/root";
 }
 
 // Mail folder id: mount.remote_root or the well-known "inbox".
@@ -325,20 +434,182 @@ function opCapabilities() {
     supports_webhooks: true,
     supports_search: false,
     supports_push: true,
+    supports_browse: true,
     default_ttl: null,
     max_file_size: null,
   };
 }
 
+// ---- browse (discovery for the mount editor) ------------------------------
+
+// Never called during sync. See §2.10 of the adapter contract: this exists so an
+// operator picks a folder/calendar/site/library instead of pasting a Graph id.
+
+function browseItem(id, name, kind, hasChildren, hint) {
+  return {
+    id: id,
+    name: name || id,
+    kind: kind,
+    has_children: hasChildren === true,
+    hint: hint || null,
+  };
+}
+
+// One Graph page -> BrowseItem[]. `map` turns a Graph entity into a BrowseItem.
+function browsePage(credential, url, map) {
+  var resp = graphFetch(credential, "GET", url, { context: "browse" });
+  var body = resp.body || {};
+  var values = body.value || [];
+  var items = [];
+  for (var i = 0; i < values.length; i++) {
+    var item = map(values[i]);
+    if (item) items.push(item);
+  }
+  return { items: items, next_cursor: body["@odata.nextLink"] || null };
+}
+
+function browseLimit(params) {
+  return params && params.limit && params.limit > 0
+    ? Math.min(params.limit, 200)
+    : 50;
+}
+
+function opBrowse(credential, mount, params) {
+  params = params || {};
+  // A cursor is a full Graph nextLink; the kind is already baked into it.
+  if (params.cursor) {
+    return browsePage(credential, params.cursor, function (v) {
+      return browseItem(v.id, v.displayName || v.name, params.kind || "item", false, null);
+    });
+  }
+
+  var top = browseLimit(params);
+  var parent = params.parent_id || null;
+  var kind = params.kind || (resourceOf(mount) === "calendar" ? "calendar" : "folder");
+
+  // Mail folders. Hierarchical: childFolderCount drives the expander, and
+  // `parent_id` walks into a subfolder.
+  if (kind === "folder") {
+    var base = GRAPH + principal(mount) + "/mailFolders";
+    var url = parent
+      ? base + "/" + enc(parent) + "/childFolders?$top=" + top
+      : base + "?$top=" + top;
+    return browsePage(credential, url, function (v) {
+      return browseItem(
+        v.id,
+        v.displayName,
+        "folder",
+        (v.childFolderCount || 0) > 0,
+        v.totalItemCount != null ? v.totalItemCount + " items" : null
+      );
+    });
+  }
+
+  if (kind === "calendar") {
+    return browsePage(
+      credential,
+      GRAPH + principal(mount) + "/calendars?$top=" + top,
+      function (v) {
+        return browseItem(v.id, v.name, "calendar", false, v.owner ? v.owner.address : null);
+      }
+    );
+  }
+
+  // SharePoint sites. Graph requires a search term to enumerate; `*` is the
+  // documented "all sites" wildcard.
+  if (kind === "site") {
+    var q = params.query && params.query.trim() ? params.query.trim() : "*";
+    return browsePage(
+      credential,
+      GRAPH + "/sites?search=" + enc(q) + "&$top=" + top,
+      function (v) {
+        // The COMPOSITE id (hostname,siteGuid,webGuid) is what a mount needs —
+        // the short guid alone will not resolve /sites/{id}/drives.
+        return browseItem(v.id, v.displayName || v.name, "site", true, v.webUrl || null);
+      }
+    );
+  }
+
+  // Document libraries of a site (parent_id) or a user's drives.
+  if (kind === "drive") {
+    var owner = parent
+      ? "/sites/" + encSiteId(parent)
+      : principal(mount) === "/me"
+        ? "/me"
+        : principal(mount);
+    return browsePage(credential, GRAPH + owner + "/drives?$top=" + top, function (v) {
+      return browseItem(v.id, v.name, "drive", true, v.driveType || null);
+    });
+  }
+
+  // Folders inside a drive. Files are omitted deliberately: this picker chooses
+  // a mount ROOT, and a file is never one.
+  if (kind === "driveItem") {
+    var container = parent
+      ? driveBase(mount) + "/items/" + enc(parent)
+      : driveBase(mount) + "/root";
+    return browsePage(
+      credential,
+      GRAPH + container + "/children?$top=" + top,
+      function (v) {
+        if (!v.folder) return null;
+        return browseItem(
+          v.id,
+          v.name,
+          "driveItem",
+          (v.folder.childCount || 0) > 0,
+          v.folder.childCount != null ? v.folder.childCount + " items" : null
+        );
+      }
+    );
+  }
+
+  // Directory users, for picking a shared mailbox or another user's OneDrive.
+  //
+  // NOT a permission-accurate list: Graph has no delegated API that returns
+  // "the mailboxes this account may open", so this enumerates the DIRECTORY
+  // (requires User.ReadBasic.All) and a listed mailbox can still fail at sync
+  // time. The console therefore keeps manual entry, and Test connection is what
+  // actually proves access. Do not "improve" this into an access list.
+  if (kind === "mailbox") {
+    var filter = "";
+    if (params.query && params.query.trim()) {
+      var term = params.query.trim().split("'").join("''");
+      filter =
+        "&$filter=" +
+        enc(
+          "startswith(displayName,'" + term + "') or startswith(mail,'" + term + "')"
+        );
+    }
+    return browsePage(
+      credential,
+      GRAPH + "/users?$select=id,displayName,mail,userPrincipalName&$top=" + top + filter,
+      function (v) {
+        // id is the ADDRESS, not the object guid: it is written straight into
+        // `principal`, and an address is what an operator can verify by eye.
+        var addr = v.mail || v.userPrincipalName;
+        if (!addr) return null;
+        return browseItem(addr, v.displayName || addr, "mailbox", false, addr);
+      }
+    );
+  }
+
+  throw coded("browse: unsupported kind '" + kind + "'", "config_error");
+}
+
 // ---- push subscriptions (mail / calendar / files) -------------------------
 
-// Graph subscription resource path for the mount's surface. Not URL-encoded:
-// Graph expects a literal resource path, not a query value.
+// Graph subscription resource path for the mount's surface.
+//
+// MUST resolve the same principal/drive as the polling paths. A subscription
+// created against /me while get_changes reads /users/{upn} reports healthy and
+// delivers notifications for the wrong mailbox forever — there is no error to
+// observe, so it is only caught by reading this function.
 function subscriptionResource(mount) {
   var resource = resourceOf(mount);
-  if (resource === "calendar") return "/me/events";
-  if (resource === "files") return "/me/drive/root";
-  return "/me/mailFolders/" + mailFolderId(mount) + "/messages";
+  if (resource === "calendar") return principal(mount) + "/events";
+  if (resource === "files") return driveBase(mount) + "/root";
+  return principal(mount) + "/mailFolders/" + mailFolderId(mount) + "/messages";
 }
 
 // ~2 days out. Graph caps mail/calendar subscriptions near 3 days and driveItem
@@ -414,17 +685,13 @@ function opList(credential, mount, params) {
     url = params.cursor;
   } else if (resource === "calendar") {
     url =
-      GRAPH + "/me/calendars/" + enc(calendarId(mount)) +
+      GRAPH + principal(mount) + "/calendars/" + enc(calendarId(mount)) +
       "/events?$top=" + pageSize(params);
   } else if (resource === "files") {
-    var root = driveRoot(mount);
-    var container = root
-      ? "/me/drive/items/" + enc(root)
-      : "/me/drive/root";
-    url = GRAPH + container + "/children?$top=" + pageSize(params);
+    url = GRAPH + driveContainer(mount) + "/children?$top=" + pageSize(params);
   } else {
     url =
-      GRAPH + "/me/mailFolders/" + enc(mailFolderId(mount)) +
+      GRAPH + principal(mount) + "/mailFolders/" + enc(mailFolderId(mount)) +
       "/messages?$top=" + pageSize(params) + "&$select=" + enc(mailSelect(mount));
   }
   var resp = graphFetch(credential, "GET", url, { context: "list" });
@@ -441,11 +708,13 @@ function opGet(credential, mount, params) {
   if (!params.item_id) return null;
   var url;
   if (resource === "calendar") {
-    url = GRAPH + "/me/events/" + enc(params.item_id);
+    url = GRAPH + principal(mount) + "/events/" + enc(params.item_id);
   } else if (resource === "files") {
-    url = GRAPH + "/me/drive/items/" + enc(params.item_id);
+    url = GRAPH + driveBase(mount) + "/items/" + enc(params.item_id);
   } else {
-    url = GRAPH + "/me/messages/" + enc(params.item_id) + "?$select=" + enc(mailSelect(mount));
+    url =
+      GRAPH + principal(mount) + "/messages/" + enc(params.item_id) +
+      "?$select=" + enc(mailSelect(mount));
   }
   var resp = graphFetch(credential, "GET", url, { context: "get", rawStatusOk: true });
   if (resp.status === 404) return null;
@@ -463,7 +732,7 @@ function opGetContent(credential, mount, params) {
     var resp = graphFetch(
       credential,
       "GET",
-      GRAPH + "/me/drive/items/" + enc(params.item_id) + "/content",
+      GRAPH + driveBase(mount) + "/items/" + enc(params.item_id) + "/content",
       { context: "get_content" }
     );
     var body = resp.body;
@@ -472,8 +741,8 @@ function opGetContent(credential, mount, params) {
   }
   var base =
     resource === "calendar"
-      ? GRAPH + "/me/events/" + enc(params.item_id)
-      : GRAPH + "/me/messages/" + enc(params.item_id);
+      ? GRAPH + principal(mount) + "/events/" + enc(params.item_id)
+      : GRAPH + principal(mount) + "/messages/" + enc(params.item_id);
   var resp2 = graphFetch(credential, "GET", base + "?$select=body", {
     context: "get_content",
   });
@@ -488,19 +757,16 @@ function initialDeltaUrl(mount, resource) {
   if (resource === "calendar") {
     var win = windowBounds(mount);
     return (
-      GRAPH + "/me/calendars/" + enc(calendarId(mount)) +
+      GRAPH + principal(mount) + "/calendars/" + enc(calendarId(mount)) +
       "/calendarView/delta?startDateTime=" + enc(win.start) +
       "&endDateTime=" + enc(win.end)
     );
   }
   if (resource === "files") {
-    var root = driveRoot(mount);
-    return root
-      ? GRAPH + "/me/drive/items/" + enc(root) + "/delta"
-      : GRAPH + "/me/drive/root/delta";
+    return GRAPH + driveContainer(mount) + "/delta";
   }
   return (
-    GRAPH + "/me/mailFolders/" + enc(mailFolderId(mount)) +
+    GRAPH + principal(mount) + "/mailFolders/" + enc(mailFolderId(mount)) +
     "/messages/delta?$select=" + enc(mailSelect(mount))
   );
 }
@@ -551,6 +817,8 @@ function handler(input) {
       return opRenew(credential, params);
     case "unsubscribe":
       return opUnsubscribe(credential, params);
+    case "browse":
+      return opBrowse(credential, mount, params);
     default:
       throw new Error("Unsupported operation: " + operation);
   }

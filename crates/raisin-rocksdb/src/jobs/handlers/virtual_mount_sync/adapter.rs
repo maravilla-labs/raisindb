@@ -106,6 +106,12 @@ pub struct Capabilities {
     pub supports_search: bool,
     #[serde(default)]
     pub supports_push: bool,
+    /// Adapter implements the optional `browse` operation (§2.10). The engine
+    /// never calls `browse` — this is carried so the cached capabilities the UI
+    /// reads are complete; dropping it here would silently strip the flag from
+    /// every integration node the engine writes.
+    #[serde(default)]
+    pub supports_browse: bool,
     #[serde(default)]
     pub default_ttl: Option<u64>,
     #[serde(default)]

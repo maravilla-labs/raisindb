@@ -17,6 +17,14 @@ properties:
        `email`, `profile`, then click **Grant admin consent**. (The last three
        are what let RaisinDB label the connected account with its mailbox
        address instead of a bare `ms-graph`.)
+
+       Add these too if you want shared mailboxes or SharePoint:
+       `Mail.Read.Shared`, `Calendars.Read.Shared` (shared mailboxes and
+       calendars), `Files.Read.All` (another user's OneDrive) and
+       `Sites.Read.All` (SharePoint document libraries). They are still
+       *delegated* — the connected account reaches only what it has actually
+       been granted in Exchange/SharePoint, so they do not widen access by
+       themselves.
     5. Copy the **Application (client) ID** and the client secret into the fields
        on this page. The secret is encrypted at rest.
     6. **If your app registration is single-tenant** (the default), copy the
@@ -25,10 +33,32 @@ properties:
        endpoints on `common` fails with `AADSTS50194` the moment you try to
        connect.
     7. Click **Connect account** and sign in. Then create a mount and set
-       **resource** to `mail`, `calendar`, or `files` (OneDrive), and pick the
-       matching **Mapping function** (`/mappers/ms-graph-mail`,
+       **resource** to `mail`, `calendar`, or `files` (OneDrive/SharePoint), and
+       pick the matching **Mapping function** (`/mappers/ms-graph-mail`,
        `-calendar`, or `-files`) — leaving it blank falls back to a generic
        mapping that drops the provider-specific fields.
+
+    ### Shared mailboxes and SharePoint
+
+    A mount reads the connected account's own data unless you tell it otherwise:
+
+    - **Shared mailbox / calendar** — set **Mailbox / user** to its address
+      (e.g. `sales@contoso.com`). The connected account must have **Full
+      Access** to it in Exchange, and the app registration needs the `.Shared`
+      scopes from step 4.
+    - **Someone else's OneDrive** — set **Mailbox / user** and choose drive
+      location `user` (needs `Files.Read.All`).
+    - **SharePoint document library** — choose drive location `site` and set the
+      **SharePoint site ID** (needs `Sites.Read.All`). Leave the drive ID blank
+      for the site's default library. SharePoint files sync through the same
+      `/mappers/ms-graph-files` mapper as OneDrive.
+
+    Set these on the **connection** when it always means one mailbox, or on an
+    individual **mount** when one connection serves several.
+
+    Whichever you use, run **Test connection** before enabling the mount: a
+    missing Exchange/SharePoint grant looks exactly like a working config until
+    the first sync.
 
     **Push:** automatic. The engine registers the Graph subscription for you when
     a mount uses `mode: webhook` or `hybrid` — no manual webhook setup needed.
@@ -62,14 +92,30 @@ properties:
     # openid/email/profile are what make Microsoft return an id_token, from
     # which the callback reads the account's email to LABEL the connected
     # account. Drop them and accounts show up as a bare "ms-graph".
+    #
+    # The `.Shared` / `.All` scopes are what allow a mount to name a `principal`
+    # other than the signed-in user (a shared mailbox, a colleague's OneDrive) or
+    # a SharePoint document library. They are delegated, not application, scopes:
+    # the connected account still only reaches what a human has been granted in
+    # Exchange / SharePoint. Granting them does NOT widen access on its own.
+    #
+    # NOTE for existing installs: the manifest pins this node to `mode: skip`
+    # (deliberately — see manifest.yaml), so a package update does NOT add these
+    # scopes to an already-configured connector. Add them in the admin console
+    # and reconnect each account; Microsoft only issues the new consent on a
+    # fresh authorization.
     scopes:
       - offline_access
       - openid
       - email
       - profile
       - Mail.Read
+      - Mail.Read.Shared
       - Calendars.Read
+      - Calendars.Read.Shared
       - Files.Read
+      - Files.Read.All
+      - Sites.Read.All
     # Filled in by the admin console to match the deployment's callback URL,
     # e.g. https://<host>/api/integrations/<repo>/oauth/callback
     # The <repo> segment is REQUIRED and the path must end in /callback --

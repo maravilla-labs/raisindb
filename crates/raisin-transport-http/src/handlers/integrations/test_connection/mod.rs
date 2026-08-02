@@ -18,6 +18,13 @@
 mod probe;
 mod support;
 
+// Shared with the browse endpoint, which must resolve credentials, build the
+// mount snapshot and classify/scrub adapter errors *identically* — a picker that
+// browsed a different mailbox than the probe tested would be worse than no
+// picker at all.
+#[cfg(feature = "storage-rocksdb")]
+pub(super) use support::{adapter_error_code, mount_snapshot, resolve_credential, sanitize};
+
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -86,6 +93,10 @@ pub struct Capabilities {
     pub supports_search: bool,
     #[serde(default)]
     pub supports_push: bool,
+    /// Adapter implements the optional `browse` operation (§2.10). Affects only
+    /// the admin UI: false keeps the mount editor's free-text id inputs.
+    #[serde(default)]
+    pub supports_browse: bool,
     #[serde(default)]
     pub default_ttl: Option<u64>,
     #[serde(default)]
@@ -211,12 +222,15 @@ pub async fn test_connection(
             }
         };
 
-    let api_config = node
-        .properties
-        .get("api_config")
-        .and_then(|pv| serde_json::to_value(pv).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let mount = support::mount_snapshot(&req.remote_root, &api_config, req.sync_config.as_ref());
+    // Built from the integration node and the selected account so the probe sees
+    // the same merged `config` a real sync would — connector- and
+    // connection-level settings included.
+    let mount = support::mount_snapshot(
+        &req.remote_root,
+        &node,
+        req.account_id.as_deref(),
+        req.sync_config.as_ref(),
+    );
     let outcome = match tokio::time::timeout(
         PROBE_TIMEOUT,
         probe::run_probe(

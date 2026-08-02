@@ -8,12 +8,14 @@ import {
   type Integration,
   type SyncConfig,
   type WriteConfig,
+  type BrowseItem,
 } from '../../api/integrations'
 import { branchesApi } from '../../api/branches'
 import { nodesApi } from '../../api/nodes'
 import { capabilitiesUnknown } from './CapabilityChips'
 import TestConnectionPanel from './TestConnectionPanel'
 import CopyableUrlField from './CopyableUrlField'
+import RemotePicker from './RemotePicker'
 import type { SetupUrls } from '../../api/integrations'
 import { FunctionPicker } from '../../pages/functions/components/editor/FunctionPicker'
 
@@ -137,6 +139,18 @@ export default function MountEditor({
   const providerType = selectedIntegration?.provider_type
   const isMsGraph = providerType === 'ms-graph'
   const isCalendar = providerType === 'google-calendar' || (isMsGraph && sync.resource === 'calendar')
+  const msGraphResource = sync.resource || 'mail'
+  /**
+   * What the adapter will assume when `drive_scope` is unset — a site id implies
+   * `site`, a principal implies `user`, otherwise `me`. Mirrored here so the
+   * dropdown shows the scope that will actually be used rather than defaulting
+   * the display to `me` and quietly disagreeing with the adapter.
+   */
+  const inferredDriveScope: NonNullable<SyncConfig['drive_scope']> = sync.site_id?.trim()
+    ? 'site'
+    : sync.principal?.trim()
+      ? 'user'
+      : 'me'
   const windowDaysAhead = sync.window?.days_ahead ?? 90
   const windowDaysBack = sync.window?.days_back ?? 7
 
@@ -224,6 +238,64 @@ export default function MountEditor({
   }, [providerType, isMsGraph, sync.resource])
 
   const [showMapperPicker, setShowMapperPicker] = useState(false)
+
+  /**
+   * Which remote picker is open, if any. Gated on the connector's cached
+   * `supports_browse`; every field it fills stays editable by hand, so an
+   * unprobed connector, a missing directory permission or a provider outage
+   * degrades to the free-text input rather than blocking the mount.
+   */
+  const [picker, setPicker] = useState<{
+    kind: string
+    title: string
+    searchable?: boolean
+    rootParentId?: string
+    apply: (item: BrowseItem) => void
+  } | null>(null)
+  const canBrowse = selectedIntegration?.capabilities?.supports_browse === true && !!accountRef
+
+  /** The picker needs the same selectors the mount syncs with. */
+  const browseSyncConfig = useMemo(
+    () => ({
+      resource: sync.resource,
+      principal: sync.principal,
+      drive_scope: sync.drive_scope,
+      site_id: sync.site_id,
+      drive_id: sync.drive_id,
+    }),
+    [sync.resource, sync.principal, sync.drive_scope, sync.site_id, sync.drive_id],
+  )
+
+  /** Small "Pick…" button rendered next to a free-text id field. */
+  function pickButton(
+    kind: string,
+    title: string,
+    apply: (item: BrowseItem) => void,
+    searchable?: boolean,
+  ) {
+    if (!canBrowse) return null
+    // Document libraries are listed within a site, so that picker cannot open
+    // until one is chosen.
+    const rootParentId = kind === 'drive' ? sync.site_id?.trim() : undefined
+    if (kind === 'drive' && !rootParentId) return null
+    return (
+      <button
+        type="button"
+        onClick={() => setPicker({ kind, title, searchable, apply, rootParentId })}
+        className="px-3 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm rounded-lg whitespace-nowrap"
+      >
+        Pick…
+      </button>
+    )
+  }
+
+  /** The remote-root picker's kind depends on which surface the mount syncs. */
+  const remoteRootPicker = useMemo(() => {
+    if (!isMsGraph) return null
+    if (msGraphResource === 'calendar') return { kind: 'calendar', title: 'Calendars' }
+    if (msGraphResource === 'files') return { kind: 'driveItem', title: 'Folders' }
+    return { kind: 'folder', title: 'Mail folders' }
+  }, [isMsGraph, msGraphResource])
 
   // With several connections the engine refuses to guess which one a mount
   // means (it used to silently take the first, syncing an arbitrary mailbox),
@@ -476,7 +548,13 @@ export default function MountEditor({
             </div>
             <div>
               <label className={labelCls}>Remote root</label>
-              <input className={field} value={remoteRoot} onChange={(e) => setRemoteRoot(e.target.value)} placeholder="folder id / mailbox" />
+              <div className="flex gap-2">
+                <input className={field} value={remoteRoot} onChange={(e) => setRemoteRoot(e.target.value)} placeholder="folder id / mailbox" />
+                {remoteRootPicker &&
+                  pickButton(remoteRootPicker.kind, remoteRootPicker.title, (item) =>
+                    setRemoteRoot(item.id),
+                  )}
+              </div>
             </div>
             <div>
               <label className={labelCls}>Mapping function</label>
@@ -516,6 +594,24 @@ export default function MountEditor({
               )}
             </div>
           </div>
+
+          {picker && (
+            <RemotePicker
+              repo={repo}
+              integrationPath={integrationRef}
+              accountId={accountRef || undefined}
+              kind={picker.kind}
+              title={picker.title}
+              searchable={picker.searchable}
+              rootParentId={picker.rootParentId}
+              syncConfig={browseSyncConfig}
+              onSelect={(item) => {
+                picker.apply(item)
+                setPicker(null)
+              }}
+              onClose={() => setPicker(null)}
+            />
+          )}
 
           {showMapperPicker && (
             <FunctionPicker
@@ -598,7 +694,7 @@ export default function MountEditor({
                     >
                       <option value="mail">Mail</option>
                       <option value="calendar">Calendar</option>
-                      <option value="files">OneDrive</option>
+                      <option value="files">Files (OneDrive / SharePoint)</option>
                     </select>
                   </div>
                 )}
@@ -626,6 +722,97 @@ export default function MountEditor({
                     </div>
                   </>
                 )}
+              </div>
+            )}
+            {isMsGraph && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className={labelCls}>
+                      {msGraphResource === 'files' ? 'User (for a personal OneDrive)' : 'Mailbox / user'}
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        className={field}
+                        value={sync.principal || ''}
+                        onChange={(e) => patchSync({ principal: e.target.value })}
+                        placeholder="blank = the connected account"
+                      />
+                      {pickButton(
+                        'mailbox',
+                        'Directory users',
+                        (item) => patchSync({ principal: item.id }),
+                        true,
+                      )}
+                    </div>
+                  </div>
+                  {msGraphResource === 'files' && (
+                    <div>
+                      <label className={labelCls}>Drive location</label>
+                      <select
+                        className={field}
+                        value={sync.drive_scope || inferredDriveScope}
+                        onChange={(e) =>
+                          patchSync({ drive_scope: e.target.value as SyncConfig['drive_scope'] })
+                        }
+                      >
+                        <option value="me">My OneDrive (connected account)</option>
+                        <option value="user">Another user's OneDrive</option>
+                        <option value="site">SharePoint document library</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+                {msGraphResource === 'files' && (sync.drive_scope || inferredDriveScope) === 'site' && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>SharePoint site ID</label>
+                      <div className="flex gap-2">
+                        <input
+                          className={field}
+                          value={sync.site_id || ''}
+                          onChange={(e) => patchSync({ site_id: e.target.value })}
+                          placeholder="contoso.sharepoint.com,siteGuid,webGuid"
+                        />
+                        {pickButton(
+                          'site',
+                          'SharePoint sites',
+                          // Choosing a different site invalidates the library
+                          // and the folder under it — clear both rather than
+                          // leaving a drive id that belongs to another site.
+                          (item) => patchSync({ site_id: item.id, drive_id: '' }),
+                          true,
+                        )}
+                      </div>
+                    </div>
+                    <div>
+                      <label className={labelCls}>Document library (drive) ID</label>
+                      <div className="flex gap-2">
+                        <input
+                          className={field}
+                          value={sync.drive_id || ''}
+                          onChange={(e) => patchSync({ drive_id: e.target.value })}
+                          placeholder="blank = the site's default library"
+                        />
+                        {pickButton('drive', 'Document libraries', (item) =>
+                          patchSync({ drive_id: item.id }),
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {/* Access is granted in Exchange/SharePoint, not here — a mount that
+                    names a mailbox the account cannot open looks perfectly valid
+                    until the first sync fails, so point at the one control that
+                    actually proves it. */}
+                <p className="text-xs text-zinc-500">
+                  {msGraphResource === 'files' &&
+                  (sync.drive_scope || inferredDriveScope) === 'site'
+                    ? 'Needs the Sites.Read.All scope on the connector and access to the site. Files sync through the same mapper as OneDrive.'
+                    : sync.principal?.trim()
+                      ? 'Reading someone else’s mailbox, calendar or drive needs the matching .Shared / .All scope on the connector AND access granted to the connected account in Exchange or SharePoint. Run Test connection to confirm before enabling.'
+                      : 'Leave blank to sync the connected account’s own data. Enter a shared mailbox address to sync that instead.'}
+                </p>
               </div>
             )}
             <div className="grid grid-cols-2 gap-4">

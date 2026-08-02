@@ -16,6 +16,8 @@
 //!   TTL'd `state` parameter minted by the authenticated `start` call.
 
 mod accounts_lock;
+mod adapter_invoke;
+mod browse;
 mod client_secret;
 mod config_secrets;
 mod connections;
@@ -27,6 +29,8 @@ mod setup_info;
 pub mod state_store;
 mod test_connection;
 
+#[cfg(feature = "storage-rocksdb")]
+pub use browse::browse;
 pub use client_secret::set_client_secret;
 pub use config_secrets::set_config_secrets;
 pub use connections::{create_connection, delete_connection, list_connections, update_connection};
@@ -87,12 +91,17 @@ pub(crate) fn config_service(
     state.node_service_for_context(tenant_id, repo, CONFIG_BRANCH, CONFIG_WORKSPACE, Some(auth))
 }
 
-/// The `oauth_config` object of an integration node as raw JSON (or `Null`).
-pub(crate) fn oauth_config(node: &Node) -> Value {
+/// An object-valued property of a node as raw JSON (or `Null`).
+pub(crate) fn json_prop(node: &Node, key: &str) -> Value {
     node.properties
-        .get("oauth_config")
+        .get(key)
         .and_then(|pv| serde_json::to_value(pv).ok())
         .unwrap_or(Value::Null)
+}
+
+/// The `oauth_config` object of an integration node as raw JSON (or `Null`).
+pub(crate) fn oauth_config(node: &Node) -> Value {
+    json_prop(node, "oauth_config")
 }
 
 /// Read a string field from a JSON object, trimming empties to `None`.
@@ -232,7 +241,7 @@ mod redirect_uri_tests {
     use super::*;
     use serde_json::json;
 
-    const BASE: &str = "https://solutas.rdb.maravilla.cloud";
+    const BASE: &str = "https://rdb.example.test";
 
     /// Pure resolver — no `RAISINDB_BASE_URL` mutation, so these are safe to run
     /// in parallel with the other handlers that read that same variable.
@@ -244,7 +253,7 @@ mod redirect_uri_tests {
     fn missing_redirect_uri_falls_back_to_canonical() {
         assert_eq!(
             resolve(&json!({}), "studio"),
-            "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback"
+            "https://rdb.example.test/api/integrations/studio/oauth/callback"
         );
     }
 
@@ -253,11 +262,11 @@ mod redirect_uri_tests {
     #[test]
     fn wrong_path_is_repaired_in_place() {
         let cfg = json!({
-            "redirect_uri": "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/"
+            "redirect_uri": "https://rdb.example.test/api/integrations/studio/oauth/"
         });
         assert_eq!(
             resolve(&cfg, "studio"),
-            "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback"
+            "https://rdb.example.test/api/integrations/studio/oauth/callback"
         );
     }
 
@@ -289,7 +298,7 @@ mod redirect_uri_tests {
         let cfg = json!({ "redirect_uri": "not a url" });
         assert_eq!(
             resolve(&cfg, "studio"),
-            "https://solutas.rdb.maravilla.cloud/api/integrations/studio/oauth/callback"
+            "https://rdb.example.test/api/integrations/studio/oauth/callback"
         );
     }
 

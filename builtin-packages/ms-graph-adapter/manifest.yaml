@@ -3,12 +3,16 @@ version: 1.0.0
 title: Microsoft 365 Adapter (Preview)
 description: >
   EXPERIMENTAL virtual-node adapter for Microsoft 365 over Microsoft Graph v1.0.
-  Mount an Outlook mail folder or a calendar into a workspace path and RaisinDB
-  keeps it in sync — messages become raisin:Mail nodes (fulltext on subject and
-  body, indexed sender / conversation_id / message_id / date, so conversation
-  grouping and sender filters are index-backed) and events become raisin:Event
-  nodes. Set `include_body` on the connection or mount to sync full message
-  bodies; it is off by default because bodies multiply delta payload size. Ships
+  Mount an Outlook mail folder, a calendar, OneDrive or a SharePoint document
+  library into a workspace path and RaisinDB keeps it in sync — messages become
+  raisin:Mail nodes (fulltext on subject and body, indexed sender /
+  conversation_id / message_id / date, so conversation grouping and sender
+  filters are index-backed) and events become raisin:Event nodes. Set
+  `principal` to sync a SHARED MAILBOX rather than the connected account's own,
+  and `drive_scope: site` + a site id to sync a SharePoint library through the
+  same files mapper. Set `include_body` on the connection or mount to sync full
+  message bodies; it is off by default because bodies multiply delta payload
+  size. Ships
   the Graph adapter function, a mail mapper and a calendar mapper, and a
   pre-configured (disabled) raisin:Integration template you complete with your
   own Microsoft Entra (Azure AD) OAuth app in the admin console.

@@ -46,6 +46,64 @@ properties:
       group: microsoft
       order: 20
 
+  - name: principal
+    type: String
+    required: false
+    meta:
+      label: Mailbox / user (leave blank for the connected account)
+      description: >
+        Whose mailbox, calendar or OneDrive this connection reads. Blank means
+        the signed-in account itself. Set it to a SHARED MAILBOX address to sync
+        one — that needs `Mail.Read.Shared` / `Calendars.Read.Shared` on the app
+        registration AND the connected account holding Full Access to the
+        mailbox in Exchange. A mount may override it, so one connection can
+        serve several shared mailboxes.
+      placeholder: sales@contoso.com
+      group: microsoft
+      order: 15
+
+  - name: drive_scope
+    type: String
+    required: false
+    meta:
+      label: Drive location (resource "files" only)
+      description: >
+        Which drive a files mount reads. `me` is the connected account's
+        OneDrive; `user` is the OneDrive of the account named above (needs
+        `Files.Read.All`); `site` is a SharePoint document library (needs
+        `Sites.Read.All`). Left blank it is inferred — a site id means `site`, a
+        mailbox/user means `user`, otherwise `me`.
+      enum:
+        - me
+        - user
+        - site
+      group: microsoft
+      order: 40
+
+  - name: site_id
+    type: String
+    required: false
+    meta:
+      label: SharePoint site ID
+      description: >
+        Required when the drive location is `site`. The composite Graph site id,
+        `hostname,siteGuid,webGuid` — read it from
+        `GET /sites/{hostname}:/sites/{path}`.
+      placeholder: contoso.sharepoint.com,00000000-...,00000000-...
+      group: microsoft
+      order: 41
+
+  - name: drive_id
+    type: String
+    required: false
+    meta:
+      label: SharePoint document library (drive) ID
+      description: >
+        Which library within the site. Leave blank for the site's default
+        document library, which is what most sites need.
+      group: microsoft
+      order: 42
+
   - name: include_body
     type: Boolean
     required: false
