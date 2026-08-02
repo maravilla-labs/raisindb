@@ -85,7 +85,19 @@ pub fn extract_geometry_source(expr: &Expr) -> Option<(String, String, String)> 
 pub fn extract_spatial_predicate(expr: &TypedExpr) -> Option<CanonicalPredicate> {
     match &expr.expr {
         Expr::Function { name, args, .. } if name.eq_ignore_ascii_case("ST_DWITHIN") => {
-            match_dwithin(args, expr)
+            match_dwithin(args, expr, true)
+        }
+        // `ST_3DDWITHIN(g, <const>, d)` takes the SAME 2-D access path.
+        //
+        // Horizontal distance is never greater than 3D distance, so every row
+        // within `d` in 3D is also within `d` horizontally: the 2-D cell ring is
+        // a conservative SUPERSET and cannot drop a matching row. It is never
+        // exact, though — the ring also admits rows that are close on the ground
+        // and far in altitude — so the predicate is always retained as a
+        // residual filter (`exact_when_point = false`), which is what makes the
+        // narrowing safe.
+        Expr::Function { name, args, .. } if name.eq_ignore_ascii_case("ST_3DDWITHIN") => {
+            match_dwithin(args, expr, false)
         }
         // `ST_DISTANCE(g, <const>) < r` / `<= r` is the same access path as
         // ST_DWITHIN. `>` / `>=` are anti-ranges with NO index path and must fall
@@ -110,7 +122,15 @@ pub fn extract_spatial_predicate(expr: &TypedExpr) -> Option<CanonicalPredicate>
 
 /// `ST_DWITHIN(a, b, radius)` where exactly one of `a`/`b` is a geometry source
 /// and the other is a constant geometry.
-fn match_dwithin(args: &[TypedExpr], original: &TypedExpr) -> Option<CanonicalPredicate> {
+///
+/// `exact_when_point` is false for `ST_3DDWITHIN`, whose altitude component the
+/// 2-D index cannot answer, so the original predicate must survive as a residual
+/// filter.
+fn match_dwithin(
+    args: &[TypedExpr],
+    original: &TypedExpr,
+    exact_when_point: bool,
+) -> Option<CanonicalPredicate> {
     if args.len() != 3 {
         return None;
     }
@@ -141,7 +161,7 @@ fn match_dwithin(args: &[TypedExpr], original: &TypedExpr) -> Option<CanonicalPr
         }
     };
 
-    build_dwithin(source, &center, radius, true, original)
+    build_dwithin(source, &center, radius, exact_when_point, original)
 }
 
 /// `ST_DISTANCE(<source>, <const>) <op> <const radius>`.
