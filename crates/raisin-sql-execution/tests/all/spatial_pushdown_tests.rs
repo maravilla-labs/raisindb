@@ -749,3 +749,205 @@ async fn a_revision_scoped_spatial_query_avoids_the_pruned_index() {
     );
     assert_eq!(head_rows, vec!["mid".to_string(), "near".to_string()]);
 }
+
+// ---------------------------------------------------------------------------
+// ST_3DDWITHIN — the ROWS, not the plan
+// ---------------------------------------------------------------------------
+//
+// `ST_3DDWITHIN` now reuses the 2-D `ST_DWITHIN` access path: the cell ring of
+// radius `d` is a conservative superset, because horizontal distance is never
+// greater than 3D distance. That narrowing is only safe while the predicate
+// SURVIVES as a residual filter, so the altitude component is still applied per
+// candidate row.
+//
+// `planner/tests_spatial.rs` asserts the plan keeps the filter. It cannot
+// assert that the filter then EXCLUDES anything — which is the half that turns
+// "we now use the index" into "we now return the wrong rows". These tests are
+// that half.
+//
+// SCOPE, stated precisely: like every test in this module, these run with no
+// spatial state source, so the catalog reports NotBuilt and the engine takes
+// the FALLBACK row scan. They therefore prove the 3D PREDICATE's semantics —
+// that altitude filters, that the query centre's Z is read, that the answer
+// never exceeds the 2-D one. They do NOT prove the index-backed path returns
+// the same rows; that pairing needs a populated index plus a state source, and
+// is the remaining gap for this change.
+
+/// Insert a sensor carrying a 3-D geometry: `[lon, lat, altitude]`.
+async fn insert_sensor(
+    engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>,
+    name: &str,
+    lon: f64,
+    lat: f64,
+    altitude: f64,
+) {
+    let sql = format!(
+        "INSERT INTO '{WS}' (id, path, node_type, properties) VALUES \
+         ('{name}','/{name}','test:Shop', \
+          '{{\"location\":{{\"type\":\"Point\",\"coordinates\":[{lon},{lat},{altitude}]}},\
+             \"floor\":\"L1\"}}'::JSONB)"
+    );
+    let mut stream = engine
+        .execute(&sql)
+        .await
+        .unwrap_or_else(|e| panic!("insert failed [{sql}]: {e}"));
+    while let Some(row) = stream.next().await {
+        row.unwrap_or_else(|e| panic!("insert row error: {e}"));
+    }
+}
+
+/// Three sensors at the SAME horizontal position, differing only in altitude.
+///
+/// Horizontally every one of them is a candidate for any radius, so whatever
+/// separates them in the result set can only be the altitude component.
+async fn seed_altitudes(engine: &QueryEngine<raisin_rocksdb::RocksDBStorage>) {
+    insert_sensor(engine, "ground", CENTER_LON, CENTER_LAT, 0.0).await;
+    insert_sensor(engine, "low", CENTER_LON, CENTER_LAT, 100.0).await;
+    insert_sensor(engine, "high", CENTER_LON, CENTER_LAT, 5_000.0).await;
+}
+
+/// THE regression this guards. All three sensors are horizontally identical, so
+/// a 3D radius of 200 m must keep exactly the two within 200 m vertically.
+///
+/// If the predicate were stripped once the index was chosen, every row inside
+/// the horizontal ring would come back and `high` — 5 km straight up — would
+/// appear. That is the silent-wrong-answer this pairing exists to prevent.
+#[tokio::test]
+async fn st_3ddwithin_excludes_rows_that_are_only_far_in_altitude() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let rows = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+        ),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        rows,
+        vec!["ground".to_string(), "low".to_string()],
+        "altitude must still filter after the 2-D index narrows the candidates \
+         — 'high' is 5 km up and horizontally identical, so its presence would \
+         mean the residual filter was dropped",
+    );
+}
+
+/// The 2-D and 3-D predicates must disagree exactly where altitude says so.
+///
+/// Same centre, same radius, same rows on the ground: `ST_DWITHIN` takes all
+/// three, `ST_3DDWITHIN` takes two. If they ever agreed here, the 3D predicate
+/// would be doing nothing.
+#[tokio::test]
+async fn the_3d_predicate_is_strictly_stronger_than_the_2d_one() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let flat = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_POINT({CENTER_LON}, {CENTER_LAT}), 200)"
+        ),
+    )
+    .await
+    .expect("2D query must not error");
+
+    let solid = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+        ),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        flat,
+        vec!["ground".to_string(), "high".to_string(), "low".to_string()],
+        "horizontally all three are within 200 m",
+    );
+    assert!(
+        solid.len() < flat.len(),
+        "the 3D predicate must be strictly stronger than the 2-D one, got \
+         2D={flat:?} 3D={solid:?}",
+    );
+}
+
+/// Raising the query altitude changes WHICH rows match — the altitude of the
+/// centre is genuinely read, not ignored.
+///
+/// A centre at 5000 m must select `high` and reject the two near the ground:
+/// the exact inverse of the ground-level query over identical data.
+#[tokio::test]
+async fn the_query_altitude_selects_a_different_row_set() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let rows = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 5000), 200)"
+        ),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        rows,
+        vec!["high".to_string()],
+        "a centre 5 km up must match only the sensor at that altitude — if the \
+         centre's Z were dropped this would return the ground-level rows",
+    );
+}
+
+/// A 2-D geometry has no altitude, and must not be silently treated as z = 0.
+///
+/// This pins the mixed-dimension case: the rows are the ordinary 2-D shops, and
+/// the query is a 3D one. Whatever the answer is, it must not error and must not
+/// return a row the plain 2-D predicate would exclude.
+#[tokio::test]
+async fn a_3d_predicate_over_2d_data_stays_within_the_2d_answer() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed(&engine).await;
+
+    let flat = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_DWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_POINT({CENTER_LON}, {CENTER_LAT}), 500)"
+        ),
+    )
+    .await
+    .expect("2D query must not error");
+
+    let solid = names(
+        &engine,
+        &format!(
+            "SELECT name FROM '{WS}' WHERE ST_3DDWITHIN(\
+               CAST(properties->>'location' AS GEOMETRY), \
+               ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 500)"
+        ),
+    )
+    .await
+    .expect("3D query over 2-D data must not error");
+
+    for name in &solid {
+        assert!(
+            flat.contains(name),
+            "the 3D predicate returned {name}, which the 2-D predicate excludes \
+             — the horizontal ring is supposed to be a SUPERSET of the answer, \
+             so this direction can never be wider: 2D={flat:?} 3D={solid:?}",
+        );
+    }
+}
