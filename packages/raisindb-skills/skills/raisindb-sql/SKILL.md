@@ -302,7 +302,7 @@ SELECT * FROM GRAPH_TABLE(
 |---------|---------|
 | `(a:Article)` | Node whose type ends in `:Article` (see below) |
 | ``(a:`news:Article`)`` | Node of exactly that type |
-| `-[:tagged-with]->` | Outgoing relation of type `tagged-with` |
+| ``-[:`tagged-with`]->`` | Outgoing relation of type `tagged-with`. A hyphenated type MUST be backticked -- a bare identifier stops at the hyphen. |
 | `<-[:corrects]-` | Incoming relation |
 | `-[r:follows]-` | Any direction, bind to variable `r` |
 | `-[:continues]->{1,3}` | 1 to 3 hops (canonical) |
@@ -360,7 +360,7 @@ the relation index, so it returns only nodes that have at least one relation.
 
 ```sql
 SELECT * FROM GRAPH_TABLE(
-  MATCH (article:Article)-[:tagged-with]->(tag:Tag)
+  MATCH (article:Article)-[:`tagged-with`]->(tag:Tag)
   WHERE article.path = '/articles/tech/rust-web-dev'
   COLUMNS (tag.path, tag.name AS label)
 ) AS tags

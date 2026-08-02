@@ -111,6 +111,16 @@ fn public_pgq_doc_examples_parse() {
     ok("GRAPH_TABLE(MATCH (a:Article)-[:continues]->{1,3}(b:Article) COLUMNS (b.title))");
     ok("GRAPH_TABLE(MATCH (a:Article)-[:continues*1..3]->(b:Article) COLUMNS (b.title))");
 
+    // From the studio-getting-started skill: the "related via shared tag" shape
+    // that is the reason to reach for GRAPH_TABLE at all.
+    ok("GRAPH_TABLE(MATCH (a:Article)-[:`tagged-with`]->(t:Tag)<-[:`tagged-with`]-(b:Article) \
+        COLUMNS (b.name))");
+
+    // A hyphenated relation type MUST be backticked: the regular identifier
+    // rule is alphanumeric + underscore, so `tagged-with` would stop at the
+    // hyphen. Both skills carried the unbackticked spelling in places.
+    rejected("GRAPH_TABLE(MATCH (a:Article)-[:tagged-with]->(t:Tag) COLUMNS (t.name))");
+
     // NOTE: `COLUMNS (p)` deliberately PARSES. A bare path variable is rejected
     // later, at validation, by `path_accessors::path_is_not_selectable`, whose
     // message names the accessors — proven end to end by
