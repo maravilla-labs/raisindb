@@ -523,15 +523,92 @@ WHERE DESCENDANT_OF('/posts') AND properties->>'published_at'::String < $1
 ORDER BY properties->>'published_at'::String DESC LIMIT 1
 ```
 
+### Editorial-order cursors (`__order`) — the fastest folder pagination
+
+`CHILD_OF('/parent')` with no `ORDER BY` returns children in editorial
+(drag-and-drop) order, and that order **is** exposed as the `__order` column, so
+it can drive a keyset cursor. This is the only ordering inside a folder that is
+a pure index seek — cost depends on the page size, not on how big the folder is.
+
+```sql
+-- page 1 (select __order to get the cursor for the next page)
+SELECT name, __order FROM mail
+WHERE CHILD_OF('/inbox/2026/05')
+ORDER BY __order LIMIT 50
+
+-- page 2+ : feed back the LAST row's __order
+SELECT name, __order FROM mail
+WHERE CHILD_OF('/inbox/2026/05') AND __order > $1
+ORDER BY __order LIMIT 50
+
+-- newest-first (insertion order tracks arrival for imported content)
+SELECT name, __order FROM mail
+WHERE CHILD_OF('/inbox/2026/05') AND __order < $1
+ORDER BY __order DESC LIMIT 50
+```
+
+**Match the comparison to the direction: `>` with `ASC`, `<` with `DESC`.** The
+cursor is a start position, not a range bound. Get it backwards and the bound is
+silently dropped — you still get correct rows, but the query reads the whole
+folder on every page instead of seeking. Same for `>=`: only `>` and `<` are
+recognised as cursors.
+
+`__order` is opaque sortable text. Pass it back verbatim as a string; never cast
+it to a number or compare it to a `path`.
+
+`SELECT *` already includes `__order`; an explicit projection must name it.
+
 Notes:
-- `CHILD_OF('/parent')` with NO `ORDER BY` returns children in the maintained
-  ordered-children (editorial/drag-and-drop) order. That order is not exposed
-  as a SQL column, so keyset cursors over it aren't possible — cursor on
-  `path` / `created_at` / a property, or slice the ordered list client-side.
+- **Never mix an `__order` cursor with `ORDER BY path`** (or vice versa). Both
+  order parents before children, but `path` sorts siblings alphabetically while
+  `__order` sorts them editorially. They agree only while the manual order
+  happens to be alphabetical — so this looks fine until someone drags something,
+  then silently drops and duplicates rows.
 - Every node carries `created_at`/`updated_at` (stamped at the storage layer
   on every write path), so `ORDER BY created_at` is always meaningful. Nodes
   written before this guarantee may have NULL `created_at`; prefer an explicit
   property (e.g. `published_at`) when your data predates it.
+- `ORDER BY` on anything OTHER than `__order` inside a folder (`created_at`, a
+  property) cannot seek by default — it reads the folder and sorts. To make it a
+  seek, declare a compound index; see §15.1.
+
+### 15.1 Making `ORDER BY` inside a folder a seek
+
+`WHERE CHILD_OF(...) ORDER BY <property>` reads every child and sorts, because
+no index carries both a hierarchy handle and a value ordering. Declare a
+compound index on the NodeType to fix that:
+
+```yaml
+compound_indexes:
+  - name: folder_time
+    columns: ["__parent_path", "__created_at"]
+    has_order_column: true
+```
+
+`__parent_path` is the containing directory, so `CHILD_OF` becomes an equality
+on the leading column and the trailing column serves the `ORDER BY`. The sort is
+then eliminated and the `LIMIT` bounds the scan.
+
+```sql
+-- a seek once the index above exists
+SELECT name FROM mail
+WHERE CHILD_OF('/inbox/2026/05')
+ORDER BY created_at DESC LIMIT 50
+```
+
+Constraints worth knowing before you rely on it:
+
+- **`DESCENDANT_OF` cannot use this.** A subtree is a path *range*, and in any
+  sorted index a range cannot precede the order column — only equality can. Use
+  `CHILD_OF`, or sort a bounded subtree result.
+- **Existing rows are not in a new index.** Entries are written on write, so
+  data created before the index needs a rebuild.
+- **Prefer `__created_at` / `__updated_at` as the order column**, declared with
+  `column_type: Timestamp` — they are stored inverted, so newest-first is a
+  forward scan that bounds properly. A `String` column ordered `DESC` is correct
+  but reads the whole group before truncating.
+- Index **names are branch-global**: two NodeTypes declaring the same name share
+  one keyspace. Give each index a distinct name.
 
 ## 16. Schema Tables (Reserved)
 

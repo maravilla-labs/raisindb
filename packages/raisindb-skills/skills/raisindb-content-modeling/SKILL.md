@@ -85,6 +85,60 @@ indexable: true
 | `publishable` | Adds publish/unpublish lifecycle |
 | `auditable` | Records who changed what and when |
 | `indexable` | Includes in full-text search index |
+| `compound_indexes` | Multi-column indexes that make `filter + ORDER BY + LIMIT` a seek (see below) |
+
+### Compound Indexes (`ORDER BY … LIMIT` as a seek)
+
+A listing that filters on one thing and sorts by another — the commonest shape
+in any admin UI — reads every matching row and sorts it, unless a compound
+index covers it. Declare one on the NodeType:
+
+```yaml
+compound_indexes:
+  - name: folder_time                          # branch-global; keep it unique
+    columns: ["__parent_path", "__created_at"]
+    has_order_column: true                     # last column serves ORDER BY
+```
+
+The index is `equality columns…` then **one** trailing order column. That is the
+only shape a sorted index can serve: equality on a leading prefix, then one
+column to order by.
+
+Available system columns, alongside any of your own properties:
+
+| Column | Matches | Notes |
+|---|---|---|
+| `__parent_path` | `CHILD_OF('/x')` | the containing directory |
+| `__node_type` | `node_type = 'x'` | |
+| `__created_at` | `ORDER BY created_at` | use `column_type: Timestamp` |
+| `__updated_at` | `ORDER BY updated_at` | use `column_type: Timestamp` |
+
+With the index above, this stops sorting and starts seeking:
+
+```sql
+SELECT * FROM mail WHERE CHILD_OF('/inbox/2026/05')
+ORDER BY created_at DESC LIMIT 50
+```
+
+Rules that decide whether it actually gets used:
+
+- **All equality columns must be matched**, in order, for the trailing column to
+  serve the `ORDER BY`. A partial prefix match still filters, but iterates in
+  residual order, so the sort stays.
+- **`DESCENDANT_OF` cannot be an index column.** A subtree is a path *range*, and
+  a range cannot precede the order column. Only `CHILD_OF` (an equality on the
+  parent) works.
+- **Timestamp order columns are stored inverted**, so newest-first is a forward
+  scan that bounds correctly. A `String` column ordered `DESC` is correct but
+  reads the whole group before truncating — prefer a timestamp when you can.
+- **Existing content is not indexed retroactively.** Entries are written on
+  write; content that predates the index needs a rebuild.
+- **Names are branch-global.** Two NodeTypes with the same index name share one
+  keyspace and interleave incompatible entries — always use distinct names.
+
+Don't add these speculatively: every index costs write amplification on create,
+update and move. Add one when a listing is measurably slow, and check with
+`EXPLAIN` that the plan shows `CompoundIndexScan` and no `Sort`/`TopN`.
 
 ### Reference Values at Runtime
 
