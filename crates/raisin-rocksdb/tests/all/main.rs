@@ -21,6 +21,7 @@
 mod apply_revision_capture_test;
 mod apply_revision_test;
 mod audit_attribution_test;
+mod branch_fork_index_copies_test;
 mod branch_fork_publish_test;
 mod branch_fork_spatial_index_test;
 mod branch_head_monotonic_test;

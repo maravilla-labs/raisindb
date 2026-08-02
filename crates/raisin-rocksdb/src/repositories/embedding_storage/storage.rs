@@ -7,6 +7,7 @@ use raisin_embeddings::{EmbeddingData, EmbeddingStorage};
 use raisin_error::Result;
 use raisin_hlc::HLC;
 use rocksdb::{WriteBatch, DB};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// RocksDB-backed embedding storage
@@ -437,8 +438,10 @@ impl EmbeddingStorage for RocksDBEmbeddingStorage {
         let prefix = Self::workspace_prefix(tenant_id, repo_id, branch, workspace_id);
         let iter = self.db.prefix_iterator_cf(cf, &prefix);
 
-        let mut results = Vec::new();
-        let mut last_node_id: Option<String> = None;
+        // Source ids in first-seen order, plus where each one sits in `results`
+        // so a later revision can update it in place.
+        let mut results: Vec<(String, HLC)> = Vec::new();
+        let mut position: HashMap<String, usize> = HashMap::new();
 
         for result in iter {
             let (key, _) = result.map_err(|e| {
@@ -450,25 +453,41 @@ impl EmbeddingStorage for RocksDBEmbeddingStorage {
                 break;
             }
 
-            // Parse key: {tenant}\0{repo}\0{branch}\0{workspace}\0{node_id}\0{revision}
-            let key_str = String::from_utf8_lossy(&key);
-            let parts: Vec<&str> = key_str.split('\0').collect();
+            // Parse through `parse_key` — the ONE parser, shared with
+            // `get_embedding`.
+            //
+            // This function used to read the source id out of `parts[4]` with
+            // its own hand-rolled split. That is the LEGACY layout's node_id
+            // slot; in the v2 layout part 4 is the EMBEDDER HASH, so every
+            // caller got a list of embedder hashes rather than node ids, and
+            // the dedup below then collapsed a whole workspace to one row per
+            // embedder. `list_embeddings` is what an HNSW rebuild reads to know
+            // WHICH nodes to re-index, so the rebuilt index pointed at ids that
+            // resolve to no node at all.
+            let Some((_, _, source_id, _, _)) = Self::parse_key(&key) else {
+                continue;
+            };
 
-            if parts.len() >= 5 {
-                let node_id = parts[4].to_string();
+            if key.len() < 16 {
+                continue;
+            }
+            let revision = HLC::decode_descending(&key[key.len() - 16..]).map_err(|e| {
+                raisin_error::Error::storage(format!("Invalid HLC encoding: {}", e))
+            })?;
 
-                // Only include each node once (latest revision due to descending order)
-                if last_node_id.as_ref() != Some(&node_id) {
-                    // Extract HLC from last 16 bytes
-                    if key.len() >= 16 {
-                        let hlc_bytes = &key[key.len() - 16..];
-                        let revision = HLC::decode_descending(hlc_bytes).map_err(|e| {
-                            raisin_error::Error::storage(format!("Invalid HLC encoding: {}", e))
-                        })?;
-
-                        results.push((node_id.clone(), revision));
-                        last_node_id = Some(node_id);
+            // One row per source, carrying its NEWEST revision. Revisions of a
+            // single source are adjacent and descending, but a source reappears
+            // once per embedder and once per chunk — non-adjacently — so
+            // "differs from the previous key" is not a dedup.
+            match position.get(&source_id) {
+                Some(&index) => {
+                    if revision > results[index].1 {
+                        results[index].1 = revision;
                     }
+                }
+                None => {
+                    position.insert(source_id.clone(), results.len());
+                    results.push((source_id, revision));
                 }
             }
         }
