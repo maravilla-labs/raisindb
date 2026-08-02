@@ -32,12 +32,12 @@ pub use adapter::{
 };
 // Credential assembly lives in raisin-models so the sync engine and the HTTP
 // connection-test handler cannot drift apart.
+pub use batch::SyncBatcher;
 pub use config::{
     default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount, ExternalItem,
     IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig, WriteConfig,
     SYNC_ACTOR, SYSTEM_WORKSPACE,
 };
-pub use batch::SyncBatcher;
 pub use materializer::{
     BatchOp, BatchStats, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,
     VirtualNodeRef,
@@ -328,8 +328,7 @@ impl VirtualMountSyncHandler {
         // Ephemeral TTL cleanup up front.
         if mount.sync_config.ephemeral {
             if let Some(ttl) = mount.sync_config.ttl_seconds {
-                let _ =
-                    ephemeral::cleanup_expired(&mut batcher, ttl, Utc::now().timestamp()).await;
+                let _ = ephemeral::cleanup_expired(&mut batcher, ttl, Utc::now().timestamp()).await;
             }
         }
 

@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::batch::SyncBatcher;
 use super::config::{ListPage, MountState};
-use super::{stage_item, persist_state, AdapterError, SyncCtx};
+use super::{persist_state, stage_item, AdapterError, SyncCtx};
 
 /// Run a full reconcile.
 pub async fn run(

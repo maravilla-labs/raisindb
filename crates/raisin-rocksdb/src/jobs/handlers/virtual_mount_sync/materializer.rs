@@ -1104,10 +1104,21 @@ mod tests {
         let idx = SyncIndex::from_nodes(vec![mount_owned, foreign, outside], "m1", "/docs");
 
         assert_eq!(idx.by_external("ext-a").map(|n| n.id.as_str()), Some("n1"));
-        assert_eq!(idx.by_external("ext-a").and_then(|n| n.etag.clone()).as_deref(), Some("v1"));
+        assert_eq!(
+            idx.by_external("ext-a")
+                .and_then(|n| n.etag.clone())
+                .as_deref(),
+            Some("v1")
+        );
         // The foreign node is visible by path — that guard depends on it.
-        assert_eq!(idx.at_path("/docs/user.txt").map(|e| e.mount_owned), Some(false));
-        assert_eq!(idx.at_path("/docs/a.txt").map(|e| e.mount_owned), Some(true));
+        assert_eq!(
+            idx.at_path("/docs/user.txt").map(|e| e.mount_owned),
+            Some(false)
+        );
+        assert_eq!(
+            idx.at_path("/docs/a.txt").map(|e| e.mount_owned),
+            Some(true)
+        );
         // Nodes outside the mount path are not indexed at all.
         assert!(idx.at_path("/elsewhere/x.txt").is_none());
         assert_eq!(idx.virtual_len(), 1);
@@ -1124,8 +1135,14 @@ mod tests {
             synced_secs: None,
         });
         assert!(idx.at_path("/docs/thread-1").is_some());
-        assert_eq!(idx.at_path("/docs/thread-1").map(|e| e.mount_owned), Some(false));
-        assert_eq!(idx.at_path("/docs/thread-1/msg.txt").map(|e| e.mount_owned), Some(true));
+        assert_eq!(
+            idx.at_path("/docs/thread-1").map(|e| e.mount_owned),
+            Some(false)
+        );
+        assert_eq!(
+            idx.at_path("/docs/thread-1/msg.txt").map(|e| e.mount_owned),
+            Some(true)
+        );
         assert_eq!(idx.by_external("ext-a").map(|n| n.id.as_str()), Some("n1"));
 
         idx.record_delete("ext-a");

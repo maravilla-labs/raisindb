@@ -225,7 +225,9 @@ impl NodeRepositoryImpl {
 /// value (`check_unique_constraints` reads the COMMITTED index, so it cannot see
 /// a sibling in the same batch). A second copy of this walk would be free to
 /// drift from the one the write path enforces.
-pub(crate) fn extract_unique_property_names(node_type: &raisin_models::nodes::NodeType) -> Vec<String> {
+pub(crate) fn extract_unique_property_names(
+    node_type: &raisin_models::nodes::NodeType,
+) -> Vec<String> {
     match node_type.properties {
         Some(ref props) => props
             .iter()

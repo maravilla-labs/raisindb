@@ -158,8 +158,8 @@ impl<'a> SyncBatcher<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::materializer::{estimate_op_bytes, BatchOp, VirtualMeta};
     use super::super::config::MappedNode;
+    use super::super::materializer::{estimate_op_bytes, BatchOp, VirtualMeta};
 
     fn op(body_len: usize) -> BatchOp {
         let mut props = serde_json::Map::new();
