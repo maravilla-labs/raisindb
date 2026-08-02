@@ -5,18 +5,28 @@
 //! Handles the connection lifecycle including authentication, message routing,
 //! and cleanup on disconnect.
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use bytes::Bytes;
 use futures::{stream::StreamExt, SinkExt};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
     connection::ConnectionState,
     protocol::{EventMessage, RequestEnvelope, ResponseEnvelope},
+    shutdown::{InFlight, CLOSE_CODE_GOING_AWAY},
 };
 use raisin_models::auth::AuthContext;
+
+/// How long we let the sender task drain queued responses and put the Close
+/// frame on the wire after the connection's channels have been closed.
+///
+/// Bounded because a client that has stopped reading would otherwise wedge the
+/// socket — and therefore axum's drain — indefinitely.
+const SENDER_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 use super::auth_token::authenticate_with_token;
 use super::request::process_request;
@@ -34,6 +44,15 @@ pub(super) async fn handle_socket<S, B>(
     B: raisin_binary::BinaryStorage + 'static,
 {
     let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // A connection that upgrades on an already-established keep-alive socket
+    // can still land here after the signal fired (axum only stops *accepting*).
+    // Refuse it immediately rather than adding one more thing to drain.
+    if state.shutdown.is_cancelled() {
+        debug!("Rejecting WebSocket upgrade: server is shutting down");
+        let _ = ws_sender.send(going_away_close()).await;
+        return;
+    }
 
     // Try to authenticate from initial token
     let connection_state = if let Some(token) = initial_token {
@@ -94,13 +113,48 @@ pub(super) async fn handle_socket<S, B>(
     // Send initial "connected" message with anonymous token if available
     send_connected_message(&connection_state, &mut ws_sender).await;
 
+    // Tracks requests this connection has started but not yet finished.
+    // Requests run on detached tasks, so nothing else knows about them — and
+    // on shutdown these are exactly what must NOT be cut off.
+    let in_flight = InFlight::new();
+
     // Spawn task to send responses back to client
-    let ws_sender_handle = spawn_sender_task(ws_sender, &mut response_rx, &mut event_rx);
+    let mut ws_sender_handle = spawn_sender_task(
+        ws_sender,
+        &mut response_rx,
+        &mut event_rx,
+        state.shutdown.clone(),
+    );
 
     // Process incoming messages
-    process_incoming_messages(&mut ws_receiver, &state, &connection_state).await;
+    let stopped_for_shutdown = process_incoming_messages(
+        &mut ws_receiver,
+        &state,
+        &connection_state,
+        &in_flight,
+        &state.shutdown,
+    )
+    .await;
 
-    // Cleanup
+    // On shutdown, give already-started requests a bounded window to finish.
+    // An idle connection observes zero in flight and returns immediately —
+    // that is what stops one idle browser tab from holding the drain open.
+    if stopped_for_shutdown {
+        let grace = state.config.shutdown_grace;
+        if in_flight.wait_idle(grace).await {
+            debug!("In-flight WebSocket operations drained before close");
+        } else {
+            warn!(
+                remaining = in_flight.count(),
+                grace_ms = grace.as_millis(),
+                "Shutdown grace expired with WebSocket operations still in flight; closing anyway"
+            );
+        }
+    }
+
+    // Cleanup. Dropping the response/event senders here is what lets the
+    // sender task observe end-of-stream, flush what is still queued and emit
+    // the Close frame.
     let connection_id = {
         let conn = connection_state.read();
         let id = conn.connection_id.clone();
@@ -112,8 +166,28 @@ pub(super) async fn handle_socket<S, B>(
     // Unregister the connection from the global registry
     state.connection_registry.unregister(&connection_id);
 
-    // Wait for sender task to finish
-    ws_sender_handle.abort();
+    // Let the sender task finish (flush + Close frame), but never unboundedly.
+    if tokio::time::timeout(SENDER_FLUSH_TIMEOUT, &mut ws_sender_handle)
+        .await
+        .is_err()
+    {
+        debug!(
+            connection_id = %connection_id,
+            "WebSocket sender task did not finish within the flush timeout; aborting"
+        );
+        ws_sender_handle.abort();
+    }
+}
+
+/// The Close frame sent when the *server* is going away.
+///
+/// 1001 tells browsers this is a peer-initiated close, so client SDKs
+/// reconnect rather than surfacing a broken-pipe error.
+fn going_away_close() -> Message {
+    Message::Close(Some(CloseFrame {
+        code: CLOSE_CODE_GOING_AWAY,
+        reason: "server shutting down".into(),
+    }))
 }
 
 /// Create an anonymous connection state with resolved permissions.
@@ -214,10 +288,16 @@ async fn send_connected_message(
 }
 
 /// Spawn the task that sends responses and events back to the client.
+///
+/// Deliberately NOT cancelled by the shutdown signal: it is the path a
+/// still-running request's response takes back to the client. It ends when the
+/// connection drops its senders, which the receive side only does after the
+/// in-flight grace has elapsed.
 fn spawn_sender_task(
     mut ws_sender: futures::stream::SplitSink<WebSocket, Message>,
     response_rx: &mut mpsc::UnboundedReceiver<ResponseEnvelope>,
     event_rx: &mut mpsc::UnboundedReceiver<EventMessage>,
+    shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     // We need to take ownership of the receivers
     let mut response_rx_owned = std::mem::replace(response_rx, mpsc::unbounded_channel().1);
@@ -264,20 +344,55 @@ fn spawn_sender_task(
             }
         }
 
-        let _ = ws_sender.send(Message::Close(None)).await;
+        let close = if shutdown.is_cancelled() {
+            going_away_close()
+        } else {
+            Message::Close(None)
+        };
+        let _ = ws_sender.send(close).await;
     })
 }
 
-/// Process incoming WebSocket messages until the connection closes.
+/// Process incoming WebSocket messages until the connection closes or the
+/// server begins shutting down.
+///
+/// Returns `true` when the loop stopped because of the shutdown signal (the
+/// caller then applies the in-flight grace), `false` on a normal client-side
+/// close or transport error.
+///
+/// Note that the shutdown signal is only observed *between* messages. A
+/// transactional request is processed inline and runs to completion before the
+/// loop comes back around — that is intentional: an in-flight write is never
+/// cut mid-execution.
 async fn process_incoming_messages<S, B>(
     ws_receiver: &mut futures::stream::SplitStream<WebSocket>,
     state: &Arc<WsState<S, B>>,
     connection_state: &Arc<parking_lot::RwLock<ConnectionState>>,
-) where
+    in_flight: &Arc<InFlight>,
+    shutdown: &CancellationToken,
+) -> bool
+where
     S: raisin_storage::Storage + raisin_storage::transactional::TransactionalStorage + 'static,
     B: raisin_binary::BinaryStorage + 'static,
 {
-    while let Some(msg) = ws_receiver.next().await {
+    loop {
+        let msg = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                let connection_id = connection_state.read().connection_id.clone();
+                info!(
+                    connection_id = %connection_id,
+                    in_flight = in_flight.count(),
+                    "Server shutting down; stopping WebSocket read loop"
+                );
+                return true;
+            }
+            msg = ws_receiver.next() => match msg {
+                Some(msg) => msg,
+                None => return false,
+            },
+        };
+
         match msg {
             Ok(Message::Binary(data)) => {
                 tracing::info!("Received binary message - size: {} bytes", data.len());
@@ -313,13 +428,19 @@ async fn process_incoming_messages<S, B>(
                                 "Processing transactional request inline - ID: {}",
                                 request.request_id
                             );
+                            // Inline, so it is already finished by the time the
+                            // loop re-checks the shutdown signal; no guard needed.
                             process_request(state, connection_state, request).await;
                         } else {
                             tracing::info!(
                                 "Spawning async task to process request - ID: {}",
                                 request.request_id
                             );
+                            // The guard makes this detached task visible to the
+                            // shutdown grace, so a write in progress is not cut off.
+                            let guard = in_flight.guard();
                             tokio::spawn(async move {
+                                let _guard = guard;
                                 tracing::info!(
                                     "Processing request in async task - ID: {}",
                                     request.request_id
@@ -339,7 +460,7 @@ async fn process_incoming_messages<S, B>(
             }
             Ok(Message::Close(_)) => {
                 info!("Client closed connection");
-                break;
+                return false;
             }
             Ok(Message::Ping(_)) => {
                 debug!("Received ping");
@@ -349,7 +470,7 @@ async fn process_incoming_messages<S, B>(
             }
             Err(e) => {
                 error!("WebSocket error: {}", e);
-                break;
+                return false;
             }
         }
     }

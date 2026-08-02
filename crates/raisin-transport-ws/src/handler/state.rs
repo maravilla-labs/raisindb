@@ -177,6 +177,16 @@ where
     /// `audit_query` request to read a node's audit-log entries. Audit *writes*
     /// are produced globally by the event-bus `AuditEventHandler`, not here.
     pub audit: Arc<WsAuditRepo>,
+
+    /// Fired by the process's signal handler when the server is shutting down.
+    ///
+    /// Every connection task selects on this: an upgraded WebSocket never ends
+    /// on its own, so without it `axum::serve`'s graceful drain waits on idle
+    /// browser tabs until the supervisor SIGKILLs the process — and a SIGKILL
+    /// leaves RocksDB's WAL unflushed, which is replayed on the next boot.
+    /// Default is a token nobody ever cancels (tests, embedders).
+    /// See [`crate::shutdown`] and `WsState::with_shutdown`.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl<S, B> WsState<S, B>
@@ -245,7 +255,20 @@ where
             schema_stats_cache,
             lock_manager,
             audit,
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Attach the process-wide shutdown token.
+    ///
+    /// Call this with the same token the signal handler cancels, *before*
+    /// handing the state to the router. Without it the state carries a token
+    /// nobody cancels and connections behave exactly as they did before —
+    /// they hold the drain open.
+    #[must_use]
+    pub fn with_shutdown(mut self, shutdown: tokio_util::sync::CancellationToken) -> Self {
+        self.shutdown = shutdown;
+        self
     }
 
     /// Check if anonymous access is enabled for a tenant/repo context.

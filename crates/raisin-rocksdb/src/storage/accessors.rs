@@ -93,6 +93,51 @@ impl RocksDBStorage {
         &self.db
     }
 
+    /// Flush every column family and the WAL, then stop background work.
+    ///
+    /// Call this on the process's shutdown path, once serving has stopped.
+    ///
+    /// **Why it must be explicit.** The only thing that flushes on its own is
+    /// the `DB` destructor, and `db` is an `Arc` cloned into services, job
+    /// handlers and caches across the process — so returning from `main` does
+    /// not reliably drop it, and even an orderly SIGTERM can leave the
+    /// memtables unflushed and a large WAL behind. That WAL is then replayed
+    /// on the *next* boot, which is what turns an unclean stop into a slow
+    /// start.
+    ///
+    /// Blocking; call it from `spawn_blocking` (or outside the runtime), never
+    /// on an async worker thread. Idempotent and safe to call while other
+    /// `Arc<DB>` handles are still alive — it does not close the database.
+    pub fn flush_and_close(&self) -> Result<(), rocksdb::Error> {
+        // Memtables first: this is what makes the WAL replaceable.
+        let mut first_error = None;
+        for cf_name in crate::all_column_families() {
+            if let Some(cf) = self.db.cf_handle(cf_name) {
+                if let Err(e) = self.db.flush_cf(&cf) {
+                    tracing::warn!(cf = %cf_name, error = %e, "Failed to flush column family on shutdown");
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+
+        if let Err(e) = self.db.flush_wal(true) {
+            tracing::warn!(error = %e, "Failed to sync the WAL on shutdown");
+            first_error.get_or_insert(e);
+        }
+
+        // Stop compactions/flushes so nothing is mid-write when the process
+        // exits. `false` = do not wait for unscheduled work to be scheduled.
+        self.db.cancel_all_background_work(true);
+
+        match first_error {
+            Some(e) => Err(e),
+            None => {
+                tracing::info!("RocksDB flushed and background work cancelled");
+                Ok(())
+            }
+        }
+    }
+
     /// Shared per-(tenant,repo,branch) lock manager used by Tantivy
     /// indexing.
     ///

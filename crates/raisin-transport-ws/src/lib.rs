@@ -47,6 +47,7 @@ pub mod handler;
 pub mod handlers;
 pub mod protocol;
 pub mod registry;
+pub mod shutdown;
 
 // Re-exports
 pub use auth::{Claims, JwtAuthService, TokenType};
@@ -56,6 +57,7 @@ pub use event_handler::WsEventHandler;
 pub use handler::{websocket_handler, websocket_handler_tenantless, WsConfig, WsState};
 pub use protocol::{EventMessage, RequestEnvelope, RequestType, ResponseEnvelope, ResponseStatus};
 pub use registry::ConnectionRegistry;
+pub use shutdown::{InFlight, InFlightGuard, CLOSE_CODE_GOING_AWAY};
 
 // Version info
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -28,6 +28,15 @@ pub struct WsConfig {
     /// Development mode — allows insecure JWT fallbacks.
     /// NEVER enable in production.
     pub dev_mode: bool,
+
+    /// How long, on shutdown, a connection waits for the requests it has
+    /// already started (a node write, a SQL DML, a job enqueue) before it
+    /// closes the socket anyway.
+    ///
+    /// Idle sockets never wait at all — they close immediately. This bound
+    /// exists so that an in-flight *write* is not cut off, while a stuck one
+    /// still cannot hold the whole process's drain open.
+    pub shutdown_grace: std::time::Duration,
 }
 
 impl Default for WsConfig {
@@ -40,6 +49,7 @@ impl Default for WsConfig {
             global_concurrency_limit: Some(1000),
             anonymous_enabled: false,
             dev_mode: false,
+            shutdown_grace: std::time::Duration::from_secs(5),
         }
     }
 }

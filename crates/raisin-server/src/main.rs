@@ -1022,6 +1022,20 @@ async fn main() {
     // WebSocket transport
     // ========================================================================
 
+    // Shutdown signal for WebSocket connections.
+    //
+    // `axum::serve(...).with_graceful_shutdown(...)` waits for every OPEN
+    // connection, and an upgraded WebSocket never closes on its own — so a
+    // single idle Studio tab held the drain until systemd's timeout fired
+    // SIGKILL, and a SIGKILL leaves RocksDB's WAL unflushed for the next boot
+    // to replay (observed: ~350 MB vs 192 KB after a clean stop). Cancelling
+    // this token tells each connection task to finish the requests it has
+    // already started, send a 1001 Close frame and return.
+    //
+    // Separate from the job system's `shutdown_token`, which is `None` when
+    // background jobs are disabled — this one must always fire.
+    let ws_shutdown = tokio_util::sync::CancellationToken::new();
+
     #[cfg(feature = "websocket")]
     let app = {
         tracing::info!("Initializing WebSocket transport...");
@@ -1052,27 +1066,36 @@ async fn main() {
             global_concurrency_limit: Some(global_concurrency_limit),
             anonymous_enabled: server_config.anonymous_enabled,
             dev_mode: server_config.dev_mode,
+            shutdown_grace: std::time::Duration::from_secs(
+                std::env::var("WS_SHUTDOWN_GRACE_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(5),
+            ),
         };
 
         let connection = Arc::new(raisin_core::RaisinConnection::with_storage(storage.clone()));
-        let ws_state = Arc::new(WsState::new(
-            storage.clone(),
-            connection,
-            ws_svc.clone(),
-            bin.clone(),
-            ws_config,
-            #[cfg(feature = "storage-rocksdb")]
-            Some(auth_service.clone()),
-            #[cfg(feature = "storage-rocksdb")]
-            Some(storage.clone()),
-            #[cfg(feature = "storage-rocksdb")]
-            ws_indexing_engine,
-            #[cfg(feature = "storage-rocksdb")]
-            ws_hnsw_engine,
-            Some(schema_stats_cache.clone()),
-            lock_manager.clone(),
-            audit_repo.clone(),
-        ));
+        let ws_state = Arc::new(
+            WsState::new(
+                storage.clone(),
+                connection,
+                ws_svc.clone(),
+                bin.clone(),
+                ws_config,
+                #[cfg(feature = "storage-rocksdb")]
+                Some(auth_service.clone()),
+                #[cfg(feature = "storage-rocksdb")]
+                Some(storage.clone()),
+                #[cfg(feature = "storage-rocksdb")]
+                ws_indexing_engine,
+                #[cfg(feature = "storage-rocksdb")]
+                ws_hnsw_engine,
+                Some(schema_stats_cache.clone()),
+                lock_manager.clone(),
+                audit_repo.clone(),
+            )
+            .with_shutdown(ws_shutdown.clone()),
+        );
 
         let ws_router = Router::new()
             // Operator / multi-tenant form (explicit tenant in path)
@@ -1205,9 +1228,29 @@ async fn main() {
     let batch_token: Option<tokio_util::sync::CancellationToken> = None;
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(batch_token))
+        .with_graceful_shutdown(shutdown_signal(batch_token, ws_shutdown))
         .await
         .expect("Failed to serve HTTP application");
+
+    // Close RocksDB explicitly.
+    //
+    // Nothing else does. `Arc<DB>` handles are cloned into services, jobs and
+    // caches all over the process, so returning from `main` does NOT reliably
+    // run the DB's destructor — which is the only thing that would flush the
+    // memtables and the WAL. Without this, even a *clean* SIGTERM can leave a
+    // large WAL for the next boot to replay. Blocking, so it goes on a
+    // blocking thread rather than a runtime worker.
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        let storage_for_close = storage.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || storage_for_close.flush_and_close())
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()))
+        {
+            tracing::warn!(error = %e, "RocksDB flush on shutdown reported an error");
+        }
+    }
 
     // Tear down the dedicated job-pool runtimes OFF the async context.
     //
@@ -1228,16 +1271,25 @@ async fn main() {
     }
 }
 
-/// Wait for SIGINT (Ctrl-C) or SIGTERM, then cancel the batch
-/// aggregator's shutdown token so its background flush task drains
-/// the in-memory pending map (and the persisted CF) before exit.
+/// Wait for SIGINT (Ctrl-C) or SIGTERM, then release everything that would
+/// otherwise hold the drain open:
 ///
-/// Without this, `axum::serve` would block forever on the listener
-/// and `BatchIndexAggregator`'s in-memory ops could outlive the
-/// process. SIGKILL still bypasses this — that's why the
-/// `pending_batch_ops` column family exists as a second line of
-/// defense (see `batch_aggregator::persistence`).
-async fn shutdown_signal(batch_shutdown: Option<tokio_util::sync::CancellationToken>) {
+/// 1. `ws_shutdown` — WebSocket connections. `axum::serve`'s graceful shutdown
+///    waits for every open connection, and an upgraded WebSocket never ends on
+///    its own, so without this ONE idle browser tab keeps the process alive
+///    until the supervisor SIGKILLs it (and a SIGKILL means an unflushed WAL
+///    that the next boot has to replay). Each connection finishes the requests
+///    it has already started, then sends a 1001 Close frame and returns.
+/// 2. The batch aggregator's shutdown token, so its background flush task
+///    drains the in-memory pending map (and the persisted CF) before exit.
+///
+/// SIGKILL still bypasses all of this — that's why the `pending_batch_ops`
+/// column family exists as a second line of defense (see
+/// `batch_aggregator::persistence`).
+async fn shutdown_signal(
+    batch_shutdown: Option<tokio_util::sync::CancellationToken>,
+    ws_shutdown: tokio_util::sync::CancellationToken,
+) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -1263,6 +1315,13 @@ async fn shutdown_signal(batch_shutdown: Option<tokio_util::sync::CancellationTo
             tracing::info!("SIGTERM received; initiating graceful shutdown");
         }
     }
+
+    // Do this FIRST. axum's drain waits on every open connection, and an
+    // upgraded WebSocket never ends on its own — so unless the sockets are
+    // told to close, the drain below never completes and the process is
+    // eventually SIGKILLed with an unflushed WAL.
+    ws_shutdown.cancel();
+    tracing::info!("Signalled WebSocket connections to drain in-flight work and close");
 
     if let Some(token) = batch_shutdown {
         token.cancel();

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # Web framework and WebSocket
 axum = { workspace = true, features = ["macros", "ws"] }
 tokio = { workspace = true }
+tokio-util = "0.7"
 futures = "0.3"
 futures-util = { version = "0.3", default-features = false }
 
