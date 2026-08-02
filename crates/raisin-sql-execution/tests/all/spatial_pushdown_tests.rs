@@ -765,13 +765,13 @@ async fn a_revision_scoped_spatial_query_avoids_the_pruned_index() {
 // "we now use the index" into "we now return the wrong rows". These tests are
 // that half.
 //
-// SCOPE, stated precisely: like every test in this module, these run with no
-// spatial state source, so the catalog reports NotBuilt and the engine takes
-// the FALLBACK row scan. They therefore prove the 3D PREDICATE's semantics —
-// that altitude filters, that the query centre's Z is read, that the answer
-// never exceeds the 2-D one. They do NOT prove the index-backed path returns
-// the same rows; that pairing needs a populated index plus a state source, and
-// is the remaining gap for this change.
+// These run against the REAL index path, not the fallback: `QueryEngine` wires
+// `storage.spatial_state()` into the catalog, and a SQL insert of a geometry
+// calls `ensure_for_write`, which creates the state record. So the planner sees
+// a built index and picks `SpatialDistanceScan` — which
+// `st_3ddwithin_uses_the_index_and_still_excludes_by_altitude` asserts via
+// EXPLAIN in the same test that checks the rows, so the access path and the
+// answer are pinned together rather than in two tests that could drift.
 
 /// Insert a sensor carrying a 3-D geometry: `[lon, lat, altitude]`.
 async fn insert_sensor(
@@ -950,4 +950,105 @@ async fn a_3d_predicate_over_2d_data_stays_within_the_2d_answer() {
              so this direction can never be wider: 2D={flat:?} 3D={solid:?}",
         );
     }
+}
+
+/// THE gap this closes: the index path and the answer, pinned in ONE test.
+///
+/// Everything else about `ST_3DDWITHIN` is proven in two halves that can drift.
+/// `planner/tests_spatial.rs` says the plan is a `SpatialDistanceScan` carrying
+/// a residual filter; the row tests above say altitude excludes the right
+/// sensors. Neither says those two things happen *at the same time* — and the
+/// dangerous state is exactly the one where the index is chosen and the filter
+/// is not applied, because that returns a superset silently.
+///
+/// So: assert EXPLAIN picked the index, then assert the rows, over the same
+/// engine and the same data.
+#[tokio::test]
+async fn st_3ddwithin_uses_the_index_and_still_excludes_by_altitude() {
+    let (storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    // Precondition: the geometry write built the index state the planner reads.
+    // Without this the assertions below would pass for the wrong reason — a
+    // fallback scan also returns the right rows.
+    assert!(
+        !spatial_precisions(&storage, "location").is_empty(),
+        "the SQL insert must have created the spatial state record, otherwise \
+         this test silently degrades into a fallback-scan test",
+    );
+
+    let predicate = format!(
+        "ST_3DDWITHIN(CAST(properties->>'location' AS GEOMETRY), \
+         ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+    );
+
+    let plan = explain(
+        &engine,
+        &format!("EXPLAIN SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await;
+    assert!(
+        plan.contains("SpatialDistanceScan"),
+        "ST_3DDWITHIN must narrow through the 2-D index — the horizontal ring is \
+         a conservative superset, so there is no reason to scan. Plan was:\n{plan}"
+    );
+
+    let rows = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await
+    .expect("3D query must not error");
+
+    assert_eq!(
+        rows,
+        vec!["ground".to_string(), "low".to_string()],
+        "the index was used AND altitude still excluded the sensor 5 km up. \
+         Returning 'high' here would be the silent superset: index chosen, \
+         residual filter dropped. Plan was:\n{plan}"
+    );
+}
+
+/// The index path and the fallback path must agree on the same data.
+///
+/// A differential check: the same 3D question asked with the index available
+/// and asked at a historical revision (which the planner routes off the index)
+/// must produce identical rows. This is the shape that catches an index that is
+/// subtly *incomplete* rather than absent — the fallback is the reference
+/// answer.
+#[tokio::test]
+async fn the_3d_index_path_agrees_with_the_fallback_path() {
+    let (_storage, engine, _tmp) = setup().await;
+    seed_altitudes(&engine).await;
+
+    let predicate = format!(
+        "ST_3DDWITHIN(CAST(properties->>'location' AS GEOMETRY), \
+         ST_FORCE3D(ST_POINT({CENTER_LON}, {CENTER_LAT}), 0), 200)"
+    );
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+
+    let indexed = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE {predicate}"),
+    )
+    .await
+    .expect("indexed query");
+
+    // A revision-scoped read is deliberately routed off the pruned index.
+    let scanned = names(
+        &engine,
+        &format!("SELECT name FROM '{WS}' WHERE __revision = {now_ms} AND {predicate}"),
+    )
+    .await
+    .expect("fallback query");
+
+    assert_eq!(
+        indexed, scanned,
+        "the index path and the row scan must agree — everything was seeded \
+         before this revision, so only the ACCESS PATH differs",
+    );
+    assert_eq!(indexed, vec!["ground".to_string(), "low".to_string()]);
 }

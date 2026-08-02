@@ -92,6 +92,17 @@ fn public_pgq_doc_examples_parse() {
         ));
     }
 
+    // Node patterns: a label is the node type's LOCAL name. The namespaced
+    // spelling is a parse error, which the reference now warns about.
+    ok("GRAPH_TABLE(MATCH (n:Article) COLUMNS (n.title))");
+    rejected("GRAPH_TABLE(MATCH (n:news:Article) COLUMNS (n.title))");
+
+    // Inline WHERE inside a pattern is rejected on purpose — it used to parse
+    // into a field nothing read, so the predicate vanished and the query
+    // returned unfiltered rows. The reference documents the MATCH-level form.
+    rejected("GRAPH_TABLE(MATCH (n:Page WHERE n.status = 'published') COLUMNS (n.title))");
+    ok("GRAPH_TABLE(MATCH (n:Page) WHERE n.status = 'published' COLUMNS (n.title))");
+
     // NOTE: `COLUMNS (p)` deliberately PARSES. A bare path variable is rejected
     // later, at validation, by `path_accessors::path_is_not_selectable`, whose
     // message names the accessors — proven end to end by
