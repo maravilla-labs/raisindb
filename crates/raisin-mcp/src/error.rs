@@ -49,6 +49,26 @@ pub enum McpError {
     #[error("Function failed: {0}")]
     FunctionFailed(String),
 
+    /// The request's protocol version is unknown or unsupported.
+    ///
+    /// Carries the versions this server does support, which the error's `data`
+    /// member reports alongside the requested one so the client can pick a
+    /// mutually supported revision and retry.
+    #[error("Unsupported protocol version: {requested}")]
+    UnsupportedProtocolVersion {
+        /// The version the client asked for.
+        requested: String,
+    },
+
+    /// A required per-request client capability was not declared.
+    #[error("Missing required client capability: {0}")]
+    MissingClientCapability(String),
+
+    /// HTTP headers disagree with the request body, or a required header is
+    /// missing or malformed. The transport answers `400` for this.
+    #[error("Header mismatch: {0}")]
+    HeaderMismatch(String),
+
     /// Underlying RaisinDB error (storage, validation, auth, functions, ...).
     #[error(transparent)]
     Raisin(#[from] raisin_error::Error),
@@ -89,11 +109,38 @@ impl McpError {
         Self::FunctionFailed(msg.into())
     }
 
+    /// Construct an unsupported-protocol-version error.
+    pub fn unsupported_protocol_version(requested: impl Into<String>) -> Self {
+        Self::UnsupportedProtocolVersion {
+            requested: requested.into(),
+        }
+    }
+
+    /// Construct a missing-client-capability error.
+    pub fn missing_client_capability(msg: impl Into<String>) -> Self {
+        Self::MissingClientCapability(msg.into())
+    }
+
+    /// Construct a header-mismatch error.
+    pub fn header_mismatch(msg: impl Into<String>) -> Self {
+        Self::HeaderMismatch(msg.into())
+    }
+
     /// Map this error onto the JSON-RPC 2.0 error code used on the wire.
     ///
-    /// Codes follow the JSON-RPC spec reserved range where applicable
-    /// (`-32700` parse, `-32600` invalid request, `-32601` method not found,
-    /// `-32602` invalid params) and a server-defined range otherwise.
+    /// Codes follow the JSON-RPC reserved range where applicable (`-32700`
+    /// parse, `-32600` invalid request, `-32601` method not found, `-32602`
+    /// invalid params).
+    ///
+    /// MCP partitions the implementation-defined range: `-32000..-32019` is
+    /// ours to use, while `-32020..-32099` is reserved for codes the spec
+    /// itself defines — `-32020` header mismatch, `-32021` missing client
+    /// capability, `-32022` unsupported protocol version. Codes from earlier
+    /// revisions are reserved and never reused, which is why `FunctionFailed`
+    /// no longer maps to `-32002`: that was "resource not found" up to
+    /// 2025-11-25 (now `-32602`), and reusing it would make a tool's own
+    /// failure indistinguishable from a missing resource to any client that
+    /// still knows the old meaning.
     pub fn code(&self) -> i32 {
         match self {
             Self::Parse(_) => -32700,
@@ -101,9 +148,31 @@ impl McpError {
             Self::NotFound(_) => -32601,
             Self::InvalidParams(_) => -32602,
             Self::Unauthorized(_) => -32001,
-            Self::FunctionFailed(_) => -32002,
+            Self::FunctionFailed(_) => -32003,
+            Self::HeaderMismatch(_) => -32020,
+            Self::MissingClientCapability(_) => -32021,
+            Self::UnsupportedProtocolVersion { .. } => -32022,
             Self::Raisin(_) => -32000,
             Self::Serialization(_) => -32603,
+        }
+    }
+
+    /// The `data` member the spec requires for certain error codes.
+    ///
+    /// `-32022` MUST carry `{ supported, requested }` so the client can choose
+    /// a mutually supported revision and retry; `-32021` MUST carry
+    /// `{ requiredCapabilities }`. Returning `None` leaves `data` off entirely,
+    /// which is correct for every other variant.
+    pub fn data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::UnsupportedProtocolVersion { requested } => Some(serde_json::json!({
+                "supported": crate::protocol::SUPPORTED_PROTOCOL_VERSIONS,
+                "requested": requested,
+            })),
+            Self::MissingClientCapability(capability) => Some(serde_json::json!({
+                "requiredCapabilities": { capability.clone(): {} },
+            })),
+            _ => None,
         }
     }
 }

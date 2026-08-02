@@ -689,8 +689,7 @@ async fn a_fork_inherits_graph_configs_but_not_the_derived_projection() -> Resul
 
     // The derived projection, written straight to the CF the way the background
     // compute persists it.
-    let projection_key =
-        raisin_rocksdb::keys::graph_projection_key(TENANT, REPO, MAIN, "pagerank");
+    let projection_key = raisin_rocksdb::keys::graph_projection_key(TENANT, REPO, MAIN, "pagerank");
     let handle = env
         .storage
         .db()

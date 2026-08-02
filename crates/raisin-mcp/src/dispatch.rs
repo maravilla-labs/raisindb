@@ -24,9 +24,12 @@ use serde_json::{json, Value};
 use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
 use crate::protocol::{
-    CallToolParams, CallToolResult, ContentBlock, InitializeResult, ListResourcesResult,
-    ListToolsResult, ReadResourceParams, ReadResourceResult, ResourcesCapability,
-    ServerCapabilities, ServerInfo, SubscribeResourceParams, ToolsCapability, PROTOCOL_VERSION,
+    is_legacy_handshake, CallToolParams, CallToolResult, ContentBlock, DiscoverResult,
+    InitializeParams, InitializeResult, ListResourcesResult, ListToolsResult, ReadResourceParams,
+    ReadResourceResult, RequestMeta, ResourcesCapability, ServerCapabilities, ServerInfo,
+    SubscribeResourceParams, SubscriptionFilter, SubscriptionsListenParams, ToolsCapability,
+    CACHE_SCOPE_PRIVATE, META_CLIENT_CAPABILITIES, META_SERVER_INFO, PROTOCOL_VERSION,
+    RESULT_TYPE_COMPLETE, SUPPORTED_PROTOCOL_VERSIONS, UI_EXTENSION_ID, UI_MIME_TYPE,
 };
 use crate::registry::ToolRegistry;
 use crate::resources::{NodeResourceProvider, ResourceContents};
@@ -39,6 +42,22 @@ use crate::services::SharedAssetReader;
 /// including the `#fragment` keeps two tools that share one SPA file but bind to
 /// different routes on distinct, correctly-cached resource URIs.
 const UI_RESOURCE_SCHEME: &str = "ui";
+
+/// Cache TTL for `server/discover`, in ms.
+///
+/// Capabilities change only when the server node is edited, but a stale answer
+/// hides a newly granted tool, so keep it short rather than clever.
+const DISCOVER_TTL_MS: u64 = 60_000;
+
+/// Cache TTL for `tools/list` and `resources/list`, in ms. Both are derived
+/// from the caller's scopes and the server descriptor.
+const LIST_TTL_MS: u64 = 60_000;
+
+/// Cache TTL for `resources/read`, in ms.
+///
+/// Node content changes whenever anyone writes, and this server has no
+/// revalidation channel, so a read is only briefly reusable.
+const READ_TTL_MS: u64 = 5_000;
 
 /// Routes decoded MCP methods to the tool registry and resource provider.
 pub struct Dispatcher {
@@ -104,17 +123,26 @@ impl Dispatcher {
         self.resources.as_ref()
     }
 
-    /// Capabilities advertised in the `initialize` response.
-    pub fn capabilities(&self) -> ServerCapabilities {
+    /// Capabilities advertised by `server/discover`.
+    ///
+    /// The MCP Apps extension is declared only when the caller declared it too.
+    /// `ServerCapabilities.extensions` is first-class in 2026-07-28, and
+    /// mirroring the client's `mimeTypes` keeps the declaration honest: we
+    /// never claim a content type it did not offer.
+    pub fn capabilities(&self, meta: &RequestMeta) -> ServerCapabilities {
         let resources = self.resources.as_ref().map(|provider| ResourcesCapability {
             subscribe: provider.supports_subscribe(),
             list_changed: false,
         });
+        let extensions = meta
+            .supports_ui()
+            .then(|| json!({ UI_EXTENSION_ID: { "mimeTypes": [UI_MIME_TYPE] } }));
         ServerCapabilities {
             tools: Some(ToolsCapability {
                 list_changed: false,
             }),
             resources,
+            extensions,
         }
     }
 
@@ -127,17 +155,96 @@ impl Dispatcher {
         identity: &McpIdentity,
         request: &crate::protocol::JsonRpcRequest,
     ) -> Result<Value> {
+        let meta = RequestMeta::from_request(request);
+        // `initialize` IS the legacy negotiation, so it cannot be subject to
+        // the negotiation it predates.
+        if request.method != "initialize" {
+            Self::negotiate(&meta)?;
+        }
         self.authorize_session(identity)?;
 
         match request.method.as_str() {
-            "initialize" => self.handle_initialize(),
+            "initialize" => self.handle_initialize(request),
+            "server/discover" => self.handle_discover(&meta),
             "tools/list" => self.handle_tools_list(identity),
             "tools/call" => self.handle_tools_call(identity, request).await,
             "resources/list" => self.handle_resources_list(identity),
             "resources/read" => self.handle_resources_read(identity, request).await,
+            "subscriptions/listen" => self.handle_subscriptions_listen(identity, request),
+            // Legacy per-URI subscription, replaced by `subscriptions/listen`.
             "resources/subscribe" => self.handle_resources_subscribe(identity, request),
             other => Err(McpError::not_found(format!("unknown method: {other}"))),
         }
+    }
+
+    /// Enforce the per-request negotiation `_meta` carries in 2026-07-28.
+    ///
+    /// The revision REQUIRES both `protocolVersion` and `clientCapabilities` on
+    /// every request, and forbids inferring capabilities from earlier ones —
+    /// there is no handshake left to remember them from, since `initialize` was
+    /// removed.
+    ///
+    /// Applied uniformly, including to `server/discover`: `RequestParams._meta`
+    /// is required on every request in the schema, and a client that names an
+    /// unsupported version still recovers, because the `-32022` error's `data`
+    /// carries the `supported` list it needs to retry with.
+    fn negotiate(meta: &RequestMeta) -> Result<()> {
+        match meta.protocol_version.as_deref() {
+            Some(version) if SUPPORTED_PROTOCOL_VERSIONS.contains(&version) => {
+                // A client that negotiated an older revision through
+                // `initialize` has no per-request `_meta` to give; requiring it
+                // would refuse the very clients the version list admits.
+                if is_legacy_handshake(version) {
+                    return Ok(());
+                }
+            }
+            Some(version) => return Err(McpError::unsupported_protocol_version(version)),
+            // Absent `_meta` means a pre-2026-07-28 client mid-session: it
+            // negotiated at `initialize` and the revision had no such field.
+            None => return Ok(()),
+        }
+        if meta.client_capabilities.is_none() {
+            return Err(McpError::invalid_params(format!(
+                "missing required `_meta.{META_CLIENT_CAPABILITIES}`"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The legacy `initialize` handshake, for clients predating 2026-07-28.
+    ///
+    /// The reply echoes the client's requested revision when we support it, so
+    /// the connection settles on the newest revision BOTH sides speak rather
+    /// than on a version the server picked alone. Hardcoding one is what left
+    /// this server answering `2025-06-18` to clients asking for `2025-11-25`.
+    fn handle_initialize(&self, request: &crate::protocol::JsonRpcRequest) -> Result<Value> {
+        let params: InitializeParams = request.decode_params().unwrap_or(InitializeParams {
+            protocol_version: String::new(),
+            capabilities: Value::Null,
+            client_info: Value::Null,
+        });
+        let agreed = if SUPPORTED_PROTOCOL_VERSIONS.contains(&params.protocol_version.as_str()) {
+            params.protocol_version.clone()
+        } else {
+            // Unknown revision: answer with our newest and let the client
+            // decide whether it can proceed.
+            PROTOCOL_VERSION.to_string()
+        };
+        let meta = RequestMeta {
+            protocol_version: Some(agreed.clone()),
+            client_capabilities: Some(params.capabilities),
+            client_info: Some(params.client_info),
+        };
+        let result = InitializeResult {
+            protocol_version: agreed,
+            capabilities: self.capabilities(&meta),
+            server_info: ServerInfo {
+                name: self.descriptor.name.clone(),
+                version: self.descriptor.version.clone(),
+            },
+            instructions: self.descriptor.instructions.clone(),
+        };
+        Ok(serde_json::to_value(result)?)
     }
 
     /// Reject sessions that may not open this server.
@@ -165,17 +272,47 @@ impl Dispatcher {
         }
     }
 
-    fn handle_initialize(&self) -> Result<Value> {
-        let result = InitializeResult {
-            protocol_version: PROTOCOL_VERSION.to_string(),
-            capabilities: self.capabilities(),
-            server_info: ServerInfo {
-                name: self.descriptor.name.clone(),
-                version: self.descriptor.version.clone(),
-            },
+    /// `server/discover` — the 2026-07-28 replacement for `initialize`.
+    ///
+    /// Servers MUST implement it. Unlike the handshake it replaces it
+    /// establishes no session: it advertises what this server can do, and the
+    /// client then states its own version and capabilities on every request.
+    fn handle_discover(&self, meta: &RequestMeta) -> Result<Value> {
+        let mut result = serde_json::to_value(DiscoverResult {
+            result_type: RESULT_TYPE_COMPLETE.to_string(),
+            supported_versions: SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .map(|v| v.to_string())
+                .collect(),
+            capabilities: self.capabilities(meta),
             instructions: self.descriptor.instructions.clone(),
+            // Capabilities are derived from the caller's visible tool set, so
+            // this is per-identity and must not be shared across auth contexts.
+            ttl_ms: DISCOVER_TTL_MS,
+            cache_scope: CACHE_SCOPE_PRIVATE.to_string(),
+        })?;
+        self.attach_server_info(&mut result);
+        Ok(result)
+    }
+
+    /// Report this server's identity in a result's `_meta`, which the spec says
+    /// servers SHOULD include on every response.
+    fn attach_server_info(&self, result: &mut Value) {
+        let Some(object) = result.as_object_mut() else {
+            return;
         };
-        Ok(serde_json::to_value(result)?)
+        let meta = object
+            .entry("_meta".to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert(
+                META_SERVER_INFO.to_string(),
+                json!({
+                    "name": self.descriptor.name.clone(),
+                    "version": self.descriptor.version.clone(),
+                }),
+            );
+        }
     }
 
     fn handle_tools_list(&self, identity: &McpIdentity) -> Result<Value> {
@@ -198,7 +335,14 @@ impl Dispatcher {
             }
             entries.push(value);
         }
-        Ok(json!({ "tools": entries }))
+        let mut result = json!({
+            "resultType": RESULT_TYPE_COMPLETE,
+            "tools": entries,
+            "ttlMs": LIST_TTL_MS,
+            "cacheScope": CACHE_SCOPE_PRIVATE,
+        });
+        self.attach_server_info(&mut result);
+        Ok(result)
     }
 
     /// Canonical `ui://` URI for a binding under this session (fragment
@@ -329,7 +473,14 @@ impl Dispatcher {
             }
             resources.push(entry);
         }
-        Ok(json!({ "resources": resources }))
+        let mut result = json!({
+            "resultType": RESULT_TYPE_COMPLETE,
+            "resources": resources,
+            "ttlMs": LIST_TTL_MS,
+            "cacheScope": CACHE_SCOPE_PRIVATE,
+        });
+        self.attach_server_info(&mut result);
+        Ok(result)
     }
 
     async fn handle_resources_read(
@@ -348,9 +499,14 @@ impl Dispatcher {
             .as_ref()
             .ok_or_else(|| McpError::not_found("resources are not enabled"))?;
         let contents = provider.read(identity, &params.uri).await?;
-        Ok(serde_json::to_value(ReadResourceResult {
+        let mut result = serde_json::to_value(ReadResourceResult {
+            result_type: RESULT_TYPE_COMPLETE.to_string(),
             contents: vec![contents],
-        })?)
+            ttl_ms: READ_TTL_MS,
+            cache_scope: CACHE_SCOPE_PRIVATE.to_string(),
+        })?;
+        self.attach_server_info(&mut result);
+        Ok(result)
     }
 
     /// Serve a `ui://` widget resource (MCP Apps SEP-1865).
@@ -438,9 +594,17 @@ impl Dispatcher {
                 content["_meta"] = json!({ "ui": meta });
             }
         }
-        Ok(json!({ "contents": [content] }))
+        let mut result = json!({
+            "resultType": RESULT_TYPE_COMPLETE,
+            "contents": [content],
+            "ttlMs": READ_TTL_MS,
+            "cacheScope": CACHE_SCOPE_PRIVATE,
+        });
+        self.attach_server_info(&mut result);
+        Ok(result)
     }
 
+    /// Legacy `resources/subscribe`: one URI per call, no filter, no stream id.
     fn handle_resources_subscribe(
         &self,
         identity: &McpIdentity,
@@ -451,12 +615,55 @@ impl Dispatcher {
             .as_ref()
             .ok_or_else(|| McpError::not_found("resources are not enabled"))?;
         let params: SubscribeResourceParams = request.decode_params()?;
-
-        // Validate the subscription up front; the transport owns the resulting
-        // stream (it forwards `notifications/resources/updated` frames). The
-        // engine confirms the subscription synchronously here.
         let _ = provider.subscribe(identity, &params.uri)?;
         Ok(json!({ "subscribed": true, "uri": params.uri }))
+    }
+
+    /// `subscriptions/listen` — the 2026-07-28 replacement for
+    /// `resources/subscribe`.
+    ///
+    /// One long-lived stream now carries every notification type the client
+    /// opts into, rather than one RPC per resource URI. Each type is opt-in and
+    /// the server MUST NOT send one that was not requested, so the filter is
+    /// validated here and echoed back — narrowed to what this server can
+    /// actually produce — in `notifications/subscriptions/acknowledged`, which
+    /// the transport must emit before any notification on the stream.
+    fn handle_subscriptions_listen(
+        &self,
+        identity: &McpIdentity,
+        request: &crate::protocol::JsonRpcRequest,
+    ) -> Result<Value> {
+        let params: SubscriptionsListenParams = request.decode_params()?;
+        let requested = params.notifications;
+
+        let provider = self.resources.as_ref();
+        let subscribe_supported = provider.is_some_and(|p| p.supports_subscribe());
+
+        // Validate every requested resource subscription up front, so a bad URI
+        // is reported now rather than as silence on the stream.
+        let mut resource_subscriptions = Vec::new();
+        if let (Some(provider), true) = (provider, subscribe_supported) {
+            for uri in &requested.resource_subscriptions {
+                let _ = provider.subscribe(identity, uri)?;
+                resource_subscriptions.push(uri.clone());
+            }
+        }
+
+        // Report only what we can honour: this server emits no list-changed
+        // notifications, so echoing them back would promise a stream the client
+        // would wait on forever.
+        let granted = SubscriptionFilter {
+            tools_list_changed: false,
+            prompts_list_changed: false,
+            resources_list_changed: false,
+            resource_subscriptions,
+        };
+        let mut result = json!({
+            "resultType": RESULT_TYPE_COMPLETE,
+            "acknowledged": granted,
+        });
+        self.attach_server_info(&mut result);
+        Ok(result)
     }
 }
 
@@ -497,6 +704,7 @@ fn ui_resource_uri(workspace: &str, entry: &str) -> String {
 #[cfg(test)]
 mod ui_tests {
     use super::*;
+    use crate::protocol::META_PROTOCOL_VERSION;
 
     #[test]
     fn ui_resource_uri_strips_leading_slash() {
@@ -504,6 +712,94 @@ mod ui_tests {
             ui_resource_uri("assets", "/widgets/x/index.html"),
             "ui://assets/widgets/x/index.html"
         );
+    }
+
+    fn request_with_meta(meta: Value) -> crate::protocol::JsonRpcRequest {
+        crate::protocol::JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({ "_meta": meta })),
+        }
+    }
+
+    #[test]
+    fn current_revision_requires_per_request_negotiation() {
+        // 2026-07-28 removed `initialize`, so both fields are required on every
+        // request and may not be remembered from an earlier one.
+        let ok = RequestMeta::from_request(&request_with_meta(json!({
+            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+            META_CLIENT_CAPABILITIES: {},
+        })));
+        assert!(Dispatcher::negotiate(&ok).is_ok());
+
+        let no_caps = RequestMeta::from_request(&request_with_meta(json!({
+            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+        })));
+        assert!(Dispatcher::negotiate(&no_caps).is_err());
+    }
+
+    #[test]
+    fn legacy_clients_are_not_asked_for_fields_their_revision_lacks() {
+        // Claude Desktop 1.24012.9 tops out at 2025-11-25 and sends no
+        // per-request `_meta` at all. Demanding it would refuse every client
+        // that exists today at its first message after `initialize`.
+        let legacy = RequestMeta::from_request(&request_with_meta(json!({
+            META_PROTOCOL_VERSION: "2025-11-25",
+        })));
+        assert!(Dispatcher::negotiate(&legacy).is_ok());
+
+        let absent = RequestMeta::from_request(&crate::protocol::JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        });
+        assert!(Dispatcher::negotiate(&absent).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_revision_is_refused_with_the_supported_list() {
+        let meta = RequestMeta::from_request(&request_with_meta(json!({
+            META_PROTOCOL_VERSION: "1999-01-01",
+            META_CLIENT_CAPABILITIES: {},
+        })));
+        let err = Dispatcher::negotiate(&meta).unwrap_err();
+        assert_eq!(err.code(), -32022);
+        // The client recovers by picking from `supported` and retrying, so the
+        // data member is load-bearing, not decoration.
+        let data = err.data().expect("-32022 must carry data");
+        assert_eq!(data["requested"], json!("1999-01-01"));
+        assert!(data["supported"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(PROTOCOL_VERSION)));
+    }
+
+    #[test]
+    fn ui_extension_is_declared_only_when_the_client_declares_it() {
+        let meta = RequestMeta::from_request(&request_with_meta(json!({
+            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+            META_CLIENT_CAPABILITIES: {
+                "extensions": { UI_EXTENSION_ID: { "mimeTypes": [UI_MIME_TYPE] } }
+            },
+        })));
+        assert!(meta.supports_ui());
+
+        let without = RequestMeta::from_request(&request_with_meta(json!({
+            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+            META_CLIENT_CAPABILITIES: {},
+        })));
+        assert!(!without.supports_ui());
+
+        // A client offering only some other mime type has not offered ours.
+        let other = RequestMeta::from_request(&request_with_meta(json!({
+            META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+            META_CLIENT_CAPABILITIES: {
+                "extensions": { UI_EXTENSION_ID: { "mimeTypes": ["text/plain"] } }
+            },
+        })));
+        assert!(!other.supports_ui());
     }
 
     #[test]
