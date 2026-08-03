@@ -46,6 +46,7 @@ pub mod traits;
 pub mod services {
     pub mod archetype_resolver;
     pub mod block_translation_service;
+    pub mod derived_cache_registry;
     pub mod element_type_resolver;
     pub mod indexing_policy;
     pub mod node_service;
@@ -85,6 +86,7 @@ pub use services::block_translation_service::{
     BatchBlockTranslationUpdate, BatchBlockUpdateResult, BlockTranslationService,
     BlockTranslationUpdate, BlockTranslationUpdateResult,
 };
+pub use services::derived_cache_registry::{invalidate_all_derived_caches, register_invalidator};
 pub use services::element_type_resolver::{ElementTypeResolver, ResolvedElementType};
 pub use services::indexing_policy::IndexingPolicy;
 pub use services::node_service::NodeService;

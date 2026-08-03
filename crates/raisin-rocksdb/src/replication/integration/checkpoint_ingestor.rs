@@ -209,6 +209,18 @@ impl raisin_replication::CheckpointIngestor for RocksDbCheckpointIngestor {
         // 3. Unnecessary overhead
         //
         // Checkpoint restoration is a pure data copy operation - no initialization needed.
+        //
+        // But "no events" has a consequence beyond the init handlers: every
+        // in-memory cache derived from stored data keeps itself correct by
+        // listening for those same events, so all of them are now silently stale
+        // — they describe the database as it was BEFORE this bulk copy. The SQL
+        // workspace catalog is the sharp edge: it would answer "unknown table"
+        // for every workspace this checkpoint just brought in.
+        //
+        // This is the blunt, correct response for a bulk path. It does not
+        // re-initialize anything, so it does not reintroduce the problems the
+        // note above describes.
+        raisin_core::invalidate_all_derived_caches();
 
         Ok(num_keys)
     }
