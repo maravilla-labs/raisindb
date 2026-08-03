@@ -122,6 +122,12 @@ export default function AccessControlSettings() {
   // CORS config state
   const [corsConfig, setCorsConfig] = useState<CorsConfig>(DEFAULT_CORS_CONFIG)
   const [originalCorsConfig, setOriginalCorsConfig] = useState<CorsConfig>(DEFAULT_CORS_CONFIG)
+  // Every property currently on the `raisin:RepoAuthConfig` node, so a save can
+  // put back the fields this page does not edit. The node update is a PUT and
+  // full-replaces `properties`, so writing only the two fields shown here would
+  // silently wipe `default_roles`, `welcome_message`, `allow_registration` and
+  // the rest.
+  const [repoAuthProperties, setRepoAuthProperties] = useState<Record<string, unknown>>({})
   const [newCorsOrigin, setNewCorsOrigin] = useState('')
 
   // Messaging config state
@@ -161,12 +167,12 @@ export default function AccessControlSettings() {
       // Load access control config
       const node = await nodesApi.getAtHead(repo, branch, accessWorkspace, accessConfigPath)
 
-      const anonymousValue = node.properties?.anonymous_enabled
-      const anonymousEnabled =
-        anonymousValue === undefined || anonymousValue === null ? null : (anonymousValue as boolean)
-
+      // `anonymous_enabled` is NOT read from this node — see `loadConfig`'s CORS
+      // block below, which reads it from the `raisin:RepoAuthConfig` node the
+      // server actually consults. It is initialised to `null` (inherit) here and
+      // overwritten there.
       const nodeConfig: AccessControlConfig = {
-        anonymous_enabled: anonymousEnabled,
+        anonymous_enabled: null,
         stewardship_enabled:
           ((node.properties?.stewardship_enabled ?? node.properties?.enabled) as boolean) ??
           DEFAULT_ACCESS_CONFIG.stewardship_enabled,
@@ -196,14 +202,38 @@ export default function AccessControlSettings() {
       setConfig(nodeConfig)
       setOriginalConfig(nodeConfig)
 
-      // Load CORS config from system workspace
+      // Load repo auth config from the system workspace: CORS origins AND the
+      // anonymous-access override.
+      //
+      // Both live on the SAME `raisin:RepoAuthConfig` node, because that is the
+      // node the server reads — `is_anonymous_enabled_for_context`
+      // (raisin-transport-http/src/middleware/auth.rs) looks up
+      // `/config/repos/{repo}` in `raisin:system` and returns its
+      // `anonymous_enabled`, falling back to the tenant config when the
+      // property is absent.
+      //
+      // This page previously read and wrote `anonymous_enabled` on
+      // `/config/stewardship` in `raisin:access_control`. That saved without
+      // error and read back consistently, so the UI showed "Enable" while the
+      // server — reading a different node in a different workspace — kept
+      // answering `false`. Anonymous requests 404'd with the toggle apparently
+      // on, and nothing logged why.
       try {
-        const corsNode = await nodesApi.getAtHead(repo, branch, systemWorkspace, corsConfigPath)
+        const repoAuthNode = await nodesApi.getAtHead(repo, branch, systemWorkspace, corsConfigPath)
         const loadedCorsConfig: CorsConfig = {
-          cors_allowed_origins: (corsNode.properties?.cors_allowed_origins as string[]) ?? [],
+          cors_allowed_origins: (repoAuthNode.properties?.cors_allowed_origins as string[]) ?? [],
         }
         setCorsConfig(loadedCorsConfig)
         setOriginalCorsConfig(loadedCorsConfig)
+        setRepoAuthProperties(repoAuthNode.properties ?? {})
+
+        // Absent property means "inherit from the tenant setting" — which is
+        // exactly how the server treats it, so `null` is the honest mapping.
+        const anonymousValue = repoAuthNode.properties?.anonymous_enabled
+        const anonymousEnabled =
+          anonymousValue === undefined || anonymousValue === null ? null : (anonymousValue as boolean)
+        setConfig((prev) => ({ ...prev, anonymous_enabled: anonymousEnabled }))
+        setOriginalConfig((prev) => ({ ...prev, anonymous_enabled: anonymousEnabled }))
       } catch {
         setCorsConfig(DEFAULT_CORS_CONFIG)
         setOriginalCorsConfig(DEFAULT_CORS_CONFIG)
@@ -268,10 +298,6 @@ export default function AccessControlSettings() {
         allow_minor_login: config.allow_minor_login,
       }
 
-      if (config.anonymous_enabled !== null) {
-        properties.anonymous_enabled = config.anonymous_enabled
-      }
-
       await nodesApi.update(repo, branch, accessWorkspace, accessConfigPath, {
         properties,
         commit: {
@@ -280,15 +306,35 @@ export default function AccessControlSettings() {
         },
       })
 
-      // Save CORS config if changed
-      if (JSON.stringify(corsConfig) !== JSON.stringify(originalCorsConfig)) {
+      // Save the repo auth config — CORS origins and the anonymous override
+      // together, because they share one `raisin:RepoAuthConfig` node.
+      //
+      // Written whenever EITHER changed: keying this on the CORS diff alone
+      // would silently drop an anonymous-access change made on its own, which
+      // is the common case on this page.
+      const anonymousChanged = config.anonymous_enabled !== originalConfig.anonymous_enabled
+      const corsChanged = JSON.stringify(corsConfig) !== JSON.stringify(originalCorsConfig)
+
+      if (corsChanged || anonymousChanged) {
+        // `null` means "inherit from the tenant setting". The server treats an
+        // ABSENT property as inherit, so clearing the override has to remove the
+        // key rather than write `false` — writing `false` would pin the repo to
+        // "disabled" and silently override a tenant that enables it.
+        const nextRepoAuth: Record<string, unknown> = {
+          ...repoAuthProperties,
+          cors_allowed_origins: corsConfig.cors_allowed_origins,
+        }
+        if (config.anonymous_enabled === null) {
+          delete nextRepoAuth.anonymous_enabled
+        } else {
+          nextRepoAuth.anonymous_enabled = config.anonymous_enabled
+        }
+
         try {
           await nodesApi.update(repo, branch, systemWorkspace, corsConfigPath, {
-            properties: {
-              cors_allowed_origins: corsConfig.cors_allowed_origins,
-            },
+            properties: nextRepoAuth,
             commit: {
-              message: 'Update CORS configuration for auth endpoints',
+              message: 'Update repository auth configuration (CORS + anonymous access)',
               actor: 'admin-console',
             },
           })
@@ -297,15 +343,14 @@ export default function AccessControlSettings() {
           await nodesApi.create(repo, branch, systemWorkspace, repoConfigParentPath, {
             name: repo,
             node_type: 'raisin:RepoAuthConfig',
-            properties: {
-              cors_allowed_origins: corsConfig.cors_allowed_origins,
-            },
+            properties: nextRepoAuth,
             commit: {
-              message: 'Create CORS configuration for auth endpoints',
+              message: 'Create repository auth configuration (CORS + anonymous access)',
               actor: 'admin-console',
             },
           })
         }
+        setRepoAuthProperties(nextRepoAuth)
         setOriginalCorsConfig(corsConfig)
       }
 

@@ -118,12 +118,28 @@ async fn resolve_and_serve(
     // (principal-independent) and cached, so this runs ahead of — and cheaper
     // than — the per-asset RLS read below. `Denied` and lookup errors alike
     // fail closed as 404 so folder/asset existence is never leaked.
+    // Both gates below fail closed as 404 so existence is never leaked. That is
+    // right for the response and useless for an operator: a missing folder, an
+    // unreadable node and a genuinely absent file are indistinguishable from
+    // outside AND produced no log line at all. Name which gate rejected, at
+    // debug, so the answer costs one log level rather than a bisect.
     let config = match resolve_serving_policy(state, tenant_id, repo, branch, ws, &node_path).await
     {
         ServingPolicy::Allowed(config) => config,
-        ServingPolicy::Denied => return Err(StatusCode::NOT_FOUND),
+        ServingPolicy::Denied => {
+            tracing::debug!(
+                tenant_id,
+                repo,
+                branch,
+                ws,
+                path = %node_path,
+                "static serve DENIED: no raisin:StaticSiteFolder covers this path"
+            );
+            return Err(StatusCode::NOT_FOUND);
+        }
     };
 
+    let is_anonymous = auth.is_none();
     let svc = state.node_service_for_context(tenant_id, repo, branch, ws, auth);
 
     // RLS-scoped resolve: a node the caller may not see resolves to `None`.
@@ -134,7 +150,23 @@ async fn resolve_and_serve(
 
     let node = match node {
         Some(node) => node,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => {
+            // The serving policy already passed, so the subtree IS servable —
+            // which makes an unresolvable node here far more likely to be an RLS
+            // denial than a missing file. For an anonymous caller the usual
+            // cause is anonymous access being disabled for the repo, which is
+            // read from `/config/repos/{repo}` in `raisin:system`.
+            tracing::debug!(
+                tenant_id,
+                repo,
+                branch,
+                ws,
+                path = %node_path,
+                is_anonymous,
+                "static serve DENIED: node not visible to caller (missing, or hidden by RLS)"
+            );
+            return Err(StatusCode::NOT_FOUND);
+        }
     };
 
     // A folder (or a trailing-slash request) serves its index document.
