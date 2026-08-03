@@ -142,7 +142,13 @@ properties:
       properties:
         function:
           type: string
-          description: Name of the raisin:Function node to invoke for this tool.
+          description: >
+            PATH of the raisin:Function node to invoke, in the functions
+            workspace - e.g. /lib/studio/mcp-list-stories. Used verbatim as one
+            direct read. This is a path, not a name: a name resolved by listing
+            every raisin:Function node in the workspace and linear-searching it,
+            on every single tool call, so invoking one tool got slower for
+            everyone each time a package shipped another function.
         name:
           type: string
           description: Tool name advertised to clients.

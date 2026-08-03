@@ -391,7 +391,7 @@ fn warn_on_implicit_app_visibility(custom: &crate::server::CustomTool) {
 async fn scan_function_props(
     backend: &Arc<dyn FunctionApi>,
     data_workspaces: &[String],
-) -> Result<Vec<Value>> {
+) -> Result<Vec<(Option<String>, Value)>> {
     let mut workspaces: Vec<&str> = vec![FUNCTIONS_WORKSPACE];
     for ws in data_workspaces {
         if ws != FUNCTIONS_WORKSPACE {
@@ -402,13 +402,19 @@ async fn scan_function_props(
     let mut props = Vec::new();
     for ws in workspaces {
         let table = crate::sql::quote_workspace(ws)?;
-        let sql = format!("SELECT properties FROM {table} WHERE node_type = $1");
+        // `path` comes along so a tool may reference its function by path — one
+        // direct read at invoke time instead of listing every function node.
+        let sql = format!("SELECT path, properties FROM {table} WHERE node_type = $1");
         let rows = backend
             .sql_query(&sql, vec![json!(FUNCTION_NODE_TYPE)])
             .await?;
         for row in rows.as_array().cloned().unwrap_or_default() {
             if let Some(p) = row.get("properties") {
-                props.push(p.clone());
+                let path = row
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                props.push((path, p.clone()));
             }
         }
     }
@@ -429,7 +435,7 @@ pub async fn discover_function_tools(
     let props = scan_function_props(backend, &descriptor.data_policy.workspaces).await?;
     Ok(props
         .iter()
-        .filter_map(CustomTool::from_function_properties)
+        .filter_map(|(_, p)| CustomTool::from_function_properties(p))
         .collect())
 }
 
@@ -498,16 +504,25 @@ pub async fn resolve_plan(
     // schema inheritance and function-side discovery.
     let func_props =
         scan_function_props(discovery_backend, &descriptor.data_policy.workspaces).await?;
-    let meta_by_name: HashMap<String, FunctionMeta> = func_props
-        .iter()
-        .filter_map(FunctionMeta::from_props)
-        .map(|m| (m.name.clone(), m))
-        .collect();
+    // Indexed by BOTH the function's `name` property and its node path, because
+    // a tool may reference either. Schema inheritance failing silently is not a
+    // small bug: a tool that inherits no `outputSchema` returns only a text
+    // block, so its widget receives no structuredContent and renders empty.
+    let mut meta_by_key: HashMap<String, FunctionMeta> = HashMap::new();
+    for (path, props) in &func_props {
+        let Some(meta) = FunctionMeta::from_props(props) else {
+            continue;
+        };
+        if let Some(path) = path {
+            meta_by_key.insert(path.clone(), meta.clone());
+        }
+        meta_by_key.insert(meta.name.clone(), meta);
+    }
 
     // Fill omitted server-side tool fields (description / inputSchema / outputSchema)
     // from the referenced `raisin:Function`.
     for tool in &mut descriptor.custom_tools {
-        if let Some(meta) = meta_by_name.get(&tool.function) {
+        if let Some(meta) = meta_by_key.get(&tool.function) {
             tool.fill_defaults_from(meta);
         }
     }
@@ -515,7 +530,7 @@ pub async fn resolve_plan(
     // Function-side tools, resolved but not yet deduplicated against
     // server-side names — that needs a built registry, which is per-caller.
     let mut function_tools = Vec::new();
-    for props in &func_props {
+    for (_, props) in &func_props {
         if let Some(mut custom) = CustomTool::from_function_properties(props) {
             // A function-side `mcp` block may reference the server's named
             // widgets too; the descriptor resolved only its own tools.

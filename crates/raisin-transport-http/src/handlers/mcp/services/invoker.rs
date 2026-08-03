@@ -12,9 +12,7 @@ use serde_json::Value;
 
 use raisin_models::auth::AuthContext;
 
-use crate::handlers::functions::{
-    build_loaded_function, find_function_node_on_branch, load_function_code_on_branch,
-};
+use crate::handlers::functions::{build_loaded_function, load_function_code_on_branch};
 use crate::state::AppState;
 
 use super::super::api_factory::build_mcp_function_api;
@@ -109,17 +107,26 @@ impl HttpFunctionInvoker {
         // carries `auth`, the function's data API is built with `auth`, and
         // admin escalation stays off — so every node the function reads or
         // writes is RLS-scoped to the authenticated user, never to system.
+        // `function` is the node's PATH in the functions workspace, used
+        // verbatim: one direct read. It used to be a name, which has no index
+        // behind it, so resolving it listed every `raisin:Function` node in the
+        // workspace — materializing and access-filtering each one — and then
+        // linear-searched. That ran on every tool call, so invoking one tool got
+        // slower for everyone each time a package shipped another function.
         let resolve_auth = AuthContext::system();
-        let node = find_function_node_on_branch(
-            &self.state,
-            &self.tenant_id,
-            &self.repo,
-            &self.branch,
-            name,
-            Some(&resolve_auth),
-        )
-        .await
-        .map_err(|e| McpError::not_found(format!("function `{name}`: {e}")))?;
+        let node = self
+            .state
+            .node_service_for_context(
+                &self.tenant_id,
+                &self.repo,
+                &self.branch,
+                "functions",
+                Some(resolve_auth),
+            )
+            .get_by_path(name)
+            .await
+            .map_err(|e| McpError::protocol(format!("resolving function `{name}`: {e}")))?
+            .ok_or_else(|| McpError::not_found(format!("function `{name}` not found")))?;
 
         let code = load_function_code_on_branch(
             &self.state,
