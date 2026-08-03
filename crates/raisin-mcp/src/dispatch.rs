@@ -367,10 +367,15 @@ impl Dispatcher {
     fn ui_resource_meta(&self, ui: &UiBinding) -> Value {
         let mut meta = serde_json::Map::new();
         let declared = match &ui.csp {
-            Some(csp) if !csp.is_empty() => serde_json::to_value(csp).unwrap_or(Value::Null),
+            Some(csp) if !csp.is_empty() => {
+                sanitize_csp_lists(serde_json::to_value(csp).unwrap_or(Value::Null))
+            }
             _ => Value::Null,
         };
-        let csp_value = csp_with_own_origin(declared, self.public_base.as_deref());
+        // `public_base` may be derived from the request's `x-forwarded-host`,
+        // so it gets the same treatment as author-declared origins.
+        let own_origin = self.public_base.as_deref().and_then(sanitize_origin);
+        let csp_value = csp_with_own_origin(declared, own_origin.as_deref());
         if let Some(csp) = csp_value {
             meta.insert("csp".into(), csp);
         }
@@ -528,12 +533,20 @@ impl Dispatcher {
             .split_once('/')
             .ok_or_else(|| McpError::not_found(format!("malformed ui resource uri: {uri}")))?;
 
-        // Resolve the declaring binding FIRST: it carries the mode, which
-        // decides what this resource even is. Serving every binding inline
-        // regardless of mode is what made `mode: uri-list` a silent no-op —
-        // a multi-file widget was handed to the host as `srcdoc`, where its
-        // relative `./assets/*.js` URLs resolve against a null origin and load
-        // nothing.
+        // Resolve the declaring binding FIRST — and REQUIRE one.
+        //
+        // The binding carries the mode, which decides what this resource even
+        // is. It is also the ONLY authorization this path has: a `ui://` read
+        // is reachable by any caller who can open the server, and it does not
+        // pass through the per-tool `scopes` gate that `handle_tools_call`
+        // applies. Defaulting a miss to `UiMode::Html` and reading the asset
+        // anyway turned `ui://{any-workspace}/{any-path}` into an arbitrary
+        // asset reader for every authenticated caller, bounded only by RLS —
+        // the last line of defence, not the intended one. A widget belonging
+        // to a tool gated behind `scopes: ["admin"]` was readable by anyone.
+        //
+        // `visible_descriptors` already filters by the caller's scopes, so
+        // requiring a match here inherits that gate exactly.
         let canonical = {
             let (bare, _fragment) = split_entry(uri);
             bare.to_string()
@@ -543,8 +556,18 @@ impl Dispatcher {
             .visible_descriptors(identity)
             .into_iter()
             .filter_map(|t| t.ui)
-            .find(|ui| self.ui_uri_for(identity, ui) == canonical);
-        let mode = binding.as_ref().map_or(UiMode::Html, |ui| ui.mode);
+            .find(|ui| self.ui_uri_for(identity, ui) == canonical)
+            .ok_or_else(|| {
+                // Deliberately indistinguishable from a genuinely absent
+                // resource: telling an unauthorized caller that a widget
+                // exists is itself a disclosure.
+                tracing::debug!(
+                    uri = %uri,
+                    "ui resource DENIED: no visible tool binding declares this URI"
+                );
+                McpError::not_found(format!("unknown ui resource: {uri}"))
+            })?;
+        let mode = binding.mode;
 
         let mut content = match mode {
             UiMode::Html => {
@@ -588,11 +611,9 @@ impl Dispatcher {
         // Binding metadata (csp/permissions/prefersBorder) rides on the content
         // item — the spec-preferred location, which takes precedence over the
         // listing's copy.
-        if let Some(ui) = binding {
-            let meta = self.ui_resource_meta(&ui);
-            if meta.as_object().is_some_and(|m| !m.is_empty()) {
-                content["_meta"] = json!({ "ui": meta });
-            }
+        let meta = self.ui_resource_meta(&binding);
+        if meta.as_object().is_some_and(|m| !m.is_empty()) {
+            content["_meta"] = json!({ "ui": meta });
         }
         let mut result = json!({
             "resultType": RESULT_TYPE_COMPLETE,
@@ -1013,6 +1034,63 @@ fn find_tag_end(html: &str, tag: &str) -> Option<usize> {
     Some(close + 1)
 }
 
+/// Longest origin we will emit. Nothing legitimate is close to this; the cap
+/// exists so a pathological node property cannot bloat every `resources/read`.
+const MAX_ORIGIN_LEN: usize = 253 + 16;
+
+/// Accept an origin only if it is safe to interpolate into a CSP header.
+///
+/// Hosts build a real `Content-Security-Policy` header by joining these values
+/// with spaces and semicolons, so a value containing `;`, a quote, or a newline
+/// can terminate one directive and inject another. The values reach us from
+/// node properties (author-controlled) and, for `public_base`, from the
+/// `x-forwarded-host` request header (attacker-influenced) — neither is
+/// trustworthy enough to pass through verbatim.
+///
+/// Deliberately strict and deliberately silent: a rejected origin is dropped,
+/// never surfaced as an error. A malformed CSP entry must not turn a working
+/// widget into a failed `resources/read`.
+fn sanitize_origin(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > MAX_ORIGIN_LEN {
+        return None;
+    }
+    // Covers the CSP delimiters plus anything that could break out of a header
+    // line. Control characters include CR/LF, so header splitting is covered.
+    if value
+        .chars()
+        .any(|c| c.is_control() || matches!(c, ';' | ',' | '\'' | '"' | ' ' | '\\'))
+    {
+        return None;
+    }
+    // Require a real scheme://host. A bare host would be interpreted by hosts
+    // as a relative source and match more than the author intended. Wildcard
+    // subdomains (`https://*.example.com`) are legal and preserved.
+    let (scheme, rest) = value.split_once("://")?;
+    if !matches!(scheme, "http" | "https") || rest.is_empty() {
+        return None;
+    }
+    // Reject anything with a path, query or fragment: CSP source expressions
+    // are origins, and a stray `/` changes matching semantics.
+    if rest.contains('/') || rest.contains('?') || rest.contains('#') {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+/// Drop every unsafe entry from each domain list of a serialized [`UiCsp`].
+fn sanitize_csp_lists(mut declared: Value) -> Value {
+    let Some(map) = declared.as_object_mut() else {
+        return declared;
+    };
+    for list in map.values_mut() {
+        if let Some(items) = list.as_array_mut() {
+            items.retain(|item| item.as_str().is_some_and(|s| sanitize_origin(s).is_some()));
+        }
+    }
+    declared
+}
+
 /// Merge the server's own origin into a widget CSP's connect/resource lists,
 /// preserving whatever the binding declared and never duplicating.
 ///
@@ -1043,4 +1121,94 @@ fn csp_with_own_origin(declared: Value, base: Option<&str>) -> Option<Value> {
         }
     }
     Some(Value::Object(csp))
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    // ---- CSP origin sanitization -----------------------------------------
+    //
+    // These values reach a real `Content-Security-Policy` header that the HOST
+    // builds by joining them. Author-declared origins come from node
+    // properties; the server's own origin can come from `x-forwarded-host`.
+    // Neither is trustworthy enough to interpolate verbatim.
+
+    #[test]
+    fn a_plain_origin_survives_sanitization() {
+        assert_eq!(
+            sanitize_origin("https://api.example.com"),
+            Some("https://api.example.com".to_string())
+        );
+        // Wildcard subdomains are a legal CSP source expression.
+        assert_eq!(
+            sanitize_origin("https://*.example.com"),
+            Some("https://*.example.com".to_string())
+        );
+        // Explicit ports are legal.
+        assert_eq!(
+            sanitize_origin("http://localhost:8080"),
+            Some("http://localhost:8080".to_string())
+        );
+    }
+
+    /// THE injection cases. A `;` or a newline ends one CSP directive and
+    /// starts another, so either would let a node property rewrite the whole
+    /// policy — e.g. re-opening `script-src` on an attacker's origin.
+    #[test]
+    fn csp_delimiters_and_newlines_are_rejected() {
+        for bad in [
+            "https://evil.com; script-src *",
+            "https://evil.com\r\nX-Injected: 1",
+            "https://evil.com\nscript-src *",
+            "https://a.com,https://b.com",
+            "'unsafe-inline'",
+            "https://evil.com \"",
+            "https://evil.com'",
+        ] {
+            assert_eq!(sanitize_origin(bad), None, "must reject: {bad:?}");
+        }
+    }
+
+    /// A CSP source is an ORIGIN. A bare host would be read as a relative
+    /// source and match more than the author meant; a path changes matching
+    /// semantics.
+    #[test]
+    fn non_origins_are_rejected() {
+        for bad in [
+            "example.com",
+            "https://example.com/path",
+            "https://example.com?q=1",
+            "https://example.com#f",
+            "javascript://evil",
+            "data:",
+            "",
+            "   ",
+        ] {
+            assert_eq!(sanitize_origin(bad), None, "must reject: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn sanitize_csp_lists_drops_only_the_bad_entries() {
+        let declared = json!({
+            "connectDomains": ["https://good.example", "https://evil.com; script-src *"],
+            "resourceDomains": ["https://cdn.example"],
+        });
+        let cleaned = sanitize_csp_lists(declared);
+        assert_eq!(
+            cleaned["connectDomains"],
+            json!(["https://good.example"]),
+            "the injecting entry is dropped, the good one survives"
+        );
+        assert_eq!(cleaned["resourceDomains"], json!(["https://cdn.example"]));
+    }
+
+    /// A malformed origin must never fail the request — a widget that renders
+    /// with a narrower CSP is strictly better than one that 500s.
+    #[test]
+    fn an_entirely_bad_list_yields_an_empty_list_not_an_error() {
+        let cleaned = sanitize_csp_lists(json!({ "connectDomains": ["nonsense", "also; bad"] }));
+        assert_eq!(cleaned["connectDomains"], json!([]));
+    }
 }

@@ -327,12 +327,50 @@ pub fn assemble_registry(
 
     if let Some(functions) = &services.functions {
         for custom in &descriptor.custom_tools {
-            let tool = crate::data_tools::FunctionTool::new(custom.clone(), functions.clone());
+            let mut custom = custom.clone();
+            default_privileged_tool_to_model_only(&mut custom);
+            let tool = crate::data_tools::FunctionTool::new(custom, functions.clone());
             registry.register(tool)?;
         }
     }
 
     Ok(registry)
+}
+
+/// A scope-gated tool must not become widget-callable by omission.
+///
+/// SEP-1865 defaults `visibility` to `["model", "app"]` when it is absent, so a
+/// tool that declares `scopes` — i.e. one the author considered privileged —
+/// silently becomes callable by the widget as well as the agent. That is the
+/// wrong direction to fail in: a widget renders untrusted DATA and is a
+/// confused deputy within the user's authority, so the privileged surface
+/// should be opt-in, not opt-out.
+///
+/// Stamping an explicit `["model"]` only when the author wrote no `visibility`
+/// keeps `visibility: ["model", "app"]` working for authors who mean it.
+///
+/// Note the limit: `visibility` lives on the UI binding, so this can only speak
+/// for tools that HAVE a widget. A scope-gated tool with no `ui` emits no
+/// `_meta.ui` at all and is left to the host's own defaulting — its real gate
+/// is `scopes`, re-checked on every `tools/call`, which is unaffected by any of
+/// this.
+fn default_privileged_tool_to_model_only(custom: &mut crate::server::CustomTool) {
+    if custom.scopes.is_empty() {
+        return;
+    }
+    let Some(ui) = custom.ui.as_mut() else {
+        return;
+    };
+    if ui.visibility.is_some() {
+        return;
+    }
+    tracing::warn!(
+        tool = %custom.name,
+        scopes = ?custom.scopes,
+        "tool declares scopes but no ui.visibility; defaulting to [\"model\"] so it \
+         is not widget-callable. Set visibility explicitly to silence this."
+    );
+    ui.visibility = Some(vec!["model".to_string()]);
 }
 
 /// Scan the `properties` of `raisin:Function` nodes that may feed MCP tools.
