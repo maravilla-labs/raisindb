@@ -149,6 +149,18 @@ impl Dispatcher {
             .read_asset(identity, workspace, &format!("/{path}"))
             .await?;
         let html = String::from_utf8_lossy(&asset.bytes).into_owned();
+        // Deliberately INFO, not debug. Whether a host fetched the widget at all
+        // is the single fact that separates "our resource is wrong" from "this
+        // host does not implement SEP-1865", and it was unobservable: the
+        // server logs no method names, so an absent read and a failed read look
+        // identical in the log. Diagnosing that cost several wrong theories.
+        tracing::info!(
+            %uri,
+            bytes = asset.bytes.len(),
+            mime = UI_MIME_TYPE,
+            base_href = binding.wants_base_href(),
+            "ui resource SERVED"
+        );
         let base_href = binding.wants_base_href().then(|| {
             self.public_base.as_deref().map(|base| {
                 widget_base_href(base, &identity.repo, &identity.branch, workspace, path)

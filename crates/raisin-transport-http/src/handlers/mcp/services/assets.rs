@@ -24,6 +24,13 @@ pub(in crate::handlers::mcp) struct HttpAssetReader {
     state: AppState,
     tenant_id: String,
     repo: String,
+    /// The caller's RESOLVED auth context, as resolved once for the request.
+    ///
+    /// Not rebuilt from the [`McpIdentity`]: that reconstruction keeps only the
+    /// subject and roles, dropping groups, the local user id and — decisively —
+    /// the resolved permissions, which RLS treats as deny-all. The symptom is
+    /// silent, because a denied node is `None` and `None` reads as "not found".
+    auth: Option<raisin_models::auth::AuthContext>,
 }
 
 impl HttpAssetReader {
@@ -32,11 +39,13 @@ impl HttpAssetReader {
         state: AppState,
         tenant_id: impl Into<String>,
         repo: impl Into<String>,
+        auth: Option<raisin_models::auth::AuthContext>,
     ) -> Self {
         Self {
             state,
             tenant_id: tenant_id.into(),
             repo: repo.into(),
+            auth,
         }
     }
 
@@ -46,7 +55,13 @@ impl HttpAssetReader {
         workspace: &str,
         path: &str,
     ) -> raisin_mcp::Result<AssetBytes> {
-        let auth = identity.to_auth_context();
+        // Prefer the resolved context; fall back to the identity only when the
+        // request carried none (an anonymous caller), where there is nothing to
+        // resolve and the reconstruction is equivalent.
+        let auth = self
+            .auth
+            .clone()
+            .unwrap_or_else(|| identity.to_auth_context());
 
         let nodes_svc = self.state.node_service_for_context(
             &self.tenant_id,

@@ -176,6 +176,7 @@ impl Dispatcher {
             "tools/list" => self.handle_tools_list(identity),
             "tools/call" => self.handle_tools_call(identity, request).await,
             "resources/list" => self.handle_resources_list(identity),
+            "resources/templates/list" => self.handle_resource_templates_list(),
             "resources/read" => self.handle_resources_read(identity, request).await,
             "subscriptions/listen" => self.handle_subscriptions_listen(identity, request),
             // Legacy per-URI subscription, replaced by `subscriptions/listen`.

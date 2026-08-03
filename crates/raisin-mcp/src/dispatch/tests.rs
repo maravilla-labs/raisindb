@@ -527,4 +527,48 @@ mod conformance_tests {
         let html = "<html><head></head></html>".to_string();
         assert_eq!(inject_widget_preamble(html.clone(), None, None), html);
     }
+
+    /// `resources/templates/list` is standard MCP (since 2024-11-05) and part
+    /// of the `resources` capability, so a client that sees `resources`
+    /// advertised may call it while discovering. This server answered
+    /// `-32601 unknown method`, and a client that treats a discovery error as
+    /// fatal never went on to `resources/read` — so a working widget was never
+    /// fetched and the host reported it as a failure to load the app.
+    ///
+    /// For a server with no templates the correct answer is an EMPTY LIST.
+    /// Never an error: advertising a capability and then refusing its methods
+    /// is what broke this.
+    #[test]
+    fn resource_templates_list_answers_instead_of_erroring() {
+        use crate::dispatch::Dispatcher;
+        use crate::registry::ToolRegistry;
+        use crate::server::{DataPolicy, McpServerDescriptor};
+
+        let descriptor = McpServerDescriptor {
+            name: "T".into(),
+            version: "1.0.0".into(),
+            slug: "t".into(),
+            instructions: None,
+            public: true,
+            scopes: Vec::new(),
+            data_policy: DataPolicy {
+                workspaces: vec!["stories".into()],
+                operations: Vec::new(),
+                resources: true,
+            },
+            custom_tools: Vec::new(),
+            ui_resources: Vec::new(),
+        };
+        let dispatcher = Dispatcher::new(descriptor, ToolRegistry::new());
+
+        let result = dispatcher
+            .handle_resource_templates_list()
+            .expect("must answer, never error");
+        let templates = result["resourceTemplates"]
+            .as_array()
+            .expect("resourceTemplates must be an array");
+        // No resource provider wired here, so the list is empty — and that is
+        // still a valid answer.
+        assert!(templates.is_empty());
+    }
 }

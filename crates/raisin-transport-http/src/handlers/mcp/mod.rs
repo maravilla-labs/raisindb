@@ -265,7 +265,7 @@ async fn dispatch(
         tenant_id,
         repo,
         branch,
-        caller_auth,
+        caller_auth.clone(),
         agent,
     ));
     let search: Arc<dyn raisin_mcp::SearchProvider> =
@@ -328,9 +328,21 @@ async fn dispatch(
         repo,
     ));
     // Asset reader: serves raw `raisin:Asset` bytes (RLS-scoped) for blob
-    // resource reads and `mode: html` MCP-UI widgets.
-    let assets: Arc<dyn raisin_mcp::AssetReader> =
-        Arc::new(HttpAssetReader::new(state.clone(), tenant_id, repo));
+    // resource reads and MCP Apps widgets.
+    //
+    // Takes the SAME resolved context as the data tools and the function
+    // invoker, for the same load-bearing reason spelled out above — and this is
+    // where that lesson had not been applied. Rebuilt from the identity, the
+    // context carried no resolved permissions, so RLS denied the widget's own
+    // asset and `get_by_path` returned `None`, which surfaces as
+    // "asset not found". A widget that plainly existed, and that the very same
+    // caller could fetch over HTTP, was unreadable over MCP.
+    let assets: Arc<dyn raisin_mcp::AssetReader> = Arc::new(HttpAssetReader::new(
+        state.clone(),
+        tenant_id,
+        repo,
+        caller_auth,
+    ));
 
     // Admit every workspace the descriptor exposes, not just the active one —
     // `resources/list` advertises a root for each, so anything narrower makes

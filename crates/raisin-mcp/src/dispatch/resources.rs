@@ -76,6 +76,47 @@ impl Dispatcher {
         Ok(result)
     }
 
+    /// `resources/templates/list` — the parameterized half of the resource
+    /// space, as RFC 6570 URI templates.
+    ///
+    /// Standard MCP since 2024-11-05 and part of the `resources` capability, so
+    /// a client that sees `resources` advertised may call it during discovery.
+    /// This server answered `-32601 unknown method`, and a client treating that
+    /// as a fatal discovery error never reached `resources/read` — so a
+    /// perfectly good widget was never fetched, and the host reported it as a
+    /// failure to load the app. Implementing it is not optional once the
+    /// capability is advertised: for a server with no templates the correct
+    /// answer is an empty list, never an error.
+    ///
+    /// Not identity-scoped: a template describes the SHAPE of the uri space,
+    /// not its contents. Reading through one still goes through
+    /// `resources/read`, where RLS applies per node.
+    pub(super) fn handle_resource_templates_list(&self) -> Result<Value> {
+        let mut templates = Vec::new();
+        if self.resources.is_some() {
+            for workspace in &self.descriptor.data_policy.workspaces {
+                templates.push(json!({
+                    // `{+path}` reserves `/` so a whole node path substitutes
+                    // as one variable rather than being percent-encoded.
+                    "uriTemplate": format!("{}://{workspace}/{{+path}}", crate::resources::RESOURCE_SCHEME),
+                    "name": format!("{workspace} node"),
+                    "description": format!(
+                        "A node at a given path in the `{workspace}` workspace."
+                    ),
+                    "mimeType": "application/json",
+                }));
+            }
+        }
+        let mut result = json!({
+            "resultType": RESULT_TYPE_COMPLETE,
+            "resourceTemplates": templates,
+            "ttlMs": LIST_TTL_MS,
+            "cacheScope": CACHE_SCOPE_PRIVATE,
+        });
+        self.attach_server_info(&mut result);
+        Ok(result)
+    }
+
     pub(super) async fn handle_resources_read(
         &self,
         identity: &McpIdentity,

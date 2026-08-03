@@ -354,6 +354,16 @@ pub fn assemble_registry(
 /// `_meta.ui` at all and is left to the host's own defaulting — its real gate
 /// is `scopes`, re-checked on every `tools/call`, which is unaffected by any of
 /// this.
+///
+/// And that limit is why the rule is NOT applied to a tool the author bound a
+/// widget to. Attaching `ui:` to a tool IS the statement that this tool belongs
+/// to the app surface: the widget is rendered from its result and calls it back
+/// to navigate. Stamping `["model"]` there disarmed exactly the tools the app
+/// depends on — Studio's three widget tools all declare `scopes`, so all three
+/// went out as model-only, and in-widget navigation had no way to work. The
+/// stamp was aimed at OTHER privileged tools becoming app-callable by
+/// omission, which is a real concern; a tool carrying its own widget is not an
+/// omission. Those are warned about instead, so the author can decide.
 fn default_privileged_tool_to_model_only(custom: &mut crate::server::CustomTool) {
     if custom.scopes.is_empty() {
         return;
@@ -367,10 +377,11 @@ fn default_privileged_tool_to_model_only(custom: &mut crate::server::CustomTool)
     tracing::warn!(
         tool = %custom.name,
         scopes = ?custom.scopes,
-        "tool declares scopes but no ui.visibility; defaulting to [\"model\"] so it \
-         is not widget-callable. Set visibility explicitly to silence this."
+        "scope-gated tool carries a widget but declares no ui.visibility, so it \
+         inherits the SEP-1865 default [\"model\", \"app\"] and the widget may call \
+         it. That is usually intended for a tool the widget renders. Set \
+         visibility explicitly to be sure."
     );
-    ui.visibility = Some(vec!["model".to_string()]);
 }
 
 /// Scan the `properties` of `raisin:Function` nodes that may feed MCP tools.
