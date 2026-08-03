@@ -326,3 +326,97 @@ mod security_tests {
         assert_eq!(cleaned["connectDomains"], json!([]));
     }
 }
+
+#[cfg(test)]
+mod conformance_tests {
+    use super::super::ui::*;
+    use crate::server::{UiBinding, UiCsp, UiMode, UiPermissions};
+
+    fn binding_json(v: serde_json::Value) -> UiBinding {
+        serde_json::from_value(v).expect("binding should parse")
+    }
+
+    /// SEP-1865 models a permission request as the PRESENCE of an empty object.
+    /// `{"camera": true}` is what a YAML author naturally writes and what hosts
+    /// ignore, so the typed field normalizes it on the way out.
+    #[test]
+    fn permissions_serialize_as_empty_objects() {
+        let ui = binding_json(serde_json::json!({
+            "entry": "/w/index.html",
+            "permissions": { "camera": true, "clipboardWrite": {} }
+        }));
+        let out = serde_json::to_value(ui.permissions.unwrap()).unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!({ "camera": {}, "clipboardWrite": {} }),
+            "`true` must normalize to `{{}}`, and an omitted key must stay absent"
+        );
+    }
+
+    /// A permission is granted by presence, so `false` is the one spelling that
+    /// must not silently grant it.
+    #[test]
+    fn a_false_permission_is_rejected_rather_than_granted() {
+        let parsed: Result<UiBinding, _> = serde_json::from_value(serde_json::json!({
+            "entry": "/w/index.html",
+            "permissions": { "camera": false }
+        }));
+        assert!(parsed.is_err(), "`camera: false` must not parse as a grant");
+    }
+
+    /// `mode` was required with no default. A deployed node carrying
+    /// `mode: uri-list` must still parse, because a failed UiBinding parse
+    /// cascades through CustomTool and assemble_registry and takes down the
+    /// whole server — not just the widget.
+    #[test]
+    fn a_deployed_uri_list_binding_still_parses_and_mode_is_now_optional() {
+        let legacy = binding_json(serde_json::json!({
+            "mode": "uri-list", "entry": "/w/index.html"
+        }));
+        assert_eq!(legacy.mode, Some(UiMode::UriList));
+
+        let modern = binding_json(serde_json::json!({ "entry": "/w/index.html" }));
+        assert_eq!(modern.mode, None, "authors may now omit mode entirely");
+    }
+
+    /// CSP lists are camelCase on the wire, but the Rust field names are
+    /// snake_case and hand-written YAML uses both. Either must parse, or a
+    /// mistyped key yields a silently empty CSP.
+    #[test]
+    fn csp_domains_parse_in_either_casing() {
+        let camel: UiCsp =
+            serde_json::from_value(serde_json::json!({ "connectDomains": ["https://a.test"] }))
+                .unwrap();
+        let snake: UiCsp =
+            serde_json::from_value(serde_json::json!({ "connect_domains": ["https://a.test"] }))
+                .unwrap();
+        assert_eq!(camel.connect_domains, snake.connect_domains);
+        assert_eq!(camel.connect_domains, vec!["https://a.test".to_string()]);
+    }
+
+    /// The sandbox domain is a bare hostname, not an origin — hosts publish it
+    /// as `{hash}.claudemcpcontent.com`. A scheme or path means the author
+    /// misunderstood, so reject rather than reinterpret.
+    #[test]
+    fn sandbox_domain_accepts_a_hostname_and_rejects_an_origin() {
+        assert_eq!(
+            sanitize_domain("a904794854a047f6.claudemcpcontent.com"),
+            Some("a904794854a047f6.claudemcpcontent.com".to_string())
+        );
+        for bad in [
+            "https://x.example.com",
+            "x.example.com/path",
+            "no-dot",
+            "evil.com; script-src *",
+            "",
+        ] {
+            assert_eq!(sanitize_domain(bad), None, "must reject: {bad:?}");
+        }
+    }
+
+    /// Empty permissions must not emit an empty object into `_meta.ui`.
+    #[test]
+    fn absent_permissions_emit_nothing() {
+        assert!(UiPermissions::default().is_empty());
+    }
+}

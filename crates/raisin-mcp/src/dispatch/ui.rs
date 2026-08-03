@@ -63,8 +63,14 @@ impl Dispatcher {
         if let Some(csp) = csp_value {
             meta.insert("csp".into(), csp);
         }
-        if let Some(permissions) = &ui.permissions {
-            meta.insert("permissions".into(), permissions.clone());
+        if let Some(permissions) = ui.permissions.as_ref().filter(|p| !p.is_empty()) {
+            // Serializes each granted member as `{}`, per SEP-1865.
+            if let Ok(value) = serde_json::to_value(permissions) {
+                meta.insert("permissions".into(), value);
+            }
+        }
+        if let Some(domain) = ui.domain.as_deref().and_then(sanitize_domain) {
+            meta.insert("domain".into(), json!(domain));
         }
         if let Some(prefers_border) = ui.prefers_border {
             meta.insert("prefersBorder".into(), json!(prefers_border));
@@ -127,7 +133,9 @@ impl Dispatcher {
             })?;
         let mode = binding.mode;
 
-        let mut content = match mode {
+        // Stage 1 keeps existing behaviour: an absent mode renders as the
+        // single-file inline widget, which is what every author meant.
+        let mut content = match mode.unwrap_or(UiMode::Html) {
             UiMode::Html => {
                 let Some(assets) = self.assets.as_ref() else {
                     return Err(McpError::not_found("ui resources are not enabled"));
@@ -316,6 +324,27 @@ pub(super) fn sanitize_origin(value: &str) -> Option<String> {
         return None;
     }
     Some(value.to_string())
+}
+
+/// Accept a sandbox `domain` only if it is a bare hostname.
+///
+/// Unlike a CSP source this is NOT an origin — hosts published examples like
+/// `a904794854a047f6.claudemcpcontent.com`, with no scheme. It still lands in
+/// host-side configuration, so it gets the same "no delimiters, no control
+/// characters" treatment, and a scheme or path is rejected rather than silently
+/// reinterpreted.
+pub(super) fn sanitize_domain(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > MAX_ORIGIN_LEN {
+        return None;
+    }
+    if value.contains("://") || value.contains('/') {
+        return None;
+    }
+    let ok = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
+    (ok && value.contains('.')).then(|| value.to_string())
 }
 
 /// Drop every unsafe entry from each domain list of a serialized [`UiCsp`].

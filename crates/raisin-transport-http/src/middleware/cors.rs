@@ -178,6 +178,17 @@ pub async fn unified_cors_middleware(
                     .expect("hardcoded headers are valid"),
             );
             headers.insert(
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                // A browser-based MCP host drives OAuth off the 401 challenge:
+                // it reads `WWW-Authenticate` for the resource_metadata URL and
+                // only then runs the flow. Without this the header is present on
+                // the wire but invisible to `fetch`, so the 401 is opaque and
+                // lazy auth cannot start.
+                "WWW-Authenticate"
+                    .parse()
+                    .expect("hardcoded header is valid"),
+            );
+            headers.insert(
                 header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
                 "true".parse().expect("hardcoded 'true' is valid"),
             );
@@ -241,6 +252,14 @@ fn apply_preflight_cors_headers(headers: &mut axum::http::HeaderMap, origin: &st
         "Content-Type, Authorization, Accept, Cache-Control"
             .parse()
             .expect("hardcoded headers are valid"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        // See the note on the other CORS site: browser hosts must be able to
+        // read the 401 challenge to start the OAuth flow.
+        "WWW-Authenticate"
+            .parse()
+            .expect("hardcoded header is valid"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_CREDENTIALS,

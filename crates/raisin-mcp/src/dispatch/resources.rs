@@ -23,6 +23,7 @@ use crate::protocol::{
     SubscriptionsListenParams, CACHE_SCOPE_PRIVATE, RESULT_TYPE_COMPLETE,
 };
 use crate::resources::ResourceContents;
+use crate::server::UiMode;
 
 impl Dispatcher {
     pub(super) fn handle_resources_list(&self, identity: &McpIdentity) -> Result<Value> {
@@ -56,7 +57,7 @@ impl Dispatcher {
             let mut entry = json!({
                 "uri": uri,
                 "name": ui.name.clone().unwrap_or_else(|| tool.name.clone()),
-                "mimeType": ui_mime_type(ui.mode),
+                "mimeType": ui_mime_type(ui.mode.unwrap_or(UiMode::Html)),
             });
             if let Some(description) = &ui.description {
                 entry["description"] = json!(description);

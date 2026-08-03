@@ -21,6 +21,7 @@
 //! [`crate::registry`] reads these nodes and assembles the live tool set; this
 //! module is the parsed, validated shape and the operation enumeration.
 
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -147,16 +148,32 @@ pub enum UiMode {
 #[serde(rename_all = "camelCase")]
 pub struct UiCsp {
     /// Origins for network requests (fetch/XHR/WebSocket) — CSP `connect-src`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        alias = "connect_domains",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub connect_domains: Vec<String>,
     /// Origins for static resources (images/scripts/styles/fonts/media).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        alias = "resource_domains",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub resource_domains: Vec<String>,
     /// Origins for nested iframes — CSP `frame-src`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        alias = "frame_domains",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub frame_domains: Vec<String>,
     /// Allowed base URIs — CSP `base-uri`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        alias = "base_uri_domains",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub base_uri_domains: Vec<String>,
 }
 
@@ -170,13 +187,91 @@ impl UiCsp {
     }
 }
 
+/// One requested sandbox permission.
+///
+/// Serializes as `{}` — SEP-1865 models a permission request as the PRESENCE of
+/// an empty object, not as a boolean. Deserializes leniently from `{}`, `true`
+/// or `null` so hand-written YAML (`camera: true`) means what its author
+/// intended instead of shipping a value hosts ignore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiPermissionGrant;
+
+impl Serialize for UiPermissionGrant {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_map(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for UiPermissionGrant {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // Accept anything truthy-shaped; the value carries no information, only
+        // its presence does. `false` is the one spelling that must NOT grant.
+        match Value::deserialize(deserializer)? {
+            Value::Bool(false) | Value::Null => Err(serde::de::Error::custom(
+                "permission is granted by presence; use `{}` or omit the key",
+            )),
+            _ => Ok(UiPermissionGrant),
+        }
+    }
+}
+
+/// Sandbox permissions a widget requests (SEP-1865 `_meta.ui.permissions`).
+///
+/// Only these four are defined by the spec. Unknown keys are ignored rather
+/// than rejected — a stricter parse would fail the whole descriptor, and
+/// through `CustomTool`/`assemble_registry` that takes down the entire server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiPermissions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<UiPermissionGrant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<UiPermissionGrant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geolocation: Option<UiPermissionGrant>,
+    #[serde(
+        default,
+        rename = "clipboardWrite",
+        alias = "clipboard_write",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub clipboard_write: Option<UiPermissionGrant>,
+}
+
+impl UiPermissions {
+    /// Whether no permission is requested at all.
+    pub fn is_empty(&self) -> bool {
+        self.camera.is_none()
+            && self.microphone.is_none()
+            && self.geolocation.is_none()
+            && self.clipboard_write.is_none()
+    }
+}
+
 /// A tool's optional MCP-UI binding: a delivery mode plus a workspace-relative
 /// path (with an optional `#fragment`) to the widget's entry document, and the
 /// MCP Apps (SEP-1865) resource metadata the widget advertises to hosts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiBinding {
     /// How the host should render the widget.
-    pub mode: UiMode,
+    ///
+    /// **Deprecated and optional.** SEP-1865 defines exactly one delivery
+    /// format — inline HTML with mimeType `text/html;profile=mcp-app` — and
+    /// lists external URLs (`text/uri-list`) under "Content Types (deferred
+    /// from MVP)". A widget is always delivered inline regardless of what this
+    /// says; see [`UiMode`].
+    ///
+    /// Kept deserializable rather than removed: it was required with no serde
+    /// default, so a deployed node carrying `mode: uri-list` would fail to
+    /// parse, and a failed `UiBinding` parse cascades through `CustomTool` and
+    /// `assemble_registry` to take down the WHOLE server at `initialize` — not
+    /// just the one widget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<UiMode>,
     /// Workspace-relative path to the entry document, optionally suffixed with a
     /// `#fragment` naming an in-app SPA route (`site/widgets/order/index.html#/card`).
     pub entry: String,
@@ -198,10 +293,25 @@ pub struct UiBinding {
     /// calls served from the same RaisinDB instance work out of the box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub csp: Option<UiCsp>,
-    /// Sandbox permissions the widget requests (camera/microphone/geolocation/
-    /// clipboardWrite), passed through verbatim.
+    /// Sandbox permissions the widget requests.
+    ///
+    /// Typed rather than a raw `Value` because the spec requires each granted
+    /// member to be an EMPTY OBJECT — `{"camera": {}}`, not `{"camera": true}`.
+    /// Passing the author's YAML through verbatim shipped whatever they wrote,
+    /// and `camera: true` is the natural thing to write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<Value>,
+    pub permissions: Option<UiPermissions>,
+    /// Stable sandbox origin the host should serve this widget from, e.g.
+    /// `a904794854a047f6.claudemcpcontent.com`.
+    ///
+    /// Hosts otherwise pick a per-conversation origin. A stable one is what
+    /// makes OAuth callbacks, CORS allowlists and API-key allowlists possible.
+    ///
+    /// The format is host-specific — Claude and ChatGPT use different domains —
+    /// so this is passed through verbatim and left unset by default. A wrong
+    /// value is worse than none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     /// Whether the host should draw a visible border + background.
     #[serde(
         default,

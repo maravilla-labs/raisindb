@@ -106,6 +106,14 @@ properties:
         inputSchema:
           type: object
           description: JSON Schema describing the accepted argument object.
+        outputSchema:
+          type: object
+          description: >
+            JSON Schema describing the tool's structured result. Inherited from
+            the function's output_schema when omitted. REQUIRED IN PRACTICE FOR
+            ANY TOOL WITH A ui BINDING - without it the result carries only a
+            text content block, so the widget receives no structuredContent and
+            renders empty. This is the most common authoring mistake.
         scopes:
           type: array
           items:
@@ -120,13 +128,70 @@ properties:
             mode:
               type: string
               description: >
-                How the host renders the widget. "html" delivers the entry file
-                inline as a text/html resource (srcdoc); "uri-list" returns a
-                text/uri-list pointing at the static endpoint for iframe src.
-                Allowed values - html, uri-list.
+                DEPRECATED - do not set on new bindings. MCP Apps (SEP-1865)
+                defines exactly one delivery format, inline HTML with mimeType
+                text/html;profile=mcp-app, and lists external URLs
+                (text/uri-list) as deferred from the MVP. A widget is delivered
+                inline whatever this says. Still accepted so deployed nodes keep
+                parsing. Allowed values - html, uri-list.
             entry:
               type: string
               description: >
                 Workspace-relative path to the widget's entry document, with an
                 optional #fragment naming an in-app SPA route
-                (e.g. site/widgets/order/index.html#/card).
+                (e.g. site/widgets/order/index.html#/card). The document must be
+                a single self-contained HTML5 file - the spec has no multi-file
+                delivery, so bundle scripts and styles inline.
+            workspace:
+              type: string
+              description: >
+                Workspace the entry path resolves in. Defaults to the session's
+                active workspace, which often cannot hold assets - a server
+                whose primary workspace allows only document types keeps its
+                widgets in a sibling asset workspace.
+            name:
+              type: string
+              description: Display name for the ui:// resource in resources/list.
+            description:
+              type: string
+              description: Description of the UI resource.
+            visibility:
+              type: array
+              items:
+                type: string
+              description: >
+                Who may call this tool - "model" (the agent) and/or "app" (the
+                widget). Defaults to both per SEP-1865. NOT a security boundary,
+                which is what scopes are for - the host enforces this, and a
+                tool declaring scopes is defaulted to ["model"] so a privileged
+                tool never becomes widget-callable by omission.
+            prefersBorder:
+              type: boolean
+              description: >
+                Whether the host should draw a border and background. Setting it
+                explicitly is recommended - host defaults vary.
+            domain:
+              type: string
+              description: >
+                Stable sandbox origin the host should serve this widget from,
+                as a bare hostname (e.g. abc123.claudemcpcontent.com). Hosts
+                otherwise pick a per-conversation origin; a stable one is what
+                makes OAuth callbacks and CORS/API-key allowlists possible. The
+                format is host-specific, so leave unset unless the host
+                documents a value - a wrong one is worse than none.
+            permissions:
+              type: object
+              description: >
+                Sandbox permissions the widget requests. Each granted member is
+                an EMPTY OBJECT, not a boolean - {"camera": {}}. Recognised -
+                camera, microphone, geolocation, clipboardWrite. Hosts may
+                decline, so feature-detect rather than assuming a grant.
+            csp:
+              type: object
+              description: >
+                Origins the widget needs, which the host turns into its sandbox
+                CSP. Lists - connectDomains (fetch/XHR/WebSocket),
+                resourceDomains (scripts/styles/images/fonts/media),
+                frameDomains (nested iframes), baseUriDomains. This server's own
+                origin is added automatically. Omitting csp entirely means the
+                host's restrictive default - no external network access at all.
