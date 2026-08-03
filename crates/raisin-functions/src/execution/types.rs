@@ -26,6 +26,24 @@ pub use raisin_rocksdb::{
     FunctionExecutorCallback, SqlExecutorCallback,
 };
 
+/// The process-wide HTTP client for function execution.
+///
+/// `reqwest::Client` is already an `Arc` internally — cloning is cheap and
+/// shares the connection pool, which is the whole point. CONSTRUCTING one is
+/// not cheap: it builds a fresh pool and loads the TLS root store.
+///
+/// Six sites used to call `reqwest::Client::new()` independently, several of
+/// them per request rather than at startup: the MCP path built one for the
+/// caller backend, one for the discovery backend, and a third per tool
+/// invocation — three per `tools/call`, whether or not the tool made a single
+/// HTTP request. Beyond the setup cost, a client discarded after one call can
+/// never reuse a connection, so every outbound request paid a fresh TCP + TLS
+/// handshake too.
+pub fn shared_http_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
 /// Bundle of all dependencies needed for function execution.
 ///
 /// This struct is created once at startup and passed to `ExecutionProvider`
@@ -52,7 +70,13 @@ where
     /// HNSW engine for vector operations (optional - vector search won't work without it)
     pub hnsw_engine: Option<Arc<raisin_hnsw::HnswIndexingEngine>>,
 
-    /// HTTP client for external requests
+    /// HTTP client for external requests.
+    ///
+    /// Prefer [`shared_http_client`] over `reqwest::Client::new()`: building one
+    /// constructs a fresh connection pool and TLS root store, and this struct is
+    /// assembled per REQUEST on the MCP and WS paths — three times per
+    /// `tools/call` — so a per-call client both costs real latency and throws
+    /// away connection reuse for the tools that do make HTTP calls.
     pub http_client: reqwest::Client,
 
     /// AI config store for tenant-scoped AI configuration (optional - AI won't work without it)

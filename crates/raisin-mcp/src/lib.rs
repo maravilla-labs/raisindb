@@ -100,9 +100,9 @@ pub use protocol::{
     SUPPORTED_PROTOCOL_VERSIONS, UI_EXTENSION_ID, UI_MIME_TYPE,
 };
 pub use registry::{
-    assemble_for_slug, assemble_registry, discover_function_tools, resolve_server_descriptor,
-    AssemblyServices, DynTool, Tool, ToolDescriptor, ToolKind, ToolRegistry, DEFAULT_REPO,
-    FUNCTION_NODE_TYPE, MCP_SERVER_NODE_TYPE,
+    assemble_for_slug, assemble_from_plan, assemble_registry, discover_function_tools,
+    resolve_plan, resolve_server_descriptor, AssemblyServices, DynTool, McpServerPlan, Tool,
+    ToolDescriptor, ToolKind, ToolRegistry, DEFAULT_REPO, FUNCTION_NODE_TYPE, MCP_SERVER_NODE_TYPE,
 };
 pub use resources::{
     parse_resource_uri, resource_uri, NodeResourceProvider, ResourceContents, ResourceDescriptor,

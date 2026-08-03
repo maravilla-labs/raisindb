@@ -43,18 +43,26 @@ pub fn calculate_content_hash(content: &str) -> String {
 /// This function is kept for backward compatibility. New code should use
 /// `load_global_nodetypes_with_hashes()` for per-file hash tracking.
 pub fn calculate_nodetype_version() -> String {
-    let mut hasher = md5::Context::new();
-
-    // Iterate over all .yaml files in the embedded directory
-    for file in GLOBAL_NODETYPES_DIR.files() {
-        if file.path().extension().and_then(|e| e.to_str()) == Some("yaml") {
-            if let Some(content) = file.contents_utf8() {
-                hasher.consume(content.as_bytes());
+    // Memoized: the input is compiled INTO the binary, so the answer cannot
+    // change while the process lives. It was being recomputed — an MD5 over
+    // every embedded NodeType YAML — on every HTTP request, because
+    // `ensure_tenant_middleware` calls this to decide whether re-initialization
+    // is needed. Constant work on the hot path of every request.
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let mut hasher = md5::Context::new();
+            // Iterate over all .yaml files in the embedded directory
+            for file in GLOBAL_NODETYPES_DIR.files() {
+                if file.path().extension().and_then(|e| e.to_str()) == Some("yaml") {
+                    if let Some(content) = file.contents_utf8() {
+                        hasher.consume(content.as_bytes());
+                    }
+                }
             }
-        }
-    }
-
-    format!("{:x}", hasher.finalize())
+            format!("{:x}", hasher.finalize())
+        })
+        .clone()
 }
 
 /// Load the effective global NodeType definitions.

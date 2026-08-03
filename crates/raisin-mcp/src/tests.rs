@@ -339,3 +339,134 @@ fn user_auth_context_from_identity_has_no_permissions() {
     // permission set, so RLS never denies it.
     assert!(sys_ctx.permissions().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Plan caching — the boundary that must not leak authority
+// ---------------------------------------------------------------------------
+
+/// Minimal invoker: assembly only needs one to be PRESENT before it will build
+/// custom tools; these tests never call through it.
+struct StubInvoker;
+
+impl crate::services::FunctionInvoker for StubInvoker {
+    fn invoke<'a>(
+        &'a self,
+        _identity: &'a McpIdentity,
+        _name: &'a str,
+        _input: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = crate::error::Result<raisin_functions::ExecutionResult>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Err(crate::error::McpError::protocol("not called in tests")) })
+    }
+}
+
+/// An `McpServerPlan` is shared across callers, so it must contain nothing
+/// caller-specific. Binding one twice must produce independent registries, each
+/// wired to the services handed in at bind time — that is what keeps a cached
+/// plan from executing one caller's tools with another caller's authority.
+#[test]
+fn a_plan_binds_independently_per_caller() {
+    use crate::registry::{assemble_from_plan, McpServerPlan};
+
+    let plan = McpServerPlan {
+        descriptor: descriptor_with(
+            vec![DataOperation::GetNode, DataOperation::ListWorkspaces],
+            vec![],
+            vec![],
+        ),
+        function_tools: Vec::new(),
+    };
+
+    // Two separate callers, each with their own backend.
+    let first = assemble_from_plan(
+        &plan,
+        &AssemblyServices {
+            backend: backend(),
+            search: None,
+            functions: None,
+        },
+    )
+    .expect("bind for caller one");
+    let second = assemble_from_plan(
+        &plan,
+        &AssemblyServices {
+            backend: backend(),
+            search: None,
+            functions: None,
+        },
+    )
+    .expect("bind for caller two");
+
+    // Same tool SET from the same plan...
+    let names = |r: &crate::registry::ToolRegistry| {
+        let identity = McpIdentity::new("root", "repo").with_scopes(["admin"]);
+        let mut n: Vec<String> = r
+            .visible_descriptors(&identity)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(&first), names(&second));
+    assert_eq!(names(&first).len(), 2);
+
+    // ...and the plan itself is unchanged by binding, so the cached value stays
+    // reusable rather than accumulating one caller's state.
+    assert_eq!(plan.descriptor.data_policy.operations.len(), 2);
+    assert!(plan.function_tools.is_empty());
+}
+
+/// Scope filtering must stay on the PER-REQUEST path. It is applied by
+/// `visible_descriptors(identity)` against a bound registry, never baked into
+/// the plan — otherwise the first caller to warm the cache would decide what
+/// every later caller sees.
+#[test]
+fn scope_filtering_is_applied_after_binding_not_in_the_plan() {
+    use crate::registry::{assemble_from_plan, McpServerPlan};
+
+    let gated = CustomTool {
+        name: "privileged".to_string(),
+        description: "Needs a scope".to_string(),
+        function: "privileged_fn".to_string(),
+        input_schema: json!({ "type": "object" }),
+        output_schema: None,
+        scopes: vec!["admin".to_string()],
+        ui: None,
+    };
+    let plan = McpServerPlan {
+        descriptor: descriptor_with(vec![DataOperation::GetNode], vec![gated], vec![]),
+        function_tools: Vec::new(),
+    };
+    let services = AssemblyServices {
+        backend: backend(),
+        search: None,
+        functions: Some(Arc::new(StubInvoker)),
+    };
+
+    // ONE bound registry, two identities — the cached-plan case.
+    let registry = assemble_from_plan(&plan, &services).expect("bind");
+
+    let privileged = McpIdentity::new("root", "repo").with_scopes(["admin"]);
+    let plain = McpIdentity::new("nobody", "repo");
+
+    let visible = |identity: &McpIdentity| -> Vec<String> {
+        registry
+            .visible_descriptors(identity)
+            .into_iter()
+            .map(|d| d.name)
+            .collect()
+    };
+    assert!(visible(&privileged).contains(&"privileged".to_string()));
+    assert!(
+        !visible(&plain).contains(&"privileged".to_string()),
+        "a caller without the scope must not see the tool, even though the \
+         plan behind the registry is shared"
+    );
+}

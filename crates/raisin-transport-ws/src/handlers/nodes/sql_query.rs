@@ -367,7 +367,7 @@ where
                     binary_storage: ws_state.bin.clone(),
                     indexing_engine: ws_state.indexing_engine.clone(),
                     hnsw_engine: ws_state.hnsw_engine.clone(),
-                    http_client: reqwest::Client::new(),
+                    http_client: raisin_functions::shared_http_client(),
                     ai_config_store: None,
                     // Same job-system deps as job-driven executions — keeps the
                     // callback surface (functions.execute / flows.run /

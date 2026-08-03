@@ -138,7 +138,7 @@ async fn insert_unauthenticated_context(state: &AppState, req: &mut Request<Body
     .await;
 
     if anonymous_enabled {
-        let permission_service = PermissionService::new(state.storage().clone());
+        let permission_service = &state.permission_service;
         let resolved_permissions = permission_service
             .resolve_anonymous_user(&tenant_id, &repo_id, "main")
             .await
@@ -493,7 +493,7 @@ async fn resolve_admin_auth_context(
             "Admin impersonating user"
         );
 
-        let permission_service = PermissionService::new(state.storage().clone());
+        let permission_service = &state.permission_service;
         let permissions = permission_service
             .resolve_for_user_id(&admin_claims.tenant_id, &repo_id, "main", &target_user_id)
             .await
@@ -536,7 +536,7 @@ async fn resolve_user_auth_context(
 
     let repo_id = extract_repo_from_path(uri_path).unwrap_or_else(|| "default".to_string());
 
-    let permission_service = PermissionService::new(state.storage().clone());
+    let permission_service = &state.permission_service;
     let permissions = permission_service
         .resolve_for_identity_id(&user_claims.tenant_id, &repo_id, "main", &user_claims.sub)
         .await

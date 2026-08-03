@@ -31,6 +31,7 @@
 mod api_factory;
 mod auth;
 mod identity;
+pub mod plan_cache;
 mod services;
 
 #[cfg(feature = "storage-rocksdb")]
@@ -61,7 +62,7 @@ use crate::state::AppState;
 ///
 /// The `{slug}` path segment resolves against this workspace; the server's own
 /// `dataPolicy.workspaces` then govern which content workspaces its tools touch.
-const MCP_DISCOVERY_WORKSPACE: &str = "mcp";
+pub(crate) const MCP_DISCOVERY_WORKSPACE: &str = "mcp";
 
 /// Handle one MCP Streamable HTTP request: `POST /mcp/{repo}/{branch}/{slug}`.
 ///
@@ -277,8 +278,27 @@ async fn dispatch(
         functions: Some(invoker),
     };
 
-    let (descriptor, registry) =
-        assemble_for_slug(&services, &discovery_backend, MCP_DISCOVERY_WORKSPACE, slug).await?;
+    // Resolve the caller-independent half from cache when we can. The SQL scans
+    // behind it are what made every request — including one that ends in a
+    // 119-byte error — cost ~0.9 s.
+    //
+    // The cached value is deliberately caller-INDEPENDENT (see `McpServerPlan`).
+    // Binding it below re-derives every tool against THIS caller's services, and
+    // scope filtering still happens per request in `visible_descriptors` and
+    // again in `handle_tools_call`.
+    let plan_key = format!("{tenant_id}\0{repo}\0{branch}\0{slug}");
+    let plan = match state.mcp_plan_cache.get(&plan_key) {
+        Some(plan) => plan,
+        None => {
+            let plan = Arc::new(
+                raisin_mcp::resolve_plan(&discovery_backend, MCP_DISCOVERY_WORKSPACE, slug).await?,
+            );
+            state.mcp_plan_cache.put(&plan_key, plan.clone());
+            plan
+        }
+    };
+    let descriptor = plan.descriptor.clone();
+    let registry = raisin_mcp::assemble_from_plan(&plan, &services)?;
 
     // The session's active workspace defaults to the server's first declared
     // content workspace, falling back to the discovery workspace.

@@ -73,6 +73,7 @@ mod types;
 
 // Re-export public API
 pub use provider::ExecutionProvider;
+pub use types::shared_http_client;
 pub use types::{
     BinaryRetrievalCallback, ExecutionCallbacks, ExecutionDependencies, ExecutionMode,
     FunctionContext, FunctionEnabledChecker, FunctionExecutionConfig, FunctionExecutionResult,

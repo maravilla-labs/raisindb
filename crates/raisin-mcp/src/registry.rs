@@ -328,7 +328,6 @@ pub fn assemble_registry(
     if let Some(functions) = &services.functions {
         for custom in &descriptor.custom_tools {
             let mut custom = custom.clone();
-            default_privileged_tool_to_model_only(&mut custom);
             let tool = crate::data_tools::FunctionTool::new(custom, functions.clone());
             registry.register(tool)?;
         }
@@ -364,11 +363,11 @@ pub fn assemble_registry(
 /// stamp was aimed at OTHER privileged tools becoming app-callable by
 /// omission, which is a real concern; a tool carrying its own widget is not an
 /// omission. Those are warned about instead, so the author can decide.
-fn default_privileged_tool_to_model_only(custom: &mut crate::server::CustomTool) {
+fn warn_on_implicit_app_visibility(custom: &crate::server::CustomTool) {
     if custom.scopes.is_empty() {
         return;
     }
-    let Some(ui) = custom.ui.as_mut() else {
+    let Some(ui) = custom.ui.as_ref() else {
         return;
     };
     if ui.visibility.is_some() {
@@ -455,6 +454,44 @@ pub async fn assemble_for_slug(
     workspace: &str,
     slug: &str,
 ) -> Result<(McpServerDescriptor, ToolRegistry)> {
+    let plan = resolve_plan(discovery_backend, workspace, slug).await?;
+    let registry = assemble_from_plan(&plan, services)?;
+    Ok((plan.descriptor, registry))
+}
+
+/// Everything about a server that does NOT depend on who is calling.
+///
+/// This is the expensive half — the SQL scans and the parsing — and it is
+/// identical for every caller, so it is what a cache should hold.
+///
+/// **Nothing here may depend on the caller.** It is resolved through the SYSTEM
+/// `discovery_backend` and handed to any caller that asks for the same
+/// `(tenant, repo, branch, slug)`. Scope filtering happens downstream, per
+/// request, in [`ToolRegistry::visible_descriptors`] and again — independently
+/// — in `handle_tools_call`. Moving a scope decision into this struct would
+/// hand one caller's tool set to another; a cached value must be safe for
+/// everybody.
+#[derive(Debug, Clone)]
+pub struct McpServerPlan {
+    /// The parsed server node, with tool schemas already inherited from the
+    /// referenced `raisin:Function` nodes.
+    pub descriptor: McpServerDescriptor,
+    /// Function-side tools (an `mcp` block on a `raisin:Function`), already
+    /// resolved against the server's named widgets. Still needs to lose any
+    /// name that a server-side tool claims, which happens at bind time.
+    pub function_tools: Vec<CustomTool>,
+}
+
+/// Resolve the caller-independent half: the SQL scans and the parsing.
+///
+/// Expensive and cacheable. This is where a request's ~0.9 s went — it was run
+/// on EVERY request, before the JSON-RPC method was even looked at, so a
+/// 119-byte error cost the same as a full `tools/list`.
+pub async fn resolve_plan(
+    discovery_backend: &Arc<dyn FunctionApi>,
+    workspace: &str,
+    slug: &str,
+) -> Result<McpServerPlan> {
     let mut descriptor = resolve_server_descriptor(discovery_backend, workspace, slug).await?;
 
     // One scan of the function nodes feeding this server, reused for server-side
@@ -475,35 +512,60 @@ pub async fn assemble_for_slug(
         }
     }
 
-    let mut registry = assemble_registry(&descriptor, services)?;
-
-    // Function-side tools (an `mcp` block on a raisin:Function). Server-side tools
-    // win on a name collision.
-    if let Some(functions) = &services.functions {
-        for props in &func_props {
-            if let Some(mut custom) = CustomTool::from_function_properties(props) {
-                if registry.get(&custom.name).is_some() {
-                    continue;
+    // Function-side tools, resolved but not yet deduplicated against
+    // server-side names — that needs a built registry, which is per-caller.
+    let mut function_tools = Vec::new();
+    for props in &func_props {
+        if let Some(mut custom) = CustomTool::from_function_properties(props) {
+            // A function-side `mcp` block may reference the server's named
+            // widgets too; the descriptor resolved only its own tools.
+            let name = custom.name.clone();
+            if let Some(ui) = custom.ui.as_mut() {
+                if !descriptor.resolve_ui(ui, &name) {
+                    custom.ui = None;
                 }
-                // A function-side `mcp` block may reference the server's named
-                // widgets too; the descriptor resolved only its own tools.
-                let name = custom.name.clone();
-                if let Some(ui) = custom.ui.as_mut() {
-                    if !descriptor.resolve_ui(ui, &name) {
-                        custom.ui = None;
-                    }
-                }
-                registry.register(crate::data_tools::FunctionTool::new(
-                    custom,
-                    functions.clone(),
-                ))?;
             }
+            function_tools.push(custom);
         }
     }
 
+    // Authoring diagnostics belong here, not on the per-request path: emitted
+    // during binding they repeated on every single request.
     warn_on_ui_resource_conflicts(&descriptor);
+    for tool in descriptor.custom_tools.iter().chain(function_tools.iter()) {
+        warn_on_implicit_app_visibility(tool);
+    }
 
-    Ok((descriptor, registry))
+    Ok(McpServerPlan {
+        descriptor,
+        function_tools,
+    })
+}
+
+/// Bind a cached [`McpServerPlan`] to THIS caller's services.
+///
+/// Cheap: allocation and wiring only, no storage access. Everything expensive
+/// already happened in [`resolve_plan`].
+pub fn assemble_from_plan(
+    plan: &McpServerPlan,
+    services: &AssemblyServices,
+) -> Result<ToolRegistry> {
+    let mut registry = assemble_registry(&plan.descriptor, services)?;
+
+    // Server-side tools win on a name collision.
+    if let Some(functions) = &services.functions {
+        for custom in &plan.function_tools {
+            if registry.get(&custom.name).is_some() {
+                continue;
+            }
+            registry.register(crate::data_tools::FunctionTool::new(
+                custom.clone(),
+                functions.clone(),
+            ))?;
+        }
+    }
+
+    Ok(registry)
 }
 
 /// Warn when two tools describe the same widget differently.

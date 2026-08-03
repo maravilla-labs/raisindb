@@ -428,7 +428,7 @@ async fn main() {
                 binary_storage: bin.clone(),
                 indexing_engine: indexing_engine.clone(),
                 hnsw_engine: hnsw_engine.clone(),
-                http_client: reqwest::Client::new(),
+                http_client: raisin_functions::shared_http_client(),
                 ai_config_store: Some(Arc::new(storage.tenant_ai_config_repository())),
                 job_registry: Some(storage.job_registry().clone()),
                 job_data_store: Some(storage.job_data_store().clone()),

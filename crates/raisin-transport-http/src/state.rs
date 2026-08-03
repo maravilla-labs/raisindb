@@ -113,6 +113,34 @@ pub struct AppState {
     /// themselves are still served RLS-scoped.
     pub(crate) static_site_cache:
         Arc<TtlCache<Arc<Vec<crate::handlers::static_site::StaticSiteEntry>>>>,
+    /// Caller-INDEPENDENT half of an MCP server's tool set, keyed by
+    /// `{tenant}\0{repo}\0{branch}\0{slug}` — a bounded key, like
+    /// `cors_cache`, never a request-controlled path.
+    ///
+    /// Holds only what is safe to hand to ANY caller: the parsed descriptor and
+    /// the resolved tool definitions. Scope filtering stays per-request, in
+    /// `visible_descriptors` and again in `handle_tools_call`. This was rebuilt
+    /// from storage on every single request — `1 + W` SQL scans materializing
+    /// every `raisin:Function` node — before the JSON-RPC method was even read.
+    ///
+    /// TTL is a backstop; the real invalidation is event-driven, so an edited
+    /// server or function shows up on the next request.
+    pub(crate) mcp_plan_cache: Arc<TtlCache<Arc<raisin_mcp::McpServerPlan>>>,
+    /// Permission resolution, cached (5-min TTL, keyed by
+    /// `tenant:repo:branch:identity:<id>`).
+    ///
+    /// Held on `AppState` because the cache lives INSIDE the service — building
+    /// one per request, as every call site used to, resolves nothing from cache
+    /// and throws the entry away. Resolution is not cheap: a PROPERTY_INDEX
+    /// prefix scan plus a full node load to find the user, then one lookup per
+    /// group, then role inheritance, then a SECOND pass over the effective
+    /// roles to collect permissions. An MCP request paid that twice — once in
+    /// `optional_auth_middleware`'s anonymous fallback and once in
+    /// `resolve_mcp_auth`.
+    ///
+    /// The TTL means a revoked role can stay effective for up to 5 minutes;
+    /// `invalidate_user` / `invalidate_branch` exist for the paths that know.
+    pub(crate) permission_service: Arc<raisin_core::CachedPermissionService<Store>>,
     #[cfg(feature = "storage-rocksdb")]
     pub(crate) indexing_engine: Option<Arc<TantivyIndexingEngine>>,
     #[cfg(feature = "storage-rocksdb")]
@@ -569,6 +597,10 @@ pub fn router_with_bin_and_audit(
         ))
     };
 
+    // Clone the handle before `storage` moves into the struct: the permission
+    // cache must be ONE instance for the process, not one per request.
+    let storage_for_permissions = Arc::clone(&storage);
+
     let state = AppState {
         storage,
         connection,
@@ -582,6 +614,10 @@ pub fn router_with_bin_and_audit(
         superadmin_token,
         cors_allowed_origins: cors_allowed_origins.to_vec(),
         static_site_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(60))),
+        mcp_plan_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(300))),
+        permission_service: Arc::new(raisin_core::CachedPermissionService::with_default_ttl(
+            storage_for_permissions,
+        )),
         #[cfg(feature = "storage-rocksdb")]
         cors_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(60))),
         #[cfg(feature = "storage-rocksdb")]
@@ -609,6 +645,19 @@ pub fn router_with_bin_and_audit(
         // other caller leaves it empty and never cancels.
         shutdown: Arc::new(std::sync::OnceLock::new()),
     };
+
+    // Keep the cached MCP plans honest. A package author editing a function and
+    // not seeing it in `tools/list` would be a far worse bug than the latency
+    // this cache removes, so the entries are dropped on the write rather than
+    // waiting out the TTL.
+    {
+        use raisin_storage::Storage as _;
+        state.storage.event_bus().subscribe(Arc::new(
+            crate::handlers::mcp::plan_cache::McpPlanCacheInvalidator::new(
+                state.mcp_plan_cache.clone(),
+            ),
+        ));
+    }
 
     // NOTE: Global CorsLayer has been removed in favor of unified_cors_middleware
     // which implements hierarchical CORS resolution: Repo → Tenant → Global

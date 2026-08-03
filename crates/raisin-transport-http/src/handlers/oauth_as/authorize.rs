@@ -329,7 +329,7 @@ async fn authenticate_owner(
 
     // Resolve the identity's roles/groups, then narrow the requested scopes to
     // what the identity actually holds (consent never widens access).
-    let permission_service = PermissionService::new(state.storage().clone());
+    let permission_service = &state.permission_service;
     let grants = match permission_service
         .resolve_for_identity_id(tenant_id, repo, "main", &identity.identity_id)
         .await

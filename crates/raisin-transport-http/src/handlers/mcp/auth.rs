@@ -107,7 +107,7 @@ pub(super) async fn resolve_mcp_auth(
 
     // Rebuild the caller's context from their real permissions so RLS scopes data
     // access correctly; the token only narrows which tools are reachable.
-    let permission_service = PermissionService::new(state.storage().clone());
+    let permission_service = &state.permission_service;
     let permissions = permission_service
         .resolve_for_identity_id(&claims.tenant_id, repo, "main", &claims.sub)
         .await

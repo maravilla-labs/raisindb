@@ -52,7 +52,7 @@ pub(crate) fn build_function_api(
         binary_storage: state.bin.clone(),
         indexing_engine: state.indexing_engine.clone(),
         hnsw_engine: state.hnsw_engine.clone(),
-        http_client: reqwest::Client::new(),
+        http_client: raisin_functions::shared_http_client(),
         ai_config_store,
         // Job-system deps power raisin.functions.execute / flows.run /
         // scheduler.* — sync invocations get the same surface as job-driven

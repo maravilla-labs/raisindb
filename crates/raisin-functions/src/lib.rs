@@ -68,6 +68,7 @@ pub use api::{
     SqlExecuteCallback,
     SqlQueryCallback,
 };
+pub use execution::shared_http_client;
 pub use executor::{ExecutionHandle, FunctionExecutor};
 pub use loader::FunctionLoader;
 pub use plugin::{register_function_plugin, FunctionBindingPlugin};
