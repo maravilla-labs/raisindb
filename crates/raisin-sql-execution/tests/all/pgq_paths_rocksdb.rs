@@ -120,12 +120,7 @@ async fn create(storage: &Arc<raisin_rocksdb::RocksDBStorage>, id: &str) {
         .unwrap_or_else(|e| panic!("create {id}: {e}"));
 }
 
-async fn link(
-    storage: &Arc<raisin_rocksdb::RocksDBStorage>,
-    from: &str,
-    to: &str,
-    weight: f32,
-) {
+async fn link(storage: &Arc<raisin_rocksdb::RocksDBStorage>, from: &str, to: &str, weight: f32) {
     let rel = RelationRef::new(
         to.to_string(),
         WS.to_string(),

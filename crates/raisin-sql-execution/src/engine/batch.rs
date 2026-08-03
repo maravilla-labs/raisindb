@@ -5,7 +5,6 @@
 
 use super::QueryEngine;
 use crate::physical_plan::dml_executor::{classify_filter, FilterComplexity};
-use crate::physical_plan::eval::{set_function_context, FunctionContext};
 use crate::physical_plan::executor::{Row, RowStream};
 use futures::stream;
 use indexmap::IndexMap;
@@ -24,7 +23,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         tracing::info!("SQL Query Engine starting batch execution");
 
         // 1. Analyze all statements
-        let analyzer = Analyzer::with_catalog(self.catalog.clone_box());
+        let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
         let statements = analyzer
             .analyze_batch(sql)
             .map_err(|e| Error::Validation(format!("Batch analysis error: {}", e)))?;
@@ -63,14 +62,14 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         tracing::info!("Executing {} statements in batch (sync)", statements.len());
 
         // 3. Execute each statement sequentially (sync path)
-        self.execute_batch_sync_internal(&statements).await
+        self.execute_batch_sync_internal(sql, &statements).await
     }
 
     /// Execute a batch synchronously (force sync, no async routing)
     pub async fn execute_batch_sync(&self, sql: &str) -> Result<RowStream, Error> {
         tracing::info!("SQL Query Engine starting batch execution (forced sync)");
 
-        let analyzer = Analyzer::with_catalog(self.catalog.clone_box());
+        let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
         let statements = analyzer
             .analyze_batch(sql)
             .map_err(|e| Error::Validation(format!("Batch analysis error: {}", e)))?;
@@ -81,12 +80,13 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             ));
         }
 
-        self.execute_batch_sync_internal(&statements).await
+        self.execute_batch_sync_internal(sql, &statements).await
     }
 
     /// Internal sync execution path for analyzed statements
     async fn execute_batch_sync_internal(
         &self,
+        sql: &str,
         statements: &[AnalyzedStatement],
     ) -> Result<RowStream, Error> {
         // Determine branch for user node lookup (check for branch_override in any Query statement)
@@ -101,44 +101,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             })
             .unwrap_or_else(|| self.branch.clone());
 
-        // Set function context for system functions (RAISIN_CURRENT_USER)
-        if let Some(ref auth) = self.auth_context {
-            tracing::info!(
-                "[execute_batch_sync_internal] Setting up function context: user_id={:?}",
-                auth.user_id
-            );
-
-            let user_node = if let Some(ref user_id) = auth.user_id {
-                let node = self.lookup_user_node(user_id, &branch_for_lookup).await;
-                tracing::info!(
-                    "[execute_batch_sync_internal] lookup_user_node result for user_id={}: found={}",
-                    user_id,
-                    node.is_some()
-                );
-                node
-            } else {
-                tracing::warn!(
-                    "[execute_batch_sync_internal] auth_context exists but user_id is None"
-                );
-                None
-            };
-
-            set_function_context(FunctionContext {
-                user_id: auth.user_id.clone(),
-                user_node: user_node.clone(),
-            });
-
-            tracing::info!(
-                "[execute_batch_sync_internal] Function context set: user_id={:?}, has_node={}",
-                auth.user_id,
-                user_node.is_some()
-            );
-        } else {
-            tracing::info!(
-                "[execute_batch_sync_internal] No auth_context available, using default"
-            );
-            set_function_context(FunctionContext::default());
-        }
+        // Set function context for system functions (RAISIN_CURRENT_USER).
+        // Resolves the user node only when the SQL can actually call it.
+        self.install_function_context(sql, &branch_for_lookup).await;
 
         let mut last_result: Option<RowStream> = None;
 

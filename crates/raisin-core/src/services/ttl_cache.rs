@@ -103,6 +103,17 @@ impl<V: Clone + Send + Sync + 'static> TtlCache<V> {
         }
     }
 
+    /// Remove every entry whose key starts with `prefix`.
+    ///
+    /// For caches whose keys are hierarchical scopes (`{tenant}:{repo}:...`),
+    /// where an invalidation signal names an outer scope but the entries are
+    /// keyed by a finer one — a workspace change invalidating every embedding
+    /// variant of a repo's catalog, say. Note this is an O(n) scan of the map,
+    /// so it belongs on invalidation paths, never on a read path.
+    pub fn invalidate_prefix(&self, prefix: &str) {
+        self.cache.retain(|key, _| !key.starts_with(prefix));
+    }
+
     /// Remove all entries from the cache.
     pub fn invalidate_all(&self) {
         self.cache.clear();
@@ -205,6 +216,25 @@ mod tests {
         cache.invalidate("a");
         assert!(cache.get("a").is_none());
         assert!(cache.get("b").is_some());
+    }
+
+    #[test]
+    fn test_invalidate_prefix() {
+        let cache: TtlCache<String> = TtlCache::new(Duration::from_secs(60));
+        cache.put("t1:r1", "base".to_string());
+        cache.put("t1:r1:v1536", "embeddings".to_string());
+        cache.put("t1:r2", "other repo".to_string());
+        cache.put("t2:r1", "other tenant".to_string());
+
+        cache.invalidate_prefix("t1:r1");
+
+        // Every variant of the named scope goes...
+        assert!(cache.get("t1:r1").is_none());
+        assert!(cache.get("t1:r1:v1536").is_none());
+        // ...and nothing else does. A prefix that also matched `t1:r10` or
+        // `t2:r1` would silently over-invalidate every neighbouring scope.
+        assert!(cache.get("t1:r2").is_some());
+        assert!(cache.get("t2:r1").is_some());
     }
 
     #[test]

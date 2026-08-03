@@ -518,14 +518,48 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
         Ok(Box::pin(stream::once(async move { Ok(row) })))
     }
 
-    /// Look up the user node from the property index for CURRENT_USER()
+    /// Install the thread-local function context for `RAISIN_CURRENT_USER()`.
+    ///
+    /// The ONLY consumer of `FunctionContext` is `RaisinCurrentUserFunction`, and
+    /// it reads `user_node` alone — so resolving the node is pure waste unless the
+    /// statement actually calls that function. Resolving it costs a property-index
+    /// scan, a node read and a full serialization, on every authenticated
+    /// statement in the product.
+    ///
+    /// The gate is a substring test over the raw SQL: the parser cannot produce a
+    /// call without the identifier appearing verbatim, so there are no false
+    /// negatives. A false positive (the name inside a string literal) merely does
+    /// the old work.
+    ///
+    /// Call this from EVERY path that sets the function context — `execute` and
+    /// the batch path had verbatim copies of this logic before.
+    pub(crate) async fn install_function_context(&self, sql: &str, branch: &str) {
+        let Some(auth) = self.auth_context.as_ref() else {
+            set_function_context(FunctionContext::default());
+            return;
+        };
+
+        let user_node = match auth.user_id.as_ref() {
+            Some(user_id) if sql_may_call_current_user(sql) => {
+                self.lookup_user_node(user_id, branch).await
+            }
+            _ => None,
+        };
+
+        set_function_context(FunctionContext {
+            user_id: auth.user_id.clone(),
+            user_node,
+        });
+    }
+
+    /// Look up the user node from the property index for `RAISIN_CURRENT_USER()`
     pub(crate) async fn lookup_user_node(
         &self,
         user_id: &str,
         branch: &str,
     ) -> Option<serde_json::Value> {
         let workspace = "raisin:access_control";
-        tracing::info!(
+        tracing::debug!(
             "[lookup_user_node] Looking up user: user_id={}, workspace={}, branch={}",
             user_id,
             workspace,
@@ -547,7 +581,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             .await
         {
             Ok(ids) => {
-                tracing::info!(
+                tracing::debug!(
                     "[lookup_user_node] Property index query returned {} nodes",
                     ids.len()
                 );
@@ -565,7 +599,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         let node_id = match node_ids.first() {
             Some(id) => {
-                tracing::info!("[lookup_user_node] Found node_id: {}", id);
+                tracing::debug!("[lookup_user_node] Found node_id: {}", id);
                 id
             }
             None => {
@@ -601,7 +635,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             .await
         {
             Ok(Some(n)) => {
-                tracing::info!("[lookup_user_node] Successfully loaded user node");
+                tracing::debug!("[lookup_user_node] Successfully loaded user node");
                 n
             }
             Ok(None) => {
@@ -619,7 +653,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         match serde_json::to_value(&node) {
             Ok(value) => {
-                tracing::info!(
+                tracing::debug!(
                     "[lookup_user_node] Successfully serialized user node, path={:?}",
                     value.get("path")
                 );
@@ -630,6 +664,63 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
                 None
             }
         }
+    }
+}
+
+/// Could this SQL text possibly call `RAISIN_CURRENT_USER()`?
+///
+/// Conservative by construction: the parser cannot emit that call unless the
+/// identifier appears verbatim in the source, so a `false` here is proof the
+/// function is unreachable. A `true` on a mere mention (a string literal, a
+/// column comment) just falls back to the old behaviour.
+pub(crate) fn sql_may_call_current_user(sql: &str) -> bool {
+    const NEEDLE: &[u8] = b"RAISIN_CURRENT_USER";
+
+    // Case-insensitive substring search without allocating an uppercased copy of
+    // the whole statement — this runs on every query.
+    sql.as_bytes()
+        .windows(NEEDLE.len())
+        .any(|w| w.eq_ignore_ascii_case(NEEDLE))
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::sql_may_call_current_user;
+
+    #[test]
+    fn detects_the_call_in_any_case() {
+        assert!(sql_may_call_current_user("SELECT RAISIN_CURRENT_USER()"));
+        assert!(sql_may_call_current_user("select raisin_current_user()"));
+        assert!(sql_may_call_current_user("SELECT Raisin_Current_User()"));
+        assert!(sql_may_call_current_user(
+            "SELECT RAISIN_CURRENT_USER()->>'path' AS p FROM 'ws'"
+        ));
+    }
+
+    #[test]
+    fn skips_ordinary_statements() {
+        assert!(!sql_may_call_current_user("SELECT * FROM 'ws'"));
+        assert!(!sql_may_call_current_user(
+            "UPDATE 'ws' SET properties = $1::jsonb WHERE path = $2"
+        ));
+        // CURRENT_USER is a different, unrelated function — it reads no context.
+        assert!(!sql_may_call_current_user("SELECT CURRENT_USER"));
+        // Near-misses must not trip the gate.
+        assert!(!sql_may_call_current_user("SELECT raisin_current_use()"));
+    }
+
+    #[test]
+    fn errs_toward_doing_the_work() {
+        // A mere mention is a false positive: wasteful, never wrong.
+        assert!(sql_may_call_current_user(
+            "SELECT 'RAISIN_CURRENT_USER' AS note"
+        ));
+    }
+
+    #[test]
+    fn handles_input_shorter_than_the_needle() {
+        assert!(!sql_may_call_current_user(""));
+        assert!(!sql_may_call_current_user("SELECT 1"));
     }
 }
 

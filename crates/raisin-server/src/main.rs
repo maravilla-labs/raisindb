@@ -20,6 +20,7 @@ mod config;
 mod deps_setup;
 #[cfg(feature = "storage-rocksdb")]
 mod flow_sweeper;
+mod function_module_event_handler;
 mod management;
 #[cfg(feature = "storage-rocksdb")]
 mod migrations;
@@ -27,6 +28,7 @@ mod nodetype_init_handler;
 mod schema_stats_event_handler;
 mod sse;
 mod startup;
+mod workspace_catalog_event_handler;
 mod workspace_init_handler;
 mod workspace_structure_init_handler;
 
@@ -189,6 +191,25 @@ async fn main() {
             schema_stats_event_handler::SchemaStatsEventHandler::new(schema_stats_cache.clone()),
         ));
         tracing::info!("Schema stats cache initialized with event-driven invalidation");
+    }
+
+    // The SQL catalog is derived once per repo and shared by every transport;
+    // this handler is what keeps a newly created workspace immediately queryable.
+    {
+        let event_bus = storage.event_bus();
+        event_bus.subscribe(std::sync::Arc::new(
+            workspace_catalog_event_handler::WorkspaceCatalogEventHandler,
+        ));
+        tracing::info!("Workspace catalog cache initialized with event-driven invalidation");
+    }
+
+    // Function module cache: on by default, and this subscription is what makes
+    // that safe — a function edit must never keep executing the old code.
+    {
+        let event_bus = storage.event_bus();
+        event_bus.subscribe(std::sync::Arc::new(
+            function_module_event_handler::FunctionModuleEventHandler::new("functions"),
+        ));
     }
 
     // Register graph projection event handler for event-driven invalidation
@@ -433,6 +454,7 @@ async fn main() {
                 job_registry: Some(storage.job_registry().clone()),
                 job_data_store: Some(storage.job_data_store().clone()),
                 lock_manager: lock_manager.clone(),
+                schema_stats_cache: Some(schema_stats_cache.clone()),
             });
 
             let execution_callbacks = ExecutionProvider::create_callbacks_with_deps(

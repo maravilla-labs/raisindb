@@ -28,7 +28,85 @@ use raisin_storage::{NodeRepository, Storage, StorageScope};
 
 use super::callbacks;
 use super::code_loader;
+use super::module_cache;
 use super::types::{ExecutionDependencies, FunctionExecutionConfig, FunctionExecutionResult};
+
+/// Resolve the module set a function may import, via the module cache.
+///
+/// On a miss (and always, when the cache is disabled) this does exactly what the
+/// executor did inline before: a prefix scan for siblings, then one scan per
+/// external `../dir/` reference. Both loaders are best-effort — a failure yields
+/// an empty set rather than failing the invocation, matching the previous
+/// `unwrap_or_default()` behaviour.
+#[allow(clippy::too_many_arguments)]
+async fn load_module_set<S, B>(
+    deps: &ExecutionDependencies<S, B>,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    functions_workspace: &str,
+    function_path: &str,
+    entry_code: &str,
+    entry_file_name: &str,
+) -> std::collections::HashMap<String, String>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    if let Some(cached) = module_cache::get(
+        tenant_id,
+        repo_id,
+        branch,
+        functions_workspace,
+        function_path,
+    ) {
+        debug!(
+            function = %function_path,
+            modules = cached.len(),
+            "Module set served from cache"
+        );
+        return (*cached).clone();
+    }
+
+    let mut modules = code_loader::load_sibling_files(
+        deps.storage.as_ref(),
+        deps.binary_storage.as_ref(),
+        tenant_id,
+        repo_id,
+        branch,
+        functions_workspace,
+        function_path,
+        entry_file_name,
+    )
+    .await
+    .unwrap_or_default();
+
+    let external_files = code_loader::load_external_modules(
+        deps.storage.as_ref(),
+        deps.binary_storage.as_ref(),
+        tenant_id,
+        repo_id,
+        branch,
+        functions_workspace,
+        function_path,
+        entry_code,
+        &modules,
+    )
+    .await
+    .unwrap_or_default();
+    modules.extend(external_files);
+
+    module_cache::put(
+        tenant_id,
+        repo_id,
+        branch,
+        functions_workspace,
+        function_path,
+        Arc::new(modules.clone()),
+    );
+
+    modules
+}
 use crate::api::{FunctionApi, RaisinFunctionApi};
 use crate::executor::FunctionExecutor;
 use crate::types::{ExecutionContext, LoadedFunction};
@@ -88,36 +166,23 @@ where
     )
     .await?;
 
-    // 2b. Load sibling files for ES6 module resolution
+    // 2b/2c. Resolve the module set: sibling files plus anything reachable via
+    // `../dir/` imports. This is a subtree prefix scan plus one scan per external
+    // dir plus a binary read per non-inline file — all of it repeated on every
+    // invocation for a set that only changes when the function is edited, hence
+    // the cache. Disabled by default; see `module_cache`.
     let entry_file_name = metadata.entry_file_path().to_string();
-    let mut sibling_files = code_loader::load_sibling_files(
-        deps.storage.as_ref(),
-        deps.binary_storage.as_ref(),
-        tenant_id,
-        repo_id,
-        branch,
-        &config.functions_workspace,
-        function_path,
-        &entry_file_name,
-    )
-    .await
-    .unwrap_or_default();
-
-    // 2c. Load external modules referenced via ../ imports
-    let external_files = code_loader::load_external_modules(
-        deps.storage.as_ref(),
-        deps.binary_storage.as_ref(),
+    let sibling_files = load_module_set(
+        deps,
         tenant_id,
         repo_id,
         branch,
         &config.functions_workspace,
         function_path,
         &code,
-        &sibling_files,
+        &entry_file_name,
     )
-    .await
-    .unwrap_or_default();
-    sibling_files.extend(external_files);
+    .await;
 
     // 3. Create API callbacks
     // We need to clone the Arc to create callbacks with proper lifetimes
@@ -131,6 +196,7 @@ where
         job_registry: deps.job_registry.clone(),
         job_data_store: deps.job_data_store.clone(),
         lock_manager: deps.lock_manager.clone(),
+        schema_stats_cache: deps.schema_stats_cache.clone(),
     });
 
     // Check if function requires admin escalation (from function metadata)

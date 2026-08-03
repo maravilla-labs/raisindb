@@ -67,23 +67,15 @@ where
             .or(session_branch)
             .unwrap_or_else(|| repository.config.default_branch.clone());
 
-        // Fetch all workspaces from the repository and register them in the catalog
-        let workspaces = state
-            .storage
-            .workspaces()
-            .list(RepoScope::new(&tenant_id, &repo))
-            .await?;
-
-        // Create a catalog with all workspaces registered
-        let mut catalog = StaticCatalog::default_nodes_schema();
-        for workspace in &workspaces {
-            catalog.register_workspace(workspace.name.clone());
-        }
+        // Shared, cached catalog — this used to list every workspace per query.
+        let catalog =
+            raisin_sql_execution::workspace_catalog(state.storage.as_ref(), &tenant_id, &repo)
+                .await?;
 
         // Create QueryEngine with storage, catalog, and repository config for locale translation
         // Note: WS handler doesn't have job registrar, so bulk ops execute synchronously
         let mut engine = QueryEngine::new(state.storage.clone(), &tenant_id, &repo, &branch)
-            .with_catalog(Arc::new(catalog))
+            .with_catalog(catalog)
             .with_repository_config(repository.config.clone());
 
         // Wire the indexing engines so full-text (FULLTEXT_MATCH) and vector SQL
@@ -383,6 +375,7 @@ where
                         .as_ref()
                         .map(|s| s.job_data_store().clone()),
                     lock_manager: ws_state.lock_manager.clone(),
+                    schema_stats_cache: ws_state.schema_stats_cache.clone(),
                 });
 
                 let callbacks = raisin_functions::execution::callbacks::create_production_callbacks(

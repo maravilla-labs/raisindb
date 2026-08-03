@@ -91,6 +91,13 @@ where
     /// Atomic locks / inventory manager (optional - `raisin.locks`/`raisin.inventory`
     /// won't work without it)
     pub lock_manager: Option<raisin_locks::LockManagerHandle>,
+
+    /// Schema statistics cache for SQL planner selectivity estimation.
+    ///
+    /// Without it, every `raisin.sql.query()` call re-runs two full listings (all
+    /// NodeTypes and all Archetypes) just to read their counts — the HTTP, WS and
+    /// pgwire paths all wire this, and the function path was the one that did not.
+    pub schema_stats_cache: Option<raisin_core::SharedSchemaStatsCache>,
 }
 
 /// Configuration for function execution

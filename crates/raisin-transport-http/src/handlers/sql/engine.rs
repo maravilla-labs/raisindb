@@ -8,55 +8,40 @@ use raisin_embeddings::crypto::ApiKeyEncryptor;
 use raisin_embeddings::provider::create_provider;
 use raisin_embeddings::TenantEmbeddingConfigStore;
 use raisin_models::auth::AuthContext;
+use raisin_sql_execution::engine::catalog_cache::workspace_catalog_with_embeddings;
 use raisin_sql_execution::{
     FunctionInvokeCallback, FunctionInvokeSyncCallback, JobRegistrarCallback, QueryEngine,
     RestoreTreeRegistrarCallback, StaticCatalog,
 };
-use raisin_storage::{scope::RepoScope, JobType, Storage, WorkspaceRepository};
+use raisin_storage::JobType;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
 /// Build catalog with all workspaces and optional embedding support.
+///
+/// Delegates to the shared, cached builder in `raisin-sql-execution` — this used
+/// to list every workspace and rebuild the catalog on each request.
 pub(super) async fn build_catalog(
     state: &AppState,
     tenant_id: &str,
     repo: &str,
     embedding_config: &Option<raisin_embeddings::TenantEmbeddingConfig>,
 ) -> Result<Arc<StaticCatalog>, ApiError> {
-    let storage = state.storage();
+    let embedding_dimensions = embedding_config
+        .as_ref()
+        .filter(|c| c.enabled)
+        .map(|c| c.dimensions);
 
-    tracing::debug!("   Fetching workspaces from repository...");
-    let workspaces = storage
-        .workspaces()
-        .list(RepoScope::new(tenant_id, repo))
-        .await?;
+    let catalog = workspace_catalog_with_embeddings(
+        state.storage().as_ref(),
+        tenant_id,
+        repo,
+        embedding_dimensions,
+    )
+    .await?;
 
-    tracing::info!(
-        "   Found {} workspaces: {:?}",
-        workspaces.len(),
-        workspaces.iter().map(|w| &w.name).collect::<Vec<_>>()
-    );
-
-    // Create a catalog with all workspaces registered
-    let mut catalog = StaticCatalog::default_nodes_schema();
-
-    // Add embedding column if embeddings are enabled for this tenant
-    if let Some(ref config) = embedding_config {
-        if config.enabled {
-            tracing::info!(
-                "   Embedding support enabled: dimensions={}",
-                config.dimensions
-            );
-            catalog = catalog.with_embedding_column(config.dimensions);
-        }
-    }
-
-    for workspace in &workspaces {
-        catalog.register_workspace(workspace.name.clone());
-    }
-
-    Ok(Arc::new(catalog))
+    Ok(catalog)
 }
 
 /// Create job registrar callback for async bulk SQL operations.

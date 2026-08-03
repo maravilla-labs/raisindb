@@ -15,14 +15,17 @@ mod acl;
 mod ai_config;
 mod batch;
 mod branch;
+pub mod catalog_cache;
 mod handlers;
 pub(crate) mod helpers;
 mod restore;
 mod spatial_admin;
 
 pub use batch::batch_requires_async;
+pub use catalog_cache::{
+    invalidate_all_workspace_catalogs, invalidate_workspace_catalog, workspace_catalog,
+};
 
-use crate::physical_plan::eval::{set_function_context, FunctionContext};
 use crate::physical_plan::executor::{execute_plan, ExecutionContext, RowStream};
 use crate::physical_plan::planner::PhysicalPlanner;
 use crate::physical_plan::IndexCatalog;
@@ -157,6 +160,18 @@ pub struct QueryEngine<S: Storage> {
     pub(crate) schema_stats_cache: Option<SharedSchemaStatsCache>,
 }
 
+/// The default nodes schema, built once for the process.
+///
+/// `QueryEngine::new` is almost always followed by `.with_catalog(...)`, so the
+/// default used to be constructed (several hundred allocations across five
+/// `TableDef`s) and thrown away on every single engine construction — which is
+/// itself per query on every transport.
+fn default_catalog() -> Arc<dyn Catalog> {
+    static DEFAULT: std::sync::LazyLock<Arc<StaticCatalog>> =
+        std::sync::LazyLock::new(|| Arc::new(StaticCatalog::default_nodes_schema()));
+    DEFAULT.clone()
+}
+
 impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static> QueryEngine<S> {
     /// Create a new query engine
     pub fn new(
@@ -171,7 +186,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             hnsw_engine: None,
             embedding_provider: None,
             embedding_storage: None,
-            catalog: Arc::new(StaticCatalog::default_nodes_schema()),
+            catalog: default_catalog(),
             tenant_id: tenant_id.into(),
             repo_id: repo_id.into(),
             branch: branch.into(),
@@ -426,7 +441,7 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
 
         // 1. Parse and Semantic analysis
         tracing::debug!("Phase 1: Parsing and analyzing SQL");
-        let analyzer = Analyzer::with_catalog(self.catalog.clone_box());
+        let analyzer = Analyzer::with_catalog_arc(self.catalog.clone());
         let analyzed = analyzer
             .analyze(sql)
             .map_err(|e| Error::Validation(format!("Analysis error: {}", e)))?;
@@ -619,40 +634,9 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             ctx.lock_manager = Some(mgr.clone());
         }
 
-        // Set function context for system functions (CURRENT_USER)
-        if let Some(ref auth) = self.auth_context {
-            tracing::info!(
-                "[execute] Setting up function context: user_id={:?}",
-                auth.user_id
-            );
-
-            let user_node = if let Some(ref user_id) = auth.user_id {
-                let node = self.lookup_user_node(user_id, &branch_for_lookup).await;
-                tracing::info!(
-                    "[execute] lookup_user_node result for user_id={}: found={}",
-                    user_id,
-                    node.is_some()
-                );
-                node
-            } else {
-                tracing::warn!("[execute] auth_context exists but user_id is None");
-                None
-            };
-
-            set_function_context(FunctionContext {
-                user_id: auth.user_id.clone(),
-                user_node: user_node.clone(),
-            });
-
-            tracing::info!(
-                "[execute] Function context set: user_id={:?}, has_node={}",
-                auth.user_id,
-                user_node.is_some()
-            );
-        } else {
-            tracing::warn!("[execute] No auth_context available, using default");
-            set_function_context(FunctionContext::default());
-        }
+        // Set function context for system functions (RAISIN_CURRENT_USER).
+        // Resolves the user node only when the SQL can actually call it.
+        self.install_function_context(sql, &branch_for_lookup).await;
 
         // 6. Execute physical plan
         let stream = execute_plan(&physical_plan, &ctx).await?;

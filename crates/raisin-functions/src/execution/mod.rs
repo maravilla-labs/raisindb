@@ -68,6 +68,7 @@ pub mod code_loader;
 mod debug;
 mod executor;
 pub mod flow_callbacks_factory;
+pub mod module_cache;
 mod provider;
 mod types;
 

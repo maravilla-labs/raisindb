@@ -79,7 +79,8 @@ pub use raisin_sql::{
 
 // Re-export query engine and batch utilities
 pub use engine::{
-    batch_requires_async, FunctionInvokeCallback, FunctionInvokeSyncCallback, JobRegistrarCallback,
+    batch_requires_async, invalidate_all_workspace_catalogs, invalidate_workspace_catalog,
+    workspace_catalog, FunctionInvokeCallback, FunctionInvokeSyncCallback, JobRegistrarCallback,
     QueryEngine, RestoreTreeRegistrarCallback,
 };
 

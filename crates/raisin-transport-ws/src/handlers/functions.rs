@@ -369,6 +369,7 @@ mod inner {
                 .as_ref()
                 .map(|s| s.job_data_store().clone()),
             lock_manager: state.lock_manager.clone(),
+            schema_stats_cache: state.schema_stats_cache.clone(),
         });
 
         // Build callbacks via canonical create_production_callbacks

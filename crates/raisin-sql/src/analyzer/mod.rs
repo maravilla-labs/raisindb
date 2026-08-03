@@ -12,6 +12,8 @@
 //! - **semantic**: Core semantic analysis logic
 //! - **error**: Semantic analysis errors
 
+use std::sync::Arc;
+
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser as SqlParser;
 
@@ -46,7 +48,7 @@ pub use types::DataType;
 
 /// Semantic analyzer
 pub struct Analyzer {
-    catalog: Box<dyn Catalog>,
+    catalog: Arc<dyn Catalog>,
     functions: FunctionRegistry,
 }
 
@@ -54,13 +56,22 @@ impl Analyzer {
     /// Create analyzer with default catalog and function registry
     pub fn new() -> Self {
         Self {
-            catalog: Box::new(StaticCatalog::default_nodes_schema()),
+            catalog: Arc::new(StaticCatalog::default_nodes_schema()),
             functions: FunctionRegistry::default(),
         }
     }
 
     /// Create analyzer with custom catalog
     pub fn with_catalog(catalog: Box<dyn Catalog>) -> Self {
+        Self::with_catalog_arc(Arc::from(catalog))
+    }
+
+    /// Create analyzer from a shared catalog.
+    ///
+    /// Prefer this on any hot path: `with_catalog` + `Catalog::clone_box` deep-copies
+    /// the catalog's tables and workspace maps, which the query engine used to pay
+    /// on *every statement* even though it already held an `Arc`.
+    pub fn with_catalog_arc(catalog: Arc<dyn Catalog>) -> Self {
         Self {
             catalog,
             functions: FunctionRegistry::default(),

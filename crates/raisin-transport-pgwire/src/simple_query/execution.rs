@@ -37,16 +37,17 @@ where
         );
         debug!("SQL: {}", sql);
 
-        // Fetch workspaces from storage to register them in the catalog
-        let workspaces = match self
-            .storage
-            .workspaces()
-            .list(RepoScope::new(tenant_id, repo_id))
-            .await
+        // Shared, cached catalog — this used to list every workspace per query.
+        let catalog = match raisin_sql_execution::workspace_catalog(
+            self.storage.as_ref(),
+            tenant_id,
+            repo_id,
+        )
+        .await
         {
-            Ok(ws) => ws,
+            Ok(c) => c,
             Err(e) => {
-                error!("Failed to fetch workspaces: {}", e);
+                error!("Failed to build workspace catalog: {}", e);
                 return Response::Error(Box::new(ErrorInfo::new(
                     "ERROR".to_string(),
                     "XX000".to_string(),
@@ -54,19 +55,6 @@ where
                 )));
             }
         };
-
-        debug!(
-            "Found {} workspaces: {:?}",
-            workspaces.len(),
-            workspaces.iter().map(|w| &w.name).collect::<Vec<_>>()
-        );
-
-        // Create a catalog with all workspaces registered
-        let mut catalog = StaticCatalog::default_nodes_schema();
-        for workspace in &workspaces {
-            catalog.register_workspace(workspace.name.clone());
-        }
-        let catalog = Arc::new(catalog);
 
         // Create QueryEngine for this query with the catalog
         let mut engine = QueryEngine::new(self.storage.clone(), tenant_id, repo_id, branch)

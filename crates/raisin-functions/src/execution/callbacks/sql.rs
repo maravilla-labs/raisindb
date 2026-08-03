@@ -29,6 +29,51 @@ use serde_json::Value;
 use super::super::types::ExecutionDependencies;
 use crate::api::{SqlExecuteCallback, SqlQueryCallback};
 
+/// Build the `QueryEngine` backing `raisin.sql.query()` / `raisin.sql.execute()`.
+///
+/// Both callbacks had a verbatim copy of this, and both ran it *inside* the
+/// per-call closure — so the workspace listing and catalog construction happened
+/// once per SQL statement a function issued, not once per function.
+///
+/// The catalog now comes from the shared per-repo cache
+/// (`raisin_sql_execution::workspace_catalog`), the same one the HTTP, WS and
+/// pgwire paths use, and the schema-stats cache is wired in — its absence here
+/// meant the planner re-listed every NodeType and Archetype on every query while
+/// the other transports were served from cache.
+async fn build_engine<S, B>(
+    deps: &ExecutionDependencies<S, B>,
+    tenant: &str,
+    repo: &str,
+    branch: &str,
+    auth: Option<AuthContext>,
+) -> Result<QueryEngine<S>, raisin_error::Error>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: BinaryStorage + 'static,
+{
+    let catalog = raisin_sql_execution::workspace_catalog(deps.storage.as_ref(), tenant, repo)
+        .await
+        .map_err(|e| {
+            raisin_error::Error::Backend(format!("Failed to build workspace catalog: {e}"))
+        })?;
+
+    let mut engine =
+        QueryEngine::new(deps.storage.clone(), tenant, repo, branch).with_catalog(catalog);
+
+    if let Some(idx) = &deps.indexing_engine {
+        engine = engine.with_indexing_engine(idx.clone());
+    }
+    if let Some(hnsw) = &deps.hnsw_engine {
+        engine = engine.with_hnsw_engine(hnsw.clone());
+    }
+    if let Some(stats) = &deps.schema_stats_cache {
+        engine = engine.with_schema_stats_cache(stats.clone());
+    }
+
+    // Use system context if no auth provided (for trigger/function execution)
+    Ok(engine.with_auth(auth.unwrap_or_else(AuthContext::system)))
+}
+
 /// Create sql_query callback: `raisin.sql.query(sql, params)`
 ///
 /// Executes a SQL SELECT query and returns the results as a JSON array.
@@ -60,30 +105,10 @@ where
                 "Executing SQL query in function context"
             );
 
-            // 1. Build workspace catalog from storage
-            let workspaces = deps
-                .storage
-                .workspaces()
-                .list(RepoScope::new(&tenant, &repo))
-                .await?;
-            let mut catalog = StaticCatalog::default_nodes_schema();
-            for ws in &workspaces {
-                catalog.register_workspace(ws.name.clone());
-            }
-
-            // 2. Create QueryEngine with catalog and optional engines
-            let mut engine = QueryEngine::new(deps.storage.clone(), &tenant, &repo, &branch)
-                .with_catalog(Arc::new(catalog));
-
-            if let Some(idx) = &deps.indexing_engine {
-                engine = engine.with_indexing_engine(idx.clone());
-            }
-            if let Some(hnsw) = &deps.hnsw_engine {
-                engine = engine.with_hnsw_engine(hnsw.clone());
-            }
-            // Use system context if no auth provided (for trigger/function execution)
-            let auth = auth.unwrap_or_else(AuthContext::system);
-            engine = engine.with_auth(auth);
+            // 1-2. Build the engine. The catalog is shared and cached per repo:
+            // this closure runs on EVERY `raisin.sql.query()` call, so a function
+            // issuing 20 queries used to perform 20 full workspace listings.
+            let engine = build_engine(&deps, &tenant, &repo, &branch, auth).await?;
 
             // 3. Substitute parameters into SQL
             let final_sql = substitute_params(&sql, &params)?;
@@ -141,30 +166,8 @@ where
                 "Executing SQL statement in function context"
             );
 
-            // 1. Build workspace catalog from storage
-            let workspaces = deps
-                .storage
-                .workspaces()
-                .list(RepoScope::new(&tenant, &repo))
-                .await?;
-            let mut catalog = StaticCatalog::default_nodes_schema();
-            for ws in &workspaces {
-                catalog.register_workspace(ws.name.clone());
-            }
-
-            // 2. Create QueryEngine with catalog and optional engines
-            let mut engine = QueryEngine::new(deps.storage.clone(), &tenant, &repo, &branch)
-                .with_catalog(Arc::new(catalog));
-
-            if let Some(idx) = &deps.indexing_engine {
-                engine = engine.with_indexing_engine(idx.clone());
-            }
-            if let Some(hnsw) = &deps.hnsw_engine {
-                engine = engine.with_hnsw_engine(hnsw.clone());
-            }
-            // Use system context if no auth provided (for trigger/function execution)
-            let auth = auth.unwrap_or_else(AuthContext::system);
-            engine = engine.with_auth(auth);
+            // 1-2. Build the engine (shared, cached catalog — see `build_engine`).
+            let engine = build_engine(&deps, &tenant, &repo, &branch, auth).await?;
 
             // 3. Substitute parameters into SQL
             let final_sql = substitute_params(&sql, &params)?;

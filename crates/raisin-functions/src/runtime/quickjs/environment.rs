@@ -118,11 +118,29 @@ fn setup_raisin_api<'js>(
 
     // Evaluate JS code that creates the public API with JSON parsing, then the
     // registered function-binding plugins' snippets (empty in public builds).
-    let mut wrapper_src = String::from(API_WRAPPER_JS);
-    wrapper_src.push_str(&crate::plugin::assemble_plugin_js());
-    ctx.eval::<(), _>(wrapper_src.into_bytes())?;
+    ctx.eval::<(), _>(api_wrapper_source().clone())?;
 
     Ok(())
+}
+
+/// The API wrapper concatenated with the plugin snippets, assembled once.
+///
+/// A fresh `AsyncContext` per execution is deliberate tenant isolation, so the
+/// ~41 KB wrapper genuinely must be evaluated each time — but it does not need
+/// to be *rebuilt* each time. This used to allocate a fresh `String`, copy the
+/// whole wrapper into it and re-run plugin assembly on every single execution.
+///
+/// Plugins register during startup, before any function runs, so capturing them
+/// on first use is safe. `Ctx::eval` takes `impl Into<Vec<u8>>` and so still
+/// copies once — that copy is imposed by rquickjs and cannot be elided here.
+fn api_wrapper_source() -> &'static Vec<u8> {
+    static SRC: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+        let mut src = String::with_capacity(API_WRAPPER_JS.len() + 1024);
+        src.push_str(API_WRAPPER_JS);
+        src.push_str(&crate::plugin::assemble_plugin_js());
+        src.into_bytes()
+    });
+    &SRC
 }
 
 /// JavaScript source that creates the public `globalThis.raisin` API.

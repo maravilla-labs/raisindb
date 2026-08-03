@@ -54,6 +54,7 @@ pub(super) fn build_mcp_function_api(
         job_registry: Some(state.storage.job_registry().clone()),
         job_data_store: Some(state.storage.job_data_store().clone()),
         lock_manager: state.lock_manager.clone(),
+        schema_stats_cache: state.schema_stats_cache.clone(),
     });
 
     let callbacks = create_production_callbacks(deps, tenant, repo_id, branch_owned, auth_context);

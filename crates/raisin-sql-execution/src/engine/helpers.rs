@@ -152,7 +152,42 @@ pub(crate) async fn load_all_compound_indexes<S: Storage>(
 /// Load compound indexes from NodeType storage
 ///
 /// Fetches the NodeType definition and extracts its compound_indexes field.
+/// Shares `COMPOUND_INDEX_CACHE` with the all-types variant above, under a key
+/// that carries the node type — without this, a `node_type =` in the WHERE
+/// clause meant a NodeType read on every statement while the *unpinned* path
+/// (the more general one) was already cached.
 pub(crate) async fn load_compound_indexes<S: Storage>(
+    storage: &S,
+    tenant_id: &str,
+    repo_id: &str,
+    branch: &str,
+    node_type_name: &str,
+) -> Option<Vec<CompoundIndexDefinition>> {
+    let scope_key = format!("{tenant_id}:{repo_id}:{branch}:{node_type_name}");
+
+    if let Some(cached) = compound_index_cache().get(&scope_key) {
+        return if cached.is_empty() {
+            None
+        } else {
+            Some((*cached).clone())
+        };
+    }
+
+    let loaded =
+        load_compound_indexes_uncached(storage, tenant_id, repo_id, branch, node_type_name)
+            .await
+            .unwrap_or_default();
+
+    compound_index_cache().put(&scope_key, std::sync::Arc::new(loaded.clone()));
+
+    if loaded.is_empty() {
+        None
+    } else {
+        Some(loaded)
+    }
+}
+
+async fn load_compound_indexes_uncached<S: Storage>(
     storage: &S,
     tenant_id: &str,
     repo_id: &str,

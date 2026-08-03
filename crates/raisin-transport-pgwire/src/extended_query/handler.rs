@@ -150,33 +150,21 @@ where
             return Ok(Response::EmptyQuery);
         }
 
-        // Fetch workspaces from storage (same pattern as simple_query.rs)
-        let workspaces = self
-            .storage
-            .workspaces()
-            .list(RepoScope::new(&context.tenant_id, &context.repository))
-            .await
-            .map_err(|e| {
-                error!("Failed to fetch workspaces: {}", e);
-                PgWireError::UserError(Box::new(ErrorInfo::new(
-                    "ERROR".to_owned(),
-                    "XX000".to_owned(),
-                    format!("Failed to fetch workspaces: {}", e),
-                )))
-            })?;
-
-        debug!(
-            "Found {} workspaces: {:?}",
-            workspaces.len(),
-            workspaces.iter().map(|w| &w.name).collect::<Vec<_>>()
-        );
-
-        // Create catalog with all workspaces registered
-        let mut catalog = StaticCatalog::default_nodes_schema();
-        for workspace in &workspaces {
-            catalog.register_workspace(workspace.name.clone());
-        }
-        let catalog = Arc::new(catalog);
+        // Shared, cached catalog — this used to list every workspace per query.
+        let catalog = raisin_sql_execution::workspace_catalog(
+            self.storage.as_ref(),
+            &context.tenant_id,
+            &context.repository,
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to build workspace catalog: {}", e);
+            PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                "XX000".to_owned(),
+                format!("Failed to fetch workspaces: {}", e),
+            )))
+        })?;
 
         // Get effective branch: session override or repository default
         let branch = match context.session_branch() {

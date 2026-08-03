@@ -314,7 +314,15 @@ fn listed_ids_can_be_fetched_back() {
         ("node-b", vec![0.4, 0.5, 0.6]),
     ] {
         storage
-            .store_embedding("t", "r", "main", "ws", id, &revision, &embedding_for(id, vector))
+            .store_embedding(
+                "t",
+                "r",
+                "main",
+                "ws",
+                id,
+                &revision,
+                &embedding_for(id, vector),
+            )
             .unwrap();
     }
 
