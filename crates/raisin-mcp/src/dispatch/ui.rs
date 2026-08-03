@@ -25,8 +25,8 @@ use serde_json::{json, Value};
 use super::{Dispatcher, READ_TTL_MS, UI_RESOURCE_SCHEME};
 use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
-use crate::protocol::{CACHE_SCOPE_PRIVATE, RESULT_TYPE_COMPLETE};
-use crate::server::{split_entry, UiBinding, UiMode};
+use crate::protocol::{CACHE_SCOPE_PRIVATE, RESULT_TYPE_COMPLETE, UI_MIME_TYPE};
+use crate::server::{split_entry, UiBinding};
 
 impl Dispatcher {
     /// Canonical `ui://` URI for a binding under this session (fragment
@@ -131,48 +131,39 @@ impl Dispatcher {
                 );
                 McpError::not_found(format!("unknown ui resource: {uri}"))
             })?;
-        let mode = binding.mode;
-
-        // Stage 1 keeps existing behaviour: an absent mode renders as the
-        // single-file inline widget, which is what every author meant.
-        let mut content = match mode.unwrap_or(UiMode::Html) {
-            UiMode::Html => {
-                let Some(assets) = self.assets.as_ref() else {
-                    return Err(McpError::not_found("ui resources are not enabled"));
-                };
-                let asset = assets
-                    .read_asset(identity, workspace, &format!("/{path}"))
-                    .await?;
-                let html = String::from_utf8_lossy(&asset.bytes).into_owned();
-                let html = inject_server_origin(html, self.public_base.as_deref());
-                json!({
-                    "uri": uri,
-                    "mimeType": ui_mime_type(UiMode::Html),
-                    "text": html,
-                })
-            }
-            // The host iframes this URL with a real `src=`, so the widget is
-            // same-origin with the server and its relative asset URLs resolve.
-            // An absolute URL is required: the host is not on our origin, so a
-            // relative path would resolve against the host's.
-            UiMode::UriList => {
-                let base = self.public_base.as_deref().ok_or_else(|| {
-                    McpError::not_found(
-                        "a uri-list widget needs the server's public base URL; set RAISINDB_BASE_URL"
-                            .to_string(),
-                    )
-                })?;
-                let url = format!(
-                    "{base}/resources/{}/{}/{workspace}/{path}",
-                    identity.repo, identity.branch
-                );
-                json!({
-                    "uri": uri,
-                    "mimeType": ui_mime_type(UiMode::UriList),
-                    "text": url,
-                })
-            }
+        // ONE delivery format. SEP-1865 defines inline HTML and nothing else —
+        // external URLs sit under "Content Types (deferred from MVP)" — so a
+        // binding that still says `mode: uri-list` is served inline like any
+        // other. That mode is why ChatGPT printed a url instead of rendering a
+        // widget: `text/uri-list` is not a content type it, or any conformant
+        // host, is obliged to render.
+        //
+        // What `uri-list` DID provide was same-origin serving, which is what
+        // made a widget's relative urls resolve. `wants_base_href` carries that
+        // property across (defaulting on for exactly those bindings) without
+        // the non-conformant content type.
+        let Some(assets) = self.assets.as_ref() else {
+            return Err(McpError::not_found("ui resources are not enabled"));
         };
+        let asset = assets
+            .read_asset(identity, workspace, &format!("/{path}"))
+            .await?;
+        let html = String::from_utf8_lossy(&asset.bytes).into_owned();
+        let base_href = binding.wants_base_href().then(|| {
+            self.public_base.as_deref().map(|base| {
+                widget_base_href(base, &identity.repo, &identity.branch, workspace, path)
+            })
+        });
+        let html = inject_widget_preamble(
+            html,
+            self.public_base.as_deref(),
+            base_href.flatten().as_deref(),
+        );
+        let mut content = json!({
+            "uri": uri,
+            "mimeType": UI_MIME_TYPE,
+            "text": html,
+        });
 
         // Binding metadata (csp/permissions/prefersBorder) rides on the content
         // item — the spec-preferred location, which takes precedence over the
@@ -192,21 +183,21 @@ impl Dispatcher {
     }
 }
 
-/// The resource mime type a widget of `mode` is served as.
-///
-/// `html` is the MCP Apps profile the host renders via `srcdoc`; `uri-list` is
-/// a URL the host iframes with a real `src=`. Both must be declared
-/// consistently in `resources/list` and `resources/read` — a host that
-/// prefetched one type and received the other has to discard it.
-///
-/// Note `text/uri-list` corresponds to the spec's `externalUrl` content type,
-/// which SEP-1865 explicitly DEFERS from the MVP ("Content Types (deferred from
-/// MVP): `externalUrl`"). Hosts are therefore not obliged to render it; prefer
-/// `mode: html` unless the widget genuinely needs multi-file serving.
-pub(super) fn ui_mime_type(mode: UiMode) -> &'static str {
-    match mode {
-        UiMode::Html => "text/html;profile=mcp-app",
-        UiMode::UriList => "text/uri-list",
+/// Absolute url of the DIRECTORY holding a widget's entry document, for
+/// `<base href>`. Trailing slash is required: without it the last segment is
+/// treated as a file name and dropped when relative urls resolve.
+pub(super) fn widget_base_href(
+    base: &str,
+    repo: &str,
+    branch: &str,
+    workspace: &str,
+    path: &str,
+) -> String {
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    match path.rsplit_once('/') {
+        Some((dir, _file)) => format!("{base}/resources/{repo}/{branch}/{workspace}/{dir}/"),
+        None => format!("{base}/resources/{repo}/{branch}/{workspace}/"),
     }
 }
 
@@ -227,9 +218,52 @@ pub(super) fn ui_mime_type(mode: UiMode) -> &'static str {
 /// Returns `html` untouched when no public base is known — a widget that has
 /// its own fallback keeps working exactly as before.
 pub(super) fn inject_server_origin(html: String, base: Option<&str>) -> String {
-    let Some(base) = base else {
+    inject_widget_preamble(html, base, None)
+}
+
+/// Insert the engine's `<head>` preamble: an optional `<base href>` followed by
+/// the server-origin global.
+///
+/// Both go in one insertion, in this order, because both must precede the
+/// document's own scripts and `<base>` must precede anything that resolves a
+/// relative url. Inserting them separately would put the origin script first
+/// and leave a `<base>` that arrives too late for markup above it.
+///
+/// An author-supplied `<base>` is respected: HTML resolves against the FIRST
+/// one with an `href`, so injecting ours ahead of theirs would silently
+/// override it. We skip instead.
+pub(super) fn inject_widget_preamble(
+    html: String,
+    origin: Option<&str>,
+    base_href: Option<&str>,
+) -> String {
+    let mut preamble = String::new();
+    if let Some(href) = base_href {
+        if find_tag_end(&html, "<base").is_none() {
+            preamble.push_str(&format!("<base href=\"{}\">", escape_attribute(href)));
+        }
+    }
+    if let Some(origin) = origin {
+        preamble.push_str(&server_origin_script(origin));
+    }
+    if preamble.is_empty() {
         return html;
-    };
+    }
+    insert_into_head(html, &preamble)
+}
+
+/// Escape a value for an HTML double-quoted attribute. The href embeds a
+/// workspace and asset path from node properties, so it is author-controlled.
+fn escape_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The `<script>` defining `window.__RAISIN_SERVER_ORIGIN__`.
+fn server_origin_script(base: &str) -> String {
     // JSON-encode for the JS string, THEN escape the HTML-significant
     // characters as `\uXXXX`. JSON alone is not enough: the HTML parser looks
     // for the literal `</script` before JavaScript is ever tokenized, so a
@@ -242,29 +276,25 @@ pub(super) fn inject_server_origin(html: String, base: Option<&str>) -> String {
         .replace('<', "\\u003C")
         .replace('>', "\\u003E")
         .replace('&', "\\u0026");
-    let snippet = format!("<script>window.__RAISIN_SERVER_ORIGIN__={literal};</script>");
+    format!("<script>window.__RAISIN_SERVER_ORIGIN__={literal};</script>")
+}
 
-    // Insert immediately after <head...>, else before the first <script>, else
-    // prepend. The middle case matters for widgets built without a <head>
-    // (bundlers emit bare fragments), where appending would land the global
-    // AFTER the code that reads it.
-    if let Some(pos) = find_tag_end(&html, "<head") {
-        let mut out = String::with_capacity(html.len() + snippet.len());
-        out.push_str(&html[..pos]);
-        out.push_str(&snippet);
-        out.push_str(&html[pos..]);
-        return out;
-    }
-    match html.to_ascii_lowercase().find("<script") {
-        Some(pos) => {
-            let mut out = String::with_capacity(html.len() + snippet.len());
-            out.push_str(&html[..pos]);
-            out.push_str(&snippet);
-            out.push_str(&html[pos..]);
-            out
-        }
-        None => format!("{snippet}{html}"),
-    }
+/// Insert `snippet` immediately after `<head...>`, else before the first
+/// `<script>`, else at the very front.
+///
+/// The middle case matters for widgets built without a `<head>` (bundlers emit
+/// bare fragments), where appending would land the preamble AFTER the code that
+/// reads it.
+fn insert_into_head(html: String, snippet: &str) -> String {
+    let at = find_tag_end(&html, "<head").or_else(|| html.to_ascii_lowercase().find("<script"));
+    let Some(at) = at else {
+        return format!("{snippet}{html}");
+    };
+    let mut out = String::with_capacity(html.len() + snippet.len());
+    out.push_str(&html[..at]);
+    out.push_str(snippet);
+    out.push_str(&html[at..]);
+    out
 }
 
 /// Byte offset just past the closing `>` of the first `tag` (e.g. `<head`),

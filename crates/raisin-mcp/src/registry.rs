@@ -470,9 +470,17 @@ pub async fn assemble_for_slug(
     // win on a name collision.
     if let Some(functions) = &services.functions {
         for props in &func_props {
-            if let Some(custom) = CustomTool::from_function_properties(props) {
+            if let Some(mut custom) = CustomTool::from_function_properties(props) {
                 if registry.get(&custom.name).is_some() {
                     continue;
+                }
+                // A function-side `mcp` block may reference the server's named
+                // widgets too; the descriptor resolved only its own tools.
+                let name = custom.name.clone();
+                if let Some(ui) = custom.ui.as_mut() {
+                    if !descriptor.resolve_ui(ui, &name) {
+                        custom.ui = None;
+                    }
                 }
                 registry.register(crate::data_tools::FunctionTool::new(
                     custom,
@@ -482,5 +490,45 @@ pub async fn assemble_for_slug(
         }
     }
 
+    warn_on_ui_resource_conflicts(&descriptor);
+
     Ok((descriptor, registry))
+}
+
+/// Warn when two tools describe the same widget differently.
+///
+/// A `ui://` uri is derived from the entry document, so several tools sharing
+/// one SPA — the normal case for a multi-view app — resolve to ONE resource.
+/// SEP-1865 scopes `csp`, `permissions` and `domain` to that resource, but
+/// RaisinDB accepts them per tool binding, so nothing structurally prevents
+/// three copies from drifting apart.
+///
+/// The engine cannot serve two policies for one document: `resources/list`
+/// dedupes by uri and `read_ui_resource` takes the first matching binding, so
+/// whichever tool the registry ordered first silently wins and edits to the
+/// others do nothing. Declaring the widget once in `ui_resources` and
+/// referencing it by name avoids the whole question; this warns for the authors
+/// who have not.
+fn warn_on_ui_resource_conflicts(descriptor: &McpServerDescriptor) {
+    let mut seen: HashMap<(Option<&str>, &str), &crate::server::UiBinding> = HashMap::new();
+    for tool in &descriptor.custom_tools {
+        let Some(ui) = tool.ui.as_ref() else { continue };
+        let (path, _fragment) = ui.split_entry();
+        let key = (ui.workspace.as_deref(), path);
+        match seen.get(&key) {
+            Some(first) if first.resource_facet() != ui.resource_facet() => tracing::warn!(
+                server = %descriptor.name,
+                tool = %tool.name,
+                widget = %path,
+                "two tools declare the same widget with different resource metadata; \
+                 one document can only be served with one policy, so the first \
+                 declaration wins — declare it once under `ui_resources` and reference \
+                 it by name"
+            ),
+            Some(_) => {}
+            None => {
+                seen.insert(key, ui);
+            }
+        }
+    }
 }

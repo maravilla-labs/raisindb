@@ -14,16 +14,14 @@
 
 use serde_json::{json, Value};
 
-use super::ui::ui_mime_type;
 use super::{Dispatcher, LIST_TTL_MS, READ_TTL_MS, UI_RESOURCE_SCHEME};
 use crate::error::{McpError, Result};
 use crate::identity::McpIdentity;
 use crate::protocol::{
     ReadResourceParams, ReadResourceResult, SubscribeResourceParams, SubscriptionFilter,
-    SubscriptionsListenParams, CACHE_SCOPE_PRIVATE, RESULT_TYPE_COMPLETE,
+    SubscriptionsListenParams, CACHE_SCOPE_PRIVATE, RESULT_TYPE_COMPLETE, UI_MIME_TYPE,
 };
 use crate::resources::ResourceContents;
-use crate::server::UiMode;
 
 impl Dispatcher {
     pub(super) fn handle_resources_list(&self, identity: &McpIdentity) -> Result<Value> {
@@ -57,7 +55,7 @@ impl Dispatcher {
             let mut entry = json!({
                 "uri": uri,
                 "name": ui.name.clone().unwrap_or_else(|| tool.name.clone()),
-                "mimeType": ui_mime_type(ui.mode.unwrap_or(UiMode::Html)),
+                "mimeType": UI_MIME_TYPE,
             });
             if let Some(description) = &ui.description {
                 entry["description"] = json!(description);

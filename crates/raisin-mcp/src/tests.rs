@@ -46,6 +46,7 @@ fn descriptor_with(
             resources: false,
         },
         custom_tools,
+        ui_resources: Vec::new(),
     }
 }
 

@@ -86,6 +86,52 @@ properties:
         type: boolean
         description: Whether raisin:// resources are exposed for the workspaces above.
 
+  - name: ui_resources
+    title: UI Resources
+    type: array
+    description: >
+      Widgets declared once and referenced by name from a tool's
+      `ui: { resource: <id> }`. MCP Apps (SEP-1865) scopes csp, permissions and
+      domain to the RESOURCE - they describe the document, not the call that
+      opened it - so several tools sharing one SPA describe ONE resource and
+      must agree. Declaring the widget here is how they agree; declared inline
+      per tool, three copies drift and the engine silently serves whichever the
+      registry ordered first. A server may declare any number of widgets.
+    items:
+      type: object
+      properties:
+        id:
+          type: string
+          description: >
+            Name tools reference from their `ui` block's `resource` field.
+        entry:
+          type: string
+          description: Workspace-relative path to the widget's entry document.
+        workspace:
+          type: string
+          description: Workspace the entry path resolves in.
+        name:
+          type: string
+          description: Display name for the ui:// resource in resources/list.
+        description:
+          type: string
+          description: Description of the UI resource.
+        prefersBorder:
+          type: boolean
+          description: Whether the host should draw a border and background.
+        baseHref:
+          type: boolean
+          description: See the same field under a tool's `ui`.
+        domain:
+          type: string
+          description: See the same field under a tool's `ui`.
+        permissions:
+          type: object
+          description: See the same field under a tool's `ui`.
+        csp:
+          type: object
+          description: See the same field under a tool's `ui`.
+
   - name: tools
     title: Custom Tools
     type: array
@@ -109,11 +155,15 @@ properties:
         outputSchema:
           type: object
           description: >
-            JSON Schema describing the tool's structured result. Inherited from
-            the function's output_schema when omitted. REQUIRED IN PRACTICE FOR
-            ANY TOOL WITH A ui BINDING - without it the result carries only a
-            text content block, so the widget receives no structuredContent and
-            renders empty. This is the most common authoring mistake.
+            JSON Schema describing the tool's structured result. Usually leave
+            this unset - it is inherited from the referenced raisin:Function
+            node's output_schema, which is where a schema belongs. Set it here
+            only to override the function's for this one tool. What matters is
+            that a schema exists on ONE of the two: with neither, the result
+            carries only a text content block, so a ui-bound widget receives no
+            structuredContent and renders empty. That is the most common
+            authoring mistake. Same inheritance applies to inputSchema and
+            description.
         scopes:
           type: array
           items:
@@ -125,23 +175,52 @@ properties:
             Optional MCP-UI binding. When set, the host renders a widget
             alongside the tool result.
           properties:
+            resource:
+              type: string
+              description: >
+                Name of a `ui_resources` entry to use as this tool's widget -
+                the alternative to spelling `entry` and the resource metadata
+                out here. Fields set inline still override the resource's, so a
+                tool can narrow a shared widget without restating it. A typo
+                warns and leaves the tool callable without a widget rather than
+                failing the server.
             mode:
               type: string
               description: >
                 DEPRECATED - do not set on new bindings. MCP Apps (SEP-1865)
                 defines exactly one delivery format, inline HTML with mimeType
                 text/html;profile=mcp-app, and lists external URLs
-                (text/uri-list) as deferred from the MVP. A widget is delivered
-                inline whatever this says. Still accepted so deployed nodes keep
-                parsing. Allowed values - html, uri-list.
+                (text/uri-list) as deferred from the MVP - which is why a
+                uri-list widget arrived at ChatGPT as a bare url instead of
+                rendering. A widget is now delivered inline whatever this says.
+                Still accepted so deployed nodes keep parsing. Its one residual
+                effect - uri-list widgets were served same-origin, so it
+                defaults baseHref on. Allowed values - html, uri-list.
             entry:
               type: string
               description: >
-                Workspace-relative path to the widget's entry document, with an
-                optional #fragment naming an in-app SPA route
-                (e.g. site/widgets/order/index.html#/card). The document must be
-                a single self-contained HTML5 file - the spec has no multi-file
-                delivery, so bundle scripts and styles inline.
+                Workspace-relative path to the widget's entry document. The
+                document must be a single self-contained HTML5 file - the spec
+                has no multi-file delivery, so bundle scripts and styles inline.
+                A #fragment is accepted and IGNORED: it names an in-app route,
+                and a route is not a different resource. Which view the widget
+                boots into comes from the host at runtime (the instantiating
+                tool's name, then the tool-input notification). Omit `entry`
+                when using `resource`.
+            baseHref:
+              type: boolean
+              description: >
+                Whether to inject a <base href> pointing at the entry document's
+                directory, so the widget's RELATIVE urls (images, fonts) keep
+                resolving. Delivered inline, a widget runs on the host's sandbox
+                origin, where a relative url resolves against the host and 404s.
+                Defaults ON for a binding declaring the legacy mode: uri-list
+                (written against same-origin serving) and OFF otherwise. The
+                cost, and why it is not simply always on - with a <base>, a
+                FRAGMENT-ONLY link (<a href="#/inbox">) resolves against the
+                base url rather than the document, so a hash router built on
+                anchors navigates away instead of switching view. Turn it on for
+                relative assets; keep routing programmatic.
             workspace:
               type: string
               description: >

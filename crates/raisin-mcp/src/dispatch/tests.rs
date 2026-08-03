@@ -116,14 +116,16 @@ mod ui_tests {
     }
 
     #[test]
-    fn each_mode_declares_its_own_mime_type() {
-        // Both modes must be served AND listed as what they are. `uri-list`
-        // used to be parsed and then ignored: every binding was served inline
-        // as html, so a multi-file widget reached the host as `srcdoc` and its
-        // relative asset URLs resolved against a null origin.
-        assert_eq!(ui_mime_type(UiMode::Html), "text/html;profile=mcp-app");
-        assert_eq!(ui_mime_type(UiMode::UriList), "text/uri-list");
-        assert_ne!(ui_mime_type(UiMode::Html), ui_mime_type(UiMode::UriList));
+    fn every_widget_is_served_as_the_one_apps_mime_type() {
+        // SEP-1865 defines exactly one content type for a widget. `mode` used
+        // to pick between this and `text/uri-list` — the spec's `externalUrl`,
+        // listed under "Content Types (deferred from MVP)" and therefore
+        // renderable by no conformant host, which is why such a widget arrived
+        // in ChatGPT as a bare url. There is no longer a second answer to pick.
+        assert_eq!(UI_MIME_TYPE, "text/html;profile=mcp-app");
+        // No space after the `;` — the string is matched verbatim against the
+        // client's advertised `mimeTypes`.
+        assert!(!UI_MIME_TYPE.contains("; "));
     }
 
     #[test]
@@ -418,5 +420,111 @@ mod conformance_tests {
     #[test]
     fn absent_permissions_emit_nothing() {
         assert!(UiPermissions::default().is_empty());
+    }
+
+    /// A `<base href>` is what lets a widget keep its RELATIVE asset urls once
+    /// it is delivered inline instead of served same-origin. Without one they
+    /// resolve against the host's sandbox origin and 404.
+    #[test]
+    fn base_href_points_at_the_entry_documents_directory() {
+        assert_eq!(
+            widget_base_href(
+                "https://sol.rdb.example.cloud",
+                "studio",
+                "main",
+                "assets",
+                "mcp-widgets/studio/index.html"
+            ),
+            "https://sol.rdb.example.cloud/resources/studio/main/assets/mcp-widgets/studio/"
+        );
+        // Trailing slash is load-bearing: without it the browser treats the
+        // last segment as a file name and drops it when resolving.
+        assert!(widget_base_href("https://x.test", "r", "b", "ws", "index.html").ends_with('/'));
+    }
+
+    /// A trailing slash on the configured base must not double up.
+    #[test]
+    fn base_href_tolerates_a_trailing_slash_on_the_public_base() {
+        assert_eq!(
+            widget_base_href("https://x.test/", "r", "b", "ws", "w/index.html"),
+            "https://x.test/resources/r/b/ws/w/"
+        );
+    }
+
+    /// The migration guarantee: a binding written against same-origin serving
+    /// (`mode: uri-list`) keeps working when it is delivered inline instead.
+    /// A spec-clean binding gets a spec-clean document with nothing injected.
+    #[test]
+    fn base_href_defaults_on_only_for_a_legacy_uri_list_binding() {
+        let binding = |mode, base_href| UiBinding {
+            mode,
+            base_href,
+            resource: None,
+            entry: "w/index.html".into(),
+            workspace: None,
+            name: None,
+            description: None,
+            csp: None,
+            permissions: None,
+            domain: None,
+            prefers_border: None,
+            visibility: None,
+        };
+        assert!(binding(Some(UiMode::UriList), None).wants_base_href());
+        assert!(!binding(Some(UiMode::Html), None).wants_base_href());
+        assert!(!binding(None, None).wants_base_href());
+        // An explicit value always wins over the mode-derived default.
+        assert!(binding(Some(UiMode::Html), Some(true)).wants_base_href());
+        assert!(!binding(Some(UiMode::UriList), Some(false)).wants_base_href());
+    }
+
+    /// HTML resolves against the FIRST `<base href>`, so injecting ours ahead
+    /// of an author's would silently override theirs.
+    #[test]
+    fn an_authors_own_base_tag_is_left_alone() {
+        let html = "<html><head><base href=\"https://mine.test/\"></head></html>";
+        let out = inject_widget_preamble(html.to_string(), None, Some("https://ours.test/"));
+        assert!(!out.contains("ours.test"));
+        assert_eq!(out, html);
+    }
+
+    /// `<base>` must precede the origin script, and both must precede the
+    /// document's own scripts — a base that lands after markup above it is
+    /// too late to affect that markup.
+    #[test]
+    fn the_base_tag_precedes_the_origin_script_and_both_precede_the_document() {
+        let out = inject_widget_preamble(
+            "<html><head><script>boot()</script></head></html>".to_string(),
+            Some("https://x.test"),
+            Some("https://x.test/resources/r/b/ws/w/"),
+        );
+        let base = out.find("<base").expect("base injected");
+        let origin = out
+            .find("__RAISIN_SERVER_ORIGIN__")
+            .expect("origin injected");
+        let boot = out.find("boot()").expect("document preserved");
+        assert!(base < origin, "base must come first: {out}");
+        assert!(origin < boot, "preamble must precede the document: {out}");
+    }
+
+    /// The href embeds a workspace and asset path read from node properties,
+    /// so it is author-controlled and lands in an attribute context.
+    #[test]
+    fn base_href_is_escaped_for_its_attribute_context() {
+        let out = inject_widget_preamble(
+            "<html><head></head></html>".to_string(),
+            None,
+            Some("https://x.test/a\"><script>alert(1)</script>/"),
+        );
+        assert!(!out.contains("<script>alert(1)"), "escaped: {out}");
+        assert!(out.contains("&quot;"));
+    }
+
+    /// No public base means no base href — a widget with its own fallback must
+    /// keep working rather than get a broken absolute base.
+    #[test]
+    fn nothing_is_injected_without_a_public_base() {
+        let html = "<html><head></head></html>".to_string();
+        assert_eq!(inject_widget_preamble(html.clone(), None, None), html);
     }
 }
