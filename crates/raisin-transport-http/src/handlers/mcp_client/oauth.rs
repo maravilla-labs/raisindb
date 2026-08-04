@@ -61,9 +61,11 @@ pub async fn discover(
 
     let (mut node, descriptor) =
         load_connection(&state, &tenant.tenant_id, &repo, &slug, ACTOR).await?;
-    egress_policy(&state)
-        .validate_url(&descriptor.url)
-        .map_err(remote_error)?;
+    // The policy guards every hop, not just this first one: each URL after it is
+    // named by the remote side, so an allowlisted server could otherwise walk us
+    // to a private address.
+    let egress = egress_policy(&state);
+    egress.guard(&descriptor.url).await.map_err(remote_error)?;
 
     let http = raisin_functions::shared_http_client();
 
@@ -110,7 +112,7 @@ pub async fn discover(
     };
 
     let resource: ProtectedResourceMetadata =
-        mcp::fetch_protected_resource_metadata(&http, &metadata_url)
+        mcp::fetch_protected_resource_metadata(&http, &egress, &metadata_url)
             .await
             .map_err(remote_error)?;
 
@@ -125,13 +127,24 @@ pub async fn discover(
         })?;
 
     let as_url = mcp::as_metadata_url(&issuer).map_err(remote_error)?;
-    let server: AuthServerMetadata = mcp::fetch_as_metadata(&http, &as_url)
+    let server: AuthServerMetadata = mcp::fetch_as_metadata(&http, &egress, &as_url)
         .await
         .map_err(remote_error)?;
     if !server.is_usable() {
         return Err(ApiError::validation_failed(
             "authorization-server metadata is missing an authorization or token endpoint",
         ));
+    }
+    // Judge the endpoints we are about to STORE, not only the ones we dial now:
+    // the token endpoint is used again by every later refresh, and the
+    // authorization endpoint is handed to the operator's browser.
+    for (what, endpoint) in [
+        ("authorization endpoint", &server.authorization_endpoint),
+        ("token endpoint", &server.token_endpoint),
+    ] {
+        mcp::guard_peer_endpoint(&egress, endpoint, what)
+            .await
+            .map_err(remote_error)?;
     }
 
     let scopes = mcp::resolve_scopes(&resource, &server, challenge.as_ref());
@@ -143,9 +156,10 @@ pub async fn discover(
     let mut client = existing_client(&node);
     if client.client_id.is_empty() {
         if let Some(endpoint) = &server.registration_endpoint {
-            let issued = mcp::register_client(&http, endpoint, CLIENT_NAME, &redirect_uri, &scopes)
-                .await
-                .map_err(remote_error)?;
+            let issued =
+                mcp::register_client(&http, &egress, endpoint, CLIENT_NAME, &redirect_uri, &scopes)
+                    .await
+                    .map_err(remote_error)?;
             if let Some(secret) = &issued.client_secret {
                 store_client_secret(&state, &mut node, secret)?;
             }
@@ -314,8 +328,11 @@ async fn complete(state: &AppState, repo: &str, query: CallbackQuery) -> Result<
         client_secret: decrypt_client_secret(state, &node),
     };
 
+    // Re-checked here rather than trusted from discovery: the endpoint was
+    // stored by a call that may predate this guard, and this route is public.
     let tokens = mcp::exchange_code(
         &raisin_functions::shared_http_client(),
+        &egress_policy(state),
         &metadata,
         &client,
         &code,

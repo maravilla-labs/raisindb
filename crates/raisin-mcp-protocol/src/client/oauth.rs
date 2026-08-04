@@ -39,6 +39,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use super::egress::EgressPolicy;
 use super::error::{RemoteToolError, Result};
 
 /// Scope requested when a server advertises none.
@@ -223,21 +224,53 @@ pub fn as_metadata_url(issuer: &str) -> Result<String> {
 /// Fetch and parse RFC 9728 protected-resource metadata.
 pub async fn fetch_protected_resource_metadata(
     http: &reqwest::Client,
+    egress: &EgressPolicy,
     url: &str,
 ) -> Result<ProtectedResourceMetadata> {
-    fetch_json(http, url, "protected-resource metadata").await
+    fetch_json(http, egress, url, "protected-resource metadata").await
 }
 
 /// Fetch and parse RFC 8414 authorization-server metadata.
-pub async fn fetch_as_metadata(http: &reqwest::Client, url: &str) -> Result<AuthServerMetadata> {
-    fetch_json(http, url, "authorization-server metadata").await
+pub async fn fetch_as_metadata(
+    http: &reqwest::Client,
+    egress: &EgressPolicy,
+    url: &str,
+) -> Result<AuthServerMetadata> {
+    fetch_json(http, egress, url, "authorization-server metadata").await
+}
+
+/// Apply the egress policy to a URL the *remote side* chose.
+///
+/// Every URL in the discovery chain after the connection's own endpoint is
+/// supplied by the peer: the `WWW-Authenticate` challenge names the metadata
+/// document, that document names the issuer, and the issuer's metadata names the
+/// registration and token endpoints. Without this, an allowlisted MCP server can
+/// walk RaisinDB straight to `http://169.254.169.254/` — and, at the token
+/// endpoint, POST a client secret there.
+///
+/// The allowlist applies to these hosts too. An authorization server usually
+/// lives on a different host from the MCP endpoint (`auth.linear.app` vs
+/// `mcp.linear.app`), so an operator who sets `allowed_hosts` must list both;
+/// the error says so rather than failing opaquely.
+pub async fn guard_peer_url(egress: &EgressPolicy, url: &str, what: &str) -> Result<()> {
+    let parsed = Url::parse(url)
+        .map_err(|e| RemoteToolError::Config(format!("unparseable {what} `{url}`: {e}")))?;
+    egress.guard(&parsed).await.map_err(|e| {
+        RemoteToolError::Config(format!(
+            "{what} `{url}` is refused by the [mcp_client] egress policy: {e} \
+             (an authorization server on a different host than the MCP endpoint \
+             must be listed in allowed_hosts too)"
+        ))
+    })
 }
 
 async fn fetch_json<T: for<'de> Deserialize<'de>>(
     http: &reqwest::Client,
+    egress: &EgressPolicy,
     url: &str,
     what: &str,
 ) -> Result<T> {
+    guard_peer_url(egress, url, what).await?;
     let response = http.get(url).send().await?;
     let status = response.status();
     let body = response.text().await?;
@@ -255,6 +288,7 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(
 /// only has to paste a URL for servers that do NOT support it.
 pub async fn register_client(
     http: &reqwest::Client,
+    egress: &EgressPolicy,
     registration_endpoint: &str,
     client_name: &str,
     redirect_uri: &str,
@@ -272,6 +306,7 @@ pub async fn register_client(
         "scope": scopes.join(" "),
     });
 
+    guard_peer_url(egress, registration_endpoint, "registration endpoint").await?;
     let response = http.post(registration_endpoint).json(&body).send().await?;
     let status = response.status();
     let text = response.text().await?;
@@ -359,6 +394,7 @@ pub struct TokenResponse {
 /// Exchange an authorization code for tokens.
 pub async fn exchange_code(
     http: &reqwest::Client,
+    egress: &EgressPolicy,
     metadata: &AuthServerMetadata,
     client: &RegisteredClient,
     code: &str,
@@ -379,12 +415,13 @@ pub async fn exchange_code(
     if let Some(resource) = resource {
         form.push(("resource", resource.to_string()));
     }
-    post_token(http, &metadata.token_endpoint, &form).await
+    post_token(http, egress, &metadata.token_endpoint, &form).await
 }
 
 /// Exchange a refresh token for a fresh access token.
 pub async fn refresh_tokens(
     http: &reqwest::Client,
+    egress: &EgressPolicy,
     metadata: &AuthServerMetadata,
     client: &RegisteredClient,
     refresh_token: &str,
@@ -401,14 +438,18 @@ pub async fn refresh_tokens(
     if let Some(resource) = resource {
         form.push(("resource", resource.to_string()));
     }
-    post_token(http, &metadata.token_endpoint, &form).await
+    post_token(http, egress, &metadata.token_endpoint, &form).await
 }
 
 async fn post_token(
     http: &reqwest::Client,
+    egress: &EgressPolicy,
     token_endpoint: &str,
     form: &[(&str, String)],
 ) -> Result<TokenResponse> {
+    // The most sensitive hop in the chain: this POST carries the authorization
+    // code or the refresh token, and the client secret when one was issued.
+    guard_peer_url(egress, token_endpoint, "token endpoint").await?;
     let response = http.post(token_endpoint).form(form).send().await?;
     let status = response.status();
     let text = response.text().await?;
@@ -470,6 +511,54 @@ pub fn resolve_scopes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE SSRF this guard exists for. Every URL in the discovery chain after
+    /// the connection's own endpoint is named by the peer: the challenge names
+    /// the metadata document, that names the issuer, and the issuer's metadata
+    /// names the registration and token endpoints. An allowlisted MCP server
+    /// must not be able to walk RaisinDB to cloud instance metadata — least of
+    /// all at the token endpoint, which receives a client secret.
+    #[tokio::test]
+    async fn a_peer_supplied_url_cannot_point_at_a_private_address() {
+        let http = reqwest::Client::new();
+        let policy = EgressPolicy::default();
+
+        let metadata_url = "http://169.254.169.254/latest/meta-data/";
+        let err = fetch_protected_resource_metadata(&http, &policy, metadata_url)
+            .await
+            .expect_err("link-local metadata must be refused");
+        assert!(matches!(err, RemoteToolError::Config(_)), "got {err:?}");
+
+        let err = fetch_as_metadata(&http, &policy, "https://10.1.2.3/.well-known/x")
+            .await
+            .expect_err("private address must be refused");
+        assert!(matches!(err, RemoteToolError::Config(_)), "got {err:?}");
+
+        let metadata = AuthServerMetadata {
+            token_endpoint: "https://127.0.0.1/token".to_string(),
+            ..Default::default()
+        };
+        let err = refresh_tokens(&http, &policy, &metadata, &RegisteredClient::default(), "rt", None)
+            .await
+            .expect_err("a loopback token endpoint must never receive the refresh token");
+        assert!(matches!(err, RemoteToolError::Config(_)), "got {err:?}");
+    }
+
+    /// The policy must not be bypassable by naming an allowlisted host and then
+    /// redirecting the chain to one that is not on the list.
+    #[tokio::test]
+    async fn the_allowlist_applies_to_peer_supplied_urls_too() {
+        let policy = EgressPolicy {
+            allowed_hosts: vec!["mcp.linear.app".into()],
+            ..EgressPolicy::default()
+        };
+        let err = guard_peer_url(&policy, "https://evil.test/.well-known/x", "issuer")
+            .await
+            .expect_err("an off-allowlist host must be refused");
+        // The message has to explain the two-host case or an operator will read
+        // a correct refusal as a broken feature.
+        assert!(err.to_string().contains("allowed_hosts"), "got {err}");
+    }
 
     #[test]
     fn parses_the_challenge_this_codebase_emits() {

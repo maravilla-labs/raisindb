@@ -44,20 +44,16 @@ use raisin_error::Result;
 /// Workspace holding connection configuration.
 const SYSTEM_WORKSPACE: &str = "raisin:system";
 
-/// Operator settings for calling other servers' MCP tools, set once at startup.
-///
-/// Process-global rather than a field on [`ExecutionDependencies`] on purpose.
-/// That struct is rebuilt at five call sites plus once inline for nested calls,
-/// and the value is the same for all of them — it comes from the `[mcp_client]`
-/// TOML section, not from the request. Threading it would add a sixth place to
-/// forget, and forgetting would silently downgrade one path's egress policy.
-/// Same reasoning as [`shared_http_client`](super::shared_http_client).
-static MCP_CLIENT_CONFIG: std::sync::OnceLock<McpClientConfig> = std::sync::OnceLock::new();
-
 /// Install the operator's `[mcp_client]` settings. Called once, from the server
 /// binary; later calls are ignored.
+///
+/// The value lives in `raisin-mcp-protocol`, not here, because the other dial
+/// paths — the discovery job and the token-refresh sweep, both in
+/// `raisin-rocksdb` — cannot reach this crate (that direction closes a package
+/// cycle). One store means one egress policy; a per-crate copy is how one path
+/// ends up running under the permissive default.
 pub fn configure_mcp_client(config: McpClientConfig) {
-    let _ = MCP_CLIENT_CONFIG.set(config);
+    raisin_mcp_protocol::client::install_config(config);
 }
 
 /// Register the session cache with the derived-cache registry, once.
@@ -81,7 +77,7 @@ fn register_session_cache() {
 /// never calls [`configure_mcp_client`] cannot be talked into dialling its own
 /// network — it simply cannot reach a local sidecar.
 fn mcp_client_config() -> &'static McpClientConfig {
-    MCP_CLIENT_CONFIG.get_or_init(McpClientConfig::default)
+    raisin_mcp_protocol::client::installed_config()
 }
 
 /// Cap on a single base64 payload echoed back into a tool result.
@@ -187,10 +183,10 @@ where
 
     let config = mcp_client_config();
 
-    // Re-validated at CALL time, not only at save time: a hostname that
-    // resolved publicly when the connection was saved can be re-pointed at a
-    // private address afterwards.
-    if let Err(e) = config.egress_policy().validate_url(&descriptor.url) {
+    // Re-validated at CALL time, not only at save time, and against the
+    // RESOLVED addresses: a hostname that resolved publicly when the connection
+    // was saved can be re-pointed at a private address afterwards.
+    if let Err(e) = config.egress_policy().guard(&descriptor.url).await {
         return finish(false, None, Some(e.to_string()));
     }
 

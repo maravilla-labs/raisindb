@@ -99,7 +99,7 @@ pub async fn test_connection(
     // The URL is re-checked here, not just at save time: the stored value may
     // predate a tightened allowlist, and a hostname can be re-pointed at a
     // private address after it was saved.
-    if let Err(err) = egress_policy(&state).validate_url(&descriptor.url) {
+    if let Err(err) = egress_policy(&state).guard(&descriptor.url).await {
         return Ok(Json(TestReport::failed(&err)));
     }
 

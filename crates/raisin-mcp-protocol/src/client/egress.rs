@@ -91,6 +91,39 @@ impl EgressPolicy {
         }
     }
 
+    /// Validate a URL **and** the addresses its host resolves to, immediately
+    /// before dialling it.
+    ///
+    /// This is the check every outbound request must go through. [`validate_url`]
+    /// alone judges the scheme, the allowlist and a literal IP — it cannot see
+    /// that `mcp.example.com` currently resolves to `127.0.0.1`, which is the
+    /// whole DNS-rebinding shape.
+    ///
+    /// A residual race remains between this resolution and the one `reqwest`
+    /// performs; closing it entirely needs a connection-pinning custom resolver,
+    /// which is follow-up work rather than something pretended away here.
+    ///
+    /// [`validate_url`]: Self::validate_url
+    pub async fn guard(&self, url: &Url) -> Result<()> {
+        self.validate_url(url)?;
+
+        // A literal IP was already judged by validate_url; only a domain needs
+        // resolving, and resolving one costs a DNS round trip we should not pay
+        // for an address we can read straight out of the URL.
+        let Some(Host::Domain(domain)) = url.host() else {
+            return Ok(());
+        };
+        let port = url.port_or_known_default().unwrap_or(443);
+        let addresses: Vec<IpAddr> = tokio::net::lookup_host((domain, port))
+            .await
+            .map_err(|e| {
+                RemoteToolError::Transient(format!("could not resolve `{domain}`: {e}"))
+            })?
+            .map(|socket| socket.ip())
+            .collect();
+        self.validate_resolved(domain, &addresses)
+    }
+
     /// Validate the addresses a host actually resolved to, just before dialling.
     pub fn validate_resolved(&self, host: &str, addresses: &[IpAddr]) -> Result<()> {
         if addresses.is_empty() {
@@ -273,6 +306,25 @@ mod tests {
             .validate_resolved("x.test", &[public, private])
             .is_err());
         assert!(policy.validate_resolved("x.test", &[]).is_err());
+    }
+
+    /// `guard` must not be a thin alias for `validate_url`: it has to reject a
+    /// hostname that RESOLVES somewhere private, which is the rebinding shape
+    /// the save-time check cannot see. `localhost` is the one name every
+    /// machine resolves to loopback.
+    #[tokio::test]
+    async fn guard_rejects_a_hostname_that_resolves_to_loopback() {
+        let url = Url::parse("https://localhost/mcp").unwrap();
+        // The URL itself is unremarkable — a domain, over https.
+        assert!(open().validate_url(&url).is_ok());
+        // Resolving it is what exposes the target.
+        assert!(open().guard(&url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn guard_still_rejects_a_literal_metadata_address_without_resolving() {
+        let url = Url::parse("https://169.254.169.254/latest/meta-data/").unwrap();
+        assert!(open().guard(&url).await.is_err());
     }
 
     #[test]

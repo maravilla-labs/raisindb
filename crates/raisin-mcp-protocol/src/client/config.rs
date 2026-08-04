@@ -87,6 +87,36 @@ impl McpClientConfig {
     }
 }
 
+/// The operator's `[mcp_client]` settings for this process.
+///
+/// Deliberately a process global rather than a field threaded through every
+/// caller. The value comes from the server's TOML, never from a request, and
+/// the paths that need it — the HTTP handlers, the discovery job, the token
+/// refresh sweep, the function executor — live in crates that cannot all reach
+/// one another (`raisin-rocksdb` cannot depend on `raisin-functions`). Threading
+/// it produced four copies of the same value, and a path that missed one would
+/// silently run under the permissive default.
+static INSTALLED: std::sync::OnceLock<McpClientConfig> = std::sync::OnceLock::new();
+
+/// Install the operator's settings. Called once from the server binary; later
+/// calls are ignored so a test cannot be surprised by a mid-run change.
+pub fn install_config(config: McpClientConfig) {
+    let _ = INSTALLED.set(config);
+}
+
+/// The installed settings, or the safe default.
+///
+/// The default refuses loopback and private addresses, so a deployment that
+/// never installs a config cannot be talked into dialling its own network.
+pub fn installed_config() -> &'static McpClientConfig {
+    INSTALLED.get_or_init(McpClientConfig::default)
+}
+
+/// The installed egress policy. The single source every dial path reads.
+pub fn installed_egress_policy() -> EgressPolicy {
+    installed_config().egress_policy()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

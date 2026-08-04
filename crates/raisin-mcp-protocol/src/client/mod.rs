@@ -41,7 +41,9 @@ pub mod session;
 pub mod session_cache;
 pub mod transport;
 
-pub use config::{McpClientConfig, DEFAULT_TIMEOUT_MS};
+pub use config::{
+    install_config, installed_config, installed_egress_policy, McpClientConfig, DEFAULT_TIMEOUT_MS,
+};
 pub use connection::{
     validate_slug, AuthKind, McpConnectionDescriptor, RefreshPolicy, StaticAuthScheme, ToolFilter,
     DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS,
@@ -50,7 +52,8 @@ pub use egress::EgressPolicy;
 pub use error::{RemoteToolError, Result};
 pub use oauth::{
     as_metadata_url, authorize_url, exchange_code, expires_at, fetch_as_metadata,
-    fetch_protected_resource_metadata, parse_challenge, refresh_tokens, register_client,
+    fetch_protected_resource_metadata, guard_peer_url as guard_peer_endpoint, parse_challenge,
+    refresh_tokens, register_client,
     resolve_scopes, AuthChallenge, AuthServerMetadata, Pkce, ProtectedResourceMetadata,
     RegisteredClient, TokenResponse,
 };

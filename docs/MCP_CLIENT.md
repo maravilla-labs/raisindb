@@ -88,8 +88,18 @@ agent.
 **Egress is restricted by default.** `https` only, and private, loopback and
 link-local addresses (including cloud metadata at `169.254.169.254`) are
 refused. This is checked when you save a connection *and* again before every
-call, because a hostname that resolved publicly can be re-pointed afterwards.
-To reach an MCP server on localhost, set `allow_private_addresses = true`.
+dial — the second check resolves the hostname and judges every address it
+returns, because a name that resolved publicly at save time can be re-pointed at
+`127.0.0.1` afterwards. To reach an MCP server on localhost, set
+`allow_private_addresses = true`.
+
+**The policy covers the whole OAuth chain, not just the endpoint you typed.**
+Every URL after the connection's own is named by the remote side: its `401`
+names the metadata document, that names the issuer, and the issuer's metadata
+names the registration and token endpoints. All of them are checked. If you set
+`allowed_hosts`, list the **authorization server's host too** — it is usually a
+different host (`auth.linear.app` vs `mcp.linear.app`), and a missing entry
+makes `oauth/discover` fail with a message saying exactly that.
 
 **Multi-node clusters need `[locks]` with the `redis` backend.** Discovery
 writes shared content, and the lease is what makes it run once per cluster.

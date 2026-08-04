@@ -216,7 +216,7 @@ impl McpToolDiscoveryHandler {
 
         // Re-checked here, not merely at save time: the stored URL may predate a
         // tightened allowlist, and a host can be re-pointed after it was saved.
-        if let Err(e) = self.egress.validate_url(&descriptor.url) {
+        if let Err(e) = self.egress.guard(&descriptor.url).await {
             apply::record_health(&svc, node, e.code(), &e).await?;
             return Ok(serde_json::json!({ "skipped": "egress denied" }));
         }

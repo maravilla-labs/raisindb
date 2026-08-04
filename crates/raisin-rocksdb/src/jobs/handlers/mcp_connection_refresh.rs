@@ -149,8 +149,12 @@ async fn refresh_node(
         client_secret: decrypt_field(&node, "oauth_client_secret_encrypted", "value", secret_box),
     };
 
+    // The token endpoint comes from metadata the REMOTE side supplied at
+    // discovery time, so it is guarded here too — this POST carries the refresh
+    // token and any client secret.
     let tokens = match mcp::refresh_tokens(
         &raisin_functions_http_client(),
+        &mcp::installed_egress_policy(),
         &metadata,
         &client,
         &refresh_token,
