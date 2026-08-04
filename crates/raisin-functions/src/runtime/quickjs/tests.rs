@@ -2333,3 +2333,119 @@ async fn leak_shared_runtime_per_execution() {
         }
     }
 }
+
+/// An error carrying a `code` property must surface that code in the message.
+///
+/// Adapters signal outcomes with the reserved-code contract
+/// (`var e = new Error(msg); e.code = "auth_expired"`), and the engine
+/// classifies on the message string. The exception formatter read only
+/// `message()`, so every coded error arrived as a generic transient failure:
+/// expired credentials were retried instead of pausing the mount, misconfigured
+/// mounts hammered the provider forever, and an expired sync cursor was retried
+/// instead of triggering a resync. Production hit the last of those.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_thrown_error_code_reaches_the_engine() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            var e = new Error("Microsoft Graph rejected the access token");
+            e.code = "auth_expired";
+            throw e;
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("coded_error_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(!result.success, "a thrown error must fail the function");
+    let err = result.error.expect("error must be reported");
+    assert!(
+        err.message.contains("auth_expired"),
+        "the reserved code must reach the engine, got: {}",
+        err.message
+    );
+    // The human-readable text is preserved, not replaced.
+    assert!(
+        err.message.contains("rejected the access token"),
+        "the original message must survive, got: {}",
+        err.message
+    );
+}
+
+/// The SAME must hold for an `async` handler, whose rejection takes a different
+/// code path inside the runtime.
+///
+/// That path used to carry its own copy of the formatting logic. Fixing only the
+/// synchronous one would have covered today's (synchronous) adapters and
+/// silently missed every async function — the mirrored-code-paths trap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_thrown_error_code_reaches_the_engine_from_async() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        async function handler(input) {
+            var e = new Error("provider refused the stored cursor");
+            e.code = "cursor_invalid";
+            throw e;
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("coded_error_async_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(!result.success, "a rejected async handler must fail");
+    let err = result.error.expect("error must be reported");
+    assert!(
+        err.message.contains("cursor_invalid"),
+        "async rejections must carry the code too, got: {}",
+        err.message
+    );
+}
+
+/// An error WITHOUT a code is byte-identical to before — no stray suffix.
+///
+/// This is the backward-compatibility guarantee: only coded errors change, and
+/// every consumer matches with `contains`, so nothing else shifts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_uncoded_error_message_is_unchanged() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            throw new Error("plain failure");
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("uncoded_error_test");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    let err = result.error.expect("error must be reported");
+    assert!(err.message.contains("plain failure"));
+    assert!(
+        !err.message.contains("[code="),
+        "an uncoded error must not gain a code suffix, got: {}",
+        err.message
+    );
+}

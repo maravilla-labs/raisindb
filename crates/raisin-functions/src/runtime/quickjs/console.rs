@@ -8,7 +8,7 @@
 //! Provides the `console` object (log, debug, info, warn, error) with
 //! log capture, and the timer internal API (setTimeout, setInterval).
 
-use rquickjs::{prelude::Rest, CaughtError, Ctx, Function, Object, Promise, Value};
+use rquickjs::{prelude::Rest, CaughtError, Ctx, Exception, Function, Object, Promise, Value};
 use std::sync::{Arc, Mutex};
 
 use crate::runtime::timers::TimerRegistry;
@@ -194,15 +194,59 @@ pub(super) fn format_js_error<'js>(_ctx: &Ctx<'js>, error: CaughtError<'js>) -> 
                 msg
             }
         }
-        CaughtError::Exception(exc) => {
-            let msg = exc.message().unwrap_or_else(|| "Unknown error".to_string());
-            if let Some(stack) = exc.stack() {
-                format!("{}\n{}", msg, stack)
-            } else {
-                msg
-            }
-        }
+        CaughtError::Exception(exc) => format_exception(&exc),
         CaughtError::Value(_val) => "Unknown error value".to_string(),
+    }
+}
+
+/// Render a thrown JS `Exception` as `message [code=…]` plus its stack.
+///
+/// THE ONLY implementation. It exists as its own function because the
+/// promise-rejection path in [`super::mod`] used to carry a byte-for-byte copy
+/// of this logic, and the two were free to drift — which is exactly what
+/// happened: the fix below would have covered synchronous handlers only, and
+/// silently missed every `async` one. Both paths call this.
+///
+/// ## Why the `code` property is read here
+///
+/// Adapters signal outcomes with the documented reserved-code contract:
+///
+/// ```js
+/// var e = new Error("Microsoft Graph rejected the access token");
+/// e.code = "auth_expired";
+/// throw e;
+/// ```
+///
+/// The engine classifies on the message string (`AdapterError::classify`), but
+/// this function only ever read `message()` — so the code was dropped on the
+/// floor and EVERY coded error was classified as a generic transient failure.
+/// The consequences were not cosmetic: an expired credential was retried
+/// instead of pausing its mount for re-auth, a misconfigured mount was never
+/// marked and hammered the provider forever, and an expired sync cursor was
+/// retried instead of triggering a resync. The contract was documented on both
+/// sides and connected on neither.
+///
+/// The code is **appended** to the message rather than replacing anything, so
+/// nothing that already matches on the human-readable text changes meaning —
+/// and appended *before* the stack is joined, so it lands on the message line
+/// rather than the tail of the stack trace (where the console's `ErrorDetails`
+/// would file it under `stack_trace`).
+pub(super) fn format_exception(exc: &Exception<'_>) -> String {
+    let msg = exc.message().unwrap_or_else(|| "Unknown error".to_string());
+
+    let code = exc
+        .get::<_, Option<String>>("code")
+        .ok()
+        .flatten()
+        .filter(|c| !c.is_empty());
+    let msg = match code {
+        Some(c) => format!("{msg} [code={c}]"),
+        None => msg,
+    };
+
+    match exc.stack() {
+        Some(stack) => format!("{msg}\n{stack}"),
+        None => msg,
     }
 }
 
