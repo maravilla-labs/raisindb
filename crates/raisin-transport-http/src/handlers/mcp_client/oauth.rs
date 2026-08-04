@@ -488,7 +488,11 @@ fn relay(repo: &str, outcome: Result<String, String>) -> Response {
             message.clone(),
         ),
     };
-    let console = format!("/admin/repos/{repo}/mcp-connections");
+    // The console route is /admin/{repo}/mcp-connections — the SPA's basename
+    // is "/admin" and the repo is the first segment. There is no "repos/"
+    // segment; getting this wrong sends the operator to a 404 immediately
+    // after they consented, which is the worst possible moment for it.
+    let console = format!("/admin/{repo}/mcp-connections");
 
     // The payload rides in a data attribute and is JSON.parse'd, rather than
     // being interpolated into the <script> block. Serializing to JSON is NOT
