@@ -160,14 +160,7 @@ pub async fn create_connection(
         ));
     }
 
-    let mut node = Node {
-        node_type: CONNECTION_NODE_TYPE.to_string(),
-        name: req.slug.clone(),
-        path: path.clone(),
-        // `parent` is the parent's NAME, not its path.
-        parent: Some(CONNECTIONS_FOLDER.to_string()),
-        ..Default::default()
-    };
+    let mut node = new_connection_node(&req.slug, &path);
 
     set_prop(&mut node, "slug", json!(req.slug))?;
     set_prop(
@@ -198,6 +191,27 @@ pub async fn create_connection(
 
     svc.create(node).await?;
     Ok(Json(descriptor.redacted()))
+}
+
+/// A fresh connection node.
+///
+/// Extracted from the handler for one reason: the id below has no test coverage
+/// anywhere else, and its absence is what broke the feature in the field.
+fn new_connection_node(slug: &str, path: &str) -> Node {
+    Node {
+        // The CALLER mints the id. `NodeService::create` does not generate one —
+        // it looks this value up verbatim and refuses if it is taken, so leaving
+        // it at `Default`'s empty string stores the first connection under ""
+        // and makes every later create collide with it. Same as the canonical
+        // create path in `handlers/repo/post.rs`.
+        id: nanoid::nanoid!(),
+        node_type: CONNECTION_NODE_TYPE.to_string(),
+        name: slug.to_string(),
+        path: path.to_string(),
+        // `parent` is the parent's NAME, not its path.
+        parent: Some(CONNECTIONS_FOLDER.to_string()),
+        ..Default::default()
+    }
 }
 
 /// `PATCH /api/mcp-connections/{repo}/{slug}` — update a connection.
@@ -295,4 +309,32 @@ fn parse_and_check_url(state: &AppState, raw: &str) -> Result<Url, ApiError> {
         .validate_url(&url)
         .map_err(remote_error)?;
     Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// THE regression an operator hit: the first connection saved, and every
+    /// one after it failed with `Node with ID '' already exists`, because
+    /// `Node::default()` leaves the id empty and `NodeService::create` refuses
+    /// a duplicate rather than minting one.
+    #[test]
+    fn every_connection_gets_its_own_non_empty_id() {
+        let first = new_connection_node("github", "/mcp-connections/github");
+        let second = new_connection_node("linear", "/mcp-connections/linear");
+
+        assert!(!first.id.is_empty(), "an empty id collides on the second create");
+        assert!(!second.id.is_empty());
+        assert_ne!(first.id, second.id);
+    }
+
+    /// Re-creating a slug after deleting it must not reuse the old identity.
+    #[test]
+    fn recreating_the_same_slug_mints_a_fresh_id() {
+        let a = new_connection_node("github", "/mcp-connections/github");
+        let b = new_connection_node("github", "/mcp-connections/github");
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.path, b.path);
+    }
 }

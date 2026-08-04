@@ -26,30 +26,20 @@ keywords:
 category: integrations
 
 builtin: true
-# Only patches raisin:system's allowed types and ships one disabled example;
-# raisin:McpConnection itself is a globally-registered node type. Nothing here
-# reaches the network until an operator creates and enables a connection, so it
-# is safe in every repo on boot.
+# This package ships NO content. It only patches raisin:system's allowed types,
+# so `raisin:McpConnection` — a globally-registered node type — may be written
+# there. Nothing reaches the network until an operator creates and enables a
+# connection, so it is safe in every repo on boot.
+#
+# It deliberately ships no example connection. An earlier version did, and the
+# example was a mistake twice over: `auto_install: true` put a phantom
+# "example-linear" in EVERY repo's connection list, and the content lived at
+# `content/mcp-connections/...` — where the first segment under `content/` is
+# the WORKSPACE name, so every install failed with "Workspace 'mcp-connections'
+# does not exist" and retried to exhaustion on each boot. The shape of a
+# connection is documented in docs/MCP_CLIENT.md instead, where it costs nobody
+# a node.
 auto_install: true
-
-provides:
-  content:
-    - /raisin:system/mcp-connections/example-linear
-
-sync:
-  defaults:
-    mode: merge
-    on_conflict: prefer_server
-
-  filters:
-    # The example is documentation. `prefer_server` keeps a package update from
-    # overwriting an operator who edited it into a real connection — and the
-    # connection they would have edited holds credentials.
-    - root: /mcp-connections/example-linear
-      include:
-        - "**"
-      mode: merge
-      on_conflict: prefer_server
 
 workspace_patches:
   # Generated proxies live under /mcp/{slug}/ in the functions workspace, and

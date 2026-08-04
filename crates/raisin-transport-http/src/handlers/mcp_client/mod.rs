@@ -21,6 +21,7 @@
 mod connections;
 mod credential;
 mod oauth;
+mod oauth_client;
 mod probe;
 mod prune;
 mod refresh;
@@ -31,6 +32,7 @@ pub use connections::{
 };
 pub use credential::{clear_credential, set_credential};
 pub use oauth::{callback, disconnect, discover, start};
+pub use oauth_client::{clear_oauth_client, set_oauth_client};
 pub use probe::test_connection;
 pub use prune::{delete_tool, prune_tools};
 pub use refresh::refresh_tools;

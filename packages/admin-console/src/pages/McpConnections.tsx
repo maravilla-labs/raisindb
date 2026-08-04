@@ -17,7 +17,7 @@ import {
 
 /** Status chip derived from health + credential state. */
 function statusOf(c: McpConnection): { label: string; className: string } {
-  if (!c.enabled) return { label: 'disabled', className: 'text-white/40 border-white/10' }
+  if (!c.enabled) return { label: 'disabled', className: 'text-zinc-400 border-white/10' }
   if (c.auth_kind === 'oauth' && !c.oauth_connected)
     return { label: 'needs auth', className: 'text-amber-300 border-amber-400/30' }
   if (c.auth_kind === 'static' && !c.credential_set)
@@ -115,18 +115,18 @@ export default function McpConnections() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold flex items-center gap-2">
-            <PlugZap className="w-5 h-5 text-sky-300" />
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+            <PlugZap className="w-6 h-6 text-primary-400" />
             MCP Connections
           </h1>
-          <p className="text-sm text-white/50 mt-1">
+          <p className="text-sm text-zinc-400 mt-1">
             External MCP servers whose tools your agents can call.
           </p>
         </div>
         <button
           type="button"
           onClick={() => setCreating(true)}
-          className="px-3 py-1.5 rounded-md bg-sky-500/20 border border-sky-400/40 text-sm"
+          className="px-3 py-1.5 rounded-md bg-primary-500/20 border border-primary-400/40 text-white text-sm"
         >
           <Plus className="w-4 h-4 inline mr-1.5" />
           Add connection
@@ -148,36 +148,36 @@ export default function McpConnections() {
             value={form.title}
             onChange={(e) => setForm({ ...form, title: e.target.value })}
             placeholder="Title (e.g. Linear)"
-            className="w-full px-3 py-2 rounded-md bg-black/30 border border-white/10 text-sm"
+            className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 transition-all"
           />
           <input
             value={form.slug}
             onChange={(e) => setForm({ ...form, slug: e.target.value })}
             placeholder="Slug (lowercase, cannot change later)"
-            className="w-full px-3 py-2 rounded-md bg-black/30 border border-white/10 text-sm font-mono"
+            className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 transition-all font-mono"
           />
-          <p className="text-xs text-white/40">
+          <p className="text-xs text-zinc-500">
             The slug is part of every generated tool path, so it is fixed once tools are discovered.
           </p>
           <input
             value={form.url}
             onChange={(e) => setForm({ ...form, url: e.target.value })}
             placeholder="https://mcp.example.com/mcp"
-            className="w-full px-3 py-2 rounded-md bg-black/30 border border-white/10 text-sm font-mono"
+            className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 transition-all font-mono"
           />
           <div className="flex gap-2">
             <button
               type="button"
               onClick={create}
               disabled={!form.slug || !form.url}
-              className="px-3 py-1.5 rounded-md bg-sky-500/20 border border-sky-400/40 text-sm disabled:opacity-40"
+              className="px-3 py-1.5 rounded-md bg-primary-500/20 border border-primary-400/40 text-white text-sm disabled:opacity-40"
             >
               Create
             </button>
             <button
               type="button"
               onClick={() => setCreating(false)}
-              className="px-3 py-1.5 rounded-md border border-white/10 text-sm text-white/70"
+              className="px-3 py-1.5 rounded-md border border-white/10 text-sm text-zinc-300"
             >
               Cancel
             </button>
@@ -186,9 +186,9 @@ export default function McpConnections() {
       )}
 
       {loading ? (
-        <p className="text-sm text-white/50">Loading…</p>
+        <p className="text-sm text-zinc-400">Loading…</p>
       ) : connections.length === 0 ? (
-        <GlassCard className="p-6 text-sm text-white/50">
+        <GlassCard className="p-6 text-sm text-zinc-400">
           No MCP connections yet. Add one to let your agents call an external server's tools.
         </GlassCard>
       ) : (
@@ -208,13 +208,13 @@ export default function McpConnections() {
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium">{c.title || c.slug}</span>
+                    <span className="font-medium text-white">{c.title || c.slug}</span>
                     <span className={`text-xs px-2 py-0.5 rounded border ${status.className}`}>
                       {status.label}
                     </span>
                   </div>
-                  <div className="text-xs text-white/40 mt-1 truncate font-mono">{c.url}</div>
-                  <div className="text-xs text-white/40 mt-0.5">{c.tool_count} tools</div>
+                  <div className="text-xs text-zinc-500 mt-1 truncate font-mono">{c.url}</div>
+                  <div className="text-xs text-zinc-500 mt-0.5">{c.tool_count} tools</div>
                 </button>
               )
             })}
@@ -222,15 +222,15 @@ export default function McpConnections() {
 
           <div className="lg:col-span-2 space-y-4">
             {!current ? (
-              <GlassCard className="p-6 text-sm text-white/50">
+              <GlassCard className="p-6 text-sm text-zinc-400">
                 Select a connection to configure it.
               </GlassCard>
             ) : (
               <>
                 <GlassCard className="p-4 space-y-4">
                   <div className="flex items-center justify-between">
-                    <h2 className="font-medium">Authentication</h2>
-                    <label className="text-xs text-white/60 flex items-center gap-2">
+                    <h2 className="font-medium text-white">Authentication</h2>
+                    <label className="text-xs text-zinc-300 flex items-center gap-2">
                       <input
                         type="checkbox"
                         checked={current.enabled}
@@ -255,7 +255,7 @@ export default function McpConnections() {
                     against a third party. The server must also promise the
                     guarantee, so this may be on without a stream existing.
                   */}
-                  <label className="text-xs text-white/60 flex items-start gap-2">
+                  <label className="text-xs text-zinc-400 flex items-start gap-2">
                     <input
                       type="checkbox"
                       className="mt-0.5"
@@ -289,11 +289,11 @@ export default function McpConnections() {
 
                 <GlassCard className="p-4 space-y-3">
                   <div className="flex items-center justify-between">
-                    <h2 className="font-medium">Connection test</h2>
+                    <h2 className="font-medium text-white">Connection test</h2>
                     <button
                       type="button"
                       onClick={test}
-                      className="px-3 py-1.5 rounded-md border border-white/10 text-sm"
+                      className="px-3 py-1.5 rounded-md border border-white/10 text-white text-sm hover:bg-white/5"
                     >
                       <Activity className="w-4 h-4 inline mr-1.5" />
                       Run probe
@@ -307,12 +307,12 @@ export default function McpConnections() {
                             Reachable — {report.server_info?.name ?? 'server'} speaks{' '}
                             {report.protocol_version}
                           </p>
-                          <p className="text-white/60">
+                          <p className="text-zinc-300">
                             {report.tool_count} tools ({report.permitted_tool_count} would be
                             exposed by the current filter)
                           </p>
                           {report.tools.length > 0 && (
-                            <p className="text-xs text-white/40 font-mono">
+                            <p className="text-xs text-zinc-500 font-mono">
                               {report.tools.join(', ')}
                             </p>
                           )}
@@ -328,11 +328,11 @@ export default function McpConnections() {
 
                 <GlassCard className="p-4 space-y-3">
                   <div className="flex items-center justify-between">
-                    <h2 className="font-medium">Tools</h2>
+                    <h2 className="font-medium text-white">Tools</h2>
                     <button
                       type="button"
                       onClick={refresh}
-                      className="px-3 py-1.5 rounded-md border border-white/10 text-sm"
+                      className="px-3 py-1.5 rounded-md border border-white/10 text-white text-sm hover:bg-white/5"
                     >
                       <RefreshCw className="w-4 h-4 inline mr-1.5" />
                       Refresh tools

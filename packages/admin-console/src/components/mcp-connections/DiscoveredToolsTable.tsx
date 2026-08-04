@@ -85,8 +85,8 @@ export default function DiscoveredToolsTable({
 
   if (!tools.length) {
     return (
-      <p className="text-sm text-white/50">
-        No tools discovered yet. Use <span className="text-white/80">Refresh tools</span> once the
+      <p className="text-sm text-zinc-400">
+        No tools discovered yet. Use <span className="text-zinc-200">Refresh tools</span> once the
         connection is authorized.
       </p>
     )
@@ -114,7 +114,7 @@ export default function DiscoveredToolsTable({
         </div>
       )}
       <table className="w-full text-sm">
-        <thead className="text-white/50 text-xs uppercase">
+        <thead className="text-zinc-400 text-xs uppercase">
           <tr>
             <th className="text-left py-2 pr-4">Remote tool</th>
             <th className="text-left py-2 pr-4">Agent path</th>
@@ -125,13 +125,13 @@ export default function DiscoveredToolsTable({
         <tbody>
           {tools.map((tool) => (
             <tr key={tool.remote_name} className="border-t border-white/5">
-              <td className="py-2 pr-4 font-mono text-white/90">{tool.remote_name}</td>
+              <td className="py-2 pr-4 font-mono text-white">{tool.remote_name}</td>
               <td className="py-2 pr-4">
                 {/* This path is what an operator pastes into an agent's tools list. */}
                 <button
                   type="button"
                   onClick={() => copy(tool.function_path)}
-                  className="font-mono text-xs text-white/60 hover:text-white/90 inline-flex items-center gap-1.5"
+                  className="font-mono text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1.5"
                   title="Copy the path to paste into an agent's tools list"
                 >
                   {tool.function_path}
@@ -158,8 +158,8 @@ export default function DiscoveredToolsTable({
                   onClick={() => toggle(tool)}
                   className={`px-2.5 py-1 rounded-md text-xs border disabled:opacity-40 ${
                     tool.enabled
-                      ? 'bg-sky-500/15 border-sky-400/40 text-sky-200'
-                      : 'border-white/10 text-white/60'
+                      ? 'bg-primary-500/15 border-primary-400/40 text-primary-200'
+                      : 'border-white/10 text-zinc-300'
                   }`}
                 >
                   {busy === tool.remote_name ? (

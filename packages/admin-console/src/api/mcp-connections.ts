@@ -123,6 +123,17 @@ export interface DiscoverResult {
   redirect_uri?: string
   status?: number
   message?: string
+  /** Which auth method the server's metadata says it wants at the token endpoint. */
+  auth_method?: string
+  /** The server demands client authentication — a public client will be rejected. */
+  client_secret_required?: boolean
+  /** A secret is already stored for this connection. */
+  client_secret_set?: boolean
+  /**
+   * The server requires a secret and none is stored. Connecting WILL fail at
+   * the token exchange, AFTER consent — so this has to be surfaced before then.
+   */
+  needs_manual_client_secret?: boolean
 }
 
 /** Fields accepted when creating a connection. */
@@ -251,6 +262,32 @@ export const mcpConnectionsApi = {
 
   oauthStart(repo: string, slug: string): Promise<{ auth_url: string; state: string }> {
     return api.post(`${one(repo, slug)}/oauth/start`, {})
+  },
+
+  /**
+   * Supply an OAuth client by hand.
+   *
+   * For servers with no dynamic registration, and for ones that demand a client
+   * secret registration did not issue — Entra answers `AADSTS7000218` in that
+   * case. Write-only: the secret is never returned by any read.
+   */
+  setOauthClient(
+    repo: string,
+    slug: string,
+    body: {
+      client_id: string
+      client_secret?: string
+      issuer?: string
+      authorization_endpoint?: string
+      token_endpoint?: string
+      scopes?: string[]
+    },
+  ): Promise<{ ok: boolean; client_id_set: boolean; client_secret_set: boolean }> {
+    return api.put(`${one(repo, slug)}/oauth/client`, body)
+  },
+
+  clearOauthClient(repo: string, slug: string): Promise<{ ok: boolean }> {
+    return api.delete(`${one(repo, slug)}/oauth/client`)
   },
 
   oauthDisconnect(repo: string, slug: string): Promise<{ ok: boolean }> {

@@ -307,6 +307,10 @@ async fn ensure_folders(svc: &NodeService<RocksDBStorage>, slug: &str) -> Result
             continue;
         }
         let mut folder = Node {
+            // Minted here: `create` never generates one, so an empty id would
+            // be stored verbatim and the SECOND folder would collide with the
+            // first. See the same note in `build_proxy`.
+            id: nanoid::nanoid!(),
             node_type: FOLDER_NODE_TYPE.to_string(),
             name: name.clone(),
             path,
@@ -326,6 +330,11 @@ async fn ensure_folders(svc: &NodeService<RocksDBStorage>, slug: &str) -> Result
 /// Build the proxy `raisin:Function` node for one planned tool.
 fn build_proxy(descriptor: &McpConnectionDescriptor, plan: &ProxyPlan) -> Node {
     let mut node = Node {
+        // The CALLER mints the id. `NodeService::create` looks this value up
+        // verbatim and refuses a duplicate, so leaving it empty means exactly
+        // ONE proxy can ever be written per workspace and every tool after the
+        // first fails with "Node with ID '' already exists".
+        id: nanoid::nanoid!(),
         node_type: FUNCTION_NODE_TYPE.to_string(),
         // Node name and `props.name` MUST match: the JS resolver reads the node
         // name and the Rust one reads `props.name`, so a mismatch shows the
@@ -427,4 +436,59 @@ fn set_prop(node: &mut Node, key: &str, value: Value) -> Result<()> {
 /// Whether a node is a connection (used by the periodic scan).
 pub(crate) fn is_connection(node: &Node) -> bool {
     node.node_type == CONNECTION_NODE_TYPE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> McpConnectionDescriptor {
+        McpConnectionDescriptor::from_properties(
+            "linear",
+            &json!({ "slug": "linear", "url": "https://mcp.linear.app/mcp" }),
+        )
+        .expect("a minimal descriptor must parse")
+    }
+
+    fn plan(tool: &str) -> ProxyPlan {
+        ProxyPlan {
+            remote_name: tool.to_string(),
+            tool_slug: tool.to_string(),
+            function_name: format!("linear__{tool}"),
+            function_path: format!("/mcp/linear/{tool}"),
+            schema_hash: "sha256:x".to_string(),
+            enabled: true,
+            title: tool.to_string(),
+            description: None,
+            input_schema: json!({}),
+            output_schema: None,
+        }
+    }
+
+    /// THE regression. `NodeService::create` does not mint an id — it looks the
+    /// caller's up verbatim and refuses a duplicate. Leaving it at `Default`'s
+    /// empty string meant exactly ONE proxy could be written per workspace, and
+    /// every tool after the first failed with "Node with ID '' already exists".
+    /// No test could see it, because none of them wrote a node.
+    #[test]
+    fn every_proxy_gets_its_own_non_empty_id() {
+        let d = descriptor();
+        let first = build_proxy(&d, &plan("search"));
+        let second = build_proxy(&d, &plan("create"));
+
+        assert!(!first.id.is_empty(), "an empty id collides on the second write");
+        assert!(!second.id.is_empty());
+        assert_ne!(first.id, second.id, "two proxies must not share an id");
+    }
+
+    /// Rebuilding the SAME tool must also mint a fresh id — reconcile decides
+    /// create-vs-update by path, never by reusing a previous node's identity.
+    #[test]
+    fn rebuilding_the_same_tool_still_mints_a_fresh_id() {
+        let d = descriptor();
+        let a = build_proxy(&d, &plan("search"));
+        let b = build_proxy(&d, &plan("search"));
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.path, b.path, "the PATH is what identifies the proxy");
+    }
 }

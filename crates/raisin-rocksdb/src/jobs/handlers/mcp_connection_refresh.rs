@@ -132,6 +132,10 @@ async fn refresh_node(
         registration_endpoint: None,
         code_challenge_methods_supported: Vec::new(),
         scopes_supported: Vec::new(),
+        // Only consulted at REGISTRATION time, which has already happened by
+        // the time a refresh runs. What matters here is the stored client
+        // secret, which `RegisteredClient` carries below.
+        token_endpoint_auth_methods_supported: Vec::new(),
     };
     if metadata.token_endpoint.is_empty() {
         return Ok(false);

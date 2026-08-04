@@ -37,6 +37,8 @@ export default function ConnectionAuthPanel({
   const [headerName, setHeaderName] = useState('')
   const [busy, setBusy] = useState(false)
   const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
+  const [clientId, setClientId] = useState('')
+  const [clientSecret, setClientSecret] = useState('')
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -86,7 +88,7 @@ export default function ConnectionAuthPanel({
             className={`px-3 py-1.5 rounded-md text-sm border ${
               kind === k
                 ? 'bg-sky-500/15 border-sky-400/40 text-sky-200'
-                : 'border-white/10 text-white/60 hover:text-white/90'
+                : 'border-white/10 text-zinc-300 hover:text-white'
             }`}
           >
             {k === 'none' ? 'No auth' : k === 'static' ? 'Token / API key' : 'OAuth 2.1'}
@@ -96,7 +98,7 @@ export default function ConnectionAuthPanel({
 
       {/* Every caller of a proxy tool acts as this one identity. Operators need
           to know that before they attach a tool to an agent. */}
-      <p className="text-xs text-white/50 flex items-start gap-2">
+      <p className="text-xs text-zinc-400 flex items-start gap-2">
         <ShieldAlert className="w-4 h-4 mt-0.5 shrink-0 text-amber-300/70" />
         <span>
           A connection has one identity. Every agent and every user calling one of its tools acts
@@ -112,7 +114,7 @@ export default function ConnectionAuthPanel({
                 <ShieldCheck className="w-4 h-4" /> A credential is stored
               </span>
             ) : (
-              <span className="text-white/50">No credential stored</span>
+              <span className="text-zinc-400">No credential stored</span>
             )}
           </div>
           <input
@@ -120,21 +122,21 @@ export default function ConnectionAuthPanel({
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={connection.credential_set ? 'Replace the stored token…' : 'Bearer token or API key'}
-            className="w-full px-3 py-2 rounded-md bg-black/30 border border-white/10 text-sm"
+            className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 transition-all"
             autoComplete="off"
           />
           <input
             value={headerName}
             onChange={(e) => setHeaderName(e.target.value)}
             placeholder="Header name (leave blank for Authorization: Bearer)"
-            className="w-full px-3 py-2 rounded-md bg-black/30 border border-white/10 text-sm"
+            className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 transition-all"
           />
           <div className="flex gap-2">
             <button
               type="button"
               disabled={busy || !value}
               onClick={saveCredential}
-              className="px-3 py-1.5 rounded-md bg-sky-500/20 border border-sky-400/40 text-sm disabled:opacity-40"
+              className="px-3 py-1.5 rounded-md bg-primary-500/20 border border-primary-400/40 text-white text-sm disabled:opacity-40"
             >
               <KeyRound className="w-4 h-4 inline mr-1.5" />
               Save credential
@@ -149,7 +151,7 @@ export default function ConnectionAuthPanel({
                     onSuccess('Credential cleared')
                   })
                 }
-                className="px-3 py-1.5 rounded-md border border-white/10 text-sm text-white/70"
+                className="px-3 py-1.5 rounded-md border border-white/10 text-sm text-zinc-300"
               >
                 Clear
               </button>
@@ -165,7 +167,7 @@ export default function ConnectionAuthPanel({
               type="button"
               disabled={busy}
               onClick={discover}
-              className="px-3 py-1.5 rounded-md border border-white/10 text-sm disabled:opacity-40"
+              className="px-3 py-1.5 rounded-md border border-white/10 text-white text-sm hover:bg-white/5 disabled:opacity-40"
             >
               {busy ? <Loader2 className="w-4 h-4 inline mr-1.5 animate-spin" /> : null}
               Discover
@@ -174,7 +176,7 @@ export default function ConnectionAuthPanel({
               type="button"
               disabled={busy || !connection.oauth_client}
               onClick={connect}
-              className="px-3 py-1.5 rounded-md bg-sky-500/20 border border-sky-400/40 text-sm disabled:opacity-40"
+              className="px-3 py-1.5 rounded-md bg-primary-500/20 border border-primary-400/40 text-white text-sm disabled:opacity-40"
             >
               <Link2 className="w-4 h-4 inline mr-1.5" />
               {connection.oauth_connected ? 'Reconnect' : 'Connect'}
@@ -189,7 +191,7 @@ export default function ConnectionAuthPanel({
                     onSuccess('Disconnected')
                   })
                 }
-                className="px-3 py-1.5 rounded-md border border-white/10 text-sm text-white/70"
+                className="px-3 py-1.5 rounded-md border border-white/10 text-sm text-zinc-300"
               >
                 Disconnect
               </button>
@@ -197,13 +199,13 @@ export default function ConnectionAuthPanel({
           </div>
 
           {discovery && (
-            <div className="text-xs text-white/60 space-y-1 rounded-md border border-white/10 p-3">
+            <div className="text-xs text-zinc-300 space-y-1 rounded-md border border-white/10 p-3">
               {discovery.requires_auth === false ? (
                 <p>{discovery.message}</p>
               ) : discovery.discovered ? (
                 <>
                   <p>
-                    Issuer <span className="text-white/80">{discovery.issuer}</span>
+                    Issuer <span className="text-zinc-200">{discovery.issuer}</span>
                   </p>
                   <p>
                     {discovery.supports_dynamic_registration
@@ -211,7 +213,10 @@ export default function ConnectionAuthPanel({
                       : 'This server does not support dynamic registration — register the redirect URI below by hand.'}
                   </p>
                   {discovery.redirect_uri && (
-                    <p className="font-mono break-all text-white/70">{discovery.redirect_uri}</p>
+                    <p className="font-mono break-all text-zinc-300">{discovery.redirect_uri}</p>
+                  )}
+                  {discovery.needs_manual_client_secret && (
+                    <p className="text-amber-300 pt-1">{discovery.message}</p>
                   )}
                 </>
               ) : (
@@ -219,6 +224,55 @@ export default function ConnectionAuthPanel({
               )}
             </div>
           )}
+
+          {/*
+            Opened automatically when discovery says the server demands client
+            authentication and we have no secret — that combination fails at the
+            token exchange AFTER consent, so it has to be fixed before Connect.
+          */}
+          <details open={discovery?.needs_manual_client_secret} className="text-xs">
+            <summary className="cursor-pointer text-zinc-400 hover:text-white">
+              I registered RaisinDB myself (client id / secret)
+            </summary>
+            <div className="space-y-2 pt-3">
+              <input
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="Client ID"
+                className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 transition-all font-mono"
+              />
+              <input
+                type="password"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                placeholder="Client secret (only if the provider issued one)"
+                className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 text-sm focus:border-primary-400 focus:ring-2 focus:ring-primary-400/20 transition-all"
+                autoComplete="off"
+              />
+              <p className="text-zinc-500">
+                Endpoints already found by Discover are kept — leave them alone and supply only
+                what is missing. The secret is encrypted immediately and never shown again.
+              </p>
+              <button
+                type="button"
+                disabled={busy || !clientId.trim()}
+                onClick={() =>
+                  run('Could not save the OAuth client', async () => {
+                    await mcpConnectionsApi.setOauthClient(repo, connection.slug, {
+                      client_id: clientId.trim(),
+                      client_secret: clientSecret || undefined,
+                    })
+                    setClientId('')
+                    setClientSecret('')
+                    onSuccess('OAuth client saved')
+                  })
+                }
+                className="px-3 py-1.5 rounded-md bg-primary-500/20 border border-primary-400/40 text-white text-sm disabled:opacity-40"
+              >
+                Save OAuth client
+              </button>
+            </div>
+          </details>
         </div>
       )}
     </div>

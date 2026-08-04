@@ -91,6 +91,50 @@ pub struct AuthServerMetadata {
     /// Scopes the server understands.
     #[serde(rename = "scopes_supported", default)]
     pub scopes_supported: Vec<String>,
+    /// How the server expects a client to authenticate at the token endpoint.
+    ///
+    /// Load-bearing: a server that does not offer `none` REQUIRES client
+    /// authentication, and registering as a public client against it produces a
+    /// token exchange it rejects — Entra answers `AADSTS7000218: the request
+    /// body must contain 'client_assertion' or 'client_secret'`.
+    #[serde(rename = "token_endpoint_auth_methods_supported", default)]
+    pub token_endpoint_auth_methods_supported: Vec<String>,
+}
+
+impl AuthServerMetadata {
+    /// The auth method to request at registration.
+    ///
+    /// `none` — a public client protected by PKCE — is preferred where the
+    /// server supports it: there is no secret to store or rotate. But it must be
+    /// *offered*. Asserting it against a server that requires authentication
+    /// yields a client whose every token exchange fails, with nothing on this
+    /// side to explain why.
+    ///
+    /// An empty list means the server said nothing. RFC 8414 makes
+    /// `client_secret_basic` the default then, but an MCP server that omits the
+    /// field and accepts PKCE is far more common in practice, so `none` stays
+    /// the assumption there.
+    pub fn preferred_auth_method(&self) -> &'static str {
+        let supported = &self.token_endpoint_auth_methods_supported;
+        if supported.is_empty() || supported.iter().any(|m| m == "none") {
+            return "none";
+        }
+        if supported.iter().any(|m| m == "client_secret_post") {
+            return "client_secret_post";
+        }
+        if supported.iter().any(|m| m == "client_secret_basic") {
+            return "client_secret_basic";
+        }
+        // Something we cannot satisfy (private_key_jwt, tls_client_auth).
+        // Registering as public at least fails at registration, which is a far
+        // better place to find out than after the operator has consented.
+        "none"
+    }
+
+    /// Whether this server will demand a client secret at the token endpoint.
+    pub fn requires_client_authentication(&self) -> bool {
+        self.preferred_auth_method() != "none"
+    }
 }
 
 impl AuthServerMetadata {
@@ -293,16 +337,19 @@ pub async fn register_client(
     client_name: &str,
     redirect_uri: &str,
     scopes: &[String],
+    auth_method: &str,
 ) -> Result<RegisteredClient> {
     let body = json!({
         "client_name": client_name,
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
-        // A public client: RaisinDB holds the secret server-side, but many MCP
-        // authorization servers only issue public clients, and PKCE is what
-        // actually protects the exchange under OAuth 2.1.
-        "token_endpoint_auth_method": "none",
+        // Taken from the server's own metadata, never asserted. Hard-coding
+        // `none` registered a PUBLIC client against every server — including
+        // ones that require authentication at the token endpoint — and the
+        // exchange then failed with a provider-specific code long after the
+        // operator had already consented.
+        "token_endpoint_auth_method": auth_method,
         "scope": scopes.join(" "),
     });
 
@@ -634,7 +681,43 @@ mod tests {
             registration_endpoint: Some("https://auth.test/register".into()),
             code_challenge_methods_supported: vec!["S256".into()],
             scopes_supported: vec![],
+            token_endpoint_auth_methods_supported: vec![],
         }
+    }
+
+    /// Fault 4a: hard-coding `none` registered a PUBLIC client against every
+    /// server. Entra requires client authentication at the token endpoint, so
+    /// the exchange was rejected with AADSTS7000218 — AFTER the operator had
+    /// already consented.
+    #[test]
+    fn the_auth_method_comes_from_the_servers_own_metadata() {
+        let mut m = metadata();
+
+        // Says nothing: PKCE-protected public client is the right assumption for
+        // an MCP server, and the common case.
+        assert_eq!(m.preferred_auth_method(), "none");
+        assert!(!m.requires_client_authentication());
+
+        // Explicitly offers `none` — take it, there is no secret to store.
+        m.token_endpoint_auth_methods_supported =
+            vec!["none".into(), "client_secret_post".into()];
+        assert_eq!(m.preferred_auth_method(), "none");
+
+        // Does NOT offer `none`: this server requires authentication, and a
+        // public registration here is what produced AADSTS7000218.
+        m.token_endpoint_auth_methods_supported =
+            vec!["client_secret_post".into(), "client_secret_basic".into()];
+        assert_eq!(m.preferred_auth_method(), "client_secret_post");
+        assert!(m.requires_client_authentication());
+
+        // Basic only.
+        m.token_endpoint_auth_methods_supported = vec!["client_secret_basic".into()];
+        assert_eq!(m.preferred_auth_method(), "client_secret_basic");
+
+        // Only methods we cannot satisfy. Fail at registration, which is a far
+        // better place to find out than after consent.
+        m.token_endpoint_auth_methods_supported = vec!["private_key_jwt".into()];
+        assert_eq!(m.preferred_auth_method(), "none");
     }
 
     #[test]

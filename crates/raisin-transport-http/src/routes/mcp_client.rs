@@ -83,6 +83,14 @@ pub(crate) fn mcp_client_routes(state: &AppState) -> Router<AppState> {
                 "/api/mcp-connections/{repo}/{slug}/oauth/start",
                 post(mcp_client::start),
             )
+            // Bring-your-own client, for servers with no dynamic registration
+            // and for ones that demand a secret DCR did not issue. Write-only,
+            // like the static credential.
+            .route(
+                "/api/mcp-connections/{repo}/{slug}/oauth/client",
+                axum::routing::put(mcp_client::set_oauth_client)
+                    .delete(mcp_client::clear_oauth_client),
+            )
             .route(
                 "/api/mcp-connections/{repo}/{slug}/oauth/disconnect",
                 post(mcp_client::disconnect),

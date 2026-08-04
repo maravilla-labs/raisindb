@@ -413,22 +413,23 @@ mod tests {
             "the client package only patches allowed types; it is safe everywhere"
         );
 
-        // An auto-installed package that shipped an ENABLED connection would
-        // have every repo dialling a third-party endpoint on boot.
-        let example = get_builtin_package_dir("raisin-mcp-client")
-            .and_then(|dir| {
-                dir.get_file("raisin-mcp-client/content/mcp-connections/example-linear/.node.yaml")
-            })
-            .and_then(|f| f.contents_utf8())
-            .expect("the example connection must ship with the package");
-
+        // The package must ship NO content at all.
+        //
+        // It used to ship a disabled example connection, and the old version of
+        // this test only checked that the example was SAFE — never that it
+        // installed. It did not: the first directory under `content/` is the
+        // WORKSPACE name, so `content/mcp-connections/...` made every install
+        // fail with "Workspace 'mcp-connections' does not exist" and retry to
+        // exhaustion on each boot, in production, unnoticed. And with
+        // `auto_install`, a working example would have put a phantom connection
+        // in every repo's list.
+        let content = get_builtin_package_dir("raisin-mcp-client")
+            .and_then(|dir| dir.get_dir("raisin-mcp-client/content"));
         assert!(
-            example.contains("enabled: false"),
-            "the shipped example connection must be disabled"
-        );
-        assert!(
-            !example.contains("credential_encrypted"),
-            "package content replicates in plaintext; it must never carry a credential"
+            content.is_none(),
+            "raisin-mcp-client must ship no content: it only patches allowed \
+             node types. Anything added under content/ must be rooted at an \
+             EXISTING workspace name, e.g. content/raisin:system/..."
         );
     }
 }

@@ -46,11 +46,43 @@ const ACTOR: &str = "mcp-connection-oauth";
 /// Client name submitted at dynamic registration.
 const CLIENT_NAME: &str = "RaisinDB";
 
+/// A remote condition, reported rather than raised.
+///
+/// `discover` answers **200 with a structured report** for anything the remote
+/// side did, exactly as `test` does. Two reasons, and the second is the one that
+/// bit an operator: a non-2xx here renders as a toast that vanishes before it
+/// can be read, and the console redirects the whole app to `/admin/login` on any
+/// 401 — so an error status can navigate the operator away from the page mid-
+/// flow with the diagnosis lost. Non-2xx stays for faults on OUR side only:
+/// not-admin, unknown slug, missing master key.
+fn finding(err: &raisin_mcp::client::RemoteToolError) -> Json<Value> {
+    Json(json!({
+        "ok": false,
+        "requires_auth": true,
+        "discovered": false,
+        "error_code": err.code(),
+        "error": err.to_string(),
+    }))
+}
+
+/// The same, for a condition we detected rather than a transport error.
+fn finding_message(code: &str, message: impl Into<String>) -> Json<Value> {
+    Json(json!({
+        "ok": false,
+        "requires_auth": true,
+        "discovered": false,
+        "error_code": code,
+        "error": message.into(),
+    }))
+}
+
 /// `POST /api/mcp-connections/{repo}/{slug}/oauth/discover`
 ///
 /// Probe → challenge → protected-resource metadata → AS metadata → DCR.
 /// Everything discovered is non-secret and stored on the connection, except a
 /// DCR-issued client secret which is encrypted.
+///
+/// Always 200 for a remote outcome — see [`finding`].
 pub async fn discover(
     State(state): State<AppState>,
     Path((repo, slug)): Path<(String, String)>,
@@ -65,7 +97,9 @@ pub async fn discover(
     // named by the remote side, so an allowlisted server could otherwise walk us
     // to a private address.
     let egress = egress_policy(&state);
-    egress.guard(&descriptor.url).await.map_err(remote_error)?;
+    if let Err(e) = egress.guard(&descriptor.url).await {
+        return Ok(finding(&e));
+    }
 
     let http = raisin_functions::shared_http_client();
 
@@ -79,17 +113,20 @@ pub async fn discover(
         )
         .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
         .send()
-        .await
-        .map_err(|e| {
-            ApiError::new(
-                axum::http::StatusCode::BAD_GATEWAY,
-                "MCP_UNREACHABLE",
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(e) => {
+            return Ok(finding_message(
+                "unreachable",
                 format!("could not reach {}: {e}", descriptor.url),
-            )
-        })?;
+            ))
+        }
+    };
 
     if response.status() != reqwest::StatusCode::UNAUTHORIZED {
         return Ok(Json(json!({
+            "ok": true,
             "requires_auth": false,
             "status": response.status().as_u16(),
             "message": "server did not ask for authorization; a static credential or none may be enough",
@@ -104,6 +141,7 @@ pub async fn discover(
 
     let Some(metadata_url) = challenge.as_ref().and_then(|c| c.resource_metadata.clone()) else {
         return Ok(Json(json!({
+            "ok": true,
             "requires_auth": true,
             "discovered": false,
             "message": "server returned 401 without an RFC 9728 resource_metadata pointer; \
@@ -112,26 +150,29 @@ pub async fn discover(
     };
 
     let resource: ProtectedResourceMetadata =
-        mcp::fetch_protected_resource_metadata(&http, &egress, &metadata_url)
-            .await
-            .map_err(remote_error)?;
+        match mcp::fetch_protected_resource_metadata(&http, &egress, &metadata_url).await {
+            Ok(resource) => resource,
+            Err(e) => return Ok(finding(&e)),
+        };
 
-    let issuer = resource
-        .authorization_servers
-        .first()
-        .cloned()
-        .ok_or_else(|| {
-            ApiError::validation_failed(
-                "protected-resource metadata lists no authorization server".to_string(),
-            )
-        })?;
+    let Some(issuer) = resource.authorization_servers.first().cloned() else {
+        return Ok(finding_message(
+            "protocol_error",
+            "protected-resource metadata lists no authorization server",
+        ));
+    };
 
-    let as_url = mcp::as_metadata_url(&issuer).map_err(remote_error)?;
-    let server: AuthServerMetadata = mcp::fetch_as_metadata(&http, &egress, &as_url)
-        .await
-        .map_err(remote_error)?;
+    let as_url = match mcp::as_metadata_url(&issuer) {
+        Ok(url) => url,
+        Err(e) => return Ok(finding(&e)),
+    };
+    let server: AuthServerMetadata = match mcp::fetch_as_metadata(&http, &egress, &as_url).await {
+        Ok(server) => server,
+        Err(e) => return Ok(finding(&e)),
+    };
     if !server.is_usable() {
-        return Err(ApiError::validation_failed(
+        return Ok(finding_message(
+            "protocol_error",
             "authorization-server metadata is missing an authorization or token endpoint",
         ));
     }
@@ -142,9 +183,9 @@ pub async fn discover(
         ("authorization endpoint", &server.authorization_endpoint),
         ("token endpoint", &server.token_endpoint),
     ] {
-        mcp::guard_peer_endpoint(&egress, endpoint, what)
-            .await
-            .map_err(remote_error)?;
+        if let Err(e) = mcp::guard_peer_endpoint(&egress, endpoint, what).await {
+            return Ok(finding(&e));
+        }
     }
 
     let scopes = mcp::resolve_scopes(&resource, &server, challenge.as_ref());
@@ -156,6 +197,10 @@ pub async fn discover(
     let mut client = existing_client(&node);
     if client.client_id.is_empty() {
         if let Some(endpoint) = &server.registration_endpoint {
+            // The server's own metadata decides whether we register as a public
+            // client or a confidential one. Getting this wrong is invisible
+            // until the token exchange — which happens AFTER the operator has
+            // consented, the worst possible place to find out.
             let issued = mcp::register_client(
                 &http,
                 &egress,
@@ -163,9 +208,13 @@ pub async fn discover(
                 CLIENT_NAME,
                 &redirect_uri,
                 &scopes,
+                server.preferred_auth_method(),
             )
-            .await
-            .map_err(remote_error)?;
+            .await;
+            let issued = match issued {
+                Ok(issued) => issued,
+                Err(e) => return Ok(finding(&e)),
+            };
             if let Some(secret) = &issued.client_secret {
                 store_client_secret(&state, &mut node, secret)?;
             }
@@ -184,18 +233,41 @@ pub async fn discover(
             "registration_endpoint": server.registration_endpoint,
             "client_id": client.client_id,
             "scopes": scopes,
+            "auth_method": server.preferred_auth_method(),
             "resource": resource.resource.clone().unwrap_or_else(|| descriptor.url.to_string()),
             "registered_at": chrono::Utc::now().to_rfc3339(),
         }),
     )?;
     set_prop(&mut node, "auth_kind", json!("oauth"))?;
+
+    // Read before the node is moved into the write.
+    //
+    // The case that used to fail silently: the server demands client
+    // authentication, dynamic registration issued no secret (or there was no
+    // registration at all), and nothing surfaced that until the token exchange
+    // returned a provider-specific code AFTER the operator had consented. Say it
+    // here, while they can still act on it.
+    let secret_stored = str_prop(&node, "oauth_client_secret_encrypted").is_some();
+    let needs_secret = server.requires_client_authentication() && !secret_stored;
+
     connection_service(&state, &tenant.tenant_id, &repo, ACTOR)
         .update_node(node)
         .await?;
 
     Ok(Json(json!({
+        "ok": true,
         "requires_auth": true,
         "discovered": true,
+        "auth_method": server.preferred_auth_method(),
+        "client_secret_required": server.requires_client_authentication(),
+        "client_secret_set": secret_stored,
+        "needs_manual_client_secret": needs_secret,
+        "message": needs_secret.then(|| format!(
+            "{issuer} requires client authentication at its token endpoint, but no client secret \
+             is stored. Register RaisinDB at that provider with the redirect URI below, then save \
+             the client id and secret here — otherwise the token exchange will be rejected after \
+             you consent."
+        )),
         "issuer": issuer,
         "authorization_endpoint": server.authorization_endpoint,
         "token_endpoint": server.token_endpoint,
@@ -457,6 +529,9 @@ pub(crate) fn metadata_from(cfg: &Value) -> AuthServerMetadata {
         // re-refusing on every refresh.
         code_challenge_methods_supported: Vec::new(),
         scopes_supported: json_strs(cfg, "scopes"),
+        // Registration is already done by the time this is rebuilt; the token
+        // exchange authenticates with the stored secret, not with this list.
+        token_endpoint_auth_methods_supported: Vec::new(),
     }
 }
 
