@@ -34,6 +34,10 @@ pub async fn run_with(
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut processed: u64 = 0;
+    // How much of `processed` has already been folded into
+    // `state.backfill_items_done` by a progress write, so the final tally adds
+    // only the remainder instead of double-counting it.
+    let mut published: u64 = 0;
     // Set when the walk stops before exhausting the provider, which makes
     // `seen` a PARTIAL picture and therefore unusable for deciding what to
     // delete. See the reconcile guard below.
@@ -106,14 +110,23 @@ pub async fn run_with(
             // page landed, and a buffer that is still holding it would be dropped
             // silently on the next run's fresh start.
             batcher.flush().await?;
-            ctx.renew_lease(state.last_fencing_token).await;
+            ctx.renew_lease().await;
             // Publish progress as we go. A chunk can run for minutes; without
             // this the console sees nothing move until the whole chunk lands.
+            //
+            // Advance the REAL state, never a clone. `persist_state` bumps
+            // `state_seq` on success, and a clone would carry that bump to its
+            // grave — every later write in this run would then look stale
+            // against the stored seq and be refused, which is the exact failure
+            // this whole change exists to remove.
             {
-                let mut snapshot = state.clone();
-                snapshot.backfill_items_done =
-                    snapshot.backfill_items_done.saturating_add(processed);
-                let _ = persist_state(ctx, &snapshot).await;
+                let delta = processed.saturating_sub(published);
+                state.backfill_items_done = state.backfill_items_done.saturating_add(delta);
+                published = processed;
+                if let Some(total) = page.total {
+                    state.backfill_items_total = Some(total);
+                }
+                let _ = persist_state(ctx, state).await;
             }
             match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
@@ -133,7 +146,9 @@ pub async fn run_with(
     // Persist (or clear) the resume point. `backfill_complete` is what makes
     // reconcile deletes safe: before the first end-to-end pass, "not seen"
     // only means "not reached yet".
-    state.backfill_items_done = state.backfill_items_done.saturating_add(processed);
+    state.backfill_items_done = state
+        .backfill_items_done
+        .saturating_add(processed.saturating_sub(published));
 
     if truncated {
         state.backfill_stack = stack.clone();

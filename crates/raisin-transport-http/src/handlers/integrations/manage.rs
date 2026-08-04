@@ -145,12 +145,17 @@ pub async fn sync_mount(
     let job_type = raisin_storage::jobs::JobType::VirtualMountSync {
         mount_id: mount_id.clone(),
         mode,
+        trigger: "manual".to_string(),
     };
     let job_id = raisin_storage::jobs::JobId::new();
     let context = raisin_storage::jobs::JobContext {
         tenant_id: tenant.tenant_id.clone(),
         repo_id: repo.clone(),
-        branch: "main".to_string(),
+        // The repo's real config branch, not a hardcoded "main": the scheduler
+        // uses `repository.config.default_branch`, and a mismatch here builds a
+        // different lock key and job context than the scheduled path, after
+        // which the engine cannot find the mount and silently no-ops.
+        branch: super::config_branch(&state, &tenant.tenant_id, &repo).await,
         workspace_id: "raisin:system".to_string(),
         revision: raisin_hlc::HLC::now(),
         metadata: std::collections::HashMap::new(),

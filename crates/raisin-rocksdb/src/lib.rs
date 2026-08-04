@@ -169,6 +169,12 @@ pub use jobs::handlers::{
     BreakerTripReason, TriggerBreaker, TriggerBreakerStats, TriggerSafetyConfig,
 };
 
+// The push-notification endpoint lives in the HTTP transport but the mount
+// state it stamps is owned here, so delivery health goes through the same
+// seq-guarded write as every other mount-state change rather than the endpoint
+// hand-rolling a second writer.
+pub use jobs::handlers::virtual_mount_sync::record_push_delivery;
+
 // Re-export the scheduled-invocation JobContext metadata keys so transport
 // layers build and read invocation contexts with the same vocabulary as
 // the job handler.

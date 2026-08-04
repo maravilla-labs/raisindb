@@ -59,6 +59,7 @@ import AccessControlSettings from './pages/AccessControlSettings'
 import Integrations from './pages/Integrations'
 import McpConnections from './pages/McpConnections'
 import Mounts from './pages/Mounts'
+import MountDetail from './pages/MountDetail'
 
 /**
  * Gate the tenant-wide /management hub to dev / single-operator mode.
@@ -186,6 +187,9 @@ function App() {
           <Route path="integrations" element={<Integrations />} />
           <Route path="mcp-connections" element={<McpConnections />} />
           <Route path="mounts" element={<Mounts />} />
+          {/* Sidebar highlighting is prefix-based (`isActive('/mounts')` in
+              RepositoryLayout), so the nested detail route keeps Mounts lit. */}
+          <Route path="mounts/:mountName" element={<MountDetail />} />
           <Route path="query" element={<SqlQuery />} />
           <Route path="logs" element={<RepositoryExecutionLogs />} />
           <Route path="flows" element={<RepositoryFlows />} />

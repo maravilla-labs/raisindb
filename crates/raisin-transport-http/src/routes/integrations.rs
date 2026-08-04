@@ -80,6 +80,15 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/mounts/{mount_id}/sync",
                 post(integrations::sync_mount),
             )
+            // Deleting a mount MUST go through here, not a generic node delete:
+            // this is the only path that unregisters the provider's webhook
+            // subscription first. Without it every deleted mount leaks a live
+            // subscription and the provider keeps POSTing notifications at a URL
+            // that 404s, indefinitely.
+            .route(
+                "/api/integrations/{repo}/mounts/{mount_id}",
+                axum::routing::delete(integrations::delete_mount),
+            )
             // Provider-side URLs the admin UI displays for the user to register.
             // Integration-level (redirect URI only, no mount required) + per-mount
             // (redirect URI + push notification URL; lazily mints the mount token).

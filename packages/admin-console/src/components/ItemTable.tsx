@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from 'react'
 import { Pencil, Trash2, MoveRight, GripVertical } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { draggable, dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter'
 import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine'
 
@@ -19,6 +19,13 @@ export interface ItemTableProps<T> {
   getItemName: (item: T) => string
   itemType: string
   editPath?: (item: T) => string
+  /**
+   * Makes the whole row a link to a detail view (mirrors `editPath`, which
+   * targets an editor). The action buttons stay clickable — they sit outside
+   * the link rather than inside it, so an Edit or Delete click never navigates
+   * to the detail page as well.
+   */
+  detailPath?: (item: T) => string
   onEdit?: (item: T) => void
   onDelete?: (item: T) => void
   onMove?: (item: T) => void
@@ -33,6 +40,7 @@ interface DraggableRowProps<T> {
   getItemName: (item: T) => string
   itemType: string
   editPath?: string
+  detailPath?: string
   onEdit?: () => void
   onDelete?: () => void
   onMove?: () => void
@@ -47,12 +55,14 @@ function DraggableRow<T>({
   getItemName,
   itemType,
   editPath,
+  detailPath,
   onEdit,
   onDelete,
   onMove,
   isDraggable,
 }: DraggableRowProps<T>) {
   const rowRef = useRef<HTMLTableRowElement>(null)
+  const navigate = useNavigate()
   const [isDragging, setIsDragging] = useState(false)
   const [dropPosition, setDropPosition] = useState<'before' | 'after' | null>(null)
 
@@ -103,11 +113,25 @@ function DraggableRow<T>({
     )
   }, [item, getItemId, getItemPath, getItemName, itemType, isDraggable])
 
+  // Row-level navigation is opt-in via `detailPath`. It is applied to the data
+  // cells only — never to the actions cell, whose buttons must not also fire a
+  // navigation — and it ignores clicks that landed on a nested control or on a
+  // text selection the user was making.
+  const rowClick = detailPath
+    ? (e: React.MouseEvent) => {
+        if (e.defaultPrevented) return
+        if ((e.target as HTMLElement).closest('a,button,input,select,textarea')) return
+        if (window.getSelection()?.toString()) return
+        navigate(detailPath)
+      }
+    : undefined
+
   return (
     <tr
       ref={rowRef}
       className={`
         border-b border-white/5 hover:bg-white/5 transition-colors
+        ${detailPath ? 'cursor-pointer' : ''}
         ${isDragging ? 'opacity-50' : ''}
         ${dropPosition === 'before' ? 'border-t-2 border-t-primary-400' : ''}
         ${dropPosition === 'after' ? 'border-b-2 border-b-primary-400' : ''}
@@ -118,8 +142,27 @@ function DraggableRow<T>({
           <GripVertical className="w-4 h-4 text-zinc-500 cursor-grab" />
         </td>
       )}
-      {columns.map((col) => (
-        <td key={col.key} className="px-4 py-3" style={{ width: col.width }}>
+      {columns.map((col, i) => (
+        <td
+          key={col.key}
+          className="px-4 py-3"
+          style={{ width: col.width }}
+          onClick={rowClick}
+          // Only the first cell is focusable, so tabbing through a long table
+          // stops once per row rather than once per column.
+          tabIndex={detailPath && i === 0 ? 0 : undefined}
+          onKeyDown={
+            detailPath && i === 0
+              ? (e) => {
+                  if (e.target !== e.currentTarget) return
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    navigate(detailPath)
+                  }
+                }
+              : undefined
+          }
+        >
           {col.render(item)}
         </td>
       ))}
@@ -174,6 +217,7 @@ export function ItemTable<T>({
   getItemName,
   itemType,
   editPath,
+  detailPath,
   onEdit,
   onDelete,
   onMove,
@@ -215,6 +259,7 @@ export function ItemTable<T>({
                 getItemName={getItemName}
                 itemType={itemType}
                 editPath={editPath ? editPath(item) : undefined}
+                detailPath={detailPath ? detailPath(item) : undefined}
                 onEdit={onEdit ? () => onEdit(item) : undefined}
                 onDelete={onDelete ? () => onDelete(item) : undefined}
                 onMove={onMove ? () => onMove(item) : undefined}

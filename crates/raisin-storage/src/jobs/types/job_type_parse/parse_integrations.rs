@@ -40,11 +40,16 @@ pub(crate) fn parse_integration_variants(s: &str) -> Result<Option<JobType>, Str
     }
     if let Some(rest) = s.strip_prefix("VirtualMountSync(") {
         if let Some(c) = rest.strip_suffix(')') {
+            // 2 parts is the pre-`trigger` form; still accepted so jobs
+            // persisted before the field existed keep parsing.
             let p: Vec<&str> = c.split('/').collect();
-            if p.len() == 2 {
+            if p.len() == 2 || p.len() == 3 {
                 return Ok(Some(JobType::VirtualMountSync {
                     mount_id: p[0].to_string(),
                     mode: p[1].to_string(),
+                    trigger: p
+                        .get(2)
+                        .map_or_else(|| "unknown".to_string(), |t| t.to_string()),
                 }));
             }
         }

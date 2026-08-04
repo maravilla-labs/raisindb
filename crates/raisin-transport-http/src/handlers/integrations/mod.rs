@@ -22,6 +22,7 @@ mod client_secret;
 mod config_secrets;
 mod connections;
 mod manage;
+mod mount_delete;
 mod notifications;
 mod oauth_callback;
 mod oauth_start;
@@ -35,6 +36,8 @@ pub use client_secret::set_client_secret;
 pub use config_secrets::set_config_secrets;
 pub use connections::{create_connection, delete_connection, list_connections, update_connection};
 pub use manage::{disconnect, sync_mount};
+#[cfg(feature = "storage-rocksdb")]
+pub use mount_delete::delete_mount;
 pub use notifications::notify;
 pub use oauth_callback::callback;
 pub use oauth_start::start;
@@ -89,6 +92,36 @@ pub(crate) fn config_service(
     let mut auth = AuthContext::system();
     auth.user_id = Some(actor.to_string());
     state.node_service_for_context(tenant_id, repo, CONFIG_BRANCH, CONFIG_WORKSPACE, Some(auth))
+}
+
+/// The repo's real config (default) branch, falling back to [`CONFIG_BRANCH`].
+///
+/// The sync engine reads mount config from `repository.config.default_branch`
+/// (`virtual_mount_sync::check`), while this layer hardcodes `"main"`. On a repo
+/// whose default branch is not `main` the two disagree, and a manual sync builds
+/// a different per-mount lock key and job context than the scheduler does —
+/// after which the engine cannot find the mount node and returns a silent
+/// success. Resolve it the same way the engine does.
+///
+/// NOTE: [`config_service`] above is still hardcoded, because it is a sync fn
+/// with many callers. On a non-`main` repo the integrations HTTP surface has a
+/// wider problem than this helper fixes; see the session notes.
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) async fn config_branch(state: &AppState, tenant_id: &str, repo: &str) -> String {
+    // `repository_management()` comes from `Storage`, `get_repository` from
+    // `RepositoryManagementRepository` — both traits must be in scope.
+    use raisin_storage::{RepositoryManagementRepository, Storage};
+    let Some(storage) = state.rocksdb_storage() else {
+        return CONFIG_BRANCH.to_string();
+    };
+    storage
+        .repository_management()
+        .get_repository(tenant_id, repo)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.config.default_branch)
+        .unwrap_or_else(|| CONFIG_BRANCH.to_string())
 }
 
 /// An object-valued property of a node as raw JSON (or `Null`).

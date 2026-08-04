@@ -19,7 +19,9 @@
 //!   the mount id. No match → 404.
 //! - **Secret verification** — the mount's stored `state.push_secret` is looked
 //!   for, matched in constant time, in *any* request carrier: any query value,
-//!   any header value, or any top-level string field of the JSON body. This is
+//!   any header value, or any string ANYWHERE in the JSON body (nested, depth-
+//!   limited — providers put it inside an envelope: Graph uses
+//!   `value[].clientState`, Google Pub/Sub `message.attributes`). This is
 //!   deliberately carrier-agnostic — a provider may echo the per-subscription
 //!   secret back in whatever query param, header, or body field it chooses, and
 //!   a user-authored connector gets the exact same treatment as the shipped
@@ -112,6 +114,16 @@ pub async fn notify(
     //    accepting it from any carrier the provider chose.
     let stored_secret = string_field(&state_json, "push_secret");
     if !secret_ok(stored_secret.as_deref(), &query, &headers, &body_json) {
+        // Record the rejection on the mount. A subscription can sit at
+        // `push_status: "active"` — the provider accepted our URL once — while
+        // every delivery since is turned away, and until this was recorded there
+        // was no way to see that from the console or the logs. `warn!` because
+        // production runs at that level.
+        tracing::warn!(
+            mount_id = %mount.id,
+            "rejected push notification: stored secret not present in any carrier"
+        );
+        record_delivery(&state, &tenant.tenant_id, &repo, &mount.id, false).await;
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "INVALID_NOTIFICATION_SECRET",
@@ -119,10 +131,34 @@ pub async fn notify(
         ));
     }
 
+    record_delivery(&state, &tenant.tenant_id, &repo, &mount.id, true).await;
+
     // 4. Enqueue a delta sync idempotently (mirrors manage.rs::sync_mount) and
     //    ack immediately — never block on the sync itself.
     enqueue_delta_sync(&state, &tenant.tenant_id, &repo, &mount.id).await
 }
+
+/// Stamp webhook DELIVERY health onto the mount's `state`.
+///
+/// Distinct from subscription health: `push_status` says whether the provider
+/// accepted our URL, this says whether its notifications are actually getting
+/// through. Best-effort — a failure here must never turn into a non-200 for the
+/// provider, which would make it retry a ping we already handled.
+#[cfg(feature = "storage-rocksdb")]
+async fn record_delivery(state: &AppState, tenant: &str, repo: &str, mount_id: &str, ok: bool) {
+    let Some(storage) = state.rocksdb_storage() else {
+        return;
+    };
+    let branch = super::config_branch(state, tenant, repo).await;
+    if let Err(e) =
+        raisin_rocksdb::record_push_delivery(storage, tenant, repo, &branch, mount_id, ok).await
+    {
+        tracing::warn!(mount_id = %mount_id, error = %e, "failed to record push delivery health");
+    }
+}
+
+#[cfg(not(feature = "storage-rocksdb"))]
+async fn record_delivery(_: &AppState, _: &str, _: &str, _: &str, _: bool) {}
 
 /// Enqueue a `VirtualMountSync { mode: "delta" }` for `mount_id`, deduped on the
 /// in-flight key `vmount-sync:{mount_id}`. Returns a 200 ack either way.
@@ -144,12 +180,13 @@ async fn enqueue_delta_sync(
     let job_type = raisin_storage::jobs::JobType::VirtualMountSync {
         mount_id: mount_id.to_string(),
         mode: "delta".to_string(),
+        trigger: "push".to_string(),
     };
     let job_id = raisin_storage::jobs::JobId::new();
     let context = raisin_storage::jobs::JobContext {
         tenant_id: tenant_id.to_string(),
         repo_id: repo.to_string(),
-        branch: "main".to_string(),
+        branch: super::config_branch(state, tenant_id, repo).await,
         workspace_id: "raisin:system".to_string(),
         revision: raisin_hlc::HLC::now(),
         metadata: std::collections::HashMap::new(),
@@ -260,16 +297,47 @@ fn secret_ok(
             }
         }
     }
-    if let Some(obj) = body.as_object() {
-        for v in obj.values() {
-            if let Some(s) = v.as_str() {
-                if ct_eq(stored, s.as_bytes()) {
-                    return true;
-                }
-            }
-        }
+    // Walk the body RECURSIVELY, not just its top level.
+    //
+    // This scanned only top-level strings, which meant it never found the
+    // secret any real provider sends. Microsoft Graph POSTs
+    //
+    //     {"value":[{"subscriptionId":"…","clientState":"<secret>", …}]}
+    //
+    // whose single top-level key holds an ARRAY, so `as_str()` was `None`, the
+    // loop matched nothing, and EVERY genuine notification got 401. The
+    // subscribe-time validation handshake still returned 200 because it is
+    // answered before this check runs, so the mount looked healthy while no
+    // ping ever reached the sync engine. Google's `message.attributes` nests
+    // one level too. Depth-limited so a hostile payload cannot make us walk a
+    // pathological tree.
+    if body_contains_secret(stored, body, 0) {
+        return true;
     }
     false
+}
+
+/// Maximum nesting the body scan descends. Comfortably deeper than any real
+/// provider envelope (Graph is 2, Google Pub/Sub 2) and shallow enough that a
+/// hostile payload cannot turn this into a lot of work.
+const MAX_BODY_SCAN_DEPTH: usize = 6;
+
+/// Whether `stored` appears as any string anywhere in `body`, constant-time per
+/// comparison, bounded by [`MAX_BODY_SCAN_DEPTH`].
+fn body_contains_secret(stored: &[u8], body: &Value, depth: usize) -> bool {
+    if depth > MAX_BODY_SCAN_DEPTH {
+        return false;
+    }
+    match body {
+        Value::String(s) => ct_eq(stored, s.as_bytes()),
+        Value::Array(items) => items
+            .iter()
+            .any(|v| body_contains_secret(stored, v, depth + 1)),
+        Value::Object(obj) => obj
+            .values()
+            .any(|v| body_contains_secret(stored, v, depth + 1)),
+        _ => false,
+    }
 }
 
 /// Constant-time byte-slice equality (no `subtle` dependency in this crate).
@@ -378,6 +446,61 @@ mod tests {
         // Arbitrary query param.
         let q = qs(&[("anything", "the-secret")]);
         assert!(secret_ok(Some("the-secret"), &q, &empty_h, &Value::Null));
+    }
+
+    /// The payload REAL providers send, which the old top-level-only scan could
+    /// never match.
+    ///
+    /// The pre-existing tests all put `clientState` at the top level — a shape
+    /// Graph never sends — so they passed while production 401'd every single
+    /// notification. Assert the wire format, not a convenient stand-in.
+    #[test]
+    fn secret_found_inside_provider_envelopes() {
+        let empty_q = HashMap::new();
+        let empty_h = HeaderMap::new();
+
+        // Microsoft Graph: clientState lives in each element of `value[]`.
+        let graph = json!({
+            "value": [{
+                "subscriptionId": "9e93b593-1dca-4092-8ece-f6941dc94759",
+                "clientState": "the-secret",
+                "changeType": "created",
+                "resource": "Users/x/Messages/y"
+            }]
+        });
+        assert!(secret_ok(Some("the-secret"), &empty_q, &empty_h, &graph));
+
+        // Google Pub/Sub: nested under message.attributes.
+        let pubsub = json!({
+            "message": { "attributes": { "token": "the-secret" }, "data": "eyJ9" },
+            "subscription": "projects/p/subscriptions/s"
+        });
+        assert!(secret_ok(Some("the-secret"), &empty_q, &empty_h, &pubsub));
+
+        // A nested envelope carrying the WRONG secret is still rejected —
+        // recursion must not turn into "accept anything".
+        let wrong = json!({ "value": [{ "clientState": "not-it" }] });
+        assert!(!secret_ok(Some("the-secret"), &empty_q, &empty_h, &wrong));
+    }
+
+    /// Recursion is depth-limited, so a deeply nested payload cannot be used to
+    /// make the endpoint do unbounded work.
+    #[test]
+    fn body_scan_is_depth_limited() {
+        let mut deep = json!("the-secret");
+        for _ in 0..(MAX_BODY_SCAN_DEPTH + 3) {
+            deep = json!({ "n": deep });
+        }
+        let empty_q = HashMap::new();
+        let empty_h = HeaderMap::new();
+        assert!(!secret_ok(Some("the-secret"), &empty_q, &empty_h, &deep));
+
+        // Within the limit it is still found.
+        let mut shallow = json!("the-secret");
+        for _ in 0..3 {
+            shallow = json!({ "n": shallow });
+        }
+        assert!(secret_ok(Some("the-secret"), &empty_q, &empty_h, &shallow));
     }
 
     #[test]

@@ -418,8 +418,12 @@ impl fmt::Display for JobType {
                 tenant_id.as_deref().unwrap_or("*"),
                 repo_id.as_deref().unwrap_or("*")
             ),
-            Self::VirtualMountSync { mount_id, mode } => {
-                write!(f, "VirtualMountSync({}/{})", mount_id, mode)
+            Self::VirtualMountSync {
+                mount_id,
+                mode,
+                trigger,
+            } => {
+                write!(f, "VirtualMountSync({}/{}/{})", mount_id, mode, trigger)
             }
             Self::IntegrationTokenRefresh { tenant_id } => write!(
                 f,

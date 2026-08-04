@@ -272,6 +272,7 @@ fn ctx<'a>(
         invoker,
         materializer: mat,
         lock_manager: None,
+        lease_token: None,
         lock_key: "k".to_string(),
         credential: None,
         mount_snapshot: super::build_mount_snapshot(mount, &test_integration(Value::Null), None),
@@ -974,6 +975,7 @@ async fn lock_held_makes_sync_a_no_op() {
     let job = job_info(JobType::VirtualMountSync {
         mount_id: MOUNT_ID.to_string(),
         mode: "delta".to_string(),
+        trigger: "manual".to_string(),
     });
     let context = job_context();
     handler.handle(&job, &context).await.unwrap();
@@ -983,45 +985,107 @@ async fn lock_held_makes_sync_a_no_op() {
     assert_eq!(virtual_assets(&all_nodes(&env, TARGET_WS).await).len(), 0);
 }
 
+/// A writer holding a stale view of the state must not clobber a newer one.
+///
+/// This is the same PROPERTY the old `stale_fencing_token_rejects_state_write`
+/// asserted, re-expressed against the durable `state_seq` that replaced the
+/// lock manager's fencing token. The old guard compared a VOLATILE counter
+/// (reset to zero on every process start) against durable state, so after a
+/// restart every legitimate write was refused as "stale" — a mount materialized
+/// hundreds of nodes and then silently discarded its own resume cursor.
 #[tokio::test(flavor = "multi_thread")]
-async fn stale_fencing_token_rejects_state_write() {
+async fn stale_writer_cannot_clobber_newer_state() {
     let env = setup().await;
     persist_config_nodes(&env, "main").await;
 
-    // Establish a stored fencing token of 5.
-    let s5 = MountState {
-        last_sync_token: Some("cursor-5".to_string()),
-        last_fencing_token: Some(5),
+    // Writer A reads seq 0 and writes; its seq advances to 1.
+    let mut a = MountState {
+        last_sync_token: Some("cursor-a".to_string()),
         ..Default::default()
     };
-    let wrote = super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &s5)
-        .await
-        .unwrap();
-    assert!(wrote);
+    assert!(
+        super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &mut a)
+            .await
+            .unwrap()
+    );
+    assert_eq!(a.state_seq, 1);
+    assert_eq!(read_state_token(&env).await.as_deref(), Some("cursor-a"));
 
-    // A stale sync (token 3) must NOT overwrite.
-    let s3 = MountState {
-        last_sync_token: Some("cursor-3".to_string()),
-        last_fencing_token: Some(3),
+    // Writer B also read seq 0 (before A landed) and is therefore stale.
+    let mut b = MountState {
+        last_sync_token: Some("cursor-b".to_string()),
+        state_seq: 0,
         ..Default::default()
     };
-    let wrote = super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &s3)
-        .await
-        .unwrap();
-    assert!(!wrote, "stale fencing token must be rejected");
-    assert_eq!(read_state_token(&env).await.as_deref(), Some("cursor-5"));
+    assert!(
+        !super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &mut b)
+            .await
+            .unwrap(),
+        "a writer whose seq is behind the stored one must be refused"
+    );
+    assert_eq!(read_state_token(&env).await.as_deref(), Some("cursor-a"));
 
-    // A newer sync (token 10) is allowed.
-    let s10 = MountState {
-        last_sync_token: Some("cursor-10".to_string()),
-        last_fencing_token: Some(10),
+    // Writer A keeps going with its advanced seq — repeated writes in one run
+    // must keep working, which is what the progress ticks depend on.
+    a.last_sync_token = Some("cursor-a2".to_string());
+    assert!(
+        super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &mut a)
+            .await
+            .unwrap()
+    );
+    assert_eq!(a.state_seq, 2);
+    assert_eq!(read_state_token(&env).await.as_deref(), Some("cursor-a2"));
+}
+
+/// The guard must survive the lock store being wiped.
+///
+/// This is the regression test for the production outage: with
+/// `[locks] backend = "inprocess"` the fencing counter restarts at zero on every
+/// process start, and the server had restarted 6 times in 24 hours. Because the
+/// guard is now durable state rather than a lock artifact, a fresh process with
+/// no lock history writes successfully.
+#[tokio::test(flavor = "multi_thread")]
+async fn state_writes_survive_a_wiped_lock_store() {
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+
+    // Simulate a mount that has been written many times before the restart.
+    let mut before = MountState {
+        last_sync_token: Some("pre-restart".to_string()),
+        state_seq: 64,
         ..Default::default()
     };
-    let wrote = super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &s10)
+    assert!(
+        super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &mut before)
+            .await
+            .unwrap()
+    );
+
+    // After a restart the engine re-reads the mount, so it carries the STORED
+    // seq — not a counter that restarted at 1. The write must land.
+    let stored_seq = before.state_seq;
+    let mut after_restart = MountState {
+        last_sync_token: Some("post-restart".to_string()),
+        state_seq: stored_seq,
+        ..Default::default()
+    };
+    assert!(
+        super::persist_mount_state(
+            &env.storage,
+            TENANT,
+            REPO,
+            "main",
+            MOUNT_ID,
+            &mut after_restart
+        )
         .await
-        .unwrap();
-    assert!(wrote);
-    assert_eq!(read_state_token(&env).await.as_deref(), Some("cursor-10"));
+        .unwrap(),
+        "a restarted process must still be able to write mount state"
+    );
+    assert_eq!(
+        read_state_token(&env).await.as_deref(),
+        Some("post-restart")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1062,11 +1126,11 @@ async fn supports_changes_false_forces_full_reconcile() {
     persist_config_nodes(&env, "main").await;
 
     // Seed a stored cursor: on cursor-presence alone the delta path would run.
-    let seeded = MountState {
+    let mut seeded = MountState {
         last_sync_token: Some("cursor".to_string()),
         ..Default::default()
     };
-    super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &seeded)
+    super::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &mut seeded)
         .await
         .unwrap();
 
@@ -1085,6 +1149,7 @@ async fn supports_changes_false_forces_full_reconcile() {
     let job = job_info(JobType::VirtualMountSync {
         mount_id: MOUNT_ID.to_string(),
         mode: "delta".to_string(),
+        trigger: "manual".to_string(),
     });
     handler.handle(&job, &job_context()).await.unwrap();
 
@@ -1145,6 +1210,7 @@ async fn mount_materializes_into_target_branch() {
     let job = job_info(JobType::VirtualMountSync {
         mount_id: MOUNT_ID.to_string(),
         mode: "delta".to_string(),
+        trigger: "manual".to_string(),
     });
     handler.handle(&job, &job_context()).await.unwrap();
 
@@ -1409,6 +1475,46 @@ fn webhook_mount() -> MountConfig {
     let mut sync = SyncConfig::default();
     sync.mode = "webhook".to_string();
     mk_mount(sync)
+}
+
+/// A webhook mount with a live subscription and an unfinished backfill is DUE.
+///
+/// Regression test for a production stall. `is_due` returned early for
+/// `mode: "webhook"` — above the backfill-pending check — so a webhook mount
+/// with an active subscription was never due, and its half-finished import
+/// advanced only when the provider happened to send a ping. A quiet mailbox
+/// meant the import stopped at the first 500-item chunk and stayed there for
+/// hours while the console showed `status: "ok"`.
+///
+/// Draining our own unfinished backfill has nothing to do with whether the
+/// provider can push.
+#[test]
+fn webhook_mount_with_pending_backfill_is_due() {
+    let now = 1_800_000_000;
+    let mut mount = webhook_mount();
+    mount.state.push_status = Some("active".to_string());
+    mount.state.push_subscription_id = Some("sub-1".to_string());
+    mount.state.push_expires_at = Some("2999-01-01T00:00:00Z".to_string());
+
+    // Live subscription, nothing pending => not due (push drives it).
+    assert!(
+        !super::check::is_due(&mount, now),
+        "a fully-synced webhook mount must stay push-driven"
+    );
+
+    // Same mount, but a backfill chunk is outstanding => due.
+    mount.state.backfill_cursor = Some("page-2".to_string());
+    assert!(
+        super::check::is_due(&mount, now),
+        "an unfinished backfill must be drained even on a push-driven mount"
+    );
+
+    // The failure gate still applies, so a broken backfill cannot spin.
+    mount.state.consecutive_failures = 1;
+    assert!(
+        !super::check::is_due(&mount, now),
+        "a failing backfill must back off rather than run back-to-back"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
