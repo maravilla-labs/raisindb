@@ -40,6 +40,14 @@ export interface RefreshPolicy {
   mode: 'manual' | 'interval'
   interval_secs: number
   on_save: boolean
+  /**
+   * Hold a notification stream open so tool changes arrive live.
+   *
+   * Off by default: a listener is a socket held open for hours against a third
+   * party. The server must also promise the guarantee (2026-07-28, or
+   * `tools.listChanged`), so enabling this does not always produce a stream.
+   */
+  notifications: boolean
   call_timeout_ms: number
 }
 
@@ -207,6 +215,33 @@ export const mcpConnectionsApi = {
     enabled: boolean,
   ): Promise<{ ok: boolean; refresh_job_id: string }> {
     return api.patch(`${one(repo, slug)}/tools/${encodeURIComponent(remoteName)}`, { enabled })
+  },
+
+  /**
+   * Delete every proxy whose tool is gone upstream.
+   *
+   * Refused with 409 naming the agents that still reference the paths unless
+   * `force`. Discovery never deletes — it disables — so this is the only way a
+   * `missing` entry goes away.
+   */
+  pruneTools(
+    repo: string,
+    slug: string,
+    force = false,
+  ): Promise<{ ok: boolean; pruned: number; tools: string[] }> {
+    return api.post(`${one(repo, slug)}/prune-tools${force ? '?force=true' : ''}`, {})
+  },
+
+  /** Delete one proxy, whatever its state. Same 409 contract as prune. */
+  deleteTool(
+    repo: string,
+    slug: string,
+    remoteName: string,
+    force = false,
+  ): Promise<{ ok: boolean; pruned: number; tools: string[] }> {
+    return api.delete(
+      `${one(repo, slug)}/tools/${encodeURIComponent(remoteName)}${force ? '?force=true' : ''}`,
+    )
   },
 
   /** Probe the 401, follow RFC 9728 → RFC 8414, and register dynamically. */

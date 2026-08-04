@@ -133,6 +133,13 @@ pub struct RefreshPolicy {
     pub interval_secs: u64,
     /// Whether saving the connection triggers a discovery run.
     pub on_save: bool,
+    /// Hold a notification stream open so tool changes arrive live.
+    ///
+    /// Off by default and deliberately so: a listener is a socket held open for
+    /// hours against a third party, and an upgrade must not silently start one
+    /// per connection. It is also only half the gate — the server must actually
+    /// promise to announce changes, via 2026-07-28 or `tools.listChanged`.
+    pub notifications: bool,
     /// Per-call timeout for `tools/call`, clamped to [`MAX_CALL_TIMEOUT_MS`].
     pub call_timeout_ms: u64,
 }
@@ -143,6 +150,7 @@ impl Default for RefreshPolicy {
             mode: "manual".to_string(),
             interval_secs: 3_600,
             on_save: true,
+            notifications: false,
             call_timeout_ms: DEFAULT_CALL_TIMEOUT_MS,
         }
     }
@@ -161,6 +169,7 @@ impl RefreshPolicy {
                 .filter(|s| *s > 0)
                 .unwrap_or(defaults.interval_secs),
             on_save: bool_prop(&block, "on_save").unwrap_or(defaults.on_save),
+            notifications: bool_prop(&block, "notifications").unwrap_or(defaults.notifications),
             // Clamped, not rejected: a connection with an absurd timeout should
             // still work, just not hold a job worker for an hour.
             call_timeout_ms: u64_prop(&block, "call_timeout_ms")

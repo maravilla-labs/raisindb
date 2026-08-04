@@ -156,10 +156,16 @@ pub async fn discover(
     let mut client = existing_client(&node);
     if client.client_id.is_empty() {
         if let Some(endpoint) = &server.registration_endpoint {
-            let issued =
-                mcp::register_client(&http, &egress, endpoint, CLIENT_NAME, &redirect_uri, &scopes)
-                    .await
-                    .map_err(remote_error)?;
+            let issued = mcp::register_client(
+                &http,
+                &egress,
+                endpoint,
+                CLIENT_NAME,
+                &redirect_uri,
+                &scopes,
+            )
+            .await
+            .map_err(remote_error)?;
             if let Some(secret) = &issued.client_secret {
                 store_client_secret(&state, &mut node, secret)?;
             }

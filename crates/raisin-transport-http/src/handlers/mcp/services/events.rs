@@ -38,14 +38,40 @@ impl BusEventSource {
     }
 }
 
+/// Unregisters a bus handler when the stream that owns it goes away.
+///
+/// Without this the subscription leaked: `subscribe_fn` registered a handler
+/// per `resources/subscribe`, nothing ever removed it, and `clear_subscribers`
+/// — the only removal API at the time — drops *everyone's*. A server with
+/// clients connecting and disconnecting therefore grew its handler list for the
+/// life of the process, and every one of those dead handlers was still woken,
+/// filtered and awaited on every single node event.
+struct SubscriptionGuard {
+    bus: Arc<dyn EventBus>,
+    name: String,
+}
+
+impl Drop for SubscriptionGuard {
+    fn drop(&mut self) {
+        if self.bus.unsubscribe(&self.name) {
+            tracing::trace!(name = %self.name, "mcp resource subscription unregistered");
+        }
+    }
+}
+
 impl raisin_mcp::EventSource for BusEventSource {
     fn subscribe(&self, _identity: &McpIdentity) -> NodeChangeStream {
         let (tx, mut rx) = mpsc::unbounded_channel::<NodeChange>();
         let tenant_id = self.tenant_id.clone();
         let repo = self.repo.clone();
 
-        // A unique handler name per subscription so the bus keeps each distinct.
+        // A unique handler name per subscription so the bus keeps each distinct
+        // — and so the guard below removes exactly this one.
         let name = format!("mcp-resource-sub-{}", uuid::Uuid::new_v4());
+        let guard = SubscriptionGuard {
+            bus: self.bus.clone(),
+            name: name.clone(),
+        };
 
         self.bus
             .subscribe_fn(name, EventFilter::AllNode, move |event| {
@@ -69,6 +95,10 @@ impl raisin_mcp::EventSource for BusEventSource {
             });
 
         let stream = async_stream::stream! {
+            // Moved INTO the stream so its lifetime is the subscription's:
+            // whether the client disconnects, the server shuts down, or the
+            // stream is simply dropped, the handler goes with it.
+            let _guard = guard;
             while let Some(change) = rx.recv().await {
                 yield change;
             }

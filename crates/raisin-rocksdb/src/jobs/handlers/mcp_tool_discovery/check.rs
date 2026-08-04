@@ -35,73 +35,54 @@ pub async fn run_check(
     storage: &Arc<RocksDBStorage>,
     tenant_filter: Option<String>,
 ) -> Result<usize> {
-    let tenants = match &tenant_filter {
-        Some(t) => vec![t.clone()],
-        None => crate::management::list_tenants(storage).await?,
-    };
-
     let now_secs = chrono::Utc::now().timestamp().max(0) as u64;
     let mut enqueued = 0usize;
 
-    for tenant in tenants {
-        let repos = match crate::management::list_repositories(storage, &tenant).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(tenant = %tenant, error = %e, "mcp discovery check: failed to list repos");
-                continue;
-            }
-        };
-        for repo in repos {
-            match scan_repo(storage, &tenant, &repo, now_secs).await {
-                Ok(n) => enqueued += n,
-                Err(e) => tracing::warn!(
-                    tenant = %tenant,
-                    repo = %repo,
-                    error = %e,
-                    "mcp discovery check: repo scan failed"
-                ),
-            }
+    // ONE enumeration, shared with the token-refresh sweep and the notification
+    // listener. A private copy here is how the three drift apart.
+    for entry in super::enumerate::all_connections(storage, tenant_filter.as_deref()).await? {
+        if !entry.descriptor.is_callable() || !entry.descriptor.refresh_policy.is_scheduled() {
+            continue;
+        }
+        if !is_due(
+            last_synced_at(&entry.node),
+            entry.descriptor.refresh_policy.interval_secs,
+            now_secs,
+        ) {
+            continue;
+        }
+        match enqueue_discovery(
+            storage,
+            &entry.tenant,
+            &entry.repo,
+            &entry.branch,
+            &entry.descriptor.slug,
+        )
+        .await
+        {
+            Ok(true) => enqueued += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                tenant = %entry.tenant,
+                repo = %entry.repo,
+                slug = %entry.descriptor.slug,
+                error = %e,
+                "mcp discovery check: could not enqueue"
+            ),
         }
     }
     Ok(enqueued)
 }
 
-/// Enqueue discovery for every due connection in one repo.
-async fn scan_repo(
-    storage: &Arc<RocksDBStorage>,
-    tenant: &str,
-    repo: &str,
-    now_secs: u64,
-) -> Result<usize> {
-    let branch = default_branch(storage, tenant, repo).await;
-    let svc = system_service(storage, tenant, repo, &branch, SYSTEM_WORKSPACE);
-
-    let mut enqueued = 0usize;
-    for node in svc.list_by_type(CONNECTION_NODE_TYPE).await? {
-        let Ok(descriptor) = McpConnectionDescriptor::from_node(&node) else {
-            continue;
-        };
-        if !descriptor.is_callable() || !descriptor.refresh_policy.is_scheduled() {
-            continue;
-        }
-
-        let last = node
-            .properties
-            .get("last_synced_at")
-            .and_then(|pv| serde_json::to_value(pv).ok())
-            .as_ref()
-            .and_then(Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.timestamp().max(0) as u64);
-
-        if !is_due(last, descriptor.refresh_policy.interval_secs, now_secs) {
-            continue;
-        }
-        if enqueue_discovery(storage, tenant, repo, &branch, &descriptor.slug).await? {
-            enqueued += 1;
-        }
-    }
-    Ok(enqueued)
+/// When this connection last completed a discovery run.
+pub(crate) fn last_synced_at(node: &raisin_models::nodes::Node) -> Option<u64> {
+    node.properties
+        .get("last_synced_at")
+        .and_then(|pv| serde_json::to_value(pv).ok())
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.timestamp().max(0) as u64)
 }
 
 /// Whether a connection last synced at `last` is due again.
@@ -127,6 +108,9 @@ async fn enqueue_discovery(
         connection_slug: slug.to_string(),
         tenant_id: tenant.to_string(),
         repo_id: repo.to_string(),
+        // This scan is the interval path by definition; it only enqueues a
+        // connection whose refresh interval came due.
+        source: raisin_storage::jobs::McpDiscoverySource::Interval,
     };
     let job_id = JobId::new();
     let context = JobContext {

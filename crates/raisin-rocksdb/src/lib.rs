@@ -55,6 +55,7 @@ mod jobs;
 pub mod keys;
 pub mod lazy_indexing;
 pub mod management;
+pub mod mcp_listener;
 pub mod monitoring;
 pub mod oauth_store;
 mod prefix_transform;

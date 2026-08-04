@@ -1042,6 +1042,32 @@ async fn main() {
     // a connection is saved.
     raisin_functions::configure_mcp_client(server_config.mcp_client.clone());
 
+    // Hold notification streams open to remote MCP servers that announce tool
+    // changes, so a tool added upstream appears in seconds rather than at the
+    // next refresh interval.
+    //
+    // A supervised task rather than a job, deliberately: every JobType carries a
+    // hard wall-clock deadline (600s is the largest in the enum) and the
+    // watchdog reaps on runtime, so a stream-holding job would be severed on a
+    // fixed cycle forever. Spawned HERE because this is the only point where the
+    // storage, the lock manager, `conn_shutdown` and the installed MCP settings
+    // are all live at once — and outside the `background_jobs_enabled` block,
+    // where `conn_shutdown` does not yet exist.
+    #[cfg(feature = "storage-rocksdb")]
+    let mcp_listener = raisin_rocksdb::mcp_listener::spawn(
+        raisin_rocksdb::mcp_listener::ListenerConfig {
+            storage: storage.clone(),
+            lock_manager: lock_manager.clone(),
+            replication_enabled: server_config.replication_enabled,
+            node_id: server_config
+                .cluster_node_id
+                .clone()
+                .unwrap_or_else(|| nanoid::nanoid!(8)),
+            http: raisin_functions::shared_http_client(),
+        },
+        conn_shutdown.clone(),
+    );
+
     let (api_router, app_state) = http::router_with_bin_and_audit(
         storage.clone(),
         ws_svc.clone(),
@@ -1322,6 +1348,25 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal(batch_token, conn_shutdown))
         .await
         .expect("Failed to serve HTTP application");
+
+    // Wait for the MCP listener to release its leases before the DB closes.
+    //
+    // This is the FIRST background task this process joins — every other one is
+    // a detached `tokio::spawn` that simply stops existing when the runtime
+    // dies. Joining matters here because `LockGuard` has no `Drop` impl: a lease
+    // that is not explicitly released leaves that connection dark on every other
+    // node until its TTL lapses. Bounded, so a wedged stream cannot hold the
+    // whole shutdown open — the TTL is the backstop if this times out.
+    #[cfg(feature = "storage-rocksdb")]
+    if let Some(handle) = mcp_listener {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            Ok(Ok(())) => tracing::debug!("MCP listener stopped cleanly"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "MCP listener task failed"),
+            Err(_) => tracing::warn!(
+                "MCP listener did not stop within 5s; its leases will expire on their TTL"
+            ),
+        }
+    }
 
     // Close RocksDB explicitly.
     //

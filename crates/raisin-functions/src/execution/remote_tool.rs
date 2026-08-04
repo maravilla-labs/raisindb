@@ -71,6 +71,28 @@ fn register_session_cache() {
     });
 }
 
+/// Build the notification sink for one connection, when the job system is wired.
+///
+/// Returns `None` in a deployment without background jobs: there is nothing to
+/// enqueue into, and a sink that could only log would be worse than none. Tool
+/// calls keep working — freshness just falls back to the refresh interval.
+fn tool_change_sink<S, B>(
+    deps: &ExecutionDependencies<S, B>,
+    tenant_id: &str,
+    repo_id: &str,
+    slug: &str,
+) -> Option<Arc<dyn raisin_mcp_protocol::client::NotificationSink>>
+where
+    S: Storage + TransactionalStorage + 'static,
+    B: raisin_binary::BinaryStorage + 'static,
+{
+    let registry = deps.job_registry.clone()?;
+    let data_store = deps.job_data_store.clone()?;
+    Some(Arc::new(super::tool_change_sink::ToolChangeSink::new(
+        registry, data_store, tenant_id, repo_id, slug,
+    )))
+}
+
 /// The configured settings, or the safe default.
 ///
 /// The default refuses loopback and private addresses, so a deployment that
@@ -210,6 +232,10 @@ where
     let http = deps.http_client.clone();
     let url = descriptor.url.clone();
     let max_bytes = config.max_response_bytes;
+    // A server may put `notifications/tools/list_changed` ahead of its reply on
+    // this very call's SSE stream. Routing it costs nothing and is the only
+    // freshness signal that needs no held-open connection.
+    let sink = tool_change_sink(deps, tenant_id, repo_id, &descriptor.slug);
     let session = shared_session_cache().get_or_insert(
         tenant_id,
         repo_id,
@@ -217,9 +243,12 @@ where
         &descriptor.slug,
         descriptor.url.as_str(),
         move || {
-            McpClientSession::new(
-                StreamableHttpTransport::new(http, url, timeout).with_max_response_bytes(max_bytes),
-            )
+            let mut transport =
+                StreamableHttpTransport::new(http, url, timeout).with_max_response_bytes(max_bytes);
+            if let Some(sink) = sink {
+                transport = transport.with_notification_sink(sink);
+            }
+            McpClientSession::new(transport)
         },
     );
 

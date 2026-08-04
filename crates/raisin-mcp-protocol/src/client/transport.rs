@@ -19,7 +19,7 @@
 //! ours. RaisinDB's own server only ever replies with JSON, so the SSE branch
 //! here is exercised solely against third-party servers and the test mock.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::error::{RemoteToolError, Result};
+use super::notification::{notification_parts, NotificationSink};
 use crate::protocol::{JsonRpcResponse, JSONRPC_VERSION};
 
 /// Header carrying the negotiated MCP revision on every request.
@@ -51,6 +52,9 @@ pub struct StreamableHttpTransport {
     session_id: Mutex<Option<String>>,
     /// Revision sent in `MCP-Protocol-Version`; set once negotiated.
     protocol_version: Mutex<Option<String>>,
+    /// Where server-initiated notifications go. `None` drops them, which is
+    /// what every caller did before the sink existed.
+    notifications: Option<Arc<dyn NotificationSink>>,
 }
 
 impl StreamableHttpTransport {
@@ -67,12 +71,19 @@ impl StreamableHttpTransport {
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             session_id: Mutex::new(None),
             protocol_version: Mutex::new(None),
+            notifications: None,
         }
     }
 
     /// Override the response byte cap.
     pub fn with_max_response_bytes(mut self, max: usize) -> Self {
         self.max_response_bytes = max;
+        self
+    }
+
+    /// Route server-initiated notifications to `sink` instead of dropping them.
+    pub fn with_notification_sink(mut self, sink: Arc<dyn NotificationSink>) -> Self {
+        self.notifications = Some(sink);
         self
     }
 
@@ -123,6 +134,85 @@ impl StreamableHttpTransport {
     pub async fn notify(&self, method: &str, params: Value, auth: &ExtraHeaders) -> Result<()> {
         let body = json!({ "jsonrpc": JSONRPC_VERSION, "method": method, "params": params });
         self.post(&body, auth).await.map(|_| ())
+    }
+
+    /// Open a long-lived stream, returning the response unread.
+    ///
+    /// `body` decides the method: `Some` POSTs it (the 2026-07-28
+    /// `subscriptions/listen`), `None` issues the legacy GET. Either way the
+    /// caller drives an [`SseReader`](super::stream::SseReader) over the result.
+    ///
+    /// **No `.timeout()` is set**, and that is the point. The request timeout
+    /// used by `post` is total-elapsed, so applying it here would sever a
+    /// perfectly healthy subscription every 30 seconds. Liveness on a stream is
+    /// the reader's idle timeout instead.
+    pub async fn open_stream(
+        &self,
+        body: Option<&Value>,
+        auth: &ExtraHeaders,
+        last_event_id: Option<&str>,
+    ) -> Result<reqwest::Response> {
+        let mut req = match body {
+            Some(body) => self
+                .http
+                .post(self.url.clone())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(body),
+            None => self.http.get(self.url.clone()),
+        }
+        .header(reqwest::header::ACCEPT, "text/event-stream");
+
+        req = self.apply_session_headers(req, auth);
+        if let Some(id) = last_event_id {
+            // Resume where the dropped stream left off, so a reconnect does not
+            // silently lose whatever was emitted during the gap.
+            req = req.header("Last-Event-ID", id);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        self.adopt_session(&response);
+
+        if !status.is_success() {
+            if status.as_u16() == 404 && self.session_id().is_some() {
+                self.clear_session();
+                return Err(RemoteToolError::SessionExpired);
+            }
+            // 405 on the GET is how a server that does not offer a listening
+            // stream says so. It is a capability answer, not a fault.
+            let body = String::new();
+            return Err(RemoteToolError::from_status(status.as_u16(), &body, None));
+        }
+        Ok(response)
+    }
+
+    /// Attach the protocol version, session id and auth headers.
+    fn apply_session_headers(
+        &self,
+        mut req: reqwest::RequestBuilder,
+        auth: &ExtraHeaders,
+    ) -> reqwest::RequestBuilder {
+        if let Some(version) = self.protocol_version.lock().expect("poisoned").as_ref() {
+            req = req.header(HEADER_PROTOCOL_VERSION, version);
+        }
+        if let Some(session) = self.session_id.lock().expect("poisoned").as_ref() {
+            req = req.header(HEADER_SESSION_ID, session);
+        }
+        for (name, value) in auth {
+            req = req.header(name.as_str(), value.as_str());
+        }
+        req
+    }
+
+    /// Record a session id the server assigned or rotated on this response.
+    fn adopt_session(&self, response: &reqwest::Response) {
+        if let Some(session) = response
+            .headers()
+            .get(HEADER_SESSION_ID)
+            .and_then(|v| v.to_str().ok())
+        {
+            *self.session_id.lock().expect("poisoned") = Some(session.to_string());
+        }
     }
 
     /// POST one message and return the raw response body.
@@ -217,16 +307,43 @@ impl StreamableHttpTransport {
             });
         }
         // SSE: the reply to our request is the first `data:` frame carrying a
-        // response with our id. Earlier frames may be notifications, which we
-        // skip rather than mistake for the answer.
+        // response with our id. Earlier frames may be notifications, which are
+        // routed to the sink rather than mistaken for the answer — or, before
+        // the sink existed, silently dropped.
         for frame in sse_data_frames(text) {
-            if let Some(response) = parse_message(&frame, id)? {
+            if let Some(response) = self.dispatch_frame(&frame, id)? {
                 return Ok(response);
             }
         }
         Err(RemoteToolError::Protocol(format!(
             "no response for request id {id} in event stream"
         )))
+    }
+
+    /// Route one SSE frame: our response is returned, a notification is
+    /// delivered to the sink, anything else is ignored.
+    ///
+    /// A server may legitimately put `notifications/tools/list_changed` ahead of
+    /// the reply to an ordinary `tools/call`, which is free freshness the
+    /// response scan alone throws away.
+    fn dispatch_frame(&self, frame: &str, id: u64) -> Result<Option<JsonRpcResponse>> {
+        let value: Value = serde_json::from_str(frame)
+            .map_err(|e| RemoteToolError::Protocol(format!("malformed json-rpc message: {e}")))?;
+
+        if value.get("id").and_then(Value::as_u64) == Some(id) {
+            return serde_json::from_value(value).map(Some).map_err(|e| {
+                RemoteToolError::Protocol(format!("malformed json-rpc response: {e}"))
+            });
+        }
+
+        if let (Some(sink), Some((method, params))) =
+            (self.notifications.as_ref(), notification_parts(&value))
+        {
+            // Never fallible and never awaited: this runs inside an in-flight
+            // request, which on the POST route is an agent's `tools/call`.
+            sink.on_notification(method, params);
+        }
+        Ok(None)
     }
 }
 
@@ -311,6 +428,82 @@ mod tests {
         assert_eq!(
             transport.decode(body, 1).unwrap().result.unwrap(),
             json!({ "ok": 1 })
+        );
+    }
+
+    /// Records what a sink was handed, so the tests can assert on it.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>);
+
+    impl NotificationSink for Recorder {
+        fn on_notification(&self, method: &str, _params: &Value) {
+            self.0.lock().expect("poisoned").push(method.to_string());
+        }
+    }
+
+    /// THE change: a notification riding along with an ordinary response used to
+    /// be dropped, because it carried an id that was not ours and nothing else
+    /// looked at it.
+    #[test]
+    fn a_notification_beside_the_answer_reaches_the_sink() {
+        let sink = Arc::new(Recorder::default());
+        let transport = test_transport().with_notification_sink(sink.clone());
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
+        );
+
+        let response = transport.decode(body, 7).expect("the answer still decodes");
+        assert_eq!(response.result.unwrap(), json!({ "ok": true }));
+        assert_eq!(
+            sink.0.lock().unwrap().as_slice(),
+            ["notifications/tools/list_changed"]
+        );
+    }
+
+    /// Frames AFTER the answer are never reached — `decode` returns at the
+    /// response. A server that wants a notification seen must send it first,
+    /// which is what the spec's ordering guarantees.
+    #[test]
+    fn a_notification_after_the_answer_is_not_delivered() {
+        let sink = Arc::new(Recorder::default());
+        let transport = test_transport().with_notification_sink(sink.clone());
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n",
+        );
+
+        transport.decode(body, 7).expect("the answer decodes");
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    /// A server-to-client REQUEST carries both `method` and `id`. Handing it to
+    /// the sink would treat something the server is waiting on as fire-and-forget.
+    #[test]
+    fn a_server_initiated_request_does_not_reach_the_sink() {
+        let sink = Arc::new(Recorder::default());
+        let transport = test_transport().with_notification_sink(sink.clone());
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"sampling/createMessage\"}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n\n",
+        );
+
+        transport.decode(body, 7).expect("the answer decodes");
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    /// The blast radius of the change must be zero for every existing caller:
+    /// with no sink installed, decode behaves exactly as it did before.
+    #[test]
+    fn a_sinkless_transport_still_skips_notifications() {
+        let transport = test_transport();
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
+        );
+        assert_eq!(
+            transport.decode(body, 7).unwrap().result.unwrap(),
+            json!({ "ok": true })
         );
     }
 

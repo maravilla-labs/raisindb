@@ -36,6 +36,7 @@
 
 mod apply;
 mod check;
+pub(crate) mod enumerate;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,12 +47,15 @@ use raisin_mcp_protocol::client::{
     reconcile_plan, EgressPolicy, McpClientSession, McpConnectionDescriptor, RemoteToolError,
     StreamableHttpTransport,
 };
-use raisin_storage::jobs::{JobContext, JobInfo, JobType};
+use raisin_storage::jobs::{JobContext, JobInfo, JobType, McpDiscoverySource};
 use serde_json::Value;
 
 use crate::jobs::KeyedMutex;
 use crate::RocksDBStorage;
 
+/// Shared with the notification listener so both decrypt a credential the same
+/// way, and a master-key mismatch is diagnosed identically on either path.
+pub(crate) use apply::decrypt_credential;
 pub use check::run_check;
 
 /// Workspace holding connection configuration.
@@ -129,8 +133,9 @@ impl McpToolDiscoveryHandler {
                 connection_slug,
                 tenant_id,
                 repo_id,
+                source,
             } => self
-                .discover(tenant_id, repo_id, connection_slug)
+                .discover(tenant_id, repo_id, connection_slug, *source)
                 .await
                 .map(Some),
             other => Err(raisin_error::Error::Validation(format!(
@@ -140,7 +145,13 @@ impl McpToolDiscoveryHandler {
     }
 
     /// Discover and reconcile one connection.
-    async fn discover(&self, tenant: &str, repo: &str, slug: &str) -> Result<Value> {
+    async fn discover(
+        &self,
+        tenant: &str,
+        repo: &str,
+        slug: &str,
+        source: McpDiscoverySource,
+    ) -> Result<Value> {
         let branch = apply::default_branch(&self.storage, tenant, repo).await;
 
         // In-process first (queues), then the cluster lease (rejects). Taking
@@ -180,7 +191,14 @@ impl McpToolDiscoveryHandler {
             }
         };
 
-        let outcome = self.discover_locked(tenant, repo, &branch, slug).await;
+        let mut outcome = self.discover_locked(tenant, repo, &branch, slug).await;
+
+        // Stamp what asked for the run onto the summary, so the job list can
+        // answer "did the live notification actually fire, or was that just the
+        // hourly poll?" without correlating timestamps by hand.
+        if let Ok(Value::Object(summary)) = &mut outcome {
+            summary.insert("source".to_string(), Value::from(source.as_str()));
+        }
 
         if let (Some(lm), Some(token)) = (&self.lock_manager, lease) {
             let _ = lm.release(&lock_key, token).await;

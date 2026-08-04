@@ -71,6 +71,7 @@ pub mod flow_callbacks_factory;
 pub mod module_cache;
 mod provider;
 pub mod remote_tool;
+mod tool_change_sink;
 mod types;
 
 // Re-export public API

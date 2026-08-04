@@ -66,7 +66,14 @@ pub(crate) fn mcp_client_routes(state: &AppState) -> Router<AppState> {
             )
             .route(
                 "/api/mcp-connections/{repo}/{slug}/tools/{remote_name}",
-                axum::routing::patch(mcp_client::set_tool_enabled),
+                axum::routing::patch(mcp_client::set_tool_enabled).delete(mcp_client::delete_tool),
+            )
+            // Pruning is EXPLICIT and never automatic: discovery disables a
+            // vanished tool rather than deleting it, because a deleted proxy
+            // disappears from an agent with no error anywhere.
+            .route(
+                "/api/mcp-connections/{repo}/{slug}/prune-tools",
+                post(mcp_client::prune_tools),
             )
             .route(
                 "/api/mcp-connections/{repo}/{slug}/oauth/discover",

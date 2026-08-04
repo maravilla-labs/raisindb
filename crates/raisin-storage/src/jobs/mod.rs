@@ -34,7 +34,7 @@ pub use pool::{CategoryPoolStats, WorkerPool, WorkerPoolStats};
 pub use registry::{global_registry, JobRegistry};
 pub use types::{
     AssetProcessingOptions, BatchIndexOperation, IndexOperation, JobCategory, JobContext,
-    JobHandle, JobId, JobInfo, JobPriority, JobScope, JobStatus, JobType, PdfExtractionStrategy,
-    ScopedJobInfo,
+    JobHandle, JobId, JobInfo, JobPriority, JobScope, JobStatus, JobType, McpDiscoverySource,
+    PdfExtractionStrategy, ScopedJobInfo,
 };
 pub use worker::JobWorker;

@@ -379,7 +379,16 @@ async fn dispatch(
 
     // `subscriptions/listen` upgrades to an SSE stream of notifications.
     if request.method == "subscriptions/listen" && request.id.is_some() {
-        return subscribe_sse(dispatcher, identity, request, state.shutdown_signal());
+        let tool_changes = services::tool_changes::subscribe(&state.storage.event_bus());
+        return subscribe_sse(
+            dispatcher,
+            identity,
+            request,
+            state.shutdown_signal(),
+            tool_changes,
+            tenant_id.to_string(),
+            repo.to_string(),
+        );
     }
 
     let is_notification = request.id.is_none();
@@ -404,11 +413,15 @@ async fn dispatch(
 /// on `shutdown` — otherwise the open response holds `axum::serve`'s graceful
 /// drain until the supervisor SIGKILLs the process.
 #[cfg(feature = "storage-rocksdb")]
+#[allow(clippy::too_many_arguments)]
 fn subscribe_sse(
     dispatcher: raisin_mcp::Dispatcher,
     identity: McpIdentity,
     request: JsonRpcRequest,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    mut tool_changes: tokio::sync::broadcast::Receiver<services::tool_changes::ToolChange>,
+    tenant_id: String,
+    repo: String,
 ) -> Result<Response, McpError> {
     use raisin_mcp::{SubscriptionsListenParams, META_SUBSCRIPTION_ID};
 
@@ -424,16 +437,21 @@ fn subscribe_sse(
         granted.push(uri.clone());
     }
 
-    // This server emits no list-changed notifications, so the acknowledgement
-    // reports only the resource subscriptions. The spec requires the server to
-    // report the subset it will actually honour — promising a stream that never
-    // arrives is worse than declining it, because the client waits forever.
+    // The acknowledgement reports the subset this server will ACTUALLY honour.
+    // Promising a stream that never arrives is worse than declining it, because
+    // the client waits forever rather than falling back to polling. Tools are
+    // honoured (node events drive them); prompts and resource-list changes are
+    // not, so they are omitted whatever the client asked for.
+    let tools_wanted = params.notifications.tools_list_changed;
     let ack = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "notifications/subscriptions/acknowledged",
         "params": {
             "_meta": { META_SUBSCRIPTION_ID: id.clone() },
-            "notifications": { "resourceSubscriptions": granted },
+            "notifications": {
+                "toolsListChanged": tools_wanted,
+                "resourceSubscriptions": granted,
+            },
         },
     });
     // Sent only when the subscription is torn down gracefully; an abrupt
@@ -456,9 +474,52 @@ fn subscribe_sse(
             );
         }
 
+        // A tool-change frame carries no params beyond the subscription id: the
+        // notification means "re-list", and there is nothing else to say.
+        let tools_frame = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed",
+            "params": { "_meta": { META_SUBSCRIPTION_ID: stream_id.clone() } },
+        });
+
         let merged = futures::stream::select_all(streams.into_iter().map(Box::pin));
         futures::pin_mut!(merged);
-        while let Some(notification) = merged.next().await {
+
+        loop {
+            let notification = tokio::select! {
+                // Only polled when the client asked for tools; otherwise the
+                // branch is disabled and the server cannot send what it did not
+                // grant.
+                change = tool_changes.recv(), if tools_wanted => {
+                    match change {
+                        Ok(change) => {
+                            if !services::tool_changes::matches(&change, &tenant_id, &repo) {
+                                continue;
+                            }
+                        }
+                        // Lagging is harmless here: the payload-free
+                        // notification says "re-list", and having missed ten of
+                        // them means exactly the same thing as having missed one.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                    // Coalesce a burst. A package install writes many functions
+                    // at once; without this the client would be told to re-list
+                    // once per node written.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    while tool_changes.try_recv().is_ok() {}
+
+                    if let Ok(data) = serde_json::to_string(&tools_frame) {
+                        yield Ok(SseEvent::default().event("message").data(data));
+                    }
+                    continue;
+                }
+                next = merged.next() => match next {
+                    Some(notification) => notification,
+                    None => break,
+                },
+            };
+            {
             // Every notification delivered on a listen stream MUST carry the
             // subscription id, so a client multiplexing several streams over
             // one stdio channel can tell them apart.
@@ -477,6 +538,7 @@ fn subscribe_sse(
             });
             if let Ok(data) = serde_json::to_string(&frame) {
                 yield Ok(SseEvent::default().event("message").data(data));
+            }
             }
         }
 

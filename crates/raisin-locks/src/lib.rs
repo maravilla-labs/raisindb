@@ -38,6 +38,9 @@ use async_trait::async_trait;
 use raisin_error::Result;
 use serde::{Deserialize, Serialize};
 
+mod election;
+pub use election::LeaseElection;
+
 mod inprocess;
 pub use inprocess::InProcessLockManager;
 

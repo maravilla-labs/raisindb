@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSL-1.1
 
 import { useState } from 'react'
-import { RefreshCw, Copy, Check, AlertTriangle } from 'lucide-react'
+import { RefreshCw, Copy, Check, AlertTriangle, Trash2 } from 'lucide-react'
 import { mcpConnectionsApi, type DiscoveredTool, type ToolState } from '../../api/mcp-connections'
 
 interface Props {
@@ -56,6 +56,27 @@ export default function DiscoveredToolsTable({
     }
   }
 
+  /**
+   * Delete the proxies for tools that are gone upstream.
+   *
+   * Never automatic: discovery disables rather than deletes, because a deleted
+   * proxy vanishes from any agent holding its path with no error anywhere. The
+   * server refuses with 409 naming those agents, and that message is shown
+   * as-is rather than retried with force.
+   */
+  const prune = async () => {
+    setBusy('__prune__')
+    try {
+      const res = await mcpConnectionsApi.pruneTools(repo, slug)
+      onSuccess(`Pruned ${res.pruned} tool(s)`)
+      onRefreshed()
+    } catch (e: any) {
+      onError('Could not prune', e?.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const copy = async (path: string) => {
     await navigator.clipboard.writeText(path)
     setCopied(path)
@@ -71,8 +92,27 @@ export default function DiscoveredToolsTable({
     )
   }
 
+  const missing = tools.filter((t) => t.state === 'missing')
+
   return (
     <div className="overflow-x-auto">
+      {missing.length > 0 && (
+        <div className="mb-3 flex items-center justify-between gap-3 text-xs">
+          <span className="text-amber-200/70">
+            {missing.length} tool(s) are gone from the remote server. Their proxies are disabled,
+            not deleted, so agents referencing them fail loudly rather than losing a tool silently.
+          </span>
+          <button
+            type="button"
+            disabled={busy === '__prune__'}
+            onClick={prune}
+            className="shrink-0 px-2.5 py-1 rounded-md border border-rose-400/30 text-rose-300 disabled:opacity-40"
+          >
+            <Trash2 className="w-3 h-3 inline mr-1" />
+            Prune missing ({missing.length})
+          </button>
+        </div>
+      )}
       <table className="w-full text-sm">
         <thead className="text-white/50 text-xs uppercase">
           <tr>

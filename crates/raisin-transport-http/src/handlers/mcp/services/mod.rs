@@ -25,6 +25,7 @@ mod events;
 mod invoker;
 #[cfg(feature = "storage-rocksdb")]
 mod search;
+pub(in crate::handlers::mcp) mod tool_changes;
 
 #[cfg(feature = "storage-rocksdb")]
 pub(super) use assets::HttpAssetReader;

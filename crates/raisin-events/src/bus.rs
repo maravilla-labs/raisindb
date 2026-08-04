@@ -134,6 +134,17 @@ impl EventBus for InMemoryEventBus {
         );
     }
 
+    fn unsubscribe(&self, name: &str) -> bool {
+        let mut subscribers = self.subscribers.write().unwrap();
+        let before = subscribers.len();
+        subscribers.retain(|handler| handler.name() != name);
+        // Removes every handler sharing the name. Callers that subscribe per
+        // connection give each one a unique name, so in practice this removes
+        // exactly one — but a duplicate name is a caller bug that should not
+        // leave half of them behind.
+        before != subscribers.len()
+    }
+
     fn clear_subscribers(&self) {
         let mut subscribers = self.subscribers.write().unwrap();
         subscribers.clear();
@@ -143,10 +154,45 @@ impl EventBus for InMemoryEventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NodeEvent, NodeEventKind};
+    use crate::{EventBusExt, EventFilter, NodeEvent, NodeEventKind};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::{sleep, Duration};
+
+    /// The leak this API exists to close: a per-connection subscriber must be
+    /// removable on its own. Before `unsubscribe`, `clear_subscribers` was the
+    /// only removal path — and dropping everyone is never what one departing
+    /// subscriber wants, so callers simply leaked instead.
+    #[test]
+    fn one_subscriber_can_be_removed_without_disturbing_the_others() {
+        let bus = InMemoryEventBus::new();
+        for name in ["a", "b", "c"] {
+            bus.subscribe_fn(name, EventFilter::All, |_| Box::pin(async { Ok(()) }));
+        }
+        assert_eq!(bus.subscriber_count(), 3);
+
+        assert!(bus.unsubscribe("b"), "removing a live handler reports true");
+        assert_eq!(bus.subscriber_count(), 2, "only `b` went");
+
+        // Idempotent: a guard that runs twice, or after a clear, is harmless.
+        assert!(!bus.unsubscribe("b"), "removing it again reports false");
+        assert_eq!(bus.subscriber_count(), 2);
+    }
+
+    /// Subscribe/unsubscribe cycles must not accumulate — this is exactly the
+    /// connect-disconnect churn that grew the handler list for a process's life.
+    #[test]
+    fn repeated_subscribe_unsubscribe_leaves_nothing_behind() {
+        let bus = InMemoryEventBus::new();
+        for i in 0..200 {
+            let name = format!("sub-{i}");
+            bus.subscribe_fn(name.clone(), EventFilter::All, |_| {
+                Box::pin(async { Ok(()) })
+            });
+            assert!(bus.unsubscribe(&name));
+        }
+        assert_eq!(bus.subscriber_count(), 0);
+    }
 
     struct CountingHandler {
         count: Arc<AtomicUsize>,
@@ -190,8 +236,8 @@ mod tests {
             kind: NodeEventKind::Created,
             path: None,
             metadata: None,
-            workspace_id: todo!(),
-            revision: todo!(),
+            workspace_id: "content".to_string(),
+            revision: raisin_hlc::HLC::now(),
         };
         let event = Event::Node(node_event);
 
@@ -227,8 +273,8 @@ mod tests {
             kind: NodeEventKind::Updated,
             path: None,
             metadata: None,
-            workspace_id: todo!(),
-            revision: todo!(),
+            workspace_id: "content".to_string(),
+            revision: raisin_hlc::HLC::now(),
         };
         let event = Event::Node(node_event);
 
