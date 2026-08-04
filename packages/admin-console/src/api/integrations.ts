@@ -265,25 +265,101 @@ export interface WriteConfig {
   conflict?: 'remote_wins' | 'error'
 }
 
-/** Engine-managed mount state (read-only in the UI). */
+/** How a sync run was started. */
+export type SyncTrigger = 'push' | 'schedule' | 'manual' | 'unknown'
+
+/** What kind of walk a sync run performed. */
+export type SyncMode = 'delta' | 'full' | 'remap'
+
+/** Terminal (or in-flight) state of a sync run. */
+export type SyncOutcome =
+  | 'running'
+  | 'ok'
+  | 'error'
+  | 'auth_required'
+  | 'misconfigured'
+  | 'skipped'
+
+/**
+ * One recorded execution of the sync engine for a mount.
+ *
+ * Engine-owned and append-only; the UI never writes these.
+ */
+export interface SyncRun {
+  /** Epoch SECONDS. */
+  started_at: number
+  /** Epoch SECONDS. Absent while `outcome === 'running'`. */
+  finished_at?: number
+  duration_ms?: number
+  mode: SyncMode
+  trigger: SyncTrigger
+  outcome: SyncOutcome
+  written: number
+  skipped: number
+  deleted: number
+  failed: number
+  items_done: number
+  error?: string
+  /**
+   * The run executed but its record did not land — so the counters above, and
+   * anything derived from them, understate what actually happened. Surface this
+   * rather than hiding it: it is the difference between "nothing ran" and "we
+   * lost the receipt".
+   */
+  state_write_skipped?: boolean
+}
+
+/**
+ * Engine-managed mount state (read-only in the UI).
+ *
+ * **Every timestamp here is epoch SECONDS except `push_expires_at`**, which is
+ * an ISO-8601 string. Passing seconds to `new Date()` is what rendered a live
+ * mount as "synced 1/21/1970"; use the `*Seconds` helpers in `utils/time.ts`.
+ */
 export interface MountState {
+  /** `ok` | `syncing` | `auth_required` | `degraded` | `misconfigured`. */
   status?: string
   last_sync_token?: string
-  last_sync_at?: string
   /**
-   * Last sync ATTEMPT, successful or not. The scheduler backs off from this,
-   * not from `last_sync_at`, so it is what tells you when a failing mount will
-   * next be tried.
+   * Epoch SECONDS of the last SUCCESSFUL sync.
+   *
+   * Previously typed `string`, which it never was — the declared type was the
+   * cover story for the 1970 timestamps.
    */
-  last_attempt_at?: string
+  last_sync_at?: number
+  /**
+   * Last sync ATTEMPT, successful or not, in epoch SECONDS. The scheduler backs
+   * off from this, not from `last_sync_at`, so it is what tells you when a
+   * failing mount will next be tried.
+   */
+  last_attempt_at?: number
   last_error?: string
   consecutive_failures?: number
+  /** Internal write counter. Not for display. */
+  state_seq?: number
   /** Items materialized so far by the current full walk / backfill / remap. */
   backfill_items_done?: number
+  /**
+   * Denominator for `backfill_items_done`, when the provider reports one.
+   * Frequently absent — most do not — so treat a missing total as normal and
+   * fall back to a running tally rather than inventing a percentage.
+   */
+  backfill_items_total?: number
   /** True once a full walk has reached the end at least once. */
   backfill_complete?: boolean
-  /** Present while a walk is mid-flight (resume point for the next chunk). */
+  /**
+   * Present while a walk is mid-flight (resume point for the next chunk).
+   *
+   * **Absent between chunks**, so this alone is not a reliable "is it running"
+   * test — use `status === 'syncing'` or `backfill_stack` as well.
+   */
   backfill_cursor?: string
+  /** Pending subtrees for a hierarchical walk still to be descended into. */
+  backfill_stack?: string[]
+  /** The most recent run, including one still in flight. */
+  last_run?: SyncRun
+  /** Newest first, capped at 20 by the engine. */
+  recent_runs?: SyncRun[]
   /**
    * False when the mount requested write_through but the engine cannot honour
    * it. v1 has no write-through implementation, so the engine sets this false
@@ -300,8 +376,28 @@ export interface MountState {
    * subscribe/renew failure, if any. All read-only in the UI.
    */
   push_status?: string
+  /** ISO-8601 string — the one timestamp here that is NOT epoch seconds. */
   push_expires_at?: string
   push_last_error?: string
+  /** Provider-side subscription id, for correlating against provider logs. */
+  push_subscription_id?: string
+  /** The URL the provider must POST notifications to. */
+  push_notification_url?: string
+
+  // ---- Webhook DELIVERY health ----
+  //
+  // Distinct from the subscription lifecycle above, and the distinction is the
+  // whole point: a mount can report `push_status: "active"` with an unexpired
+  // subscription while EVERY notification is being rejected. The subscription
+  // fields look healthy throughout. Only these counters show it.
+
+  /** Epoch SECONDS of the last notification that was ACCEPTED. */
+  push_last_delivery_at?: number
+  /** Epoch SECONDS of the last notification that was REJECTED. */
+  push_last_rejected_at?: number
+  push_last_rejected_reason?: string
+  push_deliveries_ok?: number
+  push_deliveries_rejected?: number
 }
 
 export interface VirtualMount {
@@ -831,8 +927,28 @@ export const integrationsApi = {
     return nodeToMount(node)
   },
 
-  deleteMount: (repo: string, name: string) =>
-    nodesApi.delete(repo, CONFIG_BRANCH, SYSTEM_WORKSPACE, `${MOUNTS_ROOT}/${name}`),
+  /**
+   * Delete a mount, unregistering its push subscription with the provider first.
+   *
+   * Keyed on the mount NODE ID, not its name, because the endpoint is
+   * `DELETE /api/integrations/{repo}/mounts/{mount_id}`.
+   *
+   * Do NOT go back to a generic node delete here. The engine never sees one:
+   * the sync job's teardown path only runs for a mount that still exists and is
+   * merely disabled, and it bails once the node is gone — so the provider keeps
+   * POSTing at a URL that no longer resolves, with no backoff. That was measured
+   * in production as ~1,500 Graph notifications 404'ing per day for two mounts
+   * deleted long before.
+   *
+   * `unsubscribed: false` is NOT a failure. The server unsubscribes on a
+   * best-effort basis so an unreachable provider or a stale credential cannot
+   * make a mount undeletable, and `false` also covers the ordinary "there was no
+   * subscription" case for a poll-mode mount. `deleted` is always true on a 2xx.
+   */
+  deleteMount: (repo: string, mountId: string) =>
+    api.delete<{ deleted: boolean; unsubscribed: boolean }>(
+      `/api/integrations/${repo}/mounts/${encodeURIComponent(mountId)}`,
+    ),
 
   /** Enqueue a manual "sync now" for a mount. `mountId` is the mount node id. */
   syncMount: (repo: string, mountId: string, mode: 'delta' | 'full' | 'remap' = 'delta') =>

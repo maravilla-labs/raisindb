@@ -91,6 +91,10 @@ pub fn adapter_ctx<'a>(
         materializer,
         lock_manager: None,
         lock_key: String::new(),
+        // Deliberately unleased: subscribe/renew/teardown run outside the
+        // per-mount sync lease (see the module docs), so there is no handle to
+        // renew with.
+        lease_token: None,
         credential,
         mount_snapshot,
     }

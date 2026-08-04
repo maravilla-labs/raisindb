@@ -142,6 +142,28 @@ mod tests {
         assert_eq!(jt, parsed, "round-trip mismatch via {s}");
     }
 
+    /// A `VirtualMountSync` persisted BEFORE `trigger` existed must still parse.
+    ///
+    /// This matters on the deploy itself, not in theory: the job queue is
+    /// durable, so an upgrade lands on a queue that may already hold jobs in the
+    /// two-part `mount_id/mode` form. Rejecting them would strand queued syncs
+    /// with a parse error at exactly the moment the fix is meant to unstick them.
+    #[test]
+    fn legacy_two_part_sync_job_still_parses() {
+        let parsed: JobType = "VirtualMountSync(mount-123/delta)"
+            .to_string()
+            .try_into()
+            .expect("pre-trigger job form must still parse");
+        assert_eq!(
+            parsed,
+            JobType::VirtualMountSync {
+                mount_id: "mount-123".to_string(),
+                mode: "delta".to_string(),
+                trigger: "unknown".to_string(),
+            }
+        );
+    }
+
     #[test]
     fn virtual_mount_and_integration_round_trip() {
         round_trip(JobType::VirtualMountSyncCheck {
@@ -155,10 +177,12 @@ mod tests {
         round_trip(JobType::VirtualMountSync {
             mount_id: "mount-123".to_string(),
             mode: "delta".to_string(),
+            trigger: "push".to_string(),
         });
         round_trip(JobType::VirtualMountSync {
             mount_id: "mount-123".to_string(),
             mode: "full".to_string(),
+            trigger: "manual".to_string(),
         });
         round_trip(JobType::IntegrationTokenRefresh {
             tenant_id: Some("acme".to_string()),

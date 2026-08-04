@@ -36,6 +36,14 @@ export default defineConfig({
         target: 'http://localhost:8081',
         changeOrigin: true,
       },
+      // Node-event WebSocket. `ws: true` is required — without it Vite proxies
+      // the GET but not the Upgrade, so the handshake fails in dev only and the
+      // live feed silently falls back to polling.
+      '/ws': {
+        target: 'ws://localhost:8081',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 })

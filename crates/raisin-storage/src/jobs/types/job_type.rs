@@ -277,10 +277,22 @@ pub enum JobType {
         tenant_id: Option<String>,
         repo_id: Option<String>,
     },
-    /// Sync a single virtual mount. `mode` is "delta" or "full".
+    // NOTE: `default_sync_trigger` is defined below the enum.
+    /// Sync a single virtual mount. `mode` is "delta", "full" or "remap".
     VirtualMountSync {
         mount_id: String,
         mode: String,
+        /// What caused this run: `"push" | "schedule" | "manual" | "unknown"`.
+        ///
+        /// Recorded on the mount's run history. Without it you cannot tell a
+        /// mount that nothing is scheduling from one whose provider has gone
+        /// quiet — the two look identical from the outside, which is precisely
+        /// how a stalled import went undiagnosed.
+        ///
+        /// `#[serde(default)]` so jobs already queued before this field existed
+        /// still deserialize.
+        #[serde(default = "default_sync_trigger")]
+        trigger: String,
     },
     /// Refresh expiring OAuth tokens across all integrations.
     IntegrationTokenRefresh {
@@ -309,6 +321,11 @@ pub enum JobType {
         tenant_id: Option<String>,
     },
     Custom(String),
+}
+
+/// Serde default for [`JobType::VirtualMountSync::trigger`] — see that field.
+fn default_sync_trigger() -> String {
+    "unknown".to_string()
 }
 
 impl JobType {

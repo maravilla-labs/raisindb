@@ -191,9 +191,29 @@ pub struct MountState {
     /// `"ok" | "syncing" | "auth_required" | "degraded" | "misconfigured"`.
     #[serde(default)]
     pub status: Option<String>,
-    /// Fencing token of the last sync that wrote this state (cluster safety).
+    /// Total items the current walk expects to materialize, when the provider
+    /// reports it. The denominator for "37 of 500"; `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backfill_items_total: Option<u64>,
+    /// Durable, node-resident write counter — the concurrency guard for this
+    /// state blob.
+    ///
+    /// This deliberately does NOT come from the lock manager. A lock is for
+    /// locking, not for storing data: `raisin_locks`' fencing counter lives in
+    /// process memory (`inprocess`) or in a plain un-TTL'd Redis key, and both
+    /// reset to zero on restart while this blob survives in RocksDB. Comparing
+    /// the two rejected every write after a restart until the volatile counter
+    /// climbed back past the stored one — silently, because every caller
+    /// discarded the result. A sync would materialize hundreds of nodes and
+    /// then throw its own cursor away.
+    ///
+    /// So the guard is durable and lives with the data it guards, exactly like
+    /// `FlowInstance.version`: a writer carries the seq it read, and
+    /// [`super::persist_mount_state`] refuses the write if the stored seq has
+    /// moved since. Wiping the lock store now costs duplicate work at worst,
+    /// never a discarded write.
     #[serde(default)]
-    pub last_fencing_token: Option<u64>,
+    pub state_seq: u64,
     /// `false` when the mount requests `write_through` writeback but the engine
     /// or adapter cannot honour it (v1 has no writeback implementation). `None`
     /// when writeback was never requested. The UI reads this to explain the
@@ -233,6 +253,103 @@ pub struct MountState {
     /// Last push-subscription error message, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_last_error: Option<String>,
+
+    // ---- webhook DELIVERY health (distinct from subscription health) ----
+    //
+    // A live subscription says the provider accepted our URL once. It says
+    // nothing about whether its notifications are getting through: a mount can
+    // sit at `push_status: "active"` while every delivery is rejected, which is
+    // exactly how a production import stalled for hours with a green badge.
+    /// Unix epoch seconds of the last notification the endpoint ACCEPTED.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_last_delivery_at: Option<i64>,
+    /// Unix epoch seconds of the last notification the endpoint REJECTED.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_last_rejected_at: Option<i64>,
+    /// Why the last rejected delivery was rejected (e.g. `"secret mismatch"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_last_rejected_reason: Option<String>,
+    /// Deliveries accepted / rejected since the mount was created.
+    #[serde(default)]
+    pub push_deliveries_ok: u64,
+    #[serde(default)]
+    pub push_deliveries_rejected: u64,
+
+    // ---- per-run reporting ----
+    /// The most recent sync run, terminal or in flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<SyncRun>,
+    /// Bounded history, newest first, capped at [`MAX_RUN_HISTORY`].
+    ///
+    /// Bounded on purpose: a mount syncing every five minutes would otherwise
+    /// grow this blob without limit, and it is rewritten on every progress tick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_runs: Vec<SyncRun>,
+}
+
+/// How many terminal runs [`MountState::recent_runs`] retains.
+pub const MAX_RUN_HISTORY: usize = 20;
+
+/// A single sync run, as the console renders it.
+///
+/// This exists because `BatchStats` used to be computed, logged at `info!`, and
+/// dropped — and production runs at `RUST_LOG=warn`, so the one record of what a
+/// sync actually did was discarded before anyone could read it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncRun {
+    /// Unix epoch seconds.
+    pub started_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// `"delta" | "full" | "remap"`.
+    pub mode: String,
+    /// What caused this run: `"push" | "schedule" | "manual" | "unknown"`.
+    ///
+    /// Without this you cannot tell a mount nothing is scheduling from a mount
+    /// whose provider has gone quiet — they look identical from the outside.
+    pub trigger: String,
+    /// `"running" | "ok" | "error" | "auth_required" | "misconfigured" | "skipped"`.
+    pub outcome: String,
+    #[serde(default)]
+    pub written: u64,
+    #[serde(default)]
+    pub skipped: u64,
+    #[serde(default)]
+    pub deleted: u64,
+    #[serde(default)]
+    pub failed: u64,
+    /// Items this run walked (the backfill chunk size, in practice).
+    #[serde(default)]
+    pub items_done: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Set when the run finished but its state write was refused — the failure
+    /// mode that was previously invisible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_write_skipped: Option<bool>,
+}
+
+impl SyncRun {
+    /// A run that has just started.
+    pub fn started(now: i64, mode: &str, trigger: &str) -> Self {
+        Self {
+            started_at: now,
+            mode: mode.to_string(),
+            trigger: trigger.to_string(),
+            outcome: "running".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Stamp the terminal fields.
+    pub fn finish(&mut self, now: i64, outcome: &str, error: Option<String>) {
+        self.finished_at = Some(now);
+        self.duration_ms = Some(((now - self.started_at).max(0) as u64) * 1000);
+        self.outcome = outcome.to_string();
+        self.error = error;
+    }
 }
 
 impl MountState {
@@ -494,6 +611,14 @@ pub struct ListPage {
     pub items: Vec<ExternalItem>,
     #[serde(default)]
     pub next_cursor: Option<String>,
+    /// Total items the provider says this listing has, when it knows.
+    ///
+    /// Optional because most paging APIs (Graph `@odata.nextLink`, IMAP, Drive)
+    /// do not report one. Adapters that CAN report it turn the console's
+    /// "1,240 imported" into "1,240 of 8,700" — so it is worth forwarding, but
+    /// nothing may depend on its presence.
+    #[serde(default)]
+    pub total: Option<u64>,
 }
 
 /// The node shape a mapping produces (built-in default or a mapping function).

@@ -114,6 +114,27 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     if mount.state.status.as_deref() == Some("auth_required") {
         return false;
     }
+    // An unfinished backfill is due as soon as the previous chunk finished,
+    // rather than after the poll interval: a mailbox imported 500 items per run
+    // at one run every 5 minutes would take days. Chunks therefore run
+    // back-to-back — and because each run does its delta pass FIRST (see
+    // `run_sync`), new items keep arriving throughout. Gated on
+    // consecutive_failures so a broken backfill cannot spin.
+    //
+    // THIS MUST STAY ABOVE THE WEBHOOK BRANCH. It used to sit below it, which
+    // made it unreachable for `mode: "webhook"`: a webhook mount with a live
+    // subscription is never due, so its half-finished import advanced only when
+    // the provider happened to send a ping. A quiet mailbox meant an import that
+    // stopped at the first chunk and stayed there — a production mount sat at
+    // 500 of ~8,000 items for hours reporting `status: "ok"`. Draining a
+    // backfill is our own unfinished work; whether the provider can push has
+    // nothing to do with it.
+    let backfill_pending =
+        !mount.state.backfill_stack.is_empty() || mount.state.backfill_cursor.is_some();
+    if backfill_pending && mount.state.consecutive_failures == 0 {
+        return true;
+    }
+
     if mount.sync_config.mode == "webhook" {
         // Webhook mounts are push-driven, never polled — with ONE exception:
         // bootstrapping. A webhook mount that has no live push subscription
@@ -125,18 +146,6 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
         // re-bootstrapped (it would neither poll nor push; the admin must fix).
         return !mount.state.has_active_push(now)
             && mount.state.push_status.as_deref() != Some("unsupported");
-    }
-    // An unfinished backfill is due as soon as the previous chunk finished,
-    // rather than after the poll interval: a mailbox imported 500 items per run
-    // at one run every 5 minutes would take days. Chunks therefore run
-    // back-to-back — and because each run does its delta pass FIRST (see
-    // `run_sync`), new items keep arriving throughout. Still gated on
-    // consecutive_failures below via the normal path when the mount is failing,
-    // so a broken backfill cannot spin.
-    let backfill_pending =
-        !mount.state.backfill_stack.is_empty() || mount.state.backfill_cursor.is_some();
-    if backfill_pending && mount.state.consecutive_failures == 0 {
-        return true;
     }
 
     // Measure from the last ATTEMPT, not the last success. `last_sync_at` only
@@ -167,6 +176,7 @@ async fn enqueue_sync(
     let job_type = JobType::VirtualMountSync {
         mount_id: mount_id.to_string(),
         mode: "delta".to_string(),
+        trigger: "schedule".to_string(),
     };
     let job_id = JobId::new();
     let context = JobContext {

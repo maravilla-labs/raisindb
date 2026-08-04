@@ -55,6 +55,7 @@ pub fn create_integrations_sync_now(
             let job_type = JobType::VirtualMountSync {
                 mount_id: mount_id.clone(),
                 mode,
+                trigger: "manual".to_string(),
             };
             let job_id = JobId::new();
             let context = JobContext {
@@ -110,6 +111,7 @@ mod tests {
         let make_job = || JobType::VirtualMountSync {
             mount_id: mount_id.to_string(),
             mode: "delta".to_string(),
+            trigger: "manual".to_string(),
         };
 
         let first = registry

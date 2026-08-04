@@ -35,8 +35,8 @@ pub use adapter::{
 pub use batch::SyncBatcher;
 pub use config::{
     default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount, ExternalItem,
-    IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig, WriteConfig,
-    SYNC_ACTOR, SYSTEM_WORKSPACE,
+    IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig, SyncRun,
+    WriteConfig, MAX_RUN_HISTORY, SYNC_ACTOR, SYSTEM_WORKSPACE,
 };
 pub use materializer::{
     BatchOp, BatchStats, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,
@@ -100,10 +100,24 @@ impl VirtualMountSyncHandler {
                     .await
                     .map(|_| None)
             }
-            JobType::VirtualMountSync { mount_id, mode } => self
-                .run_sync(job, context, mount_id.clone(), mode.clone())
+            // The run summary is returned as the job result, not swallowed:
+            // `JobInfo.result` was always null for mount syncs, so the only
+            // record of what a sync did was an `info!` line that production's
+            // `RUST_LOG=warn` discarded.
+            JobType::VirtualMountSync {
+                mount_id,
+                mode,
+                trigger,
+            } => {
+                self.run_sync(
+                    job,
+                    context,
+                    mount_id.clone(),
+                    mode.clone(),
+                    trigger.clone(),
+                )
                 .await
-                .map(|_| None),
+            }
             JobType::VirtualMountSubscriptionRenew { tenant_id } => self
                 .run_subscription_renew(tenant_id.clone())
                 .await
@@ -114,14 +128,15 @@ impl VirtualMountSyncHandler {
         }
     }
 
-    /// Sync a single mount.
+    /// Sync a single mount. Returns the run summary as the job result.
     async fn run_sync(
         &self,
         job: &JobInfo,
         context: &JobContext,
         mount_id: String,
         mode: String,
-    ) -> Result<()> {
+        trigger: String,
+    ) -> Result<Option<Value>> {
         let tenant = context.tenant_id.clone();
         let repo = context.repo_id.clone();
         // The job is always enqueued (by `check`) on the repo's config (default)
@@ -137,7 +152,7 @@ impl VirtualMountSyncHandler {
         let svc = self.system_service(&tenant, &repo, &config_branch);
         let Some(mount_node) = svc.get(&mount_id).await? else {
             tracing::warn!(mount_id = %mount_id, "virtual mount node not found; skipping");
-            return Ok(());
+            return Ok(Some(skip_result("mount_not_found")));
         };
         let mount = MountConfig::from_node(&mount_node)
             .map_err(|e| Error::Validation(format!("invalid mount {mount_id}: {e}")))?;
@@ -147,11 +162,11 @@ impl VirtualMountSyncHandler {
             // provider subscription should stop receiving pings.
             self.teardown_push(&svc, &tenant, &repo, &config_branch, &mount)
                 .await;
-            return Ok(());
+            return Ok(Some(skip_result("disabled")));
         }
         if mount.state.status.as_deref() == Some("auth_required") {
             tracing::debug!(mount_id = %mount_id, "mount paused (auth_required); skipping");
-            return Ok(());
+            return Ok(Some(skip_result("auth_required")));
         }
 
         // Validate the materialization target branch exists. A misconfigured
@@ -178,15 +193,15 @@ impl VirtualMountSyncHandler {
                 &repo,
                 &config_branch,
                 &mount_id,
-                &state,
+                &mut state,
             )
             .await;
-            return Ok(());
+            return Ok(Some(skip_result("misconfigured")));
         }
 
         let Some(invoker) = self.invoker.clone() else {
             tracing::warn!(mount_id = %mount_id, "no adapter invoker wired; cannot sync");
-            return Ok(());
+            return Ok(Some(skip_result("no_invoker")));
         };
 
         // Guard against syncing the WRONG connection. Two cases are unsafe:
@@ -232,10 +247,10 @@ impl VirtualMountSyncHandler {
                             &repo,
                             &config_branch,
                             &mount_id,
-                            &state,
+                            &mut state,
                         )
                         .await;
-                        return Ok(());
+                        return Ok(Some(skip_result("misconfigured")));
                     }
                 }
             }
@@ -257,12 +272,12 @@ impl VirtualMountSyncHandler {
         // branch — that is the identity the periodic scan enqueues against.
         let lock_key = format!("{tenant}\0{repo}\0{config_branch}\0vmount:{mount_id}");
         let owner = format!("{}:{}", self.instance_id, job.id);
-        let (fencing_token, guard_token) = match &self.lock_manager {
+        let lease_token = match &self.lock_manager {
             Some(lm) => match lm.try_acquire(&lock_key, &owner, SYNC_LEASE_TTL).await? {
-                Some(g) => (Some(g.token), Some(g.token)),
+                Some(g) => Some(g.token),
                 None => {
-                    tracing::info!(mount_id = %mount_id, "mount is being synced elsewhere; no-op");
-                    return Ok(());
+                    tracing::warn!(mount_id = %mount_id, "mount is being synced elsewhere; no-op");
+                    return Ok(Some(skip_result("locked_elsewhere")));
                 }
             },
             None => {
@@ -273,7 +288,7 @@ impl VirtualMountSyncHandler {
                          sync is not cluster-safe (configure [locks] backend=redis)"
                     );
                 }
-                (None, None)
+                None
             }
         };
 
@@ -291,6 +306,7 @@ impl VirtualMountSyncHandler {
             materializer: self.materializer.as_ref(),
             lock_manager: self.lock_manager.clone(),
             lock_key: lock_key.clone(),
+            lease_token,
             credential,
             mount_snapshot,
         };
@@ -316,9 +332,11 @@ impl VirtualMountSyncHandler {
             Ok(b) => b,
             Err(e) => {
                 let mut state = mount.state.clone();
-                state.last_fencing_token = fencing_token;
-                let outcome = self.finalize(&ctx, &mut state, Err(e)).await;
-                if let (Some(lm), Some(token)) = (&self.lock_manager, guard_token) {
+                state.last_run = Some(SyncRun::started(Utc::now().timestamp(), &mode, &trigger));
+                let outcome = self
+                    .finalize(&ctx, &mut state, Err(e), BatchStats::default())
+                    .await;
+                if let (Some(lm), Some(token)) = (&self.lock_manager, lease_token) {
                     let _ = lm.release(&lock_key, token).await;
                 }
                 return outcome;
@@ -333,7 +351,17 @@ impl VirtualMountSyncHandler {
         }
 
         let mut state = mount.state.clone();
-        state.last_fencing_token = fencing_token;
+
+        // Mark the mount as syncing and open the run record BEFORE any adapter
+        // work. `"syncing"` is in the schema and the console already renders it,
+        // but no Rust code ever wrote it — so a mount mid-import reported a
+        // cheerful `ok` and a running sync was indistinguishable from an idle
+        // one. This write is also what lights up the console's live feed: it is
+        // an ordinary node write, so it emits `node:updated` for free.
+        let run_started_at = Utc::now().timestamp();
+        state.status = Some("syncing".to_string());
+        state.last_run = Some(SyncRun::started(run_started_at, &mode, &trigger));
+        let _ = persist_state(&ctx, &mut state).await;
 
         // Resolve capabilities once and cache them on the integration node (on
         // the config branch) so the admin UI can read them without invoking the
@@ -418,22 +446,24 @@ impl VirtualMountSyncHandler {
             "virtual mount sync finished"
         );
 
-        let outcome = self.finalize(&ctx, &mut state, result).await;
+        let outcome = self.finalize(&ctx, &mut state, result, counts).await;
 
         // Release the lease.
-        if let (Some(lm), Some(token)) = (&self.lock_manager, guard_token) {
+        if let (Some(lm), Some(token)) = (&self.lock_manager, lease_token) {
             let _ = lm.release(&lock_key, token).await;
         }
         outcome
     }
 
-    /// Apply terminal state (status / failure counters) and persist it.
+    /// Apply terminal state (status / failure counters), close the run record,
+    /// persist, and return the run summary as the job result.
     async fn finalize(
         &self,
         ctx: &SyncCtx<'_>,
         state: &mut MountState,
         result: std::result::Result<(), AdapterError>,
-    ) -> Result<()> {
+        counts: BatchStats,
+    ) -> Result<Option<Value>> {
         // Stamped on EVERY outcome, before the match, so no arm can forget it.
         // This is what the scheduler backs off against; leaving it unset on the
         // failure paths is what let a broken mount retry on every tick forever
@@ -441,20 +471,33 @@ impl VirtualMountSyncHandler {
         let now = Utc::now().timestamp();
         state.last_attempt_at = Some(now);
 
-        match result {
+        // Fold this run's counts into the open run record. Every arm below goes
+        // through `close_run`, so no outcome can leave the history without an
+        // entry — the reason the old code could report `ok` for a run that had
+        // in fact been refused.
+        let mut run = state.last_run.take().unwrap_or_else(|| {
+            SyncRun::started(now, ctx.mount.sync_config.mode.as_str(), "unknown")
+        });
+        run.written = counts.written as u64;
+        run.skipped = counts.skipped as u64;
+        run.deleted = counts.deleted as u64;
+        run.failed = counts.failed as u64;
+        run.items_done = state.backfill_items_done;
+
+        let retryable_err = match result {
             Ok(()) => {
                 state.status = Some("ok".to_string());
                 state.consecutive_failures = 0;
                 state.last_error = None;
                 state.last_sync_at = Some(now);
-                let _ = persist_state(ctx, state).await;
-                Ok(())
+                run.finish(now, "ok", None);
+                None
             }
             Err(AdapterError::AuthExpired) => {
                 state.status = Some("auth_required".to_string());
                 state.last_error = Some("auth_expired".to_string());
-                let _ = persist_state(ctx, state).await;
-                Ok(())
+                run.finish(now, "auth_required", Some("auth_expired".to_string()));
+                None
             }
             Err(e) => {
                 state.consecutive_failures += 1;
@@ -463,12 +506,16 @@ impl VirtualMountSyncHandler {
                 // A misconfigured mount gets its own status so the UI can say
                 // "fix this" rather than "it is flaky" — the operator action is
                 // completely different.
-                if matches!(e, AdapterError::Config(_)) {
+                let outcome = if matches!(e, AdapterError::Config(_)) {
                     state.status = Some("misconfigured".to_string());
-                } else if state.consecutive_failures >= config::DEGRADE_THRESHOLD {
-                    state.status = Some("degraded".to_string());
-                }
-                let _ = persist_state(ctx, state).await;
+                    "misconfigured"
+                } else {
+                    if state.consecutive_failures >= config::DEGRADE_THRESHOLD {
+                        state.status = Some("degraded".to_string());
+                    }
+                    "error"
+                };
+                run.finish(now, outcome, Some(e.to_string()));
 
                 // Returning Err makes the JOB layer retry the whole sync (3x)
                 // on top of the scheduler's own re-enqueue. That is right for a
@@ -477,7 +524,7 @@ impl VirtualMountSyncHandler {
                 // non-retryable error the run is complete — the state carries
                 // the diagnosis, and `last_attempt_at` backs the schedule off.
                 if e.is_retryable() {
-                    Err(Error::Backend(format!("virtual mount sync failed: {e}")))
+                    Some(Error::Backend(format!("virtual mount sync failed: {e}")))
                 } else {
                     tracing::warn!(
                         mount_id = %ctx.mount.mount_id,
@@ -485,9 +532,35 @@ impl VirtualMountSyncHandler {
                         status = state.status.as_deref().unwrap_or("degraded"),
                         "virtual mount sync failed permanently; not retrying until the mount is changed"
                     );
-                    Ok(())
+                    None
                 }
             }
+        };
+
+        // Push onto the bounded history BEFORE the write, so the record lands in
+        // the same revision as the status it describes.
+        state.recent_runs.insert(0, run.clone());
+        state.recent_runs.truncate(config::MAX_RUN_HISTORY);
+        state.last_run = Some(run.clone());
+
+        let wrote = persist_state(ctx, state).await.unwrap_or(false);
+        if !wrote {
+            // The run happened; its record did not land. Say so loudly and put
+            // it in the returned summary, because the mount node now under-
+            // reports what actually occurred.
+            tracing::warn!(
+                mount_id = %ctx.mount.mount_id,
+                written = counts.written,
+                deleted = counts.deleted,
+                "mount-state write was refused: this run's progress is NOT reflected on the mount"
+            );
+            run.state_write_skipped = Some(true);
+        }
+
+        let summary = serde_json::to_value(&run).unwrap_or(Value::Null);
+        match retryable_err {
+            Some(e) => Err(e),
+            None => Ok(Some(summary)),
         }
     }
 
@@ -677,7 +750,7 @@ impl VirtualMountSyncHandler {
             repo,
             config_branch,
             &mount.mount_id,
-            &state,
+            &mut state,
         )
         .await;
     }
@@ -762,7 +835,7 @@ impl VirtualMountSyncHandler {
                         &repo,
                         &config_branch,
                         &mount.mount_id,
-                        &state,
+                        &mut state,
                     )
                     .await;
                 }
@@ -855,6 +928,12 @@ pub struct SyncCtx<'a> {
     pub materializer: &'a dyn NodeMaterializer,
     pub lock_manager: Option<LockManagerHandle>,
     pub lock_key: String,
+    /// Lease handle for THIS run, used only to renew and release the lock.
+    ///
+    /// Run-local on purpose: it is a volatile capability, not durable state, and
+    /// must never be persisted or compared against stored data. The write guard
+    /// is [`MountState::state_seq`].
+    pub lease_token: Option<u64>,
     pub credential: Option<Value>,
     pub mount_snapshot: Value,
     /// Public origin for this connector's callback URLs, taken from the
@@ -877,8 +956,8 @@ impl SyncCtx<'_> {
     }
 
     /// Renew the lease between pages during long runs (no-op without a lock).
-    pub async fn renew_lease(&self, token: Option<u64>) {
-        if let (Some(lm), Some(t)) = (&self.lock_manager, token) {
+    pub async fn renew_lease(&self) {
+        if let (Some(lm), Some(t)) = (&self.lock_manager, self.lease_token) {
             let _ = lm.renew(&self.lock_key, t, SYNC_LEASE_TTL).await;
         }
     }
@@ -972,7 +1051,71 @@ pub async fn stage_item(
 /// fencing-token rule: a write whose fencing token is older than the one
 /// already stored is skipped (a GC-stalled sync must not clobber a newer
 /// cursor). Returns `true` if the state was written.
-pub async fn persist_state(ctx: &SyncCtx<'_>, state: &MountState) -> Result<bool> {
+/// Record the outcome of one inbound push notification on the mount.
+///
+/// Webhook DELIVERY health is deliberately separate from subscription health:
+/// `push_status: "active"` only means the provider accepted our URL at
+/// subscribe time. A mount can hold a live subscription while every actual
+/// notification is turned away, and that combination — green badge, zero
+/// deliveries — is invisible without this.
+///
+/// Reads the current state, stamps the counters, writes it back through the
+/// normal seq-guarded path so it cannot clobber a concurrent sync's write.
+pub async fn record_push_delivery(
+    storage: &Arc<RocksDBStorage>,
+    tenant: &str,
+    repo: &str,
+    branch: &str,
+    mount_id: &str,
+    accepted: bool,
+) -> Result<bool> {
+    let svc: NodeService<RocksDBStorage> = NodeService::new_with_context(
+        storage.clone(),
+        tenant.to_string(),
+        repo.to_string(),
+        branch.to_string(),
+        SYSTEM_WORKSPACE.to_string(),
+    );
+    let Some(node) = svc.get(mount_id).await? else {
+        return Ok(false);
+    };
+    let mut state: MountState = node
+        .properties
+        .get("state")
+        .and_then(|pv| serde_json::to_value(pv).ok())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    let now = Utc::now().timestamp();
+    if accepted {
+        state.push_last_delivery_at = Some(now);
+        state.push_deliveries_ok = state.push_deliveries_ok.saturating_add(1);
+    } else {
+        state.push_last_rejected_at = Some(now);
+        state.push_deliveries_rejected = state.push_deliveries_rejected.saturating_add(1);
+        state.push_last_rejected_reason =
+            Some("notification secret not present in any carrier".to_string());
+    }
+
+    persist_mount_state(storage, tenant, repo, branch, mount_id, &mut state).await
+}
+
+/// A job result for a sync that never ran, naming WHY.
+///
+/// These paths used to return a bare `Ok(())`, so a mount that was disabled,
+/// paused on `auth_required`, locked by another node or missing its adapter all
+/// looked identical from the outside: a job that completed with no result and
+/// no trace.
+fn skip_result(reason: &str) -> Value {
+    json!({ "outcome": "skipped", "reason": reason })
+}
+
+/// Persist mount state, returning `false` when the write was REFUSED.
+///
+/// Callers must not discard this. Silently dropping it is what let a sync
+/// materialize 500 nodes and then throw away its own resume cursor, with the
+/// console still reporting `status: "ok"`.
+pub async fn persist_state(ctx: &SyncCtx<'_>, state: &mut MountState) -> Result<bool> {
     // Mount state lives with the mount config on the CONFIG branch, never on the
     // materialization target branch.
     persist_mount_state(
@@ -987,13 +1130,20 @@ pub async fn persist_state(ctx: &SyncCtx<'_>, state: &MountState) -> Result<bool
 }
 
 /// Standalone state-persist (also directly unit-testable).
+///
+/// Guarded by [`MountState::state_seq`], a durable counter stored alongside the
+/// data it guards — deliberately NOT the lock manager's fencing token, which is
+/// volatile and reset to zero on every restart. See the field's doc comment.
+///
+/// On success `state.state_seq` is advanced to the value just written, so the
+/// same in-memory `state` can be persisted repeatedly across one run.
 pub async fn persist_mount_state(
     storage: &Arc<RocksDBStorage>,
     tenant: &str,
     repo: &str,
     branch: &str,
     mount_id: &str,
-    state: &MountState,
+    state: &mut MountState,
 ) -> Result<bool> {
     use raisin_models::nodes::properties::PropertyValue;
 
@@ -1005,28 +1155,43 @@ pub async fn persist_mount_state(
     tx.set_message("virtual mount sync: persist state")?;
 
     let Some(mut node) = tx.get_node(SYSTEM_WORKSPACE, mount_id).await? else {
+        // At `warn`, not silence: production runs `RUST_LOG=warn`, and a state
+        // write that vanishes is exactly the class of failure that has to reach
+        // the journal.
+        tracing::warn!(
+            mount_id = %mount_id,
+            branch = %branch,
+            "skipping mount-state write: mount node not found on this branch"
+        );
         return Ok(false);
     };
 
-    // Fencing check: read the currently-stored token.
-    let stored_token = node
+    // Compare-and-set on the durable, node-resident sequence. `state.state_seq`
+    // is what THIS writer last read or wrote; if the stored value has moved past
+    // it, another writer got there first and ours is stale.
+    //
+    // Note the asymmetry with the old fencing check: a stored seq that is BEHIND
+    // ours is not a conflict (it is our own earlier write, or a node restored
+    // from an older snapshot), so we proceed. Only a stored seq that has moved
+    // AHEAD means someone else wrote.
+    let stored_seq = node
         .properties
         .get("state")
         .and_then(|pv| serde_json::to_value(pv).ok())
-        .and_then(|v| v.get("last_fencing_token").and_then(|t| t.as_u64()));
-    if let (Some(stored), Some(ours)) = (stored_token, state.last_fencing_token) {
-        if stored > ours {
-            tracing::warn!(
-                mount_id = %mount_id,
-                stored,
-                ours,
-                "skipping mount-state write: stored fencing token is newer (stale sync)"
-            );
-            return Ok(false);
-        }
+        .and_then(|v| v.get("state_seq").and_then(|t| t.as_u64()))
+        .unwrap_or(0);
+    if stored_seq > state.state_seq {
+        tracing::warn!(
+            mount_id = %mount_id,
+            stored_seq,
+            ours = state.state_seq,
+            "skipping mount-state write: another writer advanced this mount's state"
+        );
+        return Ok(false);
     }
+    state.state_seq = stored_seq + 1;
 
-    let state_value = serde_json::to_value(state)
+    let state_value = serde_json::to_value(&*state)
         .map_err(|e| Error::Validation(format!("state serialize failed: {e}")))?;
     let state_pv: PropertyValue = serde_json::from_value(state_value)
         .map_err(|e| Error::Validation(format!("state to PropertyValue failed: {e}")))?;

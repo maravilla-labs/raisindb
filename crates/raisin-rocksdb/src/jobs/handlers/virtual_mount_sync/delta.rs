@@ -59,8 +59,22 @@ pub async fn run_with(
         match &next {
             Some(tok) => {
                 state.last_sync_token = Some(tok.clone());
-                let _ = persist_state(ctx, state).await;
-                ctx.renew_lease(state.last_fencing_token).await;
+                // Count delta work too. The delta path used to touch neither the
+                // progress counter nor tracing, so an incremental sync was
+                // completely invisible: no log line, no moving number, nothing
+                // to distinguish "running" from "never scheduled".
+                state.backfill_items_done = state.backfill_items_done.saturating_add(processed);
+                if !persist_state(ctx, state).await.unwrap_or(false) {
+                    // The cursor did not land. Continuing would re-page from a
+                    // position the store does not know about, so stop and let
+                    // the next run resume from the last durable cursor.
+                    tracing::warn!(
+                        mount_id = %ctx.mount.mount_id,
+                        "delta cursor write refused; stopping this pass"
+                    );
+                    break;
+                }
+                ctx.renew_lease().await;
             }
             None => break,
         }

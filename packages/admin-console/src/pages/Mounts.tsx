@@ -2,81 +2,27 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { HardDrive, Plus, RefreshCw, CheckCircle, Loader2, ShieldAlert, AlertTriangle, Activity, Webhook, X, Wand2 } from 'lucide-react'
+import { HardDrive, Plus, RefreshCw, AlertTriangle, Activity, Webhook, X, Wand2, ChevronRight } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { ItemTable, type TableColumn } from '../components/ItemTable'
 import { useToast, ToastContainer } from '../components/Toast'
 import MountEditor from '../components/integrations/MountEditor'
 import TestConnectionPanel from '../components/integrations/TestConnectionPanel'
-import { integrationsApi, type VirtualMount, type Integration, type MountState } from '../api/integrations'
+import { integrationsApi, type VirtualMount, type Integration } from '../api/integrations'
 import { workspacesApi } from '../api/workspaces'
-
-type StatusKind = 'ok' | 'syncing' | 'auth_required' | 'misconfigured' | 'degraded' | 'idle'
-
-function statusKind(state?: MountState): StatusKind {
-  const s = (state?.status || '').toLowerCase()
-  if (s === 'ok' || s === 'synced') return 'ok'
-  if (s === 'syncing') return 'syncing'
-  if (s === 'auth_required') return 'auth_required'
-  // Checked before 'degraded': the operator action is completely different.
-  // Degraded means "flaky, it may recover"; misconfigured means "it will never
-  // succeed until you change something", so it must not be diluted into the
-  // generic failure bucket.
-  if (s === 'misconfigured') return 'misconfigured'
-  if (s === 'degraded' || s === 'error') return 'degraded'
-  if ((state?.consecutive_failures || 0) > 0) return 'degraded'
-  return 'idle'
-}
-
-const STATUS_META: Record<StatusKind, { label: string; cls: string; Icon: typeof CheckCircle }> = {
-  ok: { label: 'OK', cls: 'bg-green-500/20 text-green-400', Icon: CheckCircle },
-  syncing: { label: 'Syncing', cls: 'bg-blue-500/20 text-blue-400', Icon: Loader2 },
-  auth_required: { label: 'Auth required', cls: 'bg-yellow-500/20 text-yellow-400', Icon: ShieldAlert },
-  misconfigured: { label: 'Misconfigured', cls: 'bg-orange-500/20 text-orange-400', Icon: AlertTriangle },
-  degraded: { label: 'Degraded', cls: 'bg-red-500/20 text-red-400', Icon: AlertTriangle },
-  idle: { label: 'Idle', cls: 'bg-gray-500/20 text-zinc-400', Icon: HardDrive },
-}
-
-/**
- * Progress of an in-flight full walk (first sync, backfill or remap).
- *
- * A large mailbox imports over many chunked runs and can take hours, so the row
- * has to show movement — otherwise a working import is indistinguishable from a
- * stalled one and the natural response is to hit Sync again.
- */
-function backfillProgress(state?: MountState): { text: string; done: boolean } | null {
-  const inFlight = !!state?.backfill_cursor
-  const count = state?.backfill_items_done ?? 0
-  if (!inFlight && !count) return null
-  const n = count.toLocaleString()
-  return inFlight
-    ? { text: `Importing… ${n} items so far`, done: false }
-    : { text: `Imported ${n} items`, done: true }
-}
-
-/**
- * Compact read-only descriptor of a mount's push (webhook) subscription, derived
- * from the engine-managed `state.push_*` fields. Returns null when the mount has
- * no push subscription (poll-only or never subscribed).
- */
-function pushIndicator(state?: MountState): { text: string; cls: string; title?: string } | null {
-  const status = (state?.push_status || '').toLowerCase()
-  if (!status) return null
-  const failed = status === 'failed' || status === 'error' || !!state?.push_last_error
-  const active = status === 'active'
-  const cls = failed
-    ? 'text-red-400'
-    : active
-      ? 'text-green-400'
-      : 'text-zinc-400'
-  let text = `Push: ${failed ? 'failed' : status}`
-  if (!failed && state?.push_expires_at) {
-    const d = new Date(state.push_expires_at)
-    if (!Number.isNaN(d.getTime())) text += `, renews ${d.toLocaleDateString()}`
-  }
-  return { text, cls, title: state?.push_last_error || undefined }
-}
+// Shared with the detail view. These used to be private to this file; a row and
+// the page it links to disagreeing about a mount's status is worse than either
+// being wrong alone, so there is now exactly one status ladder.
+import {
+  backfillProgress,
+  isActive,
+  isSyncing,
+  pushIndicator,
+  STATUS_META,
+  statusKind,
+} from '../utils/mountStatus'
+import { formatAbsoluteSeconds, formatRelativeSeconds } from '../utils/time'
 
 export default function Mounts() {
   const { repo } = useParams<{ repo: string }>()
@@ -87,19 +33,28 @@ export default function Mounts() {
   const [editing, setEditing] = useState<VirtualMount | undefined>(undefined)
   const [showEditor, setShowEditor] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<VirtualMount | null>(null)
-  const [syncingId, setSyncingId] = useState<string | null>(null)
   const [testTarget, setTestTarget] = useState<VirtualMount | null>(null)
   const [remapTarget, setRemapTarget] = useState<VirtualMount | null>(null)
   /** Set when the mounts list itself failed, so "broken" never renders as "empty". */
   const [loadError, setLoadError] = useState<string | null>(null)
-  const { toasts, error: showError, success: showSuccess, closeToast } = useToast()
+  const { toasts, error: showError, success: showSuccess, info: showInfo, closeToast } = useToast()
 
   /** The connector node backing a mount (matched by integration_ref path). */
   const integrationFor = (m: VirtualMount) => integrations.find((i) => i.path === m.integration_ref)
 
-  const load = useCallback(async () => {
+  /**
+   * @param silent Refresh in place, leaving the current table rendered.
+   *
+   * Only the FIRST load may show the skeleton. `load()` used to call
+   * `setLoading(true)` unconditionally, including from the 5s poll, and the
+   * render swapped the whole table for a centered "Loading…" — so an importing
+   * mount made the page blink back to a spinner every five seconds, which is
+   * the "the page keeps reloading itself" complaint. A refresh must be
+   * invisible unless it is the first one.
+   */
+  const load = useCallback(async (silent = false) => {
     if (!repo) return
-    setLoading(true)
+    if (!silent) setLoading(true)
     // allSettled, NOT all. The mounts list is the entire point of this page, and
     // the other two calls only decorate it (connector names, the workspace
     // dropdown in the editor). Under Promise.all a failure in either one
@@ -130,7 +85,7 @@ export default function Mounts() {
         'Connector names and the workspace list are unavailable; mounts are still shown and can be synced.',
       )
     }
-    setLoading(false)
+    if (!silent) setLoading(false)
   }, [repo])
 
   useEffect(() => {
@@ -141,32 +96,61 @@ export default function Mounts() {
   // minutes to hours, and a progress number that only moves on manual refresh
   // is not progress. Polling stops as soon as nothing is running, so an idle
   // page costs nothing.
-  const anyRunning = mounts.some((m) => !!m.state?.backfill_cursor)
+  //
+  // The trigger is `isActive`, NOT `backfill_cursor` alone: the cursor only
+  // exists at a chunk boundary, so keying on it stopped the refresh during the
+  // very chunk whose progress the user is watching.
+  const anyRunning = mounts.some((m) => isActive(m.state))
   useEffect(() => {
     if (!anyRunning) return
-    const t = window.setInterval(load, 5000)
+    const t = window.setInterval(() => void load(true), 5000)
     return () => window.clearInterval(t)
   }, [anyRunning, load])
 
+  /**
+   * Mounts whose enqueue POST is still in flight.
+   *
+   * This is only the request window. Whether the button stays disabled after
+   * that is decided by the mount's own `status === 'syncing'` — see
+   * `syncBusy`. `syncingId` alone cleared in `finally` roughly 100ms after the
+   * POST returned, so the button re-enabled while the job was just starting and
+   * could be clicked over and over against a running sync.
+   */
+  const [enqueuing, setEnqueuing] = useState<Set<string>>(new Set())
+  const markEnqueuing = (id: string, on: boolean) =>
+    setEnqueuing((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+
+  /** True while a mount cannot accept another sync request. */
+  const syncBusy = (m: VirtualMount) =>
+    (!!m.id && enqueuing.has(m.id)) || isSyncing(m.state)
+
   async function handleSync(m: VirtualMount) {
     if (!repo || !m.id) return
-    setSyncingId(m.id)
+    markEnqueuing(m.id, true)
     try {
       // Only request a delta sync when the connector advertises a delta API;
       // otherwise the engine can only full-reconcile.
       const mode = integrationFor(m)?.capabilities?.supports_changes === true ? 'delta' : 'full'
       const res = await integrationsApi.syncMount(repo, m.id, mode)
       if (res.status === 'already_running') {
-        showSuccess('Already syncing', m.title)
+        // Informational, not a green success toast: NOTHING was queued. Saying
+        // "success" to a request the server declined is how a user ends up
+        // clicking Sync repeatedly, believing each click did something.
+        showInfo('Already syncing', 'A run is in progress; this request was not queued.')
       } else {
         showSuccess('Sync queued', m.title)
       }
       // Give the job a moment, then refresh state.
-      setTimeout(load, 1200)
+      window.setTimeout(() => void load(true), 1200)
     } catch (e: any) {
       showError('Sync failed', e?.message)
     } finally {
-      setSyncingId(null)
+      markEnqueuing(m.id, false)
     }
   }
 
@@ -174,27 +158,46 @@ export default function Mounts() {
     if (!repo || !remapTarget?.id) return
     const target = remapTarget
     setRemapTarget(null)
-    setSyncingId(target.id!)
+    markEnqueuing(target.id!, true)
     try {
-      await integrationsApi.syncMount(repo, target.id!, 'remap')
-      showSuccess(
-        'Remap queued',
-        'Every item will be re-imported through the current mapping. Progress appears in the row.',
-      )
-      setTimeout(load, 1200)
+      const res = await integrationsApi.syncMount(repo, target.id!, 'remap')
+      if (res.status === 'already_running') {
+        showInfo('Already syncing', 'A run is in progress; the remap was not queued.')
+      } else {
+        showSuccess(
+          'Remap queued',
+          'Every item will be re-imported through the current mapping. Progress appears in the row.',
+        )
+      }
+      window.setTimeout(() => void load(true), 1200)
     } catch (e: any) {
       showError('Remap failed', e?.message)
     } finally {
-      setSyncingId(null)
+      markEnqueuing(target.id!, false)
     }
   }
 
   async function confirmDelete() {
-    if (!repo || !deleteTarget) return
+    if (!repo || !deleteTarget?.id) return
     try {
-      await integrationsApi.deleteMount(repo, deleteTarget.name)
-      showSuccess('Deleted', deleteTarget.title)
-      load()
+      const res = await integrationsApi.deleteMount(repo, deleteTarget.id)
+      // A failed unsubscribe still deletes the mount, but it leaves a live
+      // provider subscription pointing at a URL that no longer resolves. Say so
+      // — silently succeeding is what let the leak accumulate unnoticed.
+      //
+      // Gated on the mount having HAD a subscription: the server also reports
+      // `unsubscribed: false` when there was simply nothing to unregister, and
+      // warning about a leak on every poll-mode delete would train people to
+      // ignore the message that matters.
+      if (res.unsubscribed === false && !!deleteTarget.state?.push_subscription_id) {
+        showInfo(
+          'Deleted, but the provider subscription may remain',
+          'The webhook could not be unregistered. If notifications keep arriving, remove the subscription at the provider.',
+        )
+      } else {
+        showSuccess('Deleted', deleteTarget.title)
+      }
+      void load(true)
     } catch (e: any) {
       showError('Delete failed', e?.message)
     } finally {
@@ -207,14 +210,19 @@ export default function Mounts() {
       key: 'title',
       header: 'Mount',
       render: (m) => (
-        <div className="flex items-center gap-2">
-          <HardDrive className="w-4 h-4 text-teal-400" />
-          <div>
-            <div className="text-white font-medium">{m.title}</div>
-            <div className="text-xs text-zinc-500">
+        <div className="flex items-center gap-2 group">
+          <HardDrive className="w-4 h-4 text-teal-400 flex-shrink-0" />
+          <div className="min-w-0">
+            <div className="text-white font-medium group-hover:text-primary-300 transition-colors">
+              {m.title}
+            </div>
+            <div className="text-xs text-zinc-500 truncate">
               {m.target_workspace}:{m.mount_path}
             </div>
           </div>
+          {/* Affordance for the row link — the row is otherwise indistinguishable
+              from the non-clickable tables elsewhere in the console. */}
+          <ChevronRight className="w-4 h-4 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
         </div>
       ),
     },
@@ -255,11 +263,29 @@ export default function Mounts() {
                 </span>
               )
             })()}
-            {m.state?.last_sync_at && (
-              <span className="text-[10px] text-zinc-500">
-                synced {new Date(m.state.last_sync_at).toLocaleString()}
+            {/* Epoch SECONDS, not milliseconds. `new Date(seconds)` is what
+                rendered every live mount as "synced 1/21/1970, 5:02:27 PM" —
+                the timestamp was fine, the unit was not. */}
+            {m.state?.last_sync_at ? (
+              <span
+                className="text-[10px] text-zinc-500"
+                title={formatAbsoluteSeconds(m.state.last_sync_at)}
+              >
+                synced {formatRelativeSeconds(m.state.last_sync_at)}
               </span>
-            )}
+            ) : null}
+            {/* The attempt is what the scheduler backs off from, so on a failing
+                mount it is the field that says when it will next be tried.
+                Redundant while the two agree, so it is shown only when they
+                differ — i.e. exactly when the last attempt did not succeed. */}
+            {m.state?.last_attempt_at && m.state.last_attempt_at !== m.state.last_sync_at ? (
+              <span
+                className="text-[10px] text-zinc-500"
+                title={formatAbsoluteSeconds(m.state.last_attempt_at)}
+              >
+                attempted {formatRelativeSeconds(m.state.last_attempt_at)}
+              </span>
+            ) : null}
             {m.state?.last_error && (
               <span className="text-[10px] text-red-400 truncate max-w-[180px]" title={m.state.last_error}>
                 {m.state.last_error}
@@ -288,28 +314,31 @@ export default function Mounts() {
       key: 'sync',
       header: 'Sync',
       width: '170px',
-      render: (m) => (
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => handleSync(m)}
-            disabled={syncingId === m.id}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-300 hover:text-primary-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50"
-            title="Sync now"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${syncingId === m.id ? 'animate-spin' : ''}`} />
-            Sync now
-          </button>
-          <button
-            onClick={() => setRemapTarget(m)}
-            disabled={syncingId === m.id}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-400 hover:text-amber-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50"
-            title="Re-import every item through the current mapping function and folder hierarchy"
-          >
-            <Wand2 className="w-3.5 h-3.5" />
-            Remap
-          </button>
-        </div>
-      ),
+      render: (m) => {
+        const busy = syncBusy(m)
+        return (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => handleSync(m)}
+              disabled={busy}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-300 hover:text-primary-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title={isSyncing(m.state) ? 'A sync is already running' : 'Sync now'}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`} />
+              {isSyncing(m.state) ? 'Syncing…' : 'Sync now'}
+            </button>
+            <button
+              onClick={() => setRemapTarget(m)}
+              disabled={busy}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-400 hover:text-amber-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Re-import every item through the current mapping function and folder hierarchy"
+            >
+              <Wand2 className="w-3.5 h-3.5" />
+              Remap
+            </button>
+          </div>
+        )
+      },
     },
   ]
 
@@ -331,8 +360,14 @@ export default function Mounts() {
         </button>
       </div>
 
+      {/* First load only. Once the table exists it stays on screen through
+          every refresh — see `load(silent)`. */}
       {loading ? (
-        <div className="text-center text-zinc-400 py-12">Loading…</div>
+        <div className="animate-pulse space-y-2">
+          <div className="h-10 bg-white/5 rounded-lg" />
+          <div className="h-16 bg-white/5 rounded-lg" />
+          <div className="h-16 bg-white/5 rounded-lg" />
+        </div>
       ) : loadError ? (
         // Never fall through to the "No mounts yet" card on a failure: a mount
         // that exists but cannot be listed still syncs, and telling the operator
@@ -346,7 +381,7 @@ export default function Mounts() {
               Existing mounts keep syncing on the server regardless of this page.
             </p>
             <button
-              onClick={load}
+              onClick={() => void load()}
               className="mt-4 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm rounded-lg transition-colors"
             >
               Retry
@@ -370,6 +405,8 @@ export default function Mounts() {
             getItemPath={(m) => m.path || m.name}
             getItemName={(m) => m.title}
             itemType="mount"
+            // The row stays a one-liner; the detail view is where you zoom in.
+            detailPath={(m) => `/${repo}/mounts/${encodeURIComponent(m.name)}`}
             onEdit={(m) => {
               setEditing(m)
               setShowEditor(true)
@@ -386,7 +423,7 @@ export default function Mounts() {
           integrations={integrations}
           workspaces={workspaces}
           onClose={() => setShowEditor(false)}
-          onSaved={load}
+          onSaved={() => void load(true)}
           onError={showError}
           onSuccess={showSuccess}
         />
@@ -424,7 +461,7 @@ export default function Mounts() {
                   // files), not the adapter's default.
                   sync_config: testTarget.sync_config,
                 }}
-                onTested={load}
+                onTested={() => void load(true)}
                 onError={showError}
               />
             </div>
