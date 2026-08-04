@@ -45,6 +45,23 @@ pub enum AdapterError {
     /// success, so the job layer does not retry on top of the scheduler.
     #[error("adapter configuration error: {0}")]
     Config(String),
+    /// `code: "cursor_invalid"` — the stored delta cursor is no longer accepted
+    /// by the provider and the mount must resynchronize from a full walk.
+    ///
+    /// Every incremental API expires its cursors: Graph answers `410 Gone` with
+    /// `syncStateNotFound` / `resyncRequired`, Google returns `410` on a stale
+    /// `syncToken`, IMAP invalidates on `UIDVALIDITY` change. The request can
+    /// never succeed as sent, so this is NOT transient — but unlike [`Config`]
+    /// it needs no operator action, because the engine can recover by itself:
+    /// drop the cursor and fall back to a full reconcile.
+    ///
+    /// Classifying this as `Transient` is what left a production mount wedged.
+    /// Graph rejected a `generation=1` token while it had moved to generation
+    /// 51; the job retried three times per tick forever, never succeeded, and
+    /// the resulting `consecutive_failures` also gated the backfill fast path in
+    /// `check::is_due` — so the pending import could not drain either.
+    #[error("adapter cursor invalid: {0}")]
+    CursorInvalid(String),
     /// Anything else — a transient failure eligible for standard job retry.
     #[error("adapter transient error: {0}")]
     Transient(String),
@@ -60,6 +77,8 @@ impl AdapterError {
             AdapterError::AuthExpired
         } else if m.contains("rate_limited") {
             AdapterError::RateLimited
+        } else if m.contains("cursor_invalid") {
+            AdapterError::CursorInvalid(message.to_string())
         } else if m.contains("config_error") {
             AdapterError::Config(message.to_string())
         } else if m.contains("conflict") {
@@ -78,9 +97,14 @@ impl AdapterError {
             AdapterError::RateLimited | AdapterError::Transient(_) => true,
             // AuthExpired pauses the mount until reconnect; Config needs an
             // operator edit; Conflict is resolved by the next sync's fresh read.
-            AdapterError::AuthExpired | AdapterError::Config(_) | AdapterError::Conflict(_) => {
-                false
-            }
+            // CursorInvalid is recovered in-run by dropping the cursor and
+            // doing a full reconcile, so a job-level retry of the identical
+            // delta request would only repeat a request the provider has
+            // already refused.
+            AdapterError::AuthExpired
+            | AdapterError::Config(_)
+            | AdapterError::Conflict(_)
+            | AdapterError::CursorInvalid(_) => false,
         }
     }
 }
@@ -366,6 +390,25 @@ mod tests {
             AdapterError::classify("boom"),
             AdapterError::Transient(_)
         ));
+    }
+
+    /// An expired delta cursor must be recoverable, not retried.
+    ///
+    /// Verbatim production message: Graph rejected a `generation=1` delta token
+    /// after it had moved to generation 51. Classified as `Transient` it was
+    /// retried three times per scheduler tick indefinitely — the identical
+    /// rejected cursor every time — and the failure counter it accumulated also
+    /// blocked the mount's pending backfill from draining.
+    #[test]
+    fn expired_delta_cursor_is_recoverable_not_retryable() {
+        let msg = "get_changes: The sync state generation is not found; \
+                   generation=1;[highest=51][49][50][51]. cursor_invalid";
+        let err = AdapterError::classify(msg);
+        assert!(matches!(err, AdapterError::CursorInvalid(_)));
+        assert!(
+            !err.is_retryable(),
+            "retrying re-sends the cursor the provider already refused"
+        );
     }
 
     #[test]

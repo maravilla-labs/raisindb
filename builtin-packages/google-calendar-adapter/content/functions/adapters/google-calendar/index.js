@@ -30,10 +30,9 @@
  *                    (no timeMin/timeMax/orderBy — those invalidate a syncToken).
  *                    next_token = nextSyncToken. NEVER null — echo the prior
  *                    token when Google returns no new token.
- *                  * HTTP 410 GONE → the syncToken expired; throw a transient
- *                    error so the engine re-runs a full reconcile (mode:"full").
- *                    There is no dedicated resync code — transient + a later
- *                    full pass is the accepted recovery path.
+ *                  * HTTP 410 GONE → the syncToken expired; reported as
+ *                    `cursor_invalid`, so the engine drops the stored token and
+ *                    full-reconciles within the same run.
  */
 
 var CAL = "https://www.googleapis.com/calendar/v3";
@@ -84,6 +83,19 @@ function raiseForStatus(resp, context) {
   var msg =
     (body && body.error && body.error.message) ||
     "Google Calendar request failed (" + status + ")";
+
+  // An EXPIRED syncToken. Google answers 410 GONE (reason `fullSyncRequired`)
+  // and documents the recovery as "discard the token and do a full sync", which
+  // is exactly what `cursor_invalid` asks the engine to do — in the same run,
+  // rather than relying on some later full pass that may never be scheduled.
+  //
+  // This used to be a plain Error → `Transient`, so the job retried the same
+  // rejected token three times per tick and the failure counter it accumulated
+  // gated the mount's backfill fast path as well. Same defect the ms-graph
+  // adapter had; fixed in both rather than left to drift.
+  if (status === 410 || reason === "fullSyncRequired") {
+    throw coded(context + ": " + msg, "cursor_invalid");
+  }
   throw new Error(context + ": " + msg);
 }
 
