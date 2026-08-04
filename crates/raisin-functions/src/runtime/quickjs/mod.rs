@@ -371,15 +371,13 @@ impl FunctionRuntime for QuickJsRuntime {
                                 }
                                 Err(e) => {
                                     let error_msg = if e.is_exception() {
+                                        // Shared with the synchronous-throw path
+                                        // via `format_exception`, NOT a second
+                                        // copy of the same logic. The two used to
+                                        // be duplicated, so a fix to one silently
+                                        // skipped `async` handlers entirely.
                                         if let Some(caught) = ctx.catch().into_exception() {
-                                            let msg = caught
-                                                .message()
-                                                .unwrap_or_else(|| "Unknown error".to_string());
-                                            if let Some(stack) = caught.stack() {
-                                                format!("{}\n{}", msg, stack)
-                                            } else {
-                                                msg
-                                            }
+                                            console::format_exception(&caught)
                                         } else {
                                             let raw_msg = format!("{}", e);
                                             if raw_msg
