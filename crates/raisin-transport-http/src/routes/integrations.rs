@@ -80,6 +80,24 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/mounts/{mount_id}/sync",
                 post(integrations::sync_mount),
             )
+            // Pause suspends scheduling and KEEPS the provider subscription;
+            // stop ends the running pass and discards its resume point. Both
+            // write only the fields they own — deliberately not the generic node
+            // API, which replaces every property.
+            .route(
+                "/api/integrations/{repo}/mounts/{mount_id}/pause",
+                post(integrations::pause_mount),
+            )
+            .route(
+                "/api/integrations/{repo}/mounts/{mount_id}/stop",
+                post(integrations::stop_mount),
+            )
+            // Live sync progress. SSE rather than WS deliberately: `fetch`
+            // carries the ordinary bearer token, which a WS handshake cannot.
+            .route(
+                "/api/integrations/{repo}/mounts/{mount_id}/events",
+                get(integrations::stream_mount_events),
+            )
             // Deleting a mount MUST go through here, not a generic node delete:
             // this is the only path that unregisters the provider's webhook
             // subscription first. Without it every deleted mount leaks a live

@@ -24,6 +24,14 @@ export interface ActivityBurst {
   samplePath: string
   firstAt: number
   lastAt: number
+  /**
+   * Cumulative item count at the moment this burst was recorded.
+   *
+   * The sync's progress events carry running totals, not per-event deltas, so
+   * the feed subtracts the previous total to get "how many landed in this
+   * commit". Absent on bursts from older sources.
+   */
+  runningTotal?: number
 }
 
 const KIND_META = {

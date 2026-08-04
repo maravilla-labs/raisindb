@@ -164,6 +164,14 @@ impl VirtualMountSyncHandler {
                 .await;
             return Ok(Some(skip_result("disabled")));
         }
+        if mount.state.paused {
+            // NOTE the asymmetry with `!enabled` above: no `teardown_push`.
+            // Pausing must not unsubscribe from the provider, or notifications
+            // arriving during the pause are lost outright and resuming silently
+            // re-registers. Disabling is the destructive one; pausing is not.
+            tracing::debug!(mount_id = %mount_id, "mount paused by operator; skipping");
+            return Ok(Some(skip_result("paused")));
+        }
         if mount.state.status.as_deref() == Some("auth_required") {
             tracing::debug!(mount_id = %mount_id, "mount paused (auth_required); skipping");
             return Ok(Some(skip_result("auth_required")));
@@ -414,6 +422,34 @@ impl VirtualMountSyncHandler {
         // is otherwise on the delta path.
         let backfill_pending = !state.backfill_stack.is_empty() || state.backfill_cursor.is_some();
 
+        // Record the phase that is ACTUALLY about to run, replacing the mode the
+        // caller asked for.
+        //
+        // These diverge routinely and the difference is not cosmetic: a run
+        // requested as `delta` executes a full reconcile whenever the provider
+        // rejects a stale cursor, and the history then showed "Delta" against a
+        // run writing five-year-old mail. An operator reading that has no way to
+        // reach the right conclusion — it cost a long investigation.
+        let phase = if remap {
+            "remap"
+        } else if use_full {
+            "full"
+        } else if backfill_pending {
+            "delta+backfill"
+        } else {
+            "delta"
+        };
+        if let Some(run) = state.last_run.as_mut() {
+            run.mode = phase.to_string();
+        }
+        raisin_storage::jobs::global_mount_broadcaster().emit(
+            &ctx.scope.mount_id,
+            raisin_storage::jobs::MountSyncEvent::Started {
+                phase: phase.to_string(),
+                trigger: trigger.clone(),
+            },
+        );
+
         let result = if use_full {
             full::run_with(&ctx, &mut state, &mut batcher).await
         } else if backfill_pending {
@@ -580,6 +616,24 @@ impl VirtualMountSyncHandler {
             );
             run.state_write_skipped = Some(true);
         }
+
+        // One emit, at the single point every outcome funnels through — the same
+        // reason `close_run` exists. An emit per branch would eventually miss
+        // one, and a console left showing a run that never ends is exactly the
+        // phantom this work set out to remove.
+        raisin_storage::jobs::global_mount_broadcaster().emit(
+            &ctx.scope.mount_id,
+            raisin_storage::jobs::MountSyncEvent::Finished {
+                phase: run.mode.clone(),
+                outcome: run.outcome.clone(),
+                written: run.written,
+                skipped: run.skipped,
+                deleted: run.deleted,
+                failed: run.failed,
+                backfill_complete: state.backfill_complete,
+                error: run.error.clone(),
+            },
+        );
 
         let summary = serde_json::to_value(&run).unwrap_or(Value::Null);
         match retryable_err {
@@ -1151,6 +1205,55 @@ pub async fn persist_state(ctx: &SyncCtx<'_>, state: &mut MountState) -> Result<
         state,
     )
     .await
+}
+
+/// Whether an operator has asked the running sync to stop.
+///
+/// Re-read from the store rather than trusted from the in-memory copy: a stop
+/// arrives *while* this run is in flight, so the value the run started with is
+/// always stale.
+///
+/// Deliberately cooperative. Aborting the task instead would skip the lease
+/// release on both exit paths, leaving the mount locked for the full
+/// `SYNC_LEASE_TTL` with `status` stuck at `"syncing"` — a phantom run the
+/// console has no way to clear. Callers ask this only where they have just
+/// flushed and persisted, so a stop always lands on a clean boundary: no
+/// in-flight batch, cursor durable.
+pub async fn stop_requested(ctx: &SyncCtx<'_>) -> bool {
+    let read = read_mount_state(
+        &ctx.storage,
+        &ctx.scope.tenant,
+        &ctx.scope.repo,
+        &ctx.config_branch,
+        &ctx.scope.mount_id,
+    )
+    .await;
+    match read {
+        Ok(Some(state)) => state.stop_requested,
+        // An unreadable state is NOT a stop. Guessing "yes" would abandon a
+        // healthy multi-hour import on one transient read failure.
+        _ => false,
+    }
+}
+
+/// Read the persisted mount state, if the node is present on this branch.
+pub async fn read_mount_state(
+    storage: &Arc<RocksDBStorage>,
+    tenant: &str,
+    repo: &str,
+    branch: &str,
+    mount_id: &str,
+) -> Result<Option<MountState>> {
+    let tx = storage.begin_context().await?;
+    tx.set_tenant_repo(tenant, repo)?;
+    tx.set_branch(branch)?;
+    tx.set_auth_context(AuthContext::system())?;
+
+    let Some(node) = tx.get_node(SYSTEM_WORKSPACE, mount_id).await? else {
+        return Ok(None);
+    };
+    // Same parse the full config uses, so the two can never disagree.
+    Ok(Some(config::parse_object(&node, "state").unwrap_or_default()))
 }
 
 /// Standalone state-persist (also directly unit-testable).

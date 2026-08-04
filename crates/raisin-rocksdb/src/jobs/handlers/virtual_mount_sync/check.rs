@@ -111,6 +111,12 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     if !mount.enabled {
         return false;
     }
+    // Paused by an operator. Distinct from `!enabled`, which also tears the push
+    // subscription down — a pause keeps it registered so resuming is instant and
+    // nothing that arrives in the gap is lost.
+    if mount.state.paused {
+        return false;
+    }
     if mount.state.status.as_deref() == Some("auth_required") {
         return false;
     }

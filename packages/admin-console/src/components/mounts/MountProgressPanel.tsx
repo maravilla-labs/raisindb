@@ -22,7 +22,12 @@ interface MountProgressPanelProps {
 export default function MountProgressPanel({ state }: MountProgressPanelProps) {
   const progress = backfillProgress(state)
   const syncing = isSyncing(state)
-  const complete = state?.backfill_complete === true
+  // Trust `backfill_complete` only when the walk is not still going. The flag
+  // records that a walk finished ONCE and is not cleared when a new one starts,
+  // so on its own it claims "complete" while a fresh walk is demonstrably
+  // running — which is how the card read "Full walk complete" while importing
+  // five-year-old mail. `progress.done` already applies that rule.
+  const complete = progress?.done === true
 
   if (!progress) {
     return (

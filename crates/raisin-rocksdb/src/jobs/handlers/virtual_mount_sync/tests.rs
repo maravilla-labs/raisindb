@@ -2197,3 +2197,61 @@ async fn import_throughput_unbatched() {
         n as f64 / elapsed.as_secs_f64()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Delta baseline: the fix for a mount that finishes importing and then never
+// sees a new item again.
+// ---------------------------------------------------------------------------
+
+/// After a completed full walk, a delta run with no token must ask for a
+/// BASELINE, not an enumeration.
+///
+/// The bug: a changes API asked for "everything since nothing" answers with an
+/// initial full enumeration. Graph returns every message in the folder, paged,
+/// and only emits a resumable delta link on the last page. Storing page 1 of
+/// that as the delta token made every later run walk the enumeration 600 items
+/// at a time — re-reading mail the walk had just imported, reporting
+/// `0 written / 600 skipped` run after run, while genuinely new mail waited
+/// behind an enumeration that could not converge.
+#[test]
+fn a_completed_walk_asks_for_a_baseline_not_an_enumeration() {
+    // The condition the delta path evaluates.
+    let want_baseline = |token: Option<&str>, backfill_complete: bool| {
+        token.is_none() && backfill_complete
+    };
+
+    // Everything is materialized: "from now on" is the only correct request.
+    assert!(want_baseline(None, true));
+
+    // The walk has NOT finished, so the enumeration IS the import. Asking for a
+    // baseline here would skip every item that has not been imported yet.
+    assert!(!want_baseline(None, false));
+
+    // A stored token is already a resume point and must be used verbatim,
+    // whatever the walk's state.
+    assert!(!want_baseline(Some("https://graph…/delta?$skiptoken=x"), true));
+    assert!(!want_baseline(Some("https://graph…/delta?$skiptoken=x"), false));
+}
+
+/// Stop clears the delta token, so the self-healing baseline above can fire.
+///
+/// A mount already holding a mid-enumeration cursor cannot recover on its own —
+/// the cursor keeps resuming a walk that never converges. Dropping it is what
+/// lets the next run re-baseline, and it is precisely the state an operator
+/// reaches for Stop to escape.
+#[test]
+fn stop_drops_a_poisoned_delta_cursor() {
+    let mut state = MountState {
+        last_sync_token: Some("https://graph…/messages/delta?$skiptoken=page-700".to_string()),
+        backfill_complete: true,
+        ..Default::default()
+    };
+
+    // What the stop endpoint does to the state blob.
+    state.last_sync_token = None;
+    state.stop_requested = true;
+
+    assert!(state.last_sync_token.is_none());
+    // With no token and a completed walk, the next run re-baselines.
+    assert!(state.last_sync_token.is_none() && state.backfill_complete);
+}

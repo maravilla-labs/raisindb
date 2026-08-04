@@ -9,7 +9,8 @@
 //!     nodes, which live in the `raisin:system` workspace on the `main` branch
 //!     under `/integrations/{name}` and `/mounts/{name}`.
 
-import { api, ApiError } from './client'
+import { fetchEventSource } from '@microsoft/fetch-event-source'
+import { api, ApiError, getAuthHeaders } from './client'
 import { nodesApi, type Node } from './nodes'
 import { sqlApi } from './sql'
 
@@ -316,6 +317,43 @@ export interface SyncRun {
  * an ISO-8601 string. Passing seconds to `new Date()` is what rendered a live
  * mount as "synced 1/21/1970"; use the `*Seconds` helpers in `utils/time.ts`.
  */
+/**
+ * A live progress event from a running sync.
+ *
+ * `phase` is what actually executed, not what was requested — a run asked for
+ * `delta` can execute a full reconcile when the provider rejects a stale
+ * cursor, and reporting the request instead is what left runs labelled "Delta"
+ * writing five-year-old mail.
+ */
+export type MountSyncEvent =
+  | { type: 'started'; phase: string; trigger: string }
+  | {
+      type: 'progress'
+      phase: string
+      backfill_items_done: number
+      delta_items_done: number
+      items_total: number | null
+      subtrees_queued: number
+    }
+  | {
+      type: 'finished'
+      phase: string
+      outcome: string
+      written: number
+      skipped: number
+      deleted: number
+      failed: number
+      backfill_complete: boolean
+      error: string | null
+    }
+
+/** Result of a pause, resume or stop. */
+export interface MountControlResponse {
+  ok: boolean
+  paused: boolean
+  stop_requested: boolean
+}
+
 export interface MountState {
   /** `ok` | `syncing` | `auth_required` | `degraded` | `misconfigured`. */
   status?: string
@@ -339,6 +377,19 @@ export interface MountState {
   state_seq?: number
   /** Items materialized so far by the current full walk / backfill / remap. */
   backfill_items_done?: number
+  /**
+   * Items the DELTA path has materialized since the last full walk.
+   *
+   * Separate from `backfill_items_done` on purpose. Delta work used to be added
+   * to the backfill counter, which nothing in the delta path resets — so a
+   * settled mount reported hundreds of thousands "imported" and an import that
+   * could never finish.
+   */
+  delta_items_done?: number
+  /** Scheduling is suspended by an operator; the subscription is kept. */
+  paused?: boolean
+  /** A running sync has been asked to stop at its next page boundary. */
+  stop_requested?: boolean
   /**
    * Denominator for `backfill_items_done`, when the provider reports one.
    * Frequently absent — most do not — so treat a missing total as normal and
@@ -953,6 +1004,74 @@ export const integrationsApi = {
   /** Enqueue a manual "sync now" for a mount. `mountId` is the mount node id. */
   syncMount: (repo: string, mountId: string, mode: 'delta' | 'full' | 'remap' = 'delta') =>
     api.post<SyncResponse>(`/api/integrations/${repo}/mounts/${mountId}/sync`, { mode }),
+
+  /**
+   * Suspend or resume scheduling.
+   *
+   * Distinct from disabling the mount: a pause KEEPS the provider subscription
+   * registered, so resuming is instant and notifications arriving in the gap are
+   * not lost. Disabling tears the subscription down.
+   */
+  pauseMount: (repo: string, mountId: string, paused: boolean) =>
+    api.post<MountControlResponse>(
+      `/api/integrations/${repo}/mounts/${mountId}/pause`,
+      { paused }
+    ),
+
+  /**
+   * Stop the run that is happening now and discard its resume point.
+   *
+   * Cooperative — the sync notices at its next page boundary, where it has
+   * already flushed. The resume point must go too: a mount with a pending
+   * backfill is due again on the very next tick, so a stop that kept the cursor
+   * would restart within a minute.
+   */
+  stopMount: (repo: string, mountId: string) =>
+    api.post<MountControlResponse>(`/api/integrations/${repo}/mounts/${mountId}/stop`, {}),
+
+  /**
+   * Live sync progress for one mount.
+   *
+   * SSE, like every other live surface in this console — `fetchEventSource`
+   * sends the ordinary bearer token, which a WebSocket handshake cannot. The
+   * mount page was previously the only WS client here, and the only one whose
+   * auth failed.
+   *
+   * Returns an unsubscribe function.
+   */
+  subscribeToMountEvents: (
+    repo: string,
+    mountId: string,
+    onEvent: (event: MountSyncEvent) => void,
+  ): (() => void) => {
+    const controller = new AbortController()
+    const authHeaders = getAuthHeaders()
+    // Impersonation is meaningless on a progress stream and the management SSE
+    // helpers strip it too; keep the two consistent.
+    delete authHeaders['X-Raisin-Impersonate']
+
+    void fetchEventSource(`/api/integrations/${repo}/mounts/${mountId}/events`, {
+      headers: authHeaders,
+      signal: controller.signal,
+      openWhenHidden: true,
+      onmessage: (msg) => {
+        if (msg.event !== 'mount-sync') return
+        try {
+          onEvent(JSON.parse(msg.data) as MountSyncEvent)
+        } catch {
+          // A malformed frame is not worth tearing the stream down for; the
+          // next event carries the current totals anyway.
+        }
+      },
+      onerror: (err) => {
+        // Returning swallows the error and lets the library retry with backoff.
+        // Throwing here would close the stream permanently on one blip.
+        console.warn('[mount-sse] reconnecting', err)
+      },
+    })
+
+    return () => controller.abort()
+  },
 
   /**
    * Run a synchronous connection test against a connector: the server invokes

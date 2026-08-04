@@ -772,28 +772,51 @@ function opGetContent(credential, mount, params) {
 
 // Build the FIRST delta URL (no since_token yet). Subsequent calls reuse the
 // engine-persisted token verbatim — it is a full @odata.nextLink/deltaLink.
-function initialDeltaUrl(mount, resource) {
+//
+// `baselineOnly` asks Graph for a delta link WITHOUT enumerating. This is the
+// difference between "import everything from the beginning" and "tell me what
+// changes from now on", and getting it wrong is not subtle:
+//
+// A delta query with no token performs an INITIAL FULL ENUMERATION. Graph
+// returns every item in the folder, paged, and only emits @odata.deltaLink on
+// the final page. The engine stores whatever comes back as the delta token, so
+// page 1 of an enumeration becomes the "baseline" — and every later delta run
+// walks that enumeration a page at a time, re-reading items the full walk had
+// already imported (`0 written / 600 skipped`, run after run) while genuinely
+// new items sit unreachable behind it. On a large mailbox that never converges.
+//
+// `$deltatoken=latest` (drive: `token=latest`) returns the delta link straight
+// away with an empty page. The engine calls this ONLY after a full walk has
+// materialized everything, which is exactly when "from now on" is correct.
+function initialDeltaUrl(mount, resource, baselineOnly) {
   if (resource === "calendar") {
     var win = windowBounds(mount);
     return (
       GRAPH + principal(mount) + "/calendars/" + enc(calendarId(mount)) +
       "/calendarView/delta?startDateTime=" + enc(win.start) +
-      "&endDateTime=" + enc(win.end)
+      "&endDateTime=" + enc(win.end) +
+      (baselineOnly ? "&$deltatoken=latest" : "")
     );
   }
   if (resource === "files") {
-    return GRAPH + driveContainer(mount) + "/delta";
+    // Drive spells it differently: `token=latest`, no `$`.
+    return GRAPH + driveContainer(mount) + "/delta" +
+      (baselineOnly ? "?token=latest" : "");
   }
   return (
     GRAPH + principal(mount) + "/mailFolders/" + enc(mailFolderId(mount)) +
-    "/messages/delta?$select=" + enc(mailSelect(mount))
+    "/messages/delta?$select=" + enc(mailSelect(mount)) +
+    (baselineOnly ? "&$deltatoken=latest" : "")
   );
 }
 
 function opGetChanges(credential, mount, params) {
   var resource = resourceOf(mount);
   var token = params.since_token;
-  var url = token || initialDeltaUrl(mount, resource);
+  // Only meaningful when there is no token yet — a stored token already IS a
+  // resume point and must be used verbatim.
+  var baselineOnly = !token && params.baseline_only === true;
+  var url = token || initialDeltaUrl(mount, resource, baselineOnly);
   var resp = graphFetch(credential, "GET", url, { context: "get_changes" });
   var body = resp.body || {};
   var values = body.value || [];

@@ -18,6 +18,9 @@ import {
   Wand2,
   Webhook,
   X,
+  Pause,
+  Play,
+  Square,
 } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -35,14 +38,12 @@ import MountActivityFeed, {
 } from '../components/mounts/MountActivityFeed'
 import {
   integrationsApi,
-  SYSTEM_WORKSPACE,
+  type MountSyncEvent,
   type Integration,
   type VirtualMount,
 } from '../api/integrations'
 import { workspacesApi } from '../api/workspaces'
-import type { NodeEvent } from '../api/ws-events'
-import { useNodeEvents } from '../hooks/useNodeEvents'
-import { isActive, isSyncing, STATUS_META, statusKind } from '../utils/mountStatus'
+import { isActive, isPaused, isSyncing, STATUS_META, statusKind } from '../utils/mountStatus'
 import { formatAbsoluteSeconds, formatRelativeSeconds } from '../utils/time'
 
 /** Poll interval used whenever the live socket is not carrying events. */
@@ -71,6 +72,17 @@ export default function MountDetail() {
   const [showTest, setShowTest] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [confirmRemap, setConfirmRemap] = useState(false)
+  const [confirmStop, setConfirmStop] = useState(false)
+  /**
+   * The newest progress event, used in preference to the polled node state.
+   *
+   * The stream is ahead of the node read by up to a poll interval, so during an
+   * active sync this is what makes the number move continuously rather than in
+   * 30-second steps.
+   */
+  const [liveProgress, setLiveProgress] = useState<MountSyncEvent | null>(null)
+  const [sseLive, setSseLive] = useState(false)
+  const [busyControl, setBusyControl] = useState(false)
   const [enqueueing, setEnqueueing] = useState(false)
   const [bursts, setBursts] = useState<ActivityBurst[]>([])
 
@@ -124,102 +136,88 @@ export default function MountDetail() {
   // ---- realtime ----
 
   /**
-   * 1. The mount's own config node. Mount state is written as an ordinary node
-   *    update, so every status/progress/run write shows up here and the page
-   *    can re-read itself the moment the engine records anything.
+   * 1. This mount's sync progress, over SSE.
+   *
+   * Was a WebSocket subscription to `node:updated` on the config node. Two
+   * reasons it moved:
+   *
+   *  - A node event says only "something changed", so the page re-fetched and
+   *    diffed to work out what. This stream carries the counts, the executing
+   *    phase and the queue depth directly.
+   *  - A WebSocket handshake cannot send an `Authorization` header. This page
+   *    was the console's only WS client and the only one whose auth failed,
+   *    leaving it permanently on the 5s polling fallback. `fetchEventSource`
+   *    sends the ordinary bearer token, exactly like every other request here.
+   *
+   * A `finished` event still triggers a re-read: the stream reports progress,
+   * but the page renders far more of the mount than progress alone.
    */
-  const stateStatus = useNodeEvents(
-    repo,
-    {
-      workspace: SYSTEM_WORKSPACE,
-      node_type: 'raisin:VirtualMount',
-      event_types: ['node:updated'],
-    },
-    useCallback(
-      (event: NodeEvent) => {
-        // Filtering by node id here rather than by path: `path` on the event is
-        // the config-node path, but one subscription covers every mount in the
-        // repo, and re-reading on another mount's write would be pointless load.
-        if (mount?.id && event.payload.node_id && event.payload.node_id !== mount.id) return
+  useEffect(() => {
+    if (!repo || !mount?.id) return
+    setSseLive(true)
+    const unsubscribe = integrationsApi.subscribeToMountEvents(repo, mount.id, (event) => {
+      if (event.type === 'progress') setLiveProgress(event)
+      recordProgress(event)
+      if (event.type === 'finished') {
+        setLiveProgress(null)
         void load(true)
-      },
-      [load, mount?.id],
-    ),
-    !!mount,
-  )
+      }
+      if (event.type === 'started') void load(true)
+    })
+    return () => {
+      setSseLive(false)
+      unsubscribe()
+    }
+    // Re-subscribe only when the mount identity changes, never on every render.
+  }, [repo, mount?.id])
 
   /**
-   * 2. The materialized items, so the page shows what the connector is doing
-   *    right now rather than only what it has recorded.
+   * 2. Live activity, driven by the same SSE stream.
    *
-   * The subscription cannot filter by branch — the transport has no branch
-   * filter at all — so events for this path on OTHER branches would otherwise
-   * be attributed to this mount. `target_branch` is compared in the handler.
+   * Previously a second WebSocket subscription to node events under the mount
+   * path, filtered client-side by branch and actor. The sync's own progress
+   * events are a better source for the same panel: the panel already explains
+   * that "events arrive per batch commit, so each line is one commit rather
+   * than one item", and a progress event IS one batch commit — emitted only
+   * after the batch is flushed and the cursor is durable.
+   *
+   * It also removes the branch/actor guesswork. A node-event feed had to infer
+   * which writes belonged to this mount; these events are addressed to it.
    */
-  const itemFilters = useMemo(
-    () => ({
-      workspace: mount?.target_workspace,
-      // Glob, not a prefix: `**` is the recursive form and `/x/**` excludes `/x`.
-      path: mount?.mount_path
-        ? `${mount.mount_path.replace(/\/+$/, '')}/**`
-        : undefined,
-      event_types: ['node:created', 'node:updated', 'node:deleted'],
-    }),
-    [mount?.target_workspace, mount?.mount_path],
-  )
+  const recordProgress = useCallback((event: MountSyncEvent) => {
+    if (event.type !== 'progress') return
+    const total = event.backfill_items_done + event.delta_items_done
+    const now = Date.now()
 
-  const onItemEvent = useCallback(
-    (event: NodeEvent) => {
-      const p = event.payload
-      if (mount?.target_branch && p.branch && p.branch !== mount.target_branch) return
+    setBursts((prev) => {
+      const last = prev[prev.length - 1]
+      const delta = last ? Math.max(0, total - (last.runningTotal ?? 0)) : total
+      if (delta === 0) return prev
 
-      // Connector writes only. `metadata` is `HashMap<String, JsonValue>` and
-      // may be absent entirely, so this is a soft filter: when the key is
-      // missing we still show the event rather than rendering an empty feed on
-      // a producer that does not stamp an actor.
-      const actor = p.metadata?.actor
-      if (typeof actor === 'string' && actor !== 'virtual-mount-sync') return
-
-      const kind: ActivityBurst['kind'] =
-        event.event_type === 'node:created'
-          ? 'created'
-          : event.event_type === 'node:deleted'
-            ? 'deleted'
-            : 'updated'
-      const path = p.path || p.node_id || '(unknown)'
-      const now = Date.now()
-
-      setBursts((prev) => {
-        const last = prev[prev.length - 1]
-        // Coalesce into the trailing burst when it is the same kind and still
-        // within the commit window — see ActivityBurst for why this is per
-        // batch, not per item.
-        if (last && last.kind === kind && now - last.lastAt < BURST_WINDOW_MS) {
-          const merged = { ...last, count: last.count + 1, lastAt: now }
-          return [...prev.slice(0, -1), merged]
-        }
-        const next: ActivityBurst = {
-          id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
-          kind,
-          count: 1,
-          samplePath: path,
-          firstAt: now,
+      if (last && now - last.lastAt < BURST_WINDOW_MS) {
+        const merged = {
+          ...last,
+          count: last.count + delta,
           lastAt: now,
+          runningTotal: total,
         }
-        return [...prev, next].slice(-MAX_BURSTS)
-      })
-    },
-    [mount?.target_branch],
-  )
+        return [...prev.slice(0, -1), merged]
+      }
+      const next: ActivityBurst = {
+        id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'created',
+        count: delta,
+        samplePath: `${event.phase} · ${event.subtrees_queued} queued`,
+        firstAt: now,
+        lastAt: now,
+        runningTotal: total,
+      }
+      return [...prev, next].slice(-MAX_BURSTS)
+    })
+  }, [])
 
-  const itemStatus = useNodeEvents(
-    repo,
-    itemFilters,
-    onItemEvent,
-    !!mount?.target_workspace && !!mount?.mount_path,
-  )
-
-  const live = stateStatus === 'live' || itemStatus === 'live'
+  // One stream now, so one liveness signal.
+  const live = sseLive
 
   /**
    * Polling fallback. Kept whenever the socket is not live, and also while a
@@ -247,6 +245,7 @@ export default function MountDetail() {
   // ---- actions ----
 
   const syncing = isSyncing(mount?.state)
+  const paused = isPaused(mount?.state)
   // Disabled while the engine actually reports a sync, not merely for the ~100ms
   // the enqueue POST is in flight. The old button re-enabled immediately and
   // could be clicked indefinitely against a running job.
@@ -268,6 +267,41 @@ export default function MountDetail() {
       showError(`${label} failed`, e?.message)
     } finally {
       setEnqueueing(false)
+    }
+  }
+
+  /** Suspend or resume scheduling. Re-reads rather than mutating optimistically. */
+  const handlePause = async () => {
+    if (!repo || !mount?.id) return
+    setBusyControl(true)
+    try {
+      const next = !paused
+      await integrationsApi.pauseMount(repo, mount.id, next)
+      showSuccess(next ? 'Scheduling paused — the subscription is kept' : 'Scheduling resumed')
+      await load(true)
+    } catch (e: any) {
+      showError('Could not change the pause state', e?.message)
+    } finally {
+      setBusyControl(false)
+    }
+  }
+
+  /**
+   * Stop the running sync. Cooperative — it ends at the next page boundary, so
+   * the button reports "asked to stop" rather than pretending it is immediate.
+   */
+  const handleStop = async () => {
+    if (!repo || !mount?.id) return
+    setBusyControl(true)
+    try {
+      await integrationsApi.stopMount(repo, mount.id)
+      showInfo('Stop requested — the sync ends at its next page boundary')
+      window.setTimeout(() => void load(true), 1500)
+    } catch (e: any) {
+      showError('Could not stop the sync', e?.message)
+    } finally {
+      setBusyControl(false)
+      setConfirmStop(false)
     }
   }
 
@@ -389,6 +423,11 @@ export default function MountDetail() {
                 Disabled
               </span>
             )}
+            {paused && (
+              <span className="px-2 py-0.5 text-xs rounded-full bg-amber-500/10 text-amber-300 border border-amber-400/30">
+                Paused
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-3 mt-2 flex-wrap text-sm">
@@ -405,7 +444,7 @@ export default function MountDetail() {
                 </span>
               </>
             )}
-            <ConnectionPill status={live ? 'live' : stateStatus} />
+            <ConnectionPill status={live ? 'live' : 'connecting'} />
           </div>
 
           <p className="text-xs text-zinc-500 mt-1.5">{meta.hint}</p>
@@ -421,6 +460,32 @@ export default function MountDetail() {
             <RefreshCw className={`w-4 h-4 ${syncing || enqueueing ? 'animate-spin' : ''}`} />
             {syncing ? 'Syncing…' : 'Sync now'}
           </button>
+          {/*
+            Pause suspends scheduling and KEEPS the provider subscription, so
+            resuming is instant and nothing arriving in the gap is lost. That is
+            why it is not the same as unchecking "enabled", which unsubscribes.
+          */}
+          <button
+            onClick={handlePause}
+            disabled={busyControl}
+            title={paused ? 'Resume scheduling' : 'Stop scheduling; keep the subscription'}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors disabled:opacity-40"
+          >
+            {paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+            {paused ? 'Resume' : 'Pause'}
+          </button>
+          {/* Only offered while something is actually running. */}
+          {syncing && (
+            <button
+              onClick={() => setConfirmStop(true)}
+              disabled={busyControl}
+              title="Stop the running sync and discard its resume point"
+              className="flex items-center gap-1.5 px-3 py-2 text-sm text-zinc-300 hover:text-red-300 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors disabled:opacity-40"
+            >
+              <Square className="w-4 h-4" />
+              Stop
+            </button>
+          )}
           <button
             onClick={() => setShowTest(true)}
             className="flex items-center gap-1.5 px-3 py-2 text-sm text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors"
@@ -483,7 +548,21 @@ export default function MountDetail() {
         <div className="lg:col-span-2 space-y-4">
           <GlassCard>
             <h2 className="text-sm font-medium text-white mb-3">Import progress</h2>
-            <MountProgressPanel state={mount.state} />
+            <MountProgressPanel
+              state={
+                // Overlay the live counts on the polled state. The stream is
+                // ahead of the 30s node read, so during an active sync this is
+                // what makes the number move continuously instead of in steps.
+                liveProgress && liveProgress.type === 'progress'
+                  ? {
+                      ...mount.state,
+                      backfill_items_done: liveProgress.backfill_items_done,
+                      delta_items_done: liveProgress.delta_items_done,
+                      backfill_items_total: liveProgress.items_total ?? undefined,
+                    }
+                  : mount.state
+              }
+            />
           </GlassCard>
 
           <GlassCard>
@@ -561,7 +640,7 @@ export default function MountDetail() {
           <GlassCard>
             <MountActivityFeed
               bursts={bursts}
-              status={itemStatus}
+              status={live ? 'live' : 'connecting'}
               watching={`${mount.target_workspace}:${mount.mount_path}`}
             />
           </GlassCard>
@@ -718,6 +797,22 @@ export default function MountDetail() {
           void enqueue('remap', 'Remap')
         }}
         onCancel={() => setConfirmRemap(false)}
+      />
+      <ConfirmDialog
+        open={confirmStop}
+        title="Stop this sync"
+        message={
+          `End the run that is happening now in “${mount.title}”.\n\n` +
+          `The sync stops at its next page boundary, so nothing already written is lost and ` +
+          `nothing is left half-committed.\n\n` +
+          `Its resume point is DISCARDED: a partly-walked import starts from the beginning ` +
+          `next time rather than continuing. To suspend without losing the position, use ` +
+          `Pause instead.`
+        }
+        confirmText="Stop"
+        variant="danger"
+        onConfirm={() => void handleStop()}
+        onCancel={() => setConfirmStop(false)}
       />
       <ToastContainer toasts={toasts} onClose={closeToast} />
     </div>

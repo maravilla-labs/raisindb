@@ -265,6 +265,36 @@ pub fn as_metadata_url(issuer: &str) -> Result<String> {
     ))
 }
 
+/// Where RFC 9728 protected-resource metadata lives for a resource URL.
+///
+/// **The well-known URI is the discovery mechanism; the `WWW-Authenticate`
+/// challenge is only a hint.** Reading the hint alone means a server that
+/// publishes its authorization server correctly but does not challenge an
+/// unauthenticated probe is reported as needing no auth — which is wrong, and
+/// unfixable by probing harder: the auth boundary is often at `tools/call`, and
+/// calling a tool to find out is exactly what a connection test must never do.
+///
+/// Two forms, most specific first. RaisinDB's own server emits the
+/// path-suffixed one, and it is the one that disambiguates when a host serves
+/// several MCP endpoints.
+pub fn protected_resource_metadata_urls(resource: &Url) -> Vec<String> {
+    let origin = match resource.host_str() {
+        Some(host) => {
+            let port = resource.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{}://{host}{port}", resource.scheme())
+        }
+        None => return Vec::new(),
+    };
+
+    let path = resource.path().trim_end_matches('/');
+    let mut urls = Vec::new();
+    if !path.is_empty() {
+        urls.push(format!("{origin}/.well-known/oauth-protected-resource{path}"));
+    }
+    urls.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    urls
+}
+
 /// Fetch and parse RFC 9728 protected-resource metadata.
 pub async fn fetch_protected_resource_metadata(
     http: &reqwest::Client,
@@ -612,6 +642,29 @@ mod tests {
         // The message has to explain the two-host case or an operator will read
         // a correct refusal as a broken feature.
         assert!(err.to_string().contains("allowed_hosts"), "got {err}");
+    }
+
+    #[test]
+    fn well_known_urls_are_derived_most_specific_first() {
+        let url = Url::parse("https://example.test/_mcp").unwrap();
+        assert_eq!(
+            protected_resource_metadata_urls(&url),
+            vec![
+                "https://example.test/.well-known/oauth-protected-resource/_mcp".to_string(),
+                "https://example.test/.well-known/oauth-protected-resource".to_string(),
+            ]
+        );
+    }
+
+    /// The well-known segments go after the ORIGIN, so a port survives and a
+    /// path-less endpoint yields only the bare form.
+    #[test]
+    fn well_known_urls_keep_the_port_and_handle_a_bare_root() {
+        let url = Url::parse("https://example.test:8443/").unwrap();
+        assert_eq!(
+            protected_resource_metadata_urls(&url),
+            vec!["https://example.test:8443/.well-known/oauth-protected-resource".to_string()]
+        );
     }
 
     #[test]

@@ -94,7 +94,20 @@ export const STATUS_META: Record<StatusKind, StatusMeta> = {
 
 /** True when the engine reports a sync in flight right now. */
 export function isSyncing(state?: MountState): boolean {
+  // A paused mount is never syncing, whatever `status` still says.
+  //
+  // `status` is written by the engine at the START of a run and cleared at the
+  // end, so a run that ended abnormally leaves it reading `syncing` forever —
+  // which is how a mount showed "Syncing" and "Disabled" at the same time, with
+  // an empty run history behind it. Pausing is an explicit statement that
+  // nothing is running, so it wins over a stale flag.
+  if (state?.paused) return false
   return (state?.status || '').toLowerCase() === 'syncing'
+}
+
+/** True when an operator has suspended scheduling. */
+export function isPaused(state?: MountState): boolean {
+  return state?.paused === true
 }
 
 /**
@@ -131,9 +144,18 @@ export interface BackfillProgress {
  * running tally rather than a fake percentage.
  */
 export function backfillProgress(state?: MountState): BackfillProgress | null {
-  const inFlight = !!state?.backfill_cursor || isSyncing(state)
+  // A queued subtree means the walk is still going, even when the current page
+  // wrote nothing. Without this, a walk crossing already-imported ground looked
+  // identical to an idle mount — which is exactly how a running import was
+  // mistaken for a finished one.
+  const queued = state?.backfill_stack?.length ?? 0
+  const inFlight = !!state?.backfill_cursor || queued > 0 || isSyncing(state)
   const itemsDone = state?.backfill_items_done ?? 0
-  const complete = state?.backfill_complete === true
+  // `backfill_complete` records that a walk finished ONCE. It is not cleared
+  // when a new walk starts, so on its own it would claim "complete" while a
+  // fresh walk is demonstrably running. Only trust it when nothing is in
+  // flight.
+  const complete = state?.backfill_complete === true && !inFlight
   if (!inFlight && !itemsDone) return null
 
   const rawTotal = state?.backfill_items_total
@@ -141,13 +163,17 @@ export function backfillProgress(state?: MountState): BackfillProgress | null {
   const fraction = itemsTotal ? Math.min(1, itemsDone / itemsTotal) : null
   const n = itemsDone.toLocaleString()
 
-  if (!inFlight || complete) {
+  if (complete) {
     return { text: `Imported ${n} items`, done: true, fraction, itemsDone, itemsTotal }
   }
+  // Say what is being walked, not just how many items have gone by. A run of
+  // `0 written / 1200 skipped` is progress through ground already imported, and
+  // without the queue depth it reads as a stall.
+  const queueNote = queued > 0 ? ` · ${queued} subtree${queued === 1 ? '' : 's'} queued` : ''
   return {
     text: itemsTotal
-      ? `Importing… ${n} of ${itemsTotal.toLocaleString()}`
-      : `Importing… ${n} items so far`,
+      ? `Importing… ${n} of ${itemsTotal.toLocaleString()}${queueNote}`
+      : `Importing… ${n} items so far${queueNote}`,
     done: false,
     fraction,
     itemsDone,
@@ -243,8 +269,21 @@ export const TRIGGER_LABEL: Record<string, string> = {
 }
 
 /** What kind of walk a run performed. */
+/**
+ * Labels for the phase a run ACTUALLY executed.
+ *
+ * Not the mode it was requested with — the two diverge routinely. A run asked
+ * for `delta` executes a full reconcile whenever the provider rejects a stale
+ * cursor, and a mount with an unfinished import runs a delta pass followed by a
+ * backfill chunk on every tick. The history used to show the request, so runs
+ * labelled "Delta" would be seen writing five-year-old mail with no explanation
+ * available.
+ */
 export const MODE_LABEL: Record<string, string> = {
   delta: 'Delta',
-  full: 'Full',
+  full: 'Full walk',
+  // Delta first so new items arrive within one interval, then one chunk of the
+  // backfill so history fills in behind them.
+  'delta+backfill': 'Delta + backfill',
   remap: 'Remap',
 }

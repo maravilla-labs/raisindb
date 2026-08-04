@@ -124,14 +124,8 @@ pub async fn discover(
         }
     };
 
-    if response.status() != reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(Json(json!({
-            "ok": true,
-            "requires_auth": false,
-            "status": response.status().as_u16(),
-            "message": "server did not ask for authorization; a static credential or none may be enough",
-        })));
-    }
+    let probe_status = response.status();
+    let challenged = probe_status == reqwest::StatusCode::UNAUTHORIZED;
 
     let challenge = response
         .headers()
@@ -139,21 +133,55 @@ pub async fn discover(
         .and_then(|v| v.to_str().ok())
         .and_then(mcp::parse_challenge);
 
-    let Some(metadata_url) = challenge.as_ref().and_then(|c| c.resource_metadata.clone()) else {
+    // Candidates, most authoritative first: the challenge's own pointer, then
+    // the RFC 9728 well-known paths.
+    //
+    // The probe's status deliberately does NOT gate this. A 200 does not mean
+    // "no auth needed" — a server may keep `initialize` and even `tools/list`
+    // public while requiring a token at `tools/call`, and we must never probe
+    // `tools/call` to find out because a tool call has side effects. Reading the
+    // challenge alone reported such a server as open, which is how an operator
+    // was told "no auth needed" about a server that plainly needs it.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(pointer) = challenge.as_ref().and_then(|c| c.resource_metadata.clone()) {
+        candidates.push(pointer);
+    }
+    candidates.extend(mcp::protected_resource_metadata_urls(&descriptor.url));
+
+    let mut resource: Option<ProtectedResourceMetadata> = None;
+    let mut last_err: Option<String> = None;
+    for candidate in &candidates {
+        match mcp::fetch_protected_resource_metadata(&http, &egress, candidate).await {
+            Ok(found) => {
+                resource = Some(found);
+                break;
+            }
+            // A 404 here is the normal answer for a server that publishes no
+            // metadata; keep trying the remaining forms.
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+
+    let Some(resource) = resource else {
+        // No metadata anywhere. NOW the probe's status is meaningful: a server
+        // that answered 200 and advertises no authorization server is genuinely
+        // open, and one that challenged us needs configuring by hand.
         return Ok(Json(json!({
             "ok": true,
-            "requires_auth": true,
+            "requires_auth": challenged,
             "discovered": false,
-            "message": "server returned 401 without an RFC 9728 resource_metadata pointer; \
-                        its endpoints must be configured by hand",
+            "status": probe_status.as_u16(),
+            "message": if challenged {
+                "server returned 401 but publishes no RFC 9728 protected-resource metadata; \
+                 its endpoints must be configured by hand".to_string()
+            } else {
+                "server did not ask for authorization and publishes no protected-resource \
+                 metadata; a static credential or none may be enough. If you know it requires \
+                 OAuth, configure the client by hand.".to_string()
+            },
+            "detail": last_err,
         })));
     };
-
-    let resource: ProtectedResourceMetadata =
-        match mcp::fetch_protected_resource_metadata(&http, &egress, &metadata_url).await {
-            Ok(resource) => resource,
-            Err(e) => return Ok(finding(&e)),
-        };
 
     let Some(issuer) = resource.authorization_servers.first().cloned() else {
         return Ok(finding_message(

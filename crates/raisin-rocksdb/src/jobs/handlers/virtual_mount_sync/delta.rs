@@ -32,18 +32,45 @@ pub async fn run_with(
     let exclude = &ctx.mount.sync_config.exclude_patterns;
     let mut token = state.last_sync_token.clone();
     let mut processed: u64 = 0;
+    // Items actually staged, as opposed to returned by the provider. The two
+    // diverge on filtered-out changes, and the console must report the former.
+    let mut materialized: u64 = 0;
+
+    // Self-healing baseline.
+    //
+    // No token means one of two very different situations, and asking for the
+    // wrong one is what stalled a production mailbox:
+    //
+    //  - The full walk has NOT completed. Delta IS the import here, so an
+    //    initial enumeration is exactly what we want.
+    //  - The full walk HAS completed. Everything is already materialized, so an
+    //    enumeration would re-read the entire folder a page per run, reporting
+    //    `0 written / N skipped` while genuinely new items waited behind it.
+    //    What we want is "changes from now on".
+    //
+    // This also recovers a mount whose stored token is already an enumeration
+    // cursor: clear the token and the next run re-baselines instead of resuming
+    // a walk that cannot converge.
+    let want_baseline = token.is_none() && state.backfill_complete;
 
     loop {
         let params = json!({
             "since_token": token,
             "folder_id": ctx.mount.remote_root,
+            "baseline_only": want_baseline,
         });
         let resp = ctx.call("get_changes", params).await?;
         let page: ChangesPage = serde_json::from_value(resp)
             .map_err(|e| AdapterError::Transient(format!("bad get_changes response: {e}")))?;
 
         for change in &page.items {
-            stage_change(ctx, batcher, change, include, exclude).await?;
+            // `staged` is false when the change was filtered out or was already
+            // present unchanged. Counting returned items instead of written ones
+            // is how "0 written / 1200 skipped" and "1200 imported" ended up on
+            // the same screen.
+            if stage_change(ctx, batcher, change, include, exclude).await? {
+                materialized += 1;
+            }
             processed += 1;
         }
         // The cursor below claims this page landed, so the buffer must be empty
@@ -59,11 +86,16 @@ pub async fn run_with(
         match &next {
             Some(tok) => {
                 state.last_sync_token = Some(tok.clone());
-                // Count delta work too. The delta path used to touch neither the
-                // progress counter nor tracing, so an incremental sync was
-                // completely invisible: no log line, no moving number, nothing
-                // to distinguish "running" from "never scheduled".
-                state.backfill_items_done = state.backfill_items_done.saturating_add(processed);
+                // Count delta work — but in ITS OWN counter.
+                //
+                // This used to add to `backfill_items_done`, which is documented
+                // as "the current full walk" and is reset only when a fresh walk
+                // starts. Nothing in the delta path resets it, so incremental
+                // work accumulated forever: a settled mount reported "433,500
+                // items imported" and an import that could never complete.
+                // Keeping the visibility the original change wanted, without
+                // corrupting the number it borrowed.
+                state.delta_items_done = state.delta_items_done.saturating_add(materialized);
                 if !persist_state(ctx, state).await.unwrap_or(false) {
                     // The cursor did not land. Continuing would re-page from a
                     // position the store does not know about, so stop and let
@@ -75,6 +107,26 @@ pub async fn run_with(
                     break;
                 }
                 ctx.renew_lease().await;
+
+                raisin_storage::jobs::global_mount_broadcaster().emit(
+                    &ctx.scope.mount_id,
+                    raisin_storage::jobs::MountSyncEvent::Progress {
+                        phase: "delta".to_string(),
+                        backfill_items_done: state.backfill_items_done,
+                        delta_items_done: state.delta_items_done,
+                        items_total: state.backfill_items_total,
+                        subtrees_queued: state.backfill_stack.len(),
+                    },
+                );
+
+                // Clean stop boundary: batch flushed, cursor durable.
+                if super::stop_requested(ctx).await {
+                    tracing::info!(
+                        mount_id = %ctx.mount.mount_id,
+                        "stop requested; ending the delta pass at a page boundary"
+                    );
+                    break;
+                }
             }
             None => break,
         }
@@ -100,10 +152,10 @@ async fn stage_change(
     change: &super::config::Change,
     include: &[String],
     exclude: &[String],
-) -> std::result::Result<(), AdapterError> {
+) -> std::result::Result<bool, AdapterError> {
     if change.kind == "deleted" {
         batcher.stage_delete(&change.item.external_id).await?;
-        return Ok(());
+        return Ok(true);
     }
 
     // Same resolution as the full walk — both paths MUST agree, or an item would
@@ -119,8 +171,8 @@ async fn stage_change(
         change.relative_path.clone()
     };
     if !super::passes_filters(&rel_path, include, exclude) {
-        return Ok(());
+        return Ok(false);
     }
     stage_item(ctx, batcher, &change.item, &rel_path).await?;
-    Ok(())
+    Ok(true)
 }

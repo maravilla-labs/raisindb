@@ -42,6 +42,9 @@ pub async fn run_with(
     // `seen` a PARTIAL picture and therefore unusable for deciding what to
     // delete. See the reconcile guard below.
     let mut truncated = false;
+    // Set when an operator stopped the walk. Like `truncated`, it makes `seen`
+    // a partial picture — so it must gate reconcile deletes for the same reason.
+    let mut stopped = false;
 
     // Explicit stack of (folder_id, rel_prefix) to avoid async recursion.
     //
@@ -111,6 +114,19 @@ pub async fn run_with(
             // silently on the next run's fresh start.
             batcher.flush().await?;
             ctx.renew_lease().await;
+
+            // A stop lands HERE and nowhere else: the batch is flushed and the
+            // cursor is about to be durable, so abandoning the walk loses
+            // nothing and leaves a resume point the operator can discard or
+            // keep. Checked after the flush, never before it.
+            if super::stop_requested(ctx).await {
+                tracing::info!(
+                    mount_id = %ctx.mount.mount_id,
+                    "stop requested; ending the full walk at a page boundary"
+                );
+                stopped = true;
+                break;
+            }
             // Publish progress as we go. A chunk can run for minutes; without
             // this the console sees nothing move until the whole chunk lands.
             //
@@ -127,6 +143,20 @@ pub async fn run_with(
                     state.backfill_items_total = Some(total);
                 }
                 let _ = persist_state(ctx, state).await;
+
+                // Emit AFTER the state is durable, never before: an event is a
+                // claim that this page landed, and a claim that a later failure
+                // could roll back is worse than no event at all.
+                raisin_storage::jobs::global_mount_broadcaster().emit(
+                    &ctx.scope.mount_id,
+                    raisin_storage::jobs::MountSyncEvent::Progress {
+                        phase: "full".to_string(),
+                        backfill_items_done: state.backfill_items_done,
+                        delta_items_done: state.delta_items_done,
+                        items_total: state.backfill_items_total,
+                        subtrees_queued: stack.len(),
+                    },
+                );
             }
             match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
@@ -158,6 +188,19 @@ pub async fn run_with(
             processed,
             folders_pending = stack.len(),
             "backfill chunk complete; will resume on the next run"
+        );
+    } else if stopped {
+        // Stopped by an operator. Save the resume point exactly as a truncated
+        // chunk does — a stop that discarded the stack here would silently turn
+        // "pause this import" into "start it over". Whether to keep or discard
+        // the cursor is the endpoint's decision, not the walk's.
+        state.backfill_stack = stack.clone();
+        state.backfill_complete = false;
+        tracing::info!(
+            mount_id = %ctx.mount.mount_id,
+            processed,
+            folders_pending = stack.len(),
+            "backfill stopped by request; resume point preserved"
         );
     } else {
         state.backfill_stack.clear();
@@ -192,12 +235,16 @@ pub async fn run_with(
     // this used to be another full workspace scan.
     let existing = batcher.virtual_nodes();
 
-    if truncated || resuming {
+    // A stopped walk joins the same guard: it saw only part of the provider, so
+    // `seen` cannot distinguish "deleted upstream" from "not reached before the
+    // operator stopped us". Reconciling on it would delete real content.
+    if truncated || resuming || stopped {
         tracing::info!(
             mount_id = %ctx.mount.mount_id,
             processed,
             resumed = resuming,
             truncated,
+            stopped,
             max_items_per_sync = max,
             existing = existing.len(),
             "skipping reconcile deletes: this pass did not walk the provider end to end in one \
@@ -237,10 +284,26 @@ pub async fn run_with(
     // Best-effort delta baseline: if the provider has a changes API, capture a
     // resumable token so the next sync goes incremental. Providers without one
     // leave the token unset and stay on the full path.
+    //
+    // `baseline_only` is load-bearing, not a hint. A changes API asked for
+    // "everything since nothing" answers with an initial full ENUMERATION, not
+    // a baseline — Microsoft Graph returns page after page of every message in
+    // the folder and only emits a resumable delta link on the very last one.
+    // Storing page 1 of that as the delta token meant every later "delta" run
+    // walked the enumeration 600 items at a time, re-reading mail this walk had
+    // just imported and reporting `0 written / 600 skipped` forever. New items
+    // could not arrive until the whole mailbox had been re-enumerated.
+    //
+    // We have just materialized everything, so what we want is "changes from
+    // now on" — which providers expose directly (Graph: `$deltatoken=latest`).
     if let Ok(resp) = ctx
         .call(
             "get_changes",
-            json!({ "since_token": null, "folder_id": ctx.mount.remote_root }),
+            json!({
+                "since_token": null,
+                "folder_id": ctx.mount.remote_root,
+                "baseline_only": true,
+            }),
         )
         .await
     {

@@ -177,8 +177,43 @@ pub struct MountState {
     /// Cumulative across the chunks of one walk and reset when a fresh walk
     /// starts, so the console can show "1,240 imported" while a multi-hour
     /// import is running instead of a spinner with no end in sight.
+    ///
+    /// **Backfill only.** The delta path used to add to this too, which meant a
+    /// counter documented as "the current walk" accumulated incremental work
+    /// forever — nothing in the delta path resets it, so a settled mount showed
+    /// "433,500 items imported" and an import that could never finish. Delta
+    /// work goes to [`Self::delta_items_done`].
     #[serde(default)]
     pub backfill_items_done: u64,
+    /// Items the delta path has materialized since the last full walk.
+    ///
+    /// Separate from [`Self::backfill_items_done`] so incremental work stays
+    /// visible — the reason it was folded in originally — without corrupting
+    /// backfill progress. Reset alongside it when a fresh walk starts.
+    #[serde(default)]
+    pub delta_items_done: u64,
+    /// Scheduling is suspended by an operator.
+    ///
+    /// Distinct from `MountConfig.enabled`: disabling a mount also tears down
+    /// its push subscription (`mod.rs`, `teardown_push`), so notifications that
+    /// arrive while it is off are lost. A pause keeps the subscription
+    /// registered and simply stops the scheduler, so resuming is instant and
+    /// nothing is missed in the gap.
+    ///
+    /// Lives in `state` rather than as a node property deliberately: the
+    /// nodetype is `strict: true`, but `state` is a free-form Object, so this
+    /// needs no schema migration.
+    #[serde(default)]
+    pub paused: bool,
+    /// An operator asked the running sync to stop.
+    ///
+    /// Cooperative, never a hard abort. Aborting the task would skip the lease
+    /// release and leave the mount locked for the full `SYNC_LEASE_TTL`, with
+    /// `status` stuck at `"syncing"` — a phantom run the console cannot clear.
+    /// The page loops check this where they already flush and persist, so a stop
+    /// always lands on a clean boundary.
+    #[serde(default)]
+    pub stop_requested: bool,
     /// True once a full walk has reached the end at least once. Reconcile
     /// deletes are only safe after this: before it, "not seen" merely means
     /// "not reached yet".
@@ -840,7 +875,7 @@ fn opt_bool(node: &Node, key: &str) -> Option<bool> {
     }
 }
 
-fn parse_object<T: for<'de> Deserialize<'de>>(node: &Node, key: &str) -> Option<T> {
+pub(crate) fn parse_object<T: for<'de> Deserialize<'de>>(node: &Node, key: &str) -> Option<T> {
     let pv = node.properties.get(key)?;
     let json = serde_json::to_value(pv).ok()?;
     serde_json::from_value(json).ok()
