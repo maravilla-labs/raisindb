@@ -436,6 +436,30 @@ impl VirtualMountSyncHandler {
             delta::run_with(&ctx, &mut state, &mut batcher).await
         };
 
+        // A cursor the provider no longer accepts is recoverable HERE, in the
+        // same run: drop it and fall back to a full reconcile.
+        //
+        // Every incremental API expires its cursors, and the recovery they all
+        // document is "resync from scratch". Leaving it to the job retry cannot
+        // work — the retry re-sends the same rejected cursor — and the failure
+        // counter it accumulates then gates the backfill fast path in
+        // `check::is_due`, so a mount with an expired delta token could not even
+        // drain a pending import. Recovering in-run keeps `consecutive_failures`
+        // at zero, which is what keeps the chunked backfill running back-to-back.
+        let result = match result {
+            Err(AdapterError::CursorInvalid(msg)) => {
+                tracing::warn!(
+                    mount_id = %mount_id,
+                    error = %msg,
+                    "provider rejected the stored delta cursor; discarding it and \
+                     falling back to a full reconcile"
+                );
+                state.last_sync_token = None;
+                full::run_with(&ctx, &mut state, &mut batcher).await
+            }
+            other => other,
+        };
+
         let counts = batcher.stats();
         tracing::info!(
             mount_id = %mount_id,

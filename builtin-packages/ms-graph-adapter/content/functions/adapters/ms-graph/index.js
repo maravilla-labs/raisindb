@@ -92,14 +92,33 @@ function raiseForStatus(resp, context) {
   // stops retrying and marks the mount misconfigured, instead of hammering
   // Graph on every scheduler tick.
   //
+  // An EXPIRED DELTA CURSOR. Graph answers 410 Gone, and also reports it as
+  // `syncStateNotFound` / `resyncRequired` — sometimes with a 400, which is why
+  // this is checked BEFORE the 400/404 branch below. The documented recovery is
+  // "start over with a full sync", so it is reported as `cursor_invalid`: the
+  // engine drops the stored cursor and full-reconciles in the same run.
+  //
+  // This is normal operation, not a fault. Until it had its own code it fell
+  // through to a plain Error → `Transient`, so the job retried the same rejected
+  // cursor three times per tick forever; the failure counter that accumulated
+  // then gated the backfill fast path too, so a production mailbox could neither
+  // delta-sync nor finish its import. Graph had moved to sync generation 51
+  // while our stored token still said generation 1.
+  var graphCode = (body && body.error && body.error.code) || "";
+  var isStaleCursor =
+    status === 410 ||
+    graphCode === "syncStateNotFound" ||
+    graphCode === "resyncRequired" ||
+    /sync state.*not found|resync required/i.test(msg);
+  if (isStaleCursor) {
+    throw coded(context + ": " + msg, "cursor_invalid");
+  }
+
   // Deliberately NARROW. Other 4xx codes must stay retryable:
   //   408 request timeout      — a blip
   //   409 conflict             — resolved by the next sync's fresh read
-  //   410 Gone / resyncRequired — Graph EXPIRING A DELTA CURSOR, which is
-  //       normal operation and is answered by falling back to a full sync.
-  //       Marking that "misconfigured" would take a healthy mount offline and
-  //       demand an operator edit that has nothing to fix.
-  // (401/403 and 429 are already handled above as auth_expired / rate_limited.)
+  // (401/403 and 429 are already handled above as auth_expired / rate_limited;
+  //  410/resync is handled just above as cursor_invalid.)
   if (status === 400 || status === 404) {
     throw coded(context + ": " + msg, "config_error");
   }
