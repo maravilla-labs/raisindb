@@ -28,7 +28,15 @@ pub(crate) fn mcp_client_routes(state: &AppState) -> Router<AppState> {
         use axum::middleware::from_fn_with_state;
         use axum::routing::{delete, get, post, put};
 
-        Router::new()
+        // PUBLIC: a browser redirect from the authorization server cannot carry
+        // a bearer token. Authenticated instead by the single-use, TTL'd
+        // `state` the authenticated `oauth/start` call minted.
+        let public = Router::new().route(
+            "/api/mcp-connections/{repo}/oauth/callback",
+            get(mcp_client::callback),
+        );
+
+        let guarded = Router::new()
             .route(
                 "/api/mcp-connections/{repo}",
                 get(mcp_client::list_connections).post(mcp_client::create_connection),
@@ -60,7 +68,21 @@ pub(crate) fn mcp_client_routes(state: &AppState) -> Router<AppState> {
                 "/api/mcp-connections/{repo}/{slug}/tools/{remote_name}",
                 axum::routing::patch(mcp_client::set_tool_enabled),
             )
-            .layer(from_fn_with_state(state.clone(), require_auth_middleware))
+            .route(
+                "/api/mcp-connections/{repo}/{slug}/oauth/discover",
+                post(mcp_client::discover),
+            )
+            .route(
+                "/api/mcp-connections/{repo}/{slug}/oauth/start",
+                post(mcp_client::start),
+            )
+            .route(
+                "/api/mcp-connections/{repo}/{slug}/oauth/disconnect",
+                post(mcp_client::disconnect),
+            )
+            .layer(from_fn_with_state(state.clone(), require_auth_middleware));
+
+        public.merge(guarded)
     }
 
     #[cfg(not(feature = "storage-rocksdb"))]

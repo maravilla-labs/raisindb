@@ -19,6 +19,7 @@ pub mod fulltext;
 pub mod function_execution;
 pub mod huggingface_model;
 pub mod integration_token_refresh;
+pub mod mcp_connection_refresh;
 pub mod mcp_tool_discovery;
 pub mod node_delete_cleanup;
 pub mod oplog_compaction;

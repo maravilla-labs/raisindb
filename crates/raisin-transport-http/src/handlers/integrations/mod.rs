@@ -25,7 +25,7 @@ mod manage;
 mod notifications;
 mod oauth_callback;
 mod oauth_start;
-mod setup_info;
+pub(crate) mod setup_info;
 pub mod state_store;
 mod test_connection;
 

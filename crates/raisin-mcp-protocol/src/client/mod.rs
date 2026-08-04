@@ -35,6 +35,7 @@ pub mod config;
 pub mod connection;
 pub mod egress;
 pub mod error;
+pub mod oauth;
 pub mod reconcile;
 pub mod session;
 pub mod session_cache;
@@ -47,6 +48,12 @@ pub use connection::{
 };
 pub use egress::EgressPolicy;
 pub use error::{RemoteToolError, Result};
+pub use oauth::{
+    as_metadata_url, authorize_url, exchange_code, expires_at, fetch_as_metadata,
+    fetch_protected_resource_metadata, parse_challenge, refresh_tokens, register_client,
+    resolve_scopes, AuthChallenge, AuthServerMetadata, Pkce, ProtectedResourceMetadata,
+    RegisteredClient, TokenResponse,
+};
 pub use reconcile::{
     plan_proxies, reconcile_plan, schema_hash, slugify, ExistingProxy, ProxyPlan, ReconcileAction,
 };

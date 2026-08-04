@@ -193,8 +193,27 @@ impl IntegrationTokenRefreshHandler {
         )
         .with_auth(auth);
 
+        // Same sweep, same workspace, same lease discipline — one job with two
+        // node types rather than two jobs that can drift apart.
+        let mcp = crate::jobs::handlers::mcp_connection_refresh::refresh_repo(
+            &self.storage,
+            &svc,
+            self.lock_manager.as_ref(),
+            &self.instance_id,
+            tenant,
+            repo,
+            &branch_for_lease,
+            secret_box,
+            now_secs,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(tenant = %tenant, repo = %repo, error = %e, "mcp token refresh failed");
+            0
+        });
+
         let integrations = svc.list_by_type("raisin:Integration").await?;
-        let mut count = 0usize;
+        let mut count = mcp;
         for node in integrations {
             match self
                 .refresh_node(

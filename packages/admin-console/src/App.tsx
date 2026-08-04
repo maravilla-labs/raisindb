@@ -57,6 +57,7 @@ import AgentDetail from './pages/agents/AgentDetail'
 import ConversationTrace from './pages/agents/ConversationTrace'
 import AccessControlSettings from './pages/AccessControlSettings'
 import Integrations from './pages/Integrations'
+import McpConnections from './pages/McpConnections'
 import Mounts from './pages/Mounts'
 
 /**
@@ -183,6 +184,7 @@ function App() {
           <Route path=":branch/packages/*" element={<PackagesRouter />} />
           {/* Outbound integrations + virtual mounts (raisin:system workspace) */}
           <Route path="integrations" element={<Integrations />} />
+          <Route path="mcp-connections" element={<McpConnections />} />
           <Route path="mounts" element={<Mounts />} />
           <Route path="query" element={<SqlQuery />} />
           <Route path="logs" element={<RepositoryExecutionLogs />} />

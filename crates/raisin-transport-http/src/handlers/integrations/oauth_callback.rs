@@ -15,7 +15,7 @@ use raisin_crypto::SecretBox;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::state_store::{now_secs, OAUTH_STATE_STORE};
+use super::state_store::{now_secs, StateKind, OAUTH_STATE_STORE};
 use super::{
     connected_accounts, decrypt_client_secret, json_str, oauth_config, set_connected_accounts,
 };
@@ -204,7 +204,8 @@ pub async fn callback(
         ));
     };
 
-    let Some(entry) = OAUTH_STATE_STORE.consume(&state_token, now_secs()) else {
+    let Some(entry) = OAUTH_STATE_STORE.consume(&state_token, StateKind::Integration, now_secs())
+    else {
         return Ok(relay_page(&repo, &Outcome::failed(
             "invalid_state",
             "This connect attempt is unknown or expired (it is valid for 10 minutes and single-use). \
@@ -225,14 +226,14 @@ pub async fn callback(
 
     let master_key = state.get_master_key()?;
     let svc = super::config_service(&state, &entry.tenant_id, &entry.repo, "integration-oauth");
-    let Some(mut node) = svc.get_by_path(&entry.integration_path).await? else {
+    let Some(mut node) = svc.get_by_path(&entry.target_path).await? else {
         return Ok(relay_page(
             &repo,
             &Outcome::failed(
                 "unknown_connector",
                 &format!(
                 "The connector {} no longer exists — it was deleted or renamed during the connect.",
-                entry.integration_path
+                entry.target_path
             ),
             ),
         ));
@@ -301,7 +302,7 @@ pub async fn callback(
         let (code, desc) = super::oauth_error_parts(&resp.text().await.unwrap_or_default());
         tracing::warn!(
             %status,
-            integration_path = %entry.integration_path,
+            integration_path = %entry.target_path,
             %redirect_uri,
             client_secret_sent = client_secret.is_some(),
             provider_error = %code,
@@ -403,7 +404,7 @@ pub async fn callback(
     accounts.push(account);
     set_connected_accounts(&mut node, accounts)?;
     if let Err(e) = svc.update_node(node).await {
-        tracing::error!(error = %e, integration_path = %entry.integration_path,
+        tracing::error!(error = %e, integration_path = %entry.target_path,
             "failed to persist the connected account after a successful OAuth exchange");
         return Ok(relay_page(
             &repo,
@@ -415,7 +416,7 @@ pub async fn callback(
     }
 
     let integration_name = entry
-        .integration_path
+        .target_path
         .rsplit('/')
         .next()
         .unwrap_or("")
