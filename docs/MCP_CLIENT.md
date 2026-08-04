@@ -54,6 +54,70 @@ special-cased. A proxy is a function that happens to have no code.
 4. **Expose only what you need.** Every tool has an *Exposed* toggle. Narrowing
    this is the cheapest way to bound what a remote server can be asked to do.
 
+## Live tool updates
+
+`refresh_policy.interval_secs` defaults to an hour, so without help a tool added
+upstream stays invisible for that long. MCP's `notifications/tools/list_changed`
+closes that gap. The notification carries **no payload** — it means "re-list",
+nothing more — so receiving one simply schedules a discovery run.
+
+Two levels, and the first needs no configuration at all:
+
+**Opportunistic (always on).** A server may put the notification on the SSE body
+of any response, including the reply to an ordinary `tools/call`. Those are
+picked up and turned into a discovery run, so a connection an agent actually uses
+stays fresh within seconds. Costs nothing: no extra connection, no extra request.
+
+**A held-open stream (opt in).** Set `notifications: true` in the connection's
+`refresh_policy` to cover a server whose tools change while nobody is calling it.
+Off by default deliberately — a listener is a socket held open for hours against
+a third party, and an upgrade should not silently start one per connection.
+
+A listener additionally requires the server to actually promise the guarantee:
+either it speaks the 2026-07-28 revision, or it advertises
+`capabilities.tools.listChanged`. A server that offers neither is left to the
+interval refresh, which always remains the backstop.
+
+How the stream is opened depends on the negotiated revision, and RaisinDB does
+both:
+
+| Revision | Opened with | Confirmed by |
+|---|---|---|
+| 2026-07-28 | `subscriptions/listen`, requesting `toolsListChanged` only | `notifications/subscriptions/acknowledged`, which MUST arrive first |
+| 2025-06-18 and earlier | a long-lived `GET` | nothing — the socket staying up is the only signal |
+
+A server that acknowledges the subscription but **declines** `toolsListChanged`
+is logged and the listener stands down, rather than holding a connection open
+waiting for something that will never arrive.
+
+**Clusters need `[locks]` with the `redis` backend.** A listener runs under a
+per-connection lease (`mcp-listen:{slug}`) so exactly one node holds each stream.
+With locks disabled or `inprocess` while replication is on, listeners are
+**refused outright** rather than merely warned about: every node would win its
+own election and hold a duplicate stream against somebody else's server.
+
+RaisinDB's own MCP server is on the other end of this too — it advertises
+`tools.listChanged` and emits the notification when a `raisin:Function` in the
+`functions` workspace changes, so one RaisinDB pointed at another gets live
+updates.
+
+## Pruning tools that are gone
+
+Discovery **disables** a tool that vanishes upstream, never deletes it: a deleted
+proxy disappears from any agent holding its path with no error anywhere. That
+leaves `missing` entries accumulating, so removal is an explicit action:
+
+```
+DELETE /api/mcp-connections/{repo}/{slug}/tools/{remote_name}[?force=true]
+POST   /api/mcp-connections/{repo}/{slug}/prune-tools[?force=true]
+```
+
+Both refuse with **409** listing the agents that still reference the paths.
+`?force=true` proceeds anyway. There is deliberately no age-based automatic
+prune — the reason disable-don't-delete is the default is that nothing in the
+system can tell whether an agent still needs a path, and a timer knows less than
+an operator does.
+
 ## Configuration
 
 The optional `[mcp_client]` TOML section is the operator-owned half — where the
@@ -107,7 +171,8 @@ Without it every node writes the same proxy nodes.
 
 **A tool that vanishes upstream is disabled, not deleted.** You will see it in
 the table as `missing`. Deleting it would make the tool silently disappear from
-any agent referencing it, with no error anywhere.
+any agent referencing it, with no error anywhere. Remove it deliberately when
+you mean to — see *Pruning tools that are gone*.
 
 **`tools/call` is never retried automatically.** MCP has no idempotency key, so
 a retry could charge a card or file a ticket twice.
@@ -133,6 +198,8 @@ POST   /api/mcp-connections/{repo}/{slug}/oauth/discover    401 → RFC 9728 →
 POST   /api/mcp-connections/{repo}/{slug}/oauth/start       → { auth_url }
 POST   /api/mcp-connections/{repo}/{slug}/oauth/disconnect  clear tokens
 GET    /api/mcp-connections/{repo}/oauth/callback           (public)
+DELETE /api/mcp-connections/{repo}/{slug}/tools/{name}      prune one proxy
+POST   /api/mcp-connections/{repo}/{slug}/prune-tools       prune every `missing`
 ```
 
 `test` always answers **200 with a structured report**, even when the connection

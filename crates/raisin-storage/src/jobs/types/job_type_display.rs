@@ -434,9 +434,11 @@ impl fmt::Display for JobType {
                 connection_slug,
                 tenant_id,
                 repo_id,
+                source,
             } => write!(
                 f,
-                "McpToolDiscovery({tenant_id}/{repo_id}/{connection_slug})"
+                "McpToolDiscovery({tenant_id}/{repo_id}/{connection_slug}, {})",
+                source.as_str()
             ),
             Self::McpDiscoveryCheck { tenant_id } => write!(
                 f,

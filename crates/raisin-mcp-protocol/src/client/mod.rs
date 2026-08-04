@@ -31,16 +31,21 @@
 //!   recovery replays, and only once. `tools/list` is idempotent and may be
 //!   retried freely by its caller.
 
+pub mod backoff;
 pub mod config;
 pub mod connection;
 pub mod egress;
 pub mod error;
+pub mod notification;
 pub mod oauth;
 pub mod reconcile;
 pub mod session;
 pub mod session_cache;
+pub mod stream;
+pub mod subscription;
 pub mod transport;
 
+pub use backoff::{Backoff, DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY};
 pub use config::{
     install_config, installed_config, installed_egress_policy, McpClientConfig, DEFAULT_TIMEOUT_MS,
 };
@@ -50,12 +55,12 @@ pub use connection::{
 };
 pub use egress::EgressPolicy;
 pub use error::{RemoteToolError, Result};
+pub use notification::{notification_parts, NotificationSink, TOOLS_LIST_CHANGED};
 pub use oauth::{
     as_metadata_url, authorize_url, exchange_code, expires_at, fetch_as_metadata,
     fetch_protected_resource_metadata, guard_peer_url as guard_peer_endpoint, parse_challenge,
-    refresh_tokens, register_client,
-    resolve_scopes, AuthChallenge, AuthServerMetadata, Pkce, ProtectedResourceMetadata,
-    RegisteredClient, TokenResponse,
+    refresh_tokens, register_client, resolve_scopes, AuthChallenge, AuthServerMetadata, Pkce,
+    ProtectedResourceMetadata, RegisteredClient, TokenResponse,
 };
 pub use reconcile::{
     plan_proxies, reconcile_plan, schema_hash, slugify, ExistingProxy, ProxyPlan, ReconcileAction,
@@ -64,4 +69,11 @@ pub use session::{
     concat_text, ensure_object, McpClientSession, RemoteToolDescriptor, ServerHandshake,
 };
 pub use session_cache::{shared_session_cache, SessionCache};
+pub use stream::{
+    decode_message, SseEvent, SseReader, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_FRAME_BYTES,
+};
+pub use subscription::{
+    open as open_subscription, StreamEnd, SubscriptionStream, SUBSCRIPTIONS_ACKNOWLEDGED,
+    SUBSCRIPTIONS_LISTEN,
+};
 pub use transport::{ExtraHeaders, StreamableHttpTransport, DEFAULT_MAX_RESPONSE_BYTES};

@@ -146,7 +146,11 @@ impl Dispatcher {
             .then(|| json!({ UI_EXTENSION_ID: { "mimeTypes": [UI_MIME_TYPE] } }));
         ServerCapabilities {
             tools: Some(ToolsCapability {
-                list_changed: false,
+                // Honoured: a `subscriptions/listen` stream carrying
+                // `toolsListChanged` is driven from `raisin:Function` node
+                // events in the functions workspace, which the event bus
+                // already delivers.
+                list_changed: true,
             }),
             resources,
             extensions,

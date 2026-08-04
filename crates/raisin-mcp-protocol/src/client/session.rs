@@ -76,6 +76,29 @@ pub struct ServerHandshake {
     pub instructions: Option<String>,
 }
 
+impl ServerHandshake {
+    /// Whether the server promises to announce tool-list changes.
+    ///
+    /// A legacy peer that says `false` will never push
+    /// `notifications/tools/list_changed`, so holding a stream open for it burns
+    /// a connection to hear nothing. Absent capabilities mean `false`: a server
+    /// that did not claim the guarantee has not made it.
+    pub fn announces_tool_changes(&self) -> bool {
+        self.capabilities
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.list_changed)
+    }
+
+    /// Whether the peer speaks the 2026-07-28 subscription model.
+    ///
+    /// Decides which way a listener opens its stream: `subscriptions/listen` for
+    /// a modern peer, the long-lived GET for everyone else.
+    pub fn uses_listen_subscriptions(&self) -> bool {
+        !crate::protocol::is_legacy_handshake(&self.protocol_version)
+    }
+}
+
 /// A negotiated conversation with one remote MCP server.
 pub struct McpClientSession {
     transport: StreamableHttpTransport,

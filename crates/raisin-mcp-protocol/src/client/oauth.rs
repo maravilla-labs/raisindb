@@ -538,9 +538,16 @@ mod tests {
             token_endpoint: "https://127.0.0.1/token".to_string(),
             ..Default::default()
         };
-        let err = refresh_tokens(&http, &policy, &metadata, &RegisteredClient::default(), "rt", None)
-            .await
-            .expect_err("a loopback token endpoint must never receive the refresh token");
+        let err = refresh_tokens(
+            &http,
+            &policy,
+            &metadata,
+            &RegisteredClient::default(),
+            "rt",
+            None,
+        )
+        .await
+        .expect_err("a loopback token endpoint must never receive the refresh token");
         assert!(matches!(err, RemoteToolError::Config(_)), "got {err:?}");
     }
 

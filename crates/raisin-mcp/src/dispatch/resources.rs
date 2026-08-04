@@ -188,11 +188,15 @@ impl Dispatcher {
             }
         }
 
-        // Report only what we can honour: this server emits no list-changed
-        // notifications, so echoing them back would promise a stream the client
-        // would wait on forever.
+        // Report only what we can honour. Echoing back a type we never emit
+        // would promise a stream the client waits on forever, so each of these
+        // is a statement about what this server actually produces:
+        //   - tools:     yes, driven by `raisin:Function` node events.
+        //   - prompts:   no prompt registry exists to change.
+        //   - resources: the LIST is static; individual resource updates are
+        //                delivered through `resource_subscriptions` instead.
         let granted = SubscriptionFilter {
-            tools_list_changed: false,
+            tools_list_changed: requested.tools_list_changed,
             prompts_list_changed: false,
             resources_list_changed: false,
             resource_subscriptions,

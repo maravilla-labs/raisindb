@@ -116,9 +116,7 @@ impl EgressPolicy {
         let port = url.port_or_known_default().unwrap_or(443);
         let addresses: Vec<IpAddr> = tokio::net::lookup_host((domain, port))
             .await
-            .map_err(|e| {
-                RemoteToolError::Transient(format!("could not resolve `{domain}`: {e}"))
-            })?
+            .map_err(|e| RemoteToolError::Transient(format!("could not resolve `{domain}`: {e}")))?
             .map(|socket| socket.ip())
             .collect();
         self.validate_resolved(domain, &addresses)

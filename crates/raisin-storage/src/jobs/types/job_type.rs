@@ -308,6 +308,17 @@ pub enum JobType {
         connection_slug: String,
         tenant_id: String,
         repo_id: String,
+        /// What asked for this run.
+        ///
+        /// Purely diagnostic, and the reason it is worth carrying: an operator
+        /// looking at the job list cannot otherwise tell a server that
+        /// announced a change from one being polled on its interval, which is
+        /// exactly the question when someone asks "is the live update working?"
+        ///
+        /// `#[serde(default)]` so jobs queued before this field existed still
+        /// deserialize.
+        #[serde(default)]
+        source: McpDiscoverySource,
     },
     /// Periodic scan: enqueue `McpToolDiscovery` for every enabled connection
     /// whose refresh interval is due (mirrors `VirtualMountSyncCheck`).
@@ -326,6 +337,33 @@ pub enum JobType {
 /// Serde default for [`JobType::VirtualMountSync::trigger`] — see that field.
 fn default_sync_trigger() -> String {
     "unknown".to_string()
+}
+
+/// What caused an [`JobType::McpToolDiscovery`] run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDiscoverySource {
+    /// The remote server pushed `notifications/tools/list_changed`.
+    Notification,
+    /// The connection's refresh interval came due.
+    Interval,
+    /// An operator pressed refresh, or toggled a tool.
+    Manual,
+    /// Queued before this field existed, or by a path that did not say.
+    #[default]
+    Unknown,
+}
+
+impl McpDiscoverySource {
+    /// Stable lowercase name, for log lines and job summaries.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Notification => "notification",
+            Self::Interval => "interval",
+            Self::Manual => "manual",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 impl JobType {

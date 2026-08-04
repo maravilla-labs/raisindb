@@ -350,6 +350,16 @@ pub trait EventBus: Send + Sync {
     /// Subscribe a handler to receive events
     fn subscribe(&self, handler: Arc<dyn EventHandler>);
 
+    /// Remove the handler registered under `name`, reporting whether one went.
+    ///
+    /// Required, with no default implementation, deliberately: a no-op default
+    /// would let a bus silently accumulate handlers forever while every caller
+    /// believed it was cleaning up. Any per-request or per-connection
+    /// subscriber MUST call this when it goes away — before this existed,
+    /// [`clear_subscribers`](Self::clear_subscribers) was the only removal API,
+    /// and dropping all of them is never what one departing subscriber wants.
+    fn unsubscribe(&self, name: &str) -> bool;
+
     /// Clear all subscribers
     fn clear_subscribers(&self);
 }

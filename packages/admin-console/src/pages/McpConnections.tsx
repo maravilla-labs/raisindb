@@ -249,6 +249,35 @@ export default function McpConnections() {
                       Enabled
                     </label>
                   </div>
+
+                  {/*
+                    Opt-in, because a listener holds a socket open for hours
+                    against a third party. The server must also promise the
+                    guarantee, so this may be on without a stream existing.
+                  */}
+                  <label className="text-xs text-white/60 flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={current.refresh_policy?.notifications ?? false}
+                      onChange={async (e) => {
+                        if (!repo) return
+                        try {
+                          await mcpConnectionsApi.update(repo, current.slug, {
+                            refresh_policy: { notifications: e.target.checked },
+                          })
+                          await load()
+                        } catch (err: any) {
+                          showError('Could not change live updates', err?.message)
+                        }
+                      }}
+                    />
+                    <span>
+                      Live updates — hold a connection open so tool changes arrive in seconds
+                      instead of at the next refresh. Requires a server that announces them, and
+                      Redis locks on a cluster.
+                    </span>
+                  </label>
                   <ConnectionAuthPanel
                     repo={repo!}
                     connection={current}

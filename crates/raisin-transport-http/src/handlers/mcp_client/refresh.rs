@@ -58,6 +58,9 @@ pub(crate) async fn enqueue_discovery(
         connection_slug: slug.to_string(),
         tenant_id: tenant.to_string(),
         repo_id: repo.to_string(),
+        // Both callers of this helper are operator actions: the refresh button
+        // and the per-tool enable toggle.
+        source: raisin_storage::jobs::McpDiscoverySource::Manual,
     };
     let job_id = JobId::new();
     let context = JobContext {

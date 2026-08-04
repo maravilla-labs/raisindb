@@ -29,6 +29,6 @@ pub use category::JobCategory;
 pub use id::JobId;
 pub use index_operation::{BatchIndexOperation, IndexOperation};
 pub use info::{JobContext, JobHandle, JobInfo, JobScope, ScopedJobInfo};
-pub use job_type::JobType;
+pub use job_type::{JobType, McpDiscoverySource};
 pub use priority::JobPriority;
 pub use status::JobStatus;

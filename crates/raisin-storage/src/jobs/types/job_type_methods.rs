@@ -347,15 +347,22 @@ impl JobType {
             // Collapses repeated ticks WITHIN ONE PROCESS only — the registry's
             // dedup map is in-memory, not cluster-wide. Cross-node single-fire
             // comes from the lock the handler takes, not from this key.
+            // `source` is deliberately NOT in the key: a notification arriving
+            // while an interval run is already queued must collapse onto it,
+            // and keying on the cause would queue both.
             Self::McpToolDiscovery {
                 connection_slug,
                 tenant_id,
                 repo_id,
+                ..
             } => {
                 format!("mcp_tool_discovery:{tenant_id}:{repo_id}:{connection_slug}")
             }
             Self::McpDiscoveryCheck { tenant_id } => {
-                format!("mcp_discovery_check:{}", tenant_id.as_deref().unwrap_or("*"))
+                format!(
+                    "mcp_discovery_check:{}",
+                    tenant_id.as_deref().unwrap_or("*")
+                )
             }
             Self::VirtualMountSubscriptionRenew { tenant_id } => {
                 format!(
