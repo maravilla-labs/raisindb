@@ -125,7 +125,14 @@ pub async fn run_with(
                     "stop requested; ending the full walk at a page boundary"
                 );
                 stopped = true;
-                break;
+                // `break 'outer`, not `break`. A bare `break` left the page loop
+                // but not the folder loop, so a mount with queued subfolders
+                // carried on and pulled a page from every remaining folder — a
+                // stop that did not stop.
+                //
+                // The resume point is deliberately NOT saved here; see the
+                // `stopped` branch below.
+                break 'outer;
             }
             // Publish progress as we go. A chunk can run for minutes; without
             // this the console sees nothing move until the whole chunk lands.
@@ -194,17 +201,26 @@ pub async fn run_with(
             "backfill chunk complete; will resume on the next run"
         );
     } else if stopped {
-        // Stopped by an operator. Save the resume point exactly as a truncated
-        // chunk does — a stop that discarded the stack here would silently turn
-        // "pause this import" into "start it over". Whether to keep or discard
-        // the cursor is the endpoint's decision, not the walk's.
-        state.backfill_stack = stack.clone();
+        // Stopped by an operator: DISCARD the resume point.
+        //
+        // This is the one place the walk must not behave like a truncated
+        // chunk. The stop endpoint has already cleared `backfill_cursor` and
+        // `backfill_stack`, and this state write happens AFTER it — so saving
+        // them here would resurrect exactly what the operator asked to throw
+        // away, leave the mount due on the next tick, and make Stop a button
+        // that pauses for one run. The endpoint, this branch and the console's
+        // confirmation dialog all have to agree that a stop discards; they now
+        // do.
+        //
+        // Preserving the position is what PAUSE is for, and pause leaves the
+        // walk untouched precisely so it can resume.
+        state.backfill_stack.clear();
+        state.backfill_cursor = None;
         state.backfill_complete = false;
         tracing::info!(
             mount_id = %ctx.mount.mount_id,
             processed,
-            folders_pending = stack.len(),
-            "backfill stopped by request; resume point preserved"
+            "backfill stopped by request; resume point discarded"
         );
     } else {
         state.backfill_stack.clear();

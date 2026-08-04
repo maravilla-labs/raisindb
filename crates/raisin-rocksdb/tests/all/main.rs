@@ -66,4 +66,5 @@ mod test_nodetype_operation_msgpack;
 mod test_relationships;
 mod test_tombstone_handling;
 mod two_node_replication_test;
+mod virtual_mount_sync_e2e_test;
 mod workspace_replication_test;

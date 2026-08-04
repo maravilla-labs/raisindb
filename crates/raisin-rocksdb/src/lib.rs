@@ -176,6 +176,18 @@ pub use jobs::handlers::{
 // hand-rolling a second writer.
 pub use jobs::handlers::virtual_mount_sync::record_push_delivery;
 
+// The virtual-mount sync engine, for the same reason the spatial rebuild
+// handler is re-exported above: `jobs` is private, and a sync is not observable
+// from outside the crate without driving the real handler. The end-to-end tests
+// (`tests/all/virtual_mount_sync_e2e_test.rs`) run whole syncs against a mock
+// adapter — the only way to catch a failure that lives in the seam between the
+// walk, the materializer and the scheduler rather than in any one of them.
+pub use jobs::handlers::virtual_mount_sync::{
+    check as virtual_mount_check, persist_mount_state, read_mount_state, AdapterError,
+    AdapterInvoker, AdapterInvokerHandle, MountConfig, MountScope, MountState,
+    VirtualMountSyncHandler, SYSTEM_WORKSPACE,
+};
+
 // Re-export the scheduled-invocation JobContext metadata keys so transport
 // layers build and read invocation contexts with the same vocabulary as
 // the job handler.
