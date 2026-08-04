@@ -28,6 +28,7 @@ use raisin_models::nodes::Node;
 
 use super::{CustomTool, DataOperation, DataPolicy, UiBinding, UiResource};
 use crate::error::{McpError, Result};
+use crate::props::{bool_prop, str_array_prop, str_prop};
 
 /// A parsed `raisin:McpServer` descriptor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,31 +150,6 @@ impl McpServerDescriptor {
     pub fn allows_operation(&self, op: DataOperation) -> bool {
         self.data_policy.allows(op)
     }
-}
-
-/// Read a string property, descending one level into `dataPolicy` if needed.
-fn str_prop(props: &Value, key: &str) -> Option<String> {
-    props.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-/// Read a boolean property.
-fn bool_prop(props: &Value, key: &str) -> Option<bool> {
-    props.get(key).and_then(Value::as_bool)
-}
-
-/// Read a string-array property (returns empty when absent or non-array).
-fn str_array_prop(props: &Value, key: &str) -> Vec<String> {
-    props
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Read the `data` object (`{ workspaces, operations, resources }`).

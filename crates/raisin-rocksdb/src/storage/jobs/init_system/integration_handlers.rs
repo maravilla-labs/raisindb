@@ -15,10 +15,16 @@ use crate::jobs::{
 use crate::storage::RocksDBStorage;
 
 /// Create the integration OAuth token-refresh handler.
+///
+/// `lock_manager` serializes each integration's refresh across the cluster.
+/// When `None`, refresh is single-node only: the periodic driver's dedup key
+/// does NOT prevent every node running its own sweep, so two nodes can present
+/// the same rotating refresh token concurrently and disconnect the account.
 pub fn create_integration_token_refresh_handler(
     storage: Arc<RocksDBStorage>,
+    lock_manager: Option<LockManagerHandle>,
 ) -> Arc<IntegrationTokenRefreshHandler> {
-    Arc::new(IntegrationTokenRefreshHandler::new(storage))
+    Arc::new(IntegrationTokenRefreshHandler::new(storage, lock_manager))
 }
 
 /// Create the virtual-mount sync engine handler.

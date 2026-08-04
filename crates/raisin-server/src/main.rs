@@ -673,6 +673,14 @@ async fn main() {
                     Some(flow_callbacks.children_lister),
                     Some(ai_tool_call_node_creator),
                     lock_manager.clone(),
+                    // Outbound MCP tool discovery. Built from [mcp_client] so
+                    // the egress policy the HTTP layer enforces on save is the
+                    // same one the job enforces before it dials.
+                    Some(raisin_rocksdb::McpDiscoveryDeps {
+                        egress: server_config.mcp_client.egress_policy(),
+                        max_response_bytes: server_config.mcp_client.max_response_bytes,
+                        http: raisin_functions::shared_http_client(),
+                    }),
                     worker_runtimes,
                     pools_config.clone(),
                 )
@@ -771,10 +779,17 @@ async fn main() {
                         // Integration OAuth token refresh: enqueue at most once
                         // per 10-minute window. The dedup key collapses every
                         // 60s tick inside the same window to a single job, so
-                        // this effectively fires every 10 minutes (and stays
-                        // single-fire across cluster nodes via the registry
-                        // dedup). Idempotent registration needs the context
-                        // stored first, keyed by the same job id.
+                        // this effectively fires every 10 minutes.
+                        //
+                        // Per PROCESS, not per cluster: `JobRegistry`'s dedup
+                        // map is an in-memory HashMap with no storage behind
+                        // it, so every node runs its own sweep. (This comment
+                        // used to claim otherwise.) Cross-node safety is the
+                        // per-integration lease the handler takes, which needs
+                        // [locks] backend=redis to span nodes.
+                        //
+                        // Idempotent registration needs the context stored
+                        // first, keyed by the same job id.
                         let now_secs = chrono::Utc::now().timestamp().max(0) as u64;
                         let dedup_key = raisin_rocksdb::token_refresh_dedup_key(now_secs);
                         let refresh_job = raisin_storage::jobs::JobType::IntegrationTokenRefresh {
@@ -804,6 +819,40 @@ async fn main() {
                             .await
                         {
                             tracing::warn!(error = %e, "Failed to register IntegrationTokenRefresh job");
+                        }
+
+                        // MCP tool discovery scan: enqueue discovery for any
+                        // connection whose refresh interval is due. Same
+                        // 10-minute bucket as the token refresh above, and the
+                        // same caveat — this dedup is per-process, so every
+                        // node runs the scan. That is fine: the scan only
+                        // ENQUEUES, and the per-connection lease inside the
+                        // discovery job is what keeps the writes single-fire.
+                        let mcp_dedup = format!("mcp-discovery-check:{}", now_secs / 600);
+                        let mcp_job =
+                            raisin_storage::jobs::JobType::McpDiscoveryCheck { tenant_id: None };
+                        let mcp_job_id = raisin_storage::jobs::JobId::new();
+                        let mcp_context = raisin_storage::jobs::JobContext {
+                            tenant_id: "_system".to_string(),
+                            repo_id: String::new(),
+                            branch: String::new(),
+                            workspace_id: String::new(),
+                            revision: raisin_hlc::HLC::now(),
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) = job_data_store_for_loop.put(&mcp_job_id, &mcp_context) {
+                            tracing::warn!(error = %e, "Failed to store McpDiscoveryCheck job context");
+                        } else if let Err(e) = registry_for_loop
+                            .register_job_with_id_idempotent(
+                                mcp_job_id,
+                                mcp_job,
+                                "_system".to_string(),
+                                mcp_dedup,
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to register McpDiscoveryCheck job");
                         }
 
                         // Virtual-mount sync check: scan every ~60s for mounts
@@ -987,6 +1036,12 @@ async fn main() {
     // background jobs are disabled — this one must always fire.
     let conn_shutdown = tokio_util::sync::CancellationToken::new();
 
+    // Install the operator's outbound-MCP settings before anything can execute
+    // a proxy function. Process-global, so every execution path — HTTP, WS,
+    // jobs, flows — enforces the SAME egress policy the HTTP layer applies when
+    // a connection is saved.
+    raisin_functions::configure_mcp_client(server_config.mcp_client.clone());
+
     let (api_router, app_state) = http::router_with_bin_and_audit(
         storage.clone(),
         ws_svc.clone(),
@@ -1015,6 +1070,7 @@ async fn main() {
         Some(auth_service.clone()),
         Some(schema_stats_cache.clone()),
         lock_manager.clone(),
+        Some(server_config.mcp_client.clone()),
     );
 
     // Let the HTTP layer's long-lived responses (SSE) observe the shutdown

@@ -26,6 +26,7 @@
 - [SQL Access Control Extensions](./architecture/sql-access-control.md)
 - [MCP Servers as Content](./architecture/mcp.md)
   - [Native MCP-UI Support](./architecture/mcp-ui.md)
+  - [MCP Client: Calling Other Servers](./architecture/mcp-client.md)
 
 # Guides
 

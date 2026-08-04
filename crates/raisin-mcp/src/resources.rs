@@ -35,79 +35,12 @@ use crate::identity::McpIdentity;
 use crate::protocol::ResourceUpdatedNotification;
 use crate::services::{NodeChange, SharedAssetReader, SharedEventSource};
 
-/// URI scheme used to address RaisinDB content as MCP resources.
-pub const RESOURCE_SCHEME: &str = "raisin";
-
-/// Descriptor for a resource, returned by `resources/list`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceDescriptor {
-    /// Fully-qualified `raisin://` URI of the resource.
-    pub uri: String,
-    /// Display name.
-    pub name: String,
-    /// Optional human-readable description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// MIME type of the resource contents.
-    #[serde(rename = "mimeType")]
-    pub mime_type: String,
-}
-
-/// The decoded contents of a resource, returned by `resources/read`.
-///
-/// Mirrors MCP's `TextResourceContents` / `BlobResourceContents`: `text` carries
-/// UTF-8 payloads (JSON node contents, an HTML widget, a `text/uri-list`), and
-/// `blob` carries base64-encoded binary payloads (an image, a PDF). Exactly one
-/// is populated for a given read.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceContents {
-    /// URI the contents were read from.
-    pub uri: String,
-    /// MIME type of `text` / `blob`.
-    #[serde(rename = "mimeType")]
-    pub mime_type: String,
-    /// Text body (JSON for node contents, HTML/uri-list for widget resources).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Base64-encoded binary body, for byte-for-byte asset reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blob: Option<String>,
-}
-
-/// Build a `raisin://` resource URI from a workspace and node path.
-pub fn resource_uri(workspace: &str, path: &str) -> String {
-    let trimmed = path.strip_prefix('/').unwrap_or(path);
-    format!("{RESOURCE_SCHEME}://{workspace}/{trimmed}")
-}
-
-/// Split a `raisin://{workspace}/{path}` URI back into its components.
-///
-/// Returns the workspace authority and the absolute node path.
-pub fn parse_resource_uri(uri: &str) -> Result<(String, String)> {
-    let prefix = format!("{RESOURCE_SCHEME}://");
-    let rest = uri
-        .strip_prefix(&prefix)
-        .ok_or_else(|| McpError::invalid_params(format!("not a {RESOURCE_SCHEME} URI: {uri}")))?;
-    match rest.split_once('/') {
-        Some((workspace, path)) => {
-            if workspace.is_empty() {
-                return Err(McpError::invalid_params(format!(
-                    "missing workspace in URI: {uri}"
-                )));
-            }
-            Ok((workspace.to_string(), format!("/{path}")))
-        }
-        // `raisin://{workspace}` with no path addresses the workspace root.
-        None => {
-            if rest.is_empty() {
-                return Err(McpError::invalid_params(format!(
-                    "missing workspace in URI: {uri}"
-                )));
-            }
-            Ok((rest.to_string(), "/".to_string()))
-        }
-    }
-}
+// The wire types and URI helpers moved to `raisin-mcp-protocol` so the
+// outbound client can parse a resource without linking the server half. They
+// are re-exported here, unchanged, so every existing path keeps working.
+pub use raisin_mcp_protocol::resource_types::{
+    parse_resource_uri, resource_uri, ResourceContents, ResourceDescriptor, RESOURCE_SCHEME,
+};
 
 /// Read-only provider that serves RaisinDB nodes as MCP resources and bridges
 /// live node-change events into resource-update notifications.

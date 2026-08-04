@@ -50,6 +50,8 @@ mod handlers {
     pub mod locks;
     pub mod management;
     pub mod mcp;
+    #[cfg(feature = "storage-rocksdb")]
+    pub mod mcp_client;
     pub mod mixins;
     pub mod node_types;
     #[cfg(feature = "storage-rocksdb")]

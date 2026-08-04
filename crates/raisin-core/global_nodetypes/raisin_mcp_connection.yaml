@@ -1,0 +1,186 @@
+name: raisin:McpConnection
+description: An external Model Context Protocol server that RaisinDB connects to as a client
+icon: plug-zap
+version: 1
+strict: true
+indexable: true
+index_types: [Property]
+properties:
+  - name: title
+    type: String
+    required: true
+    title: Title
+    description: Human-readable connection title
+    meta:
+      label: Title
+      placeholder: Linear
+
+  - name: slug
+    type: String
+    required: true
+    unique: true
+    title: Slug
+    description: |
+      URL-safe identifier. Load-bearing: it namespaces every generated proxy
+      function's name AND path (/mcp/{slug}/{tool}), so changing it after tools
+      have been discovered orphans every proxy and breaks every agent that
+      references one. The admin console locks it after the first save.
+    index: [Property]
+    meta:
+      label: Slug
+      description: Lowercase, URL-safe. Cannot be changed once tools are discovered.
+      placeholder: linear
+
+  - name: url
+    type: String
+    required: true
+    title: Endpoint URL
+    description: |
+      Streamable HTTP endpoint of the remote MCP server. Must be https except
+      for loopback, which is allowed only when the server's [mcp_client]
+      config sets allow_private_addresses. Validated on save AND again at call
+      time, because a name that resolved publicly once can be re-pointed at a
+      private address later (DNS rebinding).
+    meta:
+      label: Endpoint URL
+      placeholder: https://mcp.example.com/mcp
+
+  - name: enabled
+    type: Boolean
+    required: false
+    title: Enabled
+    description: Whether this connection is active. Disabled connections are never called and never discovered.
+    default: true
+    index: [Property]
+
+  - name: protocol_version
+    type: String
+    required: false
+    title: Negotiated Protocol Version
+    description: MCP revision agreed with this server on the last handshake. Written by discovery; not author-editable.
+
+  - name: auth_kind
+    type: String
+    required: false
+    title: Authentication
+    description: |
+      How RaisinDB authenticates to this server: "none", "static" (a bearer
+      token / API key / custom header) or "oauth" (OAuth 2.1 service account).
+      Every caller of a proxy tool shares this ONE credential — a proxy carries
+      the connection's authority, not the calling user's.
+    default: "none"
+    meta:
+      label: Authentication
+      enum: [none, static, oauth]
+
+  - name: static_auth
+    type: Object
+    required: false
+    title: Static Auth Shape
+    description: |
+      NON-SECRET shape of the static credential; the value itself lives only in
+      credential_encrypted. Structure:
+        { scheme: "bearer" | "header",
+          header_name }  # scheme=header, e.g. "X-Api-Key"
+
+      There is deliberately no query-parameter scheme: it would put the secret
+      in the request line, where proxies, access logs and error reports capture
+      it. A server that only accepts a query key needs a documented exception,
+      not a general option.
+
+  - name: credential_encrypted
+    type: String
+    required: false
+    title: Encrypted Credential
+    description: |
+      base64(nonce||ciphertext), AES-256-GCM under RAISIN_MASTER_KEY, of
+      { value: "..." }. Write-only: set through the credential endpoint, never
+      returned by any read. The UI shows only whether it is set.
+
+  - name: oauth_client
+    type: Object
+    required: false
+    title: OAuth Client
+    description: |
+      Discovered, NON-SECRET OAuth 2.1 client registration:
+        { issuer, authorization_endpoint, token_endpoint, registration_endpoint,
+          client_id, scopes: [...], resource, registered_at }
+      Populated by the oauth/discover endpoint (RFC 9728 -> RFC 8414 -> RFC 7591).
+
+  - name: oauth_client_secret_encrypted
+    type: String
+    required: false
+    title: Encrypted OAuth Client Secret
+    description: base64 AES-256-GCM. Present only when dynamic client registration issued a confidential client.
+
+  - name: tokens_encrypted
+    type: String
+    required: false
+    title: Encrypted Tokens
+    description: |
+      base64 AES-256-GCM of { access_token, refresh_token }. The refresh token
+      never leaves Rust and is never returned by any endpoint.
+
+  - name: expires_at
+    type: Number
+    required: false
+    title: Access Token Expiry
+    description: Unix seconds. Drives the token-refresh sweep.
+
+  - name: tool_filter
+    type: Object
+    required: false
+    title: Tool Filter
+    description: |
+      Which of the server's tools to expose: { allow: [remoteName], deny: [remoteName] }.
+      An empty allow list means "all except deny". Filtered tools still get a
+      proxy node, created disabled, so an operator can see what the server offers.
+
+  - name: refresh_policy
+    type: Object
+    required: false
+    title: Refresh Policy
+    description: |
+      { mode: "manual" | "interval", interval_secs, on_save: bool,
+        call_timeout_ms }
+      call_timeout_ms bounds a single tools/call; it is capped by the job timeout.
+
+  - name: discovered_tools
+    type: Array
+    required: false
+    title: Discovered Tools
+    description: |
+      One entry per tool seen on this server, maintained by discovery:
+        { remote_name,      # VERBATIM name, the only thing sent in tools/call
+          function_name,    # {slug}__{tool-slug}, unique across connections
+          function_path,    # /mcp/{slug}/{tool-slug} in the functions workspace
+          schema_hash,      # skips a rewrite when nothing changed
+          enabled,
+          state }           # "active" | "missing" | "conflict"
+      A tool that disappears upstream is marked "missing" and its proxy is
+      disabled, never deleted: deleting it makes the tool vanish from an agent
+      with no diagnosis anywhere.
+
+  - name: health
+    type: Object
+    required: false
+    title: Health
+    description: |
+      Last probe result:
+        { status,            # ok | auth_expired | unreachable | config_error
+          checked_at, server_info, capabilities, tool_count,
+          error_code, error }
+
+  - name: last_synced_at
+    type: String
+    required: false
+    title: Last Synced At
+    description: ISO 8601 timestamp of the last successful tool discovery
+
+allowed_children: []
+# Deliberately NOT versionable: discovery rewrites health/last_synced_at on
+# every refresh, so an hourly interval would mint ~8760 revisions per year per
+# connection for data nobody reads historically.
+versionable: false
+publishable: false
+auditable: true

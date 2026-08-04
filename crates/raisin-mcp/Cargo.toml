@@ -9,7 +9,10 @@ license = "BSL-1.1"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["client"]
+# Re-exports the outbound client from raisin-mcp-protocol, so existing
+# `raisin_mcp::client::…` paths keep resolving.
+client = ["raisin-mcp-protocol/client"]
 
 [dependencies]
 # Workspace-pinned external crates
@@ -25,6 +28,9 @@ base64 = { workspace = true }
 raisin-error = { path = "../raisin-error" }
 raisin-models = { path = "../raisin-models" }
 raisin-functions = { path = "../raisin-functions" }
+# Wire types + outbound client. Split out so crates BELOW raisin-functions
+# (raisin-rocksdb and friends) can use MCP without closing a dependency cycle.
+raisin-mcp-protocol = { path = "../raisin-mcp-protocol", default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true }

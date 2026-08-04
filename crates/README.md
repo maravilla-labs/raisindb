@@ -95,6 +95,23 @@ Internationalization support
 ### `raisin-scripting-lua`
 Lua scripting integration
 
+## Model Context Protocol
+
+### `raisin-mcp-protocol`
+MCP wire types and the outbound **client** — RaisinDB calling somebody else's
+MCP server:
+- JSON-RPC envelopes and typed `tools/*` / `resources/*` payloads
+- Streamable HTTP transport, session cache, egress (SSRF) policy
+- Tool discovery reconcile planner
+- Deliberately does NOT depend on `raisin-functions`, so storage-layer job
+  handlers can use MCP without a dependency cycle
+
+### `raisin-mcp`
+The MCP **server** surface — serving RaisinDB's own tools to external clients:
+- Tool registry, data tools, dispatcher, MCP-UI (SEP-1865) widgets
+- Servers are content: a `raisin:McpServer` node, not config
+- Depends on `raisin-mcp-protocol` and re-exports it
+
 ## Transport Layers
 
 ### `raisin-transport-http`

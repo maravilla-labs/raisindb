@@ -1,7 +1,7 @@
 name: raisin:Function
 description: Serverless function definition for RaisinDB
 icon: function-square
-version: 1
+version: 2
 strict: true
 indexable: true
 index_types: [Property]
@@ -117,6 +117,10 @@ properties:
     required: false
     title: MCP Tool
     description: |
+      INBOUND. Do not confuse with `mcp_proxy` below, which is the opposite
+      direction: `mcp` exposes THIS local function to external MCP clients,
+      `mcp_proxy` marks a function that IS a remote server's tool.
+
       Optional MCP tool declaration. When present, the function is promoted to a
       tool on every raisin:McpServer whose data policy covers this function's
       workspace (and on every server, since the functions workspace is always
@@ -126,6 +130,27 @@ properties:
       function name), description (string, defaults to the function description),
       inputSchema (object, defaults to the function input_schema), outputSchema
       (object, defaults to the function output_schema), scopes (array of strings) }
+
+  - name: mcp_proxy
+    type: Object
+    required: false
+    title: MCP Proxy
+    description: |
+      OUTBOUND. The opposite direction from `mcp` above.
+
+      Present ONLY on a generated proxy for a remote MCP server's tool. Marks
+      this function as having NO CODE: invocation is forwarded to the named
+      raisin:McpConnection's remote tool instead of a QuickJS/Starlark runtime.
+      Its presence — not `language` or `execution_mode` — is what the executor
+      branches on, because an unrecognised execution_mode silently parses as
+      "async" and an unrecognised language is a hard error.
+
+      Managed by tool discovery; hand edits are overwritten on the next refresh.
+      Structure: { connection (path of the raisin:McpConnection node),
+                   connection_slug, remote_tool (the VERBATIM remote name — the
+                   only thing sent in tools/call, never derived from the local
+                   slug), schema_hash, discovered_at,
+                   state: "active" | "missing" | "conflict" }
 
 allowed_children:
   - raisin:Asset

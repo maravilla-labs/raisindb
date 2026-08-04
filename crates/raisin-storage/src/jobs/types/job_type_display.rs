@@ -426,6 +426,19 @@ impl fmt::Display for JobType {
                 "IntegrationTokenRefresh({})",
                 tenant_id.as_deref().unwrap_or("*")
             ),
+            Self::McpToolDiscovery {
+                connection_slug,
+                tenant_id,
+                repo_id,
+            } => write!(
+                f,
+                "McpToolDiscovery({tenant_id}/{repo_id}/{connection_slug})"
+            ),
+            Self::McpDiscoveryCheck { tenant_id } => write!(
+                f,
+                "McpDiscoveryCheck({})",
+                tenant_id.as_deref().unwrap_or("*")
+            ),
             Self::VirtualMountSubscriptionRenew { tenant_id } => write!(
                 f,
                 "VirtualMountSubscriptionRenew({})",

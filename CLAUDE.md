@@ -93,6 +93,8 @@ Transport (HTTP/WS/PGWire)  →  Core Business Logic  →  Storage Abstraction  
 | `raisin-sql-execution` | Physical plan execution, Cypher/PGQ support |
 | `raisin-replication` | CRDT-based multi-master replication |
 | `raisin-hlc` | Hybrid Logical Clock for versioning |
+| `raisin-mcp-protocol` | MCP wire types + outbound MCP **client** (no `raisin-functions` dep — see below) |
+| `raisin-mcp` | MCP **server** surface; depends on `raisin-mcp-protocol` and re-exports it |
 
 ### Transport Crates
 
@@ -423,6 +425,65 @@ Full authoring guide: `docs/workflows.md`. Engine-owned gaps and their triage:
 - Runtime format takes retry config as FLAT step properties (`max_retries`,
   `retry_base_delay_ms`); the nested `retry: {...}` object is designer-format
   only and the converter flattens it.
+
+## MCP: both directions
+
+RaisinDB is both an MCP **server** (external clients call its tools) and an MCP
+**client** (its agents call other servers' tools).
+
+**The crate split is load-bearing, not cosmetic.** `raisin-mcp` serves tools, so
+it depends on `raisin-functions` — which depends on `raisin-rocksdb`. Anything at
+or below the storage layer therefore cannot depend on `raisin-mcp` without
+closing a package cycle, and **Cargo rejects package cycles regardless of
+features**. `raisin-mcp-protocol` holds the wire types and the client with no
+`raisin-functions` dependency; `raisin-mcp` re-exports it, so
+`raisin_mcp::protocol::…` paths still resolve. Do not "simplify" them back
+together.
+
+Invariants to preserve:
+
+- **A proxy is a `raisin:Function` with an `mcp_proxy` block.** Presence of that
+  block is the discriminator, checked in `execute_function`
+  (`raisin-functions/.../executor.rs`) BEFORE the code load. It cannot be
+  `execution_mode` (an unknown value silently parses as `Async`) nor `language`
+  (an unknown value is a hard error). `mcp` on a function means the OPPOSITE
+  direction — expose this local function to inbound clients.
+- **One execution branch, not two.** All three paths (JS chat via the
+  `AIToolCall` job, `raisin.functions.execute()`, the flow runtime) funnel
+  through `execute_function`. Add remote-tool behaviour there, never per-path.
+- **Proxy paths never change.** An agent's `tools:` array holds a path; a rename
+  makes the tool vanish from that agent with no error anywhere. Slugs are
+  derived deterministically and collision suffixes assigned in sorted
+  remote-name order, so a server that reorders its listing cannot renumber them.
+- **A steady-state discovery writes nothing.** The schema-hash guard in
+  `reconcile_plan` is what stops an hourly refresh minting thousands of function
+  revisions a year. The hash is over CANONICAL JSON — this workspace builds
+  `serde_json` with `preserve_order`, so key order alone would otherwise change
+  the hash and rewrite every proxy forever.
+- **A tool that disappears upstream is disabled, never deleted.** A missing node
+  makes the tool vanish silently; a disabled one stays visible in the console.
+- **A failed probe records health and leaves proxies alone.** A remote being
+  down means the tool list is unknown, not empty.
+- **Egress is checked twice** — when a connection is saved and again before
+  every dial — because a host that resolved publicly can be re-pointed later.
+  Config is `[mcp_client]`, installed process-wide via
+  `raisin_functions::configure_mcp_client`, so every path shares one policy.
+- **`tools/call` is never auto-retried.** MCP has no idempotency key; a retry
+  can charge a card twice. Only session recovery replays, once.
+
+## Job dedup is per-PROCESS, not per-cluster
+
+`JobRegistry`'s dedup map is an in-memory `HashMap` with no storage behind it
+(`raisin-storage/src/jobs/registry/mod.rs`). `register_job_with_id_idempotent`
+collapses duplicates **within one process only** — on an N-node cluster every
+node runs its own copy of a periodic job.
+
+Anything that must run once per cluster needs a `raisin_locks` lease inside the
+handler (and the `redis` backend; `inprocess` serializes within one node).
+Both the integration token refresh and MCP tool discovery take a per-entity
+lease for exactly this reason — without it, two nodes presenting the same
+rotating OAuth refresh token can invalidate each other's, and two nodes writing
+the same node lose one another's update.
 
 ## Code Conventions
 

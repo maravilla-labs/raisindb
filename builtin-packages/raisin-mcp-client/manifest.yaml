@@ -1,0 +1,62 @@
+name: raisin-mcp-client
+version: 1.0.0
+title: MCP Client
+description: >
+  Connect RaisinDB to external Model Context Protocol servers. Each
+  raisin:McpConnection node describes one remote server; tool discovery
+  materializes one raisin:Function proxy per remote tool under /mcp/{slug}/ in
+  the functions workspace, which agents reference from their `tools:` array
+  exactly like any local function.
+
+  This is the OUTBOUND direction. The `raisin-mcp` package is the inbound one —
+  it lets external clients call RaisinDB's own tools. The two are independent:
+  a repo may run either, both, or neither.
+author: RaisinDB Team
+license: BSL-1.1
+icon: plug-zap
+color: "#0EA5E9"
+keywords:
+  - mcp
+  - model-context-protocol
+  - client
+  - tools
+  - agent
+
+# Discovery contract for the admin console's Connectors gallery.
+category: integrations
+
+builtin: true
+# Only patches raisin:system's allowed types and ships one disabled example;
+# raisin:McpConnection itself is a globally-registered node type. Nothing here
+# reaches the network until an operator creates and enables a connection, so it
+# is safe in every repo on boot.
+auto_install: true
+
+provides:
+  content:
+    - /raisin:system/mcp-connections/example-linear
+
+sync:
+  defaults:
+    mode: merge
+    on_conflict: prefer_server
+
+  filters:
+    # The example is documentation. `prefer_server` keeps a package update from
+    # overwriting an operator who edited it into a real connection — and the
+    # connection they would have edited holds credentials.
+    - root: /mcp-connections/example-linear
+      include:
+        - "**"
+      mode: merge
+      on_conflict: prefer_server
+
+workspace_patches:
+  # Generated proxies live under /mcp/{slug}/ in the functions workspace, and
+  # discovery creates those folders on demand.
+  functions:
+    default_folder_type: raisin:Folder
+  "raisin:system":
+    allowed_node_types:
+      add:
+        - raisin:McpConnection

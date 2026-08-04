@@ -153,6 +153,29 @@ where
     )
     .await?;
 
+    // 1b. Remote MCP proxy: no code to load, no runtime to spin up.
+    //
+    // Placed here on purpose — BEFORE `load_function_code`, which resolves the
+    // entry file and parses `language`. A proxy has neither: its `language` is
+    // a placeholder the schema requires, and an unrecognised value there is a
+    // hard error. Because every execution path funnels through this function,
+    // this single branch serves the JS chat path, `raisin.functions.execute()`,
+    // the flow runtime and the HTTP invoke endpoint alike.
+    if let Some(proxy) = super::remote_tool::proxy_block(&func_node) {
+        return super::remote_tool::invoke_remote_tool(
+            deps,
+            &proxy,
+            function_path,
+            execution_id,
+            input,
+            tenant_id,
+            repo_id,
+            branch,
+            start_time,
+        )
+        .await;
+    }
+
     // 2. Load code and metadata
     let (code, metadata) = code_loader::load_function_code(
         deps.storage.as_ref(),

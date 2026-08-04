@@ -25,6 +25,10 @@ use serde_json::Value;
 
 use crate::error::McpError;
 
+/// Re-exported so every `crate::protocol::ContentBlock` path keeps resolving;
+/// the type moved to [`crate::content`] when its codec became hand-written.
+pub use crate::content::ContentBlock;
+
 /// JSON-RPC protocol version string carried by every message.
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -371,19 +375,59 @@ pub struct ResourcesCapability {
 // `tools/list` and `tools/call`
 // ---------------------------------------------------------------------------
 
+/// `serde` default for a `resultType` field a peer omitted.
+///
+/// The cacheable-result fields below are 2026-07-28 additions. Every shipping
+/// server predates them, so a client that requires them cannot parse a single
+/// real `tools/list` response. Defaulting is what makes this struct usable in
+/// the client direction as well as the server one.
+fn default_result_type() -> String {
+    RESULT_TYPE_COMPLETE.to_string()
+}
+
+/// Parameters of `tools/list`.
+///
+/// Sent by the client. `cursor` carries the previous page's `nextCursor`;
+/// absent on the first page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListToolsParams {
+    /// Opaque pagination cursor from the previous page's `nextCursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
 /// Result of `tools/list`: the advertised tool set.
+///
+/// Generic over the descriptor type so one envelope serves both directions:
+/// the server fills it with RaisinDB's extended `ToolDescriptor` (which lives
+/// in `raisin-mcp`, since it carries a UI binding the client has no use for),
+/// while the client parses a remote reply into
+/// [`crate::client::RemoteToolDescriptor`], which carries only spec fields.
+///
+/// There is deliberately no default type parameter: defaulting it to the
+/// server's descriptor is what tied this module to the server half.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListToolsResult {
+pub struct ListToolsResult<T> {
     /// Discriminates the result shape; always `"complete"` here.
-    #[serde(rename = "resultType")]
+    #[serde(rename = "resultType", default = "default_result_type")]
     pub result_type: String,
     /// All tools the caller is allowed to see.
-    pub tools: Vec<crate::registry::ToolDescriptor>,
+    pub tools: Vec<T>,
+    /// Pagination cursor for the next page; `None` on the last page.
+    ///
+    /// Dropping this silently truncates a paginated server's tool set to its
+    /// first page, so every client-side listing MUST loop until it is `None`.
+    #[serde(
+        rename = "nextCursor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next_cursor: Option<String>,
     /// How long (ms) the client MAY cache this listing.
-    #[serde(rename = "ttlMs")]
+    #[serde(rename = "ttlMs", default)]
     pub ttl_ms: u64,
     /// Cache scope — `private`, since the listing is filtered by caller scope.
-    #[serde(rename = "cacheScope")]
+    #[serde(rename = "cacheScope", default)]
     pub cache_scope: String,
 }
 
@@ -403,9 +447,10 @@ pub struct CallToolResult {
     /// Discriminates the result shape; always `"complete"` here. A tool that
     /// needs more input would answer `input_required` with an
     /// `InputRequiredResult` instead — not yet implemented.
-    #[serde(rename = "resultType")]
+    #[serde(rename = "resultType", default = "default_result_type")]
     pub result_type: String,
-    /// Result content blocks.
+    /// Result content blocks. Absent on a structured-content-only result.
+    #[serde(default)]
     pub content: Vec<ContentBlock>,
     /// `true` when the tool reported a domain-level failure.
     #[serde(rename = "isError", default)]
@@ -455,53 +500,6 @@ impl CallToolResult {
     }
 }
 
-/// A single content block in a [`CallToolResult`] or resource read.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum ContentBlock {
-    /// Plain-text content.
-    Text {
-        /// The text body.
-        text: String,
-    },
-    /// Structured JSON content.
-    Json {
-        /// The JSON value.
-        json: Value,
-    },
-    /// An embedded resource (e.g. an MCP-UI widget delivered inline as
-    /// `text/html`, or a `text/uri-list` pointer to an iframable page).
-    Resource {
-        /// The embedded resource contents.
-        resource: crate::resources::ResourceContents,
-    },
-}
-
-impl ContentBlock {
-    /// Build a text content block.
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
-    }
-
-    /// Build a JSON content block.
-    pub fn json(json: Value) -> Self {
-        Self::Json { json }
-    }
-
-    /// Build an embedded-resource content block.
-    pub fn resource(resource: crate::resources::ResourceContents) -> Self {
-        Self::Resource { resource }
-    }
-
-    /// Build a spec-compliant `text` content block holding a serialized JSON
-    /// value (pretty-printed for readability; compact on serialize failure).
-    pub fn json_text(value: &Value) -> Self {
-        Self::Text {
-            text: serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // `resources/list`, `resources/read`, `resources/subscribe`
 // ---------------------------------------------------------------------------
@@ -513,7 +511,7 @@ pub struct ListResourcesResult {
     #[serde(rename = "resultType")]
     pub result_type: String,
     /// All readable resources visible to the caller.
-    pub resources: Vec<crate::resources::ResourceDescriptor>,
+    pub resources: Vec<crate::resource_types::ResourceDescriptor>,
     /// How long (ms) the client MAY cache this listing.
     #[serde(rename = "ttlMs")]
     pub ttl_ms: u64,
@@ -536,7 +534,7 @@ pub struct ReadResourceResult {
     #[serde(rename = "resultType")]
     pub result_type: String,
     /// One content entry per URI read.
-    pub contents: Vec<crate::resources::ResourceContents>,
+    pub contents: Vec<crate::resource_types::ResourceContents>,
     /// How long (ms) the client MAY cache these contents.
     #[serde(rename = "ttlMs")]
     pub ttl_ms: u64,

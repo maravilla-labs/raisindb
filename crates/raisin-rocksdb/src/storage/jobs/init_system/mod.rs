@@ -74,6 +74,9 @@ impl RocksDBStorage {
         flow_children_lister: Option<FlowChildrenListerCallback>,
         ai_tool_call_node_creator: Option<NodeCreatorCallback>,
         lock_manager: Option<raisin_locks::LockManagerHandle>,
+        // Outbound MCP discovery settings. `None` = the feature is not
+        // configured and discovery jobs no-op with a warning.
+        mcp_discovery: Option<crate::jobs::McpDiscoveryDeps>,
         runtimes: HashMap<JobCategory, tokio::runtime::Handle>,
         pools_config: JobPoolsConfig,
     ) -> Result<(Arc<RocksDBWorkerPool>, CancellationToken)> {
@@ -226,7 +229,18 @@ impl RocksDBStorage {
             ai_handlers::create_asset_processing_handler(self.clone(), binary_retrieval.as_ref());
 
         let integration_token_refresh_handler =
-            integration_handlers::create_integration_token_refresh_handler(self.clone());
+            integration_handlers::create_integration_token_refresh_handler(
+                self.clone(),
+                lock_manager.clone(),
+            );
+
+        let mcp_tool_discovery_handler = mcp_discovery.map(|deps| {
+            Arc::new(crate::jobs::McpToolDiscoveryHandler::new(
+                self.clone(),
+                lock_manager.clone(),
+                deps,
+            ))
+        });
 
         let virtual_mount_sync_handler = integration_handlers::create_virtual_mount_sync_handler(
             self.clone(),
@@ -238,45 +252,50 @@ impl RocksDBStorage {
 
         let spatial_index_handler = indexing_handlers::create_spatial_index_handler(&self);
 
-        let handlers = Arc::new(
-            JobHandlerRegistry::new(
-                fulltext_handler,
-                embedding_handler,
-                snapshot_handler,
-                replication_gc_handler,
-                replication_sync_handler,
-                oplog_compaction_handler,
-                property_index_handler,
-                compound_index_handler,
-                bulk_sql_handler,
-                revision_history_copy_handler,
-                copy_tree_handler,
-                restore_tree_handler,
-                node_delete_cleanup_handler,
-                retarget_references_handler,
-                relation_consistency_handler,
-                function_execution_handler,
-                flow_execution_handler,
-                flow_instance_execution_handler,
-                trigger_evaluation_handler,
-                scheduled_trigger_handler,
-                scheduled_invocation_handler,
-                package_install_handler,
-                package_process_handler,
-                package_export_handler,
-                package_create_from_selection_handler,
-                ai_tool_call_execution_handler.clone(),
-                ai_tool_result_aggregation_handler,
-                auth_create_user_node_handler,
-                resumable_upload_handler,
-                upload_session_cleanup_handler,
-                huggingface_model_handler,
-                asset_processing_handler,
-                integration_token_refresh_handler,
-                virtual_mount_sync_handler,
-            )
-            .with_spatial_index(spatial_index_handler),
-        );
+        let registry = JobHandlerRegistry::new(
+            fulltext_handler,
+            embedding_handler,
+            snapshot_handler,
+            replication_gc_handler,
+            replication_sync_handler,
+            oplog_compaction_handler,
+            property_index_handler,
+            compound_index_handler,
+            bulk_sql_handler,
+            revision_history_copy_handler,
+            copy_tree_handler,
+            restore_tree_handler,
+            node_delete_cleanup_handler,
+            retarget_references_handler,
+            relation_consistency_handler,
+            function_execution_handler,
+            flow_execution_handler,
+            flow_instance_execution_handler,
+            trigger_evaluation_handler,
+            scheduled_trigger_handler,
+            scheduled_invocation_handler,
+            package_install_handler,
+            package_process_handler,
+            package_export_handler,
+            package_create_from_selection_handler,
+            ai_tool_call_execution_handler.clone(),
+            ai_tool_result_aggregation_handler,
+            auth_create_user_node_handler,
+            resumable_upload_handler,
+            upload_session_cleanup_handler,
+            huggingface_model_handler,
+            asset_processing_handler,
+            integration_token_refresh_handler,
+            virtual_mount_sync_handler,
+        )
+        .with_spatial_index(spatial_index_handler);
+        // Applied before the Arc: the registry is not Clone, so attaching after
+        // wrapping would mean unwrapping it again.
+        let registry = match mcp_tool_discovery_handler {
+            Some(h) => registry.with_mcp_tool_discovery(h),
+            None => registry,
+        };
+        let handlers = Arc::new(registry);
 
         // --- Set up three-pool worker system ---
 

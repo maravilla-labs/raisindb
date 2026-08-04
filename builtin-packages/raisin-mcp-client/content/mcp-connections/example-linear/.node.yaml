@@ -1,0 +1,34 @@
+# A documentation example, shipped DISABLED. It is never dialled as-is: an
+# enabled connection with no credential would just 401 on every discovery run.
+#
+# To make it real: set a credential through
+#   PUT /api/mcp-connections/{repo}/example-linear/credential
+# (or use the admin console's Connections page), then set enabled: true and
+# trigger a refresh. Never put a token in this file — it is package content and
+# replicates in plaintext.
+node_type: raisin:McpConnection
+name: example-linear
+properties:
+  title: "Linear (example — disabled)"
+  slug: example-linear
+  url: "https://mcp.linear.app/mcp"
+  enabled: false
+
+  # `oauth` here means the OAuth 2.1 service-account flow: RaisinDB discovers
+  # the authorization server from the 401 challenge, registers itself
+  # dynamically, and an operator completes the consent once in the console.
+  # Every caller of a generated proxy then shares that ONE identity.
+  auth_kind: oauth
+
+  refresh_policy:
+    mode: interval
+    interval_secs: 3600
+    on_save: true
+    call_timeout_ms: 30000
+
+  # Empty allow = expose everything the server offers, minus `deny`. Narrowing
+  # `allow` to the handful of tools an agent actually needs is the cheapest way
+  # to bound what a remote server can be asked to do with your data.
+  tool_filter:
+    allow: []
+    deny: []

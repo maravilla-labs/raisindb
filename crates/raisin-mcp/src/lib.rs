@@ -67,11 +67,19 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
+// The wire types and the outbound client now live in `raisin-mcp-protocol`,
+// which this crate re-exports so every existing `raisin_mcp::protocol::…` /
+// `raisin_mcp::client::…` path keeps resolving. They were split out because
+// this crate depends on `raisin-functions` (to serve tools), which depends on
+// `raisin-rocksdb` — so nothing below that line could use MCP without closing
+// a package cycle, which Cargo rejects outright.
+#[cfg(feature = "client")]
+pub use raisin_mcp_protocol::client;
+pub use raisin_mcp_protocol::{content, error, props, protocol};
+
 pub mod data_tools;
 pub mod dispatch;
-pub mod error;
 pub mod identity;
-pub mod protocol;
 pub mod registry;
 pub mod resources;
 pub mod server;

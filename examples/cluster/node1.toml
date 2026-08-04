@@ -45,3 +45,25 @@ reaper_interval_secs = 30
 url = "redis://127.0.0.1:6379/0"
 # Key prefix; isolates multiple RaisinDB clusters sharing one Redis.
 namespace = "raisin:locks"
+
+# Outbound MCP client — where RaisinDB may connect when calling ANOTHER
+# server's tools (RaisinDB as an MCP client). Distinct from the inbound MCP
+# server surface, which is content: a raisin:McpServer node in the `mcp`
+# workspace, not config.
+#
+# The whole section is optional. Omitting it keeps the safe defaults below,
+# which refuse loopback and private addresses — an operator-supplied connection
+# URL must not be able to turn the server into a proxy into its own network
+# (http://169.254.169.254/ is cloud instance metadata).
+[mcp_client]
+# Empty = any PUBLIC host. Listing hosts narrows further, to named third
+# parties. Entries are exact ("mcp.linear.app") or a wildcard suffix
+# ("*.example.com", which matches sub-domains but NOT the bare apex).
+allowed_hosts = []
+# Permit loopback/private addresses AND plain http. Turn on only for local
+# development, or when an MCP server runs as a sidecar on a known address.
+allow_private_addresses = false
+# Cap on a single response body from a remote server.
+max_response_bytes = 8388608
+# Per-request timeout; a connection may lower it via refresh_policy.call_timeout_ms.
+default_timeout_ms = 30000

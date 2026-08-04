@@ -134,6 +134,8 @@ crates/
 ├── raisin-indexer/          # Full-text indexing (Tantivy)
 ├── raisin-hnsw/             # Vector similarity search (HNSW)
 ├── raisin-functions/        # Embedded function runtimes (QuickJS, Starlark)
+├── raisin-mcp-protocol/     # MCP wire types + outbound MCP client
+├── raisin-mcp/              # MCP server surface (serve tools to AI clients)
 ├── raisin-auth/             # Authentication strategies
 ├── raisin-replication/      # CRDT-based multi-master replication
 ├── raisin-hlc/              # Hybrid Logical Clock

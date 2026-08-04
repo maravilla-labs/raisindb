@@ -410,10 +410,7 @@ async fn scan_function_props(
             .await?;
         for row in rows.as_array().cloned().unwrap_or_default() {
             if let Some(p) = row.get("properties") {
-                let path = row
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                let path = row.get("path").and_then(Value::as_str).map(str::to_string);
                 props.push((path, p.clone()));
             }
         }

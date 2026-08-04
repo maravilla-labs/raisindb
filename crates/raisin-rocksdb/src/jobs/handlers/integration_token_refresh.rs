@@ -10,11 +10,13 @@
 //! never crosses into a function sandbox, an API response, or a log line.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use raisin_core::services::node_service::NodeService;
 use raisin_crypto::SecretBox;
 use raisin_error::Result;
+use raisin_locks::LockManagerHandle;
 use raisin_models::auth::{oauth_error_detail, AuthContext};
 use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
@@ -39,11 +41,24 @@ const REFRESH_ACTOR: &str = "integration-token-refresh";
 /// job per 10-minute wall-clock window.
 const BUCKET_SECS: u64 = 10 * 60;
 
+/// How long one integration's refresh lease is held.
+///
+/// Bounds a token exchange (one HTTP round trip) plus the node write, and is
+/// short enough that a node dying mid-refresh frees the integration well before
+/// the next 10-minute sweep.
+const REFRESH_LEASE_TTL: Duration = Duration::from_secs(120);
+
 /// Derive the idempotent dedup key for the periodic refresh driver.
 ///
-/// All ticks that fall inside the same 10-minute window collapse to a single
-/// key, so at most one `IntegrationTokenRefresh` job is active per window even
-/// when several scheduler ticks (or several cluster nodes) fire.
+/// All ticks inside the same 10-minute window collapse to a single key, so at
+/// most one `IntegrationTokenRefresh` job is active per window **in this
+/// process**.
+///
+/// It does NOT make the sweep single-fire across a cluster, despite what this
+/// comment used to claim: `JobRegistry`'s dedup map is an in-memory `HashMap`
+/// with no storage behind it, so every node runs its own sweep. Cross-node
+/// safety comes from the per-integration lease in
+/// [`IntegrationTokenRefreshHandler::refresh_node`], not from this key.
 pub fn token_refresh_dedup_key(now_secs: u64) -> String {
     format!("token-refresh:{}", now_secs / BUCKET_SECS)
 }
@@ -58,15 +73,28 @@ pub fn is_account_expiring(expires_at_secs: i64, now_secs: i64, threshold_secs: 
 pub struct IntegrationTokenRefreshHandler {
     storage: Arc<RocksDBStorage>,
     http: reqwest::Client,
+    /// Cluster-wide serialization of per-integration refreshes. `None` (locks
+    /// subsystem disabled) keeps single-node behaviour and warns when
+    /// replication is on.
+    lock_manager: Option<LockManagerHandle>,
+    /// Distinguishes this process in a lease owner string.
+    instance_id: String,
 }
 
 impl IntegrationTokenRefreshHandler {
     /// Create a new token-refresh handler bound to the given storage.
-    pub fn new(storage: Arc<RocksDBStorage>) -> Self {
+    pub fn new(storage: Arc<RocksDBStorage>, lock_manager: Option<LockManagerHandle>) -> Self {
         Self {
             storage,
             http: reqwest::Client::new(),
+            lock_manager,
+            instance_id: nanoid::nanoid!(8),
         }
+    }
+
+    /// Best-effort detection of active replication (for the no-locks warning).
+    fn replication_active(&self) -> bool {
+        self.storage.config.replication_enabled
     }
 
     /// Scan integrations and refresh any expiring OAuth access tokens.
@@ -149,6 +177,10 @@ impl IntegrationTokenRefreshHandler {
             .map(|r| r.config.default_branch)
             .unwrap_or_else(|| "main".to_string());
 
+        // Captured before `branch` moves into the service below; the lease is
+        // scoped per branch, matching where the config node actually lives.
+        let branch_for_lease = branch.clone();
+
         // System context bypasses RLS but stamps our dedicated refresh actor.
         let mut auth = AuthContext::system();
         auth.user_id = Some(REFRESH_ACTOR.to_string());
@@ -164,7 +196,18 @@ impl IntegrationTokenRefreshHandler {
         let integrations = svc.list_by_type("raisin:Integration").await?;
         let mut count = 0usize;
         for node in integrations {
-            match self.refresh_node(&svc, node, secret_box, now_secs).await {
+            match self
+                .refresh_node(
+                    &svc,
+                    node,
+                    secret_box,
+                    now_secs,
+                    tenant,
+                    repo,
+                    &branch_for_lease,
+                )
+                .await
+            {
                 Ok(n) => count += n,
                 Err(e) => {
                     tracing::warn!(tenant = %tenant, repo = %repo, error = %e, "token-refresh: node failed")
@@ -176,7 +219,82 @@ impl IntegrationTokenRefreshHandler {
 
     /// Refresh all expiring accounts on one integration node, persisting the
     /// node only if at least one account was rotated.
+    ///
+    /// Holds a per-integration lease for the whole exchange-and-write. Two
+    /// things break without it, and both are silent:
+    ///
+    /// 1. **Refresh-token rotation.** Providers that issue a new refresh token
+    ///    on each exchange invalidate the old one. Two nodes presenting the same
+    ///    stored refresh token concurrently means one of them wins and the other
+    ///    gets `invalid_grant` — and the account ends up disconnected, needing a
+    ///    manual reconnect.
+    /// 2. **Lost update.** Both nodes read `connected_accounts`, mutate their
+    ///    own copy and write the whole node back; the second write silently
+    ///    discards the first node's rotated tokens.
+    ///
+    /// The periodic driver's dedup key does NOT prevent either: the job
+    /// registry's dedup map is per-process (see [`token_refresh_dedup_key`]).
+    #[allow(clippy::too_many_arguments)]
     async fn refresh_node(
+        &self,
+        svc: &NodeService<RocksDBStorage>,
+        node: Node,
+        secret_box: &SecretBox,
+        now_secs: i64,
+        tenant: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<usize> {
+        let lock_key = raisin_locks::scoped_key(
+            tenant,
+            repo,
+            branch,
+            &format!("integration-token-refresh:{}", node.id),
+        );
+        let lease = match &self.lock_manager {
+            Some(lm) => {
+                let owner = format!("{}:{}", self.instance_id, node.id);
+                match lm.try_acquire(&lock_key, &owner, REFRESH_LEASE_TTL).await? {
+                    Some(guard) => Some(guard.token),
+                    None => {
+                        // Another node holds it; its sweep covers this
+                        // integration. Doing nothing is correct, not a failure.
+                        tracing::debug!(
+                            node_path = %node.path,
+                            "integration is being refreshed elsewhere; skipping"
+                        );
+                        return Ok(0);
+                    }
+                }
+            }
+            None => {
+                if self.replication_active() {
+                    tracing::warn!(
+                        node_path = %node.path,
+                        "locks subsystem disabled while replication is active: OAuth token \
+                         refresh is NOT cluster-safe — concurrent refreshes can invalidate a \
+                         rotating refresh token and disconnect the account (configure \
+                         [locks] backend=redis)"
+                    );
+                }
+                None
+            }
+        };
+
+        let outcome = self
+            .refresh_node_locked(svc, node, secret_box, now_secs)
+            .await;
+
+        if let (Some(lm), Some(token)) = (&self.lock_manager, lease) {
+            // Best-effort: the lease expires on its own, and failing the whole
+            // refresh because a release failed would be worse than the leak.
+            let _ = lm.release(&lock_key, token).await;
+        }
+        outcome
+    }
+
+    /// The refresh itself, with the per-integration lease already held.
+    async fn refresh_node_locked(
         &self,
         svc: &NodeService<RocksDBStorage>,
         node: Node,
@@ -407,6 +525,87 @@ fn decrypt_client_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lease — not the dedup key — is what makes the sweep safe on a
+    /// cluster. Pinned here because the dedup key LOOKS like it does the job,
+    /// and a comment in `main.rs` claimed exactly that for a long time.
+    #[tokio::test]
+    async fn a_held_lease_makes_the_second_node_skip_the_integration() {
+        let locks: raisin_locks::LockManagerHandle =
+            Arc::new(raisin_locks::InProcessLockManager::new());
+        let key = raisin_locks::scoped_key("t", "r", "main", "integration-token-refresh:node-1");
+
+        // Node A is mid-refresh.
+        let held = locks
+            .try_acquire(&key, "node-a", REFRESH_LEASE_TTL)
+            .await
+            .expect("acquire")
+            .expect("uncontended");
+
+        // Node B's sweep reaches the same integration and must back off rather
+        // than present the same rotating refresh token a second time.
+        assert!(
+            locks
+                .try_acquire(&key, "node-b", REFRESH_LEASE_TTL)
+                .await
+                .expect("acquire")
+                .is_none(),
+            "a second node must not refresh an integration already being refreshed"
+        );
+
+        // Once A is done, the integration is refreshable again.
+        assert!(locks.release(&key, held.token).await.expect("release"));
+        assert!(locks
+            .try_acquire(&key, "node-b", REFRESH_LEASE_TTL)
+            .await
+            .expect("acquire")
+            .is_some());
+    }
+
+    /// Two integrations must refresh in parallel — the lease is per-integration,
+    /// not a global sweep lock.
+    #[tokio::test]
+    async fn different_integrations_do_not_block_each_other() {
+        let locks: raisin_locks::LockManagerHandle =
+            Arc::new(raisin_locks::InProcessLockManager::new());
+        let a = raisin_locks::scoped_key("t", "r", "main", "integration-token-refresh:one");
+        let b = raisin_locks::scoped_key("t", "r", "main", "integration-token-refresh:two");
+
+        assert!(locks
+            .try_acquire(&a, "n", REFRESH_LEASE_TTL)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(locks
+            .try_acquire(&b, "n", REFRESH_LEASE_TTL)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// Scoping must isolate tenants: the same integration id in two tenants is
+    /// two different integrations.
+    #[tokio::test]
+    async fn the_lease_is_scoped_per_tenant_and_repo() {
+        let locks: raisin_locks::LockManagerHandle =
+            Arc::new(raisin_locks::InProcessLockManager::new());
+        let one = raisin_locks::scoped_key("t1", "r", "main", "integration-token-refresh:x");
+        let two = raisin_locks::scoped_key("t2", "r", "main", "integration-token-refresh:x");
+
+        assert!(locks
+            .try_acquire(&one, "n", REFRESH_LEASE_TTL)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            locks
+                .try_acquire(&two, "n", REFRESH_LEASE_TTL)
+                .await
+                .unwrap()
+                .is_some(),
+            "one tenant's refresh must not block another's"
+        );
+    }
 
     #[test]
     fn dedup_key_buckets_by_ten_minutes() {

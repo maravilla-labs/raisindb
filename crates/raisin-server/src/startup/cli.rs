@@ -104,6 +104,8 @@ pub struct MergedConfig {
     pub locks: raisin_locks::LocksConfig,
     /// System definition sourcing / rollout configuration
     pub system_definitions: raisin_core::definitions::SystemDefinitionsConfig,
+    /// Outbound MCP client configuration (egress policy, limits)
+    pub mcp_client: raisin_mcp::client::McpClientConfig,
     /// Trigger circuit breaker configuration
     pub trigger_safety: config::TriggerSafetyConfig,
     /// Physical backstop behind `trigger_safety` (see `MergedConfig` doc)
@@ -251,6 +253,13 @@ impl ServerConfig {
             .map(|c| c.system_definitions.clone())
             .unwrap_or_default();
 
+        // Outbound MCP client config from TOML (no CLI override for now).
+        // Absent section = safe defaults: no private-address egress.
+        let mcp_client = toml_config
+            .as_ref()
+            .map(|c| c.mcp_client.clone())
+            .unwrap_or_default();
+
         // Trigger circuit breaker config from TOML (no CLI override for now)
         let trigger_safety = toml_config
             .as_ref()
@@ -282,6 +291,7 @@ impl ServerConfig {
             dev_mode: self.dev_mode,
             locks,
             system_definitions,
+            mcp_client,
             trigger_safety,
             max_active_jobs_per_tenant,
         })

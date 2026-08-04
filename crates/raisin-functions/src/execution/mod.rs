@@ -70,10 +70,12 @@ mod executor;
 pub mod flow_callbacks_factory;
 pub mod module_cache;
 mod provider;
+pub mod remote_tool;
 mod types;
 
 // Re-export public API
 pub use provider::ExecutionProvider;
+pub use remote_tool::configure_mcp_client;
 pub use types::shared_http_client;
 pub use types::{
     BinaryRetrievalCallback, ExecutionCallbacks, ExecutionDependencies, ExecutionMode,

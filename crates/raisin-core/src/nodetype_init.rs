@@ -444,6 +444,70 @@ mod tests {
         }
     }
 
+    /// Assert the MCP *client* types load: the connection itself, and the
+    /// `mcp_proxy` marker on `raisin:Function`.
+    #[test]
+    fn mcp_client_nodetypes_are_loadable() {
+        let nodetypes = load_global_nodetypes();
+        let by_name = |n: &str| nodetypes.iter().find(|nt| nt.name == n).cloned();
+
+        let conn = by_name("raisin:McpConnection").expect("raisin:McpConnection must load");
+        let prop = |name: &str| {
+            conn.properties
+                .as_ref()
+                .and_then(|ps| ps.iter().find(|p| p.name.as_deref() == Some(name)))
+                .unwrap_or_else(|| panic!("raisin:McpConnection must declare `{name}`"))
+        };
+        for name in [
+            "slug",
+            "url",
+            "auth_kind",
+            "credential_encrypted",
+            "tokens_encrypted",
+            "discovered_tools",
+            "health",
+        ] {
+            let _ = prop(name);
+        }
+        // The slug namespaces every generated proxy name; two connections
+        // claiming the same one would collide on raisin:Function.name, which
+        // IS enforced, and the second connection's discovery would hard-fail.
+        assert_eq!(
+            prop("slug").unique,
+            Some(true),
+            "`slug` must be unique or two connections can generate the same proxy names"
+        );
+        // Discovery rewrites health/last_synced_at on every refresh; keeping
+        // this versionable mints a revision per refresh, forever.
+        assert_eq!(conn.versionable, Some(false));
+        // UI hints must live under `meta` — PropertyValueSchema drops
+        // top-level title/description/enum/placeholder.
+        assert!(
+            prop("auth_kind")
+                .meta
+                .as_ref()
+                .is_some_and(|m| m.contains_key("enum")),
+            "UI hints must be carried in `meta` to survive the round trip"
+        );
+
+        // raisin:Function is strict, so an undeclared `mcp_proxy` makes every
+        // generated proxy write fail with a strict_mode_violation pointing at
+        // the node rather than at the missing definition.
+        let function = by_name("raisin:Function").expect("raisin:Function must load");
+        assert_eq!(
+            function.version,
+            Some(2),
+            "adding `mcp_proxy` is a schema change and must bump the version to resync"
+        );
+        assert!(
+            function
+                .properties
+                .as_ref()
+                .is_some_and(|ps| ps.iter().any(|p| p.name.as_deref() == Some("mcp_proxy"))),
+            "raisin:Function is strict, so `mcp_proxy` must be declared or proxy writes are rejected"
+        );
+    }
+
     #[test]
     fn test_load_global_nodetypes() {
         let nodetypes = load_global_nodetypes();

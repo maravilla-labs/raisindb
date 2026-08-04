@@ -23,6 +23,11 @@ raisin-context = { path = "../raisin-context" }
 raisin-core = { path = "../raisin-core" }
 raisin-crypto = { path = "../raisin-crypto" }
 raisin-locks = { path = "../raisin-locks" }
+# MCP wire types + outbound client. This is the crate the client half was split
+# into precisely so storage-layer job handlers can use it: depending on
+# `raisin-mcp` here would close the cycle
+# raisin-functions -> raisin-rocksdb -> raisin-mcp -> raisin-functions.
+raisin-mcp-protocol = { path = "../raisin-mcp-protocol" }
 raisin-events = { path = "../raisin-events" }
 raisin-embeddings = { path = "../raisin-embeddings" }
 raisin-indexer = { path = "../raisin-indexer" }

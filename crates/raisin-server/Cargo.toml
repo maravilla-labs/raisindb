@@ -23,6 +23,9 @@ axum = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 raisin-transport-http = { path = "../raisin-transport-http" }
+# For the [mcp_client] config section; the type lives next to the egress policy
+# it configures rather than being mirrored here.
+raisin-mcp = { path = "../raisin-mcp" }
 raisin-transport-ws = { path = "../raisin-transport-ws", optional = true }
 raisin-transport-pgwire = { path = "../raisin-transport-pgwire", optional = true }
 raisin-storage = { path = "../raisin-storage" }

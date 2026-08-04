@@ -397,4 +397,38 @@ mod tests {
             "raisin-integrations (base infra) must auto-install so new instances get it"
         );
     }
+
+    /// The MCP *client* package must load, auto-install, and — critically —
+    /// ship its example connection disabled.
+    #[test]
+    fn test_raisin_mcp_client_package_is_inert_until_configured() {
+        let packages = load_builtin_packages_with_hashes();
+        let info = packages
+            .iter()
+            .find(|p| p.manifest.name == "raisin-mcp-client")
+            .expect("raisin-mcp-client must remain an available builtin");
+
+        assert!(
+            info.manifest.auto_install,
+            "the client package only patches allowed types; it is safe everywhere"
+        );
+
+        // An auto-installed package that shipped an ENABLED connection would
+        // have every repo dialling a third-party endpoint on boot.
+        let example = get_builtin_package_dir("raisin-mcp-client")
+            .and_then(|dir| {
+                dir.get_file("raisin-mcp-client/content/mcp-connections/example-linear/.node.yaml")
+            })
+            .and_then(|f| f.contents_utf8())
+            .expect("the example connection must ship with the package");
+
+        assert!(
+            example.contains("enabled: false"),
+            "the shipped example connection must be disabled"
+        );
+        assert!(
+            !example.contains("credential_encrypted"),
+            "package content replicates in plaintext; it must never carry a credential"
+        );
+    }
 }

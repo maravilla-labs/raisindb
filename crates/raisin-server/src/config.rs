@@ -138,6 +138,11 @@ pub struct ServerConfigFile {
     /// definitions only, no registries, non-breaking changes applied on start.
     #[serde(default)]
     pub system_definitions: raisin_core::definitions::SystemDefinitionsConfig,
+    /// Outbound MCP client: where RaisinDB may connect when calling another
+    /// server's tools. Defaults refuse loopback and private addresses, so an
+    /// absent section cannot turn the server into a proxy into its own network.
+    #[serde(default)]
+    pub mcp_client: raisin_mcp::client::McpClientConfig,
     /// Trigger circuit breaker configuration — guards against a single
     /// tenant's runaway trigger/function loop growing the job registry
     /// without bound. Defined locally (rather than reusing
@@ -333,5 +338,30 @@ mod tests {
         assert!(ServerConfigFile::parse_peers_string("invalid").is_err());
         assert!(ServerConfigFile::parse_peers_string("node1=invalid").is_err());
         assert!(ServerConfigFile::parse_peers_string("node1=127.0.0.1:notaport").is_err());
+    }
+
+    /// The shipped example config must parse as `ServerConfigFile`.
+    ///
+    /// Operators copy that file. A section documented there that the struct
+    /// cannot deserialize is a config error on someone else's server, at boot.
+    #[test]
+    fn shipped_example_config_parses() {
+        let example = include_str!("../../../examples/cluster/node1.toml");
+        let config: ServerConfigFile =
+            toml::from_str(example).expect("examples/cluster/node1.toml must parse");
+
+        // The documented [mcp_client] values must land where the code reads them.
+        assert!(!config.mcp_client.allow_private_addresses);
+        assert_eq!(config.mcp_client.max_response_bytes, 8_388_608);
+        assert_eq!(config.mcp_client.default_timeout_ms, 30_000);
+    }
+
+    /// An absent [mcp_client] section must not enable private egress.
+    #[test]
+    fn omitted_mcp_client_section_is_safe() {
+        let config: ServerConfigFile =
+            toml::from_str("[server]\nport = 8080\n").expect("minimal config must parse");
+        assert!(!config.mcp_client.allow_private_addresses);
+        assert!(config.mcp_client.allowed_hosts.is_empty());
     }
 }

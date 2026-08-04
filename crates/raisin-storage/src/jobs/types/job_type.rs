@@ -286,6 +286,22 @@ pub enum JobType {
     IntegrationTokenRefresh {
         tenant_id: Option<String>,
     },
+    /// Discover one external MCP server's tools and reconcile its proxy
+    /// `raisin:Function` nodes.
+    ///
+    /// Carries the tenant/repo explicitly rather than relying on `JobContext`,
+    /// mirroring `IntegrationTokenRefresh`, because the periodic scan enqueues
+    /// it for repos it discovered rather than for the caller's own scope.
+    McpToolDiscovery {
+        connection_slug: String,
+        tenant_id: String,
+        repo_id: String,
+    },
+    /// Periodic scan: enqueue `McpToolDiscovery` for every enabled connection
+    /// whose refresh interval is due (mirrors `VirtualMountSyncCheck`).
+    McpDiscoveryCheck {
+        tenant_id: Option<String>,
+    },
     /// Periodic scan: renew push/webhook subscriptions on virtual mounts whose
     /// provider subscription is close to expiring (mirrors
     /// `IntegrationTokenRefresh`).
@@ -316,6 +332,9 @@ impl JobType {
             JobType::UploadSessionCleanup { .. } => 120,
             JobType::VirtualMountSyncCheck { .. } => 60,
             JobType::IntegrationTokenRefresh { .. } => 60,
+            JobType::McpDiscoveryCheck { .. } => 60,
+            // One handshake plus a paginated tools/list against a third party.
+            JobType::McpToolDiscovery { .. } => 120,
             JobType::VirtualMountSubscriptionRenew { .. } => 120,
             // Long-running: syncing one mount can page through many remote items
             JobType::VirtualMountSync { .. } => 600,

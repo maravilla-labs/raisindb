@@ -126,6 +126,13 @@ pub struct AppState {
     /// TTL is a backstop; the real invalidation is event-driven, so an edited
     /// server or function shows up on the next request.
     pub(crate) mcp_plan_cache: Arc<TtlCache<Arc<raisin_mcp::McpServerPlan>>>,
+    /// Operator-owned OUTBOUND MCP client settings (the `[mcp_client]` TOML
+    /// section): where the client may connect, and how much it may buffer.
+    ///
+    /// Defaults refuse loopback and private addresses, so a deployment that
+    /// never configures the section cannot be talked into dialling its own
+    /// network through an operator-supplied connection URL.
+    pub(crate) mcp_client_config: raisin_mcp::client::McpClientConfig,
     /// Permission resolution, cached (5-min TTL, keyed by
     /// `tenant:repo:branch:identity:<id>`).
     ///
@@ -491,6 +498,7 @@ pub fn router(storage: Arc<Store>) -> Router {
         None, // auth_service
         None, // schema_stats_cache
         None, // lock_manager
+        None, // mcp_client_config
     );
     router
 }
@@ -519,6 +527,10 @@ pub fn router_with_bin_and_audit(
     #[cfg(feature = "storage-rocksdb")] auth_service: Option<Arc<raisin_rocksdb::AuthService>>,
     schema_stats_cache: Option<SharedSchemaStatsCache>,
     lock_manager: Option<raisin_locks::LockManagerHandle>,
+    // Outbound MCP client settings from the server's `[mcp_client]` TOML
+    // section. `None` keeps the safe default, which refuses loopback and
+    // private addresses.
+    mcp_client_config: Option<raisin_mcp::client::McpClientConfig>,
 ) -> (Router, AppState) {
     let connection = Arc::new(RaisinConnection::with_storage(storage.clone()));
 
@@ -615,6 +627,7 @@ pub fn router_with_bin_and_audit(
         cors_allowed_origins: cors_allowed_origins.to_vec(),
         static_site_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(60))),
         mcp_plan_cache: Arc::new(TtlCache::new(std::time::Duration::from_secs(300))),
+        mcp_client_config: mcp_client_config.unwrap_or_default(),
         permission_service: Arc::new(raisin_core::CachedPermissionService::with_default_ttl(
             storage_for_permissions,
         )),

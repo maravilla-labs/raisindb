@@ -19,6 +19,7 @@ pub mod fulltext;
 pub mod function_execution;
 pub mod huggingface_model;
 pub mod integration_token_refresh;
+pub mod mcp_tool_discovery;
 pub mod node_delete_cleanup;
 pub mod oplog_compaction;
 pub mod package_create_from_selection;
@@ -73,6 +74,7 @@ pub use function_execution::{
 };
 pub use huggingface_model::HuggingFaceModelHandler;
 pub use integration_token_refresh::{token_refresh_dedup_key, IntegrationTokenRefreshHandler};
+pub use mcp_tool_discovery::{McpDiscoveryDeps, McpToolDiscoveryHandler};
 pub use node_delete_cleanup::NodeDeleteCleanupHandler;
 pub use oplog_compaction::OpLogCompactionHandler;
 pub use package_create_from_selection::PackageCreateFromSelectionHandler;
@@ -158,6 +160,10 @@ pub struct JobHandlerRegistry {
     pub asset_processing: Option<Arc<AssetProcessingHandler>>,
     pub integration_token_refresh: Arc<IntegrationTokenRefreshHandler>,
     pub virtual_mount_sync: Arc<VirtualMountSyncHandler>,
+    /// Outbound MCP tool discovery. `None` when the server did not supply an
+    /// egress policy / HTTP client, in which case discovery jobs no-op loudly
+    /// rather than dialling with unknown settings.
+    pub mcp_tool_discovery: Option<Arc<McpToolDiscoveryHandler>>,
 }
 
 #[allow(deprecated)] // Contains AssetProcessingHandler which is deprecated but still used
@@ -200,6 +206,11 @@ impl JobHandlerRegistry {
         virtual_mount_sync: Arc<VirtualMountSyncHandler>,
     ) -> Self {
         Self {
+            // Attached separately via `with_mcp_tool_discovery`: this
+            // constructor already carries 30-odd positional arguments, and the
+            // handler needs settings (egress policy, HTTP client) that only the
+            // server binary has.
+            mcp_tool_discovery: None,
             fulltext,
             embedding,
             snapshot,
@@ -236,6 +247,16 @@ impl JobHandlerRegistry {
             integration_token_refresh,
             virtual_mount_sync,
         }
+    }
+
+    /// Attach the outbound MCP tool-discovery handler.
+    ///
+    /// Separate from [`Self::new`] because the handler needs the operator's
+    /// egress policy and the shared HTTP client, neither of which the storage
+    /// layer knows about — they are assembled in the server binary.
+    pub fn with_mcp_tool_discovery(mut self, handler: Arc<McpToolDiscoveryHandler>) -> Self {
+        self.mcp_tool_discovery = Some(handler);
+        self
     }
 
     /// Attach the spatial index build handler.
@@ -449,6 +470,17 @@ impl JobHandlerRegistry {
             | JobType::VirtualMountSync { .. }
             | JobType::VirtualMountSubscriptionRenew { .. } => {
                 self.virtual_mount_sync.handle(job, context).await
+            }
+            JobType::McpToolDiscovery { .. } | JobType::McpDiscoveryCheck { .. } => {
+                if let Some(ref handler) = self.mcp_tool_discovery {
+                    handler.handle(job, context).await
+                } else {
+                    tracing::warn!(
+                        job_id = %job.id,
+                        "MCP tool discovery handler not configured"
+                    );
+                    Ok(None)
+                }
             }
             JobType::AssetProcessing { .. } => {
                 // Asset processing (PDF text extraction, image embeddings, captions)

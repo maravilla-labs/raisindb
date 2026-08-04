@@ -148,6 +148,9 @@ pub use tantivy_transfer::{TantivyIndexManager, TantivyIndexMetadata, TantivyInd
 
 // Re-export replication handlers for external use
 pub use jobs::handlers::replication_sync::ReplicationSyncHandler;
+/// Outbound MCP tool discovery, assembled by the server binary from
+/// `[mcp_client]`.
+pub use jobs::handlers::{McpDiscoveryDeps, McpToolDiscoveryHandler};
 
 // Re-export the spatial index build handler. The `jobs` module is private, and a
 // rebuild is not observable from outside the crate without either running the whole

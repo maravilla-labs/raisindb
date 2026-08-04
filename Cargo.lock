@@ -6459,6 +6459,7 @@ dependencies = [
  "raisin-hnsw",
  "raisin-indexer",
  "raisin-locks",
+ "raisin-mcp-protocol",
  "raisin-models",
  "raisin-rocksdb",
  "raisin-sql-execution",
@@ -6587,12 +6588,33 @@ dependencies = [
  "futures",
  "raisin-error",
  "raisin-functions",
+ "raisin-mcp-protocol",
  "raisin-models",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "raisin-mcp-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "futures",
+ "raisin-error",
+ "raisin-models",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -6770,6 +6792,7 @@ dependencies = [
  "raisin-hnsw",
  "raisin-indexer",
  "raisin-locks",
+ "raisin-mcp-protocol",
  "raisin-models",
  "raisin-packages",
  "raisin-proj",
@@ -6833,6 +6856,7 @@ dependencies = [
  "raisin-hnsw",
  "raisin-indexer",
  "raisin-locks",
+ "raisin-mcp",
  "raisin-models",
  "raisin-packages",
  "raisin-replication",

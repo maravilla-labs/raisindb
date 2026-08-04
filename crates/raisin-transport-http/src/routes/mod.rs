@@ -17,6 +17,7 @@ mod integrations;
 mod locks;
 mod management;
 mod mcp;
+mod mcp_client;
 mod oauth;
 mod operator;
 mod packages;
@@ -91,6 +92,8 @@ pub fn routes(state: AppState) -> Router {
 
     // Outbound integrations (connect external systems, token lifecycle, sync)
     router = router.merge(integrations::integration_routes(&state));
+    // Outbound MCP connections (RaisinDB as an MCP client)
+    router = router.merge(mcp_client::mcp_client_routes(&state));
 
     // Apply unified CORS middleware for all routes (RocksDB only)
     // Implements hierarchical CORS resolution: Repo -> Tenant -> Global
