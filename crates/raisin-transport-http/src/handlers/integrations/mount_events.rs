@@ -22,10 +22,20 @@ use std::convert::Infallible;
 use axum::{
     extract::{Path, State},
     response::sse::{Event, KeepAlive, Sse},
+    Extension,
 };
 use futures::Stream;
+use raisin_models::auth::AuthContext;
 
+use super::require_admin;
+use crate::error::ApiError;
+use crate::middleware::TenantInfo;
 use crate::state::AppState;
+
+/// Actor recorded on the ownership read this endpoint performs.
+const ACTOR: &str = "integration-mount-events";
+/// NodeType guard, so the route cannot be aimed at an arbitrary node.
+const MOUNT_NODE_TYPE: &str = "raisin:VirtualMount";
 
 /// `GET /api/integrations/{repo}/mounts/{mount_id}/events`
 ///
@@ -38,19 +48,43 @@ use crate::state::AppState;
 pub async fn stream_mount_events(
     State(state): State<AppState>,
     Path((repo, mount_id)): Path<(String, String)>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    Extension(tenant): Extension<TenantInfo>,
+    auth: Option<Extension<AuthContext>>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    // Same gate as every other mount route. Being behind `require_auth_middleware`
+    // only proves the caller is *somebody*; sync progress is operator data.
+    require_admin(auth.as_deref())?;
+
+    // Prove the mount exists in THIS caller's tenant and repo before subscribing.
+    //
+    // Without this the endpoint was an IDOR: the channel was keyed on the bare
+    // mount id, so anyone authenticated could stream another tenant's sync
+    // progress by naming their mount id. That the ids are unguessable nanoids is
+    // not a security property — ids leak through logs, exports and support
+    // threads — and every sibling handler here already does this check.
+    let svc = super::config_service(&state, &tenant.tenant_id, &repo, ACTOR);
+    match svc.get(&mount_id).await? {
+        Some(node) if node.node_type == MOUNT_NODE_TYPE => {}
+        // 404 for both "no such mount" and "not a mount", so the response does
+        // not distinguish a wrong id from another tenant's id.
+        _ => return Err(ApiError::node_not_found(mount_id.clone())),
+    }
+
     let shutdown = state.shutdown_signal();
     tracing::debug!(%repo, %mount_id, "client subscribed to mount sync events");
 
+    // Scoped key, matching the publishers. A bare mount id would put two
+    // tenants on one channel.
+    let channel = raisin_storage::jobs::mount_channel_key(&tenant.tenant_id, &repo, &mount_id);
     let broadcaster = raisin_storage::jobs::global_mount_broadcaster();
-    let mut receiver = broadcaster.subscribe(&mount_id);
+    let mut receiver = broadcaster.subscribe(&channel);
 
     let stream = async_stream::stream! {
         // Released when this generator is dropped — which happens whether the
         // client disconnects, the server shuts down, or the loop exits. Doing it
         // at the end of the loop instead would leak on the common case: a page
         // the operator simply navigated away from never runs to completion.
-        let _guard = ChannelGuard(mount_id.clone());
+        let _guard = ChannelGuard(channel.clone());
 
         loop {
             match receiver.recv().await {
@@ -71,17 +105,19 @@ pub async fn stream_mount_events(
                 // connected so it sees the next run begin.
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     receiver =
-                        raisin_storage::jobs::global_mount_broadcaster().subscribe(&mount_id);
+                        raisin_storage::jobs::global_mount_broadcaster().subscribe(&channel);
                     continue;
                 }
             }
         }
     };
 
-    Sse::new(futures::StreamExt::take_until(stream, shutdown)).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("keep-alive"),
+    Ok(
+        Sse::new(futures::StreamExt::take_until(stream, shutdown)).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        ),
     )
 }
 

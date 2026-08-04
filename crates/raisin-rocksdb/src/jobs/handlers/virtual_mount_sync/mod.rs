@@ -443,7 +443,11 @@ impl VirtualMountSyncHandler {
             run.mode = phase.to_string();
         }
         raisin_storage::jobs::global_mount_broadcaster().emit(
-            &ctx.scope.mount_id,
+            &raisin_storage::jobs::mount_channel_key(
+                &ctx.scope.tenant,
+                &ctx.scope.repo,
+                &ctx.scope.mount_id,
+            ),
             raisin_storage::jobs::MountSyncEvent::Started {
                 phase: phase.to_string(),
                 trigger: trigger.clone(),
@@ -622,7 +626,11 @@ impl VirtualMountSyncHandler {
         // one, and a console left showing a run that never ends is exactly the
         // phantom this work set out to remove.
         raisin_storage::jobs::global_mount_broadcaster().emit(
-            &ctx.scope.mount_id,
+            &raisin_storage::jobs::mount_channel_key(
+                &ctx.scope.tenant,
+                &ctx.scope.repo,
+                &ctx.scope.mount_id,
+            ),
             raisin_storage::jobs::MountSyncEvent::Finished {
                 phase: run.mode.clone(),
                 outcome: run.outcome.clone(),

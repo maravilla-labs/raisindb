@@ -41,6 +41,21 @@ pub fn global_mount_broadcaster() -> &'static MountSyncBroadcaster {
     &GLOBAL_MOUNT_BROADCASTER
 }
 
+/// The channel key for one mount.
+///
+/// Scoped by tenant and repo, never the bare mount id. This process serves
+/// every tenant from one broadcaster, so a bare id would put two tenants on the
+/// same channel if their ids ever coincided — and would make a subscriber's
+/// authorization depend on the id being unguessable, which is not a security
+/// property.
+///
+/// Both sides MUST build the key through this function. A publisher and a
+/// subscriber that disagree about the format do not error; they simply never
+/// meet, and the console shows a stream that is silent forever.
+pub fn mount_channel_key(tenant_id: &str, repo_id: &str, mount_id: &str) -> String {
+    format!("{tenant_id}\0{repo_id}\0{mount_id}")
+}
+
 /// Events buffered per mount before a slow subscriber starts lagging.
 ///
 /// Small on purpose. A subscriber that falls behind wants the *current* state,
@@ -202,6 +217,17 @@ mod tests {
 
     /// Channels are per mount, so one mount's progress never reaches another's
     /// watcher.
+    /// The key is scoped, so two tenants cannot land on one channel — and a
+    /// subscriber's authorization never rests on an id being unguessable.
+    #[test]
+    fn channel_keys_are_scoped_by_tenant_and_repo() {
+        let a = mount_channel_key("tenant-a", "repo", "mount-1");
+        let b = mount_channel_key("tenant-b", "repo", "mount-1");
+        let c = mount_channel_key("tenant-a", "other", "mount-1");
+        assert_ne!(a, b, "same mount id, different tenants");
+        assert_ne!(a, c, "same mount id, different repos");
+    }
+
     #[tokio::test]
     async fn channels_do_not_leak_across_mounts() {
         let b = MountSyncBroadcaster::new();

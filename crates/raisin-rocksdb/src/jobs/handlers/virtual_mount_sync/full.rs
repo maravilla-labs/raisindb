@@ -148,7 +148,11 @@ pub async fn run_with(
                 // claim that this page landed, and a claim that a later failure
                 // could roll back is worse than no event at all.
                 raisin_storage::jobs::global_mount_broadcaster().emit(
-                    &ctx.scope.mount_id,
+                    &raisin_storage::jobs::mount_channel_key(
+                        &ctx.scope.tenant,
+                        &ctx.scope.repo,
+                        &ctx.scope.mount_id,
+                    ),
                     raisin_storage::jobs::MountSyncEvent::Progress {
                         phase: "full".to_string(),
                         backfill_items_done: state.backfill_items_done,
