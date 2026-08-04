@@ -22,6 +22,19 @@ impl<'a> AnalyzerContext<'a> {
         let typed_left = self.analyze_expr(left)?;
         let typed_right = self.analyze_expr(right)?;
 
+        // `__revision = '<timestamp>-<counter>'` — a point-in-time read pinned to
+        // a FULL HLC. The pseudo-column is declared BigInt (so `__revision = 342`
+        // keeps working), which would make the string form an InvalidBinaryOp
+        // before `extract_revision_predicate` ever sees it — but a bare timestamp
+        // cannot express the HLC counter, so same-millisecond revisions are
+        // indistinguishable. Type the comparison here and let the extractor parse
+        // the literal; an unparseable revision is an error NOW rather than a
+        // predicate that silently survives into execution.
+        if let Some(revision_cmp) = self.analyze_revision_comparison(&typed_left, op, &typed_right)?
+        {
+            return Ok(revision_cmp);
+        }
+
         // Special handling for JSON operators
         match op {
             SqlBinaryOp::Arrow => {
@@ -93,6 +106,60 @@ impl<'a> AnalyzerContext<'a> {
             },
             result_type,
         ))
+    }
+
+    /// Type a `__revision = '<timestamp>-<counter>'` comparison as Boolean.
+    ///
+    /// Returns `Ok(None)` when this isn't a `__revision`-against-string-literal
+    /// comparison, so the caller falls through to the normal operator rules
+    /// (`__revision = 342` still types via the BigInt column). The literal is
+    /// left untouched in the expression — `extract_revision_predicate` parses it
+    /// into the query's `max_revision` and drops the predicate; validating it
+    /// here means a malformed revision fails analysis instead of reaching
+    /// execution as an unsatisfiable BigInt-vs-Text comparison.
+    fn analyze_revision_comparison(
+        &self,
+        left: &TypedExpr,
+        op: &SqlBinaryOp,
+        right: &TypedExpr,
+    ) -> Result<Option<TypedExpr>> {
+        if !matches!(op, SqlBinaryOp::Eq) {
+            return Ok(None);
+        }
+        let is_revision_column = |e: &TypedExpr| {
+            matches!(&e.expr, Expr::Column { column, .. } if column == "__revision")
+        };
+        let string_literal = |e: &TypedExpr| match &e.expr {
+            Expr::Literal(Literal::Text(s)) => Some(s.clone()),
+            _ => None,
+        };
+
+        let literal = if is_revision_column(left) {
+            string_literal(right)
+        } else if is_revision_column(right) {
+            string_literal(left)
+        } else {
+            None
+        };
+        let Some(literal) = literal else {
+            return Ok(None);
+        };
+
+        if literal.parse::<raisin_hlc::HLC>().is_err() {
+            return Err(AnalysisError::TypeMismatch {
+                expected: "__revision as 'timestamp-counter' (HLC) or a timestamp integer".into(),
+                actual: format!("'{}'", literal),
+            });
+        }
+
+        Ok(Some(TypedExpr::new(
+            Expr::BinaryOp {
+                left: Box::new(left.clone()),
+                op: BinaryOperator::Eq,
+                right: Box::new(right.clone()),
+            },
+            DataType::Boolean,
+        )))
     }
 
     /// Convert SQL binary operator to internal representation

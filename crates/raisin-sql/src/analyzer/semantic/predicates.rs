@@ -97,13 +97,20 @@ pub(super) fn extract_revision_predicate(
 }
 
 /// Extract revision value from a typed expression
-/// Returns Some(revision) for numeric literals, None for IS NULL
+///
+/// Returns Some(revision) for numeric and `'timestamp-counter'` string literals,
+/// None for IS NULL. An integer literal pins `HLC(timestamp, 0)`, which cannot
+/// name a revision whose counter is non-zero — pass the full HLC string (as
+/// branch heads and `nodes.history` report it) when the pin must be exact. The
+/// string form is type-checked in `analyze_revision_comparison`, so an
+/// unparseable literal never reaches here.
 fn extract_revision_value(expr: &TypedExpr) -> Option<Option<raisin_hlc::HLC>> {
     match &expr.expr {
         Expr::Literal(Literal::Int(i)) if *i >= 0 => Some(Some(raisin_hlc::HLC::new(*i as u64, 0))),
         Expr::Literal(Literal::BigInt(i)) if *i >= 0 => {
             Some(Some(raisin_hlc::HLC::new(*i as u64, 0)))
         }
+        Expr::Literal(Literal::Text(s)) => s.parse::<raisin_hlc::HLC>().ok().map(Some),
         Expr::Literal(Literal::Null) => Some(None),
         _ => None,
     }

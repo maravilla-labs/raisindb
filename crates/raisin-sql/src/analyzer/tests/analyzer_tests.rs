@@ -2240,6 +2240,51 @@ fn test_revision_extraction_simple() {
     assert!(query.selection.is_none());
 }
 
+/// The full-HLC form: an integer literal can only pin counter 0, so a revision
+/// produced in the same millisecond as another is unreachable without this.
+#[test]
+fn test_revision_extraction_hlc_string() {
+    let analyzer = Analyzer::new();
+    let result = analyzer.analyze("SELECT id FROM nodes WHERE __revision = '1754300000123-4'");
+    assert!(result.is_ok(), "{:?}", result.err());
+
+    let AnalyzedStatement::Query(query) = result.unwrap() else {
+        panic!("Expected Query statement");
+    };
+
+    assert_eq!(query.max_revision, Some(HLC::new(1754300000123, 4)));
+    assert!(query.selection.is_none());
+}
+
+/// The pin composes with a normal filter, exactly like the integer form.
+#[test]
+fn test_revision_extraction_hlc_string_with_other_predicates() {
+    let analyzer = Analyzer::new();
+    let result = analyzer
+        .analyze("SELECT id FROM nodes WHERE __revision = '1754300000123-4' AND name = 'test'");
+    assert!(result.is_ok(), "{:?}", result.err());
+
+    let AnalyzedStatement::Query(query) = result.unwrap() else {
+        panic!("Expected Query statement");
+    };
+
+    assert_eq!(query.max_revision, Some(HLC::new(1754300000123, 4)));
+    assert!(query.selection.is_some());
+}
+
+/// A malformed revision fails ANALYSIS — never a surviving BigInt-vs-Text
+/// predicate that quietly matches nothing at execution time.
+#[test]
+fn test_revision_extraction_malformed_string_is_an_error() {
+    let analyzer = Analyzer::new();
+    assert!(analyzer
+        .analyze("SELECT id FROM nodes WHERE __revision = '1754300000123'")
+        .is_err());
+    assert!(analyzer
+        .analyze("SELECT id FROM nodes WHERE __revision = 'not-a-revision'")
+        .is_err());
+}
+
 #[test]
 fn test_revision_extraction_with_other_predicates() {
     let analyzer = Analyzer::new();
