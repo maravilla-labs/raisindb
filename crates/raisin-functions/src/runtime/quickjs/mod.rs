@@ -137,7 +137,13 @@ impl FunctionRuntime for QuickJsRuntime {
         // execution. `checkout` returns the runtime to the pool on drop only
         // if we mark it healthy below; a runtime is never shared concurrently.
         // (See QuickJsPool for the full tenant-isolation invariants.)
-        let mut checkout = self.pool.checkout().await?;
+        //
+        // The limit goes IN, because the pool has to collect and then vet a
+        // reused runtime against it — a runtime the previous occupant grew past
+        // this function's budget cannot host it, and handing it over anyway
+        // fails the first allocation in environment setup. See `checkout`.
+        let max_memory_bytes = metadata.resource_limits.max_memory_bytes as usize;
+        let mut checkout = self.pool.checkout(max_memory_bytes).await?;
         let runtime = checkout.runtime();
 
         // Set memory and stack limits from metadata. Always re-set per
@@ -145,7 +151,7 @@ impl FunctionRuntime for QuickJsRuntime {
         // limits.
         Self::configure_limits(
             &runtime,
-            metadata.resource_limits.max_memory_bytes as usize,
+            max_memory_bytes,
             metadata.resource_limits.max_stack_bytes as usize,
         )
         .await;
@@ -252,9 +258,18 @@ impl FunctionRuntime for QuickJsRuntime {
                         Some(caught) => console::format_exception(&caught),
                         None => format!("{e}"),
                     };
-                    tracing::error!(error = %detail, "Failed to setup JS environment");
+                    // Report the budget alongside the failure. `out of memory`
+                    // is a known outcome here and the limit is the one number
+                    // that makes it actionable; without it the message says a
+                    // ceiling was hit but not which ceiling.
+                    tracing::error!(
+                        error = %detail,
+                        max_memory_bytes,
+                        "Failed to setup JS environment"
+                    );
                     return Err(Error::Internal(format!(
-                        "Failed to setup JS environment: {detail}"
+                        "Failed to setup JS environment: {detail} \
+                         (memory budget {max_memory_bytes} bytes)"
                     )));
                 }
 
