@@ -1,5 +1,5 @@
 name: google-drive-adapter
-version: 1.0.0
+version: 1.1.0
 title: Google Drive Adapter
 description: >
   Virtual-node adapter for Google Drive. Mount a Drive folder into a workspace
@@ -32,7 +32,7 @@ provides:
     - /functions/mappers/google-drive-default
   # Pre-configured integration template (disabled until credentials are supplied).
   content:
-    - raisin:system/integrations/google-drive
+    - raisin:system/connectors/google-drive
 
 # Sync configuration for package updates
 # Defines which paths this package owns to prevent conflicts with other packages
@@ -52,25 +52,20 @@ sync:
         - "**"
       mode: merge
 
-    # Integration template in the system workspace
-    # skip, NOT merge. This node is the operator's LIVE connector config: it holds
-    # client_id, the encrypted client secret, connected_accounts and the tenant
-    # authority. `merge` re-applied the shipped template over it and reset every
-    # one of those to the packaged defaults — observed in production as a
-    # configured Microsoft connector reverting to client_id: "", no secret, zero
-    # accounts and auth_url back to `common`, which silently killed every mount
-    # that depended on it. `skip` is documented for exactly this ("preserve
-    # tenant-owned content across updates"): the template lands once, on first
-    # install, and is never written again.
+    # NOTE: no filter for the connector template below.
     #
-    # Deliberately scoped to the integration node only. The adapter and mapper
-    # functions above stay `merge` — those are OUR code and MUST keep updating,
-    # which is what gets a connector fix to a running deployment.
-    - root: /integrations/google-drive
-      workspace: raisin:system
-      include:
-        - "**"
-      mode: skip
+    # There used to be a `mode: skip` entry here protecting the operator's live
+    # connector node, because a re-install replaced its whole property map and
+    # wiped the client id, the encrypted secret and every connected account. It
+    # never worked: nothing on the install path reads `manifest.sync` (only the
+    # exporter does), install reads only a `.raisin-sync.yaml` at the zip root
+    # which this package does not ship, `SyncFilter` has no `workspace` field so
+    # that key was dropped by serde, and the root would not have matched anyway.
+    #
+    # The template now lives under `/connectors`, which packages own and may
+    # overwrite freely, while operator instances live under `/integrations`,
+    # which NO package declares. The protection is structural: install cannot
+    # reach a path no package ships. Do not add a policy filter back.
 
 # Workspace configuration for auto-created folders
 workspace_patches:

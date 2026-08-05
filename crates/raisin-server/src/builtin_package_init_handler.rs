@@ -807,6 +807,84 @@ mod tests {
             .to_string()
     }
 
+    /// NO builtin package may ship or declare content under
+    /// `raisin:system/integrations` — that root belongs to the operator.
+    ///
+    /// This is the whole protection, and it is deliberately structural rather
+    /// than a policy setting. A connector node holds the operator's `client_id`,
+    /// encrypted client secret, connector config and every connected account, and
+    /// a package re-install in `sync`/`overwrite` mode replaces a node's ENTIRE
+    /// property map (`node_installer` → `upsert_deep_node` → `upsert`, which
+    /// preserves only the id). There is no property-level merge anywhere in the
+    /// install path.
+    ///
+    /// The manifests used to carry a `mode: skip` filter meant to protect exactly
+    /// this, and it never once took effect: nothing on the install path reads
+    /// `manifest.sync` (only the exporter does), install reads a
+    /// `.raisin-sync.yaml` at the zip root which these packages do not ship,
+    /// `SyncFilter` has no `workspace` field so that key was dropped by serde,
+    /// and the configured root would not have matched the composed path anyway.
+    /// Four independent failures of one guard is the reason this is now a
+    /// question of WHERE files live rather than what a policy says.
+    ///
+    /// So: templates live under `/connectors`, which packages own and may
+    /// overwrite freely; instances live under `/integrations`, which no package
+    /// declares. Install cannot reach a path it never ships.
+    #[test]
+    fn no_builtin_package_ships_content_under_integrations() {
+        let mut offenders: Vec<String> = Vec::new();
+        let mut templates: Vec<String> = Vec::new();
+
+        for info in raisin_core::package_init::load_builtin_packages_with_hashes() {
+            let name = info.manifest.name.clone();
+
+            // What the manifest DECLARES.
+            for declared in &info.manifest.provides.content {
+                if declared.starts_with("raisin:system/integrations") {
+                    offenders.push(format!("{name}: manifest declares {declared}"));
+                }
+            }
+
+            // What the package actually SHIPS.
+            let Some(dir) = raisin_core::package_init::get_builtin_package_dir(&info.dir_name)
+            else {
+                continue;
+            };
+            let mut stack: Vec<&include_dir::Dir<'static>> = vec![dir];
+            while let Some(d) = stack.pop() {
+                for entry in d.entries() {
+                    match entry {
+                        include_dir::DirEntry::Dir(sub) => stack.push(sub),
+                        include_dir::DirEntry::File(f) => {
+                            let path = f.path().display().to_string();
+                            if path.contains("_raisin__system/integrations/") {
+                                offenders.push(format!("{name}: ships {path}"));
+                            }
+                            if path.contains("_raisin__system/connectors/")
+                                && path.ends_with(".node.yaml")
+                            {
+                                templates.push(format!("{name}: {path}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "a builtin package claims the operator's `/integrations` root; a re-install \
+             would replace the whole property map of whatever sits there, wiping the \
+             client id, the encrypted secret and every connected account:\n  {}",
+            offenders.join("\n  ")
+        );
+        assert!(
+            !templates.is_empty(),
+            "the connector templates have vanished from `/connectors` — the Add-connector \
+             flow has nothing to instantiate from"
+        );
+    }
+
     /// Size of the embedded (current) agent-handler/index.js.
     fn embedded_index_js_len() -> i64 {
         let dir = raisin_core::package_init::get_builtin_package_dir("ai-tools")
