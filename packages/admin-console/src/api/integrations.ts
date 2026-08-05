@@ -78,6 +78,8 @@ export const SYSTEM_WORKSPACE = 'raisin:system'
 /** Branch holding integration config (server uses `main` unconditionally). */
 export const CONFIG_BRANCH = 'main'
 const INTEGRATIONS_ROOT = '/integrations'
+/** Where PACKAGES ship connector templates. Operators never write here. */
+const CONNECTORS_ROOT = '/connectors'
 const MOUNTS_ROOT = '/mounts'
 
 // ============================================================
@@ -812,9 +814,71 @@ export const integrationsApi = {
 
   // ---- Integration config CRUD ----
 
+  /**
+   * The operator's configured connectors — never the package templates.
+   *
+   * Both are `raisin:Integration` nodes and only their PATH tells them apart:
+   * packages ship templates under `/connectors` and own that root; instances
+   * live under `/integrations`, which no package declares, so an install can
+   * never overwrite one. Listing templates here would offer the operator a
+   * connector whose credentials the next package update would wipe.
+   */
   listIntegrations: async (repo: string): Promise<Integration[]> => {
     const nodes = await listByNodeType(repo, SYSTEM_WORKSPACE, 'raisin:Integration')
-    return nodes.map(nodeToIntegration)
+    return nodes
+      .filter((n) => !(n.path || '').startsWith(`${CONNECTORS_ROOT}/`))
+      .map(nodeToIntegration)
+  },
+
+  /**
+   * The connector templates a package installed, as the catalogue to add from.
+   *
+   * A template carries everything the operator should not have to type —
+   * `provider_type`, `adapter_function`, both config schema names, the OAuth
+   * endpoints and scopes, the setup instructions — and deliberately ships
+   * `enabled: false` with no `client_id` and no connections.
+   */
+  listConnectorTemplates: async (repo: string): Promise<Integration[]> => {
+    const nodes = await listByNodeType(repo, SYSTEM_WORKSPACE, 'raisin:Integration')
+    return nodes
+      .filter((n) => (n.path || '').startsWith(`${CONNECTORS_ROOT}/`))
+      .map(nodeToIntegration)
+  },
+
+  /**
+   * Create a configured connector instance from a template.
+   *
+   * Everything package-owned is copied from the template; the caller supplies
+   * only what an operator actually owns (a name, a title, credentials, and the
+   * connector-level config). The result lives under `/integrations`, so package
+   * updates cannot touch it — which is the entire point of the split, and why
+   * two instances of one provider (two Microsoft tenants, each with its own
+   * client id and secret) are now expressible.
+   */
+  createIntegrationFromTemplate: async (
+    repo: string,
+    template: Integration,
+    overrides: Pick<Integration, 'name' | 'title'> & Partial<Integration>
+  ): Promise<Integration> => {
+    const instance: Integration = {
+      // Spreading the template carries `_raw` with it, and that is LOAD-BEARING:
+      // `config_type` and `connection_config_type` are read into typed fields but
+      // written back only through `_raw` (see `integrationToProperties`). Drop it
+      // and the new connector loses its schema-driven config form and its
+      // "Add connection" button, which is exactly what a hand-made connector
+      // suffered from before this flow existed.
+      ...template,
+      ...overrides,
+      // Never inherit the template's identity or its engine-owned fields.
+      id: undefined,
+      path: undefined,
+      enabled: overrides.enabled ?? true,
+      connected_accounts: [],
+      capabilities: undefined,
+      capabilities_checked_at: undefined,
+      client_secret_set: undefined,
+    }
+    return integrationsApi.createIntegration(repo, instance)
   },
 
   getIntegration: async (repo: string, name: string): Promise<Integration> => {

@@ -96,7 +96,12 @@ const reinstallModeOptions: SplitButtonOption<InstallMode>[] = [
   {
     value: 'skip',
     label: 'Reinstall (Skip)',
-    description: 'Only install content to paths that do not already exist. Preserves existing content.',
+    // Say plainly that this does nothing here. The server returns early for an
+    // installed package in skip mode, so picking it to "update the adapter" is a
+    // no-op that looks like a successful reinstall — which is exactly how a
+    // shipped connector fix appeared to deploy while the old code kept running.
+    description:
+      'Does nothing for an already-installed package. Only useful to fill in content that is missing.',
     icon: <Download className="w-4 h-4" />,
   },
   {

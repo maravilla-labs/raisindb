@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import { ItemTable, type TableColumn } from '../components/ItemTable'
 import { useToast, ToastContainer } from '../components/Toast'
 import IntegrationEditor from '../components/integrations/IntegrationEditor'
+import AddConnectorDialog from '../components/integrations/AddConnectorDialog'
 import CapabilityChips from '../components/integrations/CapabilityChips'
 import { integrationsApi, type Integration, type AdapterPackage } from '../api/integrations'
 
@@ -16,6 +17,8 @@ export default function Integrations() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [integrations, setIntegrations] = useState<Integration[]>([])
   const [adapters, setAdapters] = useState<AdapterPackage[]>([])
+  const [templates, setTemplates] = useState<Integration[]>([])
+  const [showAdd, setShowAdd] = useState(false)
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<Integration | undefined>(undefined)
   const [showEditor, setShowEditor] = useState(false)
@@ -26,12 +29,14 @@ export default function Integrations() {
     if (!repo) return
     setLoading(true)
     try {
-      const [ints, pkgs] = await Promise.all([
+      const [ints, pkgs, tmpl] = await Promise.all([
         integrationsApi.listIntegrations(repo),
         integrationsApi.listAdapterPackages(repo),
+        integrationsApi.listConnectorTemplates(repo),
       ])
       setIntegrations(ints)
       setAdapters(pkgs)
+      setTemplates(tmpl)
     } catch (e: any) {
       showError('Failed to load connectors', e?.message)
     } finally {
@@ -73,9 +78,25 @@ export default function Integrations() {
     }
   }, [searchParams, setSearchParams, showError])
 
+  /**
+   * Adding a connector starts from a template, never from a blank form.
+   *
+   * The blank form cannot set `config_type` / `connection_config_type` — it only
+   * reads them — so a hand-built connector silently lost its schema-driven
+   * config form AND its "Add connection" button. Seeding from a template is what
+   * makes a second instance of a shipped connector (a second Microsoft tenant,
+   * say) actually usable.
+   */
   function openNew() {
-    setEditing(undefined)
+    setShowAdd(true)
+  }
+
+  /** A freshly minted instance goes straight into the editor for credentials. */
+  function onConnectorCreated(instance: Integration) {
+    setShowAdd(false)
+    setEditing(instance)
     setShowEditor(true)
+    load()
   }
 
   function openEdit(i: Integration) {
@@ -166,7 +187,7 @@ export default function Integrations() {
           onClick={openNew}
           className="flex items-center gap-2 px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors"
         >
-          <Plus className="w-5 h-5" /> New Connector
+          <Plus className="w-5 h-5" /> Add connector
         </button>
       </div>
 
@@ -221,6 +242,17 @@ export default function Integrations() {
             onDelete={(i) => setDeleteTarget(i)}
           />
         </GlassCard>
+      )}
+
+      {showAdd && repo && (
+        <AddConnectorDialog
+          repo={repo}
+          templates={templates}
+          existing={integrations}
+          onClose={() => setShowAdd(false)}
+          onCreated={onConnectorCreated}
+          onError={showError}
+        />
       )}
 
       {showEditor && repo && (

@@ -19,12 +19,21 @@ import {
 } from 'lucide-react'
 import type { MountState, SyncRun } from '../api/integrations'
 
-export type StatusKind = 'ok' | 'syncing' | 'auth_required' | 'misconfigured' | 'degraded' | 'idle'
+export type StatusKind =
+  | 'ok'
+  | 'syncing'
+  | 'interrupted'
+  | 'auth_required'
+  | 'misconfigured'
+  | 'degraded'
+  | 'idle'
 
 export function statusKind(state?: MountState): StatusKind {
   const s = (state?.status || '').toLowerCase()
   if (s === 'ok' || s === 'synced') return 'ok'
-  if (s === 'syncing') return 'syncing'
+  // A `syncing` flag whose run is long gone is not a live sync. Saying so is
+  // what stops the console showing a permanent spinner over a dead run.
+  if (s === 'syncing') return isStaleSyncing(state) ? 'interrupted' : 'syncing'
   if (s === 'auth_required') return 'auth_required'
   // Checked before 'degraded': the operator action is completely different.
   // Degraded means "flaky, it may recover"; misconfigured means "it will never
@@ -83,6 +92,13 @@ export const STATUS_META: Record<StatusKind, StatusMeta> = {
     Icon: AlertTriangle,
     hint: 'Recent syncs failed. It may recover on its own.',
   },
+  interrupted: {
+    label: 'Interrupted',
+    cls: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+    dot: 'bg-amber-400',
+    Icon: AlertTriangle,
+    hint: 'The last sync did not finish — it was most likely cut short by the job timeout. The next scheduled run picks up where it stopped; you can also sync now.',
+  },
   idle: {
     label: 'Idle',
     cls: 'bg-zinc-500/10 text-zinc-400 border-white/10',
@@ -102,7 +118,37 @@ export function isSyncing(state?: MountState): boolean {
   // an empty run history behind it. Pausing is an explicit statement that
   // nothing is running, so it wins over a stale flag.
   if (state?.paused) return false
-  return (state?.status || '').toLowerCase() === 'syncing'
+  if ((state?.status || '').toLowerCase() !== 'syncing') return false
+  // ...and neither is a run that cannot possibly still be going.
+  return !isStaleSyncing(state)
+}
+
+/**
+ * Seconds after which a run claiming to be in flight must be dead.
+ *
+ * Twice the engine's per-mount lease TTL (600s). The job watchdog kills any sync
+ * past its timeout, so nothing legitimately runs this long.
+ */
+const STALE_SYNC_AFTER_SECONDS = 1200
+
+/**
+ * True when `status` says syncing but the run behind it is gone.
+ *
+ * A killed run never reaches `finalize`, so the flag it set on the way in is
+ * never cleared — and the console then greys out "Sync now" on that same flag,
+ * removing the one action that would fix it. A webhook mount could sit like this
+ * indefinitely, since a live subscription means it is never rescheduled either.
+ *
+ * Measured from the open run's `started_at`, not `last_attempt_at`: only
+ * `finalize` stamps the latter, and `finalize` is precisely what a killed run
+ * skips, so it is always stale on the path this detects.
+ */
+export function isStaleSyncing(state?: MountState): boolean {
+  if ((state?.status || '').toLowerCase() !== 'syncing') return false
+  const startedAt = state?.last_run?.started_at
+  // Syncing with no run record behind it: nothing exists that could finish it.
+  if (!startedAt) return true
+  return Date.now() / 1000 - startedAt > STALE_SYNC_AFTER_SECONDS
 }
 
 /** True when an operator has suspended scheduling. */
