@@ -263,6 +263,8 @@ fn ctx<'a>(
     mat: &'a dyn NodeMaterializer,
 ) -> SyncCtx<'a> {
     SyncCtx {
+        // Tests never race the wall clock; far-future so the budget never trips.
+        deadline: i64::MAX,
         public_origin: None,
         storage: env.storage.clone(),
         scope: scope(),
@@ -1717,6 +1719,131 @@ fn webhook_mount() -> MountConfig {
 ///
 /// Draining our own unfinished backfill has nothing to do with whether the
 /// provider can push.
+/// An ordinary failure must land on a terminal status straight away.
+///
+/// `finalize` used to set the status only once `consecutive_failures` reached
+/// the degrade threshold (5), so failures 1-4 left it at whatever `run_sync`
+/// wrote before the adapter work: `"syncing"`. The console then showed a
+/// permanent spinner next to a run history saying `error`, with `Sync now`
+/// greyed out on that same flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_leaves_a_terminal_status_not_syncing() {
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+
+    // Put the mount on the delta path, so the failing `get_changes` is what runs.
+    {
+        let tx = begin(&env).await;
+        let mut node = tx
+            .get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        node.properties.insert(
+            "state".to_string(),
+            prop_obj(json!({ "last_sync_token": "tok-1" })),
+        );
+        tx.upsert_node(super::SYSTEM_WORKSPACE, &node)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let mock = Arc::new(MockAdapter::default());
+    // Without this the mount falls back to a FULL walk, where the queued error
+    // would be eaten by the best-effort delta-baseline probe.
+    mock.set_caps(json!({ "can_read": true, "supports_changes": true }));
+    mock.push_changes_err(AdapterError::Transient("provider hiccup".to_string()));
+
+    let handler = VirtualMountSyncHandler::new(
+        env.storage.clone(),
+        Some(mock.clone() as super::AdapterInvokerHandle),
+        None,
+    );
+    let job = job_info(JobType::VirtualMountSync {
+        mount_id: MOUNT_ID.to_string(),
+        mode: "delta".to_string(),
+        trigger: "schedule".to_string(),
+    });
+    // A transient error IS retryable, so the job itself reports Err. That is
+    // correct and beside the point here — the mount state is what matters.
+    let _ = handler.handle(&job, &job_context()).await;
+
+    let state = read_state(&env).await.expect("state must be persisted");
+    assert_eq!(
+        state.get("status").and_then(|v| v.as_str()),
+        Some("error"),
+        "the FIRST failure must leave a terminal status, not a mount reading `syncing`"
+    );
+    assert_eq!(
+        state.get("consecutive_failures").and_then(|v| v.as_u64()),
+        Some(1)
+    );
+}
+
+/// A run that was KILLED leaves `status: "syncing"` behind, and nothing else
+/// clears it. It must not wedge the mount.
+///
+/// The watchdog aborts a sync past its job timeout by dropping the task at its
+/// await point, so `finalize` never runs. For a polled mount that only costs a
+/// lease TTL; for a WEBHOOK mount it was terminal, because the webhook branch
+/// returns `!has_active_push` — a mount with a live subscription is never
+/// scheduled, so the only thing that could clear the flag was the one thing
+/// that could not be scheduled. The console greys out `Sync now` on the same
+/// flag, so the operator had no way out either.
+#[test]
+fn a_killed_run_does_not_wedge_a_mount_at_syncing() {
+    let now = 1_800_000_000;
+    let lease = super::SYNC_LEASE_TTL.as_secs() as i64;
+
+    // A webhook mount with a live subscription: never polled, by design.
+    let mut mount = webhook_mount();
+    mount.state.push_status = Some("active".to_string());
+    mount.state.push_subscription_id = Some("sub-1".to_string());
+    mount.state.push_expires_at = Some("2999-01-01T00:00:00Z".to_string());
+    assert!(
+        !super::check::is_due(&mount, now),
+        "a settled webhook mount must stay push-driven"
+    );
+
+    // A run that is genuinely in flight must NOT be re-enqueued.
+    mount.state.status = Some("syncing".to_string());
+    mount.state.last_run = Some(super::config::SyncRun::started(now - 5, "full", "manual"));
+    assert!(
+        !super::check::is_due(&mount, now),
+        "a live run must not be treated as stale"
+    );
+
+    // One that started longer ago than any run can possibly last is dead: the
+    // watchdog guarantees no run outlives the job timeout.
+    mount.state.last_run = Some(super::config::SyncRun::started(
+        now - (2 * lease + 1),
+        "full",
+        "manual",
+    ));
+    assert!(
+        super::check::is_due(&mount, now),
+        "a webhook mount wedged at `syncing` must become due again, or nothing \
+         can ever clear the flag"
+    );
+
+    // And the same holds for a polled mount.
+    let mut polled = mk_mount(SyncConfig::default());
+    polled.state.status = Some("syncing".to_string());
+    polled.state.last_attempt_at = Some(now);
+    polled.state.last_sync_at = Some(now);
+    polled.state.last_run = Some(super::config::SyncRun::started(
+        now - (2 * lease + 1),
+        "full",
+        "schedule",
+    ));
+    assert!(
+        super::check::is_due(&polled, now),
+        "a stale `syncing` must win over the poll interval, which would otherwise \
+         hold this mount off"
+    );
+}
+
 #[test]
 fn webhook_mount_with_pending_backfill_is_due() {
     let now = 1_800_000_000;

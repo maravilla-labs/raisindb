@@ -97,6 +97,9 @@ pub fn adapter_ctx<'a>(
         lease_token: None,
         credential,
         mount_snapshot,
+        // A subscription op is a single adapter call, not a walk, so the
+        // budget never applies. Far-future so nothing can read it as expired.
+        deadline: i64::MAX,
     }
 }
 

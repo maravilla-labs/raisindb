@@ -5,6 +5,18 @@ use super::*;
 /// Lease TTL for a per-mount sync run.
 pub(super) const SYNC_LEASE_TTL: Duration = Duration::from_secs(600);
 
+/// How long a run may walk before it must stop itself at a page boundary.
+///
+/// Comfortably under the job's own `timeout_seconds` (600s for
+/// `VirtualMountSync`), because being reaped by the watchdog is not a graceful
+/// end: it aborts the task at its current await point, so `finalize` never runs,
+/// the status stays `"syncing"` forever and the lease leaks for its full TTL.
+/// Stopping ourselves first turns that into an ordinary truncated chunk — resume
+/// point persisted, status terminal, lease released — and the next tick carries
+/// on. A large mailbox therefore imports across many clean runs instead of being
+/// killed at the same point every time.
+pub(super) const SYNC_WALL_CLOCK_BUDGET: Duration = Duration::from_secs(480);
+
 /// Everything a delta/full run needs. Borrows the invoker + materializer.
 pub struct SyncCtx<'a> {
     pub storage: Arc<RocksDBStorage>,
@@ -31,6 +43,19 @@ pub struct SyncCtx<'a> {
     /// operator's stored OAuth `redirect_uri`. See
     /// [`IntegrationConfig::public_origin`].
     pub public_origin: Option<String>,
+    /// Unix epoch seconds after which the walk must stop itself at the next page
+    /// boundary. See [`SYNC_WALL_CLOCK_BUDGET`].
+    pub deadline: i64,
+}
+
+impl SyncCtx<'_> {
+    /// Whether this run has used up its wall-clock budget.
+    ///
+    /// Asked only where [`stop_requested`] already is — after a flush, with the
+    /// cursor about to be persisted — so stopping here loses nothing.
+    pub fn out_of_time(&self, now: i64) -> bool {
+        now >= self.deadline
+    }
 }
 
 impl SyncCtx<'_> {

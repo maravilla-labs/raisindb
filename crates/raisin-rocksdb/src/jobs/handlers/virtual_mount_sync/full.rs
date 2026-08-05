@@ -4,6 +4,7 @@
 //! then deletes any mount-owned virtual node not seen this pass. Finally tries
 //! to establish a delta baseline token so subsequent syncs can go incremental.
 
+use chrono::Utc;
 use std::collections::HashSet;
 
 use serde_json::json;
@@ -133,8 +134,27 @@ pub async fn run_with(
                 Some(c) if !c.is_empty() => cursor = Some(c),
                 _ => break,
             }
-            if processed >= max {
+            // Two reasons to stop with work left: the item budget, and the CLOCK.
+            //
+            // The clock one is what stops the watchdog reaping us. A walk that
+            // runs past the job's `timeout_seconds` is aborted at its await
+            // point, which skips `finalize` entirely — status wedged at
+            // `"syncing"`, lease leaked for its full TTL, and for a webhook mount
+            // nothing that would ever schedule the run that could clear it. Ending
+            // ourselves here instead makes it an ordinary truncated chunk, which
+            // this function already knows how to resume from.
+            let out_of_time = ctx.out_of_time(Utc::now().timestamp());
+            if processed >= max || out_of_time {
                 truncated = true;
+                if out_of_time {
+                    tracing::info!(
+                        mount_id = %ctx.mount.mount_id,
+                        processed,
+                        folders_pending = stack.len() + 1,
+                        "wall-clock budget spent; ending this chunk cleanly so the run is not \
+                         killed mid-walk. The next tick resumes from the persisted cursor."
+                    );
+                }
                 // Save the resume point: this folder is unfinished, so it goes
                 // back on the stack with the cursor that continues it.
                 stack.push((folder_id.clone(), prefix.clone()));

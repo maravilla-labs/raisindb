@@ -71,7 +71,7 @@ use serde_json::{json, Value};
 
 use crate::RocksDBStorage;
 pub use ctx::SyncCtx;
-use ctx::SYNC_LEASE_TTL;
+use ctx::{SYNC_LEASE_TTL, SYNC_WALL_CLOCK_BUDGET};
 pub use item::{map_item, stage_item};
 use preflight::{skip_result, Preflight};
 use resolve::CtxParts;

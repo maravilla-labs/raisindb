@@ -59,9 +59,24 @@ impl VirtualMountSyncHandler {
                     state.status = Some("misconfigured".to_string());
                     "misconfigured"
                 } else {
-                    if state.consecutive_failures >= config::DEGRADE_THRESHOLD {
-                        state.status = Some("degraded".to_string());
-                    }
+                    // `degraded` once the failures pile up, plain `error` before
+                    // that — but ALWAYS one of them.
+                    //
+                    // This used to set the status only on the `degraded` branch,
+                    // so an ordinary failure on attempts 1-4 left `status` at
+                    // whatever `run_sync` wrote before the adapter work started:
+                    // `"syncing"`. The console then showed a mount syncing
+                    // forever while its own run history said `error`, and it
+                    // greys out `Sync now` on that flag — so the operator was
+                    // left staring at a spinner with the one escape hatch
+                    // disabled. Every arm of this match must land on a terminal
+                    // status; none may fall through.
+                    state.status =
+                        Some(if state.consecutive_failures >= config::DEGRADE_THRESHOLD {
+                            "degraded".to_string()
+                        } else {
+                            "error".to_string()
+                        });
                     "error"
                 };
                 run.finish(now, outcome, Some(e.to_string()));

@@ -86,6 +86,7 @@ impl VirtualMountSyncHandler {
             lease_token,
             credential,
             mount_snapshot,
+            deadline: Utc::now().timestamp() + SYNC_WALL_CLOCK_BUDGET.as_secs() as i64,
         };
 
         // A remap re-materializes everything through the CURRENT mapper and path

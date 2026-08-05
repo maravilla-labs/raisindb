@@ -141,6 +141,36 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
         return true;
     }
 
+    // A run that was KILLED never cleared its own status, so recover it here.
+    //
+    // The job watchdog aborts any sync past `timeout_seconds` by dropping the
+    // task at its current await point. `finalize` is an ordinary sequential call
+    // and there is no `Drop` guard anywhere in this module, so on a kill it never
+    // runs: `status` stays `"syncing"` and nothing else in the system ever
+    // rewrites it — not `is_due`, not `preflight`, not the boot-time job restore,
+    // which resets orphaned JOBS but never mount state.
+    //
+    // For a polled mount that only wasted a lease TTL. For a WEBHOOK mount it was
+    // terminal: the branch below returns `!has_active_push`, so a mount holding a
+    // live subscription is never scheduled, and the only thing that could clear
+    // the flag — a sync run — was the one thing that could not be scheduled. The
+    // console compounds it by grinding `Sync now` out on the same flag. A
+    // production calendar mount sat like that for an hour with its last run
+    // reporting OK.
+    //
+    // THIS MUST STAY ABOVE THE WEBHOOK BRANCH, for the same reason the backfill
+    // guard above does: below it, the case that needs recovery most cannot reach
+    // it.
+    //
+    // The threshold is deliberately generous. The watchdog guarantees no run
+    // outlives `timeout_seconds`, so a run that started more than twice the lease
+    // TTL ago cannot still be running, whatever the status claims. Being wrong in
+    // the other direction is harmless anyway: the run we enqueue takes the
+    // per-mount lease, and a genuinely live sync simply answers `locked_elsewhere`.
+    if stale_syncing(mount, now) {
+        return true;
+    }
+
     if mount.sync_config.mode == "webhook" {
         // Webhook mounts are push-driven, never polled — with ONE exception:
         // bootstrapping. A webhook mount that has no live push subscription
@@ -167,6 +197,23 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     match last_activity {
         None => true,
         Some(last) => last + mount.effective_interval_secs() as i64 <= now,
+    }
+}
+
+/// Whether this mount claims to be syncing but cannot possibly be.
+///
+/// Measured from the open run's `started_at` rather than `last_attempt_at`,
+/// because only `finalize` stamps the latter — and `finalize` is exactly what a
+/// killed run skips, so on the path this exists to detect it is always stale.
+pub(super) fn stale_syncing(mount: &MountConfig, now: i64) -> bool {
+    if mount.state.status.as_deref() != Some("syncing") {
+        return false;
+    }
+    let cutoff = 2 * super::SYNC_LEASE_TTL.as_secs() as i64;
+    match mount.state.last_run.as_ref() {
+        Some(run) => now - run.started_at > cutoff,
+        // Status says syncing with no run record at all: nothing can finish it.
+        None => true,
     }
 }
 
