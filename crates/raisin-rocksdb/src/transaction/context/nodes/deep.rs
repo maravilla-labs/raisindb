@@ -106,7 +106,43 @@ async fn ensure_parent_folders(
                 "Creating parent folder for deep node operation"
             );
 
-            super::upsert::upsert_node(tx, workspace, &folder).await?;
+            // A concurrent creator of the SAME intermediate folder is
+            // convergence, not conflict.
+            //
+            // Two deep writes into a shared root race here: both read "absent",
+            // both try to create it, and the loser gets
+            // `Conflict: … is being created by a concurrent operation` from the
+            // path reservation. The folder it wanted exists a moment later, so
+            // failing the whole write is the wrong answer.
+            //
+            // This surfaced the moment a root was NEW. Four adapter packages
+            // ship their connector template under `/connectors`, and installing
+            // them concurrently made every package after the first fail its
+            // install — which silently left the OLD adapter code in place while
+            // the console reported the package as the new version. `/integrations`
+            // never showed it only because that folder already existed
+            // everywhere.
+            match super::upsert::upsert_node(tx, workspace, &folder).await {
+                Ok(_) => {}
+                Err(raisin_error::Error::Conflict(msg)) => {
+                    // Re-read: if the winner committed it we converge on their
+                    // row, which is exactly the desired outcome. If it is still
+                    // genuinely absent, the conflict was not convergence and
+                    // must surface.
+                    if super::read::get_node_by_path(tx, workspace, &current_path)
+                        .await?
+                        .is_none()
+                    {
+                        return Err(raisin_error::Error::Conflict(msg));
+                    }
+                    tracing::debug!(
+                        workspace = %workspace,
+                        path = %current_path,
+                        "parent folder was created concurrently; converging on it"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
