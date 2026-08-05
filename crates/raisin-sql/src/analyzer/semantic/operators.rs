@@ -30,7 +30,8 @@ impl<'a> AnalyzerContext<'a> {
         // indistinguishable. Type the comparison here and let the extractor parse
         // the literal; an unparseable revision is an error NOW rather than a
         // predicate that silently survives into execution.
-        if let Some(revision_cmp) = self.analyze_revision_comparison(&typed_left, op, &typed_right)?
+        if let Some(revision_cmp) =
+            self.analyze_revision_comparison(&typed_left, op, &typed_right)?
         {
             return Ok(revision_cmp);
         }
@@ -126,9 +127,7 @@ impl<'a> AnalyzerContext<'a> {
         if !matches!(op, SqlBinaryOp::Eq) {
             return Ok(None);
         }
-        let is_revision_column = |e: &TypedExpr| {
-            matches!(&e.expr, Expr::Column { column, .. } if column == "__revision")
-        };
+        let is_revision_column = |e: &TypedExpr| matches!(&e.expr, Expr::Column { column, .. } if column == "__revision");
         let string_literal = |e: &TypedExpr| match &e.expr {
             Expr::Literal(Literal::Text(s)) => Some(s.clone()),
             _ => None,
