@@ -96,17 +96,39 @@ pub async fn notify(
         .await
         .map_err(|e| ApiError::internal(format!("failed to list virtual mounts: {e}")))?;
 
-    let mount = mounts
+    let Some(mount) = mounts
         .into_iter()
         .find(|n| token_matches(&mount_token, &mount_state(n), &n.id))
-        .ok_or_else(|| {
-            // Do not echo the token — a miss is just "unknown subscription".
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "MOUNT_NOT_FOUND",
-                "No virtual mount matches this notification token",
-            )
-        })?;
+    else {
+        // An ORPHANED subscription: the mount is gone but the provider was never
+        // told, so it keeps delivering forever.
+        //
+        // In production this was 2,147 of 2,282 notifications — 94% of all
+        // webhook traffic — for one deleted mount. Each one wakes the server and
+        // scans every `raisin:VirtualMount` in the repo looking for a token that
+        // cannot match. A bare 404 gave the provider no reason to stop and left
+        // no trace naming what to clean up.
+        //
+        // `410 Gone` is the standard "this endpoint is permanently dead" signal
+        // and is what makes a provider retire a subscription rather than retry
+        // it. The subscription id is logged so an operator can delete it at the
+        // provider directly — we cannot unsubscribe ourselves, because the
+        // credential to do so lived on the mount that no longer exists.
+        let subscription_ids = orphan_subscription_ids(&body_json);
+        tracing::warn!(
+            repo = %repo,
+            mount_token_prefix = %mount_token.split('.').next().unwrap_or(""),
+            subscription_ids = %subscription_ids,
+            "orphaned push subscription: no mount matches this notification token. \
+             Delete the subscription at the provider — its mount is gone, so this \
+             server cannot unsubscribe it."
+        );
+        return Err(ApiError::new(
+            StatusCode::GONE,
+            "MOUNT_NOT_FOUND",
+            "No virtual mount matches this notification token",
+        ));
+    };
 
     let state_json = mount_state(&mount);
 
@@ -149,9 +171,25 @@ async fn record_delivery(state: &AppState, tenant: &str, repo: &str, mount_id: &
     let Some(storage) = state.rocksdb_storage() else {
         return;
     };
-    let branch = super::config_branch(state, tenant, repo).await;
+    // Record on the branch the mount was FOUND on, not on a separately-resolved
+    // one.
+    //
+    // The lookup above goes through `config_service`, which is hardcoded to
+    // `CONFIG_BRANCH`; this used to call `config_branch()`, which resolves the
+    // repo's real `default_branch`. On a repo where those differ the lookup
+    // succeeds and the write targets a branch the mount does not exist on, so
+    // `record_push_delivery` gives up — and every delivery counter stays at zero
+    // while notifications are demonstrably arriving and being acked with 200.
+    //
+    // Observed in production on `studio`: 200s in the access log, "No delivery
+    // yet · ACCEPTED 0" in the console, and (once this release started logging
+    // it) `skipping push-delivery counter write: mount node not found on this
+    // branch`. Two branch resolutions for one node is the bug; using one is the
+    // fix. The wider inconsistency of the integrations surface on a non-`main`
+    // repo is noted on `config_branch` and is not addressed here.
+    let branch = super::CONFIG_BRANCH;
     if let Err(e) =
-        raisin_rocksdb::record_push_delivery(storage, tenant, repo, &branch, mount_id, ok).await
+        raisin_rocksdb::record_push_delivery(storage, tenant, repo, branch, mount_id, ok).await
     {
         tracing::warn!(mount_id = %mount_id, error = %e, "failed to record push delivery health");
     }
@@ -520,5 +558,34 @@ mod tests {
         assert!(token_matches("pt-1", &state, "mount-9"));
         assert!(token_matches("mount-9", &Value::Null, "mount-9"));
         assert!(!token_matches("nope", &Value::Null, "mount-9"));
+    }
+}
+
+/// Subscription ids named in a provider notification body, for the orphan log.
+///
+/// Best-effort and shape-tolerant: Graph sends `{"value":[{"subscriptionId":…}]}`,
+/// others differ, and an orphan may arrive with no parseable body at all. The
+/// point is to give an operator something to search for at the provider, so an
+/// empty answer is fine — never an error.
+fn orphan_subscription_ids(body: &serde_json::Value) -> String {
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(items) = body.get("value").and_then(|v| v.as_array()) {
+        for item in items {
+            if let Some(id) = item.get("subscriptionId").and_then(|v| v.as_str()) {
+                if !ids.iter().any(|existing| existing == id) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    if let Some(id) = body.get("subscriptionId").and_then(|v| v.as_str()) {
+        if !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    }
+    if ids.is_empty() {
+        "none in body".to_string()
+    } else {
+        ids.join(",")
     }
 }

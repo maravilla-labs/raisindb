@@ -18,7 +18,7 @@ import { formatRelative } from '../../utils/time'
  */
 export interface ActivityBurst {
   id: string
-  kind: 'created' | 'updated' | 'deleted'
+  kind: 'created' | 'updated' | 'deleted' | 'processed'
   count: number
   /** Representative path — the first in the burst. */
   samplePath: string
@@ -38,6 +38,11 @@ const KIND_META = {
   created: { Icon: FilePlus2, cls: 'text-green-400', bg: 'bg-green-500/10', verb: 'Created' },
   updated: { Icon: FilePen, cls: 'text-blue-400', bg: 'bg-blue-500/10', verb: 'Updated' },
   deleted: { Icon: FileMinus2, cls: 'text-red-400', bg: 'bg-red-500/10', verb: 'Deleted' },
+  // Progress events carry ITEMS WALKED, not nodes written — a page of 500 with
+  // 499 unchanged etags is 500 processed and 1 created. Labelling that "Created
+  // 500 nodes" invented work that never happened and made a healthy re-scan
+  // look like a runaway import.
+  processed: { Icon: FilePen, cls: 'text-zinc-400', bg: 'bg-white/5', verb: 'Processed' },
 } as const
 
 interface MountActivityFeedProps {
@@ -122,7 +127,11 @@ export default function MountActivityFeed({ bursts, status, watching }: MountAct
                 <span className="text-xs text-zinc-300 min-w-0 flex-1 truncate">
                   <span className={meta.cls}>{meta.verb}</span>{' '}
                   <span className="tabular-nums">
-                    {b.count > 1 ? `${b.count.toLocaleString()} nodes` : '1 node'}
+                    {b.count > 1
+                      ? `${b.count.toLocaleString()} ${b.kind === 'processed' ? 'items' : 'nodes'}`
+                      : b.kind === 'processed'
+                        ? '1 item'
+                        : '1 node'}
                   </span>{' '}
                   <span className="text-zinc-500">
                     {b.count > 1 ? 'including ' : 'at '}

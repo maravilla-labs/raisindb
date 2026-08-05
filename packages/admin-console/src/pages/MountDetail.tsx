@@ -56,6 +56,16 @@ const POLL_MS = 5000
 const MAX_BURSTS = 60
 /** Events this close together are treated as one batch commit. */
 const BURST_WINDOW_MS = 1500
+/**
+ * How long ONE burst row may keep absorbing progress.
+ *
+ * Merging is gated only on the gap between events, so a mount that syncs
+ * continuously emits progress every few hundred ms and the same row absorbs
+ * them indefinitely — its count climbing into five figures while "items
+ * imported" sat at 500. A row that never closes is not a burst, it is a
+ * counter, and it reads as a node total.
+ */
+const BURST_MAX_SPAN_MS = 10_000
 
 export default function MountDetail() {
   const { repo, mountName } = useParams<{ repo: string; mountName: string }>()
@@ -194,7 +204,11 @@ export default function MountDetail() {
       const delta = last ? Math.max(0, total - (last.runningTotal ?? 0)) : total
       if (delta === 0) return prev
 
-      if (last && now - last.lastAt < BURST_WINDOW_MS) {
+      if (
+        last &&
+        now - last.lastAt < BURST_WINDOW_MS &&
+        now - last.firstAt < BURST_MAX_SPAN_MS
+      ) {
         const merged = {
           ...last,
           count: last.count + delta,
@@ -205,7 +219,7 @@ export default function MountDetail() {
       }
       const next: ActivityBurst = {
         id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
-        kind: 'created',
+        kind: 'processed',
         count: delta,
         samplePath: `${event.phase} · ${event.subtrees_queued} queued`,
         firstAt: now,
