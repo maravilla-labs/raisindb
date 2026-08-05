@@ -15,12 +15,14 @@
 //! applying deletes immediately would reorder them and leave the item alive.
 
 use super::config::{ExternalItem, MappedNode};
+use super::materializer::is_item_level;
 use super::materializer::{
     estimate_op_bytes, BatchOp, BatchStats, MountScope, NodeMaterializer, SyncIndex, VirtualMeta,
     VirtualNodeRef,
 };
 use super::{AdapterError, SyncCtx};
 use chrono::Utc;
+use raisin_error::Error;
 
 /// Buffers sync operations and flushes them in bounded batches.
 pub struct SyncBatcher<'a> {
@@ -42,7 +44,7 @@ impl<'a> SyncBatcher<'a> {
             .materializer
             .load_index(&ctx.scope)
             .await
-            .map_err(|e| AdapterError::Transient(format!("sync index load failed: {e}")))?;
+            .map_err(|e| classify_write(&e, format!("sync index load failed: {e}")))?;
         Ok(Self {
             materializer: ctx.materializer,
             scope: ctx.scope.clone(),
@@ -150,9 +152,27 @@ impl<'a> SyncBatcher<'a> {
             .materializer
             .apply_batch(&self.scope, &mut self.index, ops)
             .await
-            .map_err(|e| AdapterError::Transient(format!("materialize failed: {e}")))?;
+            .map_err(|e| classify_write(&e, format!("materialize failed: {e}")))?;
         self.stats.merge(stats);
         Ok(())
+    }
+}
+
+/// Map a storage error onto the adapter error taxonomy.
+///
+/// Every write failure used to become [`AdapterError::Transient`], which
+/// `is_retryable` reports as retryable — so a permanently-rejected write (a
+/// workspace that does not allow the mapper's node type, an RLS denial) was
+/// retried by the job layer until it exhausted `max_retries`, burning the full
+/// wall-clock budget over for an outcome that could not change.
+///
+/// Item-level errors are exactly the ones `add_node`/`put_node` raise before
+/// touching the batch, and none of them is fixed by trying again.
+fn classify_write(error: &Error, message: String) -> AdapterError {
+    if is_item_level(error) {
+        AdapterError::Config(message)
+    } else {
+        AdapterError::Transient(message)
     }
 }
 

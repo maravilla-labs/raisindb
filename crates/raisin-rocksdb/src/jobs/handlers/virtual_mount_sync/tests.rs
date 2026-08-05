@@ -1227,6 +1227,130 @@ async fn mount_materializes_into_target_branch() {
     );
 }
 
+/// A mount whose `target_branch` does not exist must back OFF, not spin.
+///
+/// This guard returns before `finalize`, so nothing else stamps the attempt.
+/// Without the stamp `last_attempt_at` stays null, `is_due` has no activity to
+/// measure an interval from and answers `true` unconditionally, and the mount is
+/// re-scanned, re-read and re-written on every 60s tick forever.
+///
+/// The account-selection guard next door already did this and carried a comment
+/// explaining why; this one did not. Both now share `mark_misconfigured`, which
+/// is the point of having one exit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_target_branch_backs_the_mount_off() {
+    let env = setup().await;
+    // Config lives on main; the mount points at a branch that was never created.
+    persist_config_nodes(&env, "no-such-branch").await;
+
+    let mock = Arc::new(MockAdapter::default());
+    let handler = VirtualMountSyncHandler::new(
+        env.storage.clone(),
+        Some(mock.clone() as super::AdapterInvokerHandle),
+        None,
+    );
+    let job = job_info(JobType::VirtualMountSync {
+        mount_id: MOUNT_ID.to_string(),
+        mode: "delta".to_string(),
+        trigger: "schedule".to_string(),
+    });
+    let result = handler.handle(&job, &job_context()).await.unwrap();
+
+    assert_eq!(
+        result
+            .as_ref()
+            .and_then(|v| v.get("reason"))
+            .and_then(|v| v.as_str()),
+        Some("misconfigured"),
+        "a nonexistent target_branch must skip as misconfigured"
+    );
+
+    let state = read_state(&env)
+        .await
+        .expect("mount state must be persisted");
+    assert_eq!(
+        state.get("status").and_then(|v| v.as_str()),
+        Some("misconfigured")
+    );
+    assert!(
+        state
+            .get("last_attempt_at")
+            .and_then(|v| v.as_i64())
+            .is_some(),
+        "the attempt must be stamped, or `is_due` keeps this mount permanently due"
+    );
+    assert_eq!(
+        state.get("consecutive_failures").and_then(|v| v.as_u64()),
+        Some(1),
+        "the failure must count, or the backoff never grows"
+    );
+}
+
+/// A `state` blob that is PRESENT but does not parse must not become a default.
+///
+/// Defaulting looks harmless and is not: `last_sync_token: None` sends the
+/// mount back to a full walk, `backfill_complete: false` disables reconcile
+/// deletes, and `state_seq: 0` against a stored seq that has advanced makes
+/// `persist_mount_state` refuse every subsequent write — permanently. The mount
+/// then materializes nodes it can never record, on every run, reporting `ok`.
+///
+/// Absent is a different case and still defaults; that is a fresh mount.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_state_blob_is_refused_not_defaulted() {
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+
+    // Overwrite `state` with a shape `MountState` cannot deserialize:
+    // `backfill_stack` is Vec<(Option<String>, String)>, not a string.
+    {
+        let tx = begin(&env).await;
+        let mut node = tx
+            .get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        node.properties.insert(
+            "state".to_string(),
+            prop_obj(json!({ "backfill_stack": "not-a-stack", "state_seq": 42 })),
+        );
+        tx.upsert_node(super::SYSTEM_WORKSPACE, &node)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let node = {
+        let tx = begin(&env).await;
+        tx.get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let parsed = super::config::MountConfig::from_node(&node);
+    assert!(
+        parsed.is_err(),
+        "a corrupt state blob must fail the parse, not silently reset the mount"
+    );
+
+    // And the low-level read refuses too, rather than handing back a zeroed
+    // `state_seq` that would jam every later write.
+    let read = super::read_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID).await;
+    assert!(
+        read.is_err(),
+        "read_mount_state must surface a corrupt blob instead of defaulting it"
+    );
+}
+
+/// The whole persisted `state` blob of the test mount.
+async fn read_state(env: &Env) -> Option<serde_json::Value> {
+    let tx = begin(env).await;
+    let node = tx
+        .get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+        .await
+        .unwrap()?;
+    serde_json::to_value(node.properties.get("state")?).ok()
+}
+
 // ---- branch helpers ----
 
 /// Create an additional branch and initialize its node types.
@@ -2216,9 +2340,8 @@ async fn import_throughput_unbatched() {
 #[test]
 fn a_completed_walk_asks_for_a_baseline_not_an_enumeration() {
     // The condition the delta path evaluates.
-    let want_baseline = |token: Option<&str>, backfill_complete: bool| {
-        token.is_none() && backfill_complete
-    };
+    let want_baseline =
+        |token: Option<&str>, backfill_complete: bool| token.is_none() && backfill_complete;
 
     // Everything is materialized: "from now on" is the only correct request.
     assert!(want_baseline(None, true));
@@ -2229,8 +2352,14 @@ fn a_completed_walk_asks_for_a_baseline_not_an_enumeration() {
 
     // A stored token is already a resume point and must be used verbatim,
     // whatever the walk's state.
-    assert!(!want_baseline(Some("https://graph…/delta?$skiptoken=x"), true));
-    assert!(!want_baseline(Some("https://graph…/delta?$skiptoken=x"), false));
+    assert!(!want_baseline(
+        Some("https://graph…/delta?$skiptoken=x"),
+        true
+    ));
+    assert!(!want_baseline(
+        Some("https://graph…/delta?$skiptoken=x"),
+        false
+    ));
 }
 
 /// Stop clears the delta token, so the self-healing baseline above can fire.

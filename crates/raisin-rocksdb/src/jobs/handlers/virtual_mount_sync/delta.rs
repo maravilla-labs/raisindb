@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::batch::SyncBatcher;
 use super::config::{ChangesPage, MountState};
-use super::{persist_state, stage_item, AdapterError, SyncCtx};
+use super::{persist_state, stage_item, AdapterError, StateWrite, SyncCtx};
 
 /// Run a delta sync, updating `state.last_sync_token` as pages complete.
 pub async fn run(
@@ -96,7 +96,11 @@ pub async fn run_with(
                 // Keeping the visibility the original change wanted, without
                 // corrupting the number it borrowed.
                 state.delta_items_done = state.delta_items_done.saturating_add(materialized);
-                if !persist_state(ctx, state).await.unwrap_or(false) {
+                if !persist_state(ctx, state)
+                    .await
+                    .map(StateWrite::is_written)
+                    .unwrap_or(false)
+                {
                     // The cursor did not land. Continuing would re-page from a
                     // position the store does not know about, so stop and let
                     // the next run resume from the last durable cursor.

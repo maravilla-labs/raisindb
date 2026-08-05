@@ -9,8 +9,11 @@ use std::collections::HashSet;
 use serde_json::json;
 
 use super::batch::SyncBatcher;
-use super::config::{ListPage, MountState};
-use super::{persist_state, stage_item, AdapterError, SyncCtx};
+use super::config::{ExternalItem, ListPage, MountState};
+use super::full_reconcile::{
+    capture_delta_baseline, reconcile_deletes, settle_resume_point, WalkFlags,
+};
+use super::{persist_state, stage_item, AdapterError, StateWrite, SyncCtx};
 
 /// Run a full reconcile.
 pub async fn run(
@@ -88,17 +91,7 @@ pub async fn run_with(
                 .map_err(|e| AdapterError::Transient(format!("bad list response: {e}")))?;
 
             for item in &page.items {
-                // A configured hierarchy replaces the provider-derived path;
-                // an unresolvable template falls back to it (see
-                // `resolve_path_template`).
-                let rel_path = match super::config::resolve_path_template(
-                    &ctx.mount.sync_config.path_template,
-                    item,
-                ) {
-                    Some(p) => p,
-                    None if prefix.is_empty() => item.name.clone(),
-                    None => format!("{}/{}", prefix, item.name),
-                };
+                let rel_path = resolve_item_path(ctx, item, &prefix);
                 if super::passes_filters(&rel_path, include, exclude) {
                     stage_item(ctx, batcher, item, &rel_path).await?;
                     seen.insert(item.external_id.clone());
@@ -134,41 +127,8 @@ pub async fn run_with(
                 // `stopped` branch below.
                 break 'outer;
             }
-            // Publish progress as we go. A chunk can run for minutes; without
-            // this the console sees nothing move until the whole chunk lands.
-            //
-            // Advance the REAL state, never a clone. `persist_state` bumps
-            // `state_seq` on success, and a clone would carry that bump to its
-            // grave — every later write in this run would then look stale
-            // against the stored seq and be refused, which is the exact failure
-            // this whole change exists to remove.
-            {
-                let delta = processed.saturating_sub(published);
-                state.backfill_items_done = state.backfill_items_done.saturating_add(delta);
-                published = processed;
-                if let Some(total) = page.total {
-                    state.backfill_items_total = Some(total);
-                }
-                let _ = persist_state(ctx, state).await;
-
-                // Emit AFTER the state is durable, never before: an event is a
-                // claim that this page landed, and a claim that a later failure
-                // could roll back is worse than no event at all.
-                raisin_storage::jobs::global_mount_broadcaster().emit(
-                    &raisin_storage::jobs::mount_channel_key(
-                        &ctx.scope.tenant,
-                        &ctx.scope.repo,
-                        &ctx.scope.mount_id,
-                    ),
-                    raisin_storage::jobs::MountSyncEvent::Progress {
-                        phase: "full".to_string(),
-                        backfill_items_done: state.backfill_items_done,
-                        delta_items_done: state.delta_items_done,
-                        items_total: state.backfill_items_total,
-                        subtrees_queued: stack.len(),
-                    },
-                );
-            }
+            published =
+                publish_progress(ctx, state, &page, processed, published, stack.len()).await?;
             match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
                 _ => break,
@@ -184,154 +144,105 @@ pub async fn run_with(
         }
     }
 
-    // Persist (or clear) the resume point. `backfill_complete` is what makes
-    // reconcile deletes safe: before the first end-to-end pass, "not seen"
-    // only means "not reached yet".
     state.backfill_items_done = state
         .backfill_items_done
         .saturating_add(processed.saturating_sub(published));
 
-    if truncated {
-        state.backfill_stack = stack.clone();
-        state.backfill_complete = false;
-        tracing::info!(
-            mount_id = %ctx.mount.mount_id,
-            processed,
-            folders_pending = stack.len(),
-            "backfill chunk complete; will resume on the next run"
-        );
-    } else if stopped {
-        // Stopped by an operator: DISCARD the resume point.
-        //
-        // This is the one place the walk must not behave like a truncated
-        // chunk. The stop endpoint has already cleared `backfill_cursor` and
-        // `backfill_stack`, and this state write happens AFTER it — so saving
-        // them here would resurrect exactly what the operator asked to throw
-        // away, leave the mount due on the next tick, and make Stop a button
-        // that pauses for one run. The endpoint, this branch and the console's
-        // confirmation dialog all have to agree that a stop discards; they now
-        // do.
-        //
-        // Preserving the position is what PAUSE is for, and pause leaves the
-        // walk untouched precisely so it can resume.
-        state.backfill_stack.clear();
-        state.backfill_cursor = None;
-        state.backfill_complete = false;
-        tracing::info!(
-            mount_id = %ctx.mount.mount_id,
-            processed,
-            "backfill stopped by request; resume point discarded"
-        );
-    } else {
-        state.backfill_stack.clear();
-        state.backfill_cursor = None;
-        state.backfill_complete = true;
+    let flags = WalkFlags {
+        resuming,
+        truncated,
+        stopped,
+    };
+    settle_resume_point(state, &stack, flags, processed, &ctx.mount.mount_id);
+    reconcile_deletes(ctx, batcher, &seen, flags, processed, max).await?;
+    capture_delta_baseline(ctx, state).await;
+    Ok(())
+}
+
+/// The path an item materializes at, relative to the mount.
+///
+/// A configured hierarchy replaces the provider-derived path;
+/// an unresolvable template falls back to it (see
+/// `resolve_path_template`).
+fn resolve_item_path(ctx: &SyncCtx<'_>, item: &ExternalItem, prefix: &str) -> String {
+    match super::config::resolve_path_template(&ctx.mount.sync_config.path_template, item) {
+        Some(p) => p,
+        None if prefix.is_empty() => item.name.clone(),
+        None => format!("{}/{}", prefix, item.name),
     }
+}
 
-    // Reconcile deletes: remove mount-owned nodes not seen this pass.
+/// Publish progress as we go. A chunk can run for minutes; without
+/// this the console sees nothing move until the whole chunk lands.
+///
+/// Advance the REAL state, never a clone. `persist_state` bumps
+/// `state_seq` on success, and a clone would carry that bump to its
+/// grave — every later write in this run would then look stale
+/// against the stored seq and be refused, which is the exact failure
+/// this whole change exists to remove.
+///
+/// Returns the new `published` watermark.
+async fn publish_progress(
+    ctx: &SyncCtx<'_>,
+    state: &mut MountState,
+    page: &ListPage,
+    processed: u64,
+    published: u64,
+    subtrees_queued: usize,
+) -> std::result::Result<u64, AdapterError> {
+    let delta = processed.saturating_sub(published);
+    state.backfill_items_done = state.backfill_items_done.saturating_add(delta);
+    if let Some(total) = page.total {
+        state.backfill_items_total = Some(total);
+    }
+    // A refused write means another writer owns this mount's state. Continuing
+    // is not merely useless, it is DANGEROUS: `persist_mount_state` does not
+    // advance `state_seq` on refusal, so every later write this run makes is
+    // refused too — and the walk would still fall through to
+    // `reconcile_deletes`, which on a partial `seen` set deletes real content.
+    // `delta.rs` already stops on exactly this condition; the full walk did not.
     //
-    // "Not seen" only means "deleted upstream" when THIS RUN saw everything.
-    // Three ways that is false, each of which deletes real content:
-    //
-    //  1. The walk hit `max_items_per_sync` (default 500) and stopped early. A
-    //     mailbox larger than the cap would have every message past item 500
-    //     deleted and recreated on every full sync — churn, a trigger storm,
-    //     and destroyed local edits, forever.
-    //  2. The walk RESUMED a chunked backfill. `seen` then holds only the final
-    //     chunk, so reconciling would delete everything the earlier chunks
-    //     imported — the whole point of the backfill. `seen` is per-run and
-    //     cannot be accumulated across runs without persisting every external
-    //     id, so a resumed pass simply never reconciles.
-    //  3. The provider answered with an empty listing (a silent hiccup, an
-    //     emptied-then-refilled folder, a permissions change that reads as
-    //     "no items" rather than an error). Deleting the entire mount subtree
-    //     on the strength of one empty response is never the right trade.
-    //
-    // The safe action in all three is to skip reconciliation: a stale extra node
-    // is recoverable on the next clean pass, deleted content is not. Deletes
-    // therefore only ever run on a single-run, start-to-finish walk — and
-    // upstream deletions still propagate promptly through the delta path.
-    // Served from the run's prefetched index, kept current by every flush above —
-    // this used to be another full workspace scan.
-    let existing = batcher.virtual_nodes();
-
-    // A stopped walk joins the same guard: it saw only part of the provider, so
-    // `seen` cannot distinguish "deleted upstream" from "not reached before the
-    // operator stopped us". Reconciling on it would delete real content.
-    if truncated || resuming || stopped {
-        tracing::info!(
-            mount_id = %ctx.mount.mount_id,
-            processed,
-            resumed = resuming,
-            truncated,
-            stopped,
-            max_items_per_sync = max,
-            existing = existing.len(),
-            "skipping reconcile deletes: this pass did not walk the provider end to end in one \
-             run, so 'not seen' does not mean 'deleted upstream'"
-        );
-    } else if seen.is_empty()
-        && !existing.is_empty()
-        && !ctx.mount.sync_config.allow_empty_reconcile
-    {
-        tracing::error!(
-            mount_id = %ctx.mount.mount_id,
-            existing = existing.len(),
-            "full sync returned NO items while {} mount-owned nodes exist; skipping reconcile \
-             deletes rather than emptying the mount. Check the mount's remote root and filters, \
-             or set sync_config.allow_empty_reconcile if the source really can be emptied.",
-            existing.len()
-        );
-    } else {
-        let mut deleted = 0usize;
-        for node in existing {
-            if !seen.contains(&node.external_id) {
-                batcher.stage_delete(&node.external_id).await?;
-                deleted += 1;
-            }
-        }
-        batcher.flush().await?;
-        if deleted > 0 {
-            tracing::info!(
+    // A MISSING mount node is a different answer and must not abort: it is the
+    // routine shape in tests and for a caller driving a walk whose config lives
+    // on another branch. Collapsing the two is what made the first attempt at
+    // this fix break five passing tests.
+    match persist_state(ctx, state).await {
+        Ok(StateWrite::Written) | Ok(StateWrite::MountMissing) => {}
+        Ok(StateWrite::Superseded) => {
+            tracing::warn!(
                 mount_id = %ctx.mount.mount_id,
-                deleted,
-                seen = seen.len(),
-                "full sync reconcile removed nodes that are gone upstream"
+                "backfill progress write superseded by a concurrent writer; abandoning this \
+                 pass before it can reconcile"
+            );
+            return Err(AdapterError::Conflict(
+                "mount state write refused by a concurrent writer".to_string(),
+            ));
+        }
+        Err(e) => {
+            tracing::warn!(
+                mount_id = %ctx.mount.mount_id,
+                error = %e,
+                "backfill progress write failed"
             );
         }
     }
 
-    // Best-effort delta baseline: if the provider has a changes API, capture a
-    // resumable token so the next sync goes incremental. Providers without one
-    // leave the token unset and stay on the full path.
-    //
-    // `baseline_only` is load-bearing, not a hint. A changes API asked for
-    // "everything since nothing" answers with an initial full ENUMERATION, not
-    // a baseline — Microsoft Graph returns page after page of every message in
-    // the folder and only emits a resumable delta link on the very last one.
-    // Storing page 1 of that as the delta token meant every later "delta" run
-    // walked the enumeration 600 items at a time, re-reading mail this walk had
-    // just imported and reporting `0 written / 600 skipped` forever. New items
-    // could not arrive until the whole mailbox had been re-enumerated.
-    //
-    // We have just materialized everything, so what we want is "changes from
-    // now on" — which providers expose directly (Graph: `$deltatoken=latest`).
-    if let Ok(resp) = ctx
-        .call(
-            "get_changes",
-            json!({
-                "since_token": null,
-                "folder_id": ctx.mount.remote_root,
-                "baseline_only": true,
-            }),
-        )
-        .await
-    {
-        if let Some(token) = resp.get("next_token").and_then(|v| v.as_str()) {
-            state.last_sync_token = Some(token.to_string());
-        }
-    }
-
-    let _ = persist_state(ctx, state).await;
-    Ok(())
+    // Emit AFTER the state is durable, never before: an event is a
+    // claim that this page landed, and a claim that a later failure
+    // could roll back is worse than no event at all.
+    raisin_storage::jobs::global_mount_broadcaster().emit(
+        &raisin_storage::jobs::mount_channel_key(
+            &ctx.scope.tenant,
+            &ctx.scope.repo,
+            &ctx.scope.mount_id,
+        ),
+        raisin_storage::jobs::MountSyncEvent::Progress {
+            phase: "full".to_string(),
+            backfill_items_done: state.backfill_items_done,
+            delta_items_done: state.delta_items_done,
+            items_total: state.backfill_items_total,
+            subtrees_queued,
+        },
+    );
+    Ok(processed)
 }
