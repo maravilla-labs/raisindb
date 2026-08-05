@@ -12,7 +12,11 @@
  *
  * `input.mount.sync_config.resource` selects the surface:
  *   - "mail"     (default) -> {principal}/mailFolders/{id}/messages
- *   - "calendar"           -> {principal}/calendars/{calId}/events + calendarView/delta
+ *   - "calendar"           -> {principal}/calendars/{calId}/events, and
+ *                             {principal}/calendarView/delta for the PRIMARY
+ *                             calendar only (v1.0 has no per-calendar delta, so
+ *                             a secondary/shared calendar reports
+ *                             supports_changes:false and full-reconciles)
  *   - "files"              -> {drive}/root/children + {drive}/root/delta
  *
  * `{principal}` is `/me` by default and `/users/{upn}` when the mount or
@@ -61,6 +65,19 @@ function includeBody(mount) {
 function mailSelect(mount) {
   return includeBody(mount) ? MAIL_SELECT + ",body" : MAIL_SELECT;
 }
+
+// Event fields the mapper actually reads, plus the recurrence discriminators.
+//
+// The calendar list used to send no $select at all, so Graph returned the FULL
+// event — `body` (an HTML document) and `bodyPreview` for every event, none of
+// which the mapper uses. With $top driven by `max_items_per_sync` (default 500)
+// that is 500 full events in one response, which Microsoft explicitly warns can
+// trigger a gateway timeout. `type` and `seriesMasterId` are load-bearing: they
+// are how an occurrence is recognised and folded back into its series.
+var EVENT_SELECT =
+  "id,subject,start,end,isAllDay,location,attendees,organizer,recurrence," +
+  "showAs,isCancelled,webLink,type,seriesMasterId,createdDateTime," +
+  "lastModifiedDateTime";
 
 function coded(message, code) {
   var e = new Error(message);
@@ -444,12 +461,28 @@ function toExternalItem(v, resource) {
 
 // ---- operations -----------------------------------------------------------
 
-function opCapabilities() {
+// Whether this mount's calendar can be delta-synced at all.
+//
+// v1.0 documents `calendarView/delta` ONLY at the mailbox level — `/me/...` and
+// `/users/{id}/calendarView/delta` — and both are the PRIMARY calendar. There is
+// no `/calendars/{id}/calendarView/delta`. A mount pointed at a secondary or
+// shared calendar therefore has no incremental feed, and claiming one made the
+// engine store a cursor for a route Graph does not serve.
+//
+// Saying `supports_changes: false` is not a degradation, it is the truth: the
+// engine already handles it by running a full reconcile every time, which is
+// what a non-primary calendar has to do.
+function calendarSupportsDelta(mount) {
+  return calendarId(mount) === "calendar";
+}
+
+function opCapabilities(mount) {
+  var deltaOk = resourceOf(mount) !== "calendar" || calendarSupportsDelta(mount);
   return {
     can_read: true,
     can_write: false,
     can_create_folders: false,
-    supports_changes: true,
+    supports_changes: deltaOk,
     supports_webhooks: true,
     supports_search: false,
     supports_push: true,
@@ -493,13 +526,75 @@ function browseLimit(params) {
     : 50;
 }
 
+// `startswith` search over the directory, shared by the `mailbox` and `user`
+// kinds. Single quotes are doubled per OData escaping.
+function directoryFilter(params) {
+  if (!params || !params.query || !params.query.trim()) return "";
+  var term = params.query.trim().split("'").join("''");
+  return "&$filter=" + enc(
+    "startswith(displayName,'" + term + "') or startswith(mail,'" + term + "')"
+  );
+}
+
+// One mapper per browse kind, so the first page and every later page agree.
+function browseMapper(kind) {
+  if (kind === "folder") {
+    return function (v) {
+      return browseItem(
+        v.id, v.displayName, "folder",
+        (v.childFolderCount || 0) > 0,
+        v.totalItemCount != null ? v.totalItemCount + " items" : null
+      );
+    };
+  }
+  if (kind === "calendar") {
+    return function (v) {
+      var owner = v.owner ? v.owner.address : null;
+      // `canShare: false` on a calendar you did not create is Graph's marker for
+      // "shared with me" — there is no `isShared` property in v1.0.
+      var hint = v.isDefaultCalendar ? "primary" : owner;
+      if (v.canShare === false && !v.isDefaultCalendar) hint = "shared · " + (owner || "");
+      return browseItem(v.id, v.name, "calendar", false, hint);
+    };
+  }
+  if (kind === "mailbox" || kind === "user") {
+    return function (v) {
+      var addr = v.mail || v.userPrincipalName;
+      if (!addr) return null;
+      // A shared mailbox is an unlicensed, sign-in-blocked directory object, so
+      // `accountEnabled: false` is the only cheap signal v1.0 offers. It is a
+      // HEURISTIC, not proof — `mailboxSettings/userPurpose` is authoritative but
+      // needs APPLICATION permission to read for anyone but the signed-in user,
+      // which delegated OAuth cannot do. Labelled as "likely" for that reason.
+      var hint = v.accountEnabled === false ? "likely shared mailbox" : addr;
+      return browseItem(addr, v.displayName || addr, kind, kind === "user", hint);
+    };
+  }
+  if (kind === "room") {
+    return function (v) {
+      var addr = v.emailAddress;
+      if (!addr) return null;
+      // Key on the SMTP address, never `place.id`, which Microsoft documents as
+      // NOT immutable. The address also drops straight into the `/users/{addr}`
+      // principal a room mailbox is addressed by.
+      return browseItem(addr, v.displayName || addr, "room", false, v.building || addr);
+    };
+  }
+  return function (v) {
+    return browseItem(v.id, v.displayName || v.name, kind, false, null);
+  };
+}
+
 function opBrowse(credential, mount, params) {
   params = params || {};
   // A cursor is a full Graph nextLink; the kind is already baked into it.
   if (params.cursor) {
-    return browsePage(credential, params.cursor, function (v) {
-      return browseItem(v.id, v.displayName || v.name, params.kind || "item", false, null);
-    });
+    // Map with the SAME function the first page used. The generic mapper here
+    // fell back to `v.id`, so page two of a `mailbox` listing returned directory
+    // object GUIDs where page one returned SMTP addresses — and the address is
+    // what gets written into `principal`, so a mailbox picked from page two
+    // produced a mount that could never resolve.
+    return browsePage(credential, params.cursor, browseMapper(params.kind || "item"));
   }
 
   var top = browseLimit(params);
@@ -524,13 +619,48 @@ function opBrowse(credential, mount, params) {
     });
   }
 
+  // Calendars, either the mount principal's or — with `parent_id` set to an SMTP
+  // address — another mailbox's.
+  //
+  // The second form matters because a shared PRIMARY calendar never appears in
+  // `/me/calendars`. Only accepted shares of SECONDARY calendars are copied into
+  // the recipient's mailbox; "Alex shared his main calendar with me", which is
+  // the common case, is reachable only as `/users/{alex}/calendars`. Browsing
+  // `/me` alone therefore hid exactly the calendars an admin most wants to mount.
+  //
+  // The emitted id is the calendar id, and the caller must pair it with
+  // `principal = parent_id`: calendar ids are MAILBOX-SCOPED, so an id from one
+  // mailbox addressed under another simply errors.
   if (kind === "calendar") {
+    var calBase = parent ? "/users/" + enc(parent) : principal(mount);
     return browsePage(
       credential,
-      GRAPH + principal(mount) + "/calendars?$top=" + top,
-      function (v) {
-        return browseItem(v.id, v.name, "calendar", false, v.owner ? v.owner.address : null);
-      }
+      GRAPH + calBase + "/calendars?$top=" + top,
+      browseMapper("calendar")
+    );
+  }
+
+  // People, as step one of picking someone else's calendar. `has_children` is
+  // true so the picker drills into `kind: "calendar"` with `parent_id` = address.
+  //
+  // Same caveat as `mailbox` below: this is the DIRECTORY, not an access list.
+  if (kind === "user") {
+    return browsePage(
+      credential,
+      GRAPH + "/users?$select=id,displayName,mail,userPrincipalName,accountEnabled&$top=" +
+        top + directoryFilter(params),
+      browseMapper("user")
+    );
+  }
+
+  // Room and equipment mailboxes. `/places` is v1.0 and needs Place.Read.All.
+  //
+  // Deliberately NOT `findRooms`, which is beta-only and caps at 100.
+  if (kind === "room") {
+    return browsePage(
+      credential,
+      GRAPH + "/places/microsoft.graph.room?$top=" + top,
+      browseMapper("room")
     );
   }
 
@@ -591,27 +721,14 @@ function opBrowse(credential, mount, params) {
   // time. The console therefore keeps manual entry, and Test connection is what
   // actually proves access. Do not "improve" this into an access list.
   if (kind === "mailbox") {
-    var filter = "";
-    if (params.query && params.query.trim()) {
-      var term = params.query.trim().split("'").join("''");
-      filter =
-        "&$filter=" +
-        enc(
-          "startswith(displayName,'" + term + "') or startswith(mail,'" + term + "')"
-        );
-    }
     return browsePage(
       credential,
-      GRAPH + "/users?$select=id,displayName,mail,userPrincipalName&$top=" + top + filter,
-      function (v) {
-        // id is the ADDRESS, not the object guid: it is written straight into
-        // `principal`, and an address is what an operator can verify by eye.
-        var addr = v.mail || v.userPrincipalName;
-        if (!addr) return null;
-        return browseItem(addr, v.displayName || addr, "mailbox", false, addr);
-      }
+      GRAPH + "/users?$select=id,displayName,mail,userPrincipalName,accountEnabled&$top=" +
+        top + directoryFilter(params),
+      browseMapper("mailbox")
     );
   }
+
 
   throw coded("browse: unsupported kind '" + kind + "'", "config_error");
 }
@@ -626,7 +743,17 @@ function opBrowse(credential, mount, params) {
 // observe, so it is only caught by reading this function.
 function subscriptionResource(mount) {
   var resource = resourceOf(mount);
-  if (resource === "calendar") return principal(mount) + "/events";
+  if (resource === "calendar") {
+    // `/events` is the DEFAULT calendar's collection. A mount whose remote_root
+    // names another calendar polled `/calendars/{id}` while subscribing here,
+    // so it could never receive a notification for the calendar it syncs —
+    // reported as a healthy subscription with "no delivery yet" forever. This
+    // is precisely the mismatch the comment above warns about.
+    var cal = calendarId(mount);
+    return cal === "calendar"
+      ? principal(mount) + "/events"
+      : principal(mount) + "/calendars/" + cal + "/events";
+  }
   if (resource === "files") return driveBase(mount) + "/root";
   return principal(mount) + "/mailFolders/" + mailFolderId(mount) + "/messages";
 }
@@ -705,7 +832,7 @@ function opList(credential, mount, params) {
   } else if (resource === "calendar") {
     url =
       GRAPH + principal(mount) + "/calendars/" + enc(calendarId(mount)) +
-      "/events?$top=" + pageSize(params);
+      "/events?$top=" + pageSize(params) + "&$select=" + enc(EVENT_SELECT);
   } else if (resource === "files") {
     url = GRAPH + driveContainer(mount) + "/children?$top=" + pageSize(params);
   } else {
@@ -791,9 +918,11 @@ function opGetContent(credential, mount, params) {
 function initialDeltaUrl(mount, resource, baselineOnly) {
   if (resource === "calendar") {
     var win = windowBounds(mount);
+    // Mailbox-level, NOT `/calendars/{id}/calendarView/delta` — that route is
+    // not part of v1.0. `calendarSupportsDelta` is what guarantees we only get
+    // here for the primary calendar, so addressing the mailbox is correct.
     return (
-      GRAPH + principal(mount) + "/calendars/" + enc(calendarId(mount)) +
-      "/calendarView/delta?startDateTime=" + enc(win.start) +
+      GRAPH + principal(mount) + "/calendarView/delta?startDateTime=" + enc(win.start) +
       "&endDateTime=" + enc(win.end) +
       (baselineOnly ? "&$deltatoken=latest" : "")
     );
@@ -820,18 +949,117 @@ function opGetChanges(credential, mount, params) {
   var resp = graphFetch(credential, "GET", url, { context: "get_changes" });
   var body = resp.body || {};
   var values = body.value || [];
-  var items = values.map(function (v) {
-    if (v["@removed"]) {
-      return { type: "deleted", item: { external_id: v.id }, relative_path: v.id };
-    }
-    var item = toExternalItem(v, resource);
-    return { type: "updated", item: item, relative_path: item.external_id };
-  });
+  var items =
+    resource === "calendar"
+      ? calendarChanges(credential, mount, values)
+      : values.map(function (v) {
+          if (v["@removed"]) {
+            return { type: "deleted", item: { external_id: v.id }, relative_path: v.id };
+          }
+          var item = toExternalItem(v, resource);
+          return { type: "updated", item: item, relative_path: item.external_id };
+        });
   // Durable, resumable cursor. While paging Graph returns @odata.nextLink; the
   // final page returns @odata.deltaLink. NEVER null: when nothing is new the
   // deltaLink round-trips, and we defensively echo the prior token/url otherwise.
   var next = body["@odata.nextLink"] || body["@odata.deltaLink"] || token || url;
   return { items: items, next_token: next };
+}
+
+// ONE NODE PER SERIES, not one per occurrence.
+//
+// The two calendar paths disagreed about what an item IS. The full walk reads
+// `/events`, which returns single instances and SERIES MASTERS — one item per
+// series, carrying `recurrence`. The delta path reads `/calendarView/delta`,
+// which returns OCCURRENCES AND EXCEPTIONS expanded across the window — one
+// item per instance, each with its own id and no `recurrence`. Since a node is
+// keyed on the Graph id, a weekly meeting became ~5 nodes and a daily standup
+// ~26, all siblings of the series-master node the full walk had already created
+// for the same meeting, with nothing relating them.
+//
+// calendarView/delta is the only delta a v1.0 calendar has, so the fix is to
+// collapse its output rather than abandon it: an occurrence or exception is
+// reported as an update of its `seriesMasterId`, deduped within the page.
+//
+// Two consequences worth stating:
+//  * A single recurring series changing produces ONE update no matter how many
+//    of its occurrences moved.
+//  * The master is fetched only when the page did not already contain it, so
+//    the common case (a series edited as a whole) costs no extra request.
+function calendarChanges(credential, mount, values) {
+  var out = [];
+  var emitted = {};
+  var i;
+
+  function emit(v) {
+    if (!v || !v.id || emitted[v.id]) return;
+    emitted[v.id] = true;
+    var item = toExternalItem(v, "calendar");
+    out.push({ type: "updated", item: item, relative_path: item.external_id });
+  }
+
+  // Series masters present in this page, so an occurrence of one of them needs
+  // no extra fetch.
+  var mastersInPage = {};
+  for (i = 0; i < values.length; i++) {
+    if (!values[i]["@removed"] && values[i].type === "seriesMaster") {
+      mastersInPage[values[i].id] = values[i];
+    }
+  }
+
+  for (i = 0; i < values.length; i++) {
+    var v = values[i];
+
+    if (v["@removed"]) {
+      // A removal from calendarView is NOT necessarily a deletion. Microsoft
+      // documents that within a date-bound view, `@removed` also covers events
+      // that merely moved OUTSIDE the window — so treating every one as a delete
+      // silently destroyed events an operator had only rescheduled. We cannot
+      // tell the two apart from the delta payload, and deleting real content is
+      // far worse than keeping a stale node, so only a removal we can attribute
+      // to a whole series or a standalone event is acted on.
+      //
+      // A removed OCCURRENCE says nothing about its series: the series is still
+      // there, and the next full walk reconciles anything genuinely gone.
+      if (v.seriesMasterId) continue;
+      out.push({ type: "deleted", item: { external_id: v.id }, relative_path: v.id });
+      continue;
+    }
+
+    if (v.type === "occurrence" || v.type === "exception") {
+      var masterId = v.seriesMasterId;
+      if (!masterId) {
+        // Shouldn't happen, but an occurrence with no master is better carried
+        // through as itself than dropped.
+        emit(v);
+        continue;
+      }
+      if (emitted[masterId]) continue;
+      var master = mastersInPage[masterId] || fetchEvent(credential, mount, masterId);
+      // A master we cannot read (deleted between pages, or no access) is skipped
+      // rather than materialized from the occurrence, which would reintroduce
+      // exactly the per-occurrence nodes this exists to prevent.
+      if (master) emit(master);
+      continue;
+    }
+
+    emit(v);
+  }
+  return out;
+}
+
+// Read one event by id, or null when it is gone. Used to resolve an occurrence
+// back to its series master when the delta page did not include it.
+function fetchEvent(credential, mount, eventId) {
+  var url = GRAPH + principal(mount) + "/events/" + enc(eventId) +
+    "?$select=" + enc(EVENT_SELECT);
+  var resp = graphFetch(credential, "GET", url, {
+    context: "get_changes:series_master",
+    rawStatusOk: true,
+  });
+  if (resp.status === 404) return null;
+  raiseForStatus(resp, "get_changes:series_master");
+  return resp.body || null;
 }
 
 // ---- dispatch -------------------------------------------------------------
@@ -844,7 +1072,7 @@ function handler(input) {
 
   switch (operation) {
     case "capabilities":
-      return opCapabilities();
+      return opCapabilities(input.mount || {});
     case "list":
       return opList(credential, mount, params);
     case "get":

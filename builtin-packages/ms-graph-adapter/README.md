@@ -107,10 +107,36 @@ Needed only for the cross-principal mounts described above:
 - `Calendars.Read.Shared` — shared calendars.
 - `Files.Read.All` — another user's OneDrive.
 - `Sites.Read.All` — SharePoint document libraries.
+- `User.ReadBasic.All` — the directory list behind the mailbox / user pickers.
+- `Place.Read.All` — the room-mailbox picker.
 
 These are **delegated**, not application, permissions: the connected account
 still reaches only what a human has been granted, so adding them does not widen
 access on its own.
+
+#### What delegated permissions cannot do
+
+Worth knowing before mounting shared resources, because these are Microsoft's
+limits and not something this adapter can work around:
+
+- **A shared mailbox cannot be positively identified.** `mailboxSettings/
+  userPurpose` is the only authoritative signal in v1.0, and reading it for
+  anyone but the signed-in user needs the APPLICATION permission
+  `MailboxSettings.Read`. The picker therefore labels an unlicensed,
+  sign-in-blocked directory object as a *likely* shared mailbox and leaves
+  "Test connection" as the real proof of access.
+- **Shared and delegated resources cannot receive webhooks.** Microsoft states
+  that `Mail.Read.Shared` / `Calendars.Read.Shared` do not support change
+  notification subscriptions; that needs application `Mail.Read` /
+  `Calendars.Read`. A shared mount therefore polls its delta feed instead of
+  being pushed to.
+- **A shared PRIMARY calendar is not in `/me/calendars`.** Only accepted shares
+  of *secondary* calendars are copied into the recipient's mailbox, so the
+  picker offers "browse another user's calendars" as its own step.
+- **Only the primary calendar has a delta feed.** v1.0 documents
+  `calendarView/delta` at the mailbox level only, so a mount pointed at a
+  secondary or shared calendar reports `supports_changes: false` and
+  full-reconciles on every run.
 
 Adding a scope to an already-configured connector requires **reconnecting each
 account** — Microsoft issues consent only on a fresh authorization. The package
