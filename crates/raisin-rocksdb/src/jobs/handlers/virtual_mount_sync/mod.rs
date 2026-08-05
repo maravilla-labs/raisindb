@@ -16,6 +16,7 @@
 mod ctx;
 mod finalize;
 mod item;
+mod phases;
 mod preflight;
 mod push;
 mod resolve;

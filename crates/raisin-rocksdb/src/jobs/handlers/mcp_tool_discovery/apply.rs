@@ -476,7 +476,10 @@ mod tests {
         let first = build_proxy(&d, &plan("search"));
         let second = build_proxy(&d, &plan("create"));
 
-        assert!(!first.id.is_empty(), "an empty id collides on the second write");
+        assert!(
+            !first.id.is_empty(),
+            "an empty id collides on the second write"
+        );
         assert!(!second.id.is_empty());
         assert_ne!(first.id, second.id, "two proxies must not share an id");
     }
