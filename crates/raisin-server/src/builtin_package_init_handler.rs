@@ -210,7 +210,39 @@ where
             // base infra, e.g. raisin-integrations) get their content installed
             // automatically; registration is a single inline write, serialized by
             // this loop, so it cannot stampede.
-            let install_content = package_info.manifest.auto_install;
+            //
+            // But `auto_install: false` must mean "do not install where ABSENT",
+            // never "do not update where PRESENT". It used to mean both, and the
+            // second meaning was a silent update hole: an adapter's code lives in
+            // the repo as a function node, installed once when the operator added
+            // the connector, so every adapter fix RaisinDB shipped reached no
+            // deployed tenant. A binary carrying a fix, and content that has
+            // never heard of it, is a genuinely confusing failure — the fix is
+            // demonstrably running and demonstrably does nothing.
+            //
+            // So: install content when the package opts in, OR when this repo
+            // already has it installed and the shipped content has moved on. The
+            // stampede this flag guards against was auto-installing into repos
+            // that could not accept the node types; a repo that already holds the
+            // package is by definition not that case.
+            let stale = self
+                .package_content_is_stale(
+                    tenant_id,
+                    repo_id,
+                    &package_info.manifest.name,
+                    &package_info.content_hash,
+                )
+                .await;
+            let install_content = package_info.manifest.auto_install || stale;
+            if stale && !package_info.manifest.auto_install {
+                info!(
+                    tenant_id = tenant_id,
+                    repo_id = repo_id,
+                    package = %package_info.manifest.name,
+                    hash = %&package_info.content_hash[..8],
+                    "Installed package content is out of date; updating it in place"
+                );
+            }
 
             {
                 match self
@@ -285,6 +317,63 @@ where
     /// Register (and optionally install) a single builtin package, from
     /// whichever definition layer supplied it.
     ///
+    /// Whether this repo already has the package installed at an OLDER hash.
+    ///
+    /// True only when BOTH hold: the package node exists and reports a completed
+    /// install, and the hash recorded as applied differs from the one shipped in
+    /// this binary. A repo that never installed the package answers false, which
+    /// is what preserves `auto_install: false` meaning "do not install where
+    /// absent".
+    ///
+    /// Any read failure answers false. Guessing "stale" on a transient storage
+    /// error would reinstall content across every repo on the box at boot, which
+    /// is far worse than leaving one package a version behind.
+    async fn package_content_is_stale(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        package_name: &str,
+        content_hash: &str,
+    ) -> bool {
+        let Ok(tx) = self.storage.begin_context().await else {
+            return false;
+        };
+        if tx.set_tenant_repo(tenant_id, repo_id).is_err()
+            || tx.set_branch("main").is_err()
+            || tx.set_auth_context(AuthContext::system()).is_err()
+        {
+            return false;
+        }
+        let store = TxPackageStore {
+            tx: tx.as_ref(),
+            binary_storage: self.binary_storage.as_ref(),
+        };
+
+        let existing = match store
+            .get_package_node_by_path(&package_registration::package_node_path(package_name))
+            .await
+        {
+            Ok(Some(node)) => node,
+            _ => return false,
+        };
+        if !package_registration::package_is_installed(&existing) {
+            return false;
+        }
+
+        match self
+            .system_update_repo
+            .get_applied(tenant_id, repo_id, ResourceType::Package, package_name)
+            .await
+        {
+            Ok(Some(applied)) => applied.content_hash != content_hash,
+            // Installed but never recorded: predates applied-hash tracking, so
+            // the installed content is unknown and assumed current. Reinstalling
+            // every such package at boot is a bigger risk than leaving a stale
+            // one an operator can update by hand.
+            _ => false,
+        }
+    }
+
     /// Both modes create/update the `raisin:Package` node and store the package
     /// `.rap` bytes so the package is listable and installable on demand. When
     /// `install_content` is `true` an install job is also enqueued to write the

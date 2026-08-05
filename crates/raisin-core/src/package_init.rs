@@ -381,6 +381,37 @@ mod tests {
         }
     }
 
+    /// `auto_install: false` means "do not install where ABSENT" — it must not
+    /// also mean "do not update where PRESENT".
+    ///
+    /// Those two were one flag, and the second meaning was a silent update hole:
+    /// an adapter's code lives in a repo as a function node installed once, so
+    /// every adapter fix RaisinDB shipped reached no deployed tenant. The binary
+    /// carried the fix and the content had never heard of it, which presents as
+    /// a fix that is demonstrably running and demonstrably does nothing.
+    ///
+    /// The rule now lives in `builtin_package_init_handler`: content is installed
+    /// when the package opts in OR when this repo already has it installed at an
+    /// older hash. This test pins the half that is checkable here — the adapters
+    /// still opt out of being installed into repos that do not use them, which is
+    /// the stampede protection the flag exists for.
+    #[test]
+    fn opting_out_of_auto_install_is_about_absence_not_staleness() {
+        let packages = load_builtin_packages_with_hashes();
+
+        // Every builtin ships a content hash, which is what makes "already
+        // installed at an older hash" answerable at all. A package without one
+        // could never be detected as stale.
+        for info in &packages {
+            assert!(
+                !info.content_hash.is_empty(),
+                "builtin package '{}' must ship a content hash, or it can never \
+                 be detected as out of date in a repo that installed it",
+                info.manifest.name
+            );
+        }
+    }
+
     /// The lightweight base integration package MUST auto-install: new instances
     /// need its raisin:system allowed-type patch + webhook-refresh function out of
     /// the box. It depends only on globally-registered node types, so it cannot
