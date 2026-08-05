@@ -1341,6 +1341,111 @@ async fn a_corrupt_state_blob_is_refused_not_defaulted() {
     );
 }
 
+/// A mount whose target workspace forbids its node type must STOP and say why.
+///
+/// This is the production shape: an operator mounts a calendar into a workspace
+/// that does not list `raisin:Event`, every item is rejected identically, and
+/// the run counted them to the end of its budget, burned the 600s job timeout,
+/// got retried three times — and recorded `OK · 100 failed`. A mount that could
+/// never work, presented as healthy, with the provider's own explanation
+/// visible only as a per-item WARN nobody reads at `RUST_LOG=error`.
+///
+/// Now it gives up early, reports `misconfigured`, and carries the rejection
+/// message in `last_error` where the console shows it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workspace_that_rejects_the_node_type_stops_the_sync_and_says_why() {
+    use raisin_storage::{RepoScope, WorkspaceRepository};
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+
+    // Restrict the target workspace so the default mapping's `raisin:Node`
+    // can never be written — the same shape as `stories` lacking `raisin:Event`.
+    let scope = RepoScope::new(TENANT, REPO);
+    let mut ws = env
+        .storage
+        .workspaces()
+        .get(scope.clone(), TARGET_WS)
+        .await
+        .unwrap()
+        .expect("target workspace must exist");
+    ws.allowed_node_types = vec!["raisin:Folder".to_string()];
+    env.storage.workspaces().put(scope, ws).await.unwrap();
+
+    // Small batches, so the breaker gets a chance to fire between flushes and
+    // we can prove the run gave up rather than grinding through every item.
+    {
+        let tx = begin(&env).await;
+        let mut node = tx
+            .get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        node.properties.insert(
+            "sync_config".to_string(),
+            prop_obj(json!({ "mode": "poll", "batch_size": 20 })),
+        );
+        tx.upsert_node(super::SYSTEM_WORKSPACE, &node)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    // More items than the failure budget, so the breaker is reached.
+    let items: Vec<_> = (0..80)
+        .map(|i| ext_item(&format!("E{i}"), &format!("e{i}.txt"), false, "v1"))
+        .collect();
+    let mock = Arc::new(MockAdapter::default());
+    mock.set_list("root", json!({ "items": items, "next_cursor": null }));
+
+    let handler = VirtualMountSyncHandler::new(
+        env.storage.clone(),
+        Some(mock.clone() as super::AdapterInvokerHandle),
+        None,
+    );
+    let job = job_info(JobType::VirtualMountSync {
+        mount_id: MOUNT_ID.to_string(),
+        mode: "full".to_string(),
+        trigger: "manual".to_string(),
+    });
+    // The job itself must NOT error: a permanently misconfigured mount is not a
+    // job failure to retry, it is a state the operator has to fix.
+    handler.handle(&job, &job_context()).await.unwrap();
+
+    let state = read_state(&env).await.expect("state must be persisted");
+    assert_eq!(
+        state.get("status").and_then(|v| v.as_str()),
+        Some("misconfigured"),
+        "a mount that cannot write anything must not report itself healthy"
+    );
+    let last_error = state
+        .get("last_error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        last_error.contains("rejected") && last_error.contains("none could be written"),
+        "last_error must explain the mount gave up, got: {last_error}"
+    );
+    assert!(
+        last_error.contains("raisin:Node"),
+        "last_error must carry the underlying rejection reason, got: {last_error}"
+    );
+
+    // And it stopped early rather than grinding through every item.
+    let failed = state
+        .get("last_run")
+        .and_then(|r| r.get("failed"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert!(
+        failed < 80,
+        "the run must give up before attempting every item, attempted {failed}"
+    );
+    assert!(
+        failed >= 50,
+        "and only after the failure budget is actually spent, attempted {failed}"
+    );
+}
+
 /// The whole persisted `state` blob of the test mount.
 async fn read_state(env: &Env) -> Option<serde_json::Value> {
     let tx = begin(env).await;

@@ -33,6 +33,7 @@ pub struct SyncBatcher<'a> {
     pending_bytes: usize,
     max_items: usize,
     max_bytes: usize,
+    max_failures: usize,
     stats: BatchStats,
 }
 
@@ -53,6 +54,7 @@ impl<'a> SyncBatcher<'a> {
             pending_bytes: 0,
             max_items: ctx.mount.sync_config.batch_size.max(1),
             max_bytes: ctx.mount.sync_config.batch_max_bytes.max(1),
+            max_failures: ctx.mount.sync_config.max_item_failures,
             stats: BatchStats::default(),
         })
     }
@@ -65,7 +67,7 @@ impl<'a> SyncBatcher<'a> {
 
     /// Outcome counts accumulated across every flush so far.
     pub fn stats(&self) -> BatchStats {
-        self.stats
+        self.stats.clone()
     }
 
     /// Whether this item can be skipped without running the mapper at all.
@@ -154,7 +156,37 @@ impl<'a> SyncBatcher<'a> {
             .await
             .map_err(|e| classify_write(&e, format!("materialize failed: {e}")))?;
         self.stats.merge(stats);
-        Ok(())
+        self.check_failure_budget()
+    }
+
+    /// Give up when items are being rejected wholesale.
+    ///
+    /// The condition is `failed >= budget AND written == 0`, and both halves
+    /// matter. A mount that writes SOME items is working — a few rejections
+    /// there are individual bad items and must not stop the import. A mount that
+    /// has written NOTHING after this many attempts is not having bad luck: its
+    /// target workspace forbids the node type its mapper produces, or RLS denies
+    /// the sync actor, and every remaining item fails the same way.
+    ///
+    /// Reported as `Config`, which `finalize` turns into `misconfigured` and
+    /// `is_retryable` reports as non-retryable. Before this the run counted
+    /// failures to the end of `max_items_per_sync`, exhausted the 600s job
+    /// timeout, was retried three times, and still recorded `OK` — with the
+    /// provider's own explanation visible only as a per-item WARN in a log
+    /// nobody reads at `RUST_LOG=error`.
+    fn check_failure_budget(&self) -> std::result::Result<(), AdapterError> {
+        if self.stats.written > 0 || self.stats.failed < self.max_failures {
+            return Ok(());
+        }
+        let reason = self
+            .stats
+            .first_error
+            .as_deref()
+            .unwrap_or("no reason recorded");
+        Err(AdapterError::Config(format!(
+            "{} items were rejected and none could be written; giving up. First rejection: {}",
+            self.stats.failed, reason
+        )))
     }
 }
 

@@ -39,7 +39,11 @@ impl BatchOp {
 }
 
 /// Outcome counts for one batch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// Deliberately NOT `Copy`: it carries [`Self::first_error`], because a count of
+/// rejections with no reason attached is what let a mount report `OK · 100
+/// failed` for hours. The message is the diagnosis; the number alone is not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BatchStats {
     pub written: usize,
     pub skipped: usize,
@@ -47,6 +51,12 @@ pub struct BatchStats {
     /// Items rejected individually (validation, RLS, a foreign node at the path)
     /// without aborting the batch.
     pub failed: usize,
+    /// The FIRST item-level rejection seen, verbatim.
+    ///
+    /// First rather than last: every item of a mount whose target workspace
+    /// forbids its node type fails the same way, so the first one is the whole
+    /// story and the last is just the newest copy of it.
+    pub first_error: Option<String>,
 }
 
 impl BatchStats {
@@ -55,6 +65,9 @@ impl BatchStats {
         self.skipped += other.skipped;
         self.deleted += other.deleted;
         self.failed += other.failed;
+        if self.first_error.is_none() {
+            self.first_error = other.first_error;
+        }
     }
 }
 

@@ -41,6 +41,12 @@ pub const DEFAULT_INTERVAL_SECS: u64 = 300;
 /// Default number of items written per transaction.
 pub const DEFAULT_BATCH_SIZE: usize = 1000;
 
+/// Default number of item rejections tolerated before a run gives up.
+///
+/// Only trips while NOTHING has been written (see `SyncBatcher::flush`), so a
+/// handful of bad items in an otherwise healthy mount never reaches it.
+pub const DEFAULT_MAX_ITEM_FAILURES: usize = 50;
+
 /// Default byte budget for one batch.
 ///
 /// A batch commits as ONE revision, which the replication layer captures as a

@@ -12,7 +12,7 @@ use super::props::{
 use super::state::MountState;
 use super::{
     DEFAULT_BATCH_MAX_BYTES, DEFAULT_BATCH_SIZE, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_ITEMS,
-    DEGRADE_THRESHOLD,
+    DEFAULT_MAX_ITEM_FAILURES, DEGRADE_THRESHOLD,
 };
 
 /// Parsed `sync_config` object of a `raisin:VirtualMount`.
@@ -77,6 +77,21 @@ pub struct SyncConfig {
     /// where that must propagate.
     #[serde(default)]
     pub allow_empty_reconcile: bool,
+    /// How many item rejections to tolerate before giving up the run, while
+    /// nothing at all has been written.
+    ///
+    /// A mount whose target workspace forbids the node type its mapper produces
+    /// rejects EVERY item. Counting those to the end of the budget burned the
+    /// full wall-clock timeout and reported `OK` with a failure tally beside it;
+    /// the operator saw a healthy-looking mount that could never work. Stopping
+    /// early turns it into a `misconfigured` status carrying the provider's own
+    /// rejection message.
+    #[serde(default = "default_max_item_failures")]
+    pub max_item_failures: usize,
+}
+
+fn default_max_item_failures() -> usize {
+    DEFAULT_MAX_ITEM_FAILURES
 }
 
 fn default_mode() -> String {
@@ -109,6 +124,7 @@ impl Default for SyncConfig {
             batch_max_bytes: default_batch_max_bytes(),
             path_template: String::new(),
             allow_empty_reconcile: false,
+            max_item_failures: default_max_item_failures(),
         }
     }
 }
