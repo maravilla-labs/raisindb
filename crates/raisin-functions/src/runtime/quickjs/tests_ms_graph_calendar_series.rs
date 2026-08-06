@@ -409,7 +409,11 @@ async fn a_failed_cancelled_occurrence_probe_still_lists_the_series() {
     let run = call_adapter(
         list_input(),
         vec![
-            page(vec![weekly_master("2026-01-06T09:00:00.0000000", "W. Europe Standard Time", false)]),
+            page(vec![weekly_master(
+                "2026-01-06T09:00:00.0000000",
+                "W. Europe Standard Time",
+                false,
+            )]),
             json!({ "status": 404, "headers": {}, "body": {} }),
             json!({ "status": 404, "headers": {}, "body": {} }),
         ],
@@ -455,8 +459,5 @@ async fn until_covers_the_final_occurrence_for_a_series_west_of_utc() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_all_day_series_still_gets_an_until() {
     let rrule = master_rrule(weekly_master("2026-01-06T00:00:00.0000000", "UTC", true)).await;
-    assert!(
-        rrule.contains("UNTIL=20261231T120000Z"),
-        "got {rrule}"
-    );
+    assert!(rrule.contains("UNTIL=20261231T120000Z"), "got {rrule}");
 }

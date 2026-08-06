@@ -39,7 +39,10 @@ fn adapter_files() -> HashMap<String, String> {
     let mut files = HashMap::new();
     for entry in std::fs::read_dir(&dir).expect("read adapter dir") {
         let path = entry.expect("dir entry").path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if name == "index.js" || !name.ends_with(".js") {
             continue;
         }

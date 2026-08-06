@@ -467,7 +467,10 @@ async fn a_write_403_names_the_missing_scope_instead_of_blaming_the_token() {
     .await;
     let err = run.error.expect("must throw");
     assert!(err.contains("[code=config_error]"), "{err}");
-    assert!(err.contains("calendar.events"), "must name the scope: {err}");
+    assert!(
+        err.contains("calendar.events"),
+        "must name the scope: {err}"
+    );
 
     // A rate-limit 403 keeps the READ mapping — it is not a scope problem and
     // must requeue rather than mark the mount misconfigured.
@@ -505,7 +508,11 @@ async fn a_gone_event_settles_an_update_and_completes_a_delete() {
     assert_eq!(run.output, Some(Value::Null));
 
     let run = call_adapter(
-        write_input("delete", json!({ "item_id": "EV1", "policy": "purge" }), None),
+        write_input(
+            "delete",
+            json!({ "item_id": "EV1", "policy": "purge" }),
+            None,
+        ),
         vec![json!({ "status": 410, "headers": {}, "body": {} })],
     )
     .await;
@@ -520,7 +527,11 @@ async fn a_gone_event_settles_an_update_and_completes_a_delete() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trash_is_refused_because_google_has_no_bin() {
     let run = call_adapter(
-        write_input("delete", json!({ "item_id": "EV1", "policy": "trash" }), None),
+        write_input(
+            "delete",
+            json!({ "item_id": "EV1", "policy": "trash" }),
+            None,
+        ),
         vec![],
     )
     .await;

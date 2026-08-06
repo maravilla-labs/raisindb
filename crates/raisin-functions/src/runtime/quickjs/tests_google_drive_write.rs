@@ -82,7 +82,10 @@ fn not_found() -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_refuses_when_the_file_changed_since_the_mount_last_saw_it() {
     let run = call_adapter(
-        input("delete", json!({ "item_id": "F1", "policy": "purge", "etag": "7" })),
+        input(
+            "delete",
+            json!({ "item_id": "F1", "policy": "purge", "etag": "7" }),
+        ),
         vec![ok(json!({ "version": "9" }))],
     )
     .await;
@@ -95,9 +98,7 @@ async fn a_delete_refuses_when_the_file_changed_since_the_mount_last_saw_it() {
         run.calls
     );
     assert!(
-        !run.calls
-            .iter()
-            .any(|c| c["method"] == json!("DELETE")),
+        !run.calls.iter().any(|c| c["method"] == json!("DELETE")),
         "a DELETE was issued despite the conflict: {:#?}",
         run.calls
     );
@@ -128,7 +129,10 @@ async fn an_update_refuses_on_the_same_mismatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_matching_version_lets_the_delete_through_under_its_policy() {
     let run = call_adapter(
-        input("delete", json!({ "item_id": "F1", "policy": "trash", "etag": "7" })),
+        input(
+            "delete",
+            json!({ "item_id": "F1", "policy": "trash", "etag": "7" }),
+        ),
         vec![ok(json!({ "version": "7" })), ok(json!({ "id": "F1" }))],
     )
     .await;
@@ -141,7 +145,10 @@ async fn a_matching_version_lets_the_delete_through_under_its_policy() {
     assert_eq!(out["trashed"], json!(true));
 
     let run = call_adapter(
-        input("delete", json!({ "item_id": "F1", "policy": "purge", "etag": "7" })),
+        input(
+            "delete",
+            json!({ "item_id": "F1", "policy": "purge", "etag": "7" }),
+        ),
         vec![ok(json!({ "version": "7" })), ok(json!({}))],
     )
     .await;
@@ -173,7 +180,10 @@ async fn a_delete_without_an_etag_issues_no_probe() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_vanished_file_completes_a_delete_and_settles_an_update() {
     let run = call_adapter(
-        input("delete", json!({ "item_id": "F1", "policy": "purge", "etag": "7" })),
+        input(
+            "delete",
+            json!({ "item_id": "F1", "policy": "purge", "etag": "7" }),
+        ),
         vec![not_found()],
     )
     .await;
@@ -197,7 +207,11 @@ async fn a_vanished_file_completes_a_delete_and_settles_an_update() {
 /// is one revision per file per drain, forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_update_is_refused_before_it_reaches_drive() {
-    let run = call_adapter(input("update", json!({ "item_id": "F1", "payload": {} })), vec![]).await;
+    let run = call_adapter(
+        input("update", json!({ "item_id": "F1", "payload": {} })),
+        vec![],
+    )
+    .await;
     let err = run.error.expect("must throw");
     assert!(err.contains("[code=config_error]"), "{err}");
     assert!(run.calls.is_empty(), "an empty PATCH reached Drive");

@@ -289,7 +289,9 @@ pub fn protected_resource_metadata_urls(resource: &Url) -> Vec<String> {
     let path = resource.path().trim_end_matches('/');
     let mut urls = Vec::new();
     if !path.is_empty() {
-        urls.push(format!("{origin}/.well-known/oauth-protected-resource{path}"));
+        urls.push(format!(
+            "{origin}/.well-known/oauth-protected-resource{path}"
+        ));
     }
     urls.push(format!("{origin}/.well-known/oauth-protected-resource"));
     urls
@@ -752,8 +754,7 @@ mod tests {
         assert!(!m.requires_client_authentication());
 
         // Explicitly offers `none` — take it, there is no secret to store.
-        m.token_endpoint_auth_methods_supported =
-            vec!["none".into(), "client_secret_post".into()];
+        m.token_endpoint_auth_methods_supported = vec!["none".into(), "client_secret_post".into()];
         assert_eq!(m.preferred_auth_method(), "none");
 
         // Does NOT offer `none`: this server requires authentication, and a

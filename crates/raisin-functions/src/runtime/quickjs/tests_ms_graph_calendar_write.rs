@@ -14,7 +14,7 @@
 //! mapper that guesses on this path silently reschedules real meetings.
 
 use super::tests_ms_graph_adapter::{adapter_files, adapter_source};
-use super::tests_ms_graph_calendar::{call_adapter, calendar_mount};
+use super::tests_ms_graph_calendar::{calendar_mount, call_adapter};
 use super::*;
 use crate::api::MockFunctionApi;
 use serde_json::{json, Value};
@@ -247,11 +247,17 @@ async fn html_wins_over_text_and_the_body_type_travels_with_it() {
     props["description_text"] = json!("plain");
     props["description_html"] = json!("<p>rich</p>");
     let payload = payload_of(props.clone(), "create").await;
-    assert_eq!(payload["body"], json!({"contentType":"html","content":"<p>rich</p>"}));
+    assert_eq!(
+        payload["body"],
+        json!({"contentType":"html","content":"<p>rich</p>"})
+    );
 
     props["description_html"] = Value::Null;
     let payload = payload_of(props, "create").await;
-    assert_eq!(payload["body"], json!({"contentType":"text","content":"plain"}));
+    assert_eq!(
+        payload["body"],
+        json!({"contentType":"text","content":"plain"})
+    );
 }
 
 /// An empty attendee list CLEARS the invitees and is therefore emitted, unlike
@@ -340,22 +346,31 @@ async fn rfc5545_becomes_graph_patterned_recurrence() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn until_round_trips_back_to_the_same_end_date() {
     // 09:00 local + 12h = 21:00Z on the same day — what the read path emits.
-    let range = pattern_of("RRULE:FREQ=DAILY;UNTIL=20261231T210000Z", "2026-08-11T09:00:00").await
-        ["range"]
+    let range = pattern_of(
+        "RRULE:FREQ=DAILY;UNTIL=20261231T210000Z",
+        "2026-08-11T09:00:00",
+    )
+    .await["range"]
         .clone();
     assert_eq!(range["type"], json!("endDate"));
     assert_eq!(range["endDate"], json!("2026-12-31"));
 
     // A 19:00 series: 19:00 + 12h = 07:00Z on 2027-01-01. Taking the date off
     // that instant would say 2027-01-01 and add a day per save.
-    let range = pattern_of("RRULE:FREQ=DAILY;UNTIL=20270101T070000Z", "2026-08-11T19:00:00").await
-        ["range"]
+    let range = pattern_of(
+        "RRULE:FREQ=DAILY;UNTIL=20270101T070000Z",
+        "2026-08-11T19:00:00",
+    )
+    .await["range"]
         .clone();
     assert_eq!(range["endDate"], json!("2026-12-31"));
 
     // A foreign RRULE that wrote a naive end-of-day still lands on its own date.
-    let range = pattern_of("RRULE:FREQ=DAILY;UNTIL=20261231T235959Z", "2026-08-11T09:00:00").await
-        ["range"]
+    let range = pattern_of(
+        "RRULE:FREQ=DAILY;UNTIL=20261231T235959Z",
+        "2026-08-11T09:00:00",
+    )
+    .await["range"]
         .clone();
     assert_eq!(range["endDate"], json!("2026-12-31"));
 }
@@ -425,7 +440,13 @@ async fn a_calendar_mount_now_declares_the_full_mirror_surface() {
     // Everything Graph owns stays out: cancelling is a DELETE under the mount's
     // delete_policy and an RSVP is a `submit` command, deliberately, because it
     // notifies the organizer and must not hide behind a property edit.
-    for f in ["status", "my_response", "organizer_email", "ical_uid", "url"] {
+    for f in [
+        "status",
+        "my_response",
+        "organizer_email",
+        "ical_uid",
+        "url",
+    ] {
         assert!(
             !fields.iter().any(|v| v == f),
             "{f} is not writable at Graph but is declared: {fields:#?}"
@@ -469,7 +490,10 @@ async fn create_posts_into_the_mounts_own_calendar_and_returns_the_new_id() {
     let call = &run.calls[0];
     assert_eq!(call["method"], json!("POST"));
     assert!(
-        call["url"].as_str().unwrap().contains("/calendars/AAMkCal%3D%3D/events"),
+        call["url"]
+            .as_str()
+            .unwrap()
+            .contains("/calendars/AAMkCal%3D%3D/events"),
         "{}",
         call["url"]
     );
@@ -494,7 +518,11 @@ async fn update_patches_the_event_and_sends_if_match_only_for_a_real_etag() {
     .await;
     let call = &run.calls[0];
     assert_eq!(call["method"], json!("PATCH"));
-    assert!(call["url"].as_str().unwrap().contains("/events/EV1"), "{}", call["url"]);
+    assert!(
+        call["url"].as_str().unwrap().contains("/events/EV1"),
+        "{}",
+        call["url"]
+    );
     assert_eq!(call["options"]["headers"]["If-Match"], json!("W/\"v1\""));
     assert_eq!(run.output.expect("output")["etag"], json!("W/\"v2\""));
 
@@ -532,7 +560,10 @@ async fn an_update_against_a_vanished_event_settles_rather_than_failing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_is_idempotent_and_soft() {
     let run = call_adapter(
-        write_input("delete", json!({ "item_id": "EV1", "policy": "trash", "etag": "W/\"v1\"" })),
+        write_input(
+            "delete",
+            json!({ "item_id": "EV1", "policy": "trash", "etag": "W/\"v1\"" }),
+        ),
         vec![json!({ "status": 204, "headers": {}, "body": Value::Null })],
     )
     .await;

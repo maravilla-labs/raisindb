@@ -58,10 +58,10 @@ pub use error::{RemoteToolError, Result};
 pub use notification::{notification_parts, NotificationSink, TOOLS_LIST_CHANGED};
 pub use oauth::{
     as_metadata_url, authorize_url, exchange_code, expires_at, fetch_as_metadata,
-    protected_resource_metadata_urls,
     fetch_protected_resource_metadata, guard_peer_url as guard_peer_endpoint, parse_challenge,
-    refresh_tokens, register_client, resolve_scopes, AuthChallenge, AuthServerMetadata, Pkce,
-    ProtectedResourceMetadata, RegisteredClient, TokenResponse,
+    protected_resource_metadata_urls, refresh_tokens, register_client, resolve_scopes,
+    AuthChallenge, AuthServerMetadata, Pkce, ProtectedResourceMetadata, RegisteredClient,
+    TokenResponse,
 };
 pub use reconcile::{
     plan_proxies, reconcile_plan, schema_hash, slugify, ExistingProxy, ProxyPlan, ReconcileAction,

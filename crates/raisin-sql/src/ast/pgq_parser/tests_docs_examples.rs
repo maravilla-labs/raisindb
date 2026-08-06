@@ -106,15 +106,19 @@ fn public_pgq_doc_examples_parse() {
     // From packages/raisindb-skills/skills/raisindb-sql/SKILL.md — a skill that
     // teaches syntax the parser rejects is the same failure as a doc that does.
     ok("GRAPH_TABLE(MATCH (a:`news:Article`) COLUMNS (a.title))");
-    ok("GRAPH_TABLE(MATCH ANY CHEAPEST p = (a:Stop)-[r:route COST r.weight]->{1,8}(b:Stop) \
-        COLUMNS (path_length(p) AS hops))");
+    ok(
+        "GRAPH_TABLE(MATCH ANY CHEAPEST p = (a:Stop)-[r:route COST r.weight]->{1,8}(b:Stop) \
+        COLUMNS (path_length(p) AS hops))",
+    );
     ok("GRAPH_TABLE(MATCH (a:Article)-[:continues]->{1,3}(b:Article) COLUMNS (b.title))");
     ok("GRAPH_TABLE(MATCH (a:Article)-[:continues*1..3]->(b:Article) COLUMNS (b.title))");
 
     // From the studio-getting-started skill: the "related via shared tag" shape
     // that is the reason to reach for GRAPH_TABLE at all.
-    ok("GRAPH_TABLE(MATCH (a:Article)-[:`tagged-with`]->(t:Tag)<-[:`tagged-with`]-(b:Article) \
-        COLUMNS (b.name))");
+    ok(
+        "GRAPH_TABLE(MATCH (a:Article)-[:`tagged-with`]->(t:Tag)<-[:`tagged-with`]-(b:Article) \
+        COLUMNS (b.name))",
+    );
 
     // A hyphenated relation type MUST be backticked: the regular identifier
     // rule is alphanumeric + underscore, so `tagged-with` would stop at the
