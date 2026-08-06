@@ -295,9 +295,10 @@ export interface SyncConfig {
 /**
  * Parsed `write_config` of a mount — mirrors the engine's `WriteConfig`
  * (`virtual_mount_sync/config/mount.rs`). Only the keys the engine actually
- * PARSES are declared here; `delete_policy`, `move_policy`, `collections` and
- * `resolver_function` are designed but unparsed, so declaring them would promise
- * a control that does nothing.
+ * PARSES are declared here; `collections` (per-node-type overrides) is designed
+ * but unparsed, so declaring it would promise a control that does nothing.
+ * `resolver_function` is parsed — but from the MOUNT, not from `write_config`;
+ * see {@link VirtualMount.resolver_function}.
  */
 export interface WriteConfig {
   /**
@@ -307,18 +308,85 @@ export interface WriteConfig {
    */
   writeback?: 'off' | 'write_through'
   /**
-   * The write mode the engine implements: `off` (default) or `state_only`.
-   * `mirror` / `submit` parse but are refused out loud by the engine
-   * (`unsupported_mode_reason`), so the UI never offers them.
+   * Which write mode this mount drives. A property of the MOUNT, not of the
+   * adapter — the same Graph connector serves a `state_only` inbox and a
+   * `submit` outbox.
+   *
+   * `state_only` pushes a declared allow-list of properties onto an existing
+   * remote object. `mirror` adds create and delete, so the node IS the remote
+   * object. `submit` means the node is a COMMAND (send a mail, RSVP) with a
+   * status lifecycle, not a mirror of anything.
    */
-  mode?: 'off' | 'state_only'
+  mode?: 'off' | 'state_only' | 'mirror' | 'submit'
   /**
-   * The `state_only` allow-list: node properties a local edit may push. Empty
-   * means nothing is pushable — the engine refuses with "mount declares no
-   * write_config.mutable_fields". There is no "all fields" value on purpose.
+   * The update allow-list: node properties a local edit may push, read by
+   * `state_only` and `mirror` alike. Empty means nothing is pushable — the
+   * engine refuses with "mount declares no write_config.mutable_fields". There
+   * is no "all fields" value on purpose: the engine is domain-blind and cannot
+   * know which properties a provider accepts as writes.
    */
   mutable_fields?: string[]
-  conflict?: 'remote_wins' | 'error'
+  /**
+   * What a local DELETE does to the remote object: `detach` pushes nothing,
+   * `trash` a recoverable soft delete (requires the adapter's `supports_trash`,
+   * or the engine REFUSES rather than silently purging), `purge` an
+   * irreversible one. Overrides the adapter's `default_delete_policy`, and
+   * `purge` is never a default at any layer — an operator has to type it.
+   */
+  delete_policy?: 'detach' | 'trash' | 'purge'
+  /**
+   * What a local MOVE does: `push` includes the location field in the outbound
+   * update, `detach` drops it (the local move sticks and the mount diverges on
+   * that one field), `reject` withholds the WHOLE update while a move field
+   * diverges. There is no `move` operation — a move is an `update` carrying the
+   * new parent/folder.
+   */
+  move_policy?: 'push' | 'detach' | 'reject'
+  /**
+   * Absolute FLOOR for how many deletes one drain may push — not a cap. The
+   * effective allowance is `max(this, max_delete_ratio × mount size)`, so a
+   * large mount is governed by the ratio and a tiny one by this.
+   */
+  max_deletes_per_run?: number
+  /** Proportional allowance, as a fraction of the mount's live node count. */
+  max_delete_ratio?: number
+  /**
+   * Require explicit confirmation for a delete whose ORIGINATING TRANSACTION
+   * was wide enough to be a bulk operation, regardless of how many deletes
+   * reach any one drain. Defaults to true.
+   */
+  require_confirmation_on_bulk?: boolean
+  /**
+   * `mirror` only: node types this mount may CREATE at the provider.
+   *
+   * Empty means no local create, and there is deliberately no default list. A
+   * node the user just authored under the mount path carries no `__mount_id`
+   * and no `__external_id` — that absence is what makes it a create candidate —
+   * so the ownership check every other write path makes is unavailable, and a
+   * type filter is the only thing between "the user added an event" and "the
+   * drain uploaded the note somebody left under the mount". Guessing wrong
+   * sends private content to a third party and no later config fix undoes it.
+   */
+  create_node_types?: string[]
+  /**
+   * `submit` only: node types this outbox treats as COMMANDS. Same provenance
+   * problem, same answer. Empty means the engine's own shipped command types.
+   */
+  command_node_types?: string[]
+  /**
+   * What a REFUSED push means — the provider saying the object changed since
+   * this mount last read it.
+   *
+   * `remote_wins` (the default, and the pre-existing behaviour) abandons the
+   * local edit and lets the next sync overwrite it: a lost edit the user can
+   * redo. `local_wins` re-sends with no concurrency base, OVERWRITING the other
+   * writer irreversibly — never a default at any layer. `error` parks the edit
+   * and reports `writeback_status: "conflict"`. `resolver_function` hands the
+   * decision to the mount's {@link VirtualMount.resolver_function}, and REQUIRES
+   * one — the engine refuses the whole drain otherwise rather than falling back
+   * to a policy nobody chose.
+   */
+  conflict?: 'remote_wins' | 'local_wins' | 'error' | 'resolver_function'
   /**
    * Keys later write stages add are preserved verbatim on round-trip, the same
    * way {@link SyncConfig} preserves provider-specific keys.
@@ -511,6 +579,14 @@ export interface MountState {
    */
   writeback_last_error?: string
   /**
+   * Health of the OUTBOUND half, distinct from {@link MountState.status} (which
+   * is about reads). `"conflict"` means at least one edit is parked awaiting a
+   * human; `"misconfigured"` means the drain never started because
+   * `write_config` could not be resolved. Cleared by the first drain that parks
+   * nothing. Engine-owned; the console only displays it.
+   */
+  writeback_status?: string
+  /**
    * What the write drain did on the most recent run that had work.
    *
    * Absent on a mount that has never drained, and NOT overwritten by an idle
@@ -577,6 +653,14 @@ export interface VirtualMount {
   remote_root?: string
   adapter_function?: string
   mapping_function?: string
+  /**
+   * Function node that decides what a REFUSED push means for this mount. Lives
+   * beside `mapping_function` rather than inside `write_config` because it is
+   * the same kind of thing, and gets the same rule: no integration-level
+   * fallback. Selected by `write_config.conflict: "resolver_function"`, or
+   * simply by being set.
+   */
+  resolver_function?: string
   sync_config?: SyncConfig
   write_config?: WriteConfig
   state?: MountState
@@ -671,6 +755,7 @@ function nodeToMount(node: Node): VirtualMount {
     remote_root: (p.remote_root as string) || undefined,
     adapter_function: (p.adapter_function as string) || undefined,
     mapping_function: (p.mapping_function as string) || undefined,
+    resolver_function: (p.resolver_function as string) || undefined,
     sync_config: (p.sync_config as SyncConfig) || {},
     // CAST, never rebuild. These two objects are handed back to the server
     // verbatim by `mountToProperties`, so a key the TS type does not name (a
@@ -701,6 +786,7 @@ function mountToProperties(m: VirtualMount): Record<string, unknown> {
     ...(m.remote_root ? { remote_root: m.remote_root } : {}),
     ...(m.adapter_function ? { adapter_function: m.adapter_function } : {}),
     ...(m.mapping_function ? { mapping_function: m.mapping_function } : {}),
+    ...(m.resolver_function ? { resolver_function: m.resolver_function } : {}),
     sync_config: m.sync_config || {},
     write_config: m.write_config || {},
     enabled: m.enabled,

@@ -95,6 +95,7 @@ export default function MountEditor({
   const [creatingPath, setCreatingPath] = useState(false)
   const [remoteRoot, setRemoteRoot] = useState(mount?.remote_root || '')
   const [mappingFn, setMappingFn] = useState(mount?.mapping_function || '')
+  const [resolverFn, setResolverFn] = useState(mount?.resolver_function || '')
   const [enabled, setEnabled] = useState(mount?.enabled ?? true)
   const [sync, setSync] = useState<SyncConfig>(mount?.sync_config || { mode: 'poll', interval_seconds: 300 })
   // `mode` is spelled out on a new mount so the key the engine actually reads is
@@ -378,6 +379,7 @@ export default function MountEditor({
         mount_path: mountPath.trim(),
         remote_root: remoteRoot.trim() || undefined,
         mapping_function: mappingFn.trim() || undefined,
+        resolver_function: resolverFn.trim() || undefined,
         enabled,
         sync_config: {
           ...sync,
@@ -903,6 +905,8 @@ export default function MountEditor({
               caps={caps}
               capsUnknown={capsUnknown}
               state={mount?.state}
+              resolverFunction={resolverFn}
+              onResolverChange={setResolverFn}
             />
           )}
 
