@@ -43,7 +43,10 @@ pub(super) fn adapter_files() -> HashMap<String, String> {
     let mut files = HashMap::new();
     for entry in std::fs::read_dir(&dir).expect("read adapter dir") {
         let path = entry.expect("dir entry").path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if name == "index.js" || !name.ends_with(".js") {
             continue;
         }
@@ -52,7 +55,11 @@ pub(super) fn adapter_files() -> HashMap<String, String> {
             std::fs::read_to_string(&path).expect("read adapter module"),
         );
     }
-    assert!(!files.is_empty(), "no sibling modules found in {}", dir.display());
+    assert!(
+        !files.is_empty(),
+        "no sibling modules found in {}",
+        dir.display()
+    );
     files
 }
 
@@ -599,6 +606,53 @@ async fn submit_refuses_unroutable_commands_without_calling_the_provider() {
             run.calls.is_empty(),
             "{label} reached the provider: {:?}",
             run.calls
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// subscribe: changeType is per RESOURCE
+// ---------------------------------------------------------------------------
+
+/// Graph rejects the whole subscription when `changeType` names a value the
+/// resource does not support, so one shared value cannot serve all three
+/// surfaces.
+///
+/// `driveItem` — what a FILES mount subscribes to (`{drive}/root`) — supports
+/// **`updated` only**: Microsoft models a new file as an update of its parent,
+/// so there is no `created` to ask for. Asking anyway produced
+/// `Invalid 'changeType' attribute: 'created'` and every OneDrive/SharePoint
+/// mount on a webhook or hybrid sync silently fell back to polling, reporting a
+/// config_error on each attempt.
+///
+/// Asserted per resource because the failure is invisible until a provider
+/// rejects it — there is nothing in the request itself that looks wrong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_asks_for_the_change_types_each_resource_actually_supports() {
+    for (resource, expected) in [
+        ("mail", "created,updated"),
+        ("calendar", "created,updated"),
+        ("files", "updated"),
+    ] {
+        let run = call_adapter(
+            json!({
+                "operation": "subscribe",
+                "credential": { "access_token": "TOKEN123", "provider_type": "ms-graph" },
+                "mount": mount(resource, None),
+                "params": { "notification_url": "https://example.test/notify" },
+            }),
+            vec![json!({
+                "status": 201,
+                "headers": {},
+                "body": { "id": "SUB1", "expirationDateTime": "2026-08-08T00:00:00Z" }
+            })],
+        )
+        .await;
+        assert!(run.error.is_none(), "{resource}: {:?}", run.error);
+        assert_eq!(
+            run.calls[0]["options"]["body"]["changeType"],
+            json!(expected),
+            "{resource} asked for the wrong change types"
         );
     }
 }

@@ -41,13 +41,29 @@ export function subscriptionExpiration() {
   return new Date(Date.now() + 2 * 86400000).toISOString();
 }
 
+// Which change types Graph will ACCEPT for this mount's resource.
+//
+// This is per-resource and Graph rejects the request outright when it is wrong —
+// `Invalid 'changeType' attribute: 'created'` — so a single shared value cannot
+// serve all three surfaces. `driveItem` (a files mount subscribes to
+// `{drive}/root`, see `subscriptionResource`) supports **`updated` only**:
+// Microsoft models a new file as an update of its parent, so there is no
+// `created` to ask for. Messages and events accept the full set.
+//
+// The consequence of getting it wrong is not subtle and was live: every
+// OneDrive/SharePoint mount on a `webhook` or `hybrid` sync mode failed to
+// subscribe and fell back to polling, reporting a config_error each time.
+function subscriptionChangeType(mount) {
+  return resourceOf(mount) === "files" ? "updated" : "created,updated";
+}
+
 // subscribe -> create a Graph subscription. `clientState` is our per-subscription
 // secret, echoed back on every notification and verified by the RaisinDB endpoint.
 export function opSubscribe(credential, mount, params) {
   var secret = raisin.crypto.uuid() + raisin.crypto.uuid();
   var expires = subscriptionExpiration();
   var payload = {
-    changeType: "created,updated",
+    changeType: subscriptionChangeType(mount),
     notificationUrl: params.notification_url,
     resource: subscriptionResource(mount),
     expirationDateTime: expires,
