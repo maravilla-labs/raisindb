@@ -94,10 +94,10 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7003d3a4.js";
+            window.path_to_searchindex_js = "searchindex-98a3460e.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-a8ca80cc.js"></script>
+        <script src="toc-50ab3bbb.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -7158,6 +7158,86 @@ SHOW SECURITY CONFIG FOR 'content';
 <li><a href="#sql-reference">SQL Reference</a> – complete SQL reference including other custom extensions</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="virtual-nodes-external-systems-as-content"><a class="header" href="#virtual-nodes-external-systems-as-content">Virtual Nodes: External Systems as Content</a></h1>
+<p><em>Experimental / preview.</em></p>
+<p>A virtual node is an ordinary node whose content originates outside RaisinDB. A mount points at a folder in a Drive, a mailbox, a calendar; the sync engine materializes what it finds there as real, committed nodes. They are not a read-only overlay — they carry revisions, fire triggers, answer SQL, get indexed and take part in workflows exactly as authored content does. That is the whole point: everything the database can already do to content applies to a mailbox the moment it is mounted.</p>
+<p>The pieces:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Node</th><th>Role</th></tr>
+</thead>
+<tbody>
+<tr><td><code>raisin:Integration</code></td><td>A connector: which provider, which OAuth app, which adapter function.</td></tr>
+<tr><td><code>raisin:VirtualMount</code></td><td>One binding of a remote container to a workspace path, with its sync and write configuration.</td></tr>
+<tr><td>adapter function</td><td>JavaScript. Talks to the provider’s API and returns normalized items.</td></tr>
+<tr><td>mapping function</td><td>JavaScript. Translates one provider item into a node — and, for writes, back again.</td></tr>
+</tbody>
+</table>
+</div>
+<p>The engine is domain-blind. It knows how to page, reconcile, retry and commit; it does not know what a calendar is or that a mail body is immutable. Everything provider-specific lives in the two JavaScript functions, which is why adding a connector is a package rather than a patch.</p>
+<h2 id="adapters-never-write-nodes"><a class="header" href="#adapters-never-write-nodes">Adapters never write nodes</a></h2>
+<p>An adapter is a function the engine calls: it takes a request, hits the provider, returns a result. Every local write is performed by the engine.</p>
+<p>This is worth stating because the alternative is tempting and loses four things at once. The engine’s per-mount lease serializes writes; the stamp-back is what prevents an echo loop; the blast-radius rails bound a delete; and adapters run privileged with a system auth context, so an adapter that could write nodes would have unrestricted workspace access from a sandbox. The division is: <strong>the adapter decides what the remote becomes and performs the remote call; the engine decides what the node becomes and performs the local write.</strong></p>
+<h2 id="the-write-path"><a class="header" href="#the-write-path">The write path</a></h2>
+<p>Writing back is opt-in per mount and off by default. The reason it is off rather than merely unconfigured is that a wrong write configuration reaches somebody else’s mailbox or calendar — it is not a setting to inherit.</p>
+<p>The generalization that makes one mechanism serve every provider is that <strong>the write mode belongs to the mount, not to the adapter</strong>. The same Microsoft 365 connector serves a <code>state_only</code> inbox and a <code>submit</code> outbox.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Mode</th><th>Example</th><th>A local change means</th></tr>
+</thead>
+<tbody>
+<tr><td><code>state_only</code></td><td>a mail message</td><td>Content is immutable; a declared allow-list of properties pushes (the read flag, flags, the folder).</td></tr>
+<tr><td><code>mirror</code></td><td>a calendar event, a Drive file</td><td>The node <strong>is</strong> the remote object — create, update and delete propagate.</td></tr>
+<tr><td><code>submit</code></td><td>send a mail, RSVP</td><td>The node is a <strong>command</strong> with a status lifecycle, not a mirror of anything.</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>submit</code> is what makes mail coherent. An email is immutable, so its write path is a <em>sending</em> path, and the natural home for that is a separate mount whose members are intents. <code>reply</code> and <code>forward</code> then need no special casing: the outbox node carries an action and the id of the message it answers.</p>
+<h3 id="change-detection-reads-revision-metadata"><a class="header" href="#change-detection-reads-revision-metadata">Change detection reads revision metadata</a></h3>
+<p>The obvious approach does not work, and the reasons are worth recording because each looks correct until tried.</p>
+<p>Filtering on <code>updated_by != "virtual-mount-sync"</code> matches every node the sync itself wrote — the transaction’s auth context wins over the raw actor, so the stamp is <code>system</code>. Comparing <code>updated_at</code> against the stored sync timestamp is always true, because one is captured when an item is staged and the other when the batch commits, minutes apart on a large page. And deletes are structurally invisible to any sweep over live nodes: the node is gone, and there is no per-mount manifest of the external ids it owned.</p>
+<p>So detection reads <code>RevisionMeta</code> — one HLC-ordered scan that is durable, ordered, delete-visible and correctly attributed — from a watermark stored on the mount. A capture hook on the event bus provides the low-latency path, and it is allowed to be noisy.</p>
+<h3 id="idempotence-not-precision"><a class="header" href="#idempotence-not-precision">Idempotence, not precision</a></h3>
+<p>The layer that carries the design is neither of those. Before any push, the engine re-reads the node and asks whether the change is already at the provider; if it is, no adapter call happens. That is what lets detection be sloppy — the same architecture the read path already uses, where an etag skip-write lets the delta feed be sloppy.</p>
+<p>The comparison is against <code>__pushed_state</code>, a stamped record of the watched properties as they were sent, <strong>not</strong> against the etag. The etag would require the token returned by a write to be byte-identical to the one the next delta reports for that item, which no provider guarantees: Microsoft’s <code>isRead</code> does bump the message’s change key, while IMAP’s <code>\Seen</code> does not move <code>MODSEQ</code> usefully. <code>__pushed_state</code> converges regardless of what the etag does; the etag skip is the optimization that keeps a converged item from being re-mapped.</p>
+<h3 id="provenance-for-nodes-the-mount-does-not-own"><a class="header" href="#provenance-for-nodes-the-mount-does-not-own">Provenance for nodes the mount does not own</a></h3>
+<p>Every other write path starts from a node carrying <code>__mount_id</code> and <code>__external_id</code>. A node the user just authored under the mount path carries neither — that absence is exactly what makes it a candidate to create remotely, or to issue as a command.</p>
+<p>The answer is an explicit node-type allow-list on the mount (<code>create_node_types</code>, <code>command_node_types</code>), <strong>empty by default with no fallback</strong>. Guessing wrong uploads private content to a third party, and no later configuration change undoes that. It is the same reasoning that gives <code>mutable_fields</code> no “all fields” value.</p>
+<h3 id="deleting-is-a-policy"><a class="header" href="#deleting-is-a-policy">Deleting is a policy</a></h3>
+<p>“Delete” is ambiguous at every provider that has a recycle bin, so it is resolved as engine default &lt; adapter default &lt; mount override, and the ambiguous reading is never the destructive one.</p>
+<ul>
+<li><code>detach</code> — nothing is pushed. Honestly documented: the node is removed locally and the next full reconcile <strong>re-imports it</strong>, because there is no per-mount suppression set.</li>
+<li><code>trash</code> — a recoverable soft delete. Requires the adapter to declare <code>supports_trash</code>; a mount asking for it against an adapter that has no trash is <strong>refused</strong>, never quietly promoted to a permanent delete.</li>
+<li><code>purge</code> — irreversible, and never a default at any layer. An operator types it.</li>
+</ul>
+<p>The rails around it are proportional: a drain is blocked when pending deletes exceed <code>max(floor, ratio × mount size)</code>. An absolute cap alone is wrong in both directions — far too low for a ten-node mount, far too high for a 200,000-message mailbox. A delete whose originating transaction touched many nodes is flagged as bulk regardless of how few deletes reach any one drain, which is how a mis-scoped <code>DELETE ... WHERE path LIKE '/mail/%'</code> is caught. A tripped rail parks the deletes and blocks outbound writes only; reading carries on.</p>
+<h3 id="commands-are-issued-at-most-once"><a class="header" href="#commands-are-issued-at-most-once">Commands are issued at most once</a></h3>
+<p><code>submit</code> deliberately bypasses the retry loop that serves the other modes, because a retry sends someone a second email.</p>
+<p>A durable <code>queued → sending</code> transition is committed before any network call, stamped with an attempt id. On success the node moves to <code>sent</code>. A rate limit returns it to <code>queued</code>. A definitive rejection fails it. <strong>Everything else parks at <code>unknown</code> and is never retried automatically</strong> — including a crash between the transition and the response, which the next drain moves to <code>unknown</code> rather than back to <code>queued</code>. The durable pre-write exists to convert an unbounded ambiguity into a bounded one: the question becomes “did this one attempt land?” rather than “how many were there?”.</p>
+<h3 id="conflict"><a class="header" href="#conflict">Conflict</a></h3>
+<p>A conflict is the provider saying the object changed since this mount last read it. It is not a fault, and what it means is a decision the engine cannot make:</p>
+<ul>
+<li><code>remote_wins</code> (default) — abandon the push and let the next sync overwrite the local value. A lost edit the user can redo.</li>
+<li><code>local_wins</code> — re-send with no concurrency base, overwriting the other writer. Not recoverable.</li>
+<li><code>error</code> — park the edit and report it.</li>
+<li><code>resolver_function</code> — hand the decision to a function shipped by the package, which answers <code>local_wins</code>, <code>remote_wins</code>, <code>merged</code> or <code>park</code>. Anything unclear — a throw, an unrecognized answer — parks rather than guesses.</li>
+</ul>
+<h2 id="attachments-and-content-on-demand"><a class="header" href="#attachments-and-content-on-demand">Attachments, and content on demand</a></h2>
+<p>A sync writes attachment <strong>metadata</strong> only: a <code>raisin:Asset</code> child per attachment with its name, mime type and size. Downloading every attachment of every message during a sync would multiply a mailbox import by whole documents, and most attachments are never opened. <code>file == null</code> on a mount-owned asset means precisely “not fetched yet”; the bytes are fetched when something asks for them and stored like any other asset’s.</p>
+<p>Attachments are children rather than an array property because the Drive adapter already maps provider blobs to <code>raisin:Asset</code> — an array would build a second, parallel blob path. As children they are queryable, can be full-text indexed, and inline images fall out naturally through a <code>content_id</code>.</p>
+<h2 id="calendars-converge-on-rfc-5545"><a class="header" href="#calendars-converge-on-rfc-5545">Calendars converge on RFC 5545</a></h2>
+<p>The two calendar providers were exact opposites: one returns series masters carrying a proprietary recurrence object, the other expands every occurrence and never shows a master at all. <code>raisin:Event</code> is neither. It stores a series master with recurrence as RFC 5545 content lines, exceptions as sibling nodes, and an explicit IANA timezone — because “every Tuesday at 09:00 Europe/Zurich” is a different instant in winter and in summer.</p>
+<p>RFC 5545 is canonical because Google, CalDAV and Apple use it natively; Microsoft is the outlier and converts. A window-bounded expander materializes concrete occurrences as a derived projection, so a date-range query stops missing every recurring event. The write path only ever touches masters and exceptions — an edit to a generated occurrence is refused with a pointer to its master, which is what real calendar systems do.</p>
+<h2 id="where-configuration-lives"><a class="header" href="#where-configuration-lives">Where configuration lives</a></h2>
+<p>Mounts and integrations live on the repository’s <strong>config branch</strong>; the nodes they materialize land on the mount’s <strong>target branch</strong>. The two are independent and must not be conflated — a sync reads its configuration from one and writes content to the other, and passing the target branch for both resolves no mount at all.</p>
+<h2 id="further-reading-2"><a class="header" href="#further-reading-2">Further reading</a></h2>
+<ul>
+<li><a href="https://raisindb.com/docs/reference/virtual-node-adapters">Virtual node adapter contract</a> — the frozen, package-facing API: operations, capabilities, error codes, and both directions of the mapping function.</li>
+<li><a href="https://raisindb.com/docs/concepts/virtual-nodes">Virtual Nodes concepts</a> — what you can mount today, and the guides for each connector.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="mcp-servers-as-content"><a class="header" href="#mcp-servers-as-content">MCP Servers as Content</a></h1>
 <p>RaisinDB ships a complete Model Context Protocol (MCP) JSON-RPC engine in the <code>raisin-mcp</code> crate, exposed over HTTP by <code>raisin-transport-http</code>. This chapter documents how that engine is put together, because the newer <a href="#native-mcp-ui-support">Native MCP-UI Support</a> feature builds directly on the pieces described here and only makes sense against them.</p>
 <p>The one design decision that colors everything else: <strong>an MCP server is content, not configuration.</strong> There is no server registry, no config file, no restart-to-reload. A server is a <code>raisin:McpServer</code> node living in a workspace, resolved by slug at request time. Everything that follows – multi-tenancy, RLS, versioning, replication, live subscriptions – falls out of that choice for free, because a server descriptor is subject to exactly the same machinery as any other node.</p>
@@ -7401,6 +7481,49 @@ SHOW SECURITY CONFIG FOR 'content';
 <ul>
 <li><strong>Dynamic per-result UI.</strong> Today <code>ui</code> is static per tool (one tool always renders the same widget/route). Letting a tool’s <em>result</em> choose the widget/route (a function returning a dynamic <code>_ui: { entry, mode }</code> that <code>dispatch.rs</code> reads in preference to the static binding) is cheap to add later and not needed for the “two tools, two views” case, which already works.</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="mcp-client-calling-other-servers"><a class="header" href="#mcp-client-calling-other-servers">MCP Client: Calling Other Servers</a></h1>
+<p>The previous chapter describes RaisinDB as an MCP <strong>server</strong> — external clients calling its tools. This one is the other direction: RaisinDB as an MCP <strong>client</strong>, so its agents can call tools that live on somebody else’s server.</p>
+<p>The design goal was that a remote tool should be indistinguishable from a local one at the point of use. An agent’s <code>tools:</code> array holds paths; after discovery, some of those paths happen to resolve to a remote server. Nothing in the agent, the tool resolvers, the permission model or the <code>AIToolCall</code> machinery needed to learn a new concept.</p>
+<h2 id="remote-tools-are-materialized-as-proxy-functions"><a class="header" href="#remote-tools-are-materialized-as-proxy-functions">Remote tools are materialized as proxy functions</a></h2>
+<p>The alternative — a second tool kind that every consumer branches on — would have forked the tool path in the JS chat resolver, the Rust flow resolver, the tool-call dispatcher and the MCP re-export. That is the mirrored-code-path failure mode this codebase keeps paying for.</p>
+<p>Instead, tool discovery writes one ordinary <code>raisin:Function</code> node per remote tool, under <code>/mcp/{connection-slug}/{tool-slug}</code> in the <code>functions</code> workspace. It carries the remote <code>inputSchema</code> verbatim, plus an <code>mcp_proxy</code> block naming its connection and the <strong>verbatim</strong> remote tool name:</p>
+<pre><code class="language-yaml">node_type: raisin:Function
+name: linear__search-issues
+properties:
+  name: linear__search-issues     # node name and props.name MUST match
+  language: javascript            # placeholder; never executed
+  input_schema: { ... }           # remote inputSchema, verbatim
+  mcp_proxy:
+    connection: /mcp-connections/linear
+    remote_tool: "search_issues"  # the ONLY thing sent in tools/call
+    schema_hash: "sha256:..."
+    state: active
+</code></pre>
+<p>Two details are load-bearing. The node name and <code>props.name</code> must be equal, because the JS resolver reads the node name and the Rust resolver reads <code>props.name</code> — a mismatch shows the model two different names for one tool. And <code>props.name</code> is namespaced <code>{slug}__{tool}</code> because <code>raisin:Function.name</code> is <code>unique</code> and <em>enforced</em>: two connections each exposing <code>search</code> would otherwise make the second connection’s discovery fail outright.</p>
+<h2 id="one-execution-branch"><a class="header" href="#one-execution-branch">One execution branch</a></h2>
+<p><code>mcp_proxy</code> is the discriminator, and it is checked in <code>execute_function</code> (<code>raisin-functions/src/execution/executor.rs</code>) between loading the function node and loading its code.</p>
+<p>The position is deliberate. It cannot be <code>execution_mode</code>: an unrecognised value there silently parses as <code>Async</code>, so a “remote” mode would be indistinguishable from a normal function. It cannot be <code>language</code> either: an unrecognised value is a hard error, and the check has to run <em>before</em> the language is read.</p>
+<p>Because all three execution paths — the JS chat path via the <code>AIToolCall</code> job, <code>raisin.functions.execute()</code>, and the Rust flow runtime — funnel through <code>execute_function</code>, this single branch serves all of them. There is no second implementation to drift.</p>
+<p>A tool that runs and reports failure (<code>isError: true</code>) becomes <code>success: false</code> with a message, not a transport error. That is what makes the JS path (which writes an <code>error</code> property the model sees next turn) and the flow path (which produces <code>{"error": …}</code>) yield identical shapes.</p>
+<h2 id="connections-are-content-too"><a class="header" href="#connections-are-content-too">Connections are content too</a></h2>
+<p>A <code>raisin:McpConnection</code> node in <code>raisin:system</code> describes one remote server: URL, auth mode, tool filter, refresh policy, discovered tools, health. Credentials are AES-256-GCM ciphertext, written through a write-only endpoint and never returned by any read.</p>
+<p>A proxy carries the <strong>connection’s</strong> authority, not the calling user’s — every caller shares one service account. That is why proxies are created under a restrictively-ACL’d <code>/mcp</code> folder: attaching one to an agent should be a deliberate act.</p>
+<h2 id="discovery-reconciles-it-does-not-rebuild"><a class="header" href="#discovery-reconciles-it-does-not-rebuild">Discovery reconciles; it does not rebuild</a></h2>
+<p><code>reconcile_plan</code> (<code>raisin-mcp-protocol/src/client/reconcile.rs</code>) is a pure function of <em>what exists</em> and <em>what the server offers</em>, so the two properties the design leans on are directly testable:</p>
+<ul>
+<li><strong>A steady-state refresh writes nothing.</strong> Discovery may run hourly forever; a schema-hash comparison skips unchanged tools. Without it each connection would mint thousands of function revisions a year. The hash is over <em>canonical</em> JSON — this workspace builds <code>serde_json</code> with <code>preserve_order</code>, so key order alone would otherwise change the hash and rewrite everything on every run.</li>
+<li><strong>Proxy paths never change.</strong> An agent holds a path; a rename makes the tool vanish from that agent with no error anywhere. Slugs are derived deterministically from the remote name, and collision suffixes are assigned in sorted remote-name order — so a server that reorders its listing between calls cannot renumber them.</li>
+</ul>
+<p>A tool that disappears upstream is <strong>disabled, not deleted</strong>: a missing node makes the tool silently vanish, while a disabled one stays visible in the console and in the connection’s tool list. A <em>failed probe</em> touches no proxies at all — a remote being down means the tool list is unknown, not empty, and treating it as empty would tear down every proxy on a transient outage.</p>
+<h2 id="cluster-safety"><a class="header" href="#cluster-safety">Cluster safety</a></h2>
+<p>Discovery writes shared content, so it must run once per cluster. The job registry’s dedup key does <strong>not</strong> provide that: its map is in-memory and per-process, so every node runs its own scan. Single-fire comes from a per-connection <code>raisin_locks</code> lease inside the handler, which needs the <code>redis</code> backend to span nodes. An in-process <code>KeyedMutex</code> sits in front of it so a manual refresh racing a scheduled one <em>queues</em> rather than being rejected.</p>
+<h2 id="egress"><a class="header" href="#egress">Egress</a></h2>
+<p>A connection URL is operator-supplied and dialled by the server itself — textbook SSRF. <code>EgressPolicy</code> requires <code>https</code> (loopback only behind an explicit flag) and rejects private, loopback, link-local (including cloud metadata at <code>169.254.169.254</code>), CGNAT and IPv6 ULA addresses.</p>
+<p>It is enforced <strong>twice</strong>: when a connection is saved, and again before every dial. A save-time-only check misses a hostname that resolved publicly and was re-pointed afterwards. Configuration is the <code>[mcp_client]</code> TOML section, installed process-wide, so every path enforces one policy rather than each wiring its own.</p>
+<h2 id="crate-layout"><a class="header" href="#crate-layout">Crate layout</a></h2>
+<p>The client lives in <code>raisin-mcp-protocol</code>, not <code>raisin-mcp</code>, and that is structural rather than tidiness. <code>raisin-mcp</code> serves tools, so it depends on <code>raisin-functions</code> — which depends on <code>raisin-rocksdb</code>. Anything at or below the storage layer (the discovery job handler, for one) therefore cannot depend on <code>raisin-mcp</code> without closing a package cycle, and Cargo rejects package cycles regardless of features.</p>
+<p><code>raisin-mcp-protocol</code> holds the wire types and the client with no <code>raisin-functions</code> dependency; <code>raisin-mcp</code> depends on it and re-exports it, so existing <code>raisin_mcp::protocol::…</code> paths still resolve and nothing is duplicated.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="embedding-guide"><a class="header" href="#embedding-guide">Embedding Guide</a></h1>
 <p>Learn how to embed RaisinDB into your Rust application.</p>
@@ -10976,8 +11099,8 @@ let my_post = Node {
     pub properties: HashMap&lt;String, PropertyValue&gt;,    // Field values
 
     // Hierarchy
-    pub children: Vec&lt;String&gt;,                         // Child node IDs (ordering by order_key)
-    pub order_key: String,                             // Fractional index for sibling ordering (Base62)
+    pub children: Vec&lt;String&gt;,                         // Legacy; NOT the source of child order
+    pub order_key: String,                             // Server-assigned fractional index (sibling order)
     pub has_children: Option&lt;bool&gt;,                    // Computed field (populated at service layer)
     pub parent: Option&lt;String&gt;,                        // Parent node **name** (not full path!)
 

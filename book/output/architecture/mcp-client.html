@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Git-Like Versioning - RaisinDB Documentation</title>
+        <title>MCP Client: Calling Other Servers - RaisinDB Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -204,7 +204,7 @@
                         <a href="https://github.com/maravilla-labs/raisindb" title="Git repository" aria-label="Git repository">
                             <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
                         </a>
-                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/architecture/versioning.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/maravilla-labs/raisindb/edit/main/book/src/architecture/mcp-client.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
                         </a>
 
@@ -238,385 +238,58 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="git-like-versioning--commits"><a class="header" href="#git-like-versioning--commits">Git-Like Versioning &amp; Commits</a></h1>
-<p>RaisinDB implements a <strong>git-like versioning architecture</strong> that separates mutable workspace drafts from immutable repository snapshots. This enables powerful workflows like feature branches, staging environments, and production deployments—all backed by the same content.</p>
-<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
-<h3 id="draft-vs-commit-model"><a class="header" href="#draft-vs-commit-model">Draft vs Commit Model</a></h3>
-<p>RaisinDB distinguishes between two types of content operations:</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Operation Type</th><th>Creates Revision</th><th>Mutates HEAD</th><th>Use Case</th></tr>
-</thead>
-<tbody>
-<tr><td><strong>Draft</strong> (PUT/POST)</td><td>❌ No</td><td>✅ Yes</td><td>Development, real-time collaboration</td></tr>
-<tr><td><strong>Commit</strong> (Transaction)</td><td>✅ Yes</td><td>✅ Yes</td><td>Releases, deployments, checkpoints</td></tr>
-</tbody>
-</table>
-</div>
-<p><strong>Draft operations</strong> (<code>PUT</code>, <code>POST</code>, <code>DELETE</code> on nodes) update the workspace’s current HEAD pointer without creating a snapshot. Think of this as “working directory changes” in git—fast, immediate, collaborative.</p>
-<p><strong>Commit operations</strong> (<code>POST .../raisin:cmd/commit</code>) create immutable revisions that snapshot the entire workspace state. These revisions are numbered sequentially (1, 2, 3, …) and can be tagged, branched, or restored.</p>
-<h3 id="revisions"><a class="header" href="#revisions">Revisions</a></h3>
-<p>Every commit creates a <strong>revision</strong> with:</p>
+                        <h1 id="mcp-client-calling-other-servers"><a class="header" href="#mcp-client-calling-other-servers">MCP Client: Calling Other Servers</a></h1>
+<p>The previous chapter describes RaisinDB as an MCP <strong>server</strong> — external clients calling its tools. This one is the other direction: RaisinDB as an MCP <strong>client</strong>, so its agents can call tools that live on somebody else’s server.</p>
+<p>The design goal was that a remote tool should be indistinguishable from a local one at the point of use. An agent’s <code>tools:</code> array holds paths; after discovery, some of those paths happen to resolve to a remote server. Nothing in the agent, the tool resolvers, the permission model or the <code>AIToolCall</code> machinery needed to learn a new concept.</p>
+<h2 id="remote-tools-are-materialized-as-proxy-functions"><a class="header" href="#remote-tools-are-materialized-as-proxy-functions">Remote tools are materialized as proxy functions</a></h2>
+<p>The alternative — a second tool kind that every consumer branches on — would have forked the tool path in the JS chat resolver, the Rust flow resolver, the tool-call dispatcher and the MCP re-export. That is the mirrored-code-path failure mode this codebase keeps paying for.</p>
+<p>Instead, tool discovery writes one ordinary <code>raisin:Function</code> node per remote tool, under <code>/mcp/{connection-slug}/{tool-slug}</code> in the <code>functions</code> workspace. It carries the remote <code>inputSchema</code> verbatim, plus an <code>mcp_proxy</code> block naming its connection and the <strong>verbatim</strong> remote tool name:</p>
+<pre><code class="language-yaml">node_type: raisin:Function
+name: linear__search-issues
+properties:
+  name: linear__search-issues     # node name and props.name MUST match
+  language: javascript            # placeholder; never executed
+  input_schema: { ... }           # remote inputSchema, verbatim
+  mcp_proxy:
+    connection: /mcp-connections/linear
+    remote_tool: "search_issues"  # the ONLY thing sent in tools/call
+    schema_hash: "sha256:..."
+    state: active
+</code></pre>
+<p>Two details are load-bearing. The node name and <code>props.name</code> must be equal, because the JS resolver reads the node name and the Rust resolver reads <code>props.name</code> — a mismatch shows the model two different names for one tool. And <code>props.name</code> is namespaced <code>{slug}__{tool}</code> because <code>raisin:Function.name</code> is <code>unique</code> and <em>enforced</em>: two connections each exposing <code>search</code> would otherwise make the second connection’s discovery fail outright.</p>
+<h2 id="one-execution-branch"><a class="header" href="#one-execution-branch">One execution branch</a></h2>
+<p><code>mcp_proxy</code> is the discriminator, and it is checked in <code>execute_function</code> (<code>raisin-functions/src/execution/executor.rs</code>) between loading the function node and loading its code.</p>
+<p>The position is deliberate. It cannot be <code>execution_mode</code>: an unrecognised value there silently parses as <code>Async</code>, so a “remote” mode would be indistinguishable from a normal function. It cannot be <code>language</code> either: an unrecognised value is a hard error, and the check has to run <em>before</em> the language is read.</p>
+<p>Because all three execution paths — the JS chat path via the <code>AIToolCall</code> job, <code>raisin.functions.execute()</code>, and the Rust flow runtime — funnel through <code>execute_function</code>, this single branch serves all of them. There is no second implementation to drift.</p>
+<p>A tool that runs and reports failure (<code>isError: true</code>) becomes <code>success: false</code> with a message, not a transport error. That is what makes the JS path (which writes an <code>error</code> property the model sees next turn) and the flow path (which produces <code>{"error": …}</code>) yield identical shapes.</p>
+<h2 id="connections-are-content-too"><a class="header" href="#connections-are-content-too">Connections are content too</a></h2>
+<p>A <code>raisin:McpConnection</code> node in <code>raisin:system</code> describes one remote server: URL, auth mode, tool filter, refresh policy, discovered tools, health. Credentials are AES-256-GCM ciphertext, written through a write-only endpoint and never returned by any read.</p>
+<p>A proxy carries the <strong>connection’s</strong> authority, not the calling user’s — every caller shares one service account. That is why proxies are created under a restrictively-ACL’d <code>/mcp</code> folder: attaching one to an agent should be a deliberate act.</p>
+<h2 id="discovery-reconciles-it-does-not-rebuild"><a class="header" href="#discovery-reconciles-it-does-not-rebuild">Discovery reconciles; it does not rebuild</a></h2>
+<p><code>reconcile_plan</code> (<code>raisin-mcp-protocol/src/client/reconcile.rs</code>) is a pure function of <em>what exists</em> and <em>what the server offers</em>, so the two properties the design leans on are directly testable:</p>
 <ul>
-<li><strong>Revision number</strong> (<code>u64</code>): Sequential identifier (1, 2, 3, …)</li>
-<li><strong>Commit message</strong>: Human-readable description</li>
-<li><strong>Actor</strong>: Username or system identifier</li>
-<li><strong>Timestamp</strong>: When the revision was created</li>
-<li><strong>Parent revision</strong>: Enables revision history traversal</li>
+<li><strong>A steady-state refresh writes nothing.</strong> Discovery may run hourly forever; a schema-hash comparison skips unchanged tools. Without it each connection would mint thousands of function revisions a year. The hash is over <em>canonical</em> JSON — this workspace builds <code>serde_json</code> with <code>preserve_order</code>, so key order alone would otherwise change the hash and rewrite everything on every run.</li>
+<li><strong>Proxy paths never change.</strong> An agent holds a path; a rename makes the tool vanish from that agent with no error anywhere. Slugs are derived deterministically from the remote name, and collision suffixes are assigned in sorted remote-name order — so a server that reorders its listing between calls cannot renumber them.</li>
 </ul>
-<p>Revisions are <strong>immutable</strong>—once created, they never change. This guarantees:</p>
-<p>✅ <strong>Reproducibility</strong>: Revision 42 always returns the same content<br>✅ <strong>Auditability</strong>: Full history of who committed what and when<br>✅ <strong>Rollback safety</strong>: Restore to any prior state without data loss</p>
-<h3 id="branches"><a class="header" href="#branches">Branches</a></h3>
-<p>Branches are <strong>named pointers</strong> to revisions, similar to git:</p>
-<pre><code>main       → revision 156
-staging    → revision 154
-feature-x  → revision 140
-</code></pre>
-<p>When you commit to a branch, the branch pointer advances to the new revision. Multiple branches can point to the same revision (like after a merge), and you can create new branches from any revision.</p>
-<h3 id="tags"><a class="header" href="#tags">Tags</a></h3>
-<p>Tags are <strong>immutable labels</strong> for specific revisions:</p>
-<pre><code>v1.0.0     → revision 100 (production release)
-beta-2024  → revision 87  (beta snapshot)
-</code></pre>
-<p>Unlike branches, tags never move once created—they permanently mark a moment in time.</p>
-<h2 id="transaction-api"><a class="header" href="#transaction-api">Transaction API</a></h2>
-<h3 id="creating-transactions"><a class="header" href="#creating-transactions">Creating Transactions</a></h3>
-<p>Transactions accumulate multiple operations before committing them atomically:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>use raisin_core::{Transaction, Node};
-
-// Start a transaction on a specific branch
-let mut tx = workspace
-    .nodes()
-    .branch("main")
-    .transaction();
-
-// Queue operations (not applied yet)
-tx.create(Node::folder("projects", "/", HashMap::new())).await?;
-tx.create(Node::document("readme", "/projects", HashMap::new())).await?;
-tx.update("existing-node-id", HashMap::from([
-    ("title".to_string(), serde_json::json!("Updated Title")),
-])).await?;
-
-// Commit atomically - all or nothing
-let revision = tx.commit("Initial project setup", "alice").await?;
-println!("Created revision {}", revision);
-<span class="boring">}</span></code></pre>
-<h3 id="operation-types"><a class="header" href="#operation-types">Operation Types</a></h3>
-<p>Transactions support four operation types:</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Operation</th><th>Effect</th><th>Example</th></tr>
-</thead>
-<tbody>
-<tr><td><strong>Create</strong></td><td>Add new node</td><td><code>tx.create(node)</code></td></tr>
-<tr><td><strong>Update</strong></td><td>Modify properties</td><td><code>tx.update(id, props)</code></td></tr>
-<tr><td><strong>Delete</strong></td><td>Remove node</td><td><code>tx.delete(id)</code></td></tr>
-<tr><td><strong>Move</strong></td><td>Change parent</td><td><code>tx.move_node(id, parent)</code></td></tr>
-</tbody>
-</table>
-</div>
-<p>All operations are applied in order during commit. If any operation fails, the entire transaction rolls back.</p>
-<h3 id="rollback"><a class="header" href="#rollback">Rollback</a></h3>
-<p>Discard pending operations without committing:</p>
-<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>let mut tx = workspace.nodes().branch("main").transaction();
-tx.create(node1).await?;
-tx.create(node2).await?;
-
-// Changed your mind? Just drop it
-tx.rollback(); // All operations discarded
-<span class="boring">}</span></code></pre>
-<p>Rollback is automatic when the transaction is dropped without calling <code>commit()</code>.</p>
-<h2 id="http-api"><a class="header" href="#http-api">HTTP API</a></h2>
-<h3 id="batch-commit-endpoint"><a class="header" href="#batch-commit-endpoint">Batch Commit Endpoint</a></h3>
-<p>Create a revision with multiple operations via the REST API:</p>
-<pre><code class="language-bash">POST /api/repository/{repo}/{branch}/{workspace}/raisin:cmd/commit
-Content-Type: application/json
-
-{
-  "message": "Deploy content to production",
-  "actor": "deploy-bot",
-  "operations": [
-    {
-      "type": "create",
-      "node": {
-        "type": "document",
-        "name": "index",
-        "path": "/",
-        "properties": {
-          "title": "Home Page",
-          "content": "Welcome!"
-        }
-      }
-    },
-    {
-      "type": "update",
-      "node_id": "abc123",
-      "properties": {
-        "status": "published"
-      }
-    }
-  ]
-}
-</code></pre>
-<p><strong>Response:</strong></p>
-<pre><code class="language-json">{
-  "revision": 157,
-  "operations_count": 2
-}
-</code></pre>
-<h3 id="single-node-commit-endpoints-github-like"><a class="header" href="#single-node-commit-endpoints-github-like">Single-Node Commit Endpoints (GitHub-Like)</a></h3>
-<p>For convenience, RaisinDB provides GitHub-style single-node commit endpoints that create a transaction with one operation and immediately commit it.</p>
-<h4 id="save-update-with-commit"><a class="header" href="#save-update-with-commit">Save (Update with Commit)</a></h4>
-<p>Update a single node and create a revision in one request:</p>
-<pre><code class="language-bash">POST /api/repository/{repo}/{branch}/{workspace}/content/{path}/raisin:cmd/save
-Content-Type: application/json
-
-{
-  "message": "Fix typo in homepage",
-  "actor": "alice",
-  "operations": [{
-    "type": "update",
-    "node_id": "homepage-id",
-    "properties": {
-      "title": "Welcome to Our Site",
-      "updated": true
-    }
-  }]
-}
-</code></pre>
-<p><strong>Response:</strong> <code>{"revision": 158, "operations_count": 1}</code></p>
-<p><strong>Use Case</strong>: Browser editing - user clicks “Save with message” button</p>
-<h4 id="create-create-with-commit"><a class="header" href="#create-create-with-commit">Create (Create with Commit)</a></h4>
-<p>Create a new node and commit in one request:</p>
-<pre><code class="language-bash">POST /api/repository/{repo}/{branch}/{workspace}/raisin:cmd/create
-Content-Type: application/json
-
-{
-  "message": "Add contact page",
-  "actor": "cms-bot",
-  "operations": [{
-    "type": "create",
-    "node": {
-      "id": "contact-page",
-      "name": "contact",
-      "path": "/pages/contact",
-      "node_type": "raisin:Page",
-      "properties": {
-        "title": "Contact Us"
-      },
-      "version": 1,
-      "children": []
-    }
-  }]
-}
-</code></pre>
-<p><strong>Response:</strong> <code>{"revision": 159, "operations_count": 1}</code></p>
-<h4 id="delete-delete-with-commit"><a class="header" href="#delete-delete-with-commit">Delete (Delete with Commit)</a></h4>
-<p>Delete a node and create a revision with audit trail:</p>
-<pre><code class="language-bash">POST /api/repository/{repo}/{branch}/{workspace}/content/{path}/raisin:cmd/delete
-Content-Type: application/json
-
-{
-  "message": "Remove obsolete pricing page",
-  "actor": "admin"
-}
-</code></pre>
-<p><strong>Response:</strong> <code>{"revision": 160, "operations_count": 1}</code></p>
-<p><strong>Use Case</strong>: Production deletions with full audit trail and rollback capability</p>
-<h3 id="draft-vs-commit-modes"><a class="header" href="#draft-vs-commit-modes">Draft vs Commit Modes</a></h3>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Aspect</th><th>Draft Mode</th><th>Commit Mode</th></tr>
-</thead>
-<tbody>
-<tr><td><strong>Endpoint</strong></td><td><code>PUT /content/node</code></td><td><code>POST /node/raisin:cmd/save</code></td></tr>
-<tr><td><strong>Speed</strong></td><td>⚡ Instant</td><td>Slightly slower</td></tr>
-<tr><td><strong>Revision</strong></td><td>❌ No</td><td>✅ Yes</td></tr>
-<tr><td><strong>Message</strong></td><td>❌ Not required</td><td>✅ Required</td></tr>
-<tr><td><strong>Audit Trail</strong></td><td>Limited</td><td>Full</td></tr>
-<tr><td><strong>Rollback</strong></td><td>Manual undo</td><td>Change branch HEAD</td></tr>
-<tr><td><strong>Use Case</strong></td><td>Real-time editing, autosave</td><td>Deployments, milestones</td></tr>
-</tbody>
-</table>
-</div>
-<p><strong>Use Draft When:</strong></p>
-<ul>
-<li>👤 Real-time editing in UI</li>
-<li>🚀 Need instant feedback</li>
-<li>🔄 Frequent autosaves</li>
-<li>🎨 Experimentation</li>
-</ul>
-<p><strong>Use Commit When:</strong></p>
-<ul>
-<li>📝 Important milestones</li>
-<li>🏭 Production deployments</li>
-<li>📊 Audit requirements</li>
-<li>↩️ Need rollback capability</li>
-</ul>
-<h3 id="common-workflows"><a class="header" href="#common-workflows">Common Workflows</a></h3>
-<h4 id="development--staging--production"><a class="header" href="#development--staging--production">Development → Staging → Production</a></h4>
-<pre><code class="language-bash"># Work in development workspace (drafts)
-PUT /api/repository/myrepo/main/dev/content/home
-{
-  "type": "document",
-  "name": "home",
-  "properties": { "title": "New Home Page" }
-}
-
-# Commit to create a revision
-POST /api/repository/myrepo/main/dev/raisin:cmd/commit
-{
-  "message": "Update home page",
-  "actor": "alice"
-}
-# → Creates revision 158
-
-# Update staging branch to point to revision 158
-PUT /api/repository/myrepo/staging
-{ "head": 158 }
-
-# Test in staging workspace...
-
-# Deploy to production
-PUT /api/repository/myrepo/production
-{ "head": 158 }
-</code></pre>
-<h4 id="feature-branches"><a class="header" href="#feature-branches">Feature Branches</a></h4>
-<pre><code class="language-bash"># Create feature branch from current main (revision 100)
-POST /api/repository/myrepo/branches
-{
-  "name": "feature-redesign",
-  "from_revision": 100
-}
-
-# Work in feature workspace
-PUT /api/repository/myrepo/feature-redesign/work/...
-
-# Commit changes
-POST /api/repository/myrepo/feature-redesign/work/raisin:cmd/commit
-{ "message": "Redesign complete", "actor": "bob" }
-# → Creates revision 101
-
-# Merge to main (update main's HEAD)
-PUT /api/repository/myrepo/main
-{ "head": 101 }
-</code></pre>
-<h2 id="comparison-with-git"><a class="header" href="#comparison-with-git">Comparison with Git</a></h2>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Feature</th><th>Git</th><th>RaisinDB</th></tr>
-</thead>
-<tbody>
-<tr><td><strong>Drafts</strong></td><td>Working directory</td><td>Workspace HEAD (mutable)</td></tr>
-<tr><td><strong>Commits</strong></td><td><code>git commit</code></td><td>Transaction commit</td></tr>
-<tr><td><strong>Branches</strong></td><td><code>git branch</code></td><td>Named branch pointers</td></tr>
-<tr><td><strong>Tags</strong></td><td><code>git tag</code></td><td>Immutable revision labels</td></tr>
-<tr><td><strong>History</strong></td><td><code>git log</code></td><td>Revision list</td></tr>
-<tr><td><strong>Checkout</strong></td><td><code>git checkout &lt;rev&gt;</code></td><td>Update branch HEAD</td></tr>
-<tr><td><strong>Merge</strong></td><td><code>git merge</code></td><td>Update branch pointer (fast-forward)</td></tr>
-<tr><td><strong>Delete file</strong></td><td><code>rm file &amp;&amp; git add -u</code></td><td>Draft <code>DELETE</code> (no revision)</td></tr>
-<tr><td><strong>Commit delete</strong></td><td><code>git rm &amp;&amp; git commit</code></td><td><code>POST .../raisin:cmd/delete</code></td></tr>
-</tbody>
-</table>
-</div>
-<p><strong>Key Difference</strong>: RaisinDB commits are at the <strong>repository level</strong>, not file-level. A commit snapshots the entire workspace, not individual files.</p>
-<h2 id="delete-behavior--version-history"><a class="header" href="#delete-behavior--version-history">Delete Behavior &amp; Version History</a></h2>
-<h3 id="version-history-preservation"><a class="header" href="#version-history-preservation">Version History Preservation</a></h3>
-<p><strong>Important</strong>: When you delete a node from HEAD, its <strong>version history is preserved</strong>. This enables git-like semantics where deleted content remains accessible in historical revisions.</p>
-<pre><code>Revision 100 (before delete)  →  Has node X + version history
-          ↓
-    DELETE node X from HEAD
-          ↓
-HEAD (after delete)  →  ❌ No node X (current state)
-Revision 100         →  ✅ Still has node X (immutable)
-Version history      →  ✅ Preserved (can restore)
-</code></pre>
-<h3 id="draft-delete-vs-commit-delete"><a class="header" href="#draft-delete-vs-commit-delete">Draft Delete vs Commit Delete</a></h3>
-<h4 id="draft-delete-no-revision"><a class="header" href="#draft-delete-no-revision">Draft Delete (No Revision)</a></h4>
-<pre><code class="language-bash">DELETE /api/repository/{repo}/{branch}/{workspace}/content/old-post
-</code></pre>
-<p><strong>Result:</strong></p>
-<ul>
-<li>Node removed from HEAD ❌</li>
-<li>Previous revisions still have node ✅</li>
-<li>Version history preserved ✅</li>
-<li>NO audit trail created ❌</li>
-<li>Fast, immediate ⚡</li>
-</ul>
-<p><strong>Use When</strong>: Quick cleanup in development, temporary removals</p>
-<h4 id="commit-delete-creates-revision"><a class="header" href="#commit-delete-creates-revision">Commit Delete (Creates Revision)</a></h4>
-<pre><code class="language-bash">POST /api/repository/{repo}/{branch}/{workspace}/content/old-post/raisin:cmd/delete
-{
-  "message": "Remove deprecated content",
-  "actor": "admin"
-}
-</code></pre>
-<p><strong>Result:</strong></p>
-<ul>
-<li>Node removed from HEAD ❌</li>
-<li>New revision created ✅</li>
-<li>Previous revisions still have node ✅</li>
-<li>Version history preserved ✅</li>
-<li>Full audit trail ✅</li>
-<li>Can rollback ✅</li>
-</ul>
-<p><strong>Use When</strong>: Production changes, compliance requirements, important deletions</p>
-<h3 id="rollback-after-delete"><a class="header" href="#rollback-after-delete">Rollback After Delete</a></h3>
-<pre><code class="language-bash"># Deleted important content at revision 102
-# Rollback by updating branch HEAD to revision 101
-
-PUT /api/management/repositories/default/{repo}/branches/main/head
-{
-  "head": 101
-}
-
-# Now HEAD points to revision 101 (before delete)
-# Deleted content is restored! ✅
-</code></pre>
-<h3 id="delete-across-revisions"><a class="header" href="#delete-across-revisions">Delete Across Revisions</a></h3>
-<p>Deleted nodes behave like in git - branches can diverge:</p>
-<pre><code>main branch (revision 100):  Has node X
-main branch (revision 101):  Node X deleted
-feature branch (revision 100): Still has node X (diverged before delete)
-
-# Feature branch can inherit the delete:
-PUT /api/.../branches/feature/head { "head": 101 }
-# Now feature branch also doesn't have node X
-</code></pre>
-<p><strong>Key Points:</strong></p>
-<ul>
-<li>✅ Old revisions remain <strong>immutable</strong> - deleted nodes still in history</li>
-<li>✅ Can <strong>time-travel</strong> to see deleted content</li>
-<li>✅ Can <strong>rollback</strong> branch HEAD to restore deleted nodes</li>
-<li>✅ <strong>Branches can diverge</strong> - one deletes, another keeps</li>
-<li>✅ Version history <strong>never deleted</strong> - enables data recovery</li>
-</ul>
-<h2 id="benefits"><a class="header" href="#benefits">Benefits</a></h2>
-<p>✅ <strong>Auditability</strong>: Every deployment is traceable to a specific revision<br>✅ <strong>Rollback</strong>: Instantly revert to any prior revision<br>✅ <strong>Testing</strong>: Test changes in staging before production<br>✅ <strong>Collaboration</strong>: Concurrent work via branches<br>✅ <strong>Reproducibility</strong>: Revision 42 is always the same content</p>
-<h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
-<ul>
-<li><strong><a href="../api/branches.html">Branches &amp; Tags API</a></strong>: Detailed API reference</li>
-<li><strong><a href="../guides/transactions.html">Transactions</a></strong>: Advanced transaction patterns</li>
-<li><strong><a href="multi-tenancy.html">Multi-Tenancy</a></strong>: Isolated versioning per tenant</li>
-</ul>
+<p>A tool that disappears upstream is <strong>disabled, not deleted</strong>: a missing node makes the tool silently vanish, while a disabled one stays visible in the console and in the connection’s tool list. A <em>failed probe</em> touches no proxies at all — a remote being down means the tool list is unknown, not empty, and treating it as empty would tear down every proxy on a transient outage.</p>
+<h2 id="cluster-safety"><a class="header" href="#cluster-safety">Cluster safety</a></h2>
+<p>Discovery writes shared content, so it must run once per cluster. The job registry’s dedup key does <strong>not</strong> provide that: its map is in-memory and per-process, so every node runs its own scan. Single-fire comes from a per-connection <code>raisin_locks</code> lease inside the handler, which needs the <code>redis</code> backend to span nodes. An in-process <code>KeyedMutex</code> sits in front of it so a manual refresh racing a scheduled one <em>queues</em> rather than being rejected.</p>
+<h2 id="egress"><a class="header" href="#egress">Egress</a></h2>
+<p>A connection URL is operator-supplied and dialled by the server itself — textbook SSRF. <code>EgressPolicy</code> requires <code>https</code> (loopback only behind an explicit flag) and rejects private, loopback, link-local (including cloud metadata at <code>169.254.169.254</code>), CGNAT and IPv6 ULA addresses.</p>
+<p>It is enforced <strong>twice</strong>: when a connection is saved, and again before every dial. A save-time-only check misses a hostname that resolved publicly and was re-pointed afterwards. Configuration is the <code>[mcp_client]</code> TOML section, installed process-wide, so every path enforces one policy rather than each wiring its own.</p>
+<h2 id="crate-layout"><a class="header" href="#crate-layout">Crate layout</a></h2>
+<p>The client lives in <code>raisin-mcp-protocol</code>, not <code>raisin-mcp</code>, and that is structural rather than tidiness. <code>raisin-mcp</code> serves tools, so it depends on <code>raisin-functions</code> — which depends on <code>raisin-rocksdb</code>. Anything at or below the storage layer (the discovery job handler, for one) therefore cannot depend on <code>raisin-mcp</code> without closing a package cycle, and Cargo rejects package cycles regardless of features.</p>
+<p><code>raisin-mcp-protocol</code> holds the wire types and the client with no <code>raisin-functions</code> dependency; <code>raisin-mcp</code> depends on it and re-exports it, so existing <code>raisin_mcp::protocol::…</code> paths still resolve and nothing is duplicated.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../architecture/multi-tenancy.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../architecture/mcp-ui.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../architecture/events.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../guides/embedding-guide.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -626,11 +299,11 @@ PUT /api/.../branches/feature/head { "head": 101 }
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../architecture/multi-tenancy.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../architecture/mcp-ui.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../architecture/events.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../guides/embedding-guide.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

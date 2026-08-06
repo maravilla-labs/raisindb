@@ -93,10 +93,10 @@
             const path_to_root = "../";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7003d3a4.js";
+            window.path_to_searchindex_js = "../searchindex-98a3460e.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-a8ca80cc.js"></script>
+        <script src="../toc-50ab3bbb.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -293,8 +293,8 @@ let my_post = Node {
     pub properties: HashMap&lt;String, PropertyValue&gt;,    // Field values
 
     // Hierarchy
-    pub children: Vec&lt;String&gt;,                         // Child node IDs (ordering by order_key)
-    pub order_key: String,                             // Fractional index for sibling ordering (Base62)
+    pub children: Vec&lt;String&gt;,                         // Legacy; NOT the source of child order
+    pub order_key: String,                             // Server-assigned fractional index (sibling order)
     pub has_children: Option&lt;bool&gt;,                    // Computed field (populated at service layer)
     pub parent: Option&lt;String&gt;,                        // Parent node **name** (not full path!)
 
