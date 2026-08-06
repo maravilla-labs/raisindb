@@ -5,9 +5,12 @@
 
 use std::sync::Arc;
 
+use crate::jobs::handlers::package_install::AppliedHashRecorder;
 use crate::jobs::{BinaryRetrievalCallback, BinaryStorageCallback, PackageInstallHandler};
+use crate::repositories::SystemUpdateRepositoryImpl;
 use crate::storage::RocksDBStorage;
 use raisin_storage::jobs::JobRegistry;
+use raisin_storage::{AppliedDefinition, ResourceType, SystemUpdateRepository};
 
 /// Create the package install handler
 pub fn create_package_install_handler(
@@ -16,7 +19,39 @@ pub fn create_package_install_handler(
     binary_retrieval: Option<&BinaryRetrievalCallback>,
     binary_storage: Option<&BinaryStorageCallback>,
 ) -> Arc<PackageInstallHandler<RocksDBStorage>> {
-    let mut builder = PackageInstallHandler::new(storage, job_registry);
+    // Built here because this is where storage is CONCRETE: the applied-hash
+    // record lives in a RocksDB repository while the handler is generic, which
+    // is why it travels as a callback rather than a repository handle.
+    //
+    // What it buys: an on-demand install (the Integrations gallery) becomes
+    // visible to the boot-time staleness check, so the next release updates the
+    // package. Without it "no record" reads as "assume current" and a
+    // gallery-installed connector never updates again — the binary carries the
+    // fix and the content has never heard of it.
+    let system_updates = SystemUpdateRepositoryImpl::new(storage.db().clone());
+    let recorder: AppliedHashRecorder = Arc::new(move |tenant_id, repo_id, name, content_hash| {
+        let repo = system_updates.clone();
+        Box::pin(async move {
+            repo.set_applied(
+                &tenant_id,
+                &repo_id,
+                ResourceType::Package,
+                &name,
+                AppliedDefinition {
+                    content_hash,
+                    // Package versions are strings; this column is an i32 and
+                    // is not what staleness compares.
+                    applied_version: None,
+                    applied_at: chrono::Utc::now(),
+                    applied_by: "package-installer".to_string(),
+                },
+            )
+            .await
+        })
+    });
+
+    let mut builder =
+        PackageInstallHandler::new(storage, job_registry).with_applied_recorder(recorder);
     if let Some(callback) = binary_retrieval {
         builder = builder.with_binary_callback(callback.clone());
     }

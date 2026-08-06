@@ -202,6 +202,30 @@ mod effective_install_mode_tests {
 /// This callback is provided by the transport layer which has access to BinaryStorage.
 /// Arguments: (resource_key)
 /// Returns: Result<Vec<u8>> - the binary data
+/// Callback that records the content hash an install actually applied.
+///
+/// Exists because the applied-hash record is what makes a package UPDATABLE:
+/// the boot-time staleness check compares the shipped content hash against the
+/// recorded one, and treats "no record" as "assume current". Only the builtin
+/// auto-install path used to write one, so a package installed from the
+/// Integrations gallery was frozen at its install-time content forever — every
+/// later fix RaisinDB shipped reached no deployed tenant, with the binary
+/// carrying the fix and the content that never heard of it sitting side by side.
+///
+/// A callback rather than a repository handle because the record lives in a
+/// concrete RocksDB repository while this handler is generic over storage.
+/// Arguments: (tenant_id, repo_id, package_name, content_hash).
+pub type AppliedHashRecorder = Arc<
+    dyn Fn(
+            String,
+            String,
+            String,
+            String,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub type BinaryRetrievalCallback = Arc<
     dyn Fn(
             String, // resource_key

@@ -24,7 +24,8 @@ use zip::ZipArchive;
 
 use super::content_types::InstallStats;
 use super::types::{
-    BinaryRetrievalCallback, BinaryStorageCallback, InstallMode, PackageInstallResult,
+    AppliedHashRecorder, BinaryRetrievalCallback, BinaryStorageCallback, InstallMode,
+    PackageInstallResult,
 };
 
 /// Handler for package installation jobs
@@ -33,6 +34,9 @@ pub struct PackageInstallHandler<S: Storage + TransactionalStorage> {
     pub(super) job_registry: Arc<JobRegistry>,
     pub(super) binary_callback: Option<BinaryRetrievalCallback>,
     pub(super) binary_store_callback: Option<BinaryStorageCallback>,
+    /// Records what content this install applied, so a later release can be
+    /// seen as an update. See [`AppliedHashRecorder`].
+    pub(super) applied_recorder: Option<AppliedHashRecorder>,
 }
 
 impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
@@ -43,7 +47,14 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             job_registry,
             binary_callback: None,
             binary_store_callback: None,
+            applied_recorder: None,
         }
+    }
+
+    /// Set the applied-hash recorder.
+    pub fn with_applied_recorder(mut self, recorder: AppliedHashRecorder) -> Self {
+        self.applied_recorder = Some(recorder);
+        self
     }
 
     /// Set the binary retrieval callback
@@ -479,8 +490,48 @@ impl<S: Storage + TransactionalStorage> PackageInstallHandler<S> {
             );
             node.properties.remove("error");
 
+            // What content this install applied, read off the node that was
+            // just installed rather than passed in — the registration wrote it
+            // there, so this is the hash of the bytes that actually landed.
+            let applied_hash = match node.properties.get("content_hash") {
+                Some(PropertyValue::String(h)) if !h.is_empty() => Some(h.clone()),
+                _ => None,
+            };
+            let package_name = match node.properties.get("name") {
+                Some(PropertyValue::String(n)) if !n.is_empty() => n.clone(),
+                _ => node.name.clone(),
+            };
+
             tx.upsert_node(workspace, &node).await?;
             tx.commit().await?;
+
+            // Record it AFTER the commit, and never fail the install on it: the
+            // package is installed either way, and a missing record costs an
+            // update opportunity rather than correctness. Recording before the
+            // commit would claim content that a failed commit never wrote.
+            //
+            // Without this an on-demand install is invisible to the staleness
+            // check, which reads "no record" as "assume current" — so the
+            // package never updates again, no matter how many releases ship.
+            if let (Some(recorder), Some(hash)) = (&self.applied_recorder, applied_hash) {
+                if let Err(e) = recorder(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    package_name.clone(),
+                    hash,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        repo_id = %repo_id,
+                        package = %package_name,
+                        error = %e,
+                        "Package installed, but recording its applied content hash failed; \
+                         it will not be seen as updatable until it is installed again"
+                    );
+                }
+            }
         }
 
         Ok(())

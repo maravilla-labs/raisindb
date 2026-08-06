@@ -56,7 +56,7 @@ pub use self::manifest::{
     AllowedNodeTypesPatch, PackageDependency, PackageManifest, PackageProvides, WorkspacePatch,
 };
 pub use self::types::{
-    BinaryRetrievalCallback, BinaryStorageCallback, BinaryStorageFromPathCallback,
-    DryRunActionCounts, DryRunLogEntry, DryRunResult, DryRunSummary, InstallMode,
-    PackageInstallResult,
+    AppliedHashRecorder, BinaryRetrievalCallback, BinaryStorageCallback,
+    BinaryStorageFromPathCallback, DryRunActionCounts, DryRunLogEntry, DryRunResult, DryRunSummary,
+    InstallMode, PackageInstallResult,
 };
