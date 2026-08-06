@@ -17,8 +17,8 @@
 
 pub mod conversation_events;
 pub mod flow_events;
-pub mod mount_events;
 pub mod monitor;
+pub mod mount_events;
 pub mod persistence;
 pub mod pool;
 pub mod registry;
@@ -29,10 +29,10 @@ pub use conversation_events::{
     global_conversation_broadcaster, ConversationEvent, ConversationEventBroadcaster,
 };
 pub use flow_events::{global_flow_broadcaster, FlowEvent, FlowEventBroadcaster};
+pub use monitor::{JobEvent, JobLogEntry, JobMonitor, JobMonitorHub, LogEmitter, LoggingMonitor};
 pub use mount_events::{
     global_mount_broadcaster, mount_channel_key, MountSyncBroadcaster, MountSyncEvent,
 };
-pub use monitor::{JobEvent, JobLogEntry, JobMonitor, JobMonitorHub, LogEmitter, LoggingMonitor};
 pub use persistence::JobPersistence;
 pub use pool::{CategoryPoolStats, WorkerPool, WorkerPoolStats};
 pub use registry::{global_registry, JobRegistry};

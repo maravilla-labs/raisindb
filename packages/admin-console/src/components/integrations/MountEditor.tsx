@@ -16,6 +16,7 @@ import { capabilitiesUnknown } from './CapabilityChips'
 import TestConnectionPanel from './TestConnectionPanel'
 import CopyableUrlField from './CopyableUrlField'
 import RemotePicker from './RemotePicker'
+import MountWriteFieldset from './MountWriteFieldset'
 import type { SetupUrls } from '../../api/integrations'
 import { FunctionPicker } from '../../pages/functions/components/editor/FunctionPicker'
 
@@ -96,7 +97,11 @@ export default function MountEditor({
   const [mappingFn, setMappingFn] = useState(mount?.mapping_function || '')
   const [enabled, setEnabled] = useState(mount?.enabled ?? true)
   const [sync, setSync] = useState<SyncConfig>(mount?.sync_config || { mode: 'poll', interval_seconds: 300 })
-  const [write, setWrite] = useState<WriteConfig>(mount?.write_config || { writeback: 'off', conflict: 'remote_wins' })
+  // `mode` is spelled out on a new mount so the key the engine actually reads is
+  // always present; `writeback` is the legacy mirror switch and stays off.
+  const [write, setWrite] = useState<WriteConfig>(
+    mount?.write_config || { writeback: 'off', mode: 'off', conflict: 'remote_wins' },
+  )
   const [includeText, setIncludeText] = useState((mount?.sync_config?.include_patterns || []).join('\n'))
   const [excludeText, setExcludeText] = useState((mount?.sync_config?.exclude_patterns || []).join('\n'))
   const [saving, setSaving] = useState(false)
@@ -305,7 +310,6 @@ export default function MountEditor({
   // Capability-driven form state. Absent capabilities => unknown => conservative.
   const caps = selectedIntegration?.capabilities
   const capsUnknown = capabilitiesUnknown(caps)
-  const canWrite = caps?.can_write === true
   const supportsChanges = caps?.supports_changes === true
   // Push (webhook/hybrid) modes are offered only when the connector advertises
   // supports_push. Otherwise the mode is forced to poll.
@@ -332,13 +336,15 @@ export default function MountEditor({
       cancelled = true
     }
   }, [repo, isEdit, mount?.id, supportsPush])
-  // v1 engine never implements write-through; it stamps writeback_supported=false
-  // whenever writeback is requested. Treat a present `false` as authoritative.
-  const writebackSupported = mount?.state?.writeback_supported
-  const writeImplemented = false // engine has no write-through path in v1
-
   function patchSync(patch: Partial<SyncConfig>) {
     setSync((prev) => ({ ...prev, ...patch }))
+  }
+
+  // Patch, never replace: `write_config` carries keys this editor does not name
+  // (and later write stages will add more), and they survive only because every
+  // edit spreads the object the server sent.
+  function patchWrite(patch: Partial<WriteConfig>) {
+    setWrite((prev) => ({ ...prev, ...patch }))
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -880,42 +886,24 @@ export default function MountEditor({
           )}
 
           {/*
-            Write-through section is capability-driven. It is shown only when the
-            connector advertises can_write, the engine reports writeback_supported,
-            AND the engine actually implements write-through. In v1 the engine has
-            no write-through path (writeImplemented=false), so this section is
-            always hidden and we surface a one-line note instead of a dead control.
-            The stored write_config is preserved untouched on save.
+            Writeback is capability-driven, like every other section here. The
+            fieldset renders whenever capabilities are known and handles its own
+            disabled states — an operator has to be able to SEE why a write was
+            refused, which a hidden section can never tell them.
           */}
-          {writeImplemented && canWrite && writebackSupported !== false && !capsUnknown ? (
-            <fieldset className="border border-white/10 rounded-lg p-4">
-              <legend className="px-2 text-sm font-semibold text-zinc-300">Write-through</legend>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className={labelCls}>Writeback</label>
-                  <select className={field} value={write.writeback || 'off'} onChange={(e) => setWrite((p) => ({ ...p, writeback: e.target.value as WriteConfig['writeback'] }))}>
-                    <option value="off">off (read-only)</option>
-                    <option value="write_through">write_through</option>
-                  </select>
-                </div>
-                <div>
-                  <label className={labelCls}>Conflict</label>
-                  <select className={field} value={write.conflict || 'remote_wins'} onChange={(e) => setWrite((p) => ({ ...p, conflict: e.target.value as WriteConfig['conflict'] }))}>
-                    <option value="remote_wins">remote_wins</option>
-                    <option value="error">error</option>
-                  </select>
-                </div>
-              </div>
-            </fieldset>
-          ) : (
+          {capsUnknown ? (
             <p className="flex items-start gap-1.5 text-xs text-zinc-500">
               <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-              {capsUnknown
-                ? 'Capabilities unknown — run Test connection. This mount is read-only until then.'
-                : !canWrite
-                  ? 'This connector is read-only.'
-                  : 'Write-through is not yet implemented in the engine — this mount is read-only.'}
+              Capabilities unknown — run Test connection. This mount is read-only until then.
             </p>
+          ) : (
+            <MountWriteFieldset
+              value={write}
+              onChange={patchWrite}
+              caps={caps}
+              capsUnknown={capsUnknown}
+              state={mount?.state}
+            />
           )}
 
           {selectedIntegration?.path && (

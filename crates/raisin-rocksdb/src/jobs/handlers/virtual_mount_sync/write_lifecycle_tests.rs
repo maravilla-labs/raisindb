@@ -1,0 +1,548 @@
+//! Lifecycle of the writeback drain: the lease it must keep, the budget it must
+//! respect, the stop it must honour, and the modes it must refuse out loud.
+//!
+//! A child module of [`super::tests`] (declared with `#[path]` at the bottom of
+//! `tests.rs`) so it can reuse that file's environment, mocks and helpers while
+//! keeping it from growing further.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use raisin_error::Result as RaisinResult;
+use raisin_locks::{FencingToken, LockGuard, LockManager, LockManagerHandle};
+use raisin_models::nodes::properties::PropertyValue;
+use serde_json::{json, Value};
+
+use super::*;
+/// The engine module under test. `super` is `tests` here, so engine items are
+/// one level further out than they are in `tests.rs` itself.
+use crate::jobs::handlers::virtual_mount_sync as sync;
+use sync::config::{MappedNode, MountState, WriteConfig};
+use sync::materializer::{BatchOp, MountScope, VirtualMeta};
+use sync::{AdapterError, AdapterInvoker, MapperWriteback, SyncCtx};
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+/// A lock manager that only counts. The drain's renewal has to be observable
+/// somewhere, and `renew_lease` is a silent no-op unless BOTH a manager and a
+/// lease token are present — which is exactly why the missing renewal could ship
+/// unnoticed.
+#[derive(Default)]
+struct CountingLocks {
+    renewals: AtomicUsize,
+}
+
+impl CountingLocks {
+    fn count(&self) -> usize {
+        self.renewals.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LockManager for CountingLocks {
+    async fn try_acquire(
+        &self,
+        key: &str,
+        _owner: &str,
+        _ttl: Duration,
+    ) -> RaisinResult<Option<LockGuard>> {
+        Ok(Some(LockGuard {
+            key: key.to_string(),
+            token: 1,
+            expires_at_ms: 0,
+        }))
+    }
+    async fn release(&self, _key: &str, _token: FencingToken) -> RaisinResult<bool> {
+        Ok(true)
+    }
+    async fn renew(&self, _key: &str, _token: FencingToken, _ttl: Duration) -> RaisinResult<bool> {
+        self.renewals.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
+    async fn claim(&self, _pool: &str, _n: u64, _capacity: u64) -> RaisinResult<Option<u64>> {
+        Ok(Some(0))
+    }
+    async fn release_claim(&self, _pool: &str, _n: u64) -> RaisinResult<u64> {
+        Ok(0)
+    }
+}
+
+/// The `state_only` mode the drain runs under in these tests.
+fn state_only_mode() -> sync::write::WriteMode {
+    sync::write::WriteMode::StateOnly(vec!["unread".to_string()])
+}
+
+/// Materialize `n` mail-shaped nodes in ONE batch, seeded (`__pushed_state`
+/// present) so each is a push candidate rather than a seed candidate.
+async fn sync_in_mails(mat: &RocksDbMaterializer, n: usize) -> Vec<String> {
+    let mut index = mat.load_index(&watched_scope()).await.unwrap();
+    let ops: Vec<BatchOp> = (0..n)
+        .map(|i| {
+            let mut properties = serde_json::Map::new();
+            properties.insert("unread".to_string(), Value::Bool(false));
+            BatchOp::Upsert {
+                rel_path: format!("m{i:02}.eml"),
+                mapped: MappedNode {
+                    node_type: "raisin:Node".to_string(),
+                    name: Some(format!("m{i:02}")),
+                    properties,
+                },
+                virt: VirtualMeta {
+                    mount_id: MOUNT_ID.to_string(),
+                    external_id: format!("M{i:02}"),
+                    etag: Some("v1".to_string()),
+                    synced_at: Utc::now().to_rfc3339(),
+                },
+            }
+        })
+        .collect();
+    mat.apply_batch(&watched_scope(), &mut index, ops)
+        .await
+        .unwrap();
+    let mut ids: Vec<(String, String)> = index
+        .virtual_nodes()
+        .into_iter()
+        .map(|n| (n.external_id, n.id))
+        .collect();
+    ids.sort();
+    ids.into_iter().map(|(_, id)| id).collect()
+}
+
+/// The local edit that makes every one of them diverge, in one transaction.
+async fn flip_unread(env: &Env, ids: &[String]) {
+    let tx = begin(env).await;
+    for id in ids {
+        let mut node = tx.get_node(TARGET_WS, id).await.unwrap().unwrap();
+        node.properties
+            .insert("unread".to_string(), PropertyValue::Boolean(true));
+        tx.upsert_node(TARGET_WS, &node).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+}
+
+/// How many of these nodes now record `unread: true` as pushed — i.e. how many
+/// stamps actually reached storage.
+async fn stamped_count(env: &Env, ids: &[String]) -> usize {
+    let mut n = 0;
+    for id in ids {
+        let node = node_by_id(env, id).await;
+        if pushed_state(&node) == json!({"unread": true}) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Ask the drain to stop, the way the Stop endpoint does: through the mount's
+/// persisted state on the config branch.
+async fn request_stop(env: &Env) {
+    let mut state = sync::read_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID)
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    state.stop_requested = true;
+    assert!(
+        sync::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &mut state)
+            .await
+            .unwrap(),
+        "the stop flag must actually land"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1. lease renewal
+// ---------------------------------------------------------------------------
+
+/// The drain renews the mount lease as it works.
+///
+/// Without this the lease expires mid-drain on any mount with more than a
+/// handful of edits behind a throttled provider: a second run then starts beside
+/// this one and both write `__etag` for the same items, which is the one way a
+/// remote change is lost. The read phases have renewed per page since they were
+/// written; the drain shipped with no renewal at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_renews_the_lease_as_it_pushes() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let ids = sync_in_mails(&mat, 3).await;
+    flip_unread(&env, &ids).await;
+
+    let locks = Arc::new(CountingLocks::default());
+    let handle: LockManagerHandle = locks.clone();
+    let c = SyncCtx {
+        lock_manager: Some(handle),
+        lease_token: Some(7),
+        ..ctx(&env, &mount, &mock, &mat)
+    };
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let stats = sync::write::drain(&c, &mut state, &mut batcher, &state_only_mode()).await;
+
+    assert_eq!(stats.pushed, 3);
+    assert_eq!(mock.update_count(), 3);
+    assert_eq!(
+        locks.count(),
+        3,
+        "one renewal per item pushed: a single throttled `update` can outlast a \
+         page-boundary renewal interval"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2. the wall-clock budget
+// ---------------------------------------------------------------------------
+
+/// A drain with no budget left stops before starting another provider call, and
+/// leaves every unpushed edit pending.
+///
+/// The failure it prevents is not a slow drain: it is the watchdog reaping the
+/// run mid-`update`, which skips `finalize` entirely — status wedged at
+/// `"syncing"`, lease leaked for its full TTL. Both read phases stop themselves
+/// for exactly this reason; the drain runs FIRST and could spend the whole
+/// budget before either of them was reached.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_out_of_time_stops_and_leaves_the_edits_pending() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let ids = sync_in_mails(&mat, 2).await;
+    flip_unread(&env, &ids).await;
+
+    let spent = SyncCtx {
+        deadline: Utc::now().timestamp() - 1,
+        ..ctx(&env, &mount, &mock, &mat)
+    };
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&spent).await.unwrap();
+    let stats = sync::write::drain(&spent, &mut state, &mut batcher, &state_only_mode()).await;
+
+    assert!(
+        stats.truncated,
+        "the truncation must be recorded, not silent"
+    );
+    assert_eq!(stats.pushed, 0);
+    assert_eq!(mock.update_count(), 0, "no call may START without budget");
+    assert_eq!(
+        stamped_count(&env, &ids).await,
+        0,
+        "an unpushed edit must never be stamped as pushed"
+    );
+
+    // Pending, not lost: the next run has a fresh budget and drains them.
+    let fresh = ctx(&env, &mount, &mock, &mat);
+    let mut batcher = sync::batch::SyncBatcher::new(&fresh).await.unwrap();
+    let stats = sync::write::drain(&fresh, &mut state, &mut batcher, &state_only_mode()).await;
+    assert_eq!(stats.pushed, 2);
+    assert!(!stats.truncated);
+    assert_eq!(stamped_count(&env, &ids).await, 2);
+}
+
+// ---------------------------------------------------------------------------
+// 3. cooperative stop
+// ---------------------------------------------------------------------------
+
+/// An operator's Stop ends the drain, and what was already pushed is still
+/// flushed.
+///
+/// Stop was honoured by both read phases and by nothing on the write side, so
+/// the externally-visible half of a run — the half that changes other people's
+/// mailboxes — kept going after the operator had asked it to stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_ends_the_drain_at_the_next_checkpoint() {
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let ids = sync_in_mails(&mat, 3).await;
+    flip_unread(&env, &ids).await;
+    request_stop(&env).await;
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let stats = sync::write::drain(&c, &mut state, &mut batcher, &state_only_mode()).await;
+
+    assert!(stats.stopped, "the stop must be recorded on the drain");
+    assert_eq!(
+        mock.update_count(),
+        0,
+        "the check runs on the FIRST iteration too, or a small drain pushes its \
+         whole candidate list before noticing"
+    );
+    assert_eq!(stamped_count(&env, &ids).await, 0);
+
+    // Clearing the stop lets the very same edits drain normally — they were
+    // parked, not consumed.
+    let mut cleared = sync::read_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    cleared.stop_requested = false;
+    sync::persist_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID, &mut cleared)
+        .await
+        .unwrap();
+
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let stats = sync::write::drain(&c, &mut state, &mut batcher, &state_only_mode()).await;
+    assert!(!stats.stopped);
+    assert_eq!(stats.pushed, 3);
+    assert_eq!(stamped_count(&env, &ids).await, 3);
+}
+
+/// A stop landing PART-WAY through keeps everything already pushed: the drain
+/// breaks to its flush rather than returning past it, so the stamps for the
+/// items it did send reach storage ahead of the read phases.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mid_drain_stop_still_flushes_what_was_pushed() {
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    // 25 candidates: the checkpoints fall at item 0 and item 20, so a stop
+    // raised during the fifth push is seen at 20 with 20 items already sent.
+    let ids = sync_in_mails(&mat, 25).await;
+    flip_unread(&env, &ids).await;
+
+    let mock = StoppingMock {
+        inner: StateOnlyMock::new(),
+        storage: env.storage.clone(),
+        stop_after: 5,
+    };
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let stats = sync::write::drain(&c, &mut state, &mut batcher, &state_only_mode()).await;
+
+    assert!(stats.stopped);
+    assert_eq!(
+        stats.pushed, 20,
+        "stopped at the checkpoint, not at the edit"
+    );
+    assert_eq!(
+        stamped_count(&env, &ids).await,
+        20,
+        "the flush must still run after an early break"
+    );
+}
+
+/// [`StateOnlyMock`] that raises the mount's stop flag part-way through the
+/// drain — the operator hitting Stop while pushes are in flight.
+struct StoppingMock {
+    inner: StateOnlyMock,
+    storage: Arc<crate::RocksDBStorage>,
+    stop_after: usize,
+}
+
+#[async_trait]
+impl AdapterInvoker for StoppingMock {
+    async fn invoke(
+        &self,
+        scope: &MountScope,
+        path: &str,
+        input: Value,
+    ) -> std::result::Result<Value, AdapterError> {
+        let out = self.inner.invoke(scope, path, input.clone()).await;
+        if input.get("operation").and_then(|v| v.as_str()) == Some("update")
+            && self.inner.update_count() == self.stop_after
+        {
+            let mut state = sync::read_mount_state(&self.storage, TENANT, REPO, "main", MOUNT_ID)
+                .await
+                .unwrap()
+                .unwrap_or_default();
+            state.stop_requested = true;
+            sync::persist_mount_state(&self.storage, TENANT, REPO, "main", MOUNT_ID, &mut state)
+                .await
+                .unwrap();
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 4. modes the engine cannot honour
+// ---------------------------------------------------------------------------
+
+/// A documented-but-unimplemented mode, and a typo, are both REFUSED with a
+/// reason rather than quietly demoted to `off`.
+///
+/// `mirror` and `submit` are in `docs/reference/virtual-node-adapters.md`
+/// §10.2, so an operator can configure one by following the documentation. That
+/// used to produce a mount that wrote nothing, reported `writeback_supported:
+/// null` ("not applicable") and logged not one line — indistinguishable from a
+/// read-only mount. A misspelled mode behaved identically.
+#[test]
+fn an_unimplemented_or_unknown_write_mode_is_refused_loudly() {
+    let caps = sync::Capabilities {
+        can_read: true,
+        can_write: true,
+        can_update: true,
+        can_create: true,
+        can_delete: true,
+        mutable_fields: vec!["unread".to_string()],
+        ..Default::default()
+    };
+    let wc = |mode: &str| WriteConfig {
+        mode: mode.to_string(),
+        mutable_fields: vec!["unread".to_string()],
+        ..Default::default()
+    };
+    let reason =
+        |mode: &str| match sync::write::resolve_mode(&wc(mode), &caps, &MapperWriteback::Supported)
+        {
+            sync::write::WriteMode::Refused(r) => r,
+            other => panic!("expected `{mode}` to be refused, got {other:?}"),
+        };
+
+    for mode in ["mirror", "submit", "MIRROR"] {
+        let r = reason(mode);
+        assert!(r.contains("not implemented yet"), "{r}");
+    }
+    let typo = reason("state-only");
+    assert!(typo.contains("not recognized"), "{typo}");
+
+    // The verdict the console reads is the SAME decision, not a second copy of
+    // it: `(Some(false), reason)`, never the `(None, None)` that means
+    // "writeback not applicable".
+    let (supported, verdict) =
+        sync::write::writeback_verdict(&wc("mirror"), &caps, &MapperWriteback::Supported);
+    assert_eq!(supported, Some(false));
+    assert!(verdict.unwrap().contains("not implemented yet"));
+
+    // `off` (and an absent mode) stay silent — a read-only mount must not start
+    // reporting a refusal it never asked for.
+    assert_eq!(
+        sync::write::resolve_mode(&wc("off"), &caps, &MapperWriteback::Supported),
+        sync::write::WriteMode::Off
+    );
+    assert_eq!(
+        sync::write::writeback_verdict(&wc("off"), &caps, &MapperWriteback::Supported),
+        (None, None)
+    );
+    assert_eq!(
+        sync::write::writeback_verdict(&WriteConfig::default(), &caps, &MapperWriteback::NoMapper),
+        (None, None)
+    );
+}
+
+/// A refused mount does not push, whatever its nodes look like.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_mode_pushes_nothing() {
+    let env = setup().await;
+    let mut mount = state_only_mount();
+    mount.write_config.mode = "mirror".to_string();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let ids = sync_in_mails(&mat, 1).await;
+    flip_unread(&env, &ids).await;
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let caps = sync::Capabilities {
+        can_read: true,
+        can_write: true,
+        can_update: true,
+        mutable_fields: vec!["unread".to_string()],
+        ..Default::default()
+    };
+    let mode = sync::write::resolve_mode(&mount.write_config, &caps, &MapperWriteback::Supported);
+    let stats = sync::write::drain(&c, &mut state, &mut batcher, &mode).await;
+
+    assert_eq!(stats, Default::default());
+    assert_eq!(mock.update_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 5. the drain leaves a receipt
+// ---------------------------------------------------------------------------
+
+/// A half-drained mount must not look like an idle one.
+///
+/// `DrainStats` lives and dies inside `drain`; `phases.rs` drops the return
+/// value. So before `last_drain`, a run that pushed 0 of 2 edits and stopped on
+/// its budget produced exactly the same observable output as a run with nothing
+/// to do — `outcome: "ok"`, every batcher counter zero, no state field. An
+/// operator had no way to tell a mount that is falling behind from one that is
+/// caught up, which is the whole reason `truncated` and `stopped` are recorded
+/// rather than inferred.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_truncated_drain_is_distinguishable_from_an_idle_one() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let ids = sync_in_mails(&mat, 2).await;
+    flip_unread(&env, &ids).await;
+
+    // Out of budget with both edits still pending.
+    let spent = SyncCtx {
+        deadline: Utc::now().timestamp() - 1,
+        ..ctx(&env, &mount, &mock, &mat)
+    };
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&spent).await.unwrap();
+    sync::write::drain(&spent, &mut state, &mut batcher, &state_only_mode()).await;
+
+    let truncated = state
+        .last_drain
+        .clone()
+        .expect("a drain that had candidates must leave a receipt");
+    assert!(truncated.truncated);
+    assert_eq!(truncated.pushed, 0);
+    assert_eq!(
+        truncated.pending, 2,
+        "the queue depth is the only thing that says this mount is behind"
+    );
+
+    // Same mount, fresh budget: the receipt must now say caught up, not keep
+    // reporting the old backlog.
+    let fresh = ctx(&env, &mount, &mock, &mat);
+    let mut batcher = sync::batch::SyncBatcher::new(&fresh).await.unwrap();
+    sync::write::drain(&fresh, &mut state, &mut batcher, &state_only_mode()).await;
+
+    let caught_up = state
+        .last_drain
+        .clone()
+        .expect("a drain that pushed must leave a receipt");
+    assert_eq!(caught_up.pushed, 2);
+    assert_eq!(
+        caught_up.pending, 0,
+        "a stale backlog would read as a mount still behind"
+    );
+    assert!(!caught_up.truncated);
+    assert!(!caught_up.stopped);
+}
+
+/// A drain with no candidates leaves the previous receipt alone.
+///
+/// The counterpart to the assertion above: `last_drain` is written on every
+/// drain that had work, so "nothing to do" must not overwrite it with zeroes —
+/// that would erase the record of the run that actually pushed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_drain_writes_no_receipt() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    sync_in_mails(&mat, 2).await;
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState::default();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let stats = sync::write::drain(&c, &mut state, &mut batcher, &state_only_mode()).await;
+
+    assert_eq!(stats, Default::default());
+    assert!(
+        state.last_drain.is_none(),
+        "an idle drain must not stamp a receipt over a real one"
+    );
+}

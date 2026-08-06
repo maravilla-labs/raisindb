@@ -16,6 +16,7 @@ import LanguageSwitcher from '../components/LanguageSwitcher'
 import { useRepositoryContext } from '../hooks/useRepositoryContext'
 import { nodesApi, Node as NodeType } from '../api/nodes'
 import { integrationsApi } from '../api/integrations'
+import { mountIsWritable } from '../utils/mountStatus'
 import VirtualNodeBadge, { virtualMountId } from '../components/VirtualNodeBadge'
 import { branchesApi, BranchDivergence, Branch } from '../api/branches'
 import { repositoriesApi } from '../api/repositories'
@@ -92,7 +93,9 @@ export default function ContentExplorer() {
     // The useEffect above will automatically reload nodes when currentLocale changes
   }
 
-  // Load virtual mounts once per repo to know which are read-only (writeback off).
+  // Load virtual mounts once per repo to know which are read-only. "Writable"
+  // is `mountIsWritable`, not the legacy `writeback` key alone — a `state_only`
+  // mount pushes real edits and must not be badged read-only.
   useEffect(() => {
     async function loadMounts() {
       if (!repo) return
@@ -100,7 +103,7 @@ export default function ContentExplorer() {
         const mounts = await integrationsApi.listMounts(repo)
         const readOnly = new Set<string>()
         for (const m of mounts) {
-          if (m.id && (m.write_config?.writeback || 'off') !== 'write_through') {
+          if (m.id && !mountIsWritable(m)) {
             readOnly.add(m.id)
           }
         }

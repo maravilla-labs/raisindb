@@ -11,9 +11,11 @@ import {
   FilePlus2,
   FileWarning,
   History,
+  Hourglass,
   Pencil,
   RefreshCw,
   SkipForward,
+  Upload,
   Trash2,
   Wand2,
   Webhook,
@@ -43,7 +45,14 @@ import {
   type VirtualMount,
 } from '../api/integrations'
 import { workspacesApi } from '../api/workspaces'
-import { isActive, isPaused, isSyncing, STATUS_META, statusKind } from '../utils/mountStatus'
+import {
+  isActive,
+  isPaused,
+  isSyncing,
+  STATUS_META,
+  statusKind,
+  writeModeLabel,
+} from '../utils/mountStatus'
 import { formatAbsoluteSeconds, formatRelativeSeconds } from '../utils/time'
 
 /** Poll interval used whenever the live socket is not carrying events. */
@@ -631,6 +640,40 @@ export default function MountDetail() {
                     hint="Items that could not be materialized"
                   />
                 </div>
+                {/*
+                  The write half of the run. Shown only once a mount has
+                  actually pushed something — a read-only mount would otherwise
+                  carry two permanent zeroes that mean nothing to it.
+
+                  `Pending` is the one an operator has to see: a drain that
+                  spends its budget with edits still queued reports
+                  outcome: "ok" like any other, so without this number a mount
+                  falling behind is indistinguishable from one caught up.
+                */}
+                {(lastRun.pushed || lastRun.writeback_pending || lastRun.stamped) ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mt-2.5">
+                    <MountStatCard
+                      label="Pushed"
+                      value={lastRun.pushed ?? 0}
+                      Icon={Upload}
+                      tone="good"
+                      hint="Local edits sent to the provider"
+                    />
+                    <MountStatCard
+                      label="Stamped"
+                      value={lastRun.stamped ?? 0}
+                      Icon={Wand2}
+                      hint="Nodes whose sync metadata was updated after a push"
+                    />
+                    <MountStatCard
+                      label="Pending"
+                      value={lastRun.writeback_pending ?? 0}
+                      Icon={Hourglass}
+                      tone={lastRun.writeback_pending ? 'warn' : undefined}
+                      hint="Edits still queued because the drain ended early — the next run picks them up"
+                    />
+                  </div>
+                ) : null}
               </>
             ) : (
               <p className="text-sm text-zinc-500">No run has been recorded yet.</p>
@@ -704,8 +747,31 @@ export default function MountDetail() {
                 </DetailRow>
               ) : null}
               <DetailRow label="Writeback">
-                <span className="text-zinc-300">{mount.write_config?.writeback || 'off'}</span>
+                <span className="text-zinc-300">{writeModeLabel(mount.write_config)}</span>
               </DetailRow>
+              {/*
+                The engine's verdict on that request, and WHY when it is no. The
+                reason string names which of adapter op / mapper / field list is
+                missing — the only place an operator can learn it.
+              */}
+              {mount.state?.writeback_supported !== undefined && (
+                <DetailRow label="Engine">
+                  <span
+                    className={
+                      mount.state.writeback_supported ? 'text-green-400' : 'text-red-400'
+                    }
+                  >
+                    {mount.state.writeback_supported ? 'writeback supported' : 'writeback not supported'}
+                  </span>
+                </DetailRow>
+              )}
+              {mount.state?.writeback_last_error && (
+                <DetailRow label="Reason">
+                  <span className="text-red-400 text-xs break-words">
+                    {mount.state.writeback_last_error}
+                  </span>
+                </DetailRow>
+              )}
               {mount.remote_root && (
                 <DetailRow label="Remote root">
                   <span className="font-mono text-xs text-zinc-400 break-all">

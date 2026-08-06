@@ -71,9 +71,17 @@ pub(super) fn raw_value(node: &Node, key: &str) -> Value {
 /// Convert a mapped property map plus reserved virtual metadata into node
 /// properties (`PropertyValue` map). Reserved keys always overwrite whatever a
 /// mapping produced.
+///
+/// `pushed_state` records the mount's watched fields as they now stand
+/// remotely. An upsert re-seeds it rather than preserving the old value, and
+/// that is what makes a REMOTE change converge instead of bouncing: the item
+/// the provider just reported IS the pushed state, so the next drain sees
+/// nothing to send. Preserving a stale map here would make every remote edit
+/// look like a local one and push the provider's own change back at it.
 pub fn build_properties(
     mapped: &serde_json::Map<String, Value>,
     virt: &crate::jobs::handlers::virtual_mount_sync::materializer::VirtualMeta,
+    pushed_state: Option<&serde_json::Map<String, Value>>,
 ) -> HashMap<String, PropertyValue> {
     let mut out: HashMap<String, PropertyValue> = HashMap::new();
     for (k, v) in mapped {
@@ -100,5 +108,14 @@ pub fn build_properties(
         "__synced_at".to_string(),
         PropertyValue::String(virt.synced_at.clone()),
     );
+    if let Some(pushed) = pushed_state {
+        if let Ok(pv) = serde_json::from_value::<PropertyValue>(Value::Object(pushed.clone())) {
+            out.insert(
+                crate::jobs::handlers::virtual_mount_sync::materializer::PUSHED_STATE_PROP
+                    .to_string(),
+                pv,
+            );
+        }
+    }
     out
 }

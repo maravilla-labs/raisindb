@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 use super::index::{MountScope, SyncIndex, VirtualNodeRef};
 use super::node_paths::join_path;
 use super::ops::BatchOp;
+use super::stamp::watched_subset;
+use super::write_view::{carried_pushed_state, write_view_of};
 use super::RocksDbMaterializer;
 use crate::jobs::handlers::virtual_mount_sync::config::build_properties;
 
@@ -18,6 +20,11 @@ pub(super) enum Staged {
     Written,
     Deleted,
     Skipped,
+    /// Reserved metadata amended on a node that was already there — the write
+    /// drain's stamp-back. Distinct from [`Self::Written`] because the failure
+    /// budget and the console's `written` count both mean "an item the provider
+    /// reported was materialized", which a stamp is not.
+    Stamped,
     /// Held back for a single-item write (an in-chunk unique collision).
     Deferred,
 }
@@ -61,6 +68,27 @@ impl RocksDbMaterializer {
                     external_id: external_id.clone(),
                 });
                 return Ok(Staged::Deleted);
+            }
+            BatchOp::StampVirtual {
+                node_id,
+                external_id,
+                etag,
+                synced_at,
+                pushed_state,
+                node_bytes: _,
+            } => {
+                return self
+                    .stage_stamp(
+                        tx,
+                        scope,
+                        pending,
+                        node_id,
+                        external_id,
+                        etag.as_deref(),
+                        synced_at,
+                        pushed_state.as_ref(),
+                    )
+                    .await;
             }
             BatchOp::Upsert {
                 rel_path,
@@ -122,13 +150,33 @@ impl RocksDbMaterializer {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| path.rsplit('/').next().unwrap_or("item").to_string());
 
+        // The item the provider just reported IS the pushed state: seeding
+        // `__pushed_state` from the mapper's own output is what makes a REMOTE
+        // change converge on arrival instead of looking like a local edit and
+        // being pushed straight back.
+        //
+        // `watched_subset` answers `None` only when this mount watches NOTHING,
+        // i.e. the engine has nothing to say about the baseline — which is not
+        // the same as "there is no baseline". An upsert rebuilds the property
+        // map from scratch, so leaving it out there DELETES a baseline an
+        // earlier `state_only` run recorded; flipping `mode` to `off` for one
+        // run would strip every node the delta touched and re-arm the
+        // never-pushed-a-local-edit failure on re-enable. Carry the stored one
+        // forward instead. (An empty map from `watched_subset` is a real answer
+        // — "watching, none of these fields reported" — and must NOT fall
+        // through to the carry.)
+        let carried = index
+            .by_external(&virt.external_id)
+            .and_then(|existing| existing.pushed_state().cloned());
+        let pushed_state = watched_subset(&mapped.properties, &scope.watched_fields).or(carried);
+
         let node = Node {
             id,
             node_type: mapped.node_type.clone(),
             name,
             path: path.clone(),
             workspace: Some(scope.workspace.clone()),
-            properties: build_properties(&mapped.properties, virt),
+            properties: build_properties(&mapped.properties, virt, pushed_state.as_ref()),
             ..Default::default()
         };
 
@@ -152,6 +200,8 @@ impl RocksDbMaterializer {
         tx.upsert_deep_node(&scope.workspace, &node, "raisin:Folder")
             .await?;
 
+        let write_view = write_view_of(&node, &scope.watched_fields);
+        let carried = carried_pushed_state(&node, &write_view);
         pending.push(IndexMutation::Upsert(VirtualNodeRef {
             id: node.id,
             path,
@@ -160,6 +210,8 @@ impl RocksDbMaterializer {
             synced_secs: chrono::DateTime::parse_from_rfc3339(&virt.synced_at)
                 .ok()
                 .map(|d| d.timestamp()),
+            pushed_state: carried,
+            write_view,
         }));
         Ok(Staged::Written)
     }

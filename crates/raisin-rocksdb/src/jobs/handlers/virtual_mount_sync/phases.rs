@@ -7,15 +7,23 @@ use super::*;
 ///
 /// Takes no `self`, no lock and no job: by the time this runs, everything a
 /// phase needs is in `ctx`, `state` and `batcher`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_phases(
     ctx: &SyncCtx<'_>,
     state: &mut MountState,
     batcher: &mut batch::SyncBatcher<'_>,
     capabilities: &Capabilities,
+    write_mode: &write::WriteMode,
     remap: bool,
     mode: &str,
     trigger: &str,
 ) -> std::result::Result<(), AdapterError> {
+    // Local edits go OUT first, under this run's lease and ahead of the read
+    // phases — see the `write` module doc for why the ordering is load-bearing
+    // rather than a preference. It never returns an error: a mount that cannot
+    // write must still be able to read.
+    write::drain(ctx, state, batcher, write_mode).await;
+
     // Choose the sync path. Full reconcile is forced on the first sync, an
     // explicit `mode: "full"`, or when the adapter cannot serve a changes
     // feed (`supports_changes: false`) even if a cursor happens to exist.

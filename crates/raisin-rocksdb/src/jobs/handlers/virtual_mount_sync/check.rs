@@ -92,7 +92,25 @@ async fn check_repo(
         let mount = match MountConfig::from_node(&node) {
             Ok(m) => m,
             Err(e) => {
+                // A `warn` and `continue` was the whole response here, and it
+                // is not one: the mount is now skipped on every tick, in BOTH
+                // directions (a corrupt `write_config` stops reads too), while
+                // `state.status` keeps whatever the last good run wrote and
+                // `last_attempt_at` freezes. Nothing in the console changes.
+                // Record the verdict where an operator looks — the same
+                // channel a bad `target_branch` uses.
                 tracing::warn!(mount_id = %node.id, error = %e, "vmount-check: invalid mount");
+                if let Err(werr) = super::misconfig::mark_unparseable_mount(
+                    storage, tenant, repo, &branch, &node.id, &e,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        mount_id = %node.id,
+                        error = %werr,
+                        "vmount-check: could not record the misconfigured verdict"
+                    );
+                }
                 continue;
             }
         };

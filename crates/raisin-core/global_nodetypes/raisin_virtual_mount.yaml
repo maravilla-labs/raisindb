@@ -100,9 +100,24 @@ properties:
     title: Write Configuration
     description: |
       Writeback behaviour: {
+        mode: "off" | "state_only",
+        mutable_fields: ["unread", ...],
         writeback: "off" | "write_through",
         conflict: "remote_wins" | "error"
       }
+      mode is the write mode this mount drives, and it is a property of the
+      MOUNT rather than of the adapter — the same connector serves a
+      state_only inbox and a read-only archive. "state_only" pushes ONLY the
+      properties named in mutable_fields through the adapter's update
+      operation; the rest of the record is treated as immutable. An empty
+      mutable_fields means nothing is pushable, and an unrecognized mode is
+      treated as "off": a mount is never more writable than the engine
+      understands it to be.
+      The effective allow-list is the INTERSECTION of mutable_fields and the
+      adapter's declared capabilities.mutable_fields, so an adapter that has
+      not opted a field in cannot be made to accept it here.
+      writeback: "write_through" asks for a full mirror (create/update/delete),
+      which is not implemented yet and is reported as unsupported.
 
   - name: state
     type: Object
@@ -111,12 +126,23 @@ properties:
     description: |
       Engine-managed state (not user-edited): {
         last_sync_token, last_sync_at, last_error,
-        consecutive_failures, status, writeback_supported
+        consecutive_failures, status, writeback_supported,
+        writeback_last_error
       }
       status is one of "ok" | "syncing" | "auth_required" | "degraded" |
       "misconfigured". writeback_supported is false when the mount requests
-      write_through writeback but the engine/adapter cannot honour it (v1 has no
-      writeback implementation); the UI reads it to explain the limitation.
+      write_through writeback but the adapter does not declare the operations a
+      mirror needs, OR its mapping_function cannot translate nodes back out (no
+      mapping_function at all, or one without a to_external operation) —
+      writability belongs to the mount, adapter and mapper together. It is
+      absent when the mount never requested writeback at all — absent and
+      false are NOT the same thing to the UI. writeback_last_error says what is
+      missing, naming both the adapter and the mapper shortfall when both
+      apply.
+      A write_config.mode of "state_only" is judged the same way but against
+      what state_only actually needs (can_write + can_update, a mapper that
+      answers to_external, and a non-empty effective mutable_fields) — never
+      against the create/delete a mirror would need.
 
   - name: enabled
     type: Boolean

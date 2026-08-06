@@ -118,7 +118,7 @@ fn index_serves_external_path_and_foreign_lookups() {
         ..Default::default()
     };
 
-    let idx = SyncIndex::from_nodes(vec![mount_owned, foreign, outside], "m1", "/docs");
+    let idx = SyncIndex::from_nodes(vec![mount_owned, foreign, outside], "m1", "/docs", &[]);
 
     assert_eq!(idx.by_external("ext-a").map(|n| n.id.as_str()), Some("n1"));
     assert_eq!(
@@ -150,6 +150,8 @@ fn recording_a_write_also_marks_its_ancestor_folders_occupied() {
         external_id: "ext-a".to_string(),
         etag: Some("v1".to_string()),
         synced_secs: None,
+        pushed_state: None,
+        write_view: None,
     });
     assert!(idx.at_path("/docs/thread-1").is_some());
     assert_eq!(
@@ -191,4 +193,131 @@ fn byte_estimate_tracks_the_property_payload() {
     };
     assert!(estimate_op_bytes(&big) > 50_000);
     assert!(estimate_op_bytes(&small) < 1_000);
+}
+
+fn stamp_op(ext: &str, etag: Option<&str>) -> BatchOp {
+    BatchOp::StampVirtual {
+        node_id: format!("node-{ext}"),
+        external_id: ext.to_string(),
+        etag: etag.map(str::to_string),
+        synced_at: "2026-01-01T00:00:00Z".to_string(),
+        pushed_state: None,
+        node_bytes: 0,
+    }
+}
+
+/// A stamp is charged the size of the node it re-writes, not the size of the
+/// metadata it amends.
+///
+/// This is what stops a drain over an existing mailbox — `state_only` switched
+/// on, where every node diverges and is pushed and stamped — from packing a
+/// whole run's mail bodies into ONE transaction, and so one `ApplyRevision`
+/// past the 10 MB transport frame cap.
+#[test]
+fn a_stamp_is_charged_the_whole_node_it_rewrites() {
+    let stamp = BatchOp::StampVirtual {
+        node_id: "node-a".to_string(),
+        external_id: "a".to_string(),
+        etag: Some("e1".to_string()),
+        synced_at: "2026-01-01T00:00:00Z".to_string(),
+        pushed_state: None,
+        node_bytes: 30_000,
+    };
+    assert!(estimate_op_bytes(&stamp) > 30_000);
+    // 500 stamps of a 30 KB mail node must blow the 4 MiB default budget many
+    // times over — i.e. flush repeatedly instead of committing as one batch.
+    assert!(estimate_op_bytes(&stamp) * 500 > 4 * 1024 * 1024);
+}
+
+/// An upsert re-states the node whole, so it wins over a stamp for the same
+/// item — in EITHER order.
+///
+/// Both directions matter and they fail differently. Keeping a later stamp
+/// would drop the upsert entirely, because a stamp writes no mapper output:
+/// the item's remote change would vanish and only its metadata would land.
+/// Keeping an earlier stamp would re-apply metadata the upsert has already
+/// rewritten, stamping a push's etag over the newer one the provider just
+/// reported — the one way this design can lose a remote change.
+#[test]
+fn an_upsert_supersedes_a_stamp_for_the_same_item() {
+    let out = dedup_ops(
+        vec![
+            stamp_op("a", Some("pushed")),
+            upsert_op("a", "a.txt", Some("v2")),
+        ],
+        "/docs",
+    );
+    assert_eq!(out.len(), 1);
+    match &out[0] {
+        BatchOp::Upsert { virt, .. } => assert_eq!(virt.etag.as_deref(), Some("v2")),
+        other => panic!("expected the upsert to survive, got {other:?}"),
+    }
+
+    let out = dedup_ops(
+        vec![
+            upsert_op("a", "a.txt", Some("v2")),
+            stamp_op("a", Some("pushed")),
+        ],
+        "/docs",
+    );
+    assert_eq!(out.len(), 1);
+    assert!(
+        matches!(&out[0], BatchOp::Upsert { .. }),
+        "an authoritative op never loses to a stamp"
+    );
+}
+
+/// Stamps collapse per external id like everything else, and a stamp for an
+/// item with no other op survives — the ordinary case, since the write drain
+/// flushes ahead of the read phases.
+#[test]
+fn stamps_collapse_per_external_id_and_survive_alone() {
+    let out = dedup_ops(
+        vec![
+            stamp_op("a", Some("e1")),
+            stamp_op("b", Some("e1")),
+            stamp_op("a", Some("e2")),
+        ],
+        "/docs",
+    );
+    assert_eq!(out.len(), 2);
+    let a = out.iter().find(|o| o.external_id() == "a").unwrap();
+    match a {
+        BatchOp::StampVirtual { etag, .. } => assert_eq!(etag.as_deref(), Some("e2")),
+        other => panic!("expected a stamp, got {other:?}"),
+    }
+}
+
+/// The converge check, in isolation: absent evidence is NOT divergence.
+#[test]
+fn a_write_view_distinguishes_unseeded_from_diverged() {
+    let fields = vec!["unread".to_string()];
+    let mut node = Node {
+        id: "n1".to_string(),
+        path: "/docs/a".to_string(),
+        ..Default::default()
+    };
+    node.properties
+        .insert("unread".to_string(), PropertyValue::Boolean(true));
+
+    // No `__pushed_state` at all: unseeded, and NOT reported as diverged-only.
+    let view = write_view_of(&node, &fields).expect("a watched mount gets a view");
+    assert!(view.is_unseeded());
+
+    // Stamped with the same value: converged.
+    node.properties.insert(
+        PUSHED_STATE_PROP.to_string(),
+        serde_json::from_value(serde_json::json!({ "unread": true })).unwrap(),
+    );
+    let view = write_view_of(&node, &fields).unwrap();
+    assert!(!view.is_unseeded());
+    assert!(!view.diverges(&fields));
+
+    // Local edit: diverged.
+    node.properties
+        .insert("unread".to_string(), PropertyValue::Boolean(false));
+    assert!(write_view_of(&node, &fields).unwrap().diverges(&fields));
+
+    // A mount that watches nothing carries no view at all.
+    assert!(write_view_of(&node, &[]).is_none());
 }

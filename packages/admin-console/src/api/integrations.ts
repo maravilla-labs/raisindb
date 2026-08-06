@@ -135,6 +135,35 @@ export interface Capabilities {
   default_ttl?: number | null
   /** Bytes; the engine skips larger items. */
   max_file_size?: number | null
+
+  // ---- write path (§3.3 / §10 of docs/reference/virtual-node-adapters.md) ----
+  //
+  // These already ride on the wire and are already persisted onto the connector
+  // node by the capability probe. Absent means "not declared", which for every
+  // adapter shipped before the write path existed is correctly read-only.
+
+  /** Adapter implements `create` (a local create propagates). */
+  can_create?: boolean
+  /** Adapter implements `update` — the capability `state_only` writes need. */
+  can_update?: boolean
+  /** Adapter implements `delete`. */
+  can_delete?: boolean
+  /** Adapter implements `submit` (issue a command rather than mirror an object). */
+  can_submit?: boolean
+  /**
+   * Which node properties this provider accepts as writes. The engine has no
+   * domain knowledge, so this is the provider's own statement of what "writable"
+   * means for it; a mount's `write_config.mutable_fields` is intersected with it.
+   */
+  mutable_fields?: string[]
+  /** `"detach" | "trash" | "purge"` — recommended default for a local delete. */
+  default_delete_policy?: string | null
+  /** `"push" | "detach" | "reject"` — recommended default for a local move. */
+  default_move_policy?: string | null
+  /** `delete` can soft-delete (provider trash) rather than purge. */
+  supports_trash?: boolean
+  /** `submit` forwards a provider-side idempotency key. */
+  supports_idempotency_key?: boolean
 }
 
 export interface Integration {
@@ -263,9 +292,38 @@ export interface SyncConfig {
   [key: string]: unknown
 }
 
+/**
+ * Parsed `write_config` of a mount — mirrors the engine's `WriteConfig`
+ * (`virtual_mount_sync/config/mount.rs`). Only the keys the engine actually
+ * PARSES are declared here; `delete_policy`, `move_policy`, `collections` and
+ * `resolver_function` are designed but unparsed, so declaring them would promise
+ * a control that does nothing.
+ */
 export interface WriteConfig {
+  /**
+   * The legacy, mode-less switch. It asks for a full `mirror`, which the engine
+   * does NOT implement — `wants_write_through()` is a separate predicate from
+   * `wants_state_only()`, so this and `mode` are independent keys.
+   */
   writeback?: 'off' | 'write_through'
+  /**
+   * The write mode the engine implements: `off` (default) or `state_only`.
+   * `mirror` / `submit` parse but are refused out loud by the engine
+   * (`unsupported_mode_reason`), so the UI never offers them.
+   */
+  mode?: 'off' | 'state_only'
+  /**
+   * The `state_only` allow-list: node properties a local edit may push. Empty
+   * means nothing is pushable — the engine refuses with "mount declares no
+   * write_config.mutable_fields". There is no "all fields" value on purpose.
+   */
+  mutable_fields?: string[]
   conflict?: 'remote_wins' | 'error'
+  /**
+   * Keys later write stages add are preserved verbatim on round-trip, the same
+   * way {@link SyncConfig} preserves provider-specific keys.
+   */
+  [key: string]: unknown
 }
 
 /** How a sync run was started. */
@@ -301,6 +359,23 @@ export interface SyncRun {
   skipped: number
   deleted: number
   failed: number
+  /**
+   * Reserved-metadata stamps the write drain applied to nodes that already
+   * existed. Deliberately NOT folded into `written`, which an operator reads as
+   * "items imported from the provider".
+   */
+  stamped?: number
+  /** Local edits this run pushed to the provider. */
+  pushed?: number
+  /**
+   * Edits still queued because the drain ended early — it spent its wall-clock
+   * budget, or an operator stopped it.
+   *
+   * The only counter that separates a mount which is caught up from one that is
+   * falling behind: a drain that stops cleanly with work left still reports
+   * `outcome: 'ok'`, because it is a success, not an error.
+   */
+  writeback_pending?: number
   items_done: number
   error?: string
   /**
@@ -345,6 +420,12 @@ export type MountSyncEvent =
       skipped: number
       deleted: number
       failed: number
+      /** Reserved-metadata stamps applied by the write drain. */
+      stamped?: number
+      /** Local edits pushed to the provider. */
+      pushed?: number
+      /** Edits still queued because the drain ended early. */
+      writeback_pending?: number
       backfill_complete: boolean
       error: string | null
     }
@@ -414,12 +495,38 @@ export interface MountState {
   /** Newest first, capped at 20 by the engine. */
   recent_runs?: SyncRun[]
   /**
-   * False when the mount requested write_through but the engine cannot honour
-   * it. v1 has no write-through implementation, so the engine sets this false
-   * whenever writeback is requested; the UI reads it to keep the write section
-   * hidden and explain the limitation.
+   * The engine's verdict on this mount's requested writeback, recomputed on
+   * every sync run from the adapter's capabilities and the mapper's shape.
+   *
+   * `true` — writes will be pushed; `false` — the request cannot be honoured
+   * and the mount syncs read-only; absent — no run has evaluated it yet (a
+   * mount that asks for nothing is never evaluated at all).
    */
   writeback_supported?: boolean
+  /**
+   * WHY `writeback_supported` is false — which of adapter op / mapper /
+   * field-list is missing (e.g. "mount declares no write_config.mutable_fields",
+   * "write mode 'mirror' is not implemented yet"). Engine-owned; the console
+   * only displays it. It refreshes on the next sync run, not on save.
+   */
+  writeback_last_error?: string
+  /**
+   * What the write drain did on the most recent run that had work.
+   *
+   * Absent on a mount that has never drained, and NOT overwritten by an idle
+   * drain — so it always describes the last run that actually pushed. `pending`
+   * is the field to watch: a drain that stops on its budget with work left still
+   * reports `outcome: 'ok'`, so nothing else on the run distinguishes a mount
+   * that is falling behind from one that is caught up.
+   */
+  last_drain?: {
+    pushed: number
+    pending: number
+    gone: number
+    failed: number
+    truncated: boolean
+    stopped: boolean
+  }
   /**
    * Push (webhook) subscription lifecycle state, engine-managed. Populated only
    * for mounts whose connector supports push and whose `sync_config.mode` is
@@ -565,6 +672,11 @@ function nodeToMount(node: Node): VirtualMount {
     adapter_function: (p.adapter_function as string) || undefined,
     mapping_function: (p.mapping_function as string) || undefined,
     sync_config: (p.sync_config as SyncConfig) || {},
+    // CAST, never rebuild. These two objects are handed back to the server
+    // verbatim by `mountToProperties`, so a key the TS type does not name (a
+    // future write stage's, a provider-specific sync key) survives a round-trip
+    // only because nothing here reconstructs the object literal. Rebuilding
+    // either of them silently DELETES every unknown key on the next save.
     write_config: (p.write_config as WriteConfig) || {},
     state: (p.state as MountState) || {},
     enabled: p.enabled !== false,

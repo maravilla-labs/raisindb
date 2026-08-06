@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use super::node_paths::{
     ancestor_paths, node_external_id, node_mount_id, node_str_prop, node_synced_secs, under,
 };
+use super::write_view::{carried_pushed_state, write_view_of, WriteView};
 
 /// Identifies one mount within a repo/branch/workspace.
 #[derive(Debug, Clone)]
@@ -32,6 +33,21 @@ pub struct MountScope {
     /// new folder hierarchy — is invisible to everything already synced. Remap
     /// is the deliberate, operator-triggered exception.
     pub force_rewrite: bool,
+    /// Node properties this mount may push outward — the `state_only`
+    /// allow-list, taken from `write_config.mutable_fields`.
+    ///
+    /// Empty for every mount that has not configured writeback, which is all of
+    /// them by default; the index then carries no [`WriteView`] at all, so a
+    /// read-only mount pays nothing for the write path existing.
+    ///
+    /// Deliberately the MOUNT's declared list rather than the effective one:
+    /// the index is loaded before the adapter's `capabilities` are probed, and
+    /// what gets STAMPED must not depend on what the adapter happens to answer
+    /// this run — a mount whose adapter probe fails once would otherwise stop
+    /// seeding `__pushed_state` and push a batch of stale flags when it
+    /// recovered. The adapter's `mutable_fields` narrows what is actually SENT
+    /// (see `write::plan`), not what is recorded.
+    pub watched_fields: Vec<String>,
 }
 
 /// Reserved virtual metadata stamped on every synced node.
@@ -54,6 +70,31 @@ pub struct VirtualNodeRef {
     /// `__synced_at` as unix epoch seconds (used by ephemeral TTL cleanup).
     /// Tolerates both `String` (ISO 8601) and `Date` stored representations.
     pub synced_secs: Option<i64>,
+    /// Present only when the mount watches fields (see
+    /// [`MountScope::watched_fields`]), and boxed so a read-only mount's index
+    /// entry grows by one pointer rather than by two maps per node.
+    pub write_view: Option<Box<WriteView>>,
+    /// The node's stored `__pushed_state`, carried ONLY when [`Self::write_view`]
+    /// is absent — see [`carried_pushed_state`]. Read through
+    /// [`Self::pushed_state`], never directly.
+    pub pushed_state: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl VirtualNodeRef {
+    /// The writeback baseline stored on this node, whichever half of the entry
+    /// is carrying it.
+    ///
+    /// The upsert path re-states a node's whole property map, so it must put
+    /// this back when it has nothing newer to say — otherwise flipping a mount's
+    /// `mode` away from `state_only` (to `off`, to debug) silently strips the
+    /// baseline from every node the next delta touches, and re-enabling
+    /// writeback then finds a mailbox of nodes with no record of what was pushed.
+    pub fn pushed_state(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        match self.write_view.as_ref().and_then(|v| v.pushed.as_ref()) {
+            Some(pushed) => Some(pushed),
+            None => self.pushed_state.as_ref(),
+        }
+    }
 }
 
 /// One node occupying a path under the mount.
@@ -89,7 +130,12 @@ pub struct SyncIndex {
 
 impl SyncIndex {
     /// Build both views from a listing of the target workspace.
-    pub fn from_nodes(nodes: Vec<Node>, mount_id: &str, mount_path: &str) -> Self {
+    pub fn from_nodes(
+        nodes: Vec<Node>,
+        mount_id: &str,
+        mount_path: &str,
+        watched_fields: &[String],
+    ) -> Self {
         let mut idx = Self::default();
         for node in nodes {
             if !under(mount_path, &node.path) {
@@ -109,6 +155,7 @@ impl SyncIndex {
                 continue;
             }
             if let Some(ext) = node_external_id(&node) {
+                let write_view = write_view_of(&node, watched_fields);
                 idx.by_external.insert(
                     ext.to_string(),
                     VirtualNodeRef {
@@ -117,6 +164,8 @@ impl SyncIndex {
                         external_id: ext.to_string(),
                         etag,
                         synced_secs: node_synced_secs(&node),
+                        pushed_state: carried_pushed_state(&node, &write_view),
+                        write_view,
                     },
                 );
             }

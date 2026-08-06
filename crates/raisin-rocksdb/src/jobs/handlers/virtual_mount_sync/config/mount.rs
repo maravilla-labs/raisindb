@@ -132,9 +132,28 @@ impl Default for SyncConfig {
 /// Parsed `write_config` object of a `raisin:VirtualMount`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteConfig {
-    /// `"off" | "write_through"`. v1 only honours `off`.
+    /// `"off" | "write_through"`. The older, mode-less switch: it asks for a
+    /// full `mirror`, which is not implemented yet.
     #[serde(default = "default_writeback")]
     pub writeback: String,
+    /// Which write mode this mount drives: `"off" | "state_only"`.
+    ///
+    /// A property of the MOUNT, not of the adapter — the same IMAP adapter
+    /// serves a `state_only` inbox and (later) a `submit` outbox. `mirror` and
+    /// `submit` are declared in the docs but not implemented here yet, and an
+    /// unrecognized value is a typo: a mount is never more writable than the
+    /// engine understands it to be, and both cases are REFUSED out loud rather
+    /// than quietly demoted to `off` (see [`Self::unsupported_mode_reason`]).
+    #[serde(default = "default_write_mode")]
+    pub mode: String,
+    /// The `state_only` allow-list: node properties a local edit may push.
+    ///
+    /// Empty means nothing is pushable, so writeback stays off for every mount
+    /// that has not opted in field by field. There is no "all fields" value on
+    /// purpose — `state_only` exists precisely because most of the record
+    /// (a mail body, its sender, its date) is immutable at the provider.
+    #[serde(default)]
+    pub mutable_fields: Vec<String>,
     /// `"remote_wins" | "error"`.
     #[serde(default)]
     pub conflict: Option<String>,
@@ -144,19 +163,65 @@ fn default_writeback() -> String {
     "off".to_string()
 }
 
+fn default_write_mode() -> String {
+    "off".to_string()
+}
+
 impl Default for WriteConfig {
     fn default() -> Self {
         Self {
             writeback: default_writeback(),
+            mode: default_write_mode(),
+            mutable_fields: Vec::new(),
             conflict: None,
         }
     }
 }
 
 impl WriteConfig {
-    /// Whether this mount asks for write-through writeback.
+    /// Whether this mount asks for write-through writeback (a `mirror`).
     pub fn wants_write_through(&self) -> bool {
         self.writeback.eq_ignore_ascii_case("write_through")
+    }
+
+    /// Whether this mount asks for `state_only` writes.
+    pub fn wants_state_only(&self) -> bool {
+        self.mode.eq_ignore_ascii_case("state_only")
+    }
+
+    /// Why this mount's `mode` cannot be honoured, when it is neither `off` nor
+    /// the one mode the engine implements.
+    ///
+    /// `None` for `off`/absent (an operator's choice, and silent) and for
+    /// `state_only` (which the caller resolves properly, against the adapter).
+    /// Everything else answers here: `mirror` and `submit` are documented in
+    /// `docs/reference/virtual-node-adapters.md` §10.2, so an operator can
+    /// configure one by following the docs — and used to get a mount that did
+    /// nothing at all, with `writeback_supported` absent and not one line in the
+    /// log. A typo behaved identically. Both are now refusals with a reason,
+    /// which is the same channel a `state_only` mount's shortfall arrives on.
+    pub fn unsupported_mode_reason(&self) -> Option<String> {
+        let mode = self.mode.trim();
+        if mode.is_empty() || mode.eq_ignore_ascii_case("off") || self.wants_state_only() {
+            return None;
+        }
+        if mode.eq_ignore_ascii_case("mirror") || mode.eq_ignore_ascii_case("submit") {
+            return Some(format!("write mode '{mode}' is not implemented yet"));
+        }
+        Some(format!(
+            "write mode '{mode}' is not recognized; expected 'off' or 'state_only'"
+        ))
+    }
+
+    /// The fields this mount declares pushable, empty unless it is
+    /// `state_only`. Reading them under any other mode would let a `mode: off`
+    /// mount push the moment an adapter declared `can_update`.
+    pub fn declared_mutable_fields(&self) -> &[String] {
+        if self.wants_state_only() {
+            &self.mutable_fields
+        } else {
+            &[]
+        }
     }
 }
 
@@ -208,7 +273,12 @@ impl MountConfig {
             enabled: opt_bool(node, "enabled").unwrap_or(true),
             sync_config: parse_object(node, "sync_config").unwrap_or_default(),
             sync_config_raw: raw_value(node, "sync_config"),
-            write_config: parse_object(node, "write_config").unwrap_or_default(),
+            // Also NOT `unwrap_or_default()`. The default is writeback OFF, so a
+            // corrupt `write_config` silently disables the push an operator
+            // explicitly configured: no error, no `writeback_last_error`, no log
+            // line — edits just accumulate locally and never reach the provider.
+            // Absent is fine (a read-only mount); unparseable is fatal.
+            write_config: parse_object_checked(node, "write_config")?.unwrap_or_default(),
             // NOT `unwrap_or_default()`. A corrupt `state` blob defaulting
             // silently is a mount that forgets its cursor, forgets that its
             // backfill finished, and resets `state_seq` to 0 — after which

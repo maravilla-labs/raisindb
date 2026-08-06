@@ -112,6 +112,36 @@ impl<'a> SyncBatcher<'a> {
         self.stage(op).await
     }
 
+    /// Stage a metadata stamp-back after a successful push.
+    ///
+    /// Goes through the same buffer as everything else so the stamps of a drain
+    /// commit in batches rather than one revision per pushed node, and so the
+    /// run's index is updated by the same code path — a stamp the index did not
+    /// learn about would be re-detected as a pending push later in the same run.
+    ///
+    /// `node_bytes` is the size of the node being stamped, which the caller
+    /// already holds. It is required rather than defaulted because the stamp
+    /// re-writes that node whole, so it IS the batch's replication cost — a
+    /// drain of large nodes must flush on the byte budget like any other write.
+    pub async fn stage_stamp(
+        &mut self,
+        node_id: &str,
+        external_id: &str,
+        etag: Option<String>,
+        pushed_state: Option<serde_json::Map<String, serde_json::Value>>,
+        node_bytes: usize,
+    ) -> std::result::Result<(), AdapterError> {
+        self.stage(BatchOp::StampVirtual {
+            node_id: node_id.to_string(),
+            external_id: external_id.to_string(),
+            etag,
+            synced_at: Utc::now().to_rfc3339(),
+            pushed_state,
+            node_bytes,
+        })
+        .await
+    }
+
     /// Stage a delete, preserving its position relative to staged upserts.
     pub async fn stage_delete(
         &mut self,

@@ -16,12 +16,14 @@
 mod ctx;
 mod finalize;
 mod item;
+mod misconfig;
 mod phases;
 mod preflight;
 mod push;
 mod resolve;
 mod run;
 mod state_store;
+mod write;
 
 mod adapter;
 mod batch;
@@ -45,9 +47,9 @@ pub use adapter::{
 // connection-test handler cannot drift apart.
 pub use batch::SyncBatcher;
 pub use config::{
-    default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount, ExternalItem,
-    IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig, SyncRun,
-    WriteConfig, MAX_RUN_HISTORY, SYNC_ACTOR, SYSTEM_WORKSPACE,
+    default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount, DrainSummary,
+    ExternalItem, IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig,
+    SyncRun, WriteConfig, MAX_RUN_HISTORY, SYNC_ACTOR, SYSTEM_WORKSPACE,
 };
 pub use materializer::{
     BatchOp, BatchStats, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,
@@ -72,7 +74,9 @@ use serde_json::{json, Value};
 use crate::RocksDBStorage;
 pub use ctx::SyncCtx;
 use ctx::{SYNC_LEASE_TTL, SYNC_WALL_CLOCK_BUDGET};
-pub use item::{map_item, stage_item};
+pub use item::{
+    map_item, map_to_external, stage_item, MapperWriteback, ToExternal, ToExternalOutcome,
+};
 use preflight::{skip_result, Preflight};
 use resolve::CtxParts;
 pub use state_store::{

@@ -46,7 +46,7 @@ mapping                              (mod.rs::map_item)
    │  built-in default_mapping (config.rs) OR the mount's mapping_function
    ▼
 materializer                         (materializer.rs::RocksDbMaterializer)
-   │  transactional upsert/delete, actor "virtual-mount-sync", AuthContext::system()
+   │  transactional upsert/delete as "virtual-mount-sync" (system privileges)
    ▼
 normal transactional write path
    └─▶ node_event triggers, fulltext, SQL indexes, audit, replication
@@ -208,7 +208,18 @@ inventory/lease locks.
 **Adapters run privileged.** `FunctionAdapterInvoker::invoke` passes a `None` auth
 context to the executor, which resolves to a **system context with RLS bypassed**
 (the same behavior trigger-invoked functions already have). Materialization writes
-also run under `AuthContext::system()` with actor `"virtual-mount-sync"`. So:
+also run with system privileges, as actor `"virtual-mount-sync"`.
+
+The identity is stamped in two places, and both matter. The transaction's raw
+actor becomes `RevisionMeta.actor`; the transaction's **auth context** is what
+the write path stamps into the node's `created_by` / `updated_by`, and it takes
+precedence over the raw actor. The sync therefore uses
+`AuthContext::system_as(SYNC_ACTOR)` — full system privileges, but an honest
+identity — so a synced node, its audit-log rows and its emitted `node:*` events
+all name `virtual-mount-sync` rather than `system`. Nodes written before this
+was fixed are still attributed to `"system"`; there is no backfill.
+
+So:
 
 - An adapter package is **highly privileged code**. It is acceptable in v1 because
   adapters are **admin-installed** — treat installing an adapter like installing a

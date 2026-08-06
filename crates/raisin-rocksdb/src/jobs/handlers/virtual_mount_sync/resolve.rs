@@ -138,6 +138,7 @@ impl VirtualMountSyncHandler {
             // Off for every ordinary path. `run_sync` turns it on for a remap;
             // the teardown and renew callers must never rewrite content.
             force_rewrite: false,
+            watched_fields: mount.write_config.declared_mutable_fields().to_vec(),
         };
         Ok(CtxParts {
             public_origin: integration.public_origin.clone(),
@@ -165,7 +166,10 @@ impl VirtualMountSyncHandler {
         tx.set_tenant_repo(tenant, repo)?;
         tx.set_branch(config_branch)?;
         tx.set_actor(SYNC_ACTOR)?;
-        tx.set_auth_context(AuthContext::system())?;
+        // System privileges, sync identity: the auth context (not the raw
+        // actor) is what stamps `updated_by`, so an `AuthContext::system()`
+        // here would attribute the integration node to `"system"`.
+        tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
         tx.set_message("virtual mount sync: cache capabilities")?;
 
         let Some(mut node) = tx.get_node(SYSTEM_WORKSPACE, integration_id).await? else {

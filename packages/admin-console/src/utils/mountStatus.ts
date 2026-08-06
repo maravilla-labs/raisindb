@@ -17,7 +17,30 @@ import {
   ShieldAlert,
   type LucideIcon,
 } from 'lucide-react'
-import type { MountState, SyncRun } from '../api/integrations'
+import type { MountState, SyncRun, WriteConfig } from '../api/integrations'
+
+/**
+ * What a mount's `write_config` actually asks for, in one place.
+ *
+ * `writeback` and `mode` are INDEPENDENT keys the engine tests with two separate
+ * predicates (`wants_write_through` / `wants_state_only`), and the console read
+ * only the legacy `writeback` — so a working `mode: state_only` mount displayed
+ * as "off" in the list and on the detail page, and had its nodes badged
+ * read-only in the content tree. One helper, three call sites, no drift.
+ */
+export function writeModeLabel(write?: WriteConfig): string {
+  if (write?.mode === 'state_only') {
+    const n = write.mutable_fields?.length ?? 0
+    return `state_only (${n} field${n === 1 ? '' : 's'})`
+  }
+  return write?.writeback || 'off'
+}
+
+/** True when a mount asks for ANY write mode the engine implements. */
+export function mountIsWritable(mount?: { write_config?: WriteConfig }): boolean {
+  const w = mount?.write_config
+  return w?.mode === 'state_only' || w?.writeback === 'write_through'
+}
 
 export type StatusKind =
   | 'ok'

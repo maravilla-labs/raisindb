@@ -4,12 +4,16 @@ properties:
   description: >
     EXPERIMENTAL virtual-node adapter for Microsoft 365 over Microsoft Graph v1.0.
     Translates the normalized adapter operations (capabilities, list, get,
-    get_content, get_changes, subscribe, renew, unsubscribe) into Graph REST calls.
-    The mount's sync_config.resource selects the surface ("mail" ->
+    get_content, get_changes, update, subscribe, renew, unsubscribe) into Graph
+    REST calls. The mount's sync_config.resource selects the surface ("mail" ->
     mailFolders/messages, "calendar" -> calendars/events + calendarView, "files" ->
     drive items + delta). `principal` selects WHOSE mailbox/calendar (blank = the
     connected account, an address = a shared mailbox), and for "files"
-    `drive_scope` picks OneDrive or a SharePoint document library. Read-only.
+    `drive_scope` picks OneDrive or a SharePoint document library. Read-only for
+    calendar and files; MAIL additionally supports `update`, a state PATCH of the
+    read flag (capabilities reports can_write/can_update/mutable_fields for the
+    mail resource ONLY). A mail write needs the Mail.ReadWrite scope, which the
+    connector does not request by default — add it and re-consent per account.
     Push-capable: subscribe/renew/unsubscribe manage a Graph subscription whose
     notifications are a pure invalidation signal. Invoked directly by the sync
     engine with a decrypted bearer token; owns no token-refresh logic.
@@ -39,8 +43,8 @@ properties:
       operation:
         type: string
         description: >
-          One of capabilities, list, get, get_content, get_changes, subscribe,
-          renew, unsubscribe
+          One of capabilities, list, get, get_content, get_changes, update
+          (mail only), subscribe, renew, unsubscribe
       params:
         type: object
         description: Operation-specific arguments

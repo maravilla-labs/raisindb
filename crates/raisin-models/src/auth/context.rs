@@ -155,6 +155,25 @@ impl AuthContext {
         }
     }
 
+    /// Create a system context that acts under a named non-human actor.
+    ///
+    /// Identical to [`Self::system`] — `is_system` bypasses RLS and the resolved
+    /// permissions are `system_admin` — except that [`Self::actor_id`] returns
+    /// `actor` instead of `"system"`.
+    ///
+    /// Every write path stamps `created_by` / `updated_by` from `actor_id()`,
+    /// and the auth context wins over the transaction's raw actor there (see
+    /// `transaction/context/nodes/create/core/put_node.rs`). So an engine that
+    /// writes on its own behalf — the virtual-mount sync, for instance — can be
+    /// honest about *who* wrote without giving up its privileges. Privilege
+    /// decisions all key on `is_system`, never on the user id string.
+    pub fn system_as(actor: impl Into<String>) -> Self {
+        AuthContext {
+            user_id: Some(actor.into()),
+            ..Self::system()
+        }
+    }
+
     /// Create a context that denies all access.
     ///
     /// Use when:
@@ -402,6 +421,18 @@ mod tests {
         assert!(ctx.bypasses_rls());
         assert!(ctx.has_role("anything"));
         assert!(ctx.in_group("anything"));
+    }
+
+    #[test]
+    fn test_system_as_keeps_privileges_but_renames_the_actor() {
+        let ctx = AuthContext::system_as("virtual-mount-sync");
+        assert_eq!(ctx.actor_id(), "virtual-mount-sync");
+        assert!(ctx.is_system);
+        assert!(ctx.bypasses_rls());
+        assert!(ctx.is_resolved());
+        assert!(ctx.has_role("anything"));
+        assert!(ctx.in_group("anything"));
+        assert!(!ctx.is_anonymous);
     }
 
     #[test]

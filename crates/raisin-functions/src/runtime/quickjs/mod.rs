@@ -31,6 +31,8 @@ mod pool;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_ms_graph_adapter;
 
 use async_trait::async_trait;
 use raisin_error::{Error, Result};

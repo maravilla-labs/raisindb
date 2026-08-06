@@ -140,6 +140,46 @@ pub struct Capabilities {
     pub default_ttl: Option<u64>,
     #[serde(default)]
     pub max_file_size: Option<i64>,
+
+    // ---- write path (§3.3 / §10 of docs/reference/virtual-node-adapters.md) ----
+    //
+    // All optional, all `false` / empty by default, so an adapter written before
+    // the write path existed — i.e. every adapter shipped today — is correctly
+    // reported as read-only rather than accidentally write-enabled.
+    /// Adapter implements the `create` operation (a local create propagates).
+    #[serde(default)]
+    pub can_create: bool,
+    /// Adapter implements the `update` operation (a local edit propagates).
+    #[serde(default)]
+    pub can_update: bool,
+    /// Adapter implements the `delete` operation (a local delete propagates,
+    /// subject to the mount's `delete_policy`).
+    #[serde(default)]
+    pub can_delete: bool,
+    /// Adapter implements the `submit` operation — issuing a command (send a
+    /// mail, RSVP) rather than mirroring an object.
+    #[serde(default)]
+    pub can_submit: bool,
+    /// The `state_only` allow-list: which node properties this provider accepts
+    /// as writes. The engine has no domain knowledge (it does not know a mail
+    /// body is immutable while its read flag is not), so this is how a provider
+    /// explains what "writable" means for it. Empty means "nothing declared".
+    #[serde(default)]
+    pub mutable_fields: Vec<String>,
+    /// Recommended default for a local delete: `"detach" | "trash" | "purge"`.
+    /// A mount may override it; `purge` is never a default.
+    #[serde(default)]
+    pub default_delete_policy: Option<String>,
+    /// Recommended default for a local move: `"push" | "detach" | "reject"`.
+    #[serde(default)]
+    pub default_move_policy: Option<String>,
+    /// `delete` can soft-delete (provider trash) rather than purge.
+    #[serde(default)]
+    pub supports_trash: bool,
+    /// `submit` can forward a provider-side idempotency key, so the engine's
+    /// at-most-once attempt id is honoured end to end.
+    #[serde(default)]
+    pub supports_idempotency_key: bool,
 }
 
 impl Capabilities {
@@ -152,6 +192,47 @@ impl Capabilities {
             can_read: true,
             ..Self::default()
         }
+    }
+
+    /// Which of the operations a `mirror` write mode needs this adapter does
+    /// NOT declare, in a stable order suitable for an operator-facing message.
+    ///
+    /// `mirror` means "the node **is** the remote object", so create, update and
+    /// delete all have to propagate; `can_write` is the umbrella flag an adapter
+    /// sets to say it writes at all. Empty means every needed op is declared.
+    pub fn missing_mirror_ops(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.can_write {
+            missing.push("can_write");
+        }
+        if !self.can_create {
+            missing.push("can_create");
+        }
+        if !self.can_update {
+            missing.push("can_update");
+        }
+        if !self.can_delete {
+            missing.push("can_delete");
+        }
+        missing
+    }
+
+    /// Which of the operations a `state_only` write mode needs this adapter
+    /// does NOT declare, in a stable order suitable for an operator message.
+    ///
+    /// `state_only` pushes a declared allow-list of fields onto an existing
+    /// remote object, so it needs `update` and nothing else — no create, no
+    /// delete. Reusing [`Self::missing_mirror_ops`] here would refuse a perfectly
+    /// good mail mount for lacking a `delete` it will never call.
+    pub fn missing_state_only_ops(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.can_write {
+            missing.push("can_write");
+        }
+        if !self.can_update {
+            missing.push("can_update");
+        }
+        missing
     }
 
     /// Parse an adapter's `capabilities` return value. Returns `None` when the

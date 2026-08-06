@@ -35,8 +35,18 @@
  * Token lifecycle is owned entirely by the engine: `credential.access_token` is
  * a current, decrypted bearer token; there is NO refresh_token and no refresh
  * logic here. If a token is rejected, throw `auth_expired` and let the engine
- * handle the reconnect/refresh cycle. Read-only: create/update/delete are not
- * supported (capabilities report can_write = false).
+ * handle the reconnect/refresh cycle.
+ *
+ * Writes: MAIL ONLY, and only `update` (a state PATCH — today that is the read
+ * flag). Calendar and files stay strictly read-only, which is why
+ * `opCapabilities` declares can_write/can_update per RESOURCE and not once for
+ * the whole adapter. create/delete/submit are not implemented and are
+ * deliberately left undeclared, so a `mirror` mount cannot resolve to a mode
+ * this adapter cannot serve.
+ *
+ * The PATCH body is whatever the mount's MAPPER produced — the adapter never
+ * re-derives the node -> Graph field mapping (§6a of the write-path design):
+ * a custom mapper that reshapes nodes must be the one that reshapes them back.
  */
 
 var GRAPH = "https://graph.microsoft.com/v1.0";
@@ -142,6 +152,26 @@ function raiseForStatus(resp, context) {
   throw new Error(context + ": " + msg);
 }
 
+// Whether the CALLER asked to handle this status itself instead of letting
+// `raiseForStatus` map it.
+//
+// `rawStatusOk` is the historical 404-only form and stays exactly as it was.
+// `rawStatuses` is the general form, added for `update`: a PATCH's statuses do
+// not mean what the same statuses mean on a GET (412 is a real conflict, 404 is
+// "the message moved and got a new id", 403 is a missing WRITE scope), and
+// `raiseForStatus` is shared by every read in this file — widening it there
+// would change read behaviour to serve one writer.
+function statusIsRaw(opts, status) {
+  if (opts.rawStatusOk && status === 404) return true;
+  var list = opts.rawStatuses;
+  if (list) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] === status) return true;
+    }
+  }
+  return false;
+}
+
 // Single authorized request. `raisin.http.fetch` is synchronous and returns
 // { status, headers, body }.
 function graphFetch(credential, method, url, opts) {
@@ -164,7 +194,7 @@ function graphFetch(credential, method, url, opts) {
   var request = { method: method, headers: headers };
   if (opts.body !== undefined) request.body = opts.body;
   var resp = raisin.http.fetch(url, request);
-  if (!opts.rawStatusOk || resp.status !== 404) {
+  if (!statusIsRaw(opts, resp.status)) {
     raiseForStatus(resp, opts.context || method + " " + url);
   }
   return resp;
@@ -476,9 +506,29 @@ function calendarSupportsDelta(mount) {
   return calendarId(mount) === "calendar";
 }
 
+// Capabilities are RESOURCE-dependent, and both dependent fields are here:
+// `supports_changes` (a non-primary calendar has no delta feed) and the write
+// flags (only mail has an `update`).
+//
+// The write flags are declared for MAIL ONLY. Declaring them adapter-wide would
+// let a calendar or files mount resolve to a writable mode and then discover at
+// drain time that every push throws — after the engine had already claimed the
+// candidates. Calendar and files must stay byte-identical to what they were.
+//
+// `mutable_fields` holds the NODE property name (`unread`), not the Graph name
+// (`isRead`): the engine intersects it with the mount's
+// `write_config.mutable_fields`, which is authored in node terms, and passes the
+// survivors to the MAPPER as `fields`. The Graph spelling is the mapper's
+// business and appears nowhere in this file.
+//
+// can_create / can_delete / can_submit are deliberately absent (the engine's
+// serde defaults them false): `state_only` needs neither, and declaring a
+// capability with no implementation behind it is how a mount resolves to a mode
+// that cannot be served.
 function opCapabilities(mount) {
-  var deltaOk = resourceOf(mount) !== "calendar" || calendarSupportsDelta(mount);
-  return {
+  var resource = resourceOf(mount);
+  var deltaOk = resource !== "calendar" || calendarSupportsDelta(mount);
+  var caps = {
     can_read: true,
     can_write: false,
     can_create_folders: false,
@@ -490,6 +540,12 @@ function opCapabilities(mount) {
     default_ttl: null,
     max_file_size: null,
   };
+  if (resource === "mail") {
+    caps.can_write = true;
+    caps.can_update = true;
+    caps.mutable_fields = ["unread"];
+  }
+  return caps;
 }
 
 // ---- browse (discovery for the mount editor) ------------------------------
@@ -897,6 +953,148 @@ function opGetContent(credential, mount, params) {
   return { content: b ? b.content || "" : "", mime_type: mime };
 }
 
+// ---- update (mail state writeback) ----------------------------------------
+
+// An etag TOKEN looks like `W/"CQAAABYAAAA..."` or `"abc"`. A stored `__etag`
+// does NOT always: `toExternalItem` falls back to `lastModifiedDateTime` when
+// Graph sent no `@odata.etag`, so a perfectly healthy mail node can carry an ISO
+// timestamp there. Sending that as If-Match is a 400 from Graph, and 400 is
+// TERMINAL (config_error) — one such message would mark the whole mount
+// misconfigured. So the header is sent only when the stored value has the shape
+// of an etag; otherwise the write is last-write-wins, which is what it already
+// was before the value was stored.
+var ETAG_SHAPE = /^(W\/)?"/;
+
+function isEmptyObject(v) {
+  if (!v || typeof v !== "object") return true;
+  for (var k in v) {
+    if (Object.prototype.hasOwnProperty.call(v, k)) return false;
+  }
+  return true;
+}
+
+// PATCH one message with the payload the MAPPER produced.
+//
+// `params` is what the engine's writeback sends:
+//   { item_id, payload, fields, etag }
+// `payload` is forwarded VERBATIM. The adapter must not rebuild it from
+// `fields`: `fields` are NODE property names and the mapper is the only
+// authorized translator between the two vocabularies.
+//
+// MAILBOX-scoped, exactly like `opGet` — `{principal}/messages/{id}`, never
+// `{principal}/mailFolders/{f}/messages/{id}`. A literal `/me` here would patch
+// the CONNECTED account's mailbox while the mount reads a shared one, silently,
+// with no error anywhere.
+function opUpdate(credential, mount, params) {
+  params = params || {};
+  var resource = resourceOf(mount);
+  if (resource !== "mail") {
+    // Terminal on purpose: retrying sends the same unsupported request forever.
+    // Only mail has an update; capabilities says so, so reaching here means the
+    // mount was resolved against a stale cached capability record.
+    throw coded(
+      "update: only the mail resource is writable (this mount is '" + resource + "')",
+      "config_error"
+    );
+  }
+  if (!params.item_id) {
+    throw coded("update: params.item_id is required", "config_error");
+  }
+  if (isEmptyObject(params.payload)) {
+    // An empty PATCH still bumps the message's change key, which invalidates
+    // every stored etag and makes the next delta re-deliver the message for no
+    // reason. The mapper already returns null rather than emit one; this is the
+    // second guard.
+    throw coded("update: refusing an empty PATCH body", "config_error");
+  }
+
+  var url = GRAPH + principal(mount) + "/messages/" + enc(params.item_id);
+  var headers = { "Content-Type": "application/json" };
+  if (typeof params.etag === "string" && ETAG_SHAPE.test(params.etag)) {
+    headers["If-Match"] = params.etag;
+  }
+
+  // Every status this path diagnoses differently from a READ is claimed here,
+  // so `raiseForStatus` never sees it. What is NOT claimed (401, 429, 5xx, 408)
+  // keeps the shared mapping, which is correct for a write too.
+  var resp = graphFetch(credential, "PATCH", url, {
+    headers: headers,
+    body: params.payload,
+    context: "update",
+    rawStatuses: [400, 403, 404, 409, 412],
+  });
+
+  var status = resp.status;
+  var body = resp.body || {};
+  var err = (body && body.error) || {};
+  var graphCode = err.code || "";
+  var graphMsg = err.message || "";
+
+  // The message changed remotely since we read it. The engine resolves this by
+  // the mount's conflict policy; it must NOT be a retry, because the retry
+  // sends the same stale If-Match and fails identically.
+  //
+  // The message text is load-bearing: `AdapterError::classify` scans for
+  // auth_expired, rate_limited, cursor_invalid, config_error and THEN conflict,
+  // so a conflict message containing any earlier token is misclassified.
+  if (status === 412 || status === 409 || graphCode === "ErrorIrresolvableConflict") {
+    throw coded(
+      "update: the message changed in Microsoft 365 since it was read (HTTP " + status + ")",
+      "conflict"
+    );
+  }
+
+  // GONE, not misconfigured. Graph message ids are NOT stable — a message that
+  // moves folders gets a NEW id unless requests carry
+  // `Prefer: IdType="ImmutableId"`, which this adapter does not send. A read
+  // tolerates that (the delta feed re-reports the item under its new id and a
+  // fresh node is materialized); a PATCH against the stale stored id 404s. Left
+  // to `raiseForStatus` that is a config_error, i.e. one moved message would
+  // permanently mark a healthy mount misconfigured. Returning null makes the
+  // engine treat this node as settled and move on.
+  if (status === 404 || graphCode === "ErrorItemNotFound") {
+    return null;
+  }
+
+  // A write-scope shortfall, which is the FIRST thing a new mail mount hits:
+  // the connector requests Mail.Read / Mail.Read.Shared and nothing else, so
+  // every read succeeds and every PATCH 403s. Inheriting `raiseForStatus`'s
+  // 401/403 -> auth_expired would send the operator to reconnect the account,
+  // and reconnecting with the same consent cannot fix it — the wrong diagnosis
+  // costs more than the failure.
+  if (status === 403) {
+    throw coded(
+      "update: Microsoft Graph refused the write (403 " + (graphCode || "Forbidden") +
+        "). This is almost certainly a missing WRITE scope, not a stale token: " +
+        "add Mail.ReadWrite (and Mail.ReadWrite.Shared for a shared mailbox) to " +
+        "the Microsoft 365 connector's OAuth scopes in the console and RECONNECT " +
+        "each account — Microsoft only issues a new scope on fresh consent.",
+      "config_error"
+    );
+  }
+
+  if (status === 400) {
+    throw coded(
+      "update: " + (graphMsg || "Microsoft Graph rejected the PATCH (400)"),
+      "config_error"
+    );
+  }
+
+  // Anything else (401, 429, 5xx, ...) keeps the shared read mapping.
+  raiseForStatus(resp, "update");
+
+  // Graph answers a message PATCH with 200 and the FULL updated message, so
+  // `@odata.etag` is normally present in the body — read exactly as
+  // `toExternalItem` reads it. `resp.headers` is a fallback (reqwest lowercases
+  // header names, hence "etag" not "ETag"). A null etag is safe: the engine
+  // keeps the previously stored one, and `__pushed_state`, not the etag, is what
+  // suppresses the echo.
+  return {
+    external_id: body.id || params.item_id,
+    etag: body["@odata.etag"] || (resp.headers && resp.headers["etag"]) || null,
+  };
+}
+
 // Build the FIRST delta URL (no since_token yet). Subsequent calls reuse the
 // engine-persisted token verbatim — it is a full @odata.nextLink/deltaLink.
 //
@@ -1079,6 +1277,8 @@ function handler(input) {
       return opGet(credential, mount, params);
     case "get_content":
       return opGetContent(credential, mount, params);
+    case "update":
+      return opUpdate(credential, mount, params);
     case "get_changes":
       return opGetChanges(credential, mount, params);
     case "subscribe":

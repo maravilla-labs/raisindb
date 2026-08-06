@@ -100,4 +100,44 @@ impl SyncCtx<'_> {
             }
         }
     }
+
+    /// Ask this mount's mapper, once per run, whether it can translate nodes
+    /// outward. Never fails the sync: a mapper that throws is reported as
+    /// unable to write, not as a broken mount.
+    ///
+    /// The probe is its own operation (`mapper_capabilities`) rather than a
+    /// `to_external` call with a null node. Probing with a null node would work
+    /// against every mapper shipped today — they all open with
+    /// `if (!item …) return null` — but it would then oblige every future
+    /// `to_external` to tolerate a null node forever, and a strict one that
+    /// threw on the probe would be misreported as read-only.
+    pub async fn probe_mapper_writeback(&self) -> MapperWriteback {
+        let Some(mapper) = &self.mount.mapping_function else {
+            // Read-only by construction, stated rather than incidental: the
+            // built-in Rust `default_mapping` is lossy, so inverting it would be
+            // guessing. No mapper, no writes — and no invocation to find out.
+            return MapperWriteback::NoMapper;
+        };
+        let input = json!({
+            "operation": "mapper_capabilities",
+            "mount": self.mount_snapshot,
+        });
+        match self.invoker.invoke(&self.scope, mapper, input).await {
+            Ok(v) => {
+                if v.get("to_external").and_then(|v| v.as_bool()) == Some(true) {
+                    MapperWriteback::Supported
+                } else {
+                    MapperWriteback::NotImplemented
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    mount_id = %self.scope.mount_id,
+                    error = %e,
+                    "mapper writeback probe failed; treating the mount as read-only"
+                );
+                MapperWriteback::ProbeFailed(e.to_string())
+            }
+        }
+    }
 }

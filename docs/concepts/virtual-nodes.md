@@ -98,7 +98,7 @@ an integration/account to a target workspace subtree.
 | `adapter_function` | String | Optional override of the integration default. |
 | `mapping_function` | String | Optional custom mapper. |
 | `sync_config` | Object | `{ mode, interval_seconds, include_patterns, exclude_patterns, ephemeral, ttl_seconds, max_items_per_sync }`. |
-| `write_config` | Object | `{ writeback, conflict }` — **reserved; write-through is deferred** (see below). |
+| `write_config` | Object | Parsed today: `{ mode, mutable_fields, conflict, writeback }`. `mode` is `off` \| `state_only` — `mirror` and `submit` are designed but refused with a reason, as are `resolver_function` / `delete_policy` / `move_policy` / `collections`, which are **not parsed at all**. A blob that is present but does not parse fails the mount loudly rather than silently disabling writeback. See [The write path](#the-write-path). |
 | `state` | Object | Engine-managed: `{ last_sync_token, last_sync_at, last_error, consecutive_failures, status, last_fencing_token }`. Do not hand-edit. |
 | `enabled` | Boolean | Default `true` (indexed). |
 
@@ -165,6 +165,13 @@ mapping** — no function call on the hot path:
 A custom `mapping_function` is a `raisin:Function` called once per item with
 `{ external_item, mount }`, returning `{ node_type, name?, properties }` or `null`
 to skip the item.
+
+On the write path the mapper is **bidirectional**, dispatching on
+`input.operation`: `to_node` (the call above, unchanged and still the default when
+no operation is given) and `to_external` (`{ node, mount, fields? }` → a provider
+payload). Both directions stay in one function node so they cannot drift. The
+engine calls `to_external` today, for `state_only` mounts — see
+[The write path](#the-write-path).
 
 ### Reserved virtual metadata
 
@@ -261,12 +268,105 @@ the inbox" story needs no new agent infrastructure.
 
 ---
 
+## The write path
+
+> **Status.** One mode ships: `state_only`, which pushes a declared allow-list of
+> fields (mail's `unread` is the worked example) through the adapter's `update`,
+> as the first step of each sync run. `mirror` and `submit` are not built — a
+> mount asking for `writeback: "write_through"` still records
+> `state.writeback_supported: false`, naming what is missing, and the console
+> still hides the controls. The rest of this section is the agreed design — read
+> it before implementing adapter write operations so what you build matches what
+> the engine will call. Full contract:
+> [`docs/reference/virtual-node-adapters.md`](../reference/virtual-node-adapters.md) §10.
+> Staging: [`docs/virtual-nodes-implementation-plan.md`](../virtual-nodes-implementation-plan.md).
+
+### Three write modes, chosen per collection
+
+The generalization that makes one engine serve calendars, mailboxes, files and
+anything written later: **write mode is a property of the mount/collection, not
+of the adapter.** The same IMAP adapter serves a `state_only` inbox mount and a
+`submit` outbox mount.
+
+| mode | the node is… | a local change means | example |
+|------|--------------|----------------------|---------|
+| `mirror` | the remote object | create/update/delete propagate | calendar event, Drive file |
+| `state_only` | an immutable record with mutable state | only declared `mutable_fields` propagate | mail: body immutable, read/flags/folder are not |
+| `submit` | a **command** | creating it and queueing it issues the command, once | send / reply / forward, RSVP |
+
+`submit` is what makes immutable resources coherent. An email cannot be edited,
+so its write path is a *sending* path — and the home for that is a separate mount
+whose members are intents rather than mirrors:
+
+```
+/mail/inbox    mode: state_only   raisin:Mail
+/mail/sent     read-only          raisin:Mail          <- canonical sent message
+/mail/outbox   mode: submit       raisin:OutboundMail  <- commands
+```
+
+Reply and forward then need no special casing — the outbox node carries the action
+and the provider's own message id. The existing `ephemeral` + `ttl_seconds`
+machinery garbage-collects completed commands for free. The same shape serves any
+future connector: a chat outbox, a refund queue, an order submission mount.
+
+### The engine/adapter boundary
+
+The write path is deliberately thin and domain-blind. The engine knows "call
+`update` with these fields"; it does **not** know what a calendar is or that mail
+bodies are immutable. That is the adapter package explaining itself through
+`capabilities` (notably `mutable_fields`), its nodetypes, and its docs.
+
+| Layer | Owns |
+|-------|------|
+| **Engine** (Rust, generic) | change detection, ordering, the mount lease, intent lifecycle, the already-pushed check, metadata stamp-back, safety rails, at-most-once semantics, error classification |
+| **Adapter package** (JS, per provider) | the remote API calls, node↔provider translation, declared capabilities, the conflict resolver |
+| **Convention** (per package) | which nodetypes, which collections, outbox layout, mount templates |
+
+**Adapters never write nodes.** An adapter takes a request, hits the provider, and
+returns a result; the engine performs every local write. Delegating that would
+lose lease serialization, the stamp-back that prevents sync loops, the destructive
+-operation rails, and the sandbox boundary — adapters run privileged with a system
+auth context, so an adapter that could write nodes could write *any* node.
+
+### Mapping becomes bidirectional — in one function
+
+`mapping_function` gains a second direction, dispatched by `operation`:
+`to_node` (`external_item → node`, exactly as today) and `to_external`
+(`node → provider payload`).
+
+Both live in the **same function node**, and that is load-bearing. The mapper is
+separate from the adapter precisely so node shape can be customized without
+forking the adapter — so if the reverse translation were hardcoded inside the
+adapter, pointing a mount at a custom mapper would make it write the wrong fields
+silently. One relationship expressed twice in two files is exactly the drift this
+codebase pays for most often.
+
+A mapper without `to_external` makes its mount read-only, recorded in
+`state.writeback_supported` so the console can explain *why*. Writability is a
+property of the **mount** — adapter and mapper together.
+
+### The two mechanisms that keep it safe
+
+- **Loop prevention is the etag stamp-back, not actor filtering.** After a push,
+  the provider's new etag is stamped back under the sync actor, so the next delta
+  returning that item hits the existing skip-write and writes nothing. For fields
+  a provider's etag does not cover (IMAP `\Seen`), a `__pushed_state` companion
+  records what was actually pushed.
+- **`submit` is at-most-once and never auto-retried.** A retried send is a
+  duplicate email. The command is durably marked `sending` *before* the call; an
+  ambiguous failure parks at `unknown` for a human rather than retrying. Only
+  `rate_limited` requeues, because it is the only error proving no side effect
+  occurred.
+
+Delete and move are per-collection policy (`detach` | `trash` | `purge` and
+`push` | `detach` | `reject`) with adapter-declared defaults, and destructive
+writes are bounded by proportional blast-radius rails so a mis-scoped bulk
+statement cannot reach the provider.
+
+---
+
 ## What is deferred
 
-- **Write-through** (`write_config.writeback: "write_through"`) — the property
-  exists and the Google Drive adapter implements `create`/`update`/`delete`, but
-  the engine does **not** yet propagate local edits back to the provider. Default
-  is off; v1 mounts are read/reconcile-only.
 - **On-demand resolution** — no `VirtualPathResolver` intercepts read-path cache
   misses to fetch a node lazily. v1 is background-sync only. **Deferred by
   decision** (original design Phase 7): intercepting reads means read paths can

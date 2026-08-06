@@ -21,6 +21,7 @@ import {
   pushIndicator,
   STATUS_META,
   statusKind,
+  writeModeLabel,
 } from '../utils/mountStatus'
 import { formatAbsoluteSeconds, formatRelativeSeconds } from '../utils/time'
 
@@ -231,7 +232,7 @@ export default function Mounts() {
       header: 'Writeback',
       width: '120px',
       render: (m) => (
-        <span className="text-xs text-zinc-300">{m.write_config?.writeback || 'off'}</span>
+        <span className="text-xs text-zinc-300">{writeModeLabel(m.write_config)}</span>
       ),
     },
     {

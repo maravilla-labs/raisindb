@@ -24,7 +24,7 @@ use super::materializer::{
     BatchOp, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,
     VirtualNodeRef,
 };
-use super::{AdapterError, AdapterInvoker, SyncCtx, VirtualMountSyncHandler};
+use super::{AdapterError, AdapterInvoker, MapperWriteback, SyncCtx, VirtualMountSyncHandler};
 use crate::RocksDBStorage;
 
 const TENANT: &str = "default";
@@ -80,6 +80,7 @@ fn scope() -> MountScope {
         mount_id: MOUNT_ID.to_string(),
         mount_path: MOUNT_PATH.to_string(),
         force_rewrite: false,
+        watched_fields: Vec::new(),
     }
 }
 
@@ -256,6 +257,67 @@ impl AdapterInvoker for MockAdapter {
     }
 }
 
+/// A mapper written before `operation` dispatch existed: it reads only
+/// `external_item`, so it ignores the operation key entirely and answers `null`
+/// to anything that is not an item. Every mapper shipped today is this shape.
+#[derive(Default)]
+struct LegacyMapper {
+    ops: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl AdapterInvoker for LegacyMapper {
+    async fn invoke(
+        &self,
+        _scope: &MountScope,
+        _adapter_path: &str,
+        input: Value,
+    ) -> Result<Value, AdapterError> {
+        self.ops.lock().unwrap().push(
+            input
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<absent>")
+                .to_string(),
+        );
+        let item = input.get("external_item");
+        let Some(id) = item.and_then(|i| i.get("external_id")) else {
+            return Ok(Value::Null); // `if (!item || !item.external_id) return null`
+        };
+        let _ = id;
+        Ok(json!({
+            "node_type": "raisin:Node",
+            "name": item.and_then(|i| i.get("name")).cloned(),
+            "properties": { "title": item.and_then(|i| i.get("name")).cloned() },
+        }))
+    }
+}
+
+/// A mapper that dispatches on `operation` and implements both directions.
+#[derive(Default)]
+struct BidiMapper {
+    last_fields: Mutex<Option<Value>>,
+}
+
+#[async_trait]
+impl AdapterInvoker for BidiMapper {
+    async fn invoke(
+        &self,
+        _scope: &MountScope,
+        _adapter_path: &str,
+        input: Value,
+    ) -> Result<Value, AdapterError> {
+        match input.get("operation").and_then(|v| v.as_str()) {
+            Some("mapper_capabilities") => Ok(json!({ "to_external": true })),
+            Some("to_external") => {
+                *self.last_fields.lock().unwrap() = input.get("fields").cloned();
+                Ok(json!({ "payload": { "isRead": true }, "external_id": "EXT-1" }))
+            }
+            _ => Ok(json!({ "node_type": "raisin:Node", "properties": {} })),
+        }
+    }
+}
+
 fn ctx<'a>(
     env: &Env,
     mount: &'a MountConfig,
@@ -267,7 +329,13 @@ fn ctx<'a>(
         deadline: i64::MAX,
         public_origin: None,
         storage: env.storage.clone(),
-        scope: scope(),
+        // Mirrors `resolve.rs`: the scope's watched fields come from the
+        // mount's declared `mutable_fields`, so a `state_only` mount's index
+        // carries the write view and every other mount's does not.
+        scope: MountScope {
+            watched_fields: mount.write_config.declared_mutable_fields().to_vec(),
+            ..scope()
+        },
         config_branch: "main".to_string(),
         mount: mount.clone(),
         adapter_path: "/adapters/mock".to_string(),
@@ -1341,6 +1409,86 @@ async fn a_corrupt_state_blob_is_refused_not_defaulted() {
         read.is_err(),
         "read_mount_state must surface a corrupt blob instead of defaulting it"
     );
+}
+
+/// A `write_config` blob that is PRESENT but does not parse must not default.
+///
+/// `WriteConfig::default()` is writeback OFF. Defaulting a corrupt blob
+/// therefore silently disables the push an operator explicitly configured:
+/// `drain` returns immediately, `writeback_supported` stays absent because
+/// nothing ever refused anything, and local edits pile up forever with no error
+/// and no log line. Absent stays fine — that is a read-only mount.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_write_config_is_refused_not_defaulted() {
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+
+    // `mutable_fields` is Vec<String>, not a string.
+    {
+        let tx = begin(&env).await;
+        let mut node = tx
+            .get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        node.properties.insert(
+            "write_config".to_string(),
+            prop_obj(json!({ "mode": "state_only", "mutable_fields": "unread" })),
+        );
+        tx.upsert_node(super::SYSTEM_WORKSPACE, &node)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let node = {
+        let tx = begin(&env).await;
+        tx.get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let parsed = super::config::MountConfig::from_node(&node);
+    let err = parsed
+        .err()
+        .expect("a corrupt write_config must fail the parse, not silently disable writeback");
+    assert!(
+        err.contains("write_config"),
+        "the error must name the property an operator has to fix; got: {err}"
+    );
+}
+
+/// An ABSENT `write_config` still defaults — a read-only mount is the norm.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_absent_write_config_still_defaults() {
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+
+    {
+        let tx = begin(&env).await;
+        let mut node = tx
+            .get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        node.properties.remove("write_config");
+        tx.upsert_node(super::SYSTEM_WORKSPACE, &node)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let node = {
+        let tx = begin(&env).await;
+        tx.get_node(super::SYSTEM_WORKSPACE, MOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let mount = super::config::MountConfig::from_node(&node)
+        .expect("an absent write_config is a read-only mount, not a broken one");
+    assert!(!mount.write_config.wants_state_only());
+    assert!(!mount.write_config.wants_write_through());
 }
 
 /// A mount whose target workspace forbids its node type must STOP and say why.
@@ -2616,3 +2764,766 @@ fn stop_drops_a_poisoned_delta_cursor() {
     // With no token and a completed walk, the next run re-baselines.
     assert!(state.last_sync_token.is_none() && state.backfill_complete);
 }
+
+// ---- capability honesty (stage 0 of the write path) ----
+
+/// An adapter written before the write path existed declares none of the write
+/// fields — and must deserialize to "cannot write anything", not to a default
+/// that would let a later stage push edits to a provider that never agreed.
+#[test]
+fn legacy_capabilities_default_to_no_write() {
+    let caps = super::Capabilities::from_adapter_value(&json!({
+        "can_read": true,
+        "supports_changes": true,
+        "max_file_size": 1024
+    }))
+    .expect("legacy capabilities still parse");
+
+    assert!(caps.can_read);
+    assert!(caps.supports_changes);
+    assert!(!caps.can_write);
+    assert!(!caps.can_create);
+    assert!(!caps.can_update);
+    assert!(!caps.can_delete);
+    assert!(!caps.can_submit);
+    assert!(caps.mutable_fields.is_empty());
+    assert!(caps.default_delete_policy.is_none());
+    assert!(caps.default_move_policy.is_none());
+    assert!(!caps.supports_trash);
+    assert!(!caps.supports_idempotency_key);
+
+    // The no-capabilities fallback is read-only for the same reason.
+    let fb = super::Capabilities::fallback();
+    assert!(fb.can_read);
+    assert!(!fb.can_write && !fb.can_create && !fb.can_update && !fb.can_delete);
+}
+
+/// A write-capable adapter round-trips every new field.
+#[test]
+fn write_capabilities_round_trip() {
+    let caps = super::Capabilities::from_adapter_value(&json!({
+        "can_read": true,
+        "can_write": true,
+        "can_create": true,
+        "can_update": true,
+        "can_delete": true,
+        "can_submit": true,
+        "mutable_fields": ["unread", "categories"],
+        "default_delete_policy": "trash",
+        "default_move_policy": "push",
+        "supports_trash": true,
+        "supports_idempotency_key": true
+    }))
+    .expect("write capabilities parse");
+
+    assert_eq!(caps.mutable_fields, vec!["unread", "categories"]);
+    assert_eq!(caps.default_delete_policy.as_deref(), Some("trash"));
+    assert_eq!(caps.default_move_policy.as_deref(), Some("push"));
+    assert!(caps.supports_trash && caps.supports_idempotency_key && caps.can_submit);
+    assert!(caps.missing_mirror_ops().is_empty());
+}
+
+/// A mount asking for write-through against a read-only adapter is reported as
+/// unsupported WITH the reason — the whole point of stage 0 is that the console
+/// can say which operation is missing instead of "not supported in v1".
+#[test]
+fn writeback_unsupported_names_the_missing_ops() {
+    let wc = WriteConfig {
+        writeback: "write_through".to_string(),
+        ..Default::default()
+    };
+    let caps = super::Capabilities {
+        can_read: true,
+        ..Default::default()
+    };
+
+    let (supported, reason) =
+        super::write::writeback_verdict(&wc, &caps, &MapperWriteback::Supported);
+    assert_eq!(supported, Some(false));
+    let reason = reason.expect("a refusal carries a reason");
+    assert!(reason.contains("can_write"), "{reason}");
+    assert!(reason.contains("can_update"), "{reason}");
+
+    // A partially-capable adapter names only what it is missing.
+    let partial = super::Capabilities {
+        can_read: true,
+        can_write: true,
+        can_create: true,
+        can_update: true,
+        ..Default::default()
+    };
+    let (supported, reason) =
+        super::write::writeback_verdict(&wc, &partial, &MapperWriteback::Supported);
+    assert_eq!(supported, Some(false));
+    assert_eq!(
+        reason.as_deref(),
+        Some("adapter does not declare can_delete")
+    );
+}
+
+/// Write-through against a fully capable adapter is supported, with no reason;
+/// a mount that never asked stays `None` (absent != `Some(false)` to the UI, and
+/// writing it every run would churn the state blob).
+#[test]
+fn writeback_verdict_supported_and_not_requested() {
+    let caps = super::Capabilities {
+        can_read: true,
+        can_write: true,
+        can_create: true,
+        can_update: true,
+        can_delete: true,
+        ..Default::default()
+    };
+
+    let (supported, reason) = super::write::writeback_verdict(
+        &WriteConfig {
+            writeback: "write_through".to_string(),
+            ..Default::default()
+        },
+        &caps,
+        &MapperWriteback::Supported,
+    );
+    assert_eq!(supported, Some(true));
+    assert!(reason.is_none());
+
+    let (supported, reason) = super::write::writeback_verdict(
+        &WriteConfig::default(),
+        &caps,
+        &MapperWriteback::Supported,
+    );
+    assert_eq!(supported, None, "an off mount is not applicable, not false");
+    assert!(reason.is_none());
+}
+
+// ---- bidirectional mapper (stage 1b) ----
+
+/// A write-capable adapter behind a mapper that cannot answer `to_external` is
+/// NOT a writable mount. Writability belongs to the mount — adapter and mapper
+/// together — so the mapper vetoes on its own, and when both fall short the
+/// operator is told both rather than fixing one and being refused for the other.
+#[test]
+fn a_read_only_mapper_vetoes_a_write_capable_adapter() {
+    let wc = WriteConfig {
+        writeback: "write_through".to_string(),
+        ..Default::default()
+    };
+    let caps = super::Capabilities {
+        can_read: true,
+        can_write: true,
+        can_create: true,
+        can_update: true,
+        can_delete: true,
+        ..Default::default()
+    };
+
+    for mapper in [
+        MapperWriteback::NoMapper,
+        MapperWriteback::NotImplemented,
+        MapperWriteback::ProbeFailed("boom".to_string()),
+    ] {
+        let (supported, reason) = super::write::writeback_verdict(&wc, &caps, &mapper);
+        assert_eq!(supported, Some(false), "{mapper:?}");
+        assert!(reason.is_some(), "{mapper:?} must state why");
+    }
+
+    // Both shortfalls reported, not just the first one found.
+    let (supported, reason) = super::write::writeback_verdict(
+        &wc,
+        &super::Capabilities::fallback(),
+        &MapperWriteback::NotImplemented,
+    );
+    assert_eq!(supported, Some(false));
+    let reason = reason.unwrap();
+    assert!(reason.contains("adapter does not declare"), "{reason}");
+    assert!(reason.contains("to_external"), "{reason}");
+}
+
+/// A mount with no `mapping_function` is read-only by construction, and says so
+/// WITHOUT invoking anything: the built-in Rust mapping has no reverse, so
+/// there is nothing to ask.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_mapping_function_means_read_only_without_a_probe() {
+    let env = setup().await;
+    let mount = mk_mount(SyncConfig::default());
+    assert!(mount.mapping_function.is_none());
+    let mock = MockAdapter::default();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let c = ctx(&env, &mount, &mock, &mat);
+
+    assert_eq!(c.probe_mapper_writeback().await, MapperWriteback::NoMapper);
+    assert_eq!(mock.call_count(), 0, "nothing to ask, so nothing was asked");
+
+    // And the reverse mapping itself short-circuits rather than inventing one.
+    let out = super::map_to_external(&c, &json!({"id": "n1"}), None)
+        .await
+        .unwrap();
+    assert!(matches!(out, super::ToExternalOutcome::NoMapper));
+    assert_eq!(mock.call_count(), 0);
+}
+
+/// Backward compatibility, the non-negotiable part of stage 1b: a mapper that
+/// predates `operation` sees the same `external_item` / `mount` it always saw
+/// and produces the same node. The engine sends `operation: "to_node"`, which a
+/// legacy mapper simply ignores.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_mapper_is_unaffected_by_operation_dispatch() {
+    let env = setup().await;
+    let mut mount = mk_mount(SyncConfig::default());
+    mount.mapping_function = Some("/mappers/legacy".to_string());
+    let mock = LegacyMapper::default();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let c = ctx(&env, &mount, &mock, &mat);
+
+    let item: super::ExternalItem =
+        serde_json::from_value(ext_item("X1", "x.txt", false, "e1")).unwrap();
+    let mapped = super::map_item(&c, &item).await.unwrap().unwrap();
+    assert_eq!(mapped.node_type, "raisin:Node");
+    assert_eq!(mapped.name.as_deref(), Some("x.txt"));
+
+    // It saw the new key and ignored it, exactly as a switch-less mapper does.
+    assert_eq!(mock.ops.lock().unwrap().as_slice(), ["to_node"]);
+
+    // The same mapper answers null to everything else, so it is reported as
+    // read-only — never accidentally write-enabled.
+    assert_eq!(
+        c.probe_mapper_writeback().await,
+        MapperWriteback::NotImplemented
+    );
+    let out = super::map_to_external(&c, &json!({"id": "n1"}), None)
+        .await
+        .unwrap();
+    assert!(matches!(out, super::ToExternalOutcome::NotWritable));
+}
+
+/// A dispatching mapper's `to_external` half: the probe is believed, the
+/// allow-list is forwarded, and the payload comes back typed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bidirectional_mapper_round_trips_to_external() {
+    let env = setup().await;
+    let mut mount = mk_mount(SyncConfig::default());
+    mount.mapping_function = Some("/mappers/bidi".to_string());
+    let mock = BidiMapper::default();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let c = ctx(&env, &mount, &mock, &mat);
+
+    assert_eq!(c.probe_mapper_writeback().await, MapperWriteback::Supported);
+
+    let fields = vec!["unread".to_string()];
+    let out = super::map_to_external(&c, &json!({"id": "n1"}), Some(&fields))
+        .await
+        .unwrap();
+    let super::ToExternalOutcome::Mapped(m) = out else {
+        panic!("expected a payload");
+    };
+    assert_eq!(m.payload, json!({"isRead": true}));
+    assert_eq!(m.external_id.as_deref(), Some("EXT-1"));
+    assert_eq!(
+        mock.last_fields.lock().unwrap().clone(),
+        Some(json!(["unread"])),
+        "the allow-list reaches the mapper verbatim"
+    );
+}
+
+// ---- sync actor identity ----
+
+/// A sync-materialized node is attributed to the sync actor, not to `"system"`.
+///
+/// Both stamps come from the same transaction but by different routes: the
+/// revision's `actor` from `set_actor`, the node's `created_by`/`updated_by`
+/// from the auth context (which wins over the raw actor in `put_node`). Before
+/// `AuthContext::system_as`, only the first was honest — every synced node
+/// claimed `"system"` wrote it, in the node record, the audit log, and the
+/// emitted `node:*` events alike.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_node_is_attributed_to_the_sync_actor() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mut index = mat.load_index(&scope()).await.unwrap();
+
+    let before = sync_revision_count(&env).await;
+    mat.apply_batch(&scope(), &mut index, vec![upsert_op("A1", "a.txt", "v1")])
+        .await
+        .unwrap();
+
+    let nodes = all_nodes(&env, TARGET_WS).await;
+    let node = virtual_assets(&nodes)
+        .into_iter()
+        .find(|n| str_prop(n, "__external_id").as_deref() == Some("A1"))
+        .expect("the synced node must exist");
+
+    assert_eq!(node.created_by.as_deref(), Some(super::SYNC_ACTOR));
+    assert_eq!(node.updated_by.as_deref(), Some(super::SYNC_ACTOR));
+
+    // Additive, not a swap: the revision actor is unchanged.
+    assert_eq!(
+        sync_revision_count(&env).await - before,
+        1,
+        "the revision must still be attributed to the sync actor"
+    );
+
+    // An update of the same node keeps the create attribution and re-stamps the
+    // update one.
+    mat.apply_batch(&scope(), &mut index, vec![upsert_op("A1", "a.txt", "v2")])
+        .await
+        .unwrap();
+    let nodes = all_nodes(&env, TARGET_WS).await;
+    let node = virtual_assets(&nodes)
+        .into_iter()
+        .find(|n| str_prop(n, "__external_id").as_deref() == Some("A1"))
+        .unwrap();
+    assert_eq!(node.created_by.as_deref(), Some(super::SYNC_ACTOR));
+    assert_eq!(node.updated_by.as_deref(), Some(super::SYNC_ACTOR));
+}
+
+// ---- state_only writeback (stage 2) ----
+
+/// One invoker playing both roles a `state_only` mount needs: the provider's
+/// adapter and the mount's bidirectional mapper. They share an invoker in
+/// production too (only the function path differs), so a single mock is the
+/// faithful shape.
+#[derive(Default)]
+struct StateOnlyMock {
+    calls: Mutex<Vec<String>>,
+    /// `params` of every `update` the engine issued, in order.
+    updates: Mutex<Vec<Value>>,
+    changes: Mutex<VecDeque<Value>>,
+    /// Etag the provider assigns to the next accepted update.
+    next_etag: Mutex<String>,
+    /// When set, `update` returns this verbatim instead of an accepted-write
+    /// envelope — how an adapter answers something other than "done", e.g. the
+    /// ms-graph adapter's `null` for a 404 ("gone": Graph message ids are not
+    /// stable, so a moved message's stored id no longer resolves).
+    update_reply: Mutex<Option<Value>>,
+}
+
+impl StateOnlyMock {
+    fn new() -> Self {
+        Self {
+            next_etag: Mutex::new("v2".to_string()),
+            ..Default::default()
+        }
+    }
+    fn update_count(&self) -> usize {
+        self.updates.lock().unwrap().len()
+    }
+    fn push_changes(&self, page: Value) {
+        self.changes.lock().unwrap().push_back(page);
+    }
+    /// Make every subsequent `update` answer `reply` verbatim.
+    fn set_update_reply(&self, reply: Value) {
+        *self.update_reply.lock().unwrap() = Some(reply);
+    }
+}
+
+#[async_trait]
+impl AdapterInvoker for StateOnlyMock {
+    async fn invoke(
+        &self,
+        _scope: &MountScope,
+        _path: &str,
+        input: Value,
+    ) -> Result<Value, AdapterError> {
+        let op = input
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        self.calls.lock().unwrap().push(op.to_string());
+        let params = input.get("params").cloned().unwrap_or(Value::Null);
+        match op {
+            "capabilities" => Ok(json!({
+                "can_read": true,
+                "can_write": true,
+                "can_update": true,
+                "supports_changes": true,
+                "mutable_fields": ["unread"],
+            })),
+            "mapper_capabilities" => Ok(json!({ "to_external": true })),
+            "to_external" => {
+                let unread = input
+                    .get("node")
+                    .and_then(|n| n.get("properties"))
+                    .and_then(|p| p.get("unread"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Ok(json!({ "payload": { "isRead": !unread } }))
+            }
+            "to_node" => {
+                let item = input.get("external_item").cloned().unwrap_or(Value::Null);
+                Ok(json!({
+                    "node_type": "raisin:Node",
+                    "name": item.get("name").cloned(),
+                    "properties": {
+                        "unread": item
+                            .get("metadata")
+                            .and_then(|m| m.get("unread"))
+                            .cloned()
+                            .unwrap_or(Value::Bool(false)),
+                    },
+                }))
+            }
+            "update" => {
+                self.updates.lock().unwrap().push(params.clone());
+                if let Some(reply) = self.update_reply.lock().unwrap().clone() {
+                    return Ok(reply);
+                }
+                Ok(json!({
+                    "external_id": params.get("item_id").cloned(),
+                    "etag": self.next_etag.lock().unwrap().clone(),
+                }))
+            }
+            "get_changes" => Ok(self
+                .changes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| json!({ "items": [], "next_token": null }))),
+            _ => Ok(Value::Null),
+        }
+    }
+}
+
+/// A mount configured for the stage-2 slice: `state_only`, one boolean field.
+fn state_only_mount() -> MountConfig {
+    let mut mount = mk_mount(SyncConfig::default());
+    mount.mapping_function = Some("/mappers/mail".to_string());
+    mount.write_config = WriteConfig {
+        mode: "state_only".to_string(),
+        mutable_fields: vec!["unread".to_string()],
+        ..Default::default()
+    };
+    mount
+}
+
+fn watched_scope() -> MountScope {
+    MountScope {
+        watched_fields: vec!["unread".to_string()],
+        ..scope()
+    }
+}
+
+/// Materialize one mail-shaped node the way a sync would, so it carries a
+/// seeded `__pushed_state` rather than a hand-written one.
+async fn sync_in_mail(mat: &RocksDbMaterializer, unread: bool, etag: &str) -> String {
+    let mut index = mat.load_index(&watched_scope()).await.unwrap();
+    let mut properties = serde_json::Map::new();
+    properties.insert("unread".to_string(), Value::Bool(unread));
+    mat.apply_batch(
+        &watched_scope(),
+        &mut index,
+        vec![BatchOp::Upsert {
+            rel_path: "m1.eml".to_string(),
+            mapped: MappedNode {
+                node_type: "raisin:Node".to_string(),
+                name: Some("m1".to_string()),
+                properties,
+            },
+            virt: VirtualMeta {
+                mount_id: MOUNT_ID.to_string(),
+                external_id: "M1".to_string(),
+                etag: Some(etag.to_string()),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+        }],
+    )
+    .await
+    .unwrap();
+    index.virtual_nodes()[0].id.clone()
+}
+
+/// Edit a node the way a user would: through an ordinary transactional write
+/// that touches no reserved property.
+async fn set_bool_prop(env: &Env, node_id: &str, key: &str, value: bool) {
+    let tx = begin(env).await;
+    let mut node = tx.get_node(TARGET_WS, node_id).await.unwrap().unwrap();
+    node.properties
+        .insert(key.to_string(), PropertyValue::Boolean(value));
+    tx.upsert_node(TARGET_WS, &node).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn node_by_id(env: &Env, node_id: &str) -> Node {
+    let tx = begin(env).await;
+    tx.get_node(TARGET_WS, node_id).await.unwrap().unwrap()
+}
+
+fn pushed_state(node: &Node) -> Value {
+    serde_json::to_value(
+        node.properties
+            .get(super::materializer::PUSHED_STATE_PROP)
+            .expect("a pushed mount-owned node carries __pushed_state"),
+    )
+    .unwrap()
+}
+
+/// A sync writes `__pushed_state` from the item the provider just reported.
+///
+/// This is what makes a REMOTE change converge on arrival. Without it every
+/// inbound item would look like an un-pushed local edit and be sent straight
+/// back to the provider that just reported it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sync_seeds_pushed_state_from_the_remote_item() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let id = sync_in_mail(&mat, false, "v1").await;
+
+    assert_eq!(
+        pushed_state(&node_by_id(&env, &id).await),
+        json!({"unread": false})
+    );
+
+    // A mount that watches nothing writes no such property at all.
+    let mut index = mat.load_index(&scope()).await.unwrap();
+    mat.apply_batch(&scope(), &mut index, vec![upsert_op("A1", "a.txt", "v1")])
+        .await
+        .unwrap();
+    let plain = all_nodes(&env, TARGET_WS)
+        .await
+        .into_iter()
+        .find(|n| str_prop(n, "__external_id").as_deref() == Some("A1"))
+        .unwrap();
+    assert!(!plain
+        .properties
+        .contains_key(super::materializer::PUSHED_STATE_PROP));
+}
+
+/// (a) A local edit of a watched field produces exactly ONE adapter `update`,
+/// and the stamp-back records both the provider's new etag and the value that
+/// was actually pushed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_edit_of_a_watched_field_pushes_once() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let id = sync_in_mail(&mat, false, "v1").await;
+    set_bool_prop(&env, &id, "unread", true).await;
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState::default();
+    let mut batcher = super::batch::SyncBatcher::new(&c).await.unwrap();
+    let stats = super::write::drain(
+        &c,
+        &mut state,
+        &mut batcher,
+        &super::write::WriteMode::StateOnly(vec!["unread".to_string()]),
+    )
+    .await;
+
+    assert_eq!(stats.pushed, 1);
+    assert_eq!(stats.failed, 0);
+    assert_eq!(mock.update_count(), 1, "exactly one provider write");
+
+    let sent = mock.updates.lock().unwrap()[0].clone();
+    assert_eq!(sent.get("item_id").and_then(|v| v.as_str()), Some("M1"));
+    assert_eq!(sent.get("etag").and_then(|v| v.as_str()), Some("v1"));
+    assert_eq!(sent.get("payload"), Some(&json!({ "isRead": false })));
+    assert_eq!(sent.get("fields"), Some(&json!(["unread"])));
+
+    let node = node_by_id(&env, &id).await;
+    assert_eq!(str_prop(&node, "__etag").as_deref(), Some("v2"));
+    assert_eq!(pushed_state(&node), json!({"unread": true}));
+}
+
+/// (b) The converge check makes the drain idempotent: running it again after a
+/// successful push issues NO second provider write.
+///
+/// This is the property the whole design rests on. Change detection is allowed
+/// to be noisy — a capture hook, a watermark walk, a full index sweep — only
+/// because a redundant candidate costs nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn draining_twice_pushes_once() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let id = sync_in_mail(&mat, false, "v1").await;
+    set_bool_prop(&env, &id, "unread", true).await;
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mode = super::write::WriteMode::StateOnly(vec!["unread".to_string()]);
+    let mut state = MountState::default();
+
+    for _ in 0..2 {
+        // A fresh batcher each time: a new run re-reads the index from storage,
+        // which is the harder case — an in-memory index would remember the
+        // stamp, but a second RUN must reach the same answer from disk alone.
+        let mut batcher = super::batch::SyncBatcher::new(&c).await.unwrap();
+        super::write::drain(&c, &mut state, &mut batcher, &mode).await;
+    }
+    assert_eq!(mock.update_count(), 1, "the second drain must be a no-op");
+}
+
+/// (c) The echo test. After a push, a delta returning that very item with the
+/// etag the provider assigned must write NOTHING.
+///
+/// This is the one that fails if the stamp-back regresses: without it the
+/// inbound item's etag never matches the stored one, the mapper re-runs, the
+/// node is rewritten, its `unread` flips back to the pre-push value, and the
+/// next drain pushes again — forever, one revision per cycle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delta_echoing_the_pushed_item_writes_nothing() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let id = sync_in_mail(&mat, false, "v1").await;
+    set_bool_prop(&env, &id, "unread", true).await;
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mode = super::write::WriteMode::StateOnly(vec!["unread".to_string()]);
+    let mut state = MountState {
+        last_sync_token: Some("t0".to_string()),
+        ..Default::default()
+    };
+    let mut batcher = super::batch::SyncBatcher::new(&c).await.unwrap();
+    super::write::drain(&c, &mut state, &mut batcher, &mode).await;
+    assert_eq!(mock.update_count(), 1);
+
+    // The provider now reports the item back, carrying the new etag and the
+    // state we just pushed — exactly what Graph's delta does after an `isRead`
+    // write.
+    mock.push_changes(json!({ "items": [{
+        "type": "updated",
+        "relative_path": "m1.eml",
+        "item": {
+            "external_id": "M1",
+            "name": "m1",
+            "is_folder": false,
+            "etag": "v2",
+            "metadata": { "unread": true },
+        },
+    }], "next_token": null }));
+
+    let revisions_before = sync_revision_count(&env).await;
+    super::delta::run(&c, &mut state).await.unwrap();
+
+    assert_eq!(
+        sync_revision_count(&env).await,
+        revisions_before,
+        "the echoed item must not produce a revision"
+    );
+    assert!(
+        !mock.calls.lock().unwrap().contains(&"to_node".to_string()),
+        "the etag skip-write must drop the item BEFORE the mapper runs"
+    );
+    let node = node_by_id(&env, &id).await;
+    assert_eq!(
+        node.properties.get("unread"),
+        Some(&PropertyValue::Boolean(true)),
+        "the local value must survive its own echo"
+    );
+    assert_eq!(mock.update_count(), 1, "and no second push is provoked");
+}
+
+/// (d) A mount with no write mode never calls `update` — even with a node whose
+/// watched field diverges, and even behind a fully write-capable adapter.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mount_with_no_write_mode_never_pushes() {
+    let env = setup().await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let id = sync_in_mail(&mat, false, "v1").await;
+    set_bool_prop(&env, &id, "unread", true).await;
+
+    // Same divergence, but the mount never asked for writes.
+    let mount = mk_mount(SyncConfig::default());
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState::default();
+    let mut batcher = super::batch::SyncBatcher::new(&c).await.unwrap();
+
+    let caps = super::Capabilities {
+        can_read: true,
+        can_write: true,
+        can_update: true,
+        mutable_fields: vec!["unread".to_string()],
+        ..Default::default()
+    };
+    let mode = super::write::resolve_mode(&mount.write_config, &caps, &MapperWriteback::Supported);
+    assert_eq!(mode, super::write::WriteMode::Off);
+
+    let stats = super::write::drain(&c, &mut state, &mut batcher, &mode).await;
+    assert_eq!(stats, Default::default());
+    assert_eq!(mock.update_count(), 0);
+    assert!(state.writeback_last_error.is_none());
+}
+
+/// A `state_only` mount whose adapter or mapper falls short is REFUSED, with a
+/// reason — and refused means nothing is sent, not that a partial write is
+/// attempted.
+#[test]
+fn state_only_is_refused_with_a_reason() {
+    let wc = WriteConfig {
+        mode: "state_only".to_string(),
+        mutable_fields: vec!["unread".to_string()],
+        ..Default::default()
+    };
+    let full = super::Capabilities {
+        can_read: true,
+        can_write: true,
+        can_update: true,
+        mutable_fields: vec!["unread".to_string()],
+        ..Default::default()
+    };
+
+    // Everything present: allowed, with the effective allow-list.
+    assert_eq!(
+        super::write::resolve_mode(&wc, &full, &MapperWriteback::Supported),
+        super::write::WriteMode::StateOnly(vec!["unread".to_string()])
+    );
+
+    // A read-only adapter names the missing op — and NOT `can_create` /
+    // `can_delete`, which `state_only` never calls.
+    let refusal =
+        |caps: &super::Capabilities, mapper: &MapperWriteback| match super::write::resolve_mode(
+            &wc, caps, mapper,
+        ) {
+            super::write::WriteMode::Refused(r) => r,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+    let reason = refusal(
+        &super::Capabilities::fallback(),
+        &MapperWriteback::Supported,
+    );
+    assert!(
+        reason.contains("can_write") && reason.contains("can_update"),
+        "{reason}"
+    );
+    assert!(!reason.contains("can_delete"), "{reason}");
+
+    // A read-only mapper vetoes a write-capable adapter.
+    assert!(refusal(&full, &MapperWriteback::NotImplemented).contains("to_external"));
+
+    // An adapter that accepts none of the mount's fields is refused rather than
+    // silently pushing a field the provider will reject on every run forever.
+    let narrow = super::Capabilities {
+        mutable_fields: vec!["flagged".to_string()],
+        ..full.clone()
+    };
+    assert!(refusal(&narrow, &MapperWriteback::Supported).contains("mutable_fields"));
+
+    // ...as is a mount that declared no fields.
+    let no_fields = WriteConfig {
+        mode: "state_only".to_string(),
+        ..Default::default()
+    };
+    match super::write::resolve_mode(&no_fields, &full, &MapperWriteback::Supported) {
+        super::write::WriteMode::Refused(r) => assert!(r.contains("mutable_fields"), "{r}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+// The unseeded/baseline behaviour that used to live here moved to
+// `write_baseline_tests.rs`, together with the mode-change and failure-budget
+// cases it turned out to be entangled with.
+
+#[path = "write_lifecycle_tests.rs"]
+mod write_lifecycle_tests;
+
+#[path = "write_baseline_tests.rs"]
+mod write_baseline_tests;
+
+#[path = "write_gone_tests.rs"]
+mod write_gone_tests;
+
+#[path = "misconfig_tests.rs"]
+mod misconfig_tests;

@@ -33,8 +33,40 @@ impl VirtualMountSyncHandler {
             tracing::warn!(mount_id = %mount_id, "virtual mount node not found; skipping");
             return Ok(Preflight::Skip("mount_not_found"));
         };
-        let mount = MountConfig::from_node(&mount_node)
-            .map_err(|e| Error::Validation(format!("invalid mount {mount_id}: {e}")))?;
+        let mount = match MountConfig::from_node(&mount_node) {
+            Ok(m) => m,
+            Err(e) => {
+                // NOT an `Err` any more. Failing the job wrote no mount state
+                // at all, so the one thing the operator can see — the mount's
+                // own status — went on claiming the last successful run while
+                // the mount had stopped syncing entirely. A parse failure is a
+                // misconfiguration like any other and belongs in the same
+                // place as a bad `target_branch`; the difference is only that
+                // there is no parsed config to carry it.
+                tracing::warn!(
+                    mount_id = %mount_id,
+                    error = %e,
+                    "mount config does not parse; marking misconfigured and skipping"
+                );
+                if let Err(werr) = misconfig::mark_unparseable_mount(
+                    &self.storage,
+                    tenant,
+                    repo,
+                    config_branch,
+                    mount_id,
+                    &e,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        mount_id = %mount_id,
+                        error = %werr,
+                        "failed to record misconfigured mount state"
+                    );
+                }
+                return Ok(Preflight::Skip("misconfigured"));
+            }
+        };
 
         if !mount.enabled {
             // Best-effort push teardown: a disabled mount that still holds a

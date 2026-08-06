@@ -5,6 +5,39 @@ use serde::{Deserialize, Serialize};
 use super::paths::parse_iso_epoch;
 use super::run::SyncRun;
 
+/// What one write-drain pass did, as recorded on the mount.
+///
+/// Deliberately small and flat: this is an operator-facing receipt, not the
+/// drain's working state. `pending` is the field that matters — it is the only
+/// thing that distinguishes a mount which is caught up from one that is falling
+/// behind, and neither `outcome: ok` nor a zero `failed` count says anything
+/// about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainSummary {
+    /// Edits that reached the provider.
+    #[serde(default)]
+    pub pushed: u64,
+    /// Candidates never attempted because the drain ended early.
+    ///
+    /// Non-zero only alongside `truncated` or `stopped`. These stay pending
+    /// untouched — no stamp, no `__pushed_state` — so the next run re-nominates
+    /// them in the same deterministic order.
+    #[serde(default)]
+    pub pending: u64,
+    /// Pushes the provider answered with "no such object under that id".
+    #[serde(default)]
+    pub gone: u64,
+    /// Pushes that failed outright.
+    #[serde(default)]
+    pub failed: u64,
+    /// The wall-clock budget ran out with candidates still pending.
+    #[serde(default)]
+    pub truncated: bool,
+    /// An operator's Stop landed mid-drain.
+    #[serde(default)]
+    pub stopped: bool,
+}
+
 /// Engine-managed `state` object of a `raisin:VirtualMount`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MountState {
@@ -115,12 +148,42 @@ pub struct MountState {
     /// never a discarded write.
     #[serde(default)]
     pub state_seq: u64,
-    /// `false` when the mount requests `write_through` writeback but the engine
-    /// or adapter cannot honour it (v1 has no writeback implementation). `None`
-    /// when writeback was never requested. The UI reads this to explain the
-    /// limitation; it never makes the sync fatal.
+    /// Whether this mount's requested writeback can actually be honoured.
+    ///
+    /// Computed once per run from the adapter's declared capabilities (see
+    /// [`crate::jobs::handlers::virtual_mount_sync::Capabilities::missing_mirror_ops`]) AND from a probe of the mount's
+    /// mapper (see [`crate::jobs::handlers::virtual_mount_sync::MapperWriteback`]) — writability belongs to the mount,
+    /// adapter and mapper together, so a write-capable adapter behind a
+    /// read-only mapper is honestly reported here as not writable. Never
+    /// hardcoded, so the console
+    /// shows what is true rather than what v1 happened to implement. `None` when
+    /// the mount never asked for writeback: absent and `Some(false)` are NOT
+    /// interchangeable to the UI, which reads absence as "unknown / not
+    /// applicable" and a present `false` as an authoritative "cannot". Never
+    /// makes the sync fatal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writeback_supported: Option<bool>,
+    /// Why [`Self::writeback_supported`] is `Some(false)` — e.g. which adapter
+    /// operation is missing. Cleared when writeback is supported.
+    ///
+    /// Lives in `state` rather than as a node property for the same reason as
+    /// [`Self::paused`]: the nodetype is `strict: true`, but `state` is a
+    /// free-form Object, so this needs no schema migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_last_error: Option<String>,
+    /// What the write drain did on the most recent run.
+    ///
+    /// The drain's own counters are otherwise consumed entirely inside
+    /// `write::drain` and dropped, which makes a drain that gave up at 120 of
+    /// 500 edits indistinguishable — to an operator, and to the console — from
+    /// one that had nothing to do. That is the same class of invisibility as a
+    /// sync that never records why it stopped.
+    ///
+    /// Absent on a mount that has never drained. Written on EVERY drain that had
+    /// candidates, including a fully clean one, so a stale summary can never be
+    /// mistaken for the current state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_drain: Option<DrainSummary>,
 
     // ---- push / webhook subscription (all engine-managed, optional) ----
     /// Stable, unguessable per-mount token that gates the public notifications

@@ -101,6 +101,20 @@ pub enum MountSyncEvent {
         skipped: u64,
         deleted: u64,
         failed: u64,
+        /// Reserved-metadata stamps the write drain applied. Kept out of
+        /// `written`, which means "items imported from the provider".
+        #[serde(default)]
+        stamped: u64,
+        /// Local edits pushed to the provider by the write drain.
+        #[serde(default)]
+        pushed: u64,
+        /// Edits still queued because the drain ended early.
+        ///
+        /// Without this a run that pushed 120 of 500 edits and stopped on its
+        /// budget is byte-identical, in this event, to one that had nothing to
+        /// do — both report `outcome: ok` with everything else zero.
+        #[serde(default)]
+        writeback_pending: u64,
         /// Whether a full walk has now reached the end at least once.
         backfill_complete: bool,
         error: Option<String>,
@@ -139,10 +153,13 @@ impl MountSyncBroadcaster {
 
     /// Subscribe to one mount's progress, creating the channel if needed.
     pub fn subscribe(&self, mount_id: &str) -> broadcast::Receiver<MountSyncEvent> {
-        let sender = self.channels.entry(mount_id.to_string()).or_insert_with(|| {
-            let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-            tx
-        });
+        let sender = self
+            .channels
+            .entry(mount_id.to_string())
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+                tx
+            });
         sender.subscribe()
     }
 

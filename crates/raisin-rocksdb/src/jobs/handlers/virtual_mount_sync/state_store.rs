@@ -215,7 +215,10 @@ pub(super) async fn persist_mount_state_detailed(
     tx.set_tenant_repo(tenant, repo)?;
     tx.set_branch(branch)?;
     tx.set_actor(SYNC_ACTOR)?;
-    tx.set_auth_context(AuthContext::system())?;
+    // System privileges, sync identity: the auth context (not the raw actor)
+    // is what stamps `updated_by`, so an `AuthContext::system()` here would
+    // attribute the mount node to `"system"`.
+    tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
     tx.set_message("virtual mount sync: persist state")?;
 
     let Some(mut node) = tx.get_node(SYSTEM_WORKSPACE, mount_id).await? else {

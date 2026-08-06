@@ -30,7 +30,15 @@ impl VirtualMountSyncHandler {
         run.written = counts.written as u64;
         run.skipped = counts.skipped as u64;
         run.deleted = counts.deleted as u64;
+        run.stamped = counts.stamped as u64;
         run.failed = counts.failed as u64;
+        // The drain's own counters do not come through the batcher — a push is a
+        // provider call, not a node write — so they arrive on the state the drain
+        // already had a mutable borrow of. Absent on a mount that never drained.
+        if let Some(d) = &state.last_drain {
+            run.pushed = d.pushed;
+            run.writeback_pending = d.pending;
+        }
         run.items_done = state.backfill_items_done;
 
         let retryable_err = match result {
@@ -141,6 +149,9 @@ impl VirtualMountSyncHandler {
                 skipped: run.skipped,
                 deleted: run.deleted,
                 failed: run.failed,
+                stamped: run.stamped,
+                pushed: run.pushed,
+                writeback_pending: run.writeback_pending,
                 backfill_complete: state.backfill_complete,
                 error: run.error.clone(),
             },

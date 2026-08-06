@@ -230,6 +230,30 @@ Do **not** set `__`-prefixed properties — the engine stamps
 `__virtual/__mount_id/__external_id/__etag/__synced_at` on top of whatever you
 return. (See the Drive mapper for a fuller example mapping Docs/Sheets/Slides.)
 
+### Both directions, one file
+
+Under the designed write path a mapper dispatches on `input.operation` and carries
+the reverse translation too:
+
+```javascript
+function handler(input) {
+  switch (input.operation) {
+    case "to_node":                 // { external_item, mount }  — the call above
+      return toNode(input.external_item, input.mount);
+    case "to_external":             // { node, mount, fields? }
+      return toExternal(input.node, input.mount, input.fields);
+  }
+}
+```
+
+Input with no `operation` still means `to_node`, so the mapper above keeps working
+unchanged. Put `to_external` **here, not in your adapter** — the mapper is what a
+user swaps to customize node shape, so a reverse mapping living in the adapter
+silently writes the wrong fields the moment someone does that. Emit only the keys
+listed in `fields` when it is present (the engine is asking for a patch), and
+return `null` to declare a node not writable. A mapper without `to_external` makes
+its mount read-only, which the console surfaces via `state.writeback_supported`.
+
 ---
 
 ## 5. Test locally
@@ -374,9 +398,25 @@ properties:
   tight `network_policy`. Treat installing one like installing a plugin.
 - **Multi-node deployments must run the Redis locks backend** or mounts can
   double-sync — see the [internals doc](../concepts/virtual-nodes-internals.md#5-cluster-safety-fencing-tokens--lease-locks).
-- **Write-through is deferred.** Even though you may implement `create`/`update`/
-  `delete`, the engine does not yet propagate local edits back to the provider in
-  v1.
+- **The write path is half built: `state_only` ships.** The engine calls `update`
+  — and only `update` — for a mount configured `write_config.mode: "state_only"`,
+  restricted to the fields both the mount and your `capabilities.mutable_fields`
+  name. If you want that to work you must implement `update` and declare
+  `can_write` / `can_update` / `mutable_fields`; an adapter that does not makes
+  the mount report itself unwritable, with the reason, in
+  `state.writeback_supported` / `state.writeback_last_error`. `create`, `delete`,
+  `submit` and `get_content` are still never called, and the `mirror` / `submit`
+  modes are refused rather than run. Read
+  [adapter reference §10](../reference/virtual-node-adapters.md#10-the-write-path)
+  **before** you write them, so what you build matches what the engine will call —
+  in particular: the write mode is chosen by the *mount*, not by your adapter;
+  `submit` is at-most-once and must never be retried; and your reverse mapping
+  belongs in the **mapper** (`operation: "to_external"`), not hardcoded in the
+  adapter, or a custom mapper will silently make it write the wrong fields.
+- **Never write nodes from an adapter.** Return results and let the engine write.
+  An adapter that writes nodes directly bypasses lease serialization, the
+  stamp-back that prevents sync loops, and the destructive-write rails — and since
+  adapters run privileged, it can reach any node in the workspace.
 - **HTTP egress, plus native protocol bindings.** The function sandbox
   (QuickJS/Starlark) has one general outbound primitive, the synchronous
   `raisin.http.fetch` — there is **no raw TCP socket** available to *function code*.

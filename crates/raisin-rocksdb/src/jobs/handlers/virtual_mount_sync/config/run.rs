@@ -30,6 +30,26 @@ pub struct SyncRun {
     pub skipped: u64,
     #[serde(default)]
     pub deleted: u64,
+    /// Reserved-metadata stamps the write drain applied to nodes that already
+    /// existed. Kept OUT of [`Self::written`], which an operator reads as
+    /// "items imported from the provider" — and which the batcher's
+    /// wholesale-rejection guard reads as "this mount can write at all".
+    #[serde(default)]
+    pub stamped: u64,
+    /// Local edits this run pushed to the provider.
+    ///
+    /// Distinct from [`Self::stamped`]: a stamp is the local metadata write that
+    /// records a push, and the drain also stamps without pushing (a converged
+    /// baseline). `pushed` is the number that answers "is writeback working".
+    #[serde(default)]
+    pub pushed: u64,
+    /// Edits still queued because the drain ended early (budget or Stop).
+    ///
+    /// The one counter that separates a mount that is caught up from one that is
+    /// falling behind. `outcome: "ok"` is reported either way — a drain that
+    /// stops cleanly with work left is a success, not an error.
+    #[serde(default)]
+    pub writeback_pending: u64,
     #[serde(default)]
     pub failed: u64,
     /// Items this run walked (the backfill chunk size, in practice).

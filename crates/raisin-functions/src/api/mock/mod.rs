@@ -29,6 +29,16 @@ pub struct MockFunctionApi {
     /// When set, reads/queries/sql/events fail with this message too — used to
     /// test the runtimes' swallowed-error conventions (null / [] / sentinels).
     all_errors: Option<String>,
+    /// Scripted `http_request` responses, consumed in order. Empty means "echo
+    /// the request back as a 200", the historical behaviour every existing test
+    /// relies on. Scripting exists so a function under test can be driven
+    /// through a provider's NON-200 statuses (a 412 conflict, a 404, a 403)
+    /// without a network.
+    http_responses: std::sync::Mutex<std::collections::VecDeque<Value>>,
+    /// Every `http_request` made, as `{ method, url, options }`, in order. This
+    /// is what lets a test assert the exact URL, headers and body a function
+    /// produced rather than just its return value.
+    http_calls: std::sync::Mutex<Vec<Value>>,
 }
 
 impl MockFunctionApi {
@@ -40,7 +50,22 @@ impl MockFunctionApi {
             locks: raisin_locks::InProcessLockManager::new(),
             node_write_error: None,
             all_errors: None,
+            http_responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            http_calls: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Script the responses `raisin.http.fetch` will return, in order. Each
+    /// entry is a full `{ status, headers, body }` value. Once the script is
+    /// exhausted the mock falls back to echoing the request as a 200.
+    pub fn with_http_responses(self, responses: Vec<Value>) -> Self {
+        *self.http_responses.lock().unwrap() = responses.into_iter().collect();
+        self
+    }
+
+    /// The `{ method, url, options }` of every HTTP request made so far.
+    pub fn http_calls(&self) -> Vec<Value> {
+        self.http_calls.lock().unwrap().clone()
     }
 
     /// Make all node write operations fail with the given message.
@@ -210,6 +235,12 @@ impl FunctionApi for MockFunctionApi {
     // ========== HTTP / Event Operations ==========
 
     async fn http_request(&self, method: &str, url: &str, options: Value) -> Result<Value> {
+        self.http_calls.lock().unwrap().push(serde_json::json!({
+            "method": method, "url": url, "options": options.clone()
+        }));
+        if let Some(scripted) = self.http_responses.lock().unwrap().pop_front() {
+            return Ok(scripted);
+        }
         Ok(serde_json::json!({
             "status": 200, "headers": {},
             "body": { "_mock": true, "method": method, "url": url, "options": options }

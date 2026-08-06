@@ -54,6 +54,7 @@ impl RocksDbMaterializer {
                 Ok(Staged::Written) => stats.written += 1,
                 Ok(Staged::Deleted) => stats.deleted += 1,
                 Ok(Staged::Skipped) => stats.skipped += 1,
+                Ok(Staged::Stamped) => stats.stamped += 1,
                 Ok(Staged::Deferred) => deferred.push(op.clone()),
                 // Item-level rejection. Every such check in `add_node` /
                 // `put_node` runs BEFORE the first batch write, so the item

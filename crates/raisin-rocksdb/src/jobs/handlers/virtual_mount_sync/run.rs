@@ -171,18 +171,41 @@ impl VirtualMountSyncHandler {
             tracing::warn!(mount_id = %mount_id, error = %e, "failed to cache capabilities");
         }
 
-        // Write-through honesty: v1 has no writeback implementation, so a mount
-        // asking for `write_through` (or whose adapter can't write) is recorded
-        // as unsupported and warned once — never fatal, never status-degraded.
-        if mount.write_config.wants_write_through() {
-            state.writeback_supported = Some(false);
+        // Write-through honesty: record whether the mount's requested writeback
+        // can be honoured, computed from what the adapter declares rather than
+        // hardcoded. Never fatal, never status-degraded — a mount that cannot
+        // write still syncs read-only.
+        //
+        // The mapper is probed only for a mount that actually asked for
+        // writeback: the verdict for every other mount is `(None, None)`
+        // regardless of what the mapper says, so probing them would spend a
+        // QuickJS invocation per run to compute a value that is discarded —
+        // the same reasoning that keeps `stage_item` from mapping an item whose
+        // etag already matches.
+        let wants_writeback =
+            mount.write_config.wants_write_through() || mount.write_config.wants_state_only();
+        let mapper_writeback = if wants_writeback {
+            ctx.probe_mapper_writeback().await
+        } else {
+            MapperWriteback::NoMapper
+        };
+        let (writeback_supported, writeback_reason) =
+            write::writeback_verdict(&mount.write_config, &capabilities, &mapper_writeback);
+        // The same resolution the verdict was derived from, kept so the drain
+        // pushes exactly the fields the operator was told are supported. Two
+        // independent computations of "what may this mount write" is precisely
+        // the mirrored-path drift that would let the console promise one thing
+        // and the engine send another.
+        let write_mode = write::resolve_mode(&mount.write_config, &capabilities, &mapper_writeback);
+        if writeback_supported == Some(false) {
             tracing::warn!(
                 mount_id = %mount_id,
-                can_write = capabilities.can_write,
-                "mount requests write_through writeback but it is not supported \
-                 (v1 has no writeback implementation); syncing read-only"
+                reason = writeback_reason.as_deref().unwrap_or(""),
+                "mount requests writeback but it is not supported; syncing read-only"
             );
         }
+        state.writeback_supported = writeback_supported;
+        state.writeback_last_error = writeback_reason;
 
         // Ensure a push subscription exists for webhook/hybrid mounts whose
         // adapter supports push (idempotent: a live subscription is left alone).
@@ -196,6 +219,7 @@ impl VirtualMountSyncHandler {
             &mut state,
             &mut batcher,
             &capabilities,
+            &write_mode,
             remap,
             &mode,
             &trigger,
@@ -207,6 +231,7 @@ impl VirtualMountSyncHandler {
             written = counts.written,
             skipped = counts.skipped,
             deleted = counts.deleted,
+            stamped = counts.stamped,
             failed = counts.failed,
             "virtual mount sync finished"
         );

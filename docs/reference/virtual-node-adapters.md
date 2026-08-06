@@ -18,6 +18,18 @@ materializes the results into nodes under a mount path.
 > target (§6.1) ship as **Experimental / Preview**. Validate them against your own account
 > before relying on them in production.
 
+> **The write path (§10) is partly implemented: `state_only` is built and called.** For a
+> mount configured `write_config.mode: "state_only"`, the engine calls your `update` —
+> restricted to the fields both the mount and your `capabilities.mutable_fields` name. If you
+> want a mount to push local edits, you must implement `update` and declare `can_write` /
+> `can_update` / `mutable_fields`; a mount whose adapter does not is reported unwritable with
+> the reason, in `state.writeback_supported` / `state.writeback_last_error`.
+>
+> The rest of §10 is designed, not yet implemented: `create`, `delete`, `submit` and
+> `get_content` are never invoked today, and the `mirror` and `submit` modes are refused with
+> a reason rather than run. The whole write path is additive — nothing on the read side
+> changes, and every existing read-only adapter and mapper keeps working untouched.
+
 ---
 
 ## 1. Handler shape
@@ -36,7 +48,7 @@ function handler(input) {
 
 | Key | Type | Notes |
 |-----|------|-------|
-| `operation` | String | One of the 8 operations in §2. |
+| `operation` | String | One of the operations in §2. |
 | `params` | Object | Operation-specific arguments (see each operation's table). |
 | `credential` | Object \| null | Decrypted account credential. `null` for adapters/operations that need none (e.g. a public API). |
 | `mount` | Object | Read-only snapshot of the mount config (§1.3). |
@@ -184,18 +196,23 @@ engine never calls them.
 | `list` | `{ folder_id?, cursor?, limit? }` | `{ items: ExternalItem[], next_cursor: string \| null }` |
 | `get` | `{ item_id?, path? }` | `ExternalItem \| null` |
 | `get_content` | `{ item_id }` | `{ content, mime_type }` |
-| `create` | `{ parent_id, name, is_folder, content?, mime_type? }` | `ExternalItem` |
-| `update` | `{ item_id, name?, content?, mime_type?, etag? }` | `ExternalItem` |
-| `delete` | `{ item_id }` | `{ deleted: true }` |
+| `create` _(write)_ | `{ parent_id, name, is_folder, payload?, content?, mime_type? }` | `ExternalItem` |
+| `update` _(write)_ | `{ item_id, payload?, name?, content?, mime_type?, fields?, etag? }` | `ExternalItem` |
+| `delete` _(write)_ | `{ item_id, mode? }` | `{ deleted: true }` |
+| `submit` _(write, optional)_ | `{ payload, external_id?, idempotency_key }` | `{ external_id, etag?, provider_id? }` |
 | `get_changes` | `{ since_token: string \| null, folder_id? }` | `{ items: Change[], next_token: string }` |
 | `subscribe` _(push, optional)_ | `{ notification_url }` | `{ subscription_id, secret?, expires_at?, resource? }` |
 | `renew` _(push, optional)_ | `{ subscription_id, notification_url }` | `{ subscription_id, expires_at? }` |
 | `unsubscribe` _(push, optional)_ | `{ subscription_id }` | `{ ok: true }` |
 | `browse` _(discovery, optional)_ | `{ kind?, parent_id?, query?, cursor?, limit? }` | `{ items: BrowseItem[], next_cursor: string \| null }` |
 
-The last three (`subscribe` / `renew` / `unsubscribe`) are the **push lifecycle** (§2.9),
-called only when the adapter advertises `supports_push: true` and the mount runs in
-`webhook` or `hybrid` mode. All three are optional.
+`subscribe` / `renew` / `unsubscribe` are the **push lifecycle** (§2.9), called only when the
+adapter advertises `supports_push: true` and the mount runs in `webhook` or `hybrid` mode. All
+three are optional.
+
+The four operations marked _(write)_ are the **write path** (§10). They are called only for a
+mount that declares a write mode, and only for the specific ops that mode needs. Read-only
+adapters omit them and report the matching capability flags as `false`.
 
 ### 2.1 `capabilities`
 
@@ -266,6 +283,8 @@ Update an existing item's name and/or content.
 | param | type | meaning |
 |-------|------|---------|
 | `item_id` | String | Provider item id. |
+| `payload` | Object? | Provider-shaped body from the mapper's `to_external` (§6.0). This is what a `state_only` write sends. |
+| `fields` | String[]? | The allow-list `payload` was built for. Present on `state_only` writes; apply ONLY these. |
 | `name` | String? | New name (rename). |
 | `content` | String? | New body. |
 | `mime_type` | String? | New content type. |
@@ -508,12 +527,36 @@ to show. Report every field honestly.
   supports_push:       boolean,   // event-driven / push providers — gates the §2.9 push lifecycle
   supports_browse:     boolean,   // implements §2.10 browse — gates the mount editor's pickers
   default_ttl:         number | null,  // suggested TTL (seconds) for ephemeral nodes
-  max_file_size:       number | null   // bytes; engine skips larger items
+  max_file_size:       number | null,  // bytes; engine skips larger items
+
+  // --- write path (§10). All optional; every one defaults to false / empty,
+  //     so an adapter that omits them is correctly treated as read-only.
+  can_create:              boolean,
+  can_update:              boolean,
+  can_delete:              boolean,
+  can_submit:              boolean,
+  mutable_fields:          string[],       // the state_only allow-list — which node
+                                           // properties this provider accepts as writes
+  default_delete_policy:   "detach" | "trash" | "purge" | null,
+  default_move_policy:     "push" | "detach" | "reject" | null,
+  supports_trash:          boolean,        // delete can soft-delete rather than purge
+  supports_idempotency_key: boolean        // submit can forward a provider idempotency key
 }
 ```
 
 `supports_changes` is the most load-bearing flag: `false` forces the engine onto the
 full-listing reconcile path for every sync.
+
+**`mutable_fields` is how a provider explains what "writable" means for it.** The engine has
+no domain knowledge — it does not know that a mail body is immutable while its read flag is
+not. An adapter that lists `["unread", "categories", "folder"]` is telling the engine exactly
+which property edits it will accept; an edit to anything else is rejected with a clear error
+instead of being silently dropped. Declare the narrowest honest set.
+
+`default_delete_policy` / `default_move_policy` are the adapter's **recommended** defaults for
+its domain — mail typically wants `trash` (users expect "delete" to mean the provider's
+trash), files and calendars typically want `detach` (never destroy remote data from a local
+delete). A mount may override either; `purge` is never a default.
 
 `supports_browse` affects only the admin UI: false (or absent) keeps the mount editor's
 free-text id inputs, true adds pickers backed by §2.10.
@@ -606,6 +649,65 @@ no function call, zero overhead on the minimal sync path:
 > **`google-drive-adapter`** does exactly this — its default mapper emits `raisin:Folder` for
 > folders and `raisin:Asset` (with `web_url` / `download_url` links, no inlined content) for
 > files.
+
+### 6.0 The mapper is bidirectional — and both directions live in ONE function
+
+A mapper dispatches on `input.operation`, exactly like an adapter:
+
+```javascript
+function handler(input) {
+  switch (input.operation) {
+    case "to_node":     // { external_item, mount }
+      // -> { node_type, name?, properties } | null   (null = skip this item)
+      return toNode(input.external_item, input.mount);
+
+    case "to_external": // { node, mount, fields? }
+      // -> { payload, external_id? } | null          (null = not writable)
+      return toExternal(input.node, input.mount, input.fields);
+
+    case "mapper_capabilities": // { mount }
+      // -> { to_external: true }
+      return { to_external: true };
+  }
+}
+```
+
+**Why both directions must be in the same function node, and not inside the adapter.** The
+mapper is deliberately *separate* from the adapter so you can customize node shape without
+forking the adapter. If the reverse translation were hardcoded in the adapter's
+`update`/`create`, then pointing a mount at a custom mapper would leave the adapter writing
+the wrong fields — silently, with no error anywhere. That is one relationship expressed twice,
+in two files, free to drift. Keeping `to_node` and `to_external` side by side in one file
+gives them one author and one place to stay consistent.
+
+Rules:
+
+- **Backward compatible.** Input with no `operation`, or `operation: "to_node"`, behaves
+  exactly as before. Existing mappers keep working untouched.
+- **`fields` is the allow-list** for `state_only` mounts (§10). When present, emit *only*
+  those keys — the engine is asking for a patch, not a whole object.
+- **Return `null` from `to_external`** to say "this node is not writable". The write parks
+  with a stated reason rather than pushing a guess.
+- **A mapper without `to_external` makes its mount read-only.** This is probed once per run
+  and recorded in `state.writeback_supported` / `state.writeback_last_error`, so the console
+  can explain *why* a write control is unavailable. Writability is a property of the **mount**
+  — adapter and mapper together — so a write-capable adapter paired with a read-only custom
+  mapper is honestly reported as not writable.
+- **The probe is its own operation: `mapper_capabilities`.** It takes `{ mount }` and returns
+  `{ to_external: true }`. A mapper that implements `to_external` MUST answer it — anything
+  else (a `null`, a missing key, a throw) is read as "no reverse mapping". A mapper written
+  before the write path existed answers `null` for free, because it reads only
+  `input.external_item` and falls straight through its `if (!item …) return null` guard, so no
+  shipped mapper needed changing and none can be accidentally write-enabled.
+  The probe is deliberately *not* a `to_external` call with a null node: that would oblige
+  every `to_external` ever written to tolerate a null node forever, and a strict one would be
+  misreported as read-only for throwing on a call it was never meant to receive.
+  It is asked only of a mount that actually requested writeback — probing a read-only mount
+  would spend a QuickJS invocation per run to compute a value that is discarded.
+- **Keep `to_external` pure and I/O-free**, like `to_node`. It runs inside the write drain,
+  under the mount lease.
+- **The built-in Rust default mapping has no reverse.** A mount with no `mapping_function` is
+  read-only by construction — the default mapping is lossy, so inverting it would be guessing.
 
 ### 6.1 `raisin:Event` — the standard calendar mapping target
 
@@ -797,3 +899,152 @@ mints it, the other reads the existing value, and it stays **stable across renew
 public notifications endpoint resolves an incoming request by matching its last path segment
 against the stored `push_notification_url`, then `push_mount_token`, then the mount id — so
 the URL the UI shows and the URL the provider calls always agree.
+
+---
+
+## 10. The write path
+
+> **Status: `state_only` ships; the rest is designed, not yet implemented.** The engine's
+> write drain calls `update`, and only `update` — for a mount with
+> `write_config.mode: "state_only"`, restricted to the fields both the mount and your
+> `capabilities.mutable_fields` name. `create`, `delete`, `submit` and `get_content` are
+> still never invoked, and a mount requesting `writeback: "write_through"` (a full mirror)
+> still records `state.writeback_supported: false` with the missing operations named.
+> Adapters may implement the rest now; they will not be exercised until those stages land.
+> Design and staging: `docs/virtual-nodes-implementation-plan.md`.
+
+### 10.0 What a `state_only` write looks like end to end
+
+1. The mount is configured `mode: "state_only"`, `mutable_fields: ["unread"]`; your adapter
+   declares `can_write`, `can_update` and `mutable_fields: ["unread"]`; your mapper answers
+   the `mapper_capabilities` probe with `{ to_external: true }`. Any of those missing and the
+   mount is reported unwritable **with the reason**, rather than silently doing nothing.
+2. A user edits `unread` on a synced node.
+3. On the next sync run — under the mount lease, **before** the read phases — the engine
+   finds the node whose `unread` no longer matches the engine-owned `__pushed_state`, re-reads
+   it, and asks your mapper for `to_external` with `fields: ["unread"]`.
+4. It calls your `update` with `{ item_id, payload, fields, etag }`, where `etag` is the
+   node's stored `__etag` (your optimistic-concurrency base).
+5. It stamps your returned `etag` and the pushed values back onto the node as the sync actor.
+   That stamp is what makes the delta echoing your own write a no-op.
+
+You are never called twice for one edit, and never called for an edit that already landed.
+
+### 10.1 The boundary: what the engine owns, what you own
+
+The engine's write path is deliberately **thin and domain-blind**. It knows "call `update`
+with these fields". It does not know what a calendar is, that a mail body is immutable, or
+what an outbox means. All of that is your package explaining itself, through `capabilities`,
+your nodetypes, and your docs.
+
+| Layer | Owns |
+|-------|------|
+| **Engine** (Rust, generic) | change detection, ordering, the mount lease, intent lifecycle, the "already pushed?" check, metadata stamp-back, safety rails, at-most-once semantics, error classification |
+| **Adapter package** (your JS) | the remote API calls, node↔provider translation, the declared capabilities, the optional conflict resolver |
+| **Convention** (your docs + nodetypes) | which node types, which collections, outbox layout, mount templates |
+
+**Adapters never write nodes.** Your adapter is a function the engine calls: take a request,
+hit the provider, return a result. The engine performs every local write. This is not
+stylistic — delegating writes would lose lease serialization (a concurrent sync clobbers your
+write), the metadata stamp-back that prevents infinite sync loops, the destructive-operation
+rails, and the sandbox boundary (adapters run privileged with a system auth context, so an
+adapter that could write nodes could write *any* node in the workspace).
+
+> **Adapter decides what the remote becomes and performs the remote call.
+> Engine decides what the node becomes and performs the local write.**
+
+### 10.2 Write modes
+
+A write mode is a property of the **mount**, not of the adapter. The same IMAP adapter serves
+a `state_only` inbox mount and a `submit` outbox mount. Your adapter declares which operations
+it can perform; the mount decides which of them apply where.
+
+| mode | the node is… | a local change means | typical use |
+|------|--------------|----------------------|-------------|
+| `mirror` | the remote object itself | create / update / delete propagate | calendar events, files |
+| `state_only` | an immutable record with mutable state | only `mutable_fields` propagate; other edits are rejected | mail (body immutable, read/flags/folder are not) |
+| `submit` | a **command** | creating it and moving it to `queued` issues the command once | send / reply / forward, RSVP |
+
+`submit` is what makes immutable resources writable in a coherent way. An email cannot be
+"edited" — so its write path is a *sending* path, and the natural home for that is a separate
+mount whose members are intents rather than mirrors:
+
+```
+/mail/inbox    mode: state_only   raisin:Mail
+/mail/sent     read-only          raisin:Mail          <- canonical sent message
+/mail/outbox   mode: submit       raisin:OutboundMail  <- commands
+```
+
+Reply and forward then need no special casing: the outbox node carries the action and the
+provider's own message id. The same shape generalizes to any connector — a chat outbox, a
+refund queue, an order submission mount are all `submit` collections.
+
+### 10.3 `submit` is at-most-once — never retried
+
+`submit` issues a side effect the provider cannot take back. A retried send is a duplicate
+email; a retried charge is a duplicate charge. So the engine treats `submit` differently from
+every other operation:
+
+- The command node is durably moved to `sending` **before** the call, so a crash mid-flight is
+  a *bounded* ambiguity rather than an unbounded one.
+- On success → `sent`, with `external_id` / `etag` stamped back.
+- `rate_limited` → requeued. **This is the only error that requeues**, because it is the only
+  one that proves no side effect occurred.
+- `auth_expired`, `config_error`, `conflict` → `failed`. Definitive pre-effect rejections.
+- **Anything else — including a timeout — parks at `unknown` and is never retried
+  automatically.** Only a human moves it back to `queued`.
+
+This inverts the usual default: for reads, an unrecognized error is transient and retried; for
+`submit`, an unrecognized error is *ambiguous* and must not be. Throw precise codes (§4).
+
+If your provider accepts an idempotency key, declare `supports_idempotency_key: true` and
+forward the engine's `idempotency_key` — that is what lets an ambiguous case be safely
+resolved rather than parked.
+
+### 10.4 Delete and move
+
+Neither is a fixed behaviour; both are policy the mount resolves from your declared defaults.
+
+| `delete_policy` | effect |
+|-----------------|--------|
+| `detach` | the node is removed locally, the remote is untouched. **A later full reconcile re-imports it** — there is no suppression list. Say so in your docs. |
+| `trash` | the remote is soft-deleted (provider trash / deleted items). Call `delete` with `mode: "trash"`. |
+| `purge` | the remote is hard-deleted. Never a default. |
+
+`move_policy` is `push` | `detach` | `reject`. **There is no `move` operation** — a move is
+modelled as an `update` carrying the new parent/folder field, which keeps the operation
+surface small and means a provider that reparents through its normal update call needs no
+extra code.
+
+### 10.5 Optimistic concurrency and conflict
+
+Writes carry the node's last-known provider etag. If it no longer matches, throw
+`code: "conflict"` (§4) rather than overwriting — that is the signal the engine's conflict
+policy acts on (`remote_wins` by default, or `local_wins`, or park for a human).
+
+A package may also ship a **conflict resolver function**, referenced by the mount as
+`resolver_function`. It is a plain `raisin:Function`, invoked exactly like a mapper, and it
+receives both sides:
+
+```javascript
+// input:  { local, remote, base_etag, field_diff, mount }
+// return: { resolution: "local_wins" | "remote_wins" | "merged" | "park", node?, fields? }
+```
+
+This is where domain knowledge belongs — only a calendar package knows that two edits touching
+different fields of the same event can be merged, while two edits to the same start time
+cannot. A throw parks the write; it is never silently dropped.
+
+### 10.6 What the engine guarantees you
+
+So you can keep your adapter simple:
+
+- **You are never called concurrently for the same mount.** Writes drain under the same lease
+  as sync, ahead of the read phase.
+- **You are not called for a write that already landed.** The engine compares stored provider
+  metadata before every call and skips no-ops.
+- **You are not called with a change you made.** Metadata stamped after your write suppresses
+  the echo when the next delta returns the item you just changed.
+- **You are not called for a runaway delete.** Proportional blast-radius rails stop a
+  mis-scoped bulk statement before it reaches the provider, park the pending writes, and
+  surface the block for an operator — without stopping reads.

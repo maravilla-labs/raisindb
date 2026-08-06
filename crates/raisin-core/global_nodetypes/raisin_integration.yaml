@@ -129,9 +129,14 @@ properties:
       Adapter capability report, cached by the sync engine so the admin UI can
       read it without invoking the adapter: {
         can_read, can_write, can_create_folders, supports_changes,
-        supports_webhooks, supports_search, supports_push,
-        default_ttl, max_file_size
+        supports_webhooks, supports_search, supports_push, supports_browse,
+        default_ttl, max_file_size,
+        can_create, can_update, can_delete, can_submit, mutable_fields,
+        default_delete_policy, default_move_policy, supports_trash,
+        supports_idempotency_key
       }
+      The trailing group is the write path; every one of those defaults to
+      false/empty, so an adapter that omits them is treated as read-only.
 
   - name: capabilities_checked_at
     type: String

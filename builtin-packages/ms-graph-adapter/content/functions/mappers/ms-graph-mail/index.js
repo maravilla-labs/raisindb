@@ -5,8 +5,14 @@
  * and fast: it must NOT call raisin.functions.call or perform any I/O — it runs
  * in the sync hot loop. Returning null skips the item.
  *
- *   input  = { external_item: ExternalItem, mount: { mount_id, mount_path, sync_config } }
- *   return = { node_type, name?, properties } | null
+ * Bidirectional (adapter contract §6.0): it dispatches on input.operation and
+ * both directions live here, so node shape and its inverse have one author.
+ *
+ *   to_node             { external_item, mount }  -> { node_type, name?, properties } | null
+ *   to_external         { node, mount, fields? }  -> { payload, external_id? } | null
+ *   mapper_capabilities { mount }                 -> { to_external: true }
+ *
+ * An absent operation means to_node, so the engine's read path is unchanged.
  *
  * Messages map to `raisin:Mail`, a global nodetype shared with the IMAP/Gmail
  * connectors. It declares the indexing that makes mail queryable: Fulltext on
@@ -26,6 +32,22 @@
  */
 
 function handler(input) {
+  switch (input && input.operation) {
+    case "to_external":
+      return toExternal(input.node, input.mount, input.fields);
+    // Probed once per sync run. Without it the mount is reported read-only,
+    // which is what every mapper that has not been taught to_external wants.
+    case "mapper_capabilities":
+      return { to_external: true };
+    // Absent operation === "to_node": the engine sent "to_node" long before any
+    // mapper switched on it, and a mapper must keep working either way.
+    case "to_node":
+    default:
+      return toNode(input);
+  }
+}
+
+function toNode(input) {
   var item = input.external_item;
   if (!item || !item.external_id) return null;
 
@@ -75,4 +97,44 @@ function handler(input) {
     name: item.name,
     properties: props,
   };
+}
+
+/**
+ * A mail message is immutable content with mutable STATE, so this mount is
+ * `state_only`: only the properties named below ever push, and `fields` (when
+ * the engine supplies it) narrows that further to the ones that actually
+ * changed. Anything outside the allow-list is dropped rather than guessed at —
+ * sending a whole message object where a patch was meant is how a sync
+ * overwrites a body it was never asked to touch.
+ *
+ * `unread` inverts: Graph's property is `isRead`.
+ */
+var WRITABLE_FIELDS = ["unread"];
+
+function toExternal(node, mount, fields) {
+  if (!node) return null;
+  var props = node.properties || {};
+  var wanted = fields && fields.length ? fields : WRITABLE_FIELDS;
+
+  var payload = {};
+  var emitted = 0;
+  for (var i = 0; i < wanted.length; i++) {
+    var field = wanted[i];
+    if (WRITABLE_FIELDS.indexOf(field) === -1) continue;
+    if (field === "unread") {
+      // Absent is not the same as false: a node that never carried the property
+      // must not be pushed as "read".
+      if (props.unread === undefined || props.unread === null) continue;
+      payload.isRead = props.unread !== true;
+      emitted++;
+    }
+  }
+
+  // Nothing writable in this request: say "not writable" rather than issuing an
+  // empty PATCH that touches the message's change key for no reason.
+  if (!emitted) return null;
+
+  var out = { payload: payload };
+  if (props.__external_id) out.external_id = props.__external_id;
+  return out;
 }

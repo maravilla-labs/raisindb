@@ -1,8 +1,10 @@
 //! Transactional materialization of external items into nodes.
 //!
-//! Every write goes through the normal transactional write path under actor
-//! [`SYNC_ACTOR`] with a system auth context, so `node_event` triggers,
-//! fulltext, SQL indexes, audit, and replication all apply for free.
+//! Every write goes through the normal transactional write path as
+//! [`SYNC_ACTOR`] — with system privileges, but with the sync actor as the
+//! identity, not `"system"` — so `node_event` triggers, fulltext, SQL indexes,
+//! audit, and replication all apply for free, and every synced node's
+//! `created_by` / `updated_by` names the engine that wrote it.
 //!
 //! # Why this is batched
 //!
@@ -37,13 +39,16 @@ mod node_paths;
 mod ops;
 mod remap;
 mod stage;
+mod stamp;
+mod write_view;
 
 #[cfg(test)]
 mod tests;
 
 pub use index::{MountScope, PathEntry, SyncIndex, VirtualMeta, VirtualNodeRef};
 pub use node_paths::is_item_level;
-pub use ops::{dedup_ops, estimate_op_bytes, BatchOp, BatchStats};
+pub use ops::{dedup_ops, estimate_node_bytes, estimate_op_bytes, BatchOp, BatchStats};
+pub use write_view::{write_view_of, WriteView, PUSHED_STATE_PROP};
 
 use async_trait::async_trait;
 use raisin_error::Result;
@@ -60,6 +65,18 @@ use crate::RocksDBStorage;
 pub trait NodeMaterializer: Send + Sync {
     /// Read the mount's slice of the target workspace once, for the whole run.
     async fn load_index(&self, scope: &MountScope) -> Result<SyncIndex>;
+
+    /// Read one node as it stands NOW.
+    ///
+    /// The write drain needs this even though it already holds an index: the
+    /// index is a snapshot taken at the top of the run, and a push must be
+    /// decided against the node's current state or a drain that took a minute
+    /// would send an edit the user has since reverted.
+    async fn read_node(
+        &self,
+        scope: &MountScope,
+        node_id: &str,
+    ) -> Result<Option<raisin_models::nodes::Node>>;
 
     /// Apply a batch of operations in ONE transaction and ONE commit, updating
     /// `index` to match what landed.
@@ -86,7 +103,15 @@ impl RocksDbMaterializer {
         Self { storage }
     }
 
-    /// Open a transaction scoped to the mount with the sync actor + system auth.
+    /// Open a transaction scoped to the mount, acting as [`SYNC_ACTOR`] with
+    /// system privileges.
+    ///
+    /// Both the raw actor and the auth context carry [`SYNC_ACTOR`] on purpose.
+    /// The raw actor is what lands on `RevisionMeta.actor`; the auth context is
+    /// what `put_node` / `add_node` stamp into `created_by` / `updated_by`, and
+    /// the auth context WINS there. A plain `AuthContext::system()` therefore
+    /// stamped every synced node `"system"` — provenance the console and the
+    /// audit log both showed, and which made this module's own promise false.
     pub(super) async fn begin(
         &self,
         scope: &MountScope,
@@ -96,7 +121,7 @@ impl RocksDbMaterializer {
         tx.set_tenant_repo(&scope.tenant, &scope.repo)?;
         tx.set_branch(&scope.branch)?;
         tx.set_actor(SYNC_ACTOR)?;
-        tx.set_auth_context(AuthContext::system())?;
+        tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
         tx.set_message(message)?;
         Ok(tx)
     }
@@ -111,7 +136,17 @@ impl NodeMaterializer for RocksDbMaterializer {
             all,
             &scope.mount_id,
             &scope.mount_path,
+            &scope.watched_fields,
         ))
+    }
+
+    async fn read_node(
+        &self,
+        scope: &MountScope,
+        node_id: &str,
+    ) -> Result<Option<raisin_models::nodes::Node>> {
+        let tx = self.begin(scope, "virtual mount sync: read node").await?;
+        tx.get_node(&scope.workspace, node_id).await
     }
 
     async fn apply_batch(

@@ -20,13 +20,21 @@ pub use paths::{parse_iso_epoch, passes_filters, resolve_path_template};
 pub use props::build_properties;
 pub(crate) use props::{parse_object, parse_object_checked};
 pub use run::SyncRun;
-pub use state::{MountState, MAX_RUN_HISTORY};
+pub use state::{DrainSummary, MountState, MAX_RUN_HISTORY};
 
 /// The workspace that holds integration/mount configuration in every repo.
 pub const SYSTEM_WORKSPACE: &str = "raisin:system";
 
 /// Actor stamped on every sync-materialized write. Downstream writeback
 /// triggers filter on this to avoid feedback loops.
+///
+/// It is stamped in two independent places, and both are needed: as the
+/// transaction's raw actor (which becomes `RevisionMeta.actor`) and as the
+/// identity of the transaction's auth context via
+/// `AuthContext::system_as(SYNC_ACTOR)` (which becomes the node's
+/// `created_by` / `updated_by`, and which takes precedence over the raw actor
+/// in `put_node` / `add_node`). Setting only the former left every synced node
+/// attributed to `"system"`.
 pub const SYNC_ACTOR: &str = "virtual-mount-sync";
 
 /// Default number of consecutive failures before a mount is marked degraded.
