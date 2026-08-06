@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: BSL-1.1
+//
+// RaisinDB - Git-like hierarchical multi model database
+// Copyright (C) 2019-2025 SOLUTAS GmbH, Switzerland
+
+//! What this adapter declares it can do, per resource. Read by the engine once
+//! per run to resolve a mount's write mode.
+
+import { calendarSupportsDelta, resourceOf } from "./mount.js";
+import { opCreate, opDelete, opUpdate } from "./write.js";
+
+// Capabilities are RESOURCE-dependent, and both dependent fields are here:
+// `supports_changes` (a non-primary calendar has no delta feed) and the write
+// flags (only mail has an `update`).
+//
+// The write flags are declared for MAIL ONLY. Declaring them adapter-wide would
+// let a calendar or files mount resolve to a writable mode and then discover at
+// drain time that every push throws — after the engine had already claimed the
+// candidates. Calendar and files must stay byte-identical to what they were.
+//
+// `mutable_fields` holds the NODE property name (`unread`), not the Graph name
+// (`isRead`): the engine intersects it with the mount's
+// `write_config.mutable_fields`, which is authored in node terms, and passes the
+// survivors to the MAPPER as `fields`. The Graph spelling is the mapper's
+// business and appears nowhere in this file.
+//
+// Declared per RESOURCE, and only for what is actually implemented below — the
+// engine's serde defaults every write flag to false, so silence is read as
+// read-only. Mail gets update + submit; calendar gets the full mirror set plus
+// submit; files stays read-only, because a Graph drive write is an upload
+// session rather than a JSON body and declaring a capability with no
+// implementation behind it is how a mount resolves to a mode that throws at
+// drain time, after the engine has already claimed its candidates.
+export function opCapabilities(mount) {
+  var resource = resourceOf(mount);
+  var deltaOk = resource !== "calendar" || calendarSupportsDelta(mount);
+  var caps = {
+    can_read: true,
+    can_write: false,
+    can_create_folders: false,
+    supports_changes: deltaOk,
+    supports_webhooks: true,
+    supports_search: false,
+    supports_push: true,
+    supports_browse: true,
+    default_ttl: null,
+    max_file_size: null,
+  };
+  if (resource === "mail") {
+    caps.can_write = true;
+    caps.can_update = true;
+    caps.mutable_fields = ["unread"];
+    // The OUTBOX half. `can_submit` is a fact about the adapter, not about the
+    // mount: the same declaration serves a `state_only` inbox that never issues
+    // a command and a `submit` outbox that does nothing else. The MOUNT's
+    // write_config.mode is what chooses.
+    caps.can_submit = true;
+  }
+  if (resource === "calendar") {
+    // A full MIRROR surface — create, update and delete are all implemented
+    // (`opCreate` / `opUpdate` / `opDelete`) — plus RSVP as a `submit` command.
+    caps.can_write = true;
+    caps.can_create = true;
+    caps.can_update = true;
+    caps.can_delete = true;
+    caps.can_submit = true;
+    // NODE property names, not Graph's. The engine intersects this with the
+    // mount's `write_config.mutable_fields` and hands the survivors to the
+    // MAPPER as `fields`; the Graph spelling is the mapper's business and
+    // appears nowhere in this file.
+    //
+    // What is deliberately NOT here is everything Graph owns or computes:
+    // organizer, ical_uid, url, online_meeting_url, my_response and `status`.
+    // Sending them is a 400 at best and a silent no-op at worst — and the two
+    // that look writable are the dangerous ones: cancelling is a DELETE under
+    // the mount's delete_policy, and an RSVP is a `submit` command precisely
+    // because it notifies the organizer and must not hide behind a property
+    // edit.
+    caps.mutable_fields = [
+      "title",
+      "description_html",
+      "description_text",
+      "start_local",
+      "start_utc",
+      "end_local",
+      "end_utc",
+      "timezone",
+      "all_day",
+      "location",
+      "attendees",
+      "show_as",
+      "recurrence",
+    ];
+    // Graph's DELETE moves an event to Deleted Items and offers no permanent
+    // delete at all, so `trash` is the honest default AND the only policy this
+    // adapter can serve; `opDelete` refuses `purge` rather than quietly
+    // soft-deleting and reporting success.
+    caps.supports_trash = true;
+    caps.default_delete_policy = "trash";
+  }
+  // Graph has NO idempotency key for sendMail, reply, forward or an event
+  // response. Declared honestly and never as an aspiration: the engine's
+  // at-most-once guarantee rests on its own durable claim, and the only thing a
+  // false `true` here would change is what an operator believes about the
+  // duplicate they are looking at.
+  caps.supports_idempotency_key = false;
+  return caps;
+}

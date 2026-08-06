@@ -38,6 +38,44 @@ pub(crate) fn parse_integration_variants(s: &str) -> Result<Option<JobType>, Str
             }
         }
     }
+    if let Some(rest) = s.strip_prefix("CalendarOccurrenceRebuild(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            let p: Vec<&str> = c.split('/').collect();
+            if p.len() == 2 {
+                return Ok(Some(JobType::CalendarOccurrenceRebuild {
+                    tenant_id: (p[0] != "*").then(|| p[0].to_string()),
+                    repo_id: (p[1] != "*").then(|| p[1].to_string()),
+                }));
+            }
+        }
+    }
+    if let Some(rest) = s.strip_prefix("VirtualMountWriteReconcile(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            let p: Vec<&str> = c.split('/').collect();
+            if p.len() == 2 {
+                return Ok(Some(JobType::VirtualMountWriteReconcile {
+                    tenant_id: (p[0] != "*").then(|| p[0].to_string()),
+                    repo_id: (p[1] != "*").then(|| p[1].to_string()),
+                }));
+            }
+        }
+    }
+    // Split from the RIGHT: `trigger` is a closed set of slugs and never
+    // contains a `/`, whereas a mount id is a node id and this parser has no
+    // business assuming it does not.
+    if let Some(rest) = s.strip_prefix("VirtualMountWriteDrain(") {
+        if let Some(c) = rest.strip_suffix(')') {
+            if let Some((mount_id, trigger)) = c.rsplit_once('/') {
+                return Ok(Some(JobType::VirtualMountWriteDrain {
+                    mount_id: mount_id.to_string(),
+                    trigger: trigger.to_string(),
+                }));
+            }
+        }
+    }
+    // NOTE: must stay BELOW the `VirtualMountWriteReconcile` arm only if that
+    // prefix were a prefix of this one; it is not, but the `VirtualMountSync(`
+    // prefix IS a prefix of nothing else, so order here is free.
     if let Some(rest) = s.strip_prefix("VirtualMountSync(") {
         if let Some(c) = rest.strip_suffix(')') {
             // 2 parts is the pre-`trigger` form; still accepted so jobs

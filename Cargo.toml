@@ -19,6 +19,11 @@ nanoid = "0.4.0"
 validator = { version = "0.20.0", features = ["derive"] }
 schemars = {version = "0.9.0", features = ["chrono04", "rust_decimal1"]}
 chrono = { version = "0.4", features = ["serde", "clock", "std"] }
+# RFC 5545 recurrence expansion (calendar occurrence projection). Pulls
+# chrono-tz, which is what makes "every Tuesday 09:00 Europe/Zurich" expand to
+# the right UTC instant on both sides of a DST transition.
+rrule = "0.14"
+chrono-tz = "0.10"
 cron = "0.15"
 regex = "1.11.0"
 lazy_static = "1.4.0"

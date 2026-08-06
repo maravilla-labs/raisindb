@@ -22,9 +22,10 @@ mod client_secret;
 mod config_secrets;
 mod connections;
 mod manage;
+mod mount_content;
 mod mount_control;
-mod mount_events;
 mod mount_delete;
+mod mount_events;
 mod notifications;
 mod oauth_callback;
 mod oauth_start;
@@ -39,9 +40,11 @@ pub use config_secrets::set_config_secrets;
 pub use connections::{create_connection, delete_connection, list_connections, update_connection};
 pub use manage::{disconnect, sync_mount};
 #[cfg(feature = "storage-rocksdb")]
+pub use mount_content::fetch_mount_content;
+#[cfg(feature = "storage-rocksdb")]
 pub use mount_control::{pause_mount, stop_mount};
-pub use mount_events::stream_mount_events;
 pub use mount_delete::delete_mount;
+pub use mount_events::stream_mount_events;
 pub use notifications::notify;
 pub use oauth_callback::callback;
 pub use oauth_start::start;

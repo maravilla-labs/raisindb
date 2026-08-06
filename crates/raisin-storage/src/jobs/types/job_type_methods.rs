@@ -338,6 +338,24 @@ impl JobType {
             Self::VirtualMountSync { mount_id, .. } => {
                 format!("virtual_mount_sync:{}", mount_id)
             }
+            // Deliberately a DIFFERENT key from the sync above. A pending full
+            // sync must not swallow a drain (its own drain phase runs first, but
+            // it may be minutes away behind a backfill), and a drain must not
+            // swallow a scheduled sync. `trigger` stays out of the key so a burst
+            // of edits collapses to one pending drain.
+            Self::VirtualMountWriteDrain { mount_id, .. } => {
+                format!("vmount-write:{}", mount_id)
+            }
+            Self::CalendarOccurrenceRebuild { tenant_id, repo_id } => format!(
+                "calendar_occurrence_rebuild:{}:{}",
+                tenant_id.as_deref().unwrap_or("*"),
+                repo_id.as_deref().unwrap_or("*")
+            ),
+            Self::VirtualMountWriteReconcile { tenant_id, repo_id } => format!(
+                "virtual_mount_write_reconcile:{}:{}",
+                tenant_id.as_deref().unwrap_or("*"),
+                repo_id.as_deref().unwrap_or("*")
+            ),
             Self::IntegrationTokenRefresh { tenant_id } => {
                 format!(
                     "integration_token_refresh:{}",
@@ -444,6 +462,9 @@ impl JobType {
             | Self::ScheduledTriggerCheck { .. }
             | Self::VirtualMountSyncCheck { .. }
             | Self::VirtualMountSync { .. }
+            | Self::VirtualMountWriteDrain { .. }
+            | Self::VirtualMountWriteReconcile { .. }
+            | Self::CalendarOccurrenceRebuild { .. }
             | Self::IntegrationTokenRefresh { .. }
             | Self::McpToolDiscovery { .. }
             | Self::McpDiscoveryCheck { .. }

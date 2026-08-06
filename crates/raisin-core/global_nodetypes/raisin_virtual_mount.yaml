@@ -69,6 +69,45 @@ properties:
     title: Mapping Function
     description: Optional custom mapper function path
 
+  - name: resolver_function
+    type: String
+    required: false
+    title: Conflict Resolver Function
+    description: |
+      Function node consulted when the provider REFUSES a push because the
+      object changed since this mount last read it. Selected by
+      write_config.conflict: "resolver_function" — or simply by setting this
+      path, which is unambiguous on its own.
+
+      Invoked through the same plumbing as mapping_function (no separate
+      executor, no separate workspace), with:
+
+        { operation: "resolve_conflict", local, remote, conflict, base_etag,
+          field_diff, mount }
+
+      `remote` is always null: the adapter contract has no single-item `get`, so
+      the provider's own refusal message in `conflict` is the only account of the
+      remote side the engine has.
+
+      It returns:
+
+        { resolution: "local_wins" | "remote_wins" | "merged" | "park",
+          fields?: { <property>: <value> },   // "merged" only
+          reason?: string }                   // "park" only
+
+      "merged" pushes those values and lands them on the node in the same write.
+      Only properties inside the mount's effective write allow-list are accepted;
+      anything else is dropped with a warning.
+
+      Every unclear answer PARKS the edit (it stays pending, the mount reports
+      writeback_status: "conflict"): a throw, an unrecognized resolution, or a
+      "merged" carrying nothing this mount may push. Nothing is ever dropped
+      silently.
+
+      Like mapping_function and unlike adapter_function, this has NO
+      integration-level fallback — a merge rule is a statement about one mount's
+      data, not about a connector shared by twenty of them.
+
   - name: sync_config
     type: Object
     required: false
@@ -103,8 +142,18 @@ properties:
         mode: "off" | "state_only",
         mutable_fields: ["unread", ...],
         writeback: "off" | "write_through",
-        conflict: "remote_wins" | "error"
+        conflict: "remote_wins" | "local_wins" | "error" | "resolver_function"
       }
+      conflict decides what a REFUSED push means — the provider saying the
+      object changed since this mount read it. "remote_wins" (the default, and
+      the pre-existing behaviour) abandons the local edit and lets the next sync
+      overwrite it: a lost edit the user can redo. "local_wins" re-sends the push
+      with no concurrency base, OVERWRITING the other writer irreversibly — never
+      a default at any layer. "error" parks the edit and reports
+      state.writeback_status: "conflict" until a human resolves it.
+      "resolver_function" hands the decision to the mount's resolver_function
+      (see that property). An unrecognized value REFUSES the whole drain rather
+      than falling back, because both directions of a wrong guess lose data.
       mode is the write mode this mount drives, and it is a property of the
       MOUNT rather than of the adapter — the same connector serves a
       state_only inbox and a read-only archive. "state_only" pushes ONLY the
@@ -127,8 +176,13 @@ properties:
       Engine-managed state (not user-edited): {
         last_sync_token, last_sync_at, last_error,
         consecutive_failures, status, writeback_supported,
-        writeback_last_error
+        writeback_last_error, writeback_status
       }
+      writeback_status is the OUTBOUND half's health, distinct from status
+      (which is about reads): "conflict" means at least one edit is parked
+      awaiting a human, "misconfigured" means the drain never started because
+      write_config could not be resolved. Cleared by the first drain that parks
+      nothing.
       status is one of "ok" | "syncing" | "auth_required" | "degraded" |
       "misconfigured". writeback_supported is false when the mount requests
       write_through writeback but the adapter does not declare the operations a

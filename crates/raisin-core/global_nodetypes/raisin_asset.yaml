@@ -1,26 +1,56 @@
 name: raisin:Asset
-description: Media asset (image, video, document, etc.)
+description: Media asset (image, video, document, mail attachment)
 icon: image
-version: 2
+# BUMPED 2 -> 3: `file` is no longer required, and the mail-attachment
+# properties below are new. Both are widenings — an existing asset stays valid.
+version: 3
 strict: false
 indexable: true
 index_types: [Fulltext, Property]
+
+# Declares the engine-owned `__` properties a virtual mount stamps. Mail
+# attachments arrive as mount-managed raisin:Asset children of a raisin:Mail,
+# so `__mount_id` / `__external_id` are indexed here for the same reason they
+# are on raisin:Mail: they are how the sync index matches an item to its node.
+mixins:
+  - raisin:VirtualNode
+
 properties:
   - name: title
     type: String
     required: true
     index: [Fulltext]
+  # NOT required as of version 3.
+  #
+  # A mail attachment is materialized as METADATA ONLY: the sync writes one
+  # raisin:Asset per attachment with its name, mime type and size, and no bytes.
+  # Bytes are fetched later, on demand, through the adapter's `get_content`,
+  # which sets this property. Requiring `file` would mean either downloading
+  # every attachment of every synced message during the sync hot loop, or
+  # inventing a placeholder Resource that points at nothing — a Resource whose
+  # `storage_key` resolves to no object is worse than an absent one, because
+  # every consumer treats presence as "the bytes are there".
+  #
+  # `file == null` therefore means exactly "content not fetched yet", and is the
+  # condition the on-demand fetch tests.
   - name: file
     type: Resource
-    required: true
+    required: false
   - name: file_type
     type: String
     required: false
     index: [Property]
+    meta:
+      label: MIME type
   - name: file_size
     type: Number
     required: false
     index: [Property]
+    meta:
+      label: Size (bytes)
+      description: >-
+        Provider-reported size. Present before the bytes are, so a UI can show
+        "2.4 MB — download" without fetching anything.
   - name: description
     type: String
     required: false
@@ -28,21 +58,49 @@ properties:
   - name: alt_text
     type: String
     required: false
-    description: Brief accessibility description for screen readers
+    meta:
+      description: Brief accessibility description for screen readers
   - name: keywords
     type: Array
     required: false
     index: [Fulltext]
-    description: Search keywords for categorization
+    meta:
+      description: Search keywords for categorization
   - name: meta
     type: Object
     required: false
-    description: AI-generated and extracted metadata
+    meta:
+      description: AI-generated and extracted metadata
   - name: content_hash
     type: String
     required: false
     index: [Property]
-    description: SHA-256 hash of file content for change detection during package installation
+    meta:
+      description: >-
+        SHA-256 of the file content. Used for change detection during package
+        installation, and set by the on-demand attachment fetch.
+
+  # ---- Mail attachments ----------------------------------------------------
+  - name: inline
+    type: Boolean
+    required: false
+    index: [Property]
+    meta:
+      label: Inline
+      description: >-
+        The attachment is referenced from the message body rather than listed
+        separately. An HTML renderer rewrites `cid:` references in `body_html`
+        to point at these; a "3 attachments" count must exclude them.
+  - name: content_id
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Content-ID
+      description: >-
+        RFC 2392 Content-ID, angle brackets stripped, as referenced by
+        `cid:<value>` in `body_html`. Meaningful only when `inline` is true.
+
 allowed_children: []
 versionable: false
 publishable: true

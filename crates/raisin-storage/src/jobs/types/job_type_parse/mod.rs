@@ -184,6 +184,17 @@ mod tests {
             mode: "full".to_string(),
             trigger: "manual".to_string(),
         });
+        round_trip(JobType::VirtualMountWriteDrain {
+            mount_id: "mount-123".to_string(),
+            trigger: "capture".to_string(),
+        });
+        // The queue is durable, so a persisted drain has to survive a restart.
+        // Split from the RIGHT, hence a mount id containing the separator still
+        // round-trips rather than silently becoming a different job.
+        round_trip(JobType::VirtualMountWriteDrain {
+            mount_id: "weird/id".to_string(),
+            trigger: "manual".to_string(),
+        });
         round_trip(JobType::IntegrationTokenRefresh {
             tenant_id: Some("acme".to_string()),
         });

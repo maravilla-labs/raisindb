@@ -1,0 +1,204 @@
+# NAMING: property names are snake_case.
+#
+# FLAT: everything filtered, ordered or paginated on is a TOP-LEVEL property.
+# UI HINTS LIVE UNDER `meta` — PropertyValueSchema silently drops title/
+# description/enum at the top level.
+
+name: raisin:OutboundMail
+description: >-
+  A COMMAND to send mail, not a copy of a message. Creating one composes; moving
+  its `status` from `draft` to `queued` authorizes an irreversible,
+  externally-visible send. It lives in a mount whose `write_config.mode` is
+  `submit` — conventionally `/mail/outbox`, beside a `state_only` `/mail/inbox`
+  and a read-only `/mail/sent`.
+icon: send
+
+version: 1
+
+# The reason this is a separate nodetype and not a writable raisin:Mail:
+# an email is IMMUTABLE. There is no edit to a sent message that a write path
+# could mirror, so mail's write direction is a SENDING path, and the natural
+# home for a send is a node that IS the request. `reply` and `forward` then need
+# no special casing anywhere in the engine — the node names the action and the
+# provider's own message id, and the adapter uses the provider's reply/forward
+# endpoints.
+indexable: true
+index_types: [Property, Fulltext]
+
+# NOT strict, matching raisin:Mail: a provider-specific send option (a Graph
+# `saveToSentItems`, an SMTP header) must be expressible without a schema
+# release. The mixin declares every engine-owned `__` property, `__write_seq`
+# included — that one is load-bearing here, not decorative: it is the durable
+# guard the at-most-once claim compares against.
+mixins:
+  - raisin:VirtualNode
+
+properties:
+  # ---- what to do ---------------------------------------------------------
+  - name: action
+    type: String
+    required: true
+    index: [Property]
+    meta:
+      label: Action
+      description: >-
+        "send" | "reply" | "reply_all" | "forward". An open set carried
+        verbatim to the adapter, exactly like a workflow `task_type`: the SHAPE
+        is validated, never the membership, because a closed enum here would
+        have to be repeated in the nodetype, the engine, the mapper and every
+        adapter and would drift in all four.
+
+  - name: in_reply_to_external_id
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: In reply to (provider id)
+      description: >-
+        The PROVIDER's own id of the message being replied to or forwarded —
+        the `__external_id` of a raisin:Mail node in the inbox mount. This is
+        why reply and forward need no engine support: the adapter calls the
+        provider's createReply/createForward against this id and the provider
+        does the quoting, the threading headers and the recipient defaults.
+
+  # ---- the message --------------------------------------------------------
+  - name: to
+    type: Array
+    required: false
+    meta:
+      label: To
+      description: >-
+        Recipient addresses, one per element. An Array and not raisin:Mail's
+        comma-joined String on purpose: that column is a DISPLAY form of what a
+        provider reported, and parsing a display string back into addresses is
+        how a mail goes to the wrong person.
+
+  - name: cc
+    type: Array
+    required: false
+    meta:
+      label: Cc
+
+  - name: bcc
+    type: Array
+    required: false
+    meta:
+      label: Bcc
+
+  - name: subject
+    type: String
+    required: false
+    index: [Fulltext]
+    meta:
+      label: Subject
+      description: >-
+        Omit on a reply and the provider supplies its own "Re" prefix.
+
+  - name: body_html
+    type: String
+    required: false
+    index: [Fulltext]
+    meta:
+      label: Body (HTML)
+      description: >-
+        Inline images reference raisin:Asset children by `cid:` — the same
+        convention raisin:Mail uses inbound.
+
+  - name: body_text
+    type: String
+    required: false
+    index: [Fulltext]
+    meta:
+      label: Body (text)
+
+  - name: importance
+    type: String
+    required: false
+    meta:
+      label: Importance
+      description: '"low" | "normal" | "high"'
+
+  # ---- the lifecycle ------------------------------------------------------
+  #
+  # ENGINE-OWNED from `queued` onwards. A human sets `draft` and `queued`; the
+  # drain sets everything else and will not act on any other value.
+  - name: status
+    type: String
+    required: true
+    index: [Property]
+    default: draft
+    meta:
+      label: Status
+      description: >-
+        draft | queued | sending | sent | failed | unknown.
+
+        DEFAULTS TO `draft`, and that default is a safety property rather than a
+        convenience: an agent, a flow step or a half-built compose UI that
+        creates one of these without thinking about status must not thereby send
+        mail. Only `queued` is ever picked up.
+
+        `sending` means CLAIMED — written durably before the provider call, so a
+        crash leaves evidence. `unknown` means the attempt's outcome is genuinely
+        unknowable and NOTHING will retry it automatically; check the provider's
+        sent items for `attempt_id` before requeueing, or you will send a second
+        copy.
+
+  - name: attempt_id
+    type: String
+    required: false
+    meta:
+      label: Attempt ID
+      description: >-
+        Stamped in the same transaction as `queued -> sending`, before any
+        network call. It is the idempotency key's distinguishing half
+        (`{mount}:{node}:{attempt}`) and, for a provider that cannot honour one,
+        it is what makes an `unknown` ANSWERABLE — search Sent for it.
+
+  - name: attempted_at
+    type: String
+    required: false
+    meta:
+      label: Attempted at
+      description: ISO 8601, stamped with the claim.
+
+  - name: sent_at
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Sent at
+      description: >-
+        ISO 8601. Present only once the command has reached `status` sent.
+
+  - name: sent_external_id
+    type: String
+    required: false
+    meta:
+      label: Sent message id
+      description: >-
+        The provider's id for the message that was actually sent, when it
+        returns one. Frequently absent — Graph's sendMail answers 202 with an
+        empty body — which is why it is optional and why `__external_id` falls
+        back to a value derived from this node's id.
+
+  - name: last_error
+    type: String
+    required: false
+    meta:
+      label: Last error
+      description: >-
+        Why this command is where it is. Cleared on a successful send and on a
+        fresh claim, so it never describes a state that has moved on.
+
+# Attachments are raisin:Asset CHILDREN, exactly as they are inbound. One
+# convention for "a blob hanging off a message", in both directions — an
+# `attachments` array here would be a second, parallel blob path.
+allowed_children:
+  - raisin:Asset
+
+versionable: false
+publishable: false
+# TRUE, unlike raisin:Mail. Inbound mail is synced content whose audit log would
+# just mirror the sync job; an outbound command is an irreversible action taken
+# on someone's behalf, and who queued it is exactly what an audit log is for.
+auditable: true

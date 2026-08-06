@@ -87,6 +87,75 @@ impl RevisionRepository for RevisionRepositoryImpl {
         Ok(revisions)
     }
 
+    /// Seek to the watermark and walk forward in commit order.
+    ///
+    /// Revision keys embed the HLC **descending** (`push_revision` →
+    /// `encode_descending`), so byte order is newest-first and ascending HLC
+    /// order is a REVERSE byte walk. Seeking to the watermark's own key and
+    /// iterating backwards therefore yields, in order: the watermark itself
+    /// (dropped by the exclusive bound below), then each newer revision.
+    ///
+    /// Two details that are easy to get wrong:
+    ///
+    /// * `Direction::Reverse` from a key that does not exist lands on the
+    ///   largest key `<=` it, which under descending encoding is the SMALLEST
+    ///   revision `>=` `after`. So a watermark that has since been garbage
+    ///   collected still resumes at the right place instead of returning
+    ///   nothing.
+    /// * The prefix check does two different jobs, and only one of them is
+    ///   correctness. Walking backwards leaves this repo's key range at its
+    ///   NEWEST revision and lands in whatever precedes it in the column family,
+    ///   so the check is what stops another repository's commits being returned
+    ///   as this one's. `break` rather than `continue` is the other job: keys
+    ///   inside a repo prefix are contiguous, so the first miss means there are
+    ///   no more, and continuing would scan the remainder of the column family
+    ///   — every other tenant's history — to return exactly the same answer.
+    async fn list_revisions_since(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        after: &HLC,
+        limit: usize,
+    ) -> Result<Vec<RevisionMeta>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = keys::KeyBuilder::new()
+            .push(tenant_id)
+            .push(repo_id)
+            .push("revisions")
+            .build_prefix();
+        let start = keys::revision_meta_key(tenant_id, repo_id, after);
+
+        let cf = cf_handle(&self.db, cf::REVISIONS)?;
+        let iter = self.db.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&start, rocksdb::Direction::Reverse),
+        );
+
+        let mut revisions = Vec::with_capacity(limit.min(1024));
+        for item in iter {
+            let (key, value) = item.map_err(|e| raisin_error::Error::storage(e.to_string()))?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let meta: RevisionMeta = rmp_serde::from_slice(&value).map_err(|e| {
+                raisin_error::Error::storage(format!("Deserialization error: {}", e))
+            })?;
+            // Exclusive lower bound. This drops at most the seek key itself;
+            // everything after it is strictly newer by construction.
+            if meta.revision <= *after {
+                continue;
+            }
+            revisions.push(meta);
+            if revisions.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(revisions)
+    }
+
     async fn list_changed_nodes(
         &self,
         tenant_id: &str,

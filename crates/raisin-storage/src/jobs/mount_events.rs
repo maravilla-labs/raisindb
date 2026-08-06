@@ -92,6 +92,21 @@ pub enum MountSyncEvent {
         /// even on a page that wrote nothing.
         subtrees_queued: usize,
     },
+    /// A safety rail refused this mount's pending deletes (§9.4).
+    ///
+    /// Emitted the moment the rail trips rather than only at `Finished`,
+    /// because a block is the one outcome an operator has to ACT on: nothing is
+    /// lost, but nothing moves until someone confirms. A run that quietly ends
+    /// `ok` with parked deletes is the silence this event exists to break.
+    WritebackBlocked {
+        /// Deletes parked, in full: none were sent.
+        deletes: u64,
+        /// The operator-facing explanation, including how to release it.
+        reason: String,
+        /// Copy this into the mount's `state.writeback_confirm_token` to
+        /// release exactly this batch.
+        confirm_token: String,
+    },
     /// The run ended.
     Finished {
         phase: String,
@@ -127,6 +142,7 @@ impl MountSyncEvent {
         match self {
             Self::Started { .. } => "started",
             Self::Progress { .. } => "progress",
+            Self::WritebackBlocked { .. } => "writeback_blocked",
             Self::Finished { .. } => "finished",
         }
     }

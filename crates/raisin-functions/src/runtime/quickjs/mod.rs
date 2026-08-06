@@ -32,7 +32,23 @@ mod pool;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_google_calendar_adapter;
+#[cfg(test)]
+mod tests_google_calendar_caps;
+#[cfg(test)]
+mod tests_google_calendar_write;
+#[cfg(test)]
+mod tests_google_drive_write;
+#[cfg(test)]
 mod tests_ms_graph_adapter;
+#[cfg(test)]
+mod tests_ms_graph_calendar;
+#[cfg(test)]
+mod tests_ms_graph_calendar_series;
+#[cfg(test)]
+mod tests_ms_graph_calendar_write;
+#[cfg(test)]
+mod tests_ms_graph_outbox;
 
 use async_trait::async_trait;
 use raisin_error::{Error, Result};

@@ -182,10 +182,13 @@ pub use jobs::handlers::virtual_mount_sync::record_push_delivery;
 // (`tests/all/virtual_mount_sync_e2e_test.rs`) run whole syncs against a mock
 // adapter — the only way to catch a failure that lives in the seam between the
 // walk, the materializer and the scheduler rather than in any one of them.
+//
+// `ContentFetch` / `ContentTarget` ride along for the HTTP on-demand attachment
+// fetch, which is the engine's only caller from outside a job.
 pub use jobs::handlers::virtual_mount_sync::{
     check as virtual_mount_check, persist_mount_state, read_mount_state, AdapterError,
-    AdapterInvoker, AdapterInvokerHandle, MountConfig, MountScope, MountState,
-    VirtualMountSyncHandler, SYSTEM_WORKSPACE,
+    AdapterInvoker, AdapterInvokerHandle, ContentFetch, ContentTarget, MountConfig, MountScope,
+    MountState, VirtualMountSyncHandler, SYSTEM_WORKSPACE,
 };
 
 // Re-export the scheduled-invocation JobContext metadata keys so transport

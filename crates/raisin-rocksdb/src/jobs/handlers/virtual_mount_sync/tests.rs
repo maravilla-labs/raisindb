@@ -117,6 +117,7 @@ fn mk_mount(sync: SyncConfig) -> MountConfig {
         remote_root: Some("root".to_string()),
         adapter_function: Some("/adapters/mock".to_string()),
         mapping_function: None,
+        resolver_function: None,
         enabled: true,
         sync_config_raw: serde_json::to_value(&sync).unwrap(),
         sync_config: sync,
@@ -2820,7 +2821,7 @@ fn write_capabilities_round_trip() {
     assert_eq!(caps.default_delete_policy.as_deref(), Some("trash"));
     assert_eq!(caps.default_move_policy.as_deref(), Some("push"));
     assert!(caps.supports_trash && caps.supports_idempotency_key && caps.can_submit);
-    assert!(caps.missing_mirror_ops().is_empty());
+    assert!(caps.missing_mirror_ops(true).is_empty());
 }
 
 /// A mount asking for write-through against a read-only adapter is reported as
@@ -2954,7 +2955,7 @@ async fn no_mapping_function_means_read_only_without_a_probe() {
     assert_eq!(mock.call_count(), 0, "nothing to ask, so nothing was asked");
 
     // And the reverse mapping itself short-circuits rather than inventing one.
-    let out = super::map_to_external(&c, &json!({"id": "n1"}), None)
+    let out = super::map_to_external(&c, &json!({"id": "n1"}), None, "update")
         .await
         .unwrap();
     assert!(matches!(out, super::ToExternalOutcome::NoMapper));
@@ -2977,8 +2978,8 @@ async fn a_legacy_mapper_is_unaffected_by_operation_dispatch() {
     let item: super::ExternalItem =
         serde_json::from_value(ext_item("X1", "x.txt", false, "e1")).unwrap();
     let mapped = super::map_item(&c, &item).await.unwrap().unwrap();
-    assert_eq!(mapped.node_type, "raisin:Node");
-    assert_eq!(mapped.name.as_deref(), Some("x.txt"));
+    assert_eq!(mapped.node.node_type, "raisin:Node");
+    assert_eq!(mapped.node.name.as_deref(), Some("x.txt"));
 
     // It saw the new key and ignored it, exactly as a switch-less mapper does.
     assert_eq!(mock.ops.lock().unwrap().as_slice(), ["to_node"]);
@@ -2989,7 +2990,7 @@ async fn a_legacy_mapper_is_unaffected_by_operation_dispatch() {
         c.probe_mapper_writeback().await,
         MapperWriteback::NotImplemented
     );
-    let out = super::map_to_external(&c, &json!({"id": "n1"}), None)
+    let out = super::map_to_external(&c, &json!({"id": "n1"}), None, "update")
         .await
         .unwrap();
     assert!(matches!(out, super::ToExternalOutcome::NotWritable));
@@ -3009,7 +3010,7 @@ async fn a_bidirectional_mapper_round_trips_to_external() {
     assert_eq!(c.probe_mapper_writeback().await, MapperWriteback::Supported);
 
     let fields = vec!["unread".to_string()];
-    let out = super::map_to_external(&c, &json!({"id": "n1"}), Some(&fields))
+    let out = super::map_to_external(&c, &json!({"id": "n1"}), Some(&fields), "update")
         .await
         .unwrap();
     let super::ToExternalOutcome::Mapped(m) = out else {
@@ -3305,7 +3306,7 @@ async fn a_local_edit_of_a_watched_field_pushes_once() {
         &c,
         &mut state,
         &mut batcher,
-        &super::write::WriteMode::StateOnly(vec!["unread".to_string()]),
+        &super::write::WriteMode::StateOnly(super::write::FieldPlan::pushing(&["unread"])),
     )
     .await;
 
@@ -3340,7 +3341,7 @@ async fn draining_twice_pushes_once() {
     set_bool_prop(&env, &id, "unread", true).await;
 
     let c = ctx(&env, &mount, &mock, &mat);
-    let mode = super::write::WriteMode::StateOnly(vec!["unread".to_string()]);
+    let mode = super::write::WriteMode::StateOnly(super::write::FieldPlan::pushing(&["unread"]));
     let mut state = MountState::default();
 
     for _ in 0..2 {
@@ -3370,7 +3371,7 @@ async fn a_delta_echoing_the_pushed_item_writes_nothing() {
     set_bool_prop(&env, &id, "unread", true).await;
 
     let c = ctx(&env, &mount, &mock, &mat);
-    let mode = super::write::WriteMode::StateOnly(vec!["unread".to_string()]);
+    let mode = super::write::WriteMode::StateOnly(super::write::FieldPlan::pushing(&["unread"]));
     let mut state = MountState {
         last_sync_token: Some("t0".to_string()),
         ..Default::default()
@@ -3468,7 +3469,7 @@ fn state_only_is_refused_with_a_reason() {
     // Everything present: allowed, with the effective allow-list.
     assert_eq!(
         super::write::resolve_mode(&wc, &full, &MapperWriteback::Supported),
-        super::write::WriteMode::StateOnly(vec!["unread".to_string()])
+        super::write::WriteMode::StateOnly(super::write::FieldPlan::pushing(&["unread"]))
     );
 
     // A read-only adapter names the missing op — and NOT `can_create` /
@@ -3527,3 +3528,27 @@ mod write_gone_tests;
 
 #[path = "misconfig_tests.rs"]
 mod misconfig_tests;
+
+#[path = "write_reconcile_tests.rs"]
+mod write_reconcile_tests;
+
+#[path = "write_capture_tests.rs"]
+mod write_capture_tests;
+
+#[path = "write_mirror_tests.rs"]
+mod write_mirror_tests;
+
+#[path = "index_scope_tests.rs"]
+mod index_scope_tests;
+
+#[path = "attachment_tests.rs"]
+mod attachment_tests;
+
+#[path = "write_move_tests.rs"]
+mod write_move_tests;
+
+#[path = "write_conflict_tests.rs"]
+mod write_conflict_tests;
+
+#[path = "write_submit_tests.rs"]
+mod write_submit_tests;

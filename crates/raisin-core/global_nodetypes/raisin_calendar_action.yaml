@@ -1,0 +1,127 @@
+# NAMING: property names are snake_case. UI hints live under `meta`.
+
+name: raisin:CalendarAction
+description: >-
+  An RSVP, modelled as a submit COMMAND rather than as a field on raisin:Event.
+  Lives in a mount whose `write_config.mode` is `submit` — conventionally
+  `/calendar/rsvp`, beside the `mirror` `/calendar`.
+icon: calendar-check
+
+version: 1
+
+# WHY THIS IS NOT A PROPERTY ON raisin:Event
+#
+# Responding to an invitation NOTIFIES THE ORGANIZER. It is irreversible and
+# externally visible, and it is exactly the class of effect that must not be
+# reachable by an ordinary property edit — a bulk UPDATE over a calendar
+# workspace, a mapper regression, a flow that copies events between branches
+# would each declined a meeting on the user's behalf with nothing in the system
+# saying so.
+#
+# As a command it inherits the whole `submit` protocol instead: nothing happens
+# until someone moves it to `queued`, the attempt is claimed durably before the
+# call, and an ambiguous outcome parks at `unknown` rather than being retried
+# into a second notification.
+indexable: true
+index_types: [Property]
+
+mixins:
+  - raisin:VirtualNode
+
+properties:
+  - name: action
+    type: String
+    required: true
+    index: [Property]
+    meta:
+      label: Action
+      description: >-
+        "accept" | "decline" | "tentative". Carried verbatim to the adapter,
+        which maps it onto the provider's own response endpoint.
+
+  - name: target_external_id
+    type: String
+    required: true
+    index: [Property]
+    meta:
+      label: Event (provider id)
+      description: >-
+        The PROVIDER's id of the event being responded to — the
+        `__external_id` of a raisin:Event node in the calendar mount. The
+        provider id and not the node id: the adapter never reads nodes, and an
+        RSVP addressed by a local id could not be sent at all.
+
+  - name: comment
+    type: String
+    required: false
+    meta:
+      label: Comment
+      description: Optional note sent to the organizer with the response.
+
+  - name: send_response
+    type: Boolean
+    required: false
+    meta:
+      label: Notify the organizer
+      description: >-
+        Defaults to true at every provider. Set false to record the response in
+        the calendar without emailing the organizer — the one part of an RSVP
+        that is NOT externally visible.
+
+  # ---- the lifecycle, identical to raisin:OutboundMail --------------------
+  #
+  # Deliberately the same vocabulary and the same engine code path. Two status
+  # lifecycles for one protocol is the mirrored-implementation drift this
+  # codebase pays for most often, and the second copy is always the one that
+  # forgets that `unknown` must not be retried.
+  - name: status
+    type: String
+    required: true
+    index: [Property]
+    default: draft
+    meta:
+      label: Status
+      description: >-
+        draft | queued | sending | sent | failed | unknown. Defaults to `draft`;
+        only `queued` is ever picked up. See raisin:OutboundMail.status.
+
+  - name: attempt_id
+    type: String
+    required: false
+    meta:
+      label: Attempt ID
+
+  - name: attempted_at
+    type: String
+    required: false
+    meta:
+      label: Attempted at
+
+  - name: sent_at
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Responded at
+      description: >-
+        ISO 8601. Present only once the command has reached `status` sent.
+
+  - name: sent_external_id
+    type: String
+    required: false
+    meta:
+      label: Provider response id
+      description: Usually absent — most providers answer an RSVP with 202 and no body.
+
+  - name: last_error
+    type: String
+    required: false
+    meta:
+      label: Last error
+
+allowed_children: []
+versionable: false
+publishable: false
+# An RSVP is an action taken on someone's behalf. Same reasoning as
+# raisin:OutboundMail.
+auditable: true

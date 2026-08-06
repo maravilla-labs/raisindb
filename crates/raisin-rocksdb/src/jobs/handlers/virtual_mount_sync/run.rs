@@ -47,7 +47,7 @@ impl VirtualMountSyncHandler {
 
         // Acquire the per-mount lease (cluster safety). Keyed on the config
         // branch — that is the identity the periodic scan enqueues against.
-        let lock_key = format!("{tenant}\0{repo}\0{config_branch}\0vmount:{mount_id}");
+        let lock_key = ctx::mount_lease_key(&tenant, &repo, &config_branch, &mount_id);
         let owner = format!("{}:{}", self.instance_id, job.id);
         let lease_token = match &self.lock_manager {
             Some(lm) => match lm.try_acquire(&lock_key, &owner, SYNC_LEASE_TTL).await? {
@@ -136,8 +136,19 @@ impl VirtualMountSyncHandler {
         // cheerful `ok` and a running sync was indistinguishable from an idle
         // one. This write is also what lights up the console's live feed: it is
         // an ordinary node write, so it emits `node:updated` for free.
+        // ...with ONE exception: a latency drain does not touch `status`.
+        //
+        // `status` describes the READ side of a mount — the console greys out
+        // `Sync now` on `"syncing"` and `check::is_due` refuses to schedule an
+        // `"auth_required"` mount. A drain fires on every local edit, so writing
+        // `"syncing"` here would stomp a `degraded`/`error` verdict the read
+        // phases had reached, and `finalize` would then write `"ok"` over it —
+        // a mount reporting healthy because someone marked a mail read.
+        let write_only = mode == write::WRITE_ONLY_MODE;
         let run_started_at = Utc::now().timestamp();
-        state.status = Some("syncing".to_string());
+        if !write_only {
+            state.status = Some("syncing".to_string());
+        }
         state.last_run = Some(SyncRun::started(run_started_at, &mode, &trigger));
         if !persist_state(&ctx, &mut state)
             .await
@@ -182,8 +193,11 @@ impl VirtualMountSyncHandler {
         // QuickJS invocation per run to compute a value that is discarded —
         // the same reasoning that keeps `stage_item` from mapping an item whose
         // etag already matches.
-        let wants_writeback =
-            mount.write_config.wants_write_through() || mount.write_config.wants_state_only();
+        // Any declared write mode earns the probe, `mirror` included — gating it
+        // on the two modes that existed when this was written is how a new mode
+        // silently arrives with `MapperWriteback::NoMapper` and is refused for a
+        // mapper it never asked about.
+        let wants_writeback = mount.write_config.wants_any_write();
         let mapper_writeback = if wants_writeback {
             ctx.probe_mapper_writeback().await
         } else {
@@ -212,7 +226,12 @@ impl VirtualMountSyncHandler {
         // Runs every sync so a bootstrap sync — enqueued by the check pass for a
         // webhook mount that lacks a subscription — registers push here, and the
         // periodic renew job keeps it alive thereafter. Fully provider-agnostic.
-        subscription::ensure(&ctx, &mut state, &capabilities).await;
+        // Skipped for a latency drain: registering or renewing a push
+        // subscription is read-path work, it costs a provider round trip, and a
+        // drain runs as often as a user edits.
+        if !write_only {
+            subscription::ensure(&ctx, &mut state, &capabilities).await;
+        }
 
         let result = phases::run_phases(
             &ctx,

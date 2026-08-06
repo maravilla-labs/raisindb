@@ -324,7 +324,10 @@ mod tests {
         let first = new_connection_node("github", "/mcp-connections/github");
         let second = new_connection_node("linear", "/mcp-connections/linear");
 
-        assert!(!first.id.is_empty(), "an empty id collides on the second create");
+        assert!(
+            !first.id.is_empty(),
+            "an empty id collides on the second create"
+        );
         assert!(!second.id.is_empty());
         assert_ne!(first.id, second.id);
     }

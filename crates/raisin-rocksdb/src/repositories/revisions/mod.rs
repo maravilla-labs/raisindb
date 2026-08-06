@@ -2,6 +2,9 @@
 
 mod trait_impl;
 
+#[cfg(test)]
+mod since_tests;
+
 use crate::{cf, cf_handle, keys};
 use raisin_error::Result;
 use raisin_hlc::{NodeHLCState, HLC};

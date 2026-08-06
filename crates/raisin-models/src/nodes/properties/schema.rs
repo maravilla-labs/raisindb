@@ -169,3 +169,73 @@ pub enum CompoundColumnType {
     /// Boolean values
     Boolean,
 }
+
+#[cfg(test)]
+mod compound_index_shape_tests {
+    use super::*;
+
+    /// The shorthand two skill files documented — `columns: ["a", "b"]` — does
+    /// not deserialize, and the failure takes the WHOLE NodeType down, not just
+    /// the index.
+    ///
+    /// Pinned here because the docs teach the YAML and the struct is what
+    /// enforces it: `CompoundIndexColumn` is a struct with a REQUIRED
+    /// `column_type` (no `#[serde(default)]`, no untagged/from-string variant),
+    /// so a bare string is `invalid type: string, expected struct
+    /// CompoundIndexColumn` — the same class of trap as the designer-format
+    /// `TemplatableNumber` bug.
+    #[test]
+    fn a_bare_string_column_is_not_a_compound_column() {
+        let err = serde_yaml::from_str::<CompoundIndexDefinition>(
+            r#"
+name: folder_time
+columns: ["__parent_path", "__created_at"]
+has_order_column: true
+"#,
+        )
+        .expect_err("the string shorthand must not silently parse");
+        assert!(
+            err.to_string().contains("CompoundIndexColumn"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The form the docs must teach: every column an object with an explicit
+    /// `column_type`, spelled exactly as the enum variant.
+    #[test]
+    fn the_object_form_with_an_explicit_column_type_parses() {
+        let def: CompoundIndexDefinition = serde_yaml::from_str(
+            r#"
+name: mail_folder_recent
+columns:
+  - property: __parent_path
+    column_type: String
+  - property: __created_at
+    column_type: Timestamp
+has_order_column: true
+"#,
+        )
+        .expect("the object form is the supported shape");
+        assert_eq!(def.columns.len(), 2);
+        assert_eq!(def.columns[1].column_type, CompoundColumnType::Timestamp);
+        assert!(def.has_order_column);
+    }
+
+    /// `column_type` has no default: omitting it is an error, not a String
+    /// column. Worth pinning separately — a `#[serde(default)]` added later
+    /// would make every mistyped column silently a String, which the writer
+    /// then refuses to index (it requires (String, PropertyValue::String)) and
+    /// the node drops out of the index with only a debug log.
+    #[test]
+    fn column_type_is_required() {
+        assert!(serde_yaml::from_str::<CompoundIndexDefinition>(
+            r#"
+name: x
+columns:
+  - property: status
+has_order_column: false
+"#,
+        )
+        .is_err());
+    }
+}

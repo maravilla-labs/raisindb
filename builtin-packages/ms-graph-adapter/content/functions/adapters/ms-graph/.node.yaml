@@ -9,11 +9,14 @@ properties:
     mailFolders/messages, "calendar" -> calendars/events + calendarView, "files" ->
     drive items + delta). `principal` selects WHOSE mailbox/calendar (blank = the
     connected account, an address = a shared mailbox), and for "files"
-    `drive_scope` picks OneDrive or a SharePoint document library. Read-only for
-    calendar and files; MAIL additionally supports `update`, a state PATCH of the
-    read flag (capabilities reports can_write/can_update/mutable_fields for the
-    mail resource ONLY). A mail write needs the Mail.ReadWrite scope, which the
-    connector does not request by default — add it and re-consent per account.
+    `drive_scope` picks OneDrive or a SharePoint document library. Writes are
+    declared PER RESOURCE: CALENDAR is a full mirror (create/update/delete) plus
+    RSVP; MAIL supports `update` (a state PATCH of the read flag) plus
+    send/reply/forward; FILES is read-only, because a Graph drive write is an
+    upload session rather than a JSON body. A write needs a ReadWrite scope
+    (Mail.ReadWrite / Calendars.ReadWrite) which the connector does not request
+    by default — add it and re-consent per account, since Microsoft only issues a
+    widened scope on fresh consent.
     Push-capable: subscribe/renew/unsubscribe manage a Graph subscription whose
     notifications are a pure invalidation signal. Invoked directly by the sync
     engine with a decrypted bearer token; owns no token-refresh logic.
@@ -43,8 +46,9 @@ properties:
       operation:
         type: string
         description: >
-          One of capabilities, list, get, get_content, get_changes, update
-          (mail only), subscribe, renew, unsubscribe
+          One of capabilities, list, get, get_content, get_changes, create
+          (calendar only), update (mail + calendar), delete (calendar only),
+          submit, subscribe, renew, unsubscribe, browse
       params:
         type: object
         description: Operation-specific arguments

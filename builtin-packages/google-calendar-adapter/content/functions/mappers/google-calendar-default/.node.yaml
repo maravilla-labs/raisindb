@@ -3,15 +3,21 @@ properties:
   title: Google Calendar Default Mapper
   description: >
     Default mapping function for Google Calendar mounts. Maps each event to a
-    raisin:Event node, hoisting start/end/all_day/location/attendees/organizer/
-    recurrence/status/url/calendar_id into typed properties. Pure and
-    side-effect-free: called once per external item in the sync hot loop;
-    performs no I/O. Returns null for cancelled events so they are skipped.
+    raisin:Event v2 — the provider-neutral shape the Microsoft 365 calendar
+    mapper also emits: UTC + local + IANA timezone, RFC 5545 recurrence lines,
+    object attendees, and status / show_as / my_response as separate columns.
+    Cancelled events are materialized with status="cancelled" rather than
+    skipped, so both providers agree. Bidirectional dispatch on input.operation:
+    to_external emits Google-shaped event JSON for a mirror mount and
+    mapper_capabilities reports to_external:true. Recurrence travels VERBATIM in
+    both directions — Google's `recurrence` is already an array of RFC 5545
+    content lines. Pure and side-effect-free: called once per item in the sync
+    hot loop; performs no I/O.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  version: 2
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216

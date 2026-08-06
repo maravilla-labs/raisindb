@@ -128,9 +128,11 @@ impl UnifiedJobEventHandler {
         // a local rebuild.
         self.reconcile_spatial_index(node_event, &context).await;
 
-        // Trigger evaluation and AI jobs - only for LOCAL events
+        // Trigger evaluation, AI jobs and virtual-mount writeback capture -
+        // only for LOCAL events
         if !is_remote_event {
-            self.handle_local_node_change(node_event, &context).await;
+            self.handle_local_node_change(node_event, &context, node_from_metadata.as_ref())
+                .await;
         }
 
         // Embedding generation - only for LOCAL events
@@ -153,8 +155,20 @@ impl UnifiedJobEventHandler {
         Ok(())
     }
 
-    /// Handle local-only aspects of node change (triggers, AI tool calls)
-    async fn handle_local_node_change(&self, node_event: &NodeEvent, context: &JobContext) {
+    /// Handle local-only aspects of node change (triggers, AI tool calls,
+    /// virtual-mount writeback capture)
+    async fn handle_local_node_change(
+        &self,
+        node_event: &NodeEvent,
+        context: &JobContext,
+        node_from_metadata: Option<&raisin_models::nodes::Node>,
+    ) {
+        // Local-only by construction, and it has to stay that way: writeback is
+        // one node's job, so a replicated edit reaching this arm would have every
+        // replica push the same change to the provider.
+        self.capture_virtual_write(node_event, node_from_metadata)
+            .await;
+
         let event_type = match &node_event.kind {
             NodeEventKind::Created => "Created",
             NodeEventKind::Updated => "Updated",

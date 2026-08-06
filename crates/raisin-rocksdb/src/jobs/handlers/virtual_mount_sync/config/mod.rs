@@ -14,13 +14,19 @@ mod run;
 mod state;
 
 pub use integration::{ConnectedAccount, IntegrationConfig};
-pub use items::{default_mapping, Change, ChangesPage, ExternalItem, ListPage, MappedNode};
+pub use items::{
+    child_external_id, default_mapping, Change, ChangesPage, ExternalItem, ListPage, MappedChild,
+    MappedItem, MappedNode, CHILD_ID_SEP,
+};
 pub use mount::{MountConfig, SyncConfig, WriteConfig};
 pub use paths::{parse_iso_epoch, passes_filters, resolve_path_template};
 pub use props::build_properties;
 pub(crate) use props::{parse_object, parse_object_checked};
 pub use run::SyncRun;
-pub use state::{DrainSummary, MountState, MAX_RUN_HISTORY};
+pub use state::{
+    DrainSummary, MountState, PendingDelete, ReconcileSummary, WritebackBlock,
+    BULK_REVISION_THRESHOLD, MAX_PENDING_DELETES, MAX_RUN_HISTORY,
+};
 
 /// The workspace that holds integration/mount configuration in every repo.
 pub const SYSTEM_WORKSPACE: &str = "raisin:system";

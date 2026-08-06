@@ -16,13 +16,15 @@
  *
  * Messages map to `raisin:Mail`, a global nodetype shared with the IMAP/Gmail
  * connectors. It declares the indexing that makes mail queryable: Fulltext on
- * subject/body/snippet, Property on from_address, conversation_id, message_id,
- * date, unread, folder — so `GROUP BY conversation_id` and sender filters are
- * index-backed rather than full scans.
+ * subject/body_html/body_text/snippet, Property on from_address,
+ * conversation_id, message_id, date, unread, folder — so
+ * `GROUP BY conversation_id` and sender filters are index-backed rather than
+ * full scans.
  *
- * Not raisin:Asset: a message is metadata plus a body that is only inlined when
- * the mount sets `sync_config.include_body`. Without it the body is absent here
- * and remains available on demand through the adapter's get_content.
+ * The MESSAGE is not raisin:Asset: it is metadata plus a body that is only
+ * inlined when the mount sets `sync_config.include_body`. Its ATTACHMENTS are,
+ * as `raisin:Asset` child nodes (see `attachmentChildren`) — metadata at sync,
+ * bytes on demand through the adapter's get_content.
  *
  * `name` stays the Graph item id (external_item.name) so distinct messages never
  * collide on a path; the human-readable subject lives in the `subject` property.
@@ -61,11 +63,25 @@ function toNode(input) {
     from_address: meta.from_address || null,
     to: meta.to || null,
     cc: meta.cc || null,
+    // Only ever populated on a copy the account itself sent, and that is the
+    // point: without them a synced Sent Items copy cannot seed a reply-all
+    // without silently dropping recipients.
+    bcc: meta.bcc || null,
+    reply_to: meta.reply_to || null,
     date: meta.date || item.modified_at || null,
+    // The unambiguous halves of `date`. "no received_at" is how an outgoing
+    // copy is recognised without branching on folder name.
+    received_at: meta.received_at || null,
+    sent_at: meta.sent_at || null,
+    is_draft: meta.is_draft === true,
     snippet: meta.snippet || null,
     unread: meta.unread === true,
     has_attachments: meta.has_attachments === true,
+    size: item.size_bytes != null ? item.size_bytes : null,
     importance: meta.importance || null,
+    // Outlook categories land in the same column as Gmail labels: one concept,
+    // one array, so a consumer never branches on provider to read a label.
+    labels: Array.isArray(meta.labels) ? meta.labels : null,
     conversation_id: meta.conversation_id || null,
     // RFC 5322 Message-ID — stable across folders and providers, so it is what
     // identifies the same mail seen through both an Inbox and a Sent Items
@@ -82,21 +98,72 @@ function toNode(input) {
     provider_metadata: meta,
   };
 
-  // Only set when the mount opted in and the adapter actually returned one.
-  // Writing "" for an absent body would blank a previously synced body and,
-  // worse, change the node on every run — defeating the etag skip-write that
-  // stops a re-sync from re-firing every downstream trigger.
-  if (typeof meta.body === "string") {
-    props.body = meta.body;
-    props.body_type = meta.body_type || "text";
-  }
+  // `body` + `body_type` REPLACED by an explicit pair, split at the source: one
+  // column whose meaning depended on a sibling column could not be searched,
+  // rendered or replied to without branching.
+  //
+  // Each is set only when the adapter actually returned it. Writing "" for an
+  // absent body would blank a previously synced body and, worse, change the node
+  // on every run — defeating the etag skip-write that stops a re-sync from
+  // re-firing every downstream trigger.
+  if (typeof meta.body_html === "string") props.body_html = meta.body_html;
+  if (typeof meta.body_text === "string") props.body_text = meta.body_text;
 
-  return {
+  // Attachments become raisin:Asset CHILD NODES, one per attachment, not an
+  // `attachments` array property: the Drive adapter already maps provider blobs
+  // to raisin:Asset, and a second parallel blob path is this codebase's most
+  // expensive recurring bug class.
+  //
+  // METADATA ONLY. No `file` property is written here — its absence is what the
+  // engine's on-demand `get_content` fetch keys off, and a placeholder Resource
+  // pointing at nothing would read to every consumer as "the bytes are there".
+  //
+  // Present only when the mount set `sync_config.include_attachments`; absent
+  // means "not synced", which is why a child list is never emitted as empty.
+  var children = attachmentChildren(meta.attachments);
+
+  var out = {
     node_type: "raisin:Mail",
     // id, not subject — path stability is owned by the adapter's external_id.
     name: item.name,
     properties: props,
   };
+  if (children) out.children = children;
+  return out;
+}
+
+/**
+ * One raisin:Asset child per attachment.
+ *
+ * `external_id` is the provider's attachment id, which is unique only WITHIN the
+ * message — the engine namespaces it under the message's own external id, so
+ * two messages carrying attachment "1" do not collide.
+ *
+ * Returns null (not []) when the adapter reported nothing, so "attachments were
+ * not synced" and "this message has none" stay distinguishable: an empty array
+ * would tell the engine to reconcile away every attachment node it had.
+ */
+function attachmentChildren(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var a = list[i];
+    if (!a || !a.external_id) continue;
+    out.push({
+      name: a.name || a.external_id,
+      node_type: "raisin:Asset",
+      external_id: a.external_id,
+      properties: {
+        title: a.name || a.external_id,
+        file_type: a.mime_type || null,
+        file_size: a.size != null ? a.size : null,
+        inline: a.inline === true,
+        // Angle brackets stripped: `body_html` references it as `cid:<value>`.
+        content_id: a.content_id ? String(a.content_id).replace(/^<|>$/g, "") : null,
+      },
+    });
+  }
+  return out.length ? out : null;
 }
 
 /**

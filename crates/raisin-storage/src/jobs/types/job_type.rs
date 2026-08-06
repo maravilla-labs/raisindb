@@ -294,6 +294,25 @@ pub enum JobType {
         #[serde(default = "default_sync_trigger")]
         trigger: String,
     },
+    /// Drain one virtual mount's pending local edits to its provider, NOW.
+    ///
+    /// The latency half of the write path. Correctness never depends on it:
+    /// the drain also runs as the first phase of every ordinary
+    /// [`Self::VirtualMountSync`], and [`Self::VirtualMountWriteReconcile`] is
+    /// the durable change feed. This job only shortens the delay between an
+    /// edit and its push from "the next poll interval" to "seconds".
+    ///
+    /// It takes the SAME per-mount lease a sync run takes and no-ops on
+    /// contention — a sync already in flight will drain these edits itself, so
+    /// waiting for the lease would only queue a second, redundant pass. That is
+    /// also why per-process job dedup is enough here: the lease, not the dedup
+    /// key, is the cluster-wide gate.
+    VirtualMountWriteDrain {
+        mount_id: String,
+        /// What caused this drain: `"capture" | "manual" | "unknown"`.
+        #[serde(default = "default_sync_trigger")]
+        trigger: String,
+    },
     /// Refresh expiring OAuth tokens across all integrations.
     IntegrationTokenRefresh {
         tenant_id: Option<String>,
@@ -324,6 +343,35 @@ pub enum JobType {
     /// whose refresh interval is due (mirrors `VirtualMountSyncCheck`).
     McpDiscoveryCheck {
         tenant_id: Option<String>,
+    },
+    /// Periodic scan: walk each writable virtual mount's revisions from its
+    /// writeback watermark, so local edits — and above all local DELETES — are
+    /// detected durably rather than only while a process happens to be up.
+    ///
+    /// Mirrors [`Self::VirtualMountSyncCheck`], with one difference that shapes
+    /// the handler: the sync check only enqueues, while this one walks and
+    /// writes mount state. Job dedup is per-process, so the handler takes a
+    /// per-mount `raisin_locks` lease; without it every node of a cluster would
+    /// advance the same watermark and discard each other's findings.
+    VirtualMountWriteReconcile {
+        tenant_id: Option<String>,
+        repo_id: Option<String>,
+    },
+    /// Periodic scan: rebuild the derived calendar-occurrence projection.
+    ///
+    /// A recurring event is stored as ONE series master carrying an RFC 5545
+    /// rule, so `WHERE start_utc >= ? AND start_utc < ?` cannot see it — the
+    /// master's own start is its first occurrence. This job expands each master
+    /// over a rolling window into concrete, indexed occurrence nodes under
+    /// `/_occurrences`.
+    ///
+    /// Derived, never authoritative: the projection is safe to delete and is
+    /// rebuilt idempotently. Job dedup is per-PROCESS, so the handler takes a
+    /// per-workspace `raisin_locks` lease whose TTL doubles as the rebuild
+    /// interval.
+    CalendarOccurrenceRebuild {
+        tenant_id: Option<String>,
+        repo_id: Option<String>,
     },
     /// Periodic scan: renew push/webhook subscriptions on virtual mounts whose
     /// provider subscription is close to expiring (mirrors
@@ -386,6 +434,13 @@ impl JobType {
             JobType::RetargetReferences { .. } => 120,
             JobType::UploadSessionCleanup { .. } => 120,
             JobType::VirtualMountSyncCheck { .. } => 60,
+            // A bounded revision walk per mount plus one MVCC read per delete.
+            // No provider calls at all, so it has no business taking as long as
+            // a sync.
+            JobType::VirtualMountWriteReconcile { .. } => 120,
+            // Pure local work: one type-index scan per workspace plus an
+            // in-memory expansion. No provider calls at all.
+            JobType::CalendarOccurrenceRebuild { .. } => 120,
             JobType::IntegrationTokenRefresh { .. } => 60,
             JobType::McpDiscoveryCheck { .. } => 60,
             // One handshake plus a paginated tools/list against a third party.
@@ -393,6 +448,11 @@ impl JobType {
             JobType::VirtualMountSubscriptionRenew { .. } => 120,
             // Long-running: syncing one mount can page through many remote items
             JobType::VirtualMountSync { .. } => 600,
+            // The same provider calls a sync's drain phase makes, under the same
+            // lease and the same wall-clock budget — so it gets the same timeout.
+            // A shorter one would have the watchdog abort a legitimate drain
+            // mid-push, which is the one thing the drain must never be.
+            JobType::VirtualMountWriteDrain { .. } => 600,
             // Function/AI execution — can involve AI API calls (10-30s each)
             JobType::FunctionExecution { .. } => 300,
             JobType::ScheduledInvocation { .. } => 300,

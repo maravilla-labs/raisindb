@@ -63,7 +63,42 @@ impl RocksDbMaterializer {
                 let Some(existing) = index.by_external(external_id) else {
                     return Ok(Staged::Skipped);
                 };
-                tx.delete_node(&scope.workspace, &existing.id).await?;
+                let node_id = existing.id.clone();
+
+                // CASCADE. `TransactionalContext::delete_node` deliberately does
+                // not descend (its own doc comment says so), so a mail deleted
+                // upstream would leave its `raisin:Asset` attachment children
+                // behind: mount-owned, orphaned under a tombstoned parent path,
+                // never seen by a full walk again — and therefore deleted only
+                // by a reconcile that would first have to notice them. They are
+                // removed here, before the parent, so a failure part-way leaves
+                // the parent alive and the next run retries the whole subtree
+                // rather than stranding it.
+                //
+                // A child already gone is NOT an error. Both the parent and the
+                // child carry an `__external_id`, so a full walk that reconciles
+                // the message away stages a `Delete` for each of them — and the
+                // batch's order is a HashMap iteration order, so the child's own
+                // op may already have run. The index is only updated after the
+                // transaction commits, so it still reports the child as live.
+                // Propagating that `NotFound` aborted the PARENT's delete, and
+                // the message survived a reconcile that had just deleted its
+                // attachment: a mail with no body left, on roughly half of runs.
+                for child_external_id in index.child_external_ids(external_id) {
+                    let Some(child) = index.by_external(&child_external_id) else {
+                        continue;
+                    };
+                    match tx.delete_node(&scope.workspace, &child.id).await {
+                        Ok(()) => {}
+                        Err(raisin_error::Error::NotFound(_)) => continue,
+                        Err(e) => return Err(e),
+                    }
+                    pending.push(IndexMutation::Delete {
+                        external_id: child_external_id,
+                    });
+                }
+
+                tx.delete_node(&scope.workspace, &node_id).await?;
                 pending.push(IndexMutation::Delete {
                     external_id: external_id.clone(),
                 });
@@ -75,6 +110,8 @@ impl RocksDbMaterializer {
                 etag,
                 synced_at,
                 pushed_state,
+                merged,
+                adopt,
                 node_bytes: _,
             } => {
                 return self
@@ -87,6 +124,8 @@ impl RocksDbMaterializer {
                         etag.as_deref(),
                         synced_at,
                         pushed_state.as_ref(),
+                        merged.as_ref(),
+                        *adopt,
                     )
                     .await;
             }

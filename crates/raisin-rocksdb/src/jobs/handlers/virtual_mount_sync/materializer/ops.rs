@@ -46,6 +46,32 @@ pub enum BatchOp {
         /// Watched-field values as actually pushed. `None` leaves the stored
         /// map alone (a stamp that only refreshes the etag).
         pushed_state: Option<Map<String, Value>>,
+        /// Ordinary (non-reserved) property values to LAND on the node as part
+        /// of the same read-modify-write — the merged values a conflict
+        /// resolver produced.
+        ///
+        /// The one exception to "a stamp touches `__`-prefixed keys only", and
+        /// it has to be in the same op rather than a second write: the merged
+        /// values and the `__pushed_state` recording them as pushed must land
+        /// together or the node converges against a baseline it does not hold.
+        /// Two writes could also interleave with a user edit between them.
+        /// `None` on every stamp but a merge.
+        merged: Option<Map<String, Value>>,
+        /// Whether this stamp ADOPTS the node — writes `__virtual`,
+        /// `__mount_id` and `__external_id` onto a node the mount did not
+        /// previously own, because the engine has just created its remote
+        /// counterpart.
+        ///
+        /// A typed flag rather than three entries in `merged`, because `merged`
+        /// drops every `__`-prefixed key on purpose: that map comes from a
+        /// conflict resolver, and a resolver able to forge `__mount_id` could
+        /// hand one mount's node to another, or fabricate provenance that the
+        /// delete rails then treat as proof of ownership. Adoption is the
+        /// engine's own assertion about a call it just made, so it travels as a
+        /// flag the engine sets and a mapper cannot reach. `mount_id` is not
+        /// carried: it comes from the scope, so an adopt cannot name a mount
+        /// other than the one whose drain is running.
+        adopt: bool,
         /// Serialized size of the node being stamped, measured by the drain
         /// from the node it already read (see [`estimate_node_bytes`]).
         ///
@@ -209,6 +235,7 @@ pub fn estimate_op_bytes(op: &BatchOp) -> usize {
             node_id,
             external_id,
             pushed_state,
+            merged,
             node_bytes,
             ..
         } => {
@@ -216,6 +243,9 @@ pub fn estimate_op_bytes(op: &BatchOp) -> usize {
                 + node_id.len()
                 + external_id.len()
                 + pushed_state
+                    .as_ref()
+                    .map_or(0, |m| json_size(&Value::Object(m.clone())))
+                + merged
                     .as_ref()
                     .map_or(0, |m| json_size(&Value::Object(m.clone())))
                 + 256

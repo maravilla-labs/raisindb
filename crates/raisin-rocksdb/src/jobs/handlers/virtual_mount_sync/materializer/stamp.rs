@@ -53,6 +53,8 @@ impl RocksDbMaterializer {
         etag: Option<&str>,
         synced_at: &str,
         pushed_state: Option<&serde_json::Map<String, serde_json::Value>>,
+        merged: Option<&serde_json::Map<String, serde_json::Value>>,
+        adopt: bool,
     ) -> Result<Staged> {
         let Some(mut node) = tx.get_node(&scope.workspace, node_id).await? else {
             // The node was deleted between the drain reading it and this write.
@@ -65,6 +67,48 @@ impl RocksDbMaterializer {
             );
             return Ok(Staged::Skipped);
         };
+        // The merged values FIRST, so the `__pushed_state` written below records
+        // the same values the node now holds. A `__` key here would let a
+        // resolver forge the engine's own metadata — the etag, the baseline —
+        // so reserved keys are dropped exactly as `config/props.rs` drops them
+        // from mapper output.
+        if let Some(merged) = merged {
+            for (key, value) in merged {
+                if key.starts_with("__") {
+                    tracing::warn!(
+                        mount_id = %scope.mount_id,
+                        node_id = %node_id,
+                        key = %key,
+                        "conflict resolver returned a reserved property; dropping it"
+                    );
+                    continue;
+                }
+                if let Ok(pv) = serde_json::from_value::<PropertyValue>(value.clone()) {
+                    node.properties.insert(key.clone(), pv);
+                }
+            }
+        }
+        // Adoption: the engine has just created this node's remote counterpart,
+        // so the node stops being ordinary user content and becomes mount-owned.
+        //
+        // Written from typed arguments and the SCOPE, never from `merged` — the
+        // provenance the delete rails read (`__mount_id` + a non-empty
+        // `__external_id`) must be the engine's own assertion about a call it
+        // made, not something a mapper or a resolver can supply. `mount_id`
+        // comes from the running drain's scope for the same reason: an adopt
+        // cannot name a mount other than the one doing the adopting.
+        if adopt {
+            node.properties
+                .insert("__virtual".to_string(), PropertyValue::Boolean(true));
+            node.properties.insert(
+                "__mount_id".to_string(),
+                PropertyValue::String(scope.mount_id.clone()),
+            );
+            node.properties.insert(
+                "__external_id".to_string(),
+                PropertyValue::String(external_id.to_string()),
+            );
+        }
         if let Some(etag) = etag {
             node.properties.insert(
                 "__etag".to_string(),

@@ -65,6 +65,17 @@ impl<'a> SyncBatcher<'a> {
         self.index.virtual_nodes()
     }
 
+    /// How many mount-owned nodes this mount currently holds.
+    ///
+    /// The denominator of the proportional blast-radius rail (`write::guard`),
+    /// and it costs nothing: the run has already loaded the index. Taken from
+    /// the index rather than counted per-run so the ratio is measured against
+    /// the mount's real size — the same number `full_reconcile` protects with
+    /// `allow_empty_reconcile`.
+    pub fn virtual_len(&self) -> usize {
+        self.index.virtual_len()
+    }
+
     /// Outcome counts accumulated across every flush so far.
     pub fn stats(&self) -> BatchStats {
         self.stats.clone()
@@ -90,6 +101,12 @@ impl<'a> SyncBatcher<'a> {
     /// Count an item skipped before mapping (see [`Self::can_skip_unmapped`]).
     pub fn note_unmapped_skip(&mut self) {
         self.stats.skipped += 1;
+    }
+
+    /// External ids of the subordinate nodes already materialized under an item
+    /// (mail attachments). Served from the run's index, so it costs no I/O.
+    pub fn child_external_ids(&self, parent_external_id: &str) -> Vec<String> {
+        self.index.child_external_ids(parent_external_id)
     }
 
     /// Stage an upsert, flushing first if it would overflow the batch.
@@ -123,7 +140,41 @@ impl<'a> SyncBatcher<'a> {
     /// already holds. It is required rather than defaulted because the stamp
     /// re-writes that node whole, so it IS the batch's replication cost — a
     /// drain of large nodes must flush on the byte budget like any other write.
+    /// `merged` is the ONE case where a stamp writes ordinary properties: the
+    /// values a conflict resolver merged, landing in the same read-modify-write
+    /// as the baseline that records them as pushed. `None` everywhere else.
     pub async fn stage_stamp(
+        &mut self,
+        node_id: &str,
+        external_id: &str,
+        etag: Option<String>,
+        pushed_state: Option<serde_json::Map<String, serde_json::Value>>,
+        merged: Option<serde_json::Map<String, serde_json::Value>>,
+        node_bytes: usize,
+    ) -> std::result::Result<(), AdapterError> {
+        self.stage(BatchOp::StampVirtual {
+            node_id: node_id.to_string(),
+            external_id: external_id.to_string(),
+            etag,
+            synced_at: Utc::now().to_rfc3339(),
+            pushed_state,
+            merged,
+            adopt: false,
+            node_bytes,
+        })
+        .await
+    }
+
+    /// Stage the stamp-back for a node whose remote counterpart the engine has
+    /// just CREATED: the same read-modify-write, plus the provenance that makes
+    /// the node mount-owned.
+    ///
+    /// Separate from [`Self::stage_stamp`] because adoption is not a variation
+    /// on stamping — it is the moment a user's own node becomes something the
+    /// mount will later reconcile, delete-propagate and prune. Making it its own
+    /// call means no ordinary push can set it by passing the wrong argument, and
+    /// a reader of the drain can see exactly where ownership is conferred.
+    pub async fn stage_adopt(
         &mut self,
         node_id: &str,
         external_id: &str,
@@ -137,6 +188,8 @@ impl<'a> SyncBatcher<'a> {
             etag,
             synced_at: Utc::now().to_rfc3339(),
             pushed_state,
+            merged: None,
+            adopt: true,
             node_bytes,
         })
         .await

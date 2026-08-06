@@ -599,6 +599,115 @@ mod tests {
         }
     }
 
+    /// The raisin:Event v2 reshape, plus the mixin that carries the engine-owned
+    /// reserved properties.
+    ///
+    /// Two things this guards that nothing else would notice:
+    /// - the VERSION BUMP. Both legacy init paths update an existing NodeType
+    ///   only when `new_version > existing_version`, so shipping the reshape at
+    ///   version 1 would leave every existing repository on the old schema with
+    ///   no error anywhere.
+    /// - the RENAME of `start`/`end` to `start_utc`/`end_utc`. Reusing the old
+    ///   names would leave stale nodes holding a naive-local or offset-bearing
+    ///   value in a column whose new contract is a fixed-width UTC instant —
+    ///   silently wrong ordering rather than a visible NULL.
+    #[test]
+    fn event_v2_is_the_provider_neutral_calendar_model() {
+        let nodetypes = load_global_nodetypes();
+        let by_name = |n: &str| nodetypes.iter().find(|nt| nt.name == n).cloned();
+
+        let mixin = by_name("raisin:VirtualNode").expect("raisin_virtual_node.yaml must load");
+        assert_eq!(mixin.is_mixin, Some(true), "must be usable as a mixin");
+        let mixin_props = mixin
+            .properties
+            .as_ref()
+            .expect("mixin declares properties");
+        for name in [
+            "__virtual",
+            "__mount_id",
+            "__external_id",
+            "__etag",
+            "__synced_at",
+            // The one raisin:Event omitted while the materializer stamped it.
+            "__pushed_state",
+        ] {
+            assert!(
+                mixin_props.iter().any(|p| p.name.as_deref() == Some(name)),
+                "raisin:VirtualNode must declare '{name}'"
+            );
+        }
+
+        let event = by_name("raisin:Event").expect("raisin_event.yaml must load");
+        assert_eq!(
+            event.version,
+            Some(2),
+            "the reshape must bump the version or the legacy init paths skip it"
+        );
+        assert_eq!(event.strict, Some(true));
+        assert_eq!(event.mixins, vec!["raisin:VirtualNode".to_string()]);
+
+        let props = event
+            .properties
+            .as_ref()
+            .expect("Event declares properties");
+        let has = |n: &str| props.iter().any(|p| p.name.as_deref() == Some(n));
+
+        for name in [
+            "start_utc",
+            "end_utc",
+            "start_local",
+            "end_local",
+            "timezone",
+            "recurrence_type",
+            "series_master_external_id",
+            "original_start_utc",
+            "show_as",
+            "my_response",
+            "organizer_email",
+            "organizer_name",
+            "ical_uid",
+            "location_geo",
+        ] {
+            assert!(has(name), "raisin:Event v2 must declare '{name}'");
+        }
+
+        // Renamed / split, so the old names must be GONE — a strict type that
+        // still declared them would let a stale-shaped write through.
+        for name in ["start", "end", "organizer"] {
+            assert!(!has(name), "'{name}' was renamed in v2 and must not remain");
+        }
+
+        // The reserved properties come from the mixin. Re-declaring them here
+        // would fork the definition and let the two drift.
+        for name in ["__virtual", "__pushed_state"] {
+            assert!(
+                !has(name),
+                "'{name}' belongs to raisin:VirtualNode, not to raisin:Event"
+            );
+        }
+
+        // recurrence is RFC 5545 content LINES now, not a provider blob.
+        let recurrence = props
+            .iter()
+            .find(|p| p.name.as_deref() == Some("recurrence"))
+            .expect("recurrence must exist");
+        assert_eq!(
+            recurrence.property_type,
+            raisin_models::nodes::properties::schema::PropertyType::Array
+        );
+
+        // UI hints must live under `meta` — PropertyValueSchema silently drops
+        // top-level title/description/enum.
+        let status = props
+            .iter()
+            .find(|p| p.name.as_deref() == Some("status"))
+            .expect("status must exist");
+        assert!(
+            status.meta.as_ref().is_some_and(|m| m.contains_key("enum")),
+            "status must carry its enum under `meta` to survive deserialization"
+        );
+    }
+
     #[test]
     fn test_calculate_content_hash() {
         let hash = calculate_content_hash("test content");
@@ -644,5 +753,178 @@ mod tests {
         for (nt, hash) in &nodetypes_with_hashes {
             println!("  - {} (hash: {}...)", nt.name, &hash[..8]);
         }
+    }
+
+    /// The raisin:Mail v2 extension, and the two changes that would otherwise be
+    /// silent.
+    ///
+    /// - the VERSION BUMP. Both legacy init paths update an existing NodeType
+    ///   only when `new_version > existing_version`, so shipping this at
+    ///   version 1 would leave every existing repository on the old schema with
+    ///   no error anywhere.
+    /// - `allowed_children`. It was `[]`, which makes an attachment child a
+    ///   VALIDATION failure at write time — so the whole attachment feature is
+    ///   inert until raisin:Asset is listed here.
+    #[test]
+    fn mail_v2_carries_the_write_path_fields_and_allows_asset_children() {
+        let nodetypes = load_global_nodetypes();
+        let by_name = |n: &str| nodetypes.iter().find(|nt| nt.name == n).cloned();
+
+        let mail = by_name("raisin:Mail").expect("raisin_mail.yaml must load");
+        assert_eq!(mail.version, Some(2), "the reshape must bump the version");
+        let props = mail.properties.as_ref().expect("Mail declares properties");
+        let has = |n: &str| props.iter().any(|p| p.name.as_deref() == Some(n));
+
+        // `body` + `body_type` REPLACED: one column whose meaning depended on a
+        // sibling column could not be searched or replied to without branching.
+        assert!(has("body_html") && has("body_text"), "the body split");
+        assert!(
+            !has("body") && !has("body_type"),
+            "the ambiguous pair must be gone, not left alongside its replacement"
+        );
+
+        for name in [
+            "bcc",
+            "reply_to",
+            "in_reply_to",
+            "references",
+            "thread_id",
+            "flags",
+            "labels",
+            "size",
+            "sent_at",
+            "received_at",
+            "is_draft",
+        ] {
+            assert!(has(name), "raisin:Mail v2 must declare '{name}'");
+        }
+
+        // Attachments are raisin:Asset CHILDREN. With `allowed_children: []`
+        // every attachment write fails validation and the message still lands,
+        // so the failure is one WARN per attachment and an empty subtree.
+        assert_eq!(
+            mail.allowed_children,
+            vec!["raisin:Asset".to_string()],
+            "raisin:Mail must allow raisin:Asset children"
+        );
+
+        // Non-strict, deliberately: a mapper carries provider-specific keys and
+        // the engine stamps reserved `__` properties. The mixin documents and
+        // indexes those without closing the type.
+        assert_ne!(mail.strict, Some(true), "raisin:Mail must stay non-strict");
+        assert!(
+            mail.mixins.iter().any(|m| m == "raisin:VirtualNode"),
+            "mount-written types declare the reserved properties through the mixin"
+        );
+    }
+
+    /// `raisin:Asset.file` must be OPTIONAL, or a metadata-only attachment
+    /// cannot exist.
+    ///
+    /// Sync writes attachment metadata and no bytes; `get_content` fills `file`
+    /// in later, on demand. With `required: true` the only alternatives are
+    /// downloading every attachment of every message during the sync hot loop,
+    /// or writing a placeholder Resource whose `storage_key` resolves to
+    /// nothing — which is worse, because every consumer reads presence as "the
+    /// bytes are there".
+    #[test]
+    fn asset_file_is_optional_so_an_unfetched_attachment_can_exist() {
+        let nodetypes = load_global_nodetypes();
+        let asset = nodetypes
+            .iter()
+            .find(|nt| nt.name == "raisin:Asset")
+            .expect("raisin_asset.yaml must load");
+        assert_eq!(asset.version, Some(3), "the widening must bump the version");
+        let props = asset
+            .properties
+            .as_ref()
+            .expect("Asset declares properties");
+        let by_name = |n: &str| props.iter().find(|p| p.name.as_deref() == Some(n));
+
+        assert_eq!(
+            by_name("file").and_then(|p| p.required),
+            Some(false),
+            "`file == null` must be representable: it means 'not fetched yet'"
+        );
+        assert!(
+            by_name("inline").is_some() && by_name("content_id").is_some(),
+            "inline images need `inline` + `content_id` to resolve `cid:` refs in body_html"
+        );
+    }
+
+    /// The two `submit` command types, and the three declarations that make
+    /// them safe.
+    ///
+    /// Each one is load-bearing rather than tidy:
+    ///
+    /// 1. **`status` defaults to `draft`.** The drain picks up `queued` and
+    ///    nothing else, so a command created without a status must land
+    ///    somewhere inert. Default it to `queued` — or leave it absent on a
+    ///    type whose engine treated absence as ready — and an agent that
+    ///    creates one of these to fill in later has sent an email.
+    /// 2. **The `raisin:VirtualNode` mixin, carrying `__write_seq`.** That
+    ///    counter is the durable half of the at-most-once claim. Without the
+    ///    declaration a strict consumer of these types rejects the very write
+    ///    that records a send as having happened.
+    /// 3. **`auditable: true`**, unlike raisin:Mail. Inbound mail's audit log
+    ///    would mirror the sync job; an outbound command is an irreversible act
+    ///    taken on a person's behalf, and who queued it is the question.
+    #[test]
+    fn submit_command_types_default_to_draft_and_declare_the_write_seq_guard() {
+        let nodetypes = load_global_nodetypes();
+        let by_name = |n: &str| nodetypes.iter().find(|nt| nt.name == n).cloned();
+
+        // The reserved counter is declared ONCE, on the mixin — not on whichever
+        // concrete type happened to need it first.
+        let mixin = by_name("raisin:VirtualNode").expect("raisin_virtual_node.yaml must load");
+        assert!(
+            mixin
+                .properties
+                .as_ref()
+                .expect("the mixin declares properties")
+                .iter()
+                .any(|p| p.name.as_deref() == Some("__write_seq")),
+            "the at-most-once guard must be declared on the mixin"
+        );
+
+        for name in ["raisin:OutboundMail", "raisin:CalendarAction"] {
+            let nt = by_name(name).unwrap_or_else(|| panic!("{name} must load"));
+            let props = nt
+                .properties
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} declares properties"));
+            let by_prop = |p: &str| props.iter().find(|x| x.name.as_deref() == Some(p)).cloned();
+
+            let status = by_prop("status").unwrap_or_else(|| panic!("{name}.status"));
+            assert_eq!(
+                status.default,
+                Some(raisin_models::nodes::properties::PropertyValue::String(
+                    "draft".to_string()
+                )),
+                "{name}.status must default to 'draft' — creating a command must not send it"
+            );
+            assert_eq!(
+                by_prop("action").and_then(|p| p.required),
+                Some(true),
+                "{name} must name what it does"
+            );
+            assert!(
+                nt.mixins.iter().any(|m| m == "raisin:VirtualNode"),
+                "{name} must inherit the engine-owned reserved properties"
+            );
+            assert_eq!(
+                nt.auditable,
+                Some(true),
+                "{name} records an irreversible act on someone's behalf"
+            );
+        }
+
+        // Attachments on an outbound mail are raisin:Asset CHILDREN, exactly as
+        // they are inbound: ONE convention for "a blob hanging off a message",
+        // in both directions.
+        assert_eq!(
+            by_name("raisin:OutboundMail").unwrap().allowed_children,
+            vec!["raisin:Asset".to_string()],
+        );
     }
 }

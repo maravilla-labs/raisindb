@@ -65,6 +65,13 @@ impl UnifiedJobEventHandler {
             );
         }
 
+        // Virtual-mount writeback capture for delete events - LOCAL only, for
+        // the same reason the create/update arm is: a replicated delete must not
+        // make every replica report the same removal to the provider.
+        if !is_remote_event {
+            self.capture_virtual_delete(node_event).await;
+        }
+
         // Trigger evaluation for delete events - only for LOCAL events
         if !is_remote_event {
             if let Err(e) = self.enqueue_trigger_evaluation(node_event, "Deleted").await {

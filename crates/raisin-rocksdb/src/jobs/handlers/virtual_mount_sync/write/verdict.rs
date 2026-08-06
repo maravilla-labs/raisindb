@@ -15,55 +15,27 @@ use super::{resolve_mode, WriteMode};
 /// and writing `Some(false)` for every read-only mount would both lie about
 /// intent and churn the state blob on every run.
 ///
-/// `write_through` is evaluated as a `mirror`: the node **is** the remote
-/// object, so every op a mirror performs has to be declared. The specific
-/// missing ops go into the reason, because "writeback unsupported" with no
-/// "why" is what sends an operator reading engine source.
+/// This is a projection of [`resolve_mode`], never a second computation of it.
+/// It used to be one: `state_only` was resolved properly while `write_through`
+/// was judged by a separate `missing_mirror_ops` block right here, which is the
+/// mirrored-path drift this codebase pays for most often. Every mode now
+/// answers through the same function the drain obeys, so the console cannot
+/// promise a write the engine will not make, or refuse one it would.
 ///
-/// Writability belongs to the mount — **adapter and mapper together**. A
-/// write-capable adapter behind a mapper that cannot answer `to_external` is
-/// not a writable mount, so `mapper` vetoes independently of `capabilities`,
-/// and BOTH shortfalls are reported when both apply: fixing the adapter only to
-/// be refused again for the mapper is the kind of round trip an honest message
-/// avoids.
+/// Writability belongs to the mount — **adapter, mapper and policy together**. A
+/// write-capable adapter behind a mapper that cannot answer `to_external` is not
+/// a writable mount, and neither is a mirror whose `delete_policy` names
+/// something its adapter cannot do. `resolve_mode` reports every shortfall it
+/// finds at once: being refused a second time for the next one is the round trip
+/// an honest message avoids.
 pub(crate) fn writeback_verdict(
     write_config: &WriteConfig,
     capabilities: &Capabilities,
     mapper: &MapperWriteback,
 ) -> (Option<bool>, Option<String>) {
-    // `state_only` is the mode the engine actually implements, so it answers
-    // first and on its own terms: it needs `update` and a field allow-list, not
-    // the create/delete a mirror needs. Judging it by `missing_mirror_ops`
-    // would refuse a working mail mount for lacking a delete it never calls.
-    if write_config.wants_state_only() {
-        return match resolve_mode(write_config, capabilities, mapper) {
-            WriteMode::StateOnly(_) => (Some(true), None),
-            WriteMode::Refused(reason) => (Some(false), Some(reason)),
-            WriteMode::Off => (None, None),
-        };
-    }
-    // A `mode` the engine cannot honour is refused HERE too, through the very
-    // same `resolve_mode` the drain obeys — not a second copy of the rule. The
-    // drain already declines to run for `Refused`; without this the console
-    // would still show `mode: "mirror"` as `(None, None)`, i.e. "writeback not
-    // applicable", which is the silence this refusal exists to break.
-    if let WriteMode::Refused(reason) = resolve_mode(write_config, capabilities, mapper) {
-        return (Some(false), Some(reason));
-    }
-    if !write_config.wants_write_through() {
-        return (None, None);
-    }
-    let mut reasons = Vec::new();
-    let missing = capabilities.missing_mirror_ops();
-    if !missing.is_empty() {
-        reasons.push(format!("adapter does not declare {}", missing.join(", ")));
-    }
-    if let Some(r) = mapper.reason() {
-        reasons.push(r);
-    }
-    if reasons.is_empty() {
-        (Some(true), None)
-    } else {
-        (Some(false), Some(reasons.join("; ")))
+    match resolve_mode(write_config, capabilities, mapper) {
+        WriteMode::Off => (None, None),
+        WriteMode::Refused(reason) => (Some(false), Some(reason)),
+        WriteMode::StateOnly(_) | WriteMode::Mirror(_) | WriteMode::Submit(_) => (Some(true), None),
     }
 }

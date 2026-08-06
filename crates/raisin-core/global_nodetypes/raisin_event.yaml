@@ -1,113 +1,323 @@
+# NAMING: property names are snake_case; enum VALUES are snake_case.
+#
+# FLAT: everything filtered, ordered or paginated on is a TOP-LEVEL property.
+# `->>` is a flat `json.get(key)` (sql-execution eval/core/json_eval.rs), so
+# `properties->>'start.dateTime'` is NULL and returns zero rows silently, and the
+# property index iterates top-level keys only (crud/indexing/property_indexes.rs).
+# A nested `structure:` block parses but is never validated and never indexed —
+# it is a console form hint.
+#
+# UI HINTS LIVE UNDER `meta`. PropertyValueSchema has no title/description/enum
+# field and no catch-all, so serde silently DROPS those keys at the top level.
+#
+# `index: [Property]` below is documentation of intent: the property index writes
+# an entry for every top-level property unconditionally and never consults the
+# schema. It states which columns are meant to be query entry points.
+#
+# NO provider passthrough blob and no compound_indexes — see the notes at the
+# bottom of this file.
+
 name: raisin:Event
-description: Calendar event synced from an external calendar connector (experimental)
+description: >-
+  Provider-neutral calendar event synced from a calendar connector. Canonical
+  time is a UTC instant plus the originating IANA zone; canonical recurrence is
+  RFC 5545 content lines on the series master, with overrides as sibling
+  exception nodes.
 icon: calendar
-version: 1
+# BUMPED 1 -> 2. The legacy init paths (init.rs, nodetype_init.rs) update an
+# existing NodeType only when `new_version > existing_version`; without this bump
+# the reshape never reaches an existing repository through them. The
+# content-hash resync (system_updates/resync.rs) propagates regardless of the
+# bump, but classifies the `start`/`end`/`organizer` removals as BREAKING, so
+# under the default NonBreaking policy it records them pending for an explicit
+# admin apply rather than writing them.
+version: 2
 strict: true
 indexable: true
 index_types: [Property]
+mixins:
+  - raisin:VirtualNode
+
 properties:
+  # ---------------------------------------------------------------- identity
   - name: title
     type: String
     required: true
-    title: Title
-    description: Event title / summary
-
-  - name: start
-    type: String
-    required: false
-    title: Start
-    description: Event start time (ISO 8601)
     index: [Property]
+    meta:
+      label: Title
+      description: Graph `subject` / Google `summary`. Falls back to "(untitled event)".
 
-  - name: end
+  - name: ical_uid
     type: String
     required: false
-    title: End
-    description: Event end time (ISO 8601)
     index: [Property]
-
-  - name: all_day
-    type: Boolean
-    required: false
-    title: All Day
-    description: Whether the event spans the whole day
-    default: false
-
-  - name: location
-    type: String
-    required: false
-    title: Location
-    description: Event location
-
-  - name: attendees
-    type: Array
-    required: false
-    title: Attendees
-    description: List of attendees
-
-  - name: organizer
-    type: String
-    required: false
-    title: Organizer
-    description: Event organizer
-
-  - name: recurrence
-    type: String
-    required: false
-    title: Recurrence
-    description: Recurrence rule (RRULE)
-
-  - name: status
-    type: String
-    required: false
-    title: Status
-    description: Event status (confirmed, tentative, cancelled, ...)
-
-  - name: url
-    type: String
-    required: false
-    title: URL
-    description: Link to the event in the source calendar
+    meta:
+      label: iCalendar UID
+      description: >-
+        RFC 5545 UID. The same meeting in the organizer's and each attendee's
+        calendar shares it, so it is the only cross-mount dedup key. Graph
+        `iCalUId`, Google `iCalUID`.
 
   - name: calendar_id
     type: String
     required: false
-    title: Calendar ID
-    description: Identifier of the source calendar
+    index: [Property]
+    meta:
+      label: Calendar ID
+      description: >-
+        Source calendar identifier. Never null: the mapper resolves the
+        provider's default-calendar id rather than passing `mount.remote_root`
+        through, which was null on every default-calendar Graph mount.
 
-  # Reserved virtual-metadata properties written by the mount materializer.
-  # A strict type MUST declare these or synced writes are rejected.
-  - name: __virtual
+  # -------------------------------------------------------------------- time
+  - name: start_utc
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Start (UTC)
+      description: >-
+        RFC 3339 UTC instant, always `YYYY-MM-DDTHH:MM:SSZ` — fixed width, so
+        lexicographic order IS chronological order and a PropertyOrderScan over
+        this column is correct. All-day events use `<date>T00:00:00Z`.
+
+  - name: end_utc
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: End (UTC)
+      description: >-
+        Same encoding as start_utc. EXCLUSIVE for all-day events, matching
+        RFC 5545 DTEND and both providers.
+
+  - name: start_local
+    type: String
+    required: false
+    meta:
+      label: Start (local)
+      description: >-
+        Wall-clock time in `timezone`, no offset — `YYYY-MM-DDTHH:MM:SS`, or
+        `YYYY-MM-DD` when all_day. What a user sees; not orderable across zones.
+
+  - name: end_local
+    type: String
+    required: false
+    meta:
+      label: End (local)
+      description: Wall-clock end in `timezone`. See start_local.
+
+  - name: timezone
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Timezone
+      description: >-
+        IANA zone of start_local/end_local (e.g. Europe/Zurich). Mandatory for
+        recurrence: "every Tuesday 09:00 Europe/Zurich" is 07:00Z in winter and
+        08:00Z in summer. Null when the adapter cannot map the provider's zone.
+
+  - name: all_day
     type: Boolean
     required: false
-    title: Virtual
-    description: Marks a mount-managed node (engine-owned)
+    default: false
+    meta:
+      label: All Day
+      description: Whether the event spans whole days.
 
-  - name: __mount_id
+  # -------------------------------------------------------------- recurrence
+  - name: recurrence_type
     type: String
     required: false
-    title: Mount ID
-    description: Owning mount node id (engine-owned)
     index: [Property]
+    meta:
+      label: Recurrence Type
+      description: >-
+        single | series_master | occurrence | exception. `occurrence` is written
+        ONLY by an expander projection, never by a mount sync.
+      enum: [single, series_master, occurrence, exception]
 
-  - name: __external_id
+  - name: recurrence
+    type: Array
+    required: false
+    meta:
+      label: Recurrence
+      description: >-
+        RFC 5545 content lines, one per element, e.g.
+        ["RRULE:FREQ=WEEKLY;BYDAY=TU", "EXDATE;TZID=Europe/Zurich:20260811T090000"].
+        Google's native wire shape verbatim; Graph converts patternedRecurrence.
+        Present on series_master nodes only.
+
+  - name: series_master_external_id
     type: String
     required: false
-    title: External ID
-    description: Provider item id, the stable upsert-match key (engine-owned)
     index: [Property]
+    meta:
+      label: Series Master External ID
+      description: >-
+        Provider id of the master, NOT a node reference — the mapper is pure and
+        cannot resolve a node id. Join with
+        `__mount_id = <mount> AND __external_id = <this>`; both are indexed.
 
-  - name: __etag
+  - name: original_start_utc
     type: String
     required: false
-    title: Etag
-    description: Provider change token at last sync (engine-owned)
+    index: [Property]
+    meta:
+      label: Original Start (UTC)
+      description: >-
+        The occurrence slot this exception replaces. Together with
+        series_master_external_id it is the exception's identity, and it is what
+        a client removes from the expanded series.
 
-  - name: __synced_at
+  - name: original_start_local
     type: String
     required: false
-    title: Synced At
-    description: ISO 8601 timestamp of the last sync write (engine-owned)
+    meta:
+      label: Original Start (local)
+      description: Wall-clock form of original_start_utc, in `timezone`.
+
+  # ------------------------------------------------ status and participation
+  - name: status
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Status
+      description: >-
+        RFC 5545 STATUS of the EVENT: confirmed | tentative | cancelled. Never an
+        RSVP value and never a free/busy value — those are my_response and
+        show_as.
+      enum: [confirmed, tentative, cancelled]
+
+  - name: show_as
+    type: String
+    required: false
+    meta:
+      label: Show As
+      description: >-
+        Free/busy intent: free | tentative | busy | out_of_office |
+        working_elsewhere.
+      enum: [free, tentative, busy, out_of_office, working_elsewhere]
+
+  - name: my_response
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: My Response
+      description: >-
+        The mounted principal's RSVP: needs_action | accepted | declined |
+        tentative | organizer. Indexed because "my unanswered invitations" is the
+        query this column exists for.
+      enum: [needs_action, accepted, declined, tentative, organizer]
+
+  - name: organizer_email
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Organizer Email
+      description: Bare address, so it is equality-comparable across providers.
+
+  - name: organizer_name
+    type: String
+    required: false
+    meta:
+      label: Organizer Name
+      description: Display name, when the provider supplies one.
+
+  - name: attendees
+    type: Array
+    required: false
+    meta:
+      label: Attendees
+      description: >-
+        Objects { email, name, type, response }. type = required | optional |
+        resource. response = needs_action | accepted | declined | tentative |
+        organizer. Never a formatted "Name <addr>" string, never a raw provider
+        object. Absent is null, never [].
+    items:
+      type: Object
+      structure:
+        email:
+          type: String
+        name:
+          type: String
+        type:
+          type: String
+        response:
+          type: String
+
+  # ------------------------------------------------------------ place, links
+  - name: location
+    type: String
+    required: false
+    meta:
+      label: Location
+      description: Display name only. Graph `location.displayName`, Google `location`.
+
+  - name: location_geo
+    type: Geometry
+    required: false
+    meta:
+      label: Location Coordinates
+      description: >-
+        GeoJSON Point. Spatially indexed automatically by value type — no opt-in
+        — so ST_DWITHIN over a calendar works. Graph-only
+        (`location.coordinates`); Google Calendar has no coordinates at all.
+
+  - name: online_meeting_url
+    type: String
+    required: false
+    meta:
+      label: Online Meeting URL
+      description: >-
+        Graph `onlineMeeting.joinUrl`, Google `hangoutLink` / conferenceData
+        video entry point.
+
+  - name: url
+    type: String
+    required: false
+    meta:
+      label: URL
+      description: Link to the event in the source calendar. Graph `webLink`, Google `htmlLink`.
+
+  # ------------------------------------------------ body (mount opt-in only)
+  - name: description_html
+    type: String
+    required: false
+    meta:
+      label: Description (HTML)
+      description: >-
+        Written only when the mount sets `include_body`, mirroring the mail
+        opt-in. Two reasons it is not always on: it forces a wider Graph $select
+        on a 500-item page, and a String property's FULL text lands in a
+        property-index key on every revision.
+
+  - name: description_text
+    type: String
+    required: false
+    meta:
+      label: Description (text)
+      description: Plain-text body. Same `include_body` opt-in as description_html.
+
+# The six engine-owned `__` reserved properties come from the raisin:VirtualNode
+# mixin above. Declaring them here as well would fork the definition; the mixin
+# is what keeps __pushed_state — which this type omitted while the materializer
+# stamped it — from making every state_only calendar write fail strict
+# validation.
+
+# No compound_indexes. Deliberate: (a) the only wanted shape is a date RANGE and
+# no range pushdown exists on any compound column — the executor reads
+# max(10*LIMIT, 100) entries and filters residually with no continuation, so a
+# week query can silently return too few rows; (b) the moment ANY compound index
+# exists in a workspace, every node UPDATE prefix-scans the whole compound CF
+# twice (tombstones/index_tombstones.rs from put_node.rs), which the sync's own
+# etag stamp-back would pay per item. Bound date ranges through the path template
+# instead.
 
 allowed_children: []
 versionable: false

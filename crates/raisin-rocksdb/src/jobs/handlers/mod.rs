@@ -9,6 +9,7 @@ pub mod ai_tool_result_aggregation;
 pub mod asset_processing;
 pub mod auth;
 pub mod bulk_sql;
+pub mod calendar_expand;
 pub mod compound_index;
 pub mod copy_tree;
 pub mod embedding;
@@ -51,6 +52,7 @@ pub use ai_tool_result_aggregation::AIToolResultAggregationHandler;
 pub use asset_processing::AssetProcessingHandler;
 pub use auth::{AuthCreateUserNodeHandler, RocksDBUserNodeCreator};
 pub use bulk_sql::{BulkSqlHandler, SqlExecutorCallback};
+pub use calendar_expand::CalendarExpandHandler;
 pub use compound_index::CompoundIndexJobHandler;
 pub use copy_tree::{CopyTreeExecutorCallback, CopyTreeHandler};
 pub use embedding::EmbeddingJobHandler;
@@ -165,6 +167,11 @@ pub struct JobHandlerRegistry {
     /// egress policy / HTTP client, in which case discovery jobs no-op loudly
     /// rather than dialling with unknown settings.
     pub mcp_tool_discovery: Option<Arc<McpToolDiscoveryHandler>>,
+    /// Derived calendar-occurrence projection rebuild. `None` leaves recurring
+    /// events unexpanded, so a date-range query over a calendar sees only
+    /// non-recurring events — attached explicitly so that is a deployment
+    /// decision rather than an accident.
+    pub calendar_expand: Option<Arc<CalendarExpandHandler>>,
 }
 
 #[allow(deprecated)] // Contains AssetProcessingHandler which is deprecated but still used
@@ -212,6 +219,7 @@ impl JobHandlerRegistry {
             // handler needs settings (egress policy, HTTP client) that only the
             // server binary has.
             mcp_tool_discovery: None,
+            calendar_expand: None,
             fulltext,
             embedding,
             snapshot,
@@ -257,6 +265,15 @@ impl JobHandlerRegistry {
     /// layer knows about — they are assembled in the server binary.
     pub fn with_mcp_tool_discovery(mut self, handler: Arc<McpToolDiscoveryHandler>) -> Self {
         self.mcp_tool_discovery = Some(handler);
+        self
+    }
+
+    /// Attach the calendar occurrence-projection rebuild handler.
+    ///
+    /// Separate from `new()` for the same reason as the others: it needs the
+    /// lock manager, which is assembled in the server binary.
+    pub fn with_calendar_expand(mut self, handler: Arc<CalendarExpandHandler>) -> Self {
+        self.calendar_expand = Some(handler);
         self
     }
 
@@ -469,8 +486,22 @@ impl JobHandlerRegistry {
                 .map(|_| None),
             JobType::VirtualMountSyncCheck { .. }
             | JobType::VirtualMountSync { .. }
+            | JobType::VirtualMountWriteDrain { .. }
+            | JobType::VirtualMountWriteReconcile { .. }
             | JobType::VirtualMountSubscriptionRenew { .. } => {
                 self.virtual_mount_sync.handle(job, context).await
+            }
+            JobType::CalendarOccurrenceRebuild { .. } => {
+                if let Some(ref handler) = self.calendar_expand {
+                    handler.handle(job, context).await
+                } else {
+                    tracing::warn!(
+                        job_id = %job.id,
+                        "Calendar occurrence expander not configured; recurring events \
+                         will not appear in date-range queries"
+                    );
+                    Ok(None)
+                }
             }
             JobType::McpToolDiscovery { .. } | JobType::McpDiscoveryCheck { .. } => {
                 if let Some(ref handler) = self.mcp_tool_discovery {

@@ -1,9 +1,30 @@
+# NAMING: property names are snake_case.
+#
+# FLAT: everything filtered, ordered or paginated on is a TOP-LEVEL property.
+# `->>` is a flat `json.get(key)` (sql-execution eval/core/json_eval.rs), so
+# `properties->>'headers.subject'` is NULL and returns zero rows silently, and
+# the property index iterates top-level keys only.
+#
+# UI HINTS LIVE UNDER `meta`. PropertyValueSchema has no title/description/enum
+# field and no catch-all, so serde silently DROPS those keys at the top level.
+# The `description:` lines this file used to carry were never loaded.
+#
+# `index: [Property]` below is documentation of intent: the property index
+# writes an entry for every top-level property unconditionally and never
+# consults the schema. It states which columns are meant to be query entry
+# points.
+
 name: raisin:Mail
-description: >
+description: >-
   A synced email message from a mail connector (Microsoft 365 / Graph, IMAP,
   Gmail). Written by a mount's mapping function, never by hand.
 icon: mail
-version: 1
+
+# BUMPED 1 -> 2. The legacy init paths update an existing NodeType only when
+# `new_version > existing_version`. The `body` / `body_type` removal is a
+# BREAKING change to the content-hash resync, so under the default NonBreaking
+# policy it is recorded pending for an explicit admin apply.
+version: 2
 
 # Global, not shipped inside one adapter package, because BOTH the Graph and the
 # IMAP connectors map onto it. A copy per package is the mirrored-definition
@@ -12,135 +33,309 @@ version: 1
 indexable: true
 index_types: [Property, Fulltext]
 
+# NOT strict, deliberately. A mail mapper carries provider-specific keys through
+# `provider_metadata` and the engine stamps reserved `__` properties on top; the
+# mixin declares those so they are documented and indexed, but strict mode would
+# also reject any new provider field before the schema caught up.
+mixins:
+  - raisin:VirtualNode
+
 properties:
   # ---- Fulltext: what you actually search --------------------------------
   - name: subject
     type: String
     required: false
     index: [Fulltext]
-    description: Message subject line
+    meta:
+      label: Subject
 
-  - name: body
+  # `body` + `body_type` REPLACED by an explicit pair. One column whose meaning
+  # depended on a sibling column could not be searched, rendered or replied to
+  # without branching, and a provider that offers both representations had to
+  # pick one. Both are populated only when the mount sets
+  # `sync_config.include_body`; mail otherwise syncs link-only and just the
+  # snippet is available.
+  - name: body_html
     type: String
     required: false
     index: [Fulltext]
-    description: >
-      Full message body. Populated only when the mount sets
-      sync_config.include_body — mail otherwise syncs link-only and just the
-      snippet is available. Carries markup when body_type is "html".
+    meta:
+      label: Body (HTML)
+      description: >-
+        HTML body, markup included. Inline images reference attachment children
+        by `cid:` — see the `content_id` property on raisin:Asset.
 
-  - name: body_type
+  - name: body_text
     type: String
     required: false
-    description: '"html" or "text" — the format of `body`.'
+    index: [Fulltext]
+    meta:
+      label: Body (text)
+      description: Plain-text body. The quoting source for a reply.
 
   - name: snippet
     type: String
     required: false
     index: [Fulltext]
-    description: Short preview (Graph bodyPreview). Always present; body is not.
+    meta:
+      label: Snippet
+      description: Short preview. Always present; a body is not.
 
   # ---- Property: what you filter, group and join on ----------------------
   - name: from
     type: String
     required: false
     index: [Property]
-    description: Sender, formatted "Name <address>" when the provider gives both
+    meta:
+      label: From
+      description: Sender, formatted "Name <address>" when the provider gives both
 
   - name: from_address
     type: String
     required: false
     index: [Property]
-    description: >
-      Bare sender address, no display name. Indexed separately because `from`
-      varies with the display name the sender happens to be using, which makes
-      it useless as a GROUP BY key.
+    meta:
+      label: From address
+      description: >-
+        Bare sender address, no display name. Indexed separately because `from`
+        varies with the display name the sender happens to be using, which makes
+        it useless as a GROUP BY key.
 
   - name: to
     type: String
     required: false
-    description: Comma-joined recipients (display form; not a grouping key)
+    meta:
+      label: To
+      description: Comma-joined recipients (display form; not a grouping key)
 
   - name: cc
     type: String
     required: false
-    description: Comma-joined CC recipients (display form)
+    meta:
+      label: Cc
+
+  - name: bcc
+    type: String
+    required: false
+    meta:
+      label: Bcc
+      description: >-
+        Present only on a message the account itself sent — a received message
+        never carries the sender's Bcc list. Needed so a synced Sent Items copy
+        can seed a reply-all without silently dropping recipients.
+
+  - name: reply_to
+    type: String
+    required: false
+    meta:
+      label: Reply-To
+      description: >-
+        Where a reply must be addressed when it is not `from`. Ignoring it sends
+        replies to an unmonitored mailbox.
 
   - name: conversation_id
     type: String
     required: false
     index: [Property]
-    description: >
-      Provider thread id. The grouping key for a conversation view —
-      GROUP BY properties->>'conversation_id'::String.
+    meta:
+      label: Conversation ID
+      description: >-
+        Provider thread id. The grouping key for a conversation view.
+
+  - name: thread_id
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Thread ID
+      description: >-
+        The provider's OTHER threading key where it has one (IMAP X-GM-THRID,
+        JMAP threadId). Kept distinct from `conversation_id` rather than
+        overloaded: two providers writing incompatible values into one column is
+        how a conversation view silently merges unrelated mail.
 
   - name: message_id
     type: String
     required: false
     index: [Property]
-    description: >
-      RFC 5322 Message-ID. Stable ACROSS providers and folders, unlike the
-      provider's own item id, so it is what deduplicates the same mail seen in
-      two mounts (e.g. an Inbox mount and a Sent Items mount).
+    meta:
+      label: Message-ID
+      description: >-
+        RFC 5322 Message-ID. Stable ACROSS providers and folders, unlike the
+        provider's own item id, so it is what deduplicates the same mail seen in
+        two mounts (e.g. an Inbox mount and a Sent Items mount).
 
+  - name: in_reply_to
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: In-Reply-To
+      description: >-
+        RFC 5322 In-Reply-To — the Message-ID this message answers. With
+        `message_id` it reconstructs a thread from headers alone, which is the
+        only threading that works across providers.
+
+  - name: references
+    type: Array
+    required: false
+    meta:
+      label: References
+      description: >-
+        RFC 5322 References, oldest first: every Message-ID in the ancestry.
+        An Array of strings, not the raw space-joined header.
+
+  # ---- Time: three columns, because they answer three questions ----------
+  #
+  # `date` stays the canonical ORDER BY column and is what every existing query
+  # uses: it is whichever of received/sent applies to this copy. `received_at`
+  # and `sent_at` are the unambiguous halves, and the presence of `sent_at`
+  # without `received_at` is what distinguishes an outgoing copy.
   - name: date
     type: String
     required: false
     index: [Property]
-    description: Received (or sent) timestamp, ISO 8601, for ORDER BY / ranges
+    meta:
+      label: Date
+      description: >-
+        Received, or sent for an outgoing copy. ISO 8601. The canonical
+        ORDER BY / range column.
 
+  - name: received_at
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Received at
+      description: ISO 8601. Absent on a draft and on a Sent Items copy.
+
+  - name: sent_at
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Sent at
+      description: ISO 8601. Absent on a draft that was never submitted.
+
+  - name: is_draft
+    type: Boolean
+    required: false
+    index: [Property]
+    meta:
+      label: Draft
+      description: >-
+        The provider holds this as an unsent draft. Distinct from
+        raisin:OutboundMail, which is a RaisinDB-authored send command; this is
+        a draft that already exists at the provider.
+
+  # ---- State ---------------------------------------------------------------
   - name: unread
     type: Boolean
     required: false
     index: [Property]
-    description: Whether the message is unread at the provider
+    meta:
+      label: Unread
+      description: >-
+        Whether the message is unread at the provider. The first field a
+        `state_only` mount pushes back (write_config.mutable_fields).
+
+  - name: flags
+    type: Array
+    required: false
+    meta:
+      label: Flags
+      description: >-
+        IMAP-style system flags, backslashes stripped and lowercased
+        ("seen", "flagged", "answered", "draft", "deleted").
+
+  - name: labels
+    type: Array
+    required: false
+    meta:
+      label: Labels
+      description: >-
+        Provider labels / categories (Gmail labels, Outlook categories). Free
+        text, one array for both, because they are the same concept and a
+        consumer branching on provider to read a label is the divergence this
+        global nodetype exists to prevent.
 
   - name: has_attachments
     type: Boolean
     required: false
     index: [Property]
-    description: Whether the provider reports attachments
+    meta:
+      label: Has attachments
+      description: >-
+        What the PROVIDER reports. Not the same as "this message has
+        raisin:Asset children": a mount that does not sync attachment metadata
+        leaves the children absent while this stays true.
+
+  - name: size
+    type: Number
+    required: false
+    meta:
+      label: Size (bytes)
+      description: Provider-reported size of the whole message, bodies included.
 
   - name: importance
     type: String
     required: false
-    description: Provider importance hint ("low" | "normal" | "high")
+    meta:
+      label: Importance
+      description: '"low" | "normal" | "high"'
 
   - name: folder
     type: String
     required: false
     index: [Property]
-    description: >
-      Source folder / mailbox this copy came from (e.g. "inbox", "sentitems").
-      Lets one query span several mail mounts and still tell them apart.
+    meta:
+      label: Folder
+      description: >-
+        Source folder / mailbox this copy came from (e.g. "inbox", "sentitems").
+        Lets one query span several mail mounts and still tell them apart.
 
   # ---- Provenance ---------------------------------------------------------
   - name: provider
     type: String
     required: false
     index: [Property]
-    description: '"ms-graph" | "imap" | "gmail" — which connector produced this'
+    meta:
+      label: Provider
+      description: '"ms-graph" | "imap" | "gmail" — which connector produced this'
 
   - name: web_url
     type: String
     required: false
-    description: Deep link to the message in the provider's own UI
+    meta:
+      label: Web URL
+      description: Deep link to the message in the provider's own UI
 
   - name: mime_type
     type: String
     required: false
-    description: Always "message/rfc822"; present so generic tooling can branch
+    meta:
+      label: MIME type
+      description: Always "message/rfc822"; present so generic tooling can branch
 
   - name: provider_metadata
     type: Object
     required: false
-    description: >
-      The adapter's raw metadata, verbatim. Anything not promoted to a typed
-      property above stays reachable here rather than being dropped.
+    meta:
+      label: Provider metadata
+      description: >-
+        The adapter's raw metadata, verbatim. Anything not promoted to a typed
+        property above stays reachable here rather than being dropped.
 
-# A message is a leaf. Attachments, when they arrive, will be raisin:Asset
-# children — added here when that ships rather than left open.
-allowed_children: []
+# Attachments are raisin:Asset CHILDREN, one node per attachment, not an
+# `attachments` array property. The Drive adapter already maps provider blobs to
+# raisin:Asset, and a parallel array-shaped blob path is this codebase's most
+# expensive recurring bug class. Sync writes metadata only; bytes arrive through
+# the adapter's `get_content` on demand.
+#
+# A mail delete CASCADES to these children — the virtual-mount materializer
+# deletes the subtree, because `TransactionalContext::delete_node` does not.
+allowed_children:
+  - raisin:Asset
 
 versionable: false
 publishable: false

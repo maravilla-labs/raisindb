@@ -10,6 +10,12 @@ allowed_node_types:
   # here does not degrade the mount gracefully — it fails every write.
   - raisin:Event
   - raisin:Mail
+  # The `submit` command types. Same reasoning, and the failure is worse: an
+  # outbox mount whose type is missing here does not fail to SEND, it fails to
+  # be composed into at all, so the operator sees a mount that works and a
+  # compose UI that cannot save.
+  - raisin:OutboundMail
+  - raisin:CalendarAction
   - raisin:Node
 allowed_root_node_types:
   - raisin:Folder

@@ -192,7 +192,31 @@ impl SyncIndex {
         self.by_external.get(external_id)?.etag.as_deref()
     }
 
-    pub(super) fn at_path(&self, path: &str) -> Option<&PathEntry> {
+    /// Namespaced external ids of the subordinate nodes materialized under
+    /// `parent_external_id` (mail attachments).
+    ///
+    /// Keyed off the external-id namespace rather than the node PATH on
+    /// purpose. A path lookup would answer "whatever currently sits beneath this
+    /// node", which after a `path_template` change or an operator's manual move
+    /// can include foreign content — and both callers act destructively on the
+    /// answer: one reports it as seen (suppressing a reconcile delete), the
+    /// other deletes it outright. The namespace says "this mount created this
+    /// node AS a child of that item", which is the actual question.
+    pub fn child_external_ids(&self, parent_external_id: &str) -> Vec<String> {
+        let prefix = format!("{parent_external_id}{}", super::super::config::CHILD_ID_SEP);
+        self.by_external
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect()
+    }
+
+    // Visible to the whole sync engine, not just the materializer: the
+    // never-clobber-user-content guard is asserted from the engine's tests.
+    pub(in crate::jobs::handlers::virtual_mount_sync) fn at_path(
+        &self,
+        path: &str,
+    ) -> Option<&PathEntry> {
         self.by_path.get(path)
     }
 

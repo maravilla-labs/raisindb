@@ -19,6 +19,65 @@ use raisin_storage::{RepositoryManagementRepository, Storage};
 use super::config::{MountConfig, SYSTEM_WORKSPACE};
 use crate::RocksDBStorage;
 
+/// Every `(tenant, repo)` a periodic mount scan should visit.
+///
+/// Shared by the sync check and the write-reconcile walk so the two cannot
+/// disagree about which repositories exist — a scan that enumerates differently
+/// from its sibling is a mount that is synced but never reconciled, or the
+/// reverse, with nothing anywhere saying so.
+pub(super) async fn scan_scope(
+    storage: &Arc<RocksDBStorage>,
+    tenant_filter: Option<String>,
+    repo_filter: Option<String>,
+) -> Result<Vec<(String, String)>> {
+    let tenants = match &tenant_filter {
+        Some(t) => vec![t.clone()],
+        None => crate::management::list_tenants(storage).await?,
+    };
+    let mut out = Vec::new();
+    for tenant in tenants {
+        let repos = match &repo_filter {
+            Some(r) => vec![r.clone()],
+            None => match crate::management::list_repositories(storage, &tenant).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(tenant = %tenant, error = %e, "vmount scan: list repos failed");
+                    continue;
+                }
+            },
+        };
+        out.extend(repos.into_iter().map(|repo| (tenant.clone(), repo)));
+    }
+    Ok(out)
+}
+
+/// The branch a repo's mount/integration CONFIG lives on.
+///
+/// Always the repo's default branch, never a fork. This is what makes forked
+/// branches inert: a fork that copies a mount config node (with its sync cursor
+/// and fencing token) never triggers a second sync, because no scan looks at it.
+/// The mount's `target_branch` selects where its virtual nodes materialize; it
+/// is not scanned for mounts.
+///
+/// `pub(crate)` rather than `pub(super)` because the event-bus capture hook
+/// resolves the same branch to address a mount, and a second implementation of
+/// "which branch is a mount's config on" is exactly the mirrored-path drift that
+/// would have it enqueue jobs against a branch no scan ever reads.
+pub(crate) async fn config_branch(
+    storage: &Arc<RocksDBStorage>,
+    tenant: &str,
+    repo: &str,
+) -> String {
+    storage
+        .repository_management()
+        .get_repository(tenant, repo)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.config.default_branch)
+        .unwrap_or_else(|| "main".to_string())
+}
+
 /// Scan mounts and enqueue those that are due. Returns the number enqueued.
 pub async fn run_check(
     storage: &Arc<RocksDBStorage>,
@@ -26,29 +85,12 @@ pub async fn run_check(
     repo_filter: Option<String>,
 ) -> Result<usize> {
     let now = Utc::now().timestamp();
-    let tenants = match &tenant_filter {
-        Some(t) => vec![t.clone()],
-        None => crate::management::list_tenants(storage).await?,
-    };
-
     let mut enqueued = 0usize;
-    for tenant in tenants {
-        let repos = match &repo_filter {
-            Some(r) => vec![r.clone()],
-            None => match crate::management::list_repositories(storage, &tenant).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(tenant = %tenant, error = %e, "vmount-check: list repos failed");
-                    continue;
-                }
-            },
-        };
-        for repo in repos {
-            match check_repo(storage, &tenant, &repo, now).await {
-                Ok(n) => enqueued += n,
-                Err(e) => {
-                    tracing::warn!(tenant = %tenant, repo = %repo, error = %e, "vmount-check: repo scan failed")
-                }
+    for (tenant, repo) in scan_scope(storage, tenant_filter, repo_filter).await? {
+        match check_repo(storage, &tenant, &repo, now).await {
+            Ok(n) => enqueued += n,
+            Err(e) => {
+                tracing::warn!(tenant = %tenant, repo = %repo, error = %e, "vmount-check: repo scan failed")
             }
         }
     }
@@ -62,20 +104,7 @@ async fn check_repo(
     repo: &str,
     now: i64,
 ) -> Result<usize> {
-    // Mount/Integration CONFIG always lives on the repo's config (default)
-    // branch. We scan ONLY this branch — never any forked branch. This is what
-    // makes forked branches inert: a fork that copies a mount config node (with
-    // its sync cursor + fencing token) never triggers a second sync, because the
-    // scan never looks at it. The mount's `target_branch` selects where its
-    // virtual nodes are materialized; it is not scanned for mounts.
-    let branch = storage
-        .repository_management()
-        .get_repository(tenant, repo)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.config.default_branch)
-        .unwrap_or_else(|| "main".to_string());
+    let branch = config_branch(storage, tenant, repo).await;
 
     let svc: NodeService<RocksDBStorage> = NodeService::new_with_context(
         storage.clone(),
@@ -292,6 +321,7 @@ mod tests {
             remote_root: None,
             adapter_function: None,
             mapping_function: None,
+            resolver_function: None,
             enabled: true,
             sync_config: SyncConfig {
                 interval_seconds: INTERVAL,

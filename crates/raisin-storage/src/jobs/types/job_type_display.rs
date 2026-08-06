@@ -418,12 +418,27 @@ impl fmt::Display for JobType {
                 tenant_id.as_deref().unwrap_or("*"),
                 repo_id.as_deref().unwrap_or("*")
             ),
+            Self::CalendarOccurrenceRebuild { tenant_id, repo_id } => write!(
+                f,
+                "CalendarOccurrenceRebuild({}/{})",
+                tenant_id.as_deref().unwrap_or("*"),
+                repo_id.as_deref().unwrap_or("*")
+            ),
+            Self::VirtualMountWriteReconcile { tenant_id, repo_id } => write!(
+                f,
+                "VirtualMountWriteReconcile({}/{})",
+                tenant_id.as_deref().unwrap_or("*"),
+                repo_id.as_deref().unwrap_or("*")
+            ),
             Self::VirtualMountSync {
                 mount_id,
                 mode,
                 trigger,
             } => {
                 write!(f, "VirtualMountSync({}/{}/{})", mount_id, mode, trigger)
+            }
+            Self::VirtualMountWriteDrain { mount_id, trigger } => {
+                write!(f, "VirtualMountWriteDrain({}/{})", mount_id, trigger)
             }
             Self::IntegrationTokenRefresh { tenant_id } => write!(
                 f,

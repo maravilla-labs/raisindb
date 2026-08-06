@@ -1,5 +1,5 @@
 name: ms-graph-adapter
-version: 1.2.0
+version: 1.4.0
 title: Microsoft 365 Adapter (Preview)
 description: >
   EXPERIMENTAL virtual-node adapter for Microsoft 365 over Microsoft Graph v1.0.
@@ -51,6 +51,13 @@ provides:
     - /functions/mappers/ms-graph-mail
     - /functions/mappers/ms-graph-calendar
     - /functions/mappers/ms-graph-files
+    # The OUTBOX (write_config.mode: submit) mapper: raisin:OutboundMail and
+    # raisin:CalendarAction -> the Graph request the adapter's `submit` issues.
+    - /functions/mappers/ms-graph-outbox
+    # Conflict resolver for a mail mount: point the mount's resolver_function
+    # at it to decide per message what a refused push means, instead of the
+    # default remote_wins (which discards the local edit silently).
+    - /functions/resolvers/ms-graph-mail
   # Pre-configured integration template (disabled until credentials are supplied).
   content:
     - raisin:system/connectors/ms-graph
@@ -77,6 +84,14 @@ sync:
         - "**"
       mode: merge
     - root: /mappers/ms-graph-files
+      include:
+        - "**"
+      mode: merge
+    - root: /mappers/ms-graph-outbox
+      include:
+        - "**"
+      mode: merge
+    - root: /resolvers/ms-graph-mail
       include:
         - "**"
       mode: merge

@@ -25,7 +25,7 @@ pub fn is_item_level(error: &Error) -> bool {
 }
 
 /// Read `__mount_id` from a node.
-pub(super) fn node_mount_id(node: &Node) -> Option<&str> {
+pub(crate) fn node_mount_id(node: &Node) -> Option<&str> {
     match node.properties.get("__mount_id")? {
         PropertyValue::String(s) => Some(s.as_str()),
         _ => None,
@@ -33,7 +33,7 @@ pub(super) fn node_mount_id(node: &Node) -> Option<&str> {
 }
 
 /// Read `__external_id` from a node.
-pub(super) fn node_external_id(node: &Node) -> Option<&str> {
+pub(crate) fn node_external_id(node: &Node) -> Option<&str> {
     match node.properties.get("__external_id")? {
         PropertyValue::String(s) => Some(s.as_str()),
         _ => None,
@@ -41,7 +41,7 @@ pub(super) fn node_external_id(node: &Node) -> Option<&str> {
 }
 
 /// Read a `__`-prefixed string property.
-pub(super) fn node_str_prop(node: &Node, key: &str) -> Option<String> {
+pub(crate) fn node_str_prop(node: &Node, key: &str) -> Option<String> {
     match node.properties.get(key)? {
         PropertyValue::String(s) => Some(s.clone()),
         _ => None,
@@ -61,7 +61,7 @@ pub(super) fn node_synced_secs(node: &Node) -> Option<i64> {
 }
 
 /// Whether `path` is at or under `prefix`.
-pub(super) fn under(prefix: &str, path: &str) -> bool {
+pub(crate) fn under(prefix: &str, path: &str) -> bool {
     if prefix == "/" {
         return true;
     }

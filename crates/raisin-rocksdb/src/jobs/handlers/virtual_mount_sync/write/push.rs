@@ -5,10 +5,12 @@ use serde_json::{json, Map, Value};
 
 use super::super::materializer::{estimate_node_bytes, write_view_of};
 use super::super::{map_to_external, AdapterError, SyncBatcher, SyncCtx, ToExternalOutcome};
-use super::plan::Candidate;
+use super::candidates::Candidate;
+use super::conflict::{self, ConflictPolicy};
+use super::fields::FieldPlan;
 
 /// What acting on one candidate did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Pushed {
     /// The adapter's `update` was called and the result stamped back.
     Sent,
@@ -18,6 +20,23 @@ pub(super) enum Pushed {
     /// (a `null` / non-object result). The edit was NOT applied and is NOT
     /// baselined — see [`push_one`] step 6.
     Gone,
+    /// `move_policy: reject` and this node's location field has moved. Nothing
+    /// was sent — not even the fields that could have gone — and nothing was
+    /// stamped, so the node stays diverged and says so again next drain.
+    Rejected,
+    /// The provider refused the push (the object changed since this mount read
+    /// it) and the mount's conflict policy ABANDONED the edit — `remote_wins`,
+    /// the default. Nothing was stamped, so the next delta overwrites the local
+    /// value with the remote one.
+    ///
+    /// Not a failure (the provider answered) and not a skip (an edit was lost),
+    /// which is why it is neither.
+    Conflicted,
+    /// The conflict was left for a human: `conflict: "error"`, or a resolver
+    /// that parked, threw, or answered something this engine does not
+    /// understand. The edit stays pending and the mount goes to
+    /// `writeback_status: "conflict"`.
+    Parked(String),
 }
 
 /// Claim → read current → converge → reverse-map → `update` → stamp back.
@@ -32,8 +51,10 @@ pub(super) async fn push_one(
     ctx: &SyncCtx<'_>,
     batcher: &mut SyncBatcher<'_>,
     candidate: &Candidate,
-    fields: &[String],
+    plan: &FieldPlan,
+    policy: &ConflictPolicy,
 ) -> std::result::Result<Pushed, AdapterError> {
+    let fields = &plan.push;
     // 2. Read the node as it stands NOW. The index entry that nominated it was
     //    read at the top of the run and the drain may have spent minutes in the
     //    provider since; pushing the nominating snapshot would re-send an edit
@@ -46,9 +67,45 @@ pub(super) async fn push_one(
     let Some(node) = node else {
         return Ok(Pushed::Skipped);
     };
-    let Some(view) = write_view_of(&node, fields) else {
+    // 2b. A derived recurrence occurrence is not writable, whatever the mount
+    //     thinks. `Config` rather than `Transient` on purpose: the request can
+    //     never succeed as written, so retrying it every tick would be a
+    //     permanent log of an error the operator can actually fix — by editing
+    //     the series master or adding an exception node. The drain's candidate
+    //     selection already filters the projection root; this catches a
+    //     projection node that landed anywhere else.
+    if let Some(reason) = crate::jobs::handlers::calendar_expand::node_refusal(&node) {
+        return Err(AdapterError::Config(reason));
+    }
+    // The view is derived over the WHOLE effective list, moves included, so the
+    // reject check below can see a field that `plan.push` deliberately withheld.
+    // Deriving it over `plan.push` alone would make a rejected move invisible to
+    // the very check that exists to refuse it.
+    let watched: Vec<String> = fields.iter().chain(plan.moves.iter()).cloned().collect();
+    let Some(view) = write_view_of(&node, &watched) else {
         return Ok(Pushed::Skipped);
     };
+
+    // 2c. `move_policy: reject`. Refused BEFORE the converge check and before
+    //     the mapper, because the answer does not depend on either: while the
+    //     location field disagrees with what the provider was last told, this
+    //     mount does not write this node at all. Withholding the whole update
+    //     rather than just the move field is the point — see
+    //     [`super::policy::MovePolicy::Reject`].
+    if plan.policy == super::policy::MovePolicy::Reject && plan.moved(&view) {
+        tracing::warn!(
+            mount_id = %ctx.scope.mount_id,
+            external_id = %candidate.external_id,
+            node_id = %node.id,
+            path = %node.path,
+            fields = ?plan.moves,
+            "move_policy is 'reject' and this node's location field has changed locally; \
+             the whole update is withheld. The local move stands — nothing moves it back — \
+             so the node stays diverged from the provider until it is moved back or the \
+             policy is changed."
+        );
+        return Ok(Pushed::Rejected);
+    }
     // A stamp re-writes this node WHOLE, so this is what the batch's byte
     // budget must charge for it. Measured here, from the node already in hand,
     // because the batcher never sees it. A drain over an existing mailbox stamps
@@ -93,7 +150,7 @@ pub(super) async fn push_one(
     //    back, or the two translations of one relationship drift.
     let node_json = serde_json::to_value(&node)
         .map_err(|e| AdapterError::Transient(format!("node serialize failed: {e}")))?;
-    let payload = match map_to_external(ctx, &node_json, Some(fields)).await? {
+    let payload = match map_to_external(ctx, &node_json, Some(fields), "update").await? {
         ToExternalOutcome::Mapped(mapped) => mapped,
         // Not an error: the mapper declining this node is an answer. Nothing is
         // stamped either, so if the mapper is fixed the edit is still pending.
@@ -115,7 +172,14 @@ pub(super) async fn push_one(
         .external_id
         .clone()
         .unwrap_or_else(|| candidate.external_id.clone());
-    let result = ctx
+    //
+    //    A `conflict` is the ONE failure that does not simply propagate. It is
+    //    the provider's answer, not a fault, and what it means is a decision the
+    //    engine cannot make: see [`super::conflict`]. Everything else — auth,
+    //    rate limits, config errors — is still returned raw, because the
+    //    conflict policy has nothing to say about them and pretending otherwise
+    //    would route a broken credential through a merge function.
+    let result = match ctx
         .call(
             "update",
             json!({
@@ -125,7 +189,42 @@ pub(super) async fn push_one(
                 "etag": stored_etag,
             }),
         )
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(e) if conflict::is_conflict(&e) => {
+            let message = e.to_string();
+            let resolution = conflict::resolve_one(
+                ctx,
+                policy,
+                &node_json,
+                fields,
+                &view.watched,
+                view.pushed.as_ref(),
+                stored_etag.as_deref(),
+                &message,
+            )
+            .await;
+            return super::conflict_push::apply(
+                ctx,
+                batcher,
+                &super::conflict_push::Refused {
+                    node: &node,
+                    node_json: &node_json,
+                    view: view.as_ref(),
+                    item_id: &item_id,
+                    external_id: &candidate.external_id,
+                    payload: &payload.payload,
+                    fields,
+                    node_bytes,
+                    message: &message,
+                },
+                resolution,
+            )
+            .await;
+        }
+        Err(e) => return Err(e),
+    };
 
     // 6. An adapter may answer "there is nothing here to update" — the MS Graph
     //    adapter returns `null` on a 404 because Graph message ids are not
@@ -169,6 +268,9 @@ pub(super) async fn push_one(
             &candidate.external_id,
             new_etag,
             Some(pushed_map(&view.watched, fields)),
+            // Not a merge: an ordinary push writes no node properties, only the
+            // engine's own metadata.
+            None,
             node_bytes,
         )
         .await?;

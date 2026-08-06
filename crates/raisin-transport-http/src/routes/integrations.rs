@@ -84,6 +84,17 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
             // stop ends the running pass and discards its resume point. Both
             // write only the fields they own — deliberately not the generic node
             // API, which replaces every property.
+            // On-demand attachment fetch. Addressed by NODE rather than by
+            // mount — the caller is a viewer holding an asset, and the mount is
+            // recoverable from the node's own `__mount_id`. NOT admin-gated,
+            // unlike the rest of this router: opening an attachment is an
+            // ordinary content read, and the handler authorizes it by reading
+            // the node through the CALLER's context so row-level security
+            // decides.
+            .route(
+                "/api/integrations/content/{repo}/{branch}/{ws}/by-id/{node_id}",
+                post(integrations::fetch_mount_content),
+            )
             .route(
                 "/api/integrations/{repo}/mounts/{mount_id}/pause",
                 post(integrations::pause_mount),

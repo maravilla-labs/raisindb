@@ -34,6 +34,7 @@
 //! a large item count safe; do not remove it.
 
 mod chunk;
+mod command;
 mod index;
 mod node_paths;
 mod ops;
@@ -45,8 +46,21 @@ mod write_view;
 #[cfg(test)]
 mod tests;
 
+pub use command::{
+    command_seq, command_status, CasOutcome, CommandCas, STATUS_PROP, WRITE_SEQ_PROP,
+};
 pub use index::{MountScope, PathEntry, SyncIndex, VirtualMeta, VirtualNodeRef};
 pub use node_paths::is_item_level;
+// Re-exported so the reconcile walk reads the reserved provenance props through
+// the SAME accessors the materializer writes them with. A second reader that
+// disagreed about the property name or its type is how a delete gets pushed for
+// a node this mount never owned.
+// `under` travels with them for the same reason: the mount-boundary test that
+// decides a node has been moved OUT of a mount must be the identical predicate
+// the index applies when it decides what is IN one. Two spellings of "under the
+// mount path" is how a node ends up detached by one half and still indexed by
+// the other.
+pub(crate) use node_paths::{node_external_id, node_mount_id, node_str_prop, under};
 pub use ops::{dedup_ops, estimate_node_bytes, estimate_op_bytes, BatchOp, BatchStats};
 pub use write_view::{write_view_of, WriteView, PUSHED_STATE_PROP};
 
@@ -77,6 +91,27 @@ pub trait NodeMaterializer: Send + Sync {
         scope: &MountScope,
         node_id: &str,
     ) -> Result<Option<raisin_models::nodes::Node>>;
+
+    /// Every node at or under the mount path, as it stands NOW.
+    ///
+    /// The write drain's `submit` mode needs this and [`Self::load_index`]
+    /// cannot serve it: a command node is authored by a USER, so it carries
+    /// neither `__mount_id` nor `__external_id` until the engine stamps one on
+    /// it — and `SyncIndex::by_external`, which is what `virtual_nodes` reads,
+    /// deliberately holds only mount-owned nodes that already have both. An
+    /// outbox drained through the index would find an empty outbox forever.
+    async fn scan_mount_nodes(&self, scope: &MountScope)
+        -> Result<Vec<raisin_models::nodes::Node>>;
+
+    /// Compare-and-swap one `submit` command node's status, in its own
+    /// immediately-committed transaction.
+    ///
+    /// Deliberately NOT routed through [`Self::apply_batch`]. The batcher exists
+    /// to amortize writes by deferring them, and a deferred `queued -> sending`
+    /// is exactly the bug the at-most-once protocol is built to prevent: the
+    /// claim must be on disk before the provider call, or a crash cannot be told
+    /// apart from a send that never happened. See [`command`].
+    async fn cas_command(&self, scope: &MountScope, cas: &CommandCas) -> Result<CasOutcome>;
 
     /// Apply a batch of operations in ONE transaction and ONE commit, updating
     /// `index` to match what landed.
@@ -125,15 +160,73 @@ impl RocksDbMaterializer {
         tx.set_message(message)?;
         Ok(tx)
     }
+
+    /// Every node at or under the mount path — and, as nearly as a key prefix
+    /// allows, nothing else.
+    ///
+    /// # Why this is a path scan and not `scan_nodes`
+    ///
+    /// This used to be `tx.scan_nodes(workspace)` with the mount filter applied
+    /// in memory by [`SyncIndex::from_nodes`]. That reads the NODES CF prefix
+    /// for the whole workspace, which materialises the value of EVERY revision
+    /// of EVERY node (the tombstone check needs the value), deserialises the
+    /// newest per id, then re-seeks NODE_PATH once per node to materialise its
+    /// path, then walks ORDERED_CHILDREN once per node — including leaves — to
+    /// put the result in tree order, matching siblings with an O(children²)
+    /// `find` and cloning each node twice. All of it, once per sync run, and
+    /// then all but the mount's own slice is thrown away by `under()`.
+    ///
+    /// A mount owning 5k of a 200k-node workspace paid for the other 195k on
+    /// every tick, which also couples unrelated mounts: growing one mailbox
+    /// slows every other mount in the workspace.
+    ///
+    /// `scan_by_path_prefix` reads the PATH_INDEX prefix instead — tiny keys
+    /// whose value is a node id — keeps the newest live revision per node, and
+    /// fetches exactly those with ONE `MultiGet`. No tree ordering (the index is
+    /// two hash maps; order was never used), no per-node NODE_PATH seek beyond
+    /// the ones the deserializer already does, no whole-workspace Vec<Node>.
+    ///
+    /// # Why the result is still filtered afterwards
+    ///
+    /// A key prefix is a byte prefix: scanning `/drive` also returns
+    /// `/driveways/x`. That is bounded and harmless because
+    /// [`SyncIndex::from_nodes`] re-applies `under()` to everything it is
+    /// handed, exactly as it did to the whole-workspace listing — so the set
+    /// that reaches the index is unchanged, including the deliberate inclusion
+    /// of FOREIGN nodes under the mount path, which the never-clobber-user-
+    /// content guard depends on. A narrower scan (by `__mount_id`, say) would
+    /// silently drop that guard.
+    ///
+    /// `mount_path == "/"` needs no special case: the prefix is `/`, which
+    /// matches every path in the workspace, and `under("/", _)` is always true.
+    pub(super) async fn load_index_nodes(
+        &self,
+        scope: &MountScope,
+    ) -> Result<Vec<raisin_models::nodes::Node>> {
+        use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
+
+        let prefix = if scope.mount_path.is_empty() {
+            "/"
+        } else {
+            scope.mount_path.as_str()
+        };
+        self.storage
+            .nodes()
+            .scan_by_path_prefix(
+                StorageScope::new(&scope.tenant, &scope.repo, &scope.branch, &scope.workspace),
+                prefix,
+                ListOptions::default(),
+            )
+            .await
+    }
 }
 
 #[async_trait]
 impl NodeMaterializer for RocksDbMaterializer {
     async fn load_index(&self, scope: &MountScope) -> Result<SyncIndex> {
-        let tx = self.begin(scope, "virtual mount sync: index").await?;
-        let all = tx.scan_nodes(&scope.workspace).await?;
+        let under_mount = self.load_index_nodes(scope).await?;
         Ok(SyncIndex::from_nodes(
-            all,
+            under_mount,
             &scope.mount_id,
             &scope.mount_path,
             &scope.watched_fields,
@@ -147,6 +240,26 @@ impl NodeMaterializer for RocksDbMaterializer {
     ) -> Result<Option<raisin_models::nodes::Node>> {
         let tx = self.begin(scope, "virtual mount sync: read node").await?;
         tx.get_node(&scope.workspace, node_id).await
+    }
+
+    async fn scan_mount_nodes(
+        &self,
+        scope: &MountScope,
+    ) -> Result<Vec<raisin_models::nodes::Node>> {
+        // The SAME `under()` predicate the index applies, for the same reason:
+        // `scan_by_path_prefix` is a BYTE prefix scan, so a `/mail/outbox` mount
+        // also returns `/mail/outbox-archive/...`. Two spellings of "under the
+        // mount path" is how a command gets submitted by a mount that does not
+        // own it.
+        let nodes = self.load_index_nodes(scope).await?;
+        Ok(nodes
+            .into_iter()
+            .filter(|n| node_paths::under(&scope.mount_path, &n.path))
+            .collect())
+    }
+
+    async fn cas_command(&self, scope: &MountScope, cas: &CommandCas) -> Result<CasOutcome> {
+        self.cas_command_impl(scope, cas).await
     }
 
     async fn apply_batch(

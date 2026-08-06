@@ -24,7 +24,7 @@ use sync::config::MountState;
 use sync::materializer::PUSHED_STATE_PROP;
 
 fn state_only_mode() -> sync::write::WriteMode {
-    sync::write::WriteMode::StateOnly(vec!["unread".to_string()])
+    sync::write::WriteMode::StateOnly(sync::write::FieldPlan::pushing(&["unread"]))
 }
 
 fn maybe_pushed_state(node: &Node) -> Option<Value> {

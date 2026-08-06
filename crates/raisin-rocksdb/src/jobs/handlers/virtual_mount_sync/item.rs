@@ -85,9 +85,12 @@ impl MapperWriteback {
 pub async fn map_item(
     ctx: &SyncCtx<'_>,
     item: &ExternalItem,
-) -> std::result::Result<Option<MappedNode>, AdapterError> {
+) -> std::result::Result<Option<MappedItem>, AdapterError> {
     let Some(mapper) = &ctx.mount.mapping_function else {
-        return Ok(Some(default_mapping(item)));
+        return Ok(Some(MappedItem {
+            node: default_mapping(item),
+            children: Vec::new(),
+        }));
     };
     // `operation` is additive and every shipped mapper ignores it: a mapper
     // written before dispatch existed reads only `external_item` and `mount`,
@@ -116,10 +119,30 @@ pub async fn map_item(
         .get("properties")
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    Ok(Some(MappedNode {
-        node_type,
-        name,
-        properties,
+    // Subordinate nodes (mail attachments as `raisin:Asset`). Absent for every
+    // mapper written before this existed; a non-array value is ignored rather
+    // than rejected, for the same reason a malformed entry is dropped.
+    let mut children = Vec::new();
+    if let Some(list) = out.get("children").and_then(|v| v.as_array()) {
+        for raw in list {
+            match MappedChild::from_value(raw) {
+                Some(child) => children.push(child),
+                None => tracing::warn!(
+                    mount_id = %ctx.mount.mount_id,
+                    external_id = %item.external_id,
+                    "mapper emitted a child without name/node_type/external_id; dropping it"
+                ),
+            }
+        }
+    }
+
+    Ok(Some(MappedItem {
+        node: MappedNode {
+            node_type,
+            name,
+            properties,
+        },
+        children,
     }))
 }
 
@@ -129,6 +152,15 @@ pub async fn map_item(
 /// mapper must emit only those keys, so the engine never sends a whole object
 /// where a patch was meant.
 ///
+/// `intent` is which operation the payload is destined for — `"create"`,
+/// `"update"` or `"submit"`. A mapper that does not read it behaves exactly as
+/// before, but the ones that need it genuinely cannot infer it: `fields` is
+/// empty for a mirror update as well as for a create, and the difference is not
+/// cosmetic. A calendar exception, for instance, is perfectly updatable (it has
+/// its own provider id) and impossible to create from nothing (the provider
+/// mints one by diverging an occurrence), so the same node must translate
+/// outward for one and decline for the other.
+///
 /// Deliberately NOT routed through [`build_input`]: a mapper is pure and
 /// I/O-free and must never receive the connection's credential. It runs inside
 /// the write drain, under the mount lease.
@@ -136,6 +168,7 @@ pub async fn map_to_external(
     ctx: &SyncCtx<'_>,
     node: &Value,
     fields: Option<&[String]>,
+    intent: &str,
 ) -> std::result::Result<ToExternalOutcome, AdapterError> {
     let Some(mapper) = &ctx.mount.mapping_function else {
         return Ok(ToExternalOutcome::NoMapper);
@@ -145,6 +178,7 @@ pub async fn map_to_external(
         "node": node,
         "mount": ctx.mount_snapshot,
         "fields": fields,
+        "intent": intent,
     });
     let out = ctx.invoker.invoke(&ctx.scope, mapper, input).await?;
     // Null is "not writable", exactly as it is "skip this item" for `to_node`.
@@ -180,13 +214,60 @@ pub async fn stage_item(
     batcher: &mut batch::SyncBatcher<'_>,
     item: &ExternalItem,
     rel_path: &str,
-) -> std::result::Result<(), AdapterError> {
+) -> std::result::Result<Vec<String>, AdapterError> {
     if batcher.can_skip_unmapped(item) {
         batcher.note_unmapped_skip();
-        return Ok(());
+        // The item was skipped, but its children are still LIVE — and a full
+        // walk deletes every mount-owned node it did not report as seen. Return
+        // the ones already materialized, or the first unchanged re-sync of a
+        // mailbox would delete every attachment node in it and the next changed
+        // sync would recreate them: churn forever, on the cheapest path there
+        // is. The ids come from the run's index, so this costs no I/O.
+        return Ok(batcher.child_external_ids(&item.external_id));
     }
     let Some(mapped) = map_item(ctx, item).await? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    batcher.stage_upsert(item, rel_path, mapped).await
+    let children = mapped.children;
+    batcher.stage_upsert(item, rel_path, mapped.node).await?;
+
+    // Children AFTER the parent, in the same buffer, so they apply in that
+    // order: `upsert_deep_node` would otherwise auto-create the mail's path as a
+    // `raisin:Folder` to hold the attachment, and the real mail node would then
+    // land on a path already occupied by a folder of a different type.
+    let mut staged = Vec::with_capacity(children.len());
+    for child in children {
+        let external_id = child_external_id(&item.external_id, &child.external_id);
+        let child_item = ExternalItem {
+            external_id: external_id.clone(),
+            name: child.name.clone(),
+            // A child's etag is the PARENT's when the provider has none of its
+            // own: attachments of an immutable message never change alone, so
+            // inheriting it lets the etag skip-write apply to them too. Without
+            // it every child would rewrite on every run.
+            etag: child.etag.clone().or_else(|| item.etag.clone()),
+            mime_type: None,
+            size_bytes: None,
+            is_folder: false,
+            parent_id: Some(item.external_id.clone()),
+            created_at: None,
+            modified_at: None,
+            web_url: None,
+            download_url: None,
+            metadata: None,
+        };
+        batcher
+            .stage_upsert(
+                &child_item,
+                &format!("{}/{}", rel_path.trim_end_matches('/'), child.name),
+                MappedNode {
+                    node_type: child.node_type,
+                    name: Some(child.name),
+                    properties: child.properties,
+                },
+            )
+            .await?;
+        staged.push(external_id);
+    }
+    Ok(staged)
 }

@@ -10,7 +10,8 @@ use raisin_locks::LockManagerHandle;
 
 use crate::jobs::handlers::virtual_mount_sync::{AdapterInvokerHandle, FunctionAdapterInvoker};
 use crate::jobs::{
-    FunctionExecutorCallback, IntegrationTokenRefreshHandler, VirtualMountSyncHandler,
+    BinaryStorageCallback, FunctionExecutorCallback, IntegrationTokenRefreshHandler,
+    VirtualMountSyncHandler,
 };
 use crate::storage::RocksDBStorage;
 
@@ -34,12 +35,20 @@ pub fn create_integration_token_refresh_handler(
 /// `None`, sync jobs no-op with a warning. `lock_manager` enables cluster-safe
 /// per-mount lease locking; when `None`, the engine uses dedup-key-only
 /// semantics.
+/// `binary_storage` backs the on-demand attachment fetch (`get_content`). When
+/// `None` the sync still materializes attachment METADATA — only the fetch of
+/// the bytes themselves is unavailable, and it says so.
 pub fn create_virtual_mount_sync_handler(
     storage: Arc<RocksDBStorage>,
     function_executor: Option<FunctionExecutorCallback>,
     lock_manager: Option<LockManagerHandle>,
+    binary_storage: Option<&BinaryStorageCallback>,
 ) -> Arc<VirtualMountSyncHandler> {
     let invoker: Option<AdapterInvokerHandle> = function_executor
         .map(|cb| Arc::new(FunctionAdapterInvoker::new(cb)) as AdapterInvokerHandle);
-    Arc::new(VirtualMountSyncHandler::new(storage, invoker, lock_manager))
+    let mut handler = VirtualMountSyncHandler::new(storage, invoker, lock_manager);
+    if let Some(callback) = binary_storage {
+        handler = handler.with_binary_store(callback.clone());
+    }
+    Arc::new(handler)
 }

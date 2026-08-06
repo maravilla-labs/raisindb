@@ -3,15 +3,18 @@ properties:
   title: Microsoft 365 Calendar Mapper
   description: >
     Mapping function for Microsoft 365 calendar mounts. Maps each Graph event to a
-    raisin:Event, hoisting start/end/location/attendees/organizer/recurrence/status/
-    url into the typed raisin:Event properties (title=subject). Pure and
-    side-effect-free: called once per external item in the sync hot loop; performs
-    no I/O.
+    raisin:Event v2 — the provider-neutral shape the Google Calendar mapper also
+    emits: UTC + local + IANA timezone, RFC 5545 recurrence lines, object
+    attendees, and status / show_as / my_response split apart instead of Graph's
+    single conflated string. Bidirectional dispatch on input.operation, but
+    to_external is null and mapper_capabilities reports to_external:false — the
+    adapter is read-only for calendars. Pure and side-effect-free: called once per
+    external item in the sync hot loop; performs no I/O.
   language: javascript
   entry_file: index.js:handler
   execution_mode: Async
   enabled: true
-  version: 1
+  version: 2
   resource_limits:
     timeout_ms: 5000
     max_memory_bytes: 16777216

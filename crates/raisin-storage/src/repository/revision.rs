@@ -82,6 +82,37 @@ pub trait RevisionRepository: Send + Sync {
         offset: usize,
     ) -> impl std::future::Future<Output = Result<Vec<RevisionMeta>>> + Send;
 
+    /// List revisions committed strictly AFTER `after`, **oldest first**.
+    ///
+    /// The seek-based counterpart to [`Self::list_revisions`], which is a prefix
+    /// iterator with `.skip(offset)`: a watermark walk built on that rescans the
+    /// whole repository history on every pass and gets slower for exactly as
+    /// long as the repository keeps committing. Revision keys are HLC-ordered,
+    /// so resuming from a watermark is a seek, not a scan.
+    ///
+    /// Ordering is the other half of the contract. `list_revisions` returns
+    /// NEWEST first, which is right for "show me recent history" and wrong for a
+    /// resumable walk: a consumer that must process every commit exactly once,
+    /// in commit order, and record where it got to, needs them oldest first —
+    /// otherwise the watermark it stores is the newest revision it happened to
+    /// see rather than a point it has processed up to.
+    ///
+    /// `after` is EXCLUSIVE, so a caller can store the last revision it handled
+    /// and pass it straight back without re-handling it.
+    ///
+    /// # Arguments
+    /// * `tenant_id` - Tenant identifier
+    /// * `repo_id` - Repository identifier
+    /// * `after` - Exclusive lower bound; only revisions greater than this
+    /// * `limit` - Maximum number of revisions to return
+    fn list_revisions_since(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        after: &HLC,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<RevisionMeta>>> + Send;
+
     /// List nodes changed in a specific revision
     ///
     /// # Arguments

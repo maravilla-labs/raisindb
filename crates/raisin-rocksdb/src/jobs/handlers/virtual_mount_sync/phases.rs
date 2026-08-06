@@ -22,7 +22,25 @@ pub(super) async fn run_phases(
     // phases — see the `write` module doc for why the ordering is load-bearing
     // rather than a preference. It never returns an error: a mount that cannot
     // write must still be able to read.
+    //
+    // A latency drain (`mode: "write"`) announces itself and stops there. It
+    // exists to
+    // shorten the delay between a local edit and its push, and reading the
+    // provider is neither needed for that nor free: a delta pass costs a
+    // provider round trip, and a mount being edited steadily would make one per
+    // edit burst on top of its own schedule.
+    //
+    // Returning `Ok(())` rather than an outcome of its own is deliberate — the
+    // drain never fails the run (see [`write::drain`]), and what it did is
+    // already on `state.last_drain` and `state.writeback_last_error`.
+    let write_only = mode == write::WRITE_ONLY_MODE;
+    if write_only {
+        announce(ctx, state, write::WRITE_ONLY_MODE, trigger);
+    }
     write::drain(ctx, state, batcher, write_mode).await;
+    if write_only {
+        return Ok(());
+    }
 
     // Choose the sync path. Full reconcile is forced on the first sync, an
     // explicit `mode: "full"`, or when the adapter cannot serve a changes
@@ -55,20 +73,7 @@ pub(super) async fn run_phases(
     } else {
         "delta"
     };
-    if let Some(run) = state.last_run.as_mut() {
-        run.mode = phase.to_string();
-    }
-    raisin_storage::jobs::global_mount_broadcaster().emit(
-        &raisin_storage::jobs::mount_channel_key(
-            &ctx.scope.tenant,
-            &ctx.scope.repo,
-            &ctx.scope.mount_id,
-        ),
-        raisin_storage::jobs::MountSyncEvent::Started {
-            phase: phase.to_string(),
-            trigger: trigger.to_string(),
-        },
-    );
+    announce(ctx, state, phase, trigger);
 
     let result = if use_full {
         full::run_with(ctx, state, batcher).await
@@ -117,4 +122,27 @@ pub(super) async fn run_phases(
     };
 
     result
+}
+
+/// Record the phase this run is ACTUALLY executing and tell the console it
+/// started.
+///
+/// One helper because the run record and the live-feed event have to agree —
+/// they are the two things an operator correlates, and a phase written to only
+/// one of them is worse than a phase written to neither.
+fn announce(ctx: &SyncCtx<'_>, state: &mut MountState, phase: &str, trigger: &str) {
+    if let Some(run) = state.last_run.as_mut() {
+        run.mode = phase.to_string();
+    }
+    raisin_storage::jobs::global_mount_broadcaster().emit(
+        &raisin_storage::jobs::mount_channel_key(
+            &ctx.scope.tenant,
+            &ctx.scope.repo,
+            &ctx.scope.mount_id,
+        ),
+        raisin_storage::jobs::MountSyncEvent::Started {
+            phase: phase.to_string(),
+            trigger: trigger.to_string(),
+        },
+    );
 }

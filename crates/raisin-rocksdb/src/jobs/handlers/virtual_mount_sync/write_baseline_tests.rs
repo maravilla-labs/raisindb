@@ -22,7 +22,7 @@ use sync::materializer::{BatchOp, VirtualMeta, PUSHED_STATE_PROP};
 
 /// The `state_only` mode these drains run under.
 fn state_only_mode() -> sync::write::WriteMode {
-    sync::write::WriteMode::StateOnly(vec!["unread".to_string()])
+    sync::write::WriteMode::StateOnly(sync::write::FieldPlan::pushing(&["unread"]))
 }
 
 /// `__pushed_state` as stored, or `None` — unlike `pushed_state`, which asserts
@@ -290,7 +290,14 @@ async fn a_stamp_does_not_disarm_the_wholesale_rejection_guard() {
     let mut pushed = serde_json::Map::new();
     pushed.insert("unread".to_string(), Value::Bool(false));
     batcher
-        .stage_stamp(&node_id, "M1", Some("v2".to_string()), Some(pushed), 512)
+        .stage_stamp(
+            &node_id,
+            "M1",
+            Some("v2".to_string()),
+            Some(pushed),
+            None,
+            512,
+        )
         .await
         .unwrap();
     batcher.flush().await.unwrap();

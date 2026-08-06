@@ -13,6 +13,7 @@
 //! per-mount lease lock from `raisin-locks` (when configured) makes syncs
 //! cluster-safe; without it the engine falls back to dedup-key-only semantics.
 
+mod content;
 mod ctx;
 mod finalize;
 mod item;
@@ -43,13 +44,15 @@ pub use adapter::{
     build_input, build_mount_snapshot, AdapterError, AdapterInvoker, AdapterInvokerHandle,
     Capabilities, FunctionAdapterInvoker,
 };
+pub use content::{ContentFetch, ContentTarget};
 // Credential assembly lives in raisin-models so the sync engine and the HTTP
 // connection-test handler cannot drift apart.
 pub use batch::SyncBatcher;
 pub use config::{
-    default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount, DrainSummary,
-    ExternalItem, IntegrationConfig, ListPage, MappedNode, MountConfig, MountState, SyncConfig,
-    SyncRun, WriteConfig, MAX_RUN_HISTORY, SYNC_ACTOR, SYSTEM_WORKSPACE,
+    child_external_id, default_mapping, passes_filters, Change, ChangesPage, ConnectedAccount,
+    DrainSummary, ExternalItem, IntegrationConfig, ListPage, MappedChild, MappedItem, MappedNode,
+    MountConfig, MountState, SyncConfig, SyncRun, WriteConfig, CHILD_ID_SEP, MAX_RUN_HISTORY,
+    SYNC_ACTOR, SYSTEM_WORKSPACE,
 };
 pub use materializer::{
     BatchOp, BatchStats, MountScope, NodeMaterializer, RocksDbMaterializer, SyncIndex, VirtualMeta,
@@ -90,6 +93,11 @@ pub struct VirtualMountSyncHandler {
     invoker: Option<AdapterInvokerHandle>,
     materializer: Arc<dyn NodeMaterializer>,
     lock_manager: Option<LockManagerHandle>,
+    /// Where fetched attachment bytes go. `None` on a deployment with no binary
+    /// storage wired: the sync still materializes attachment METADATA, and only
+    /// [`Self::fetch_content`] fails — the read path must not depend on a
+    /// capability only the on-demand fetch needs.
+    binary_store: Option<crate::jobs::handlers::package_install::BinaryStorageCallback>,
     /// Per-process identity, used to build the lease owner string.
     instance_id: String,
 }
@@ -109,8 +117,23 @@ impl VirtualMountSyncHandler {
             invoker,
             materializer,
             lock_manager,
+            binary_store: None,
             instance_id: nanoid::nanoid!(8),
         }
+    }
+
+    /// Wire the binary store the on-demand attachment fetch writes into.
+    ///
+    /// Optional and separate from [`Self::new`] because the callback lives in
+    /// the transport layer, which is built after the job handlers; a sync
+    /// engine with no binary store is fully functional for everything except
+    /// [`Self::fetch_content`].
+    pub fn with_binary_store(
+        mut self,
+        callback: crate::jobs::handlers::package_install::BinaryStorageCallback,
+    ) -> Self {
+        self.binary_store = Some(callback);
+        self
     }
 
     /// Dispatch a virtual-mount job.
@@ -138,6 +161,33 @@ impl VirtualMountSyncHandler {
                     trigger.clone(),
                 )
                 .await
+            }
+            // The latency drain is an ordinary run in `mode: "write"`, NOT a
+            // second execution path. It reuses preflight, the lease, the
+            // capabilities probe, the credential, the batcher and the drain
+            // itself, so a drain triggered by an edit and the drain that runs
+            // inside a sync cannot drift apart. `run_phases` stops after the
+            // drain in this mode: nothing is read from the provider.
+            JobType::VirtualMountWriteDrain { mount_id, trigger } => {
+                self.run_sync(
+                    job,
+                    context,
+                    mount_id.clone(),
+                    write::WRITE_ONLY_MODE.to_string(),
+                    trigger.clone(),
+                )
+                .await
+            }
+            JobType::VirtualMountWriteReconcile { tenant_id, repo_id } => {
+                write::run_write_reconcile(
+                    &self.storage,
+                    self.lock_manager.as_ref(),
+                    &self.instance_id,
+                    tenant_id.clone(),
+                    repo_id.clone(),
+                )
+                .await
+                .map(|_| None)
             }
             JobType::VirtualMountSubscriptionRenew { tenant_id } => self
                 .run_subscription_renew(tenant_id.clone())

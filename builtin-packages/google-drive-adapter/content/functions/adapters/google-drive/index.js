@@ -137,6 +137,40 @@ function opCapabilities() {
     supports_push: false,
     default_ttl: null,
     max_file_size: null,
+
+    // ---- write path ----
+    // Declared because they are implemented below and dispatched in `handler`.
+    // A capability the engine cannot see is a capability the engine will not
+    // use: `write::plan::resolve` refuses a `mirror` mount whose adapter has
+    // not said all three, so omitting them here is what makes the mount
+    // read-only regardless of what this file can actually do.
+    can_create: true,
+    can_update: true,
+    can_delete: true,
+    can_submit: false,
+
+    // What a local edit may push. Drive files are content plus one writable
+    // piece of metadata worth mirroring — the name. The node property is
+    // `title`, which is what the default mapper writes; the reverse mapper
+    // turns it back into Drive's `name`. Everything else the mapper emits is
+    // provider-computed (size, checksums, links, timestamps) and a PATCH
+    // carrying it would be rejected or silently ignored.
+    mutable_fields: ["title"],
+
+    // `detach` for files (§9.5): a local delete removes the node and leaves the
+    // Drive file alone. Deliberately NOT `trash` — a mount is frequently a
+    // read-mostly view of a shared Drive folder, and a node deleted to tidy a
+    // workspace must not bin a colleague's file. A mount whose deletes really
+    // should propagate sets `write_config.delete_policy` explicitly, and gets
+    // `trash` (recoverable) or `purge` (not) by name.
+    default_delete_policy: "detach",
+    default_move_policy: "detach",
+    // Drive has a real trash: `trashed: true` is reversible from the UI for 30
+    // days. Declaring this is what lets a mount choose `trash` at all — without
+    // it the engine REFUSES the policy rather than quietly promoting it to a
+    // permanent delete.
+    supports_trash: true,
+    supports_idempotency_key: false,
   };
 }
 
@@ -270,25 +304,81 @@ function opCreate(credential, params) {
   return multipartUpload(credential, "POST", UPLOAD + "/files", metadata, params);
 }
 
+/**
+ * Optimistic concurrency, ONE implementation, used by every write that carries
+ * a concurrency base.
+ *
+ * Drive has no conditional request — no `If-Match`, no `If-Unmodified-Since` on
+ * `files.update`/`files.delete` — so the check is a READ-THEN-COMPARE against
+ * the file's `version`, and it is worth being honest about what that buys and
+ * what it does not:
+ *
+ *   * It catches the case this is actually for: the remote changed since the
+ *     mount last read it, so the local value the engine is about to push (or the
+ *     local delete it is about to propagate) was decided against a stale view.
+ *   * It does NOT close the race. A change landing between the GET and the write
+ *     is not seen. That is inherent to a provider with no conditional write and
+ *     cannot be fixed here; the mount's conflict policy and the next delta are
+ *     what recover from it.
+ *
+ * It lives here rather than inline in `opUpdate` because `opDelete` needs the
+ * same guarantee and had NONE — the engine sends the pre-image's etag on every
+ * delete and this adapter ignored it, so a file edited remotely after the last
+ * sync was deleted anyway, with the operator's `max_delete_ratio` rails all
+ * satisfied and no error anywhere. Two writes with two different answers to
+ * "has this changed?" is the drift this codebase pays for most often.
+ *
+ * Returns `"gone"` when the file no longer exists, `"match"` otherwise; throws
+ * `conflict` on a mismatch.
+ */
+function checkVersion(credential, itemId, etag, context) {
+  if (etag === undefined || etag === null || etag === "") return "match";
+  var resp = driveFetch(
+    credential,
+    "GET",
+    DRIVE + "/files/" + enc(itemId) + "?fields=version&supportsAllDrives=true",
+    { context: context, rawStatusOk: true }
+  );
+  // GONE, not a failure. Left to `raiseForStatus` this is a plain Error, i.e.
+  // `Transient`, i.e. retried on every drain forever against an id that can
+  // never come back.
+  if (resp.status === 404) return "gone";
+  raiseForStatus(resp, context);
+  var cur = resp.body || {};
+  var remoteEtag = cur.version != null ? String(cur.version) : null;
+  if (remoteEtag !== null && remoteEtag !== String(etag)) {
+    // The message text is load-bearing: `AdapterError::classify` scans for
+    // auth_expired, rate_limited, cursor_invalid, config_error and THEN
+    // conflict, so a message containing any earlier token is misclassified.
+    throw coded("etag mismatch on " + context, "conflict");
+  }
+  return "match";
+}
+
 function opUpdate(credential, params) {
-  // Optimistic concurrency: compare the caller's expected etag (file `version`)
-  // against the current remote value; mismatch is a hard conflict.
-  if (params.etag) {
-    var cur = driveFetch(
-      credential,
-      "GET",
-      DRIVE + "/files/" + enc(params.item_id) + "?fields=version&supportsAllDrives=true",
-      { context: "update(etag-check)" }
-    ).body;
-    var remoteEtag = cur.version != null ? String(cur.version) : null;
-    if (remoteEtag !== null && remoteEtag !== String(params.etag)) {
-      throw coded("etag mismatch on update", "conflict");
-    }
+  // A vanished file SETTLES the node rather than failing it: the delta feed
+  // reports the deletion and the engine removes the node on its own schedule.
+  if (checkVersion(credential, params.item_id, params.etag, "update") === "gone") {
+    return null;
   }
 
+  // The write drain sends `params.payload` — the mount mapper's `to_external`
+  // output, already provider-shaped and already narrowed to the mount's field
+  // allow-list. `params.name` / `params.mime_type` are the older direct form,
+  // kept because the adapter contract documents them for content sync; the
+  // payload wins where both appear.
   var metadata = {};
   if (params.name !== undefined) metadata.name = params.name;
   if (params.mime_type !== undefined) metadata.mimeType = params.mime_type;
+  if (params.payload && typeof params.payload === "object") {
+    for (var pk in params.payload) metadata[pk] = params.payload[pk];
+  }
+  if (isEmptyObject(metadata) && (params.content === undefined || params.content === null)) {
+    // An empty PATCH still bumps the file's `version`, which invalidates every
+    // stored etag and makes the next delta re-deliver the file for no reason —
+    // and on a mirror that is a revision per file per drain, forever.
+    throw coded("update: refusing an empty PATCH body", "config_error");
+  }
 
   if (params.content === undefined || params.content === null) {
     var resp = driveFetch(
@@ -329,7 +419,55 @@ function multipartUpload(credential, method, base, metadata, params) {
   return toExternalItem(resp.body);
 }
 
+function isEmptyObject(v) {
+  if (!v || typeof v !== "object") return true;
+  for (var k in v) return false;
+  return true;
+}
+
+/**
+ * Delete, under the mount's resolved policy.
+ *
+ * `params.policy` is `"trash"` or `"purge"` — the engine never sends `"detach"`,
+ * because detaching means not calling this at all. The distinction is not
+ * cosmetic: `trashed: true` is reversible from the Drive UI for 30 days, and
+ * `DELETE` is not reversible by anyone. An adapter that treated the two the same
+ * would make `supports_trash` a lie and turn a recoverable operator mistake into
+ * a permanent one.
+ *
+ * Absent policy means `purge`, which is what `delete` has always meant in this
+ * contract. The engine always sends one.
+ *
+ * `params.etag` is the concurrency base captured from the node's MVCC pre-image
+ * at detection time, and it is honoured here — see [`checkVersion`]. It used to
+ * be accepted and ignored, which meant a file someone else edited after the last
+ * sync was deleted anyway: the engine's blast-radius rails were all satisfied
+ * (one node, one delete), so nothing anywhere reported that the thing destroyed
+ * was not the thing the operator had seen.
+ */
 function opDelete(credential, params) {
+  // Already gone is SUCCESS — a delete is the one operation whose desired end
+  // state a 404 already satisfies.
+  if (checkVersion(credential, params.item_id, params.etag, "delete") === "gone") {
+    return { deleted: true };
+  }
+  if (params.policy === "trash") {
+    var patched = driveFetch(
+      credential,
+      "PATCH",
+      DRIVE + "/files/" + enc(params.item_id) + "?fields=id&supportsAllDrives=true",
+      {
+        headers: { "Content-Type": "application/json" },
+        body: { trashed: true },
+        context: "delete(trash)",
+        rawStatusOk: true,
+      }
+    );
+    if (patched.status === 404) return { deleted: true, trashed: true };
+    raiseForStatus(patched, "delete(trash)");
+    return { deleted: true, trashed: true };
+  }
+
   var resp = driveFetch(
     credential,
     "DELETE",

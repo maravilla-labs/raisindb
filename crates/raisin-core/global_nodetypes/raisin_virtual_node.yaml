@@ -1,0 +1,95 @@
+# The first global MIXIN in the tree. It exists so the six engine-owned reserved
+# properties the virtual-mount materializer stamps are declared exactly ONCE.
+#
+# The resolver merges a mixin's properties into `resolved_properties` BEFORE
+# strict validation runs (services/node_type_resolver/resolution.rs step 2, then
+# services/node_validation/property_checks.rs::check_strict_mode), so a strict
+# NodeType that lists this mixin accepts every `__` property the materializer
+# writes. `check_strict_mode` exempts only keys starting with `$` — a `__` prefix
+# buys nothing — which is why declaring them is mandatory, not decorative.
+#
+# Deliberately declares no `indexable` and no `index_types`: resolution.rs
+# intersects a mixin's index_types into the child's, and the concrete type's own
+# `index_types` overrides the result afterwards (step 6). Setting them here would
+# only ever narrow a consumer by accident.
+
+name: raisin:VirtualNode
+description: >-
+  Mixin carrying the engine-owned reserved properties that the virtual-mount
+  materializer stamps on every synced node. Apply it to any strict NodeType a
+  mount may write, or strict validation rejects the synced write.
+icon: link
+# BUMPED 1 -> 2 for `__write_seq`. Every reserved property lives HERE and not on
+# the concrete type that happens to need it first: `__pushed_state` was very
+# nearly declared on raisin:Mail alone, which would have left the first strict
+# type to gain writeback rejecting every synced write with no error path that
+# named the cause.
+version: 2
+is_mixin: true
+properties:
+  - name: __virtual
+    type: Boolean
+    required: false
+    meta:
+      label: Virtual
+      description: Marks a mount-managed node (engine-owned)
+
+  - name: __mount_id
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: Mount ID
+      description: Owning mount node id (engine-owned)
+
+  - name: __external_id
+    type: String
+    required: false
+    index: [Property]
+    meta:
+      label: External ID
+      description: Provider item id, the stable upsert-match key (engine-owned)
+
+  - name: __etag
+    type: String
+    required: false
+    meta:
+      label: Etag
+      description: Provider change token at last sync (engine-owned)
+
+  - name: __synced_at
+    type: String
+    required: false
+    meta:
+      label: Synced At
+      description: ISO 8601 timestamp of the last sync write (engine-owned)
+
+  - name: __pushed_state
+    type: Object
+    required: false
+    meta:
+      label: Pushed State
+      description: >-
+        Writeback baseline — the watched-field values last known to be on the
+        provider. WriteView::diverges compares against this. Written only when
+        the mount declares mutable fields (materializer/stamp.rs,
+        config/props.rs), i.e. by a state_only or write_through mount.
+
+  - name: __write_seq
+    type: Number
+    required: false
+    meta:
+      label: Write Sequence
+      description: >-
+        Durable, node-resident guard on a `submit` command's lifecycle. Every
+        status transition compares BOTH the status and this counter and then
+        increments it, so a claim made before a crash cannot be mistaken for a
+        current one when the process comes back. Deliberately not the lock
+        manager's fencing token: that is volatile and resets on restart, which
+        is the one event this must survive. Same pattern as
+        MountState::state_seq (engine-owned).
+
+allowed_children: []
+versionable: false
+publishable: false
+auditable: false

@@ -64,6 +64,10 @@ sha2 = "0.10"
 # Utilities
 blake3 = { workspace = true }
 chrono = { workspace = true }
+# Recurrence expansion for the calendar occurrence projection
+# (jobs/handlers/calendar_expand). See the workspace manifest for why.
+rrule = { workspace = true }
+chrono-tz = { workspace = true }
 tracing = { workspace = true }
 uuid = { version = "1.18.1", features = ["v4"] }
 nanoid = { workspace = true }

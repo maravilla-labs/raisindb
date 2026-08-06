@@ -181,6 +181,9 @@ async fn stage_change(
     if !super::passes_filters(&rel_path, include, exclude) {
         return Ok(false);
     }
-    stage_item(ctx, batcher, &change.item, &rel_path).await?;
+    // The delta path has no reconcile, so the staged child ids have nothing to
+    // report to — dropped deliberately rather than threaded to a caller that
+    // would ignore them.
+    let _children = stage_item(ctx, batcher, &change.item, &rel_path).await?;
     Ok(true)
 }

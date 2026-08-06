@@ -13,12 +13,32 @@ impl VirtualMountSyncHandler {
         result: std::result::Result<(), AdapterError>,
         counts: BatchStats,
     ) -> Result<Option<Value>> {
-        // Stamped on EVERY outcome, before the match, so no arm can forget it.
-        // This is what the scheduler backs off against; leaving it unset on the
-        // failure paths is what let a broken mount retry on every tick forever
-        // (see `MountState::last_attempt_at` and `check::is_due`).
         let now = Utc::now().timestamp();
-        state.last_attempt_at = Some(now);
+        // A latency drain reads nothing from the provider, so it must not move
+        // any of the clocks the READ scheduler runs on.
+        //
+        // This is the sharpest edge in routing the drain through `run_sync`.
+        // `check::is_due` schedules against `max(last_sync_at, last_attempt_at)`,
+        // and a drain fires on every local edit — so stamping either here would
+        // let a mailbox that is being worked through continuously postpone its
+        // own delta poll forever, one edit at a time. Remote changes would stop
+        // arriving, with the mount reporting `ok` and a fresh run in its history.
+        //
+        // `status` and `consecutive_failures` are left alone for the same
+        // reason: they are the read side's verdict, and a successful push says
+        // nothing about whether the provider's changes feed is healthy.
+        let write_only = state
+            .last_run
+            .as_ref()
+            .is_some_and(|r| r.mode == write::WRITE_ONLY_MODE);
+
+        // Stamped on EVERY other outcome, before the match, so no arm can forget
+        // it. This is what the scheduler backs off against; leaving it unset on
+        // the failure paths is what let a broken mount retry on every tick
+        // forever (see `MountState::last_attempt_at` and `check::is_due`).
+        if !write_only {
+            state.last_attempt_at = Some(now);
+        }
 
         // Fold this run's counts into the open run record. Every arm below goes
         // through `close_run`, so no outcome can leave the history without an
@@ -43,10 +63,12 @@ impl VirtualMountSyncHandler {
 
         let retryable_err = match result {
             Ok(()) => {
-                state.status = Some("ok".to_string());
-                state.consecutive_failures = 0;
-                state.last_error = None;
-                state.last_sync_at = Some(now);
+                if !write_only {
+                    state.status = Some("ok".to_string());
+                    state.consecutive_failures = 0;
+                    state.last_error = None;
+                    state.last_sync_at = Some(now);
+                }
                 run.finish(now, "ok", None);
                 None
             }

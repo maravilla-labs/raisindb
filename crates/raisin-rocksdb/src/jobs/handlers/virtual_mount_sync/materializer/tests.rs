@@ -202,6 +202,8 @@ fn stamp_op(ext: &str, etag: Option<&str>) -> BatchOp {
         etag: etag.map(str::to_string),
         synced_at: "2026-01-01T00:00:00Z".to_string(),
         pushed_state: None,
+        merged: None,
+        adopt: false,
         node_bytes: 0,
     }
 }
@@ -221,6 +223,8 @@ fn a_stamp_is_charged_the_whole_node_it_rewrites() {
         etag: Some("e1".to_string()),
         synced_at: "2026-01-01T00:00:00Z".to_string(),
         pushed_state: None,
+        merged: None,
+        adopt: false,
         node_bytes: 30_000,
     };
     assert!(estimate_op_bytes(&stamp) > 30_000);

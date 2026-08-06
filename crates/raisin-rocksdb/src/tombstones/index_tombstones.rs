@@ -355,6 +355,40 @@ pub(super) fn tombstone_relation_indexes(
 ///
 /// Scans workspace prefix to find all compound index entries for this node.
 /// Handles both draft and published compound indexes.
+///
+/// # This is O(every compound entry in the workspace) per node WRITE
+///
+/// Not per delete — per write. `put_node` calls this unconditionally whenever a
+/// node already exists, with no check that the node's type declares any compound
+/// index at all, and it scans the workspace prefix TWICE (draft and published)
+/// because the key carries no node id until its last component.
+///
+/// It is free today only because no NodeType in the tree declares a compound
+/// index, so both iterators seek into an empty range. The moment ONE index
+/// exists over a large type, every update in that workspace pays a scan of every
+/// entry that index holds — and on a workspace a connector syncs into, the
+/// sync's own `__etag` / `__pushed_state` stamp-back is a full node rewrite per
+/// item, so the cost lands squarely on the hot path. One index over 200k mails
+/// at ~3 live revisions makes a 500-item drain read ~6×10⁸ keys.
+///
+/// This is the same pathology [`tombstone_spatial_indexes`] documents removing
+/// 20 lines below, and it wants the same treatment: DERIVE the node's own keys
+/// instead of searching for them. The old node carries its own column values, so
+/// for each declared index the full value tuple — and therefore the key prefix
+/// `cidx[_pub]\0{name}\0{values…}` — is computable without a scan; only the
+/// entries under that one prefix can belong to this node's previous revision,
+/// because each update already tombstones its predecessor's group (induction:
+/// the A→B update tombstones group A, so at B→C only group B can be live). What
+/// blocks it is availability, not correctness: this function is synchronous and
+/// has no NodeType, while `compound_indexes` needs an async fetch. The two
+/// UPDATE call sites — `tombstone_compound_indexes_tx` and
+/// `add_compound_tombstones_to_batch` — both sit immediately before a resolve of
+/// exactly those definitions, so threading them in is contained; the DELETE path
+/// (`add_node_tombstones`) can keep the scan, deletes being rare.
+///
+/// Until then: **do not declare a compound index on a NodeType a virtual mount
+/// writes** (`raisin:Mail`, `raisin:Event`). The scan it turns on costs more
+/// than the index saves.
 pub(super) fn tombstone_compound_indexes(
     batch: &mut WriteBatch,
     db: &DB,

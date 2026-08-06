@@ -925,6 +925,90 @@ async fn main() {
                         {
                             tracing::warn!(error = %e, "Failed to register VirtualMountSubscriptionRenew job");
                         }
+
+                        // Virtual-mount write reconcile: walk each writable
+                        // mount's revisions from its writeback watermark, at
+                        // most once every 5 minutes. This is the DURABLE half
+                        // of change detection — the only path that can see a
+                        // local delete, since a deleted node is gone from the
+                        // workspace and from the sync index and is recoverable
+                        // only from its MVCC pre-image, which garbage
+                        // collection eventually takes.
+                        //
+                        // Same dedup caveat as the scans above: the registry's
+                        // dedup map is per-process, so every cluster node runs
+                        // its own copy. Here that is NOT harmless — this job
+                        // writes mount state — so the handler takes a per-mount
+                        // lease before touching anything.
+                        let reconcile_bucket = now_secs / 300;
+                        let reconcile_job =
+                            raisin_storage::jobs::JobType::VirtualMountWriteReconcile {
+                                tenant_id: None,
+                                repo_id: None,
+                            };
+                        let reconcile_id = raisin_storage::jobs::JobId::new();
+                        let reconcile_ctx = raisin_storage::jobs::JobContext {
+                            tenant_id: "_system".to_string(),
+                            repo_id: String::new(),
+                            branch: String::new(),
+                            workspace_id: String::new(),
+                            revision: raisin_hlc::HLC::now(),
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) = job_data_store_for_loop.put(&reconcile_id, &reconcile_ctx) {
+                            tracing::warn!(error = %e, "Failed to store VirtualMountWriteReconcile job context");
+                        } else if let Err(e) = registry_for_loop
+                            .register_job_with_id_idempotent(
+                                reconcile_id,
+                                reconcile_job,
+                                "_system".to_string(),
+                                format!("vmount-write-reconcile:{reconcile_bucket}"),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to register VirtualMountWriteReconcile job");
+                        }
+
+                        // Calendar occurrence projection: expand every series
+                        // master over a rolling window into concrete, indexed
+                        // occurrence nodes. Without it a date-range query over a
+                        // calendar silently misses every recurring event, since
+                        // a master's own `start_utc` is only its FIRST
+                        // occurrence.
+                        //
+                        // Enqueued every 5 minutes; the handler's own
+                        // per-workspace lease is what makes the actual rebuild
+                        // happen at most once per interval per cluster, because
+                        // the registry's dedup map is per-process.
+                        let expand_bucket = now_secs / 300;
+                        let expand_job = raisin_storage::jobs::JobType::CalendarOccurrenceRebuild {
+                            tenant_id: None,
+                            repo_id: None,
+                        };
+                        let expand_id = raisin_storage::jobs::JobId::new();
+                        let expand_ctx = raisin_storage::jobs::JobContext {
+                            tenant_id: "_system".to_string(),
+                            repo_id: String::new(),
+                            branch: String::new(),
+                            workspace_id: String::new(),
+                            revision: raisin_hlc::HLC::now(),
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) = job_data_store_for_loop.put(&expand_id, &expand_ctx) {
+                            tracing::warn!(error = %e, "Failed to store CalendarOccurrenceRebuild job context");
+                        } else if let Err(e) = registry_for_loop
+                            .register_job_with_id_idempotent(
+                                expand_id,
+                                expand_job,
+                                "_system".to_string(),
+                                format!("calendar-occurrence-rebuild:{expand_bucket}"),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to register CalendarOccurrenceRebuild job");
+                        }
                     }
                 });
                 tracing::info!("Scheduled trigger enqueuer started (60s interval)");

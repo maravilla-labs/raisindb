@@ -135,6 +135,20 @@ pub struct RocksDBStorage {
     pub(crate) job_dispatcher:
         Arc<std::sync::RwLock<Option<Arc<crate::jobs::dispatcher::JobDispatcher>>>>,
 
+    // The virtual-mount sync engine (set after init_job_system), so the
+    // on-demand attachment fetch can reach it without going through the job
+    // queue. Same slot pattern as `job_dispatcher`, and for the same reason: the
+    // handler is built during job-system init from dependencies this struct does
+    // not own, and rebuilding a second one here would mean a second adapter
+    // invoker and a second binary-store callback — two of everything, drifting.
+    //
+    // A fetch is SYNCHRONOUS on purpose. It exists to answer "someone is opening
+    // this attachment now"; routed through the queue the caller would get a job
+    // id and no bytes, and would have to poll for a file that is usually a
+    // few hundred KB and one HTTP call away.
+    pub(crate) virtual_mount_sync:
+        Arc<std::sync::RwLock<Option<Arc<crate::jobs::VirtualMountSyncHandler>>>>,
+
     // Replication components
     pub(crate) operation_capture: Arc<crate::OperationCapture>,
     pub(crate) operation_queue: Option<Arc<crate::replication::OperationQueue>>,

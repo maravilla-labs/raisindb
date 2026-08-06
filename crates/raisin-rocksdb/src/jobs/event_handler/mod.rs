@@ -19,6 +19,7 @@ mod replication_handlers;
 mod repo_handlers;
 mod spatial_reconcile;
 mod trigger_helpers;
+pub(crate) mod vmount_capture;
 
 #[cfg(test)]
 mod spatial_reconcile_tests;
@@ -59,6 +60,12 @@ pub struct UnifiedJobEventHandler {
     trigger_registry: Option<Arc<TriggerRegistry<RocksDBStorage>>>,
     /// Processing rules repository for per-repo asset processing configuration
     processing_rules: ProcessingRulesRepositoryImpl,
+    /// Which virtual mounts want outbound writes, and where they materialize.
+    ///
+    /// Cached per repository because the DELETE arm of the capture hook has no
+    /// cheap rejection available to it — a deleted node carries no properties to
+    /// test — so it consults this on every local delete in the process.
+    vmount_routes: Arc<vmount_capture::MountRouteCache>,
 }
 
 impl UnifiedJobEventHandler {
@@ -94,6 +101,7 @@ impl UnifiedJobEventHandler {
             batch_aggregator: None,
             trigger_registry: None,
             processing_rules,
+            vmount_routes: Arc::new(vmount_capture::MountRouteCache::new()),
         }
     }
 

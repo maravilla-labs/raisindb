@@ -139,6 +139,30 @@ impl RevisionRepository for InMemoryRevisionRepo {
             .collect())
     }
 
+    /// Oldest-first, exclusive of `after` — see the trait doc. The map here is
+    /// unordered, so this sorts rather than seeks; the ordering CONTRACT is what
+    /// callers depend on, not the access path.
+    async fn list_revisions_since(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        after: &HLC,
+        limit: usize,
+    ) -> Result<Vec<RevisionMeta>> {
+        let prefix = format!("{}/{}/", tenant_id, repo_id);
+        let revisions = self.revisions.read().await;
+
+        let mut repo_revisions: Vec<RevisionMeta> = revisions
+            .iter()
+            .filter(|(key, meta)| key.starts_with(&prefix) && meta.revision > *after)
+            .map(|(_, meta)| meta.clone())
+            .collect();
+
+        repo_revisions.sort_by(|a, b| a.revision.cmp(&b.revision));
+        repo_revisions.truncate(limit);
+        Ok(repo_revisions)
+    }
+
     async fn list_changed_nodes(
         &self,
         _tenant_id: &str,

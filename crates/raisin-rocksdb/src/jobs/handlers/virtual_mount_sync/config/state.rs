@@ -27,6 +27,21 @@ pub struct DrainSummary {
     /// Pushes the provider answered with "no such object under that id".
     #[serde(default)]
     pub gone: u64,
+    /// Local deletes propagated to the provider.
+    #[serde(default)]
+    pub deleted: u64,
+    /// Local deletes deliberately NOT propagated, under `delete_policy: detach`.
+    ///
+    /// Reported separately from [`Self::deleted`] because the remote object is
+    /// still there and will be re-imported by the next reconcile. Folding the
+    /// two together would let a mount report deletions it never made.
+    #[serde(default)]
+    pub detached: u64,
+    /// A blast-radius rail refused this run's deletes (§9.4). Everything is
+    /// parked on [`MountState::writeback_pending_deletes`], nothing was sent,
+    /// and reads were unaffected.
+    #[serde(default)]
+    pub blocked: bool,
     /// Pushes that failed outright.
     #[serde(default)]
     pub failed: u64,
@@ -36,6 +51,194 @@ pub struct DrainSummary {
     /// An operator's Stop landed mid-drain.
     #[serde(default)]
     pub stopped: bool,
+    /// Updates withheld whole under `move_policy: reject`, because the node had
+    /// been moved locally.
+    ///
+    /// Not a failure and not a skip: the mount is doing exactly what it was
+    /// configured to do, and is also not writing the nodes it otherwise would.
+    /// Both halves have to be visible or `outcome: ok` reads as "caught up".
+    #[serde(default)]
+    pub rejected: u64,
+    /// Pushes the provider refused because the object had changed since this
+    /// mount last read it, and the mount's conflict policy abandoned them.
+    ///
+    /// Counted apart from [`Self::failed`] because nothing is broken: the
+    /// provider answered, and `remote_wins` — the default — deliberately drops
+    /// the local edit and waits for the next delta to overwrite it. That is a
+    /// LOST EDIT, though, and a mount losing edits every run must not report the
+    /// same clean receipt as one with nothing to do.
+    #[serde(default)]
+    pub conflicts: u64,
+    /// Conflicts left PENDING: `conflict: "error"`, a resolver that parked, a
+    /// resolver that threw, or an answer this engine does not recognize.
+    ///
+    /// The difference from [`Self::conflicts`] is what the operator must do.
+    /// A conflict is self-clearing; a parked one is not — it comes back on every
+    /// drain until a human resolves it, and the mount sits at
+    /// `writeback_status: "conflict"` meanwhile.
+    #[serde(default)]
+    pub parked: u64,
+
+    // ---- `submit` outboxes only (§5) ----
+    //
+    // Skipped when zero so a mount that has never had an outbox does not carry
+    // four zeroes in its state blob forever.
+    /// Commands the provider accepted.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub submitted: u64,
+    /// Commands returned to `queued` because the provider explicitly refused to
+    /// act (`rate_limited`) — the only outcome on this path that is retried.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub requeued: u64,
+    /// Commands terminally failed: definitively not sent.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub abandoned: u64,
+    /// Commands parked at `unknown` — they may or may not have been issued.
+    ///
+    /// The one number on an outbox that always needs a human. It is reported
+    /// apart from [`Self::abandoned`] because the two require opposite actions:
+    /// a failed command can be requeued freely, an unresolved one must be
+    /// checked at the provider FIRST or requeueing it sends a second copy.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unresolved: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// A local delete the reconcile walk found, queued until the drain acts on it.
+///
+/// Everything a push needs is captured HERE, at detection time, because
+/// detection is the half that cannot be reconstructed later: once the watermark
+/// has moved past a delete's revision and the MVCC pre-image it was recovered
+/// from has been garbage collected, nothing in the system remembers that the
+/// node existed — not its provider id, not its etag, not that this mount owned
+/// it.
+///
+/// A queued delete is not a committed one. `write::guard` may refuse the whole
+/// batch (§9.4), in which case these stay exactly as they are until an operator
+/// confirms; nothing here is ever discarded to make a rail's arithmetic work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDelete {
+    /// The node that was deleted.
+    pub node_id: String,
+    /// The provider-side id, recovered from the MVCC pre-image. Never empty —
+    /// a delete without one is not provably this mount's to push (§9.3).
+    pub external_id: String,
+    /// The node's path at the moment before it was deleted, for the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The `__etag` the pre-image carried, as the delete's optimistic-concurrency
+    /// base.
+    ///
+    /// Captured at detection because there is nowhere else to get it: by the
+    /// time anything drains, the node is gone and the pre-image may be
+    /// collected. An adapter that honours it refuses to delete a remote object
+    /// that has changed since this mount last saw it — which is the difference
+    /// between propagating a delete and losing an edit someone else made in the
+    /// window. `None` when the node was never etagged; the delete is then
+    /// unconditional, as it has to be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    /// The revision that deleted it, as an HLC string.
+    pub revision: String,
+    /// Unix epoch seconds at which the walk found it.
+    pub detected_at: i64,
+    /// The deleting transaction touched more nodes than
+    /// [`BULK_REVISION_THRESHOLD`], so this is one of a mass delete.
+    ///
+    /// Free, and nothing else gives you the signal: `RevisionMeta.changed_nodes`
+    /// says how wide the originating transaction was, which is the difference
+    /// between a user deleting one message and a mis-scoped
+    /// `DELETE FROM 'ws' WHERE path LIKE '/mail/%'`. Carried from detection so
+    /// the rails can require confirmation on it regardless of how many deletes
+    /// end up in any one drain.
+    #[serde(default)]
+    pub bulk: bool,
+}
+
+/// Above this many nodes in one revision, a delete is flagged `bulk`.
+///
+/// A deliberate low number: a person deleting things by hand does not commit
+/// fifty nodes at once, and everything that does (a SQL DML statement, a
+/// subtree prune, a function loop) is exactly what the confirmation rail exists
+/// to catch.
+pub const BULK_REVISION_THRESHOLD: usize = 50;
+
+/// How many detected deletes a mount retains before the walk stops advancing.
+///
+/// Back-pressure, not truncation: on overflow the reconcile walk leaves the
+/// watermark where it is and stops, so the deletes it has not recorded are
+/// found again on the next pass. Dropping them instead would lose them
+/// permanently — the walk is the only thing that can see a delete at all.
+pub const MAX_PENDING_DELETES: usize = 500;
+
+/// A tripped safety rail, recorded on the mount until an operator releases it.
+///
+/// The soft-block half of §9.4. Nothing is discarded when a rail trips: the
+/// pending deletes stay exactly where they are on
+/// [`MountState::writeback_pending_deletes`], and this records why they are not
+/// moving and what to type to let them.
+///
+/// Modelled as one object rather than a `bool` beside a reason beside a token
+/// because those three can disagree — a `writeback_blocked: true` with no reason
+/// is a mount that has stopped writing and cannot say why, which is the silence
+/// the block exists to break.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritebackBlock {
+    /// Fingerprint of the exact batch that was refused. An operator releases it
+    /// by copying this into [`MountState::writeback_confirm_token`].
+    ///
+    /// Content-derived, so a confirmation authorises the batch that was
+    /// reviewed and not whatever has accumulated since.
+    pub token: String,
+    /// The full operator-facing explanation, including how to release it.
+    pub reason: String,
+    /// How many deletes are parked.
+    pub deletes: u64,
+    /// Unix epoch seconds the rail tripped.
+    pub at: i64,
+}
+
+/// What one reconcile walk did, as recorded on the mount.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileSummary {
+    /// Unix epoch seconds the walk finished.
+    #[serde(default)]
+    pub at: i64,
+    /// Revisions read from the watermark.
+    #[serde(default)]
+    pub scanned: u64,
+    /// Revisions skipped because the sync engine itself wrote them.
+    #[serde(default)]
+    pub echoes: u64,
+    /// Node changes on the mount's branch/workspace that were NOT the sync's
+    /// own. An upper bound on local edits: ownership is not what the walk reads
+    /// each node for (the drain re-checks divergence against the index anyway),
+    /// so a change here may well belong to a node this mount has nothing to do
+    /// with.
+    #[serde(default)]
+    pub local_changes: u64,
+    /// Deletes newly recorded on [`MountState::writeback_pending_deletes`].
+    #[serde(default)]
+    pub deletes_found: u64,
+    /// Mount-owned nodes found OUTSIDE the mount path and detached — the node
+    /// keeps its content, loses its provenance, and the remote is untouched.
+    ///
+    /// Expect the provider's object to come back as a NEW node at the next
+    /// reconcile: there is no per-mount suppression set. See `write::relocate`.
+    #[serde(default)]
+    pub detached: u64,
+    /// Foreign nodes found INSIDE the mount path and refused adoption. Nothing
+    /// was created at the provider and nothing was written locally.
+    #[serde(default)]
+    pub rejected: u64,
+    /// The limit was reached with revisions still unread, or the pending-delete
+    /// cap stopped the walk. Either way there is more to do and the next pass
+    /// resumes from the watermark.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Engine-managed `state` object of a `raisin:VirtualMount`.
@@ -163,6 +366,20 @@ pub struct MountState {
     /// makes the sync fatal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writeback_supported: Option<bool>,
+    /// Health of the OUTBOUND half of this mount, distinct from
+    /// [`Self::status`] (which is about the read side).
+    ///
+    /// `"conflict"` means at least one edit is parked awaiting a human: the
+    /// provider refused it and the mount's policy — `error`, or a resolver that
+    /// parked/threw/answered something unrecognized — declined to decide.
+    /// `"misconfigured"` means the drain never started because `write_config`
+    /// could not be resolved. Cleared by the first drain that parks nothing.
+    ///
+    /// A separate field rather than another `writeback_last_error` string
+    /// because the console has to be able to BADGE this: a message that a human
+    /// must read to learn the mount is stuck is the same silence as no message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_status: Option<String>,
     /// Why [`Self::writeback_supported`] is `Some(false)` — e.g. which adapter
     /// operation is missing. Cleared when writeback is supported.
     ///
@@ -184,6 +401,53 @@ pub struct MountState {
     /// mistaken for the current state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_drain: Option<DrainSummary>,
+
+    // ---- durable change detection (the reconcile watermark) ----
+    /// How far the [`RevisionMeta`](raisin_storage::RevisionMeta) walk has read,
+    /// as an HLC string.
+    ///
+    /// The durable half of change detection. An event-bus hook is fast and
+    /// in-process; this is what survives a crash, a restart and a failover, and
+    /// it is the ONLY thing that can see a delete — a deleted node is gone from
+    /// the workspace, absent from the sync index, and indistinguishable from a
+    /// node that was never there.
+    ///
+    /// `None` means the mount has never reconciled. It is then initialized to
+    /// the repository's CURRENT head rather than to zero: walking a repo's
+    /// entire history the first time writeback is enabled would spend an
+    /// unbounded amount of work re-deriving edits the drain's divergence check
+    /// already covers, and would surface deletes from before the mount could
+    /// have pushed them.
+    ///
+    /// Lives in `state` rather than as a node property for the same reason as
+    /// [`Self::paused`]: the nodetype is `strict: true`, `state` is free-form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_revision: Option<String>,
+    /// Deletes the walk has found and nothing has acted on yet.
+    ///
+    /// Bounded by [`MAX_PENDING_DELETES`]; see that constant for why the walk
+    /// stops rather than truncating.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writeback_pending_deletes: Vec<PendingDelete>,
+    /// What the most recent reconcile walk did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconcile: Option<ReconcileSummary>,
+    /// A safety rail has refused this mount's pending deletes (§9.4).
+    ///
+    /// Present means outbound writes are PARKED — not discarded. Reads are
+    /// deliberately unaffected: refusing to destroy remote data must never also
+    /// stop new data arriving, or the pragmatic response to a scare becomes
+    /// "turn the rail off".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_blocked: Option<WritebackBlock>,
+    /// The operator's release: set it to the blocked batch's
+    /// [`WritebackBlock::token`] and the next drain pushes exactly that batch.
+    ///
+    /// Consumed on use, and matched against a token derived from the batch's
+    /// CONTENT, so a confirmation given for three deletes cannot silently
+    /// authorise thirty that arrived after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_confirm_token: Option<String>,
 
     // ---- push / webhook subscription (all engine-managed, optional) ----
     /// Stable, unguessable per-mount token that gates the public notifications

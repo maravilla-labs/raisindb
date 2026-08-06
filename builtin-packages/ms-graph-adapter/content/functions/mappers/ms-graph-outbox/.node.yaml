@@ -1,0 +1,31 @@
+node_type: raisin:Function
+properties:
+  title: Microsoft 365 Outbox Mapper
+  description: >
+    Mapping function for a Microsoft 365 OUTBOX mount (write_config.mode:
+    submit). Translates a raisin:OutboundMail or raisin:CalendarAction command
+    node into the Graph request the adapter's `submit` issues. Write-direction
+    only: `to_node` returns null, because an outbox imports nothing.
+  language: javascript
+  entry_file: index.js:handler
+  execution_mode: Async
+  enabled: true
+  version: 1
+  resource_limits:
+    timeout_ms: 5000
+    max_memory_bytes: 16777216
+  input_schema:
+    type: object
+    properties:
+      operation:
+        type: string
+        description: "to_external | mapper_capabilities | to_node"
+      node:
+        type: object
+        description: The command node to translate outward
+      mount:
+        type: object
+        description: Read-only mount snapshot { mount_id, mount_path, sync_config }
+  output_schema:
+    type: object
+    description: "{ payload: { action, body }, external_id? } or null when not sendable"

@@ -166,6 +166,21 @@ pub struct Capabilities {
     /// explains what "writable" means for it. Empty means "nothing declared".
     #[serde(default)]
     pub mutable_fields: Vec<String>,
+    /// Which of [`Self::mutable_fields`] express the object's LOCATION at the
+    /// provider — the folder, the parent, the label set that IS the mailbox.
+    ///
+    /// A move is an `update` carrying this field and nothing more (§8), so this
+    /// is what lets `move_policy` mean anything: the engine is domain-blind and
+    /// cannot tell that `folder` relocates a message while `unread` does not.
+    /// Empty — the default, and where every adapter shipped today is — means no
+    /// declared field relocates anything, so `move_policy` has nothing to gate
+    /// and the mount behaves exactly as it did before this existed.
+    ///
+    /// A name here that is NOT in `mutable_fields` is inert: the effective push
+    /// list is the intersection of mount and adapter, and a field the adapter
+    /// does not accept as a write never reaches the classification at all.
+    #[serde(default)]
+    pub move_fields: Vec<String>,
     /// Recommended default for a local delete: `"detach" | "trash" | "purge"`.
     /// A mount may override it; `purge` is never a default.
     #[serde(default)]
@@ -200,12 +215,18 @@ impl Capabilities {
     /// `mirror` means "the node **is** the remote object", so create, update and
     /// delete all have to propagate; `can_write` is the umbrella flag an adapter
     /// sets to say it writes at all. Empty means every needed op is declared.
-    pub fn missing_mirror_ops(&self) -> Vec<&'static str> {
+    ///
+    /// `needs_create` comes from the MOUNT, not the adapter: the engine issues
+    /// `create` only for a mount that opted a node type into local creation, so
+    /// an adapter that updates and deletes is a complete mirror for every mount
+    /// that does not. Demanding the capability unconditionally refused correct
+    /// adapters for an op they would never be called with.
+    pub fn missing_mirror_ops(&self, needs_create: bool) -> Vec<&'static str> {
         let mut missing = Vec::new();
         if !self.can_write {
             missing.push("can_write");
         }
-        if !self.can_create {
+        if needs_create && !self.can_create {
             missing.push("can_create");
         }
         if !self.can_update {
@@ -231,6 +252,34 @@ impl Capabilities {
         }
         if !self.can_update {
             missing.push("can_update");
+        }
+        missing
+    }
+
+    /// Which of the operations a `submit` write mode needs this adapter does
+    /// NOT declare.
+    ///
+    /// `submit` issues a COMMAND — it neither mirrors nor patches a remote
+    /// object — so `can_update`, `can_create` and `can_delete` say nothing about
+    /// it and requiring them would refuse a perfectly good outbox for lacking
+    /// operations it will never call. `can_write` is still required: it is the
+    /// umbrella flag that says this adapter changes anything at the provider at
+    /// all, and an adapter that sets `can_submit` without it has contradicted
+    /// itself rather than opted in.
+    ///
+    /// Note what is NOT here: [`Self::supports_idempotency_key`]. An adapter
+    /// that cannot forward a provider-side key is still a usable outbox — the
+    /// engine's at-most-once protocol is built on the durable `queued ->
+    /// sending` claim, not on the provider cooperating, precisely because
+    /// almost none of them do (Graph's `sendMail` has no such key, and SMTP has
+    /// nothing at all). Requiring it would refuse every real adapter.
+    pub fn missing_submit_ops(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.can_write {
+            missing.push("can_write");
+        }
+        if !self.can_submit {
+            missing.push("can_submit");
         }
         missing
     }

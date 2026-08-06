@@ -10,8 +10,8 @@ sync. Events are leaves — there is no folder hierarchy.
 
 This package implements the frozen adapter contract in
 `docs/reference/virtual-node-adapters.md` over the Google Calendar **v3** REST
-API. It is **read-only**: the adapter reports `can_read` and `supports_changes`
-and nothing else.
+API. It reads (`can_read`, `supports_changes`, `supports_push`) and it **writes**
+a full mirror (`can_create`, `can_update`, `can_delete`).
 
 ## What it ships
 
@@ -23,8 +23,25 @@ and nothing else.
 
 ### Capabilities
 
-`can_read` and `supports_changes` are `true`. Writes, folder creation, webhooks,
-search, and push are **not** implemented — this is a one-way, read-only mirror.
+`can_read`, `supports_changes` and `supports_push` are `true`, and so are
+`can_create` / `can_update` / `can_delete`. Folder creation and search are not
+implemented, and neither is `submit`: an RSVP through Google is a PATCH of the
+caller's own attendee row rather than a distinct action endpoint.
+
+Two provider facts shape the write path, and both are surprising enough to state
+before you enable it:
+
+- **Google has no trash for events.** A delete is immediate and unrecoverable, so
+  the adapter declares `supports_trash: false` and defaults `delete_policy` to
+  `detach` — a local delete does **not** reach Google until an operator sets the
+  mount's `delete_policy` to `purge`. A mount configured for `trash` is refused
+  at resolution rather than silently promoted to a purge.
+- **Google mails every attendee** when an event with attendees is created, moved
+  or deleted. That is irreversible and externally visible, so every write sends
+  `sendUpdates=none`. A mount that wants invitations sets
+  `sync_config.send_updates` to `externalOnly` or `all` — deliberately opt-in,
+  because a sync engine mirroring a node is not a person deciding to notify
+  twelve people.
 
 ## Window + syncToken flow
 
@@ -76,6 +93,16 @@ The template requests a single least-privilege scope:
 
 - `https://www.googleapis.com/auth/calendar.readonly` — read calendars and their
   events.
+
+**Writing needs more, and the template deliberately does not ask for it.** A
+mirror mount needs `https://www.googleapis.com/auth/calendar.events`; with only
+the read scope every write returns 403, which the adapter reports as a
+`config_error` naming this scope rather than as an expired token. Widening it is
+three steps and none can be skipped: add the scope to the **live**
+`raisin:Integration` node under `/integrations` (the `/connectors` template is
+package-owned and is overwritten on update), enable it on the Google Cloud
+consent screen, and **reconnect each account** — Google only issues a widened
+scope on fresh consent, never on refresh.
 
 The template sets `access_type: offline` + `prompt: consent` so Google issues a
 refresh token; the engine stores it encrypted and never passes it to the adapter.

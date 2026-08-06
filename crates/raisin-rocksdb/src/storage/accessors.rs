@@ -88,6 +88,26 @@ impl RocksDBStorage {
         lock.as_ref().map(|d| d.stats())
     }
 
+    /// Publish the virtual-mount sync engine (called after `init_job_system`).
+    pub fn set_virtual_mount_sync_handler(
+        &self,
+        handler: Arc<crate::jobs::VirtualMountSyncHandler>,
+    ) {
+        let mut lock = self.virtual_mount_sync.write().unwrap();
+        *lock = Some(handler);
+    }
+
+    /// The virtual-mount sync engine, for callers that need it OUTSIDE the job
+    /// queue — today the on-demand attachment fetch.
+    ///
+    /// `None` when the job system has not been initialized (an embedded or
+    /// test storage). A caller must report that rather than treat it as "no
+    /// content available": the difference is "this deployment cannot fetch" and
+    /// "there is nothing to fetch", and only the first is a misconfiguration.
+    pub fn virtual_mount_sync_handler(&self) -> Option<Arc<crate::jobs::VirtualMountSyncHandler>> {
+        self.virtual_mount_sync.read().unwrap().clone()
+    }
+
     /// Get the underlying RocksDB instance
     pub fn db(&self) -> &Arc<DB> {
         &self.db

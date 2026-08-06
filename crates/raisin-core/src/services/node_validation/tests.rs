@@ -783,3 +783,103 @@ async fn test_validate_node_with_nonexistent_nodetype() {
         error_msg
     );
 }
+
+/// The virtual-mount materializer stamps `__pushed_state` on every node of a
+/// mount that declares mutable fields, and `check_strict_mode` exempts only keys
+/// starting with `$` — a `__` prefix buys nothing. `raisin:Event` is
+/// `strict: true`, so before the `raisin:VirtualNode` mixin existed the first
+/// writable calendar mount had EVERY synced write rejected.
+///
+/// This asserts both halves: the mixin makes the write validate, and stripping
+/// it puts the rejection straight back.
+#[tokio::test]
+async fn strict_event_accepts_the_stamped_reserved_properties_via_the_mixin() {
+    let storage = setup_test_storage().await;
+    crate::nodetype_init::init_repository_nodetypes(storage.clone(), "default", "default", "main")
+        .await
+        .unwrap();
+
+    let validator = NodeValidator::new(
+        storage.clone(),
+        "default".to_string(),
+        "default".to_string(),
+        "main".to_string(),
+    );
+
+    let mut props = HashMap::new();
+    props.insert(
+        "title".to_string(),
+        PropertyValue::String("Standup".to_string()),
+    );
+    // Everything the materializer stamps, including the one the type omitted.
+    props.insert("__virtual".to_string(), PropertyValue::Boolean(true));
+    props.insert(
+        "__mount_id".to_string(),
+        PropertyValue::String("mount-1".to_string()),
+    );
+    props.insert(
+        "__external_id".to_string(),
+        PropertyValue::String("evt-1".to_string()),
+    );
+    props.insert(
+        "__etag".to_string(),
+        PropertyValue::String("W/\"1\"".to_string()),
+    );
+    props.insert(
+        "__synced_at".to_string(),
+        PropertyValue::String("2026-08-05T09:00:00Z".to_string()),
+    );
+    props.insert(
+        "__pushed_state".to_string(),
+        PropertyValue::Object(HashMap::from([(
+            "my_response".to_string(),
+            PropertyValue::String("accepted".to_string()),
+        )])),
+    );
+    let node = create_test_node("raisin:Event", props);
+
+    validator
+        .validate_node("ws1", &node)
+        .await
+        .expect("a strict raisin:Event must accept the reserved properties the sync stamps");
+
+    // Now take the mixin away and prove it was what made the difference.
+    let scope = BranchScope::new("default", "default", "main");
+    let mut event_type = storage
+        .node_types()
+        .get(scope.clone(), "raisin:Event", None)
+        .await
+        .unwrap()
+        .expect("raisin:Event must be installed");
+    assert_eq!(
+        event_type.mixins,
+        vec!["raisin:VirtualNode".to_string()],
+        "the reserved properties must come from the mixin, not be re-declared inline"
+    );
+    event_type.mixins.clear();
+    storage
+        .node_types()
+        .put(scope, event_type, CommitMetadata::system("strip the mixin"))
+        .await
+        .unwrap();
+
+    // Narrowed to the one property the pre-mixin type omitted, so the rejection
+    // can only be about it (strict mode reports the first offender it finds).
+    let mut narrow = HashMap::new();
+    narrow.insert(
+        "title".to_string(),
+        PropertyValue::String("Standup".to_string()),
+    );
+    narrow.insert(
+        "__pushed_state".to_string(),
+        PropertyValue::Object(HashMap::new()),
+    );
+    let err = validator
+        .validate_node("ws1", &create_test_node("raisin:Event", narrow))
+        .await
+        .expect_err("without the mixin the stamped reserved properties are undefined properties");
+    assert!(
+        err.to_string().contains("__pushed_state"),
+        "expected the strict-mode rejection to name the stamped property, got: {err}"
+    );
+}

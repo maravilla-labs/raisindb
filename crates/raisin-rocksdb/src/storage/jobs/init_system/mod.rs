@@ -242,11 +242,26 @@ impl RocksDBStorage {
             ))
         });
 
+        // Built before the sync handler consumes `lock_manager`. The lease it
+        // takes is what makes the rebuild once-per-cluster rather than
+        // once-per-process — see `calendar_expand::job`.
+        let calendar_expand_handler = Arc::new(crate::jobs::handlers::CalendarExpandHandler::new(
+            self.clone(),
+            lock_manager.clone(),
+        ));
+
         let virtual_mount_sync_handler = integration_handlers::create_virtual_mount_sync_handler(
             self.clone(),
             function_executor_for_vmount,
             lock_manager,
+            binary_storage.as_ref(),
         );
+
+        // Published to the storage so the on-demand attachment fetch can reach
+        // the SAME engine instance the job queue uses. Building a second one at
+        // the HTTP layer would mean a second adapter invoker and a second
+        // binary-store callback — two of everything, free to drift.
+        self.set_virtual_mount_sync_handler(virtual_mount_sync_handler.clone());
 
         // --- Assemble handler registry ---
 
@@ -288,7 +303,8 @@ impl RocksDBStorage {
             integration_token_refresh_handler,
             virtual_mount_sync_handler,
         )
-        .with_spatial_index(spatial_index_handler);
+        .with_spatial_index(spatial_index_handler)
+        .with_calendar_expand(calendar_expand_handler);
         // Applied before the Arc: the registry is not Clone, so attaching after
         // wrapping would mean unwrapping it again.
         let registry = match mcp_tool_discovery_handler {

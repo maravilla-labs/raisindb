@@ -74,7 +74,7 @@ impl LockManager for CountingLocks {
 
 /// The `state_only` mode the drain runs under in these tests.
 fn state_only_mode() -> sync::write::WriteMode {
-    sync::write::WriteMode::StateOnly(vec!["unread".to_string()])
+    sync::write::WriteMode::StateOnly(sync::write::FieldPlan::pushing(&["unread"]))
 }
 
 /// Materialize `n` mail-shaped nodes in ONE batch, seeded (`__pushed_state`
@@ -374,11 +374,16 @@ impl AdapterInvoker for StoppingMock {
 /// A documented-but-unimplemented mode, and a typo, are both REFUSED with a
 /// reason rather than quietly demoted to `off`.
 ///
-/// `mirror` and `submit` are in `docs/reference/virtual-node-adapters.md`
-/// §10.2, so an operator can configure one by following the documentation. That
-/// used to produce a mount that wrote nothing, reported `writeback_supported:
-/// null` ("not applicable") and logged not one line — indistinguishable from a
+/// `submit` is in `docs/reference/virtual-node-adapters.md` §10.2, so an
+/// operator can configure it by following the documentation. That used to
+/// produce a mount that wrote nothing, reported `writeback_supported: null`
+/// ("not applicable") and logged not one line — indistinguishable from a
 /// read-only mount. A misspelled mode behaved identically.
+///
+/// `mirror` was in this list until Stage 7 implemented it; it is now covered by
+/// `write_mirror_tests`, and the case that matters here is the one that
+/// replaced it — a mirror whose ADAPTER falls short is still refused, with the
+/// missing ops named.
 #[test]
 fn an_unimplemented_or_unknown_write_mode_is_refused_loudly() {
     let caps = sync::Capabilities {
@@ -402,20 +407,35 @@ fn an_unimplemented_or_unknown_write_mode_is_refused_loudly() {
             other => panic!("expected `{mode}` to be refused, got {other:?}"),
         };
 
-    for mode in ["mirror", "submit", "MIRROR"] {
+    // `submit` was in this list until Stage 10 implemented it. It is now
+    // refused for the HONEST reason instead — this adapter declares create,
+    // update and delete and no `can_submit`, and a mount is never more able to
+    // send than its adapter says it is.
+    for mode in ["submit", "SUBMIT"] {
         let r = reason(mode);
-        assert!(r.contains("not implemented yet"), "{r}");
+        assert!(r.contains("can_submit"), "{r}");
+        assert!(
+            !r.contains("not implemented"),
+            "the engine implements submit; refusing it as unimplemented would send \
+             an operator to fix the wrong thing: {r}"
+        );
     }
     let typo = reason("state-only");
     assert!(typo.contains("not recognized"), "{typo}");
+
+    // `mirror` is implemented and resolves against these full capabilities.
+    assert!(matches!(
+        sync::write::resolve_mode(&wc("mirror"), &caps, &MapperWriteback::Supported),
+        sync::write::WriteMode::Mirror(_)
+    ));
 
     // The verdict the console reads is the SAME decision, not a second copy of
     // it: `(Some(false), reason)`, never the `(None, None)` that means
     // "writeback not applicable".
     let (supported, verdict) =
-        sync::write::writeback_verdict(&wc("mirror"), &caps, &MapperWriteback::Supported);
+        sync::write::writeback_verdict(&wc("submit"), &caps, &MapperWriteback::Supported);
     assert_eq!(supported, Some(false));
-    assert!(verdict.unwrap().contains("not implemented yet"));
+    assert!(verdict.unwrap().contains("can_submit"));
 
     // `off` (and an absent mode) stay silent — a read-only mount must not start
     // reporting a refusal it never asked for.

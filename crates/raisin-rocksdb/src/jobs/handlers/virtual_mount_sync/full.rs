@@ -94,7 +94,13 @@ pub async fn run_with(
             for item in &page.items {
                 let rel_path = resolve_item_path(ctx, item, &prefix);
                 if super::passes_filters(&rel_path, include, exclude) {
-                    stage_item(ctx, batcher, item, &rel_path).await?;
+                    // Subordinate nodes (mail attachments) join `seen` with
+                    // their parent. They are mount-owned and carry an
+                    // `__external_id`, so `reconcile_deletes` considers them —
+                    // and every one of them would be "not seen upstream" if the
+                    // walk only ever reported the ids the provider LISTS.
+                    let children = stage_item(ctx, batcher, item, &rel_path).await?;
+                    seen.extend(children);
                     seen.insert(item.external_id.clone());
                     processed += 1;
                 }

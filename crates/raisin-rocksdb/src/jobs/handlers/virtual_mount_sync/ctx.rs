@@ -17,6 +17,29 @@ pub(super) const SYNC_LEASE_TTL: Duration = Duration::from_secs(600);
 /// killed at the same point every time.
 pub(super) const SYNC_WALL_CLOCK_BUDGET: Duration = Duration::from_secs(480);
 
+/// The cluster-wide lease key for one mount.
+///
+/// ONE definition, because every writer of this mount's state has to name the
+/// same key or the lease protects nothing. It is keyed on the CONFIG branch —
+/// the identity the periodic scan enqueues against, and where the state blob it
+/// guards actually lives — not on the materialization target branch.
+///
+/// Both the sync run and the write-reconcile walk take it, and that is
+/// deliberate rather than incidental: they both write [`MountState`], whose
+/// `state_seq` guard makes the loser of a race skip *every remaining write of
+/// its run*. A reconcile pass that ran beside a sync would not merely lose its
+/// own watermark, it would poison the sync's cursor writes for the rest of the
+/// run. Sharing the lease makes that race unrepresentable; the cost is that a
+/// mount in a long backfill reconciles on a later tick instead.
+pub(super) fn mount_lease_key(
+    tenant: &str,
+    repo: &str,
+    config_branch: &str,
+    mount_id: &str,
+) -> String {
+    format!("{tenant}\0{repo}\0{config_branch}\0vmount:{mount_id}")
+}
+
 /// Everything a delta/full run needs. Borrows the invoker + materializer.
 pub struct SyncCtx<'a> {
     pub storage: Arc<RocksDBStorage>,
