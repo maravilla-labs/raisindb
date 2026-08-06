@@ -20,6 +20,8 @@ mod branches;
 mod element_types;
 mod flow_events;
 mod flows;
+/// Shared by every inline execution path here; see the module docs.
+mod function_modules;
 mod functions;
 mod locks;
 mod node_types;

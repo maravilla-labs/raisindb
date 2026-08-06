@@ -373,7 +373,7 @@ pub(super) fn create_function_invoke_sync_callback(
                         raisin_error::Error::Backend(format!("Failed to load function code: {}", e))
                     })?;
 
-                let loaded = raisin_functions::LoadedFunction::new(
+                let mut loaded = raisin_functions::LoadedFunction::new(
                     metadata,
                     code,
                     function_node.path.clone(),
@@ -383,6 +383,28 @@ pub(super) fn create_function_invoke_sync_callback(
                         .clone()
                         .unwrap_or_else(|| "functions".into()),
                 );
+
+                // Importable modules. `LoadedFunction::files` is what the
+                // QuickJS resolver consults and the loader is rebuilt per
+                // execution for tenant isolation, so an empty map rejects EVERY
+                // import — a multi-file function called from SQL would fail with
+                // `Error resolving module '…' from 'entry'` while the same
+                // function works from a trigger or the job executor.
+                //
+                // Called directly rather than through the HTTP helper because
+                // this path honours the CALLER's workspace, which is not always
+                // `functions`; the helper hardcodes it.
+                loaded.files = crate::handlers::functions::helpers::load_function_modules_in(
+                    &state,
+                    &tenant_id,
+                    &repo,
+                    "main",
+                    ws,
+                    &function_node.path,
+                    loaded.metadata.entry_file_path(),
+                    &loaded.code,
+                )
+                .await;
 
                 // Build execution context and API
                 let context =

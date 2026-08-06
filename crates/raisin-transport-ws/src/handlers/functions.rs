@@ -337,7 +337,7 @@ mod inner {
         .await
         .map_err(|e| WsError::InternalError(format!("Failed to load function code: {}", e)))?;
 
-        let loaded = raisin_functions::LoadedFunction::new(
+        let mut loaded = raisin_functions::LoadedFunction::new(
             metadata.clone(),
             code,
             function_node.path.clone(),
@@ -347,6 +347,21 @@ mod inner {
                 .clone()
                 .unwrap_or_else(|| FUNCTIONS_WORKSPACE.into()),
         );
+
+        // Without this every `import` in the entry file fails at declare time —
+        // see `super::function_modules`.
+        loaded.files = crate::handlers::function_modules::load_function_modules(
+            &*state.storage,
+            &*state.bin,
+            &tenant_id,
+            &repo,
+            DEFAULT_BRANCH,
+            FUNCTIONS_WORKSPACE,
+            &function_node.path,
+            loaded.metadata.entry_file_path(),
+            &loaded.code,
+        )
+        .await;
 
         // Build ExecutionDependencies
         let deps = Arc::new(ExecutionDependencies {

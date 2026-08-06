@@ -52,7 +52,9 @@ pub(super) async fn invoke_adapter(
     mount: &Value,
 ) -> Result<AdapterResult, ApiError> {
     use crate::handlers::functions::api_factory::build_function_api;
-    use crate::handlers::functions::helpers::{build_loaded_function, load_function_code};
+    use crate::handlers::functions::helpers::{
+        build_loaded_function, load_function_code, load_function_modules_on_branch,
+    };
     use raisin_functions::{ExecutionContext, FunctionExecutor};
 
     let input = json!({
@@ -63,7 +65,27 @@ pub(super) async fn invoke_adapter(
     });
 
     let code = load_function_code(state, tenant_id, repo, node).await?;
-    let loaded = build_loaded_function(node, code)?;
+    let mut loaded = build_loaded_function(node, code)?;
+
+    // The adapter's importable modules. `LoadedFunction::files` is what the
+    // QuickJS resolver consults, and the loader is rebuilt per execution for
+    // tenant isolation — so an empty map rejects EVERY import, and an adapter
+    // split across sibling files fails here with
+    // `Error resolving module './x.js' from 'entry'`.
+    //
+    // The sync engine fills this in through `code_loader` and was never
+    // affected, which is what made the symptom so confusing: a mount synced
+    // perfectly while Test connection on the same connector failed outright.
+    loaded.files = load_function_modules_on_branch(
+        state,
+        tenant_id,
+        repo,
+        FUNCTIONS_BRANCH,
+        &node.path,
+        loaded.metadata.entry_file_path(),
+        &loaded.code,
+    )
+    .await;
 
     let context = ExecutionContext::new(tenant_id, repo, FUNCTIONS_BRANCH, "system")
         .with_workspace(FUNCTIONS_WORKSPACE)

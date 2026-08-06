@@ -232,6 +232,37 @@ pub(crate) async fn load_function_modules_on_branch(
     entry_file_name: &str,
     entry_code: &str,
 ) -> HashMap<String, String> {
+    load_function_modules_in(
+        state,
+        tenant_id,
+        repo,
+        branch,
+        FUNCTIONS_WORKSPACE,
+        function_path,
+        entry_file_name,
+        entry_code,
+    )
+    .await
+}
+
+/// As [`load_function_modules_on_branch`], but for a caller whose functions do
+/// NOT live in the default workspace.
+///
+/// SQL function calls carry the workspace the query named, and a scan against
+/// `functions` would silently find nothing there — an empty module map, which
+/// is indistinguishable at the resolver from "this function has no modules".
+/// One implementation, two entry points, rather than a second copy of the scan.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn load_function_modules_in(
+    state: &AppState,
+    tenant_id: &str,
+    repo: &str,
+    branch: &str,
+    workspace: &str,
+    function_path: &str,
+    entry_file_name: &str,
+    entry_code: &str,
+) -> HashMap<String, String> {
     use raisin_functions::execution::code_loader;
 
     let mut files = code_loader::load_sibling_files(
@@ -240,7 +271,7 @@ pub(crate) async fn load_function_modules_on_branch(
         tenant_id,
         repo,
         branch,
-        FUNCTIONS_WORKSPACE,
+        workspace,
         function_path,
         entry_file_name,
     )
@@ -253,7 +284,7 @@ pub(crate) async fn load_function_modules_on_branch(
         tenant_id,
         repo,
         branch,
-        FUNCTIONS_WORKSPACE,
+        workspace,
         function_path,
         entry_code,
         &files,
@@ -490,5 +521,95 @@ pub(super) fn job_belongs_to_repo(
         Ok(Some(ctx)) => ctx.repo_id == repo,
         Ok(None) => true,
         Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod module_loading_invariant {
+    //! Every inline execution path must fill `LoadedFunction::files`.
+    //!
+    //! This is a source-level guard, which is unusual and deliberate. The bug it
+    //! exists for shipped: six separate call sites built a `LoadedFunction` by
+    //! hand and left `files` empty, so the QuickJS resolver rejected every
+    //! `import` and any multi-file function failed with
+    //! `Error resolving module '…' from 'entry'` — over HTTP, over WS, from SQL
+    //! and from a webhook — while the SAME function worked from a trigger, a
+    //! flow or a sync run, because those go through the job executor which loads
+    //! modules for them. That asymmetry is what made it survive review and reach
+    //! production.
+    //!
+    //! There is no unit test that can catch it: the omission is at the call
+    //! site, not in any function's behaviour, and neither transport crate has an
+    //! integration harness that could execute a real multi-module function. So
+    //! this asserts the property directly on the source — file granularity
+    //! rather than line windows, so reformatting cannot break it.
+    //!
+    //! If this fails on a file you just added: call
+    //! [`load_function_modules_on_branch`] (or `load_function_modules_in`, or
+    //! the WS crate's `handlers::function_modules`) and assign the result to
+    //! `loaded.files`.
+
+    use std::path::{Path, PathBuf};
+
+    /// Defines the helpers rather than executing anything.
+    const ALLOWED_WITHOUT_ASSIGNMENT: &[&str] = &["handlers/functions/helpers.rs"];
+
+    fn crate_src(rel: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
+    }
+
+    fn rust_files(root: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn every_file_that_builds_a_loaded_function_also_loads_its_modules() {
+        // Both transports, because the same omission occurred independently in
+        // each and a fix in one says nothing about the other.
+        let roots = [crate_src("src"), crate_src("../raisin-transport-ws/src")];
+
+        let mut offenders = Vec::new();
+        for root in &roots {
+            let mut files = Vec::new();
+            rust_files(root, &mut files);
+            for file in files {
+                let Ok(src) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                let builds =
+                    src.contains("LoadedFunction::new(") || src.contains("build_loaded_function(");
+                if !builds {
+                    continue;
+                }
+                let display = file.display().to_string();
+                if ALLOWED_WITHOUT_ASSIGNMENT
+                    .iter()
+                    .any(|a| display.replace('\\', "/").ends_with(a))
+                {
+                    continue;
+                }
+                let loads = src.contains(".files =") || src.contains("with_files(");
+                if !loads {
+                    offenders.push(display);
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these build a LoadedFunction but never fill `files`, so every `import` \
+             in the function they run will fail to resolve:\n  {}",
+            offenders.join("\n  ")
+        );
     }
 }

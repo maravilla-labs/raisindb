@@ -211,7 +211,22 @@ async fn execute_sync(
 
     // Load and execute function
     let code = load_function_code(state, tenant_id, repo, &function_node).await?;
-    let loaded = build_loaded_function(&function_node, code)?;
+    let mut loaded = build_loaded_function(&function_node, code)?;
+
+    // Without this a webhook-triggered function whose entry uses `import` fails
+    // at declare time with `Error resolving module '…' from 'entry'`, while the
+    // SAME function works from a flow or the job executor — those go through
+    // `code_loader`. See `crate::handlers::functions::helpers`.
+    loaded.files = crate::handlers::functions::helpers::load_function_modules_on_branch(
+        state,
+        tenant_id,
+        repo,
+        DEFAULT_BRANCH,
+        &function_node.path,
+        loaded.metadata.entry_file_path(),
+        &loaded.code,
+    )
+    .await;
 
     let context = ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, "http-trigger")
         .with_workspace(FUNCTIONS_WORKSPACE)

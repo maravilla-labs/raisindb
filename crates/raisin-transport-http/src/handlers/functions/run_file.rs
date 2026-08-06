@@ -207,6 +207,14 @@ pub async fn run_file(
             metadata.resource_limits = resource_limits;
         }
 
+        // The directory the file lives in IS its module root — a file run from
+        // the console imports its siblings by the same `./x.js` specifiers it
+        // uses in production, so resolving them against anything else would make
+        // "Run" behave differently from a real invocation.
+        let module_dir = asset_path
+            .rsplit_once('/')
+            .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_string());
+
         let mut loaded = LoadedFunction::new(
             metadata,
             code,
@@ -214,6 +222,23 @@ pub async fn run_file(
             asset_id,
             asset_workspace,
         );
+
+        // Without this every `import` fails at declare time with
+        // `Error resolving module '…' from 'entry'`, because the QuickJS loader
+        // is rebuilt per execution against `files` and an empty map resolves
+        // nothing. Skipped for an inline-code run with no path to scan.
+        if let Some(dir) = module_dir {
+            loaded.files = super::load_function_modules_on_branch(
+                &state_clone,
+                &tenant_clone,
+                &repo_clone,
+                DEFAULT_BRANCH,
+                &dir,
+                &file_name,
+                &loaded.code,
+            )
+            .await;
+        }
 
         // Apply timeout override
         if let Some(timeout) = req_timeout {

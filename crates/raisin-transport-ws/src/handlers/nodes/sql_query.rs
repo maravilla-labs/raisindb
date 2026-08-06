@@ -336,7 +336,7 @@ where
                         raisin_error::Error::Backend(format!("Failed to load function code: {}", e))
                     })?;
 
-                let loaded = raisin_functions::LoadedFunction::new(
+                let mut loaded = raisin_functions::LoadedFunction::new(
                     metadata,
                     code,
                     function_node.path.clone(),
@@ -346,6 +346,22 @@ where
                         .clone()
                         .unwrap_or_else(|| "functions".into()),
                 );
+
+                // The CALLER's workspace, not a constant: a query may name
+                // another one, and scanning `functions` would find nothing
+                // there. See `crate::handlers::function_modules`.
+                loaded.files = crate::handlers::function_modules::load_function_modules(
+                    &*ws_state.storage,
+                    &*ws_state.bin,
+                    &ws_tenant,
+                    &ws_repo,
+                    "main",
+                    ws,
+                    &function_node.path,
+                    loaded.metadata.entry_file_path(),
+                    &loaded.code,
+                )
+                .await;
 
                 // Build execution context
                 let context =
