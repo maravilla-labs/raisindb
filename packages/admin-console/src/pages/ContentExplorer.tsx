@@ -4,6 +4,7 @@ import { ArrowLeft, Search, ChevronRight, Home, Plus, Clock, Filter, GitMerge, R
 import { Allotment } from 'allotment'
 import 'allotment/dist/style.css'
 import TreeView from '../components/TreeView'
+import AssetContentFetch from '../components/AssetContentFetch'
 import ContentView from '../components/ContentView'
 import WorkspaceSwitcher from '../components/WorkspaceSwitcher'
 import RevisionBrowser from '../components/RevisionBrowser'
@@ -736,6 +737,20 @@ export default function ContentExplorer() {
                   onClose={handleExitCompareMode}
                 />
               ) : (
+                <>
+                {/*
+                  A mount-owned attachment carries metadata and no bytes until
+                  something asks. Rendered here rather than inside ContentView
+                  because it is a mount concern, and it renders nothing at all
+                  for an ordinary asset.
+                */}
+                <AssetContentFetch
+                  repo={repo!}
+                  branch={branch!}
+                  workspace={workspace!}
+                  node={selectedNode}
+                  onFetched={loadRootNodes}
+                />
                 <ContentView
                   repo={repo!}
                   branch={branch!}
@@ -755,6 +770,7 @@ export default function ContentExplorer() {
                   onTranslationUpdate={loadRootNodes}
                   readonly={isTimeTravelMode}
                 />
+                </>
               )
             )}
           </div>

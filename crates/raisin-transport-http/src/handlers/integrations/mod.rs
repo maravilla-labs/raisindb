@@ -42,7 +42,7 @@ pub use manage::{disconnect, sync_mount};
 #[cfg(feature = "storage-rocksdb")]
 pub use mount_content::fetch_mount_content;
 #[cfg(feature = "storage-rocksdb")]
-pub use mount_control::{pause_mount, stop_mount};
+pub use mount_control::{confirm_writeback, pause_mount, stop_mount};
 pub use mount_delete::delete_mount;
 pub use mount_events::stream_mount_events;
 pub use notifications::notify;

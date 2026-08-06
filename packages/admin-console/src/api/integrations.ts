@@ -587,6 +587,28 @@ export interface MountState {
    */
   writeback_status?: string
   /**
+   * A tripped blast-radius rail. Present means the drain REFUSED a batch of
+   * deletes: every one is parked, nothing was sent to the provider, nothing was
+   * lost, and reads are unaffected.
+   *
+   * Releasing it needs {@link MountState.writeback_confirm_token} set to this
+   * `token`, which is derived from the batch's own contents — so a confirmation
+   * given for three deletes cannot silently authorise the thirty that arrived
+   * afterwards.
+   */
+  writeback_blocked?: {
+    /** Fingerprint of the exact batch refused; copy into the confirm token. */
+    token: string
+    /** The full operator-facing explanation, including how to release it. */
+    reason: string
+    /** How many deletes are parked. */
+    deletes: number
+    /** Unix epoch seconds the rail tripped. */
+    at: number
+  }
+  /** Set to a `writeback_blocked.token` to release exactly that batch. */
+  writeback_confirm_token?: string
+  /**
    * What the write drain did on the most recent run that had work.
    *
    * Absent on a mount that has never drained, and NOT overwritten by an idle
@@ -1290,6 +1312,41 @@ export const integrationsApi = {
    */
   stopMount: (repo: string, mountId: string) =>
     api.post<MountControlResponse>(`/api/integrations/${repo}/mounts/${mountId}/stop`, {}),
+
+  /**
+   * Release ONE blocked batch of deletes.
+   *
+   * `token` is `state.writeback_blocked.token`, which fingerprints that exact
+   * batch — so a confirmation given after reviewing three deletes cannot
+   * authorise the thirty that arrived since. The engine re-checks it against
+   * the batch it is about to push and re-blocks if they disagree.
+   */
+  confirmWriteback: (repo: string, mountId: string, token: string) =>
+    api.post<MountControlResponse>(
+      `/api/integrations/${repo}/mounts/${mountId}/writeback/confirm`,
+      { token }
+    ),
+
+  /**
+   * Fetch the bytes behind one mount-owned `raisin:Asset` (a mail attachment).
+   *
+   * Sync writes attachment METADATA only, so `file == null` means "not fetched
+   * yet" rather than "empty". Addressed by node: the mount is recovered from
+   * the node's own provenance. `already_present` is an ordinary answer, not an
+   * error — two viewers opening the same attachment must not both download it.
+   */
+  fetchMountContent: (
+    repo: string,
+    branch: string,
+    workspace: string,
+    nodeId: string,
+    force = false
+  ) =>
+    api.post<{ status: 'stored' | 'already_present'; bytes?: number; storage_key?: string }>(
+      `/api/integrations/content/${repo}/${branch}/${encodeURIComponent(workspace)}/by-id/${nodeId}` +
+        (force ? '?force=true' : ''),
+      {}
+    ),
 
   /**
    * Live sync progress for one mount.

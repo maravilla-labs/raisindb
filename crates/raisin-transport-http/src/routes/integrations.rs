@@ -103,6 +103,13 @@ pub(crate) fn integration_routes(state: &AppState) -> Router<AppState> {
                 "/api/integrations/{repo}/mounts/{mount_id}/stop",
                 post(integrations::stop_mount),
             )
+            // Release ONE blocked batch of deletes. Scoped to the batch by a
+            // content-derived token, so confirming three deletes cannot
+            // authorise the thirty that arrived since.
+            .route(
+                "/api/integrations/{repo}/mounts/{mount_id}/writeback/confirm",
+                post(integrations::confirm_writeback),
+            )
             // Live sync progress. SSE rather than WS deliberately: `fetch`
             // carries the ordinary bearer token, which a WS handshake cannot.
             .route(

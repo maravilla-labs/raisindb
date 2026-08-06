@@ -31,6 +31,7 @@ import MountEditor from '../components/integrations/MountEditor'
 import TestConnectionPanel from '../components/integrations/TestConnectionPanel'
 import CapabilityChips from '../components/integrations/CapabilityChips'
 import MountProgressPanel from '../components/mounts/MountProgressPanel'
+import MountWritebackBlock from '../components/integrations/MountWritebackBlock'
 import MountRunTimeline from '../components/mounts/MountRunTimeline'
 import MountPushPanel from '../components/mounts/MountPushPanel'
 import MountStatCard from '../components/mounts/MountStatCard'
@@ -565,6 +566,18 @@ export default function MountDetail() {
           </div>
         </div>
       )}
+
+      {/*
+        Above the columns and outside every card: a tripped rail is an incident
+        waiting for a decision, not one panel's worth of status. It renders only
+        when the engine has actually blocked a batch.
+      */}
+      <MountWritebackBlock
+        repo={repo ?? ''}
+        mountId={mount.id ?? ''}
+        state={mount.state}
+        onReleased={() => load(true)}
+      />
 
       <div className="grid gap-4 lg:grid-cols-3 items-start">
         {/* ---- Left column ---- */}

@@ -115,6 +115,55 @@ pub async fn stop_mount(
     Ok(Json(response(&sync_state)))
 }
 
+/// Body for the writeback release.
+#[derive(Debug, Deserialize)]
+pub struct ConfirmWritebackRequest {
+    /// The `state.writeback_blocked.token` being released. Required, and
+    /// deliberately not optional or defaulted: a release with no token would be
+    /// "approve whatever is parked", which is exactly the blanket authorization
+    /// the rails exist to withhold.
+    pub token: String,
+}
+
+/// `POST /api/integrations/{repo}/mounts/{mount_id}/writeback/confirm`
+///
+/// Release one blocked batch of deletes.
+///
+/// A tripped rail parks every pending delete, sets `state.writeback_blocked`
+/// and pushes nothing — reads carry on. Clearing it is deliberately a human
+/// action, and deliberately scoped to ONE batch: the token is derived from that
+/// batch's own contents, so a confirmation given after reviewing three deletes
+/// cannot authorise the thirty that arrived since. The engine re-checks the
+/// token against the batch it is about to push and re-blocks if they disagree.
+///
+/// The token is required to MATCH; this endpoint only records it. Recording an
+/// arbitrary string is harmless — the engine ignores a token that fingerprints
+/// nothing — and validating it here would mean reading the block twice and
+/// racing a drain that may have re-evaluated it in between.
+pub async fn confirm_writeback(
+    State(state): State<AppState>,
+    Path((repo, mount_id)): Path<(String, String)>,
+    Extension(tenant): Extension<TenantInfo>,
+    auth: Option<Extension<AuthContext>>,
+    Json(req): Json<ConfirmWritebackRequest>,
+) -> Result<Json<MountControlResponse>, ApiError> {
+    require_admin(auth.as_deref())?;
+
+    let token = req.token.trim().to_string();
+    if token.is_empty() {
+        return Err(ApiError::validation_failed(
+            "writeback confirm token is required; copy state.writeback_blocked.token",
+        ));
+    }
+
+    let sync_state = mutate_state(&state, &tenant.tenant_id, &repo, &mount_id, |s| {
+        s.insert("writeback_confirm_token".to_string(), json!(token));
+    })
+    .await?;
+
+    Ok(Json(response(&sync_state)))
+}
+
 /// Read the mount, apply `edit` to its `state` object, write it back.
 ///
 /// Only the `state` property is replaced; every other property is left exactly
