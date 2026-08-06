@@ -95,10 +95,18 @@ index covers it. Declare one on the NodeType:
 
 ```yaml
 compound_indexes:
-  - name: folder_time                          # branch-global; keep it unique
-    columns: ["__parent_path", "__created_at"]
-    has_order_column: true                     # last column serves ORDER BY
+  - name: mail_folder_recent        # branch-global: prefix it with the type
+    columns:
+      - property: __parent_path
+        column_type: String
+      - property: __created_at
+        column_type: Timestamp
+    has_order_column: true          # last column serves ORDER BY
 ```
+
+**Every column is an object with an explicit `column_type`.** The shorthand
+`columns: ["__parent_path", "__created_at"]` does NOT parse — `column_type` has
+no default — and the error takes the whole NodeType down, not just the index.
 
 The index is `equality columns…` then **one** trailing order column. That is the
 only shape a sorted index can serve: equality on a leading prefix, then one
@@ -112,6 +120,51 @@ Available system columns, alongside any of your own properties:
 | `__node_type` | `node_type = 'x'` | |
 | `__created_at` | `ORDER BY created_at` | use `column_type: Timestamp` |
 | `__updated_at` | `ORDER BY updated_at` | use `column_type: Timestamp` |
+
+#### Constraints that decide whether an index is worth declaring
+
+- **Only `String` equality columns work end to end.** The writer encodes a
+  `Boolean` as one raw byte and an `Integer` as 8 big-endian bytes; the scanner
+  looks every equality column up as a `String`. The prefix never matches and the
+  index silently returns nothing. Declaring the column `String` instead makes the
+  writer refuse the value and drop the node from the index entirely. Mirror a
+  flag into a String property (`state: "unread" | "read"`) rather than indexing
+  a Boolean.
+- **A regular property can never be a `Timestamp` column** — only `__created_at`
+  / `__updated_at` get the inverted encoding. An ISO-8601 String orders
+  correctly, but `DESC` reads the whole equality group before truncating.
+- **There is no range pushdown on any column.** Only equality prefixes. The
+  executor reads `max(10 × LIMIT, 100)` index entries and then applies the rest
+  of the `WHERE` as a residual filter with no continuation, so a date-range
+  predicate can silently return fewer rows than `LIMIT`. Bound ranges through the
+  path template (`/calendar/{cal}/{YYYY}/{MM}/{DD}` + `CHILD_OF`) instead.
+- **`DESCENDANT_OF` cannot be an index column** — a subtree is a path range, and
+  a range cannot precede an order column. Only `CHILD_OF` works, as an equality
+  on `__parent_path`.
+- **Index names are branch-global and carry no node type**, so two NodeTypes
+  sharing a name share one keyspace and interleave rows. Prefix every name with
+  its type.
+- **A node missing any one declared column is omitted from that index**, at debug
+  log level only. An index whose leading column is a mapper-supplied property
+  returns a SUBSET with no error whenever the mapper omits it.
+- **The `properties->>'k'::String` cast form can never drive an index** — it is
+  deliberately kept as a verbatim row filter. Indexed predicates must be written
+  bare: `properties->>'k' = 'v'`.
+- **Existing content is not indexed retroactively**, and the rebuild CLEARS the
+  workspace's compound entries before rewriting them, so every compound query
+  returns zero rows while it runs. Rebuild with
+  `POST /api/admin/management/database/{tenant}/{repo}/reindex/start?branch=…`,
+  body `{"workspace":"…","index_types":["compound"]}`.
+- **Declaring the first compound index in a workspace makes every node UPDATE
+  prefix-scan the entire compound-index column family twice**, unconditionally
+  (the update tombstoner has no way to derive which entries are the node's own).
+  On a workspace a connector syncs into — where the sync's own etag stamp-back is
+  a full node rewrite per item — that cost dominates everything the index saves.
+  Do not add one to a synced NodeType until that tombstoner is fixed.
+
+Prove an index is actually used before trusting it: `EXPLAIN SELECT …` must show
+`CompoundIndexScan` and no `Sort` / `TopN`, and at `RUST_LOG=info` the planner
+logs `Matched compound index '<name>' … claims_order=true`.
 
 With the index above, this stops sorting and starts seeking:
 

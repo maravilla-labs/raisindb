@@ -697,10 +697,22 @@ compound index on the NodeType to fix that:
 
 ```yaml
 compound_indexes:
-  - name: folder_time
-    columns: ["__parent_path", "__created_at"]
+  - name: mail_folder_recent      # branch-global: prefix it with the node type
+    columns:
+      - property: __parent_path
+        column_type: String
+      - property: __created_at
+        column_type: Timestamp
     has_order_column: true
 ```
+
+Every column is an object with an explicit `column_type`; the shorthand
+`columns: ["__parent_path", "__created_at"]` does not parse and takes the whole
+NodeType down with it. Only `String` equality columns work end to end (a
+`Boolean` or `Integer` column is written one way and looked up another, so it
+never matches), there is no range pushdown on any column, and `DESCENDANT_OF`
+can never be an index column. See the content-modeling skill for the full list
+before declaring one.
 
 `__parent_path` is the containing directory, so `CHILD_OF` becomes an equality
 on the leading column and the trailing column serves the `ORDER BY`. The sort is
