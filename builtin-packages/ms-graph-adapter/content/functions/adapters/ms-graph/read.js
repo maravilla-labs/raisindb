@@ -24,7 +24,17 @@ export function opList(credential, mount, params) {
       GRAPH + principal(mount) + "/calendars/" + enc(calendarId(mount)) +
       "/events?$top=" + pageSize(params) + "&$select=" + enc(eventSelect(mount));
   } else if (resource === "files") {
-    url = GRAPH + driveContainer(mount) + "/children?$top=" + pageSize(params);
+    // The engine's full walk recurses folders EXPLICITLY: each `list` call
+    // names the folder whose children it wants via `params.folder_id` (null
+    // for the mount root). Ignoring it — as this branch used to — re-listed
+    // the mount ROOT for every queued subfolder: nested content was never
+    // enumerated at all, the same root-level folders were rediscovered and
+    // re-queued on every pop, and the walk never converged. A flat drive
+    // masked it completely, because the first pop IS the root.
+    var container = params.folder_id
+      ? driveBase(mount) + "/items/" + enc(params.folder_id)
+      : driveContainer(mount);
+    url = GRAPH + container + "/children?$top=" + pageSize(params);
   } else {
     url =
       GRAPH + principal(mount) + "/mailFolders/" + enc(mailFolderId(mount)) +
@@ -179,15 +189,21 @@ export function opGet(credential, mount, params) {
 export function opGetContent(credential, mount, params) {
   var resource = resourceOf(mount);
   if (resource === "files") {
-    var resp = graphFetch(
-      credential,
-      "GET",
-      GRAPH + driveBase(mount) + "/items/" + enc(params.item_id) + "/content",
-      { context: "get_content" }
+    // REFUSED, not attempted. Two independent reasons this path cannot return
+    // correct bytes today, and both fail silently rather than loudly:
+    // `raisin.http.fetch` decodes every response as TEXT, so any binary file
+    // (image, PDF, zip) is corrupted before the adapter even sees it — the
+    // exact failure the mail-attachment branch below documents; and Graph's
+    // `/content` 302-redirects to a per-item download host outside the
+    // adapter's network allow-list. Storing corrupted bytes that read as
+    // "fetched" is strictly worse than saying no; consumers should fetch via
+    // the item's `download_url` metadata (re-read it via `get` first — the
+    // pre-authenticated URL expires within about an hour).
+    throw coded(
+      "get_content: drive file content sync is not supported by this adapter yet " +
+        "(binary-safe fetch is not available; use the download_url from a fresh `get`)",
+      "config_error"
     );
-    var body = resp.body;
-    var content = typeof body === "string" ? body : JSON.stringify(body);
-    return { content: content, mime_type: "application/octet-stream" };
   }
   // A mail ATTACHMENT: `parent_item_id` is the message, `item_id` the
   // attachment. Graph has no route that addresses an attachment on its own, so

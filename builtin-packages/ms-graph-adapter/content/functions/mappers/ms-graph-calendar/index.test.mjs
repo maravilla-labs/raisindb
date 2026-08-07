@@ -26,11 +26,51 @@ function map(metadata, item = {}) {
   });
 }
 
-test('reports no writeback: the adapter rejects every non-mail update', () => {
+test('declares two-way writeback, and an empty node maps to nothing', () => {
   assert.deepEqual(handler({ operation: 'mapper_capabilities', mount }), {
-    to_external: false,
+    to_external: true,
   });
+  // An empty node has no emittable fields; the mapper declines rather than
+  // sending an empty PATCH.
   assert.equal(handler({ operation: 'to_external', node: {}, mount }), null);
+});
+
+// The invite-spam guard, from the mapper's side: `attendees` must be emitted
+// ONLY when it is in the caller's field list. (The engine's half of the same
+// guard passes only the fields that actually DIVERGED — Graph resends meeting
+// invitations to every attendee whenever `attendees` appears in a PATCH,
+// changed or not.)
+test('attendees is emitted only when the field list names it', () => {
+  const node = {
+    properties: {
+      title: 'Renamed',
+      attendees: [{ email: 'a@example.com', name: 'A' }],
+    },
+  };
+  const titleOnly = handler({
+    operation: 'to_external',
+    node,
+    mount,
+    fields: ['title'],
+    intent: 'update',
+  });
+  assert.ok(titleOnly && titleOnly.payload);
+  assert.equal(titleOnly.payload.subject, 'Renamed');
+  assert.equal(
+    'attendees' in titleOnly.payload,
+    false,
+    'a title-only update must not carry the attendee list'
+  );
+
+  const withAttendees = handler({
+    operation: 'to_external',
+    node,
+    mount,
+    fields: ['title', 'attendees'],
+    intent: 'update',
+  });
+  assert.ok(withAttendees && withAttendees.payload.attendees);
+  assert.equal(withAttendees.payload.attendees.length, 1);
 });
 
 test('an absent operation still means to_node', () => {

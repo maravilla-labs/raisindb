@@ -145,12 +145,21 @@ pub(super) async fn push_one(
         return Ok(Pushed::Skipped);
     }
 
+    // Push ONLY what actually changed, never the whole allow-list. Some
+    // provider fields have side effects on mere PRESENCE in an update —
+    // Microsoft Graph resends meeting invites to every attendee whenever
+    // `attendees` appears in a PATCH — so an update triggered by a title edit
+    // must not carry the attendee list along just because the mount permits
+    // attendee edits. `diverges()` above guarantees this is non-empty.
+    let push_fields = view.diverged_fields(fields);
+    let push_fields = &push_fields;
+
     // 4. Reverse-map through the mount's own mapper, never inside the adapter:
     //    a custom mapper that reshapes nodes must be the one that reshapes them
     //    back, or the two translations of one relationship drift.
     let node_json = serde_json::to_value(&node)
         .map_err(|e| AdapterError::Transient(format!("node serialize failed: {e}")))?;
-    let payload = match map_to_external(ctx, &node_json, Some(fields), "update").await? {
+    let payload = match map_to_external(ctx, &node_json, Some(push_fields), "update").await? {
         ToExternalOutcome::Mapped(mapped) => mapped,
         // Not an error: the mapper declining this node is an answer. Nothing is
         // stamped either, so if the mapper is fixed the edit is still pending.
@@ -185,7 +194,7 @@ pub(super) async fn push_one(
             json!({
                 "item_id": item_id,
                 "payload": payload.payload,
-                "fields": fields,
+                "fields": push_fields,
                 "etag": stored_etag,
             }),
         )
@@ -198,7 +207,7 @@ pub(super) async fn push_one(
                 ctx,
                 policy,
                 &node_json,
-                fields,
+                push_fields,
                 &view.watched,
                 view.pushed.as_ref(),
                 stored_etag.as_deref(),
@@ -215,7 +224,7 @@ pub(super) async fn push_one(
                     item_id: &item_id,
                     external_id: &candidate.external_id,
                     payload: &payload.payload,
-                    fields,
+                    fields: push_fields,
                     node_bytes,
                     message: &message,
                 },
@@ -267,7 +276,14 @@ pub(super) async fn push_one(
             &node.id,
             &candidate.external_id,
             new_etag,
-            Some(pushed_map(&view.watched, fields)),
+            // The stamp REPLACES `__pushed_state` wholesale, and this push
+            // carried only the diverged subset — so the new map must merge the
+            // just-sent values OVER the existing baseline. Stamping the subset
+            // alone would drop every converged field's baseline, making them
+            // all "diverged" again next drain: a perpetual re-push, and for a
+            // presence-side-effect field like `attendees` the exact invite
+            // spam the diverged-subset push exists to prevent.
+            Some(pushed_map(view.pushed.as_ref(), &view.watched, push_fields)),
             // Not a merge: an ordinary push writes no node properties, only the
             // engine's own metadata.
             None,
@@ -277,15 +293,30 @@ pub(super) async fn push_one(
     Ok(Pushed::Sent)
 }
 
-/// The values actually sent, which is what `__pushed_state` must record — not
-/// the whole watched map. A field the mount watches but did not push this time
-/// (because the adapter does not accept it) must not be recorded as pushed, or
-/// enabling it later would look like it had already converged.
-fn pushed_map(watched: &Map<String, Value>, fields: &[String]) -> Map<String, Value> {
-    let mut out = Map::new();
-    for field in fields {
-        if let Some(v) = watched.get(field) {
-            out.insert(field.clone(), v.clone());
+/// The prior baseline with the values actually sent merged over it.
+///
+/// Two rules meet here. The stamp must record the values SENT — a field the
+/// mount watches but did not push this time must not be recorded as pushed, or
+/// enabling it later would look like it had already converged. And it must not
+/// LOSE the baseline of fields pushed on earlier drains: the stamp replaces
+/// `__pushed_state` wholesale, so the prior map is carried forward and only
+/// the just-sent fields are overwritten.
+fn pushed_map(
+    prior: Option<&Map<String, Value>>,
+    watched: &Map<String, Value>,
+    sent: &[String],
+) -> Map<String, Value> {
+    let mut out = prior.cloned().unwrap_or_default();
+    for field in sent {
+        match watched.get(field) {
+            Some(v) => {
+                out.insert(field.clone(), v.clone());
+            }
+            // Sent as an absence (the local edit removed the value): the
+            // baseline must record the absence too.
+            None => {
+                out.remove(field);
+            }
         }
     }
     out

@@ -277,8 +277,11 @@ async fn detach_withholds_the_location_field_and_pushes_the_rest() {
     );
     assert_eq!(
         pushed_state(&node_by_id(&env, &id).await),
-        json!({ "unread": true }),
-        "a withheld field must not be recorded as pushed"
+        json!({ "unread": true, "folder": "inbox" }),
+        "the withheld move must not be recorded as pushed: the baseline keeps the \
+         provider's TRUE folder (inbox), never the local value (archive). The \
+         stamp extends the prior baseline rather than replacing it, so the \
+         imported folder value survives the detach push."
     );
 
     // The local move stands — nothing moves it back — and it does not re-nominate
@@ -382,9 +385,13 @@ async fn an_adapter_without_move_fields_is_unaffected_by_the_policy() {
 
     assert_eq!(stats.rejected, 0);
     assert_eq!(stats.pushed, 1, "the folder is just another mutable field");
+    // ONLY the diverged field travels. `unread` matches its imported baseline,
+    // and a push must not carry converged fields along — some provider fields
+    // have side effects on mere presence in an update (Graph re-sends meeting
+    // invites whenever `attendees` appears in a PATCH).
     assert_eq!(
         mock.last_update().get("payload"),
-        Some(&json!({ "unread": false, "folder": "archive" }))
+        Some(&json!({ "folder": "archive" }))
     );
     let _ = id;
 }

@@ -70,6 +70,23 @@ impl WriteView {
             .iter()
             .any(|f| self.watched.get(f) != pushed.and_then(|p| p.get(f)))
     }
+
+    /// The subset of `fields` that actually differ from what was last pushed.
+    ///
+    /// A push must carry ONLY these — never the mount's whole allow-list. The
+    /// distinction is not cosmetic: some provider fields have side effects on
+    /// mere PRESENCE in an update. Microsoft Graph resends meeting invitations
+    /// to every attendee whenever `attendees` appears in a PATCH, changed or
+    /// not — so a mount that allows attendee edits used to spam every attendee
+    /// each time someone fixed a typo in the title.
+    pub fn diverged_fields(&self, fields: &[String]) -> Vec<String> {
+        let pushed = self.pushed.as_ref();
+        fields
+            .iter()
+            .filter(|f| self.watched.get(*f) != pushed.and_then(|p| p.get(*f)))
+            .cloned()
+            .collect()
+    }
 }
 
 /// The watched-field view of one node, or `None` when the mount watches

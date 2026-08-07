@@ -100,7 +100,21 @@ async fn force(
     if !result.is_object() {
         return Ok(Pushed::Gone);
     }
-    let pushed = subset(&refused.view.watched, refused.fields);
+    // EXTENDED, not replaced — same rule as `merge` below. The push carried
+    // only the diverged fields, so replacing the whole baseline would erase
+    // what was agreed about every other watched field and re-push them all
+    // next drain.
+    let mut pushed = refused.view.pushed.clone().unwrap_or_default();
+    for field in refused.fields {
+        match refused.view.watched.get(field) {
+            Some(v) => {
+                pushed.insert(field.clone(), v.clone());
+            }
+            None => {
+                pushed.remove(field);
+            }
+        }
+    }
     stamp(batcher, refused, &result, pushed, None).await?;
     Ok(Pushed::Sent)
 }
