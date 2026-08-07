@@ -87,6 +87,7 @@ impl VirtualMountSyncHandler {
             credential,
             mount_snapshot,
             deadline: Utc::now().timestamp() + SYNC_WALL_CLOCK_BUDGET.as_secs() as i64,
+            write_mode: std::sync::OnceLock::new(),
         };
 
         // A remap re-materializes everything through the CURRENT mapper and path
@@ -222,6 +223,8 @@ impl VirtualMountSyncHandler {
         // the mirrored-path drift that would let the console promise one thing
         // and the engine send another.
         let write_mode = write::resolve_mode(&mount.write_config, &capabilities, &mapper_writeback);
+        // Let page boundaries push pending local edits under this run's lease.
+        let _ = ctx.write_mode.set(write_mode.clone());
         if writeback_supported == Some(false) {
             tracing::warn!(
                 mount_id = %mount_id,

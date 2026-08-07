@@ -100,6 +100,8 @@ pub fn adapter_ctx<'a>(
         // A subscription op is a single adapter call, not a walk, so the
         // budget never applies. Far-future so nothing can read it as expired.
         deadline: i64::MAX,
+        // Subscription contexts never drain.
+        write_mode: std::sync::OnceLock::new(),
     }
 }
 

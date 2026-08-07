@@ -24,7 +24,7 @@ mod push;
 mod resolve;
 mod run;
 mod state_store;
-mod write;
+pub(crate) mod write;
 
 mod adapter;
 mod batch;

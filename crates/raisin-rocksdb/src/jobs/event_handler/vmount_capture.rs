@@ -297,6 +297,20 @@ impl UnifiedJobEventHandler {
         ) else {
             return;
         };
+        // Note the node FIRST, before the drain job is enqueued: if a sync run
+        // holds the mount's lease, the drain no-ops ("locked_elsewhere") and
+        // this note is what lets the running sync push the edit at its next
+        // page boundary instead of after the whole import. If no sync is
+        // running, the drain's fresh index nominates the node anyway and the
+        // note is consumed later as a one-point-read no-op.
+        let key = crate::jobs::handlers::virtual_mount_sync::write::pending::pending_key(
+            &node_event.tenant_id,
+            &node_event.repository_id,
+            &route.config_branch,
+            &route.mount_id,
+        );
+        crate::jobs::handlers::virtual_mount_sync::write::pending::note(&key, &node_event.node_id);
+
         self.enqueue_vmount(
             node_event,
             route,

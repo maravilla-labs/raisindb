@@ -134,6 +134,10 @@ pub async fn run_with(
                 // `stopped` branch below.
                 break 'outer;
             }
+            // Local edits noted while this walk has been running go out HERE,
+            // under this run's lease — a mount mid-import must not make its
+            // user wait for the import to finish before an edit is pushed.
+            super::write::drain_pending(ctx, state, batcher).await;
             published =
                 publish_progress(ctx, state, &page, processed, published, stack.len()).await?;
             match page.next_cursor {

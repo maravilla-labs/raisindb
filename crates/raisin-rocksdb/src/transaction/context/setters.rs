@@ -205,6 +205,20 @@ pub fn set_is_system(tx: &RocksDBTransaction, is_system: bool) -> Result<()> {
     Ok(())
 }
 
+/// Mark this transaction as engine bookkeeping (state blobs, counters).
+///
+/// See `TransactionalContext::set_bookkeeping` for the contract: durable,
+/// versioned, replicated, events still emitted — only TreeSnapshot and trigger
+/// fan-out are skipped.
+pub fn set_bookkeeping(tx: &RocksDBTransaction, bookkeeping: bool) -> Result<()> {
+    let mut metadata = tx
+        .metadata
+        .lock()
+        .map_err(|e| raisin_error::Error::storage(format!("Failed to lock metadata: {}", e)))?;
+    metadata.bookkeeping = bookkeeping;
+    Ok(())
+}
+
 /// Set the authentication context for this transaction
 ///
 /// When set, RLS (row-level security) and field-level security will be

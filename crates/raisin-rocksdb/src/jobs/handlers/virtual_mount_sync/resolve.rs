@@ -171,12 +171,33 @@ impl VirtualMountSyncHandler {
         // here would attribute the integration node to `"system"`.
         tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
         tx.set_message("virtual mount sync: cache capabilities")?;
+        // A capability cache is engine bookkeeping, same as mount state.
+        tx.set_bookkeeping(true)?;
 
         let Some(mut node) = tx.get_node(SYSTEM_WORKSPACE, integration_id).await? else {
             return Ok(());
         };
         let caps_value = serde_json::to_value(capabilities)
             .map_err(|e| Error::Validation(format!("capabilities serialize failed: {e}")))?;
+
+        // Only write when the answer CHANGED. Every sync run resolves
+        // capabilities, and re-stamping an identical answer plus a fresh
+        // `capabilities_checked_at` minted a replicated integration-node
+        // revision per run — a third commit on top of the two mount-state
+        // commits, for a value that almost never changes. The timestamp
+        // therefore means "when this cached answer was established", which is
+        // what the console needs it for (staleness display), not "the last
+        // time a sync ran".
+        let unchanged = node
+            .properties
+            .get("capabilities")
+            .and_then(|pv| serde_json::to_value(pv).ok())
+            .map(|stored| stored == caps_value)
+            .unwrap_or(false);
+        if unchanged {
+            return Ok(());
+        }
+
         let caps_pv: PropertyValue = serde_json::from_value(caps_value)
             .map_err(|e| Error::Validation(format!("capabilities to PropertyValue failed: {e}")))?;
         node.properties.insert("capabilities".to_string(), caps_pv);

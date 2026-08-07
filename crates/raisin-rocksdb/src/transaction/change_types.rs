@@ -55,4 +55,5 @@ pub struct CommitMetadata {
     pub actor: Option<Arc<String>>,
     pub message: Option<Arc<String>>,
     pub is_system: bool,
+    pub bookkeeping: bool,
 }

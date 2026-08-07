@@ -60,6 +60,7 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     let actor = commit_meta.actor;
     let message = commit_meta.message;
     let is_system = commit_meta.is_system;
+    let bookkeeping = commit_meta.bookkeeping;
 
     tracing::warn!(
         "COMMIT DEBUG: max_revision={:?}, branch={:?}, actor={:?}, message={:?}, is_system={}",
@@ -230,22 +231,33 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
         .await?;
     }
 
-    // PHASE 5.5: Enqueue async snapshot creation job
-    if let (Some(branch_name), Some(new_revision)) = (branch.as_deref(), max_revision.as_ref()) {
-        tx.enqueue_snapshot_job(
-            &tenant_id,
-            &repo_id,
-            branch_name,
-            new_revision,
-            &changed_nodes,
-            &changed_translations,
-        )
-        .await?;
+    // PHASE 5.5: Enqueue async snapshot creation job.
+    //
+    // Skipped for bookkeeping commits (state blobs, counters): the write is
+    // durable and replicated either way; the snapshot job only feeds
+    // `rev/{revision}` time-travel reads, which are meaningless for an
+    // engine-owned cursor blob — and at bookkeeping write rates the per-commit
+    // job churn is the dominant cost.
+    if !bookkeeping {
+        if let (Some(branch_name), Some(new_revision)) = (branch.as_deref(), max_revision.as_ref())
+        {
+            tx.enqueue_snapshot_job(
+                &tenant_id,
+                &repo_id,
+                branch_name,
+                new_revision,
+                &changed_nodes,
+                &changed_translations,
+            )
+            .await?;
+        }
     }
 
-    // PHASE 6: Emit NodeEvent for each changed node
+    // PHASE 6: Emit NodeEvent for each changed node (bookkeeping included —
+    // live observers keep working; the event carries a `bookkeeping` marker so
+    // fan-out consumers like trigger evaluation can bow out cheaply).
     if let Some(branch_name) = branch.as_deref() {
-        tx.emit_node_events(&tenant_id, &repo_id, branch_name, &changed_nodes)
+        tx.emit_node_events(&tenant_id, &repo_id, branch_name, &changed_nodes, bookkeeping)
             .await;
     }
 

@@ -106,6 +106,7 @@ impl RocksDBTransaction {
         repo_id: &str,
         branch_name: &str,
         changed_nodes: &ChangedNodesMap,
+        bookkeeping: bool,
     ) {
         use raisin_storage::transactional::TransactionalContext;
         use raisin_storage::NodeRepository;
@@ -211,6 +212,12 @@ impl RocksDBTransaction {
                     "agent".to_string(),
                     serde_json::Value::String(agent.clone()),
                 );
+            }
+            // Engine-bookkeeping marker: consumers that exist for CONTENT
+            // fan-out (trigger evaluation) bow out on it; observers that
+            // watch the node itself (WS subscriptions, audit) ignore it.
+            if bookkeeping {
+                metadata.insert("bookkeeping".to_string(), serde_json::Value::Bool(true));
             }
             if let Some(data) = node_data {
                 metadata.insert("node_data".to_string(), data);

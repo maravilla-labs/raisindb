@@ -40,6 +40,7 @@ impl RocksDBTransaction {
             actor: metadata.actor.clone(),
             message: metadata.message.clone(),
             is_system: metadata.is_system,
+            bookkeeping: metadata.bookkeeping,
         })
     }
 

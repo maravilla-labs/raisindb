@@ -135,6 +135,10 @@ pub async fn run_with(
                     );
                     break;
                 }
+
+                // Local edits noted while this pass has been running go out
+                // here, under this run's lease (see `write::drain_pending`).
+                super::write::drain_pending(ctx, state, batcher).await;
             }
             None => break,
         }

@@ -266,6 +266,23 @@ pub trait TransactionalContext: Send + Sync {
     /// Set whether this is a system commit (background job, migration, etc.)
     fn set_is_system(&self, is_system: bool) -> Result<()>;
 
+    /// Mark this transaction as engine bookkeeping: state blobs, counters,
+    /// watermarks — writes whose payload is operational metadata, not content.
+    ///
+    /// A bookkeeping commit is still durable, still versioned, still
+    /// replicated, and still emits node events (live observers keep working).
+    /// What it skips is the content fan-out that is meaningless for a state
+    /// blob and expensive at bookkeeping write rates: the per-revision
+    /// TreeSnapshot job and trigger evaluation. A sync engine persisting its
+    /// cursor once per page must not mint a snapshot job and a full trigger
+    /// walk per page.
+    ///
+    /// Default is a no-op: a backend without the optimization treats the
+    /// commit as ordinary, which is always correct.
+    fn set_bookkeeping(&self, _bookkeeping: bool) -> Result<()> {
+        Ok(())
+    }
+
     /// Set the authentication context for this transaction.
     ///
     /// When set, RLS (row-level security) and field-level security will be

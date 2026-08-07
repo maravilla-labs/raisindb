@@ -49,6 +49,10 @@ pub(super) async fn mark_unparseable_mount(
     tx.set_actor(SYNC_ACTOR)?;
     tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
     tx.set_message("virtual mount sync: mark misconfigured")?;
+    // Engine-authored mount-node writes are bookkeeping (see
+    // `state_store::persist_mount_state_detailed`); operator config edits via
+    // the HTTP surface stay ordinary writes and fan out normally.
+    tx.set_bookkeeping(true)?;
 
     let Some(mut node) = tx.get_node(SYSTEM_WORKSPACE, mount_id).await? else {
         return Ok(false);

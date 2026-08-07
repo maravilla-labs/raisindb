@@ -69,6 +69,15 @@ pub struct SyncCtx<'a> {
     /// Unix epoch seconds after which the walk must stop itself at the next page
     /// boundary. See [`SYNC_WALL_CLOCK_BUDGET`].
     pub deadline: i64,
+    /// The write mode this run resolved, if it has resolved one.
+    ///
+    /// Set by `run_sync` after the capabilities/mapper probes; never set for
+    /// contexts that do not drain (subscription teardown/renew, tests). Read
+    /// by `write::drain_pending` so page boundaries can push local edits noted
+    /// while this run holds the lease — without threading the mode through
+    /// every phase signature. A `OnceLock` because the batcher already borrows
+    /// the context by the time the mode is resolved.
+    pub write_mode: std::sync::OnceLock<write::WriteMode>,
 }
 
 impl SyncCtx<'_> {

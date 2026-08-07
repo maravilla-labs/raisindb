@@ -42,6 +42,24 @@ impl UnifiedJobEventHandler {
         node_event: &NodeEvent,
         event_type: &str,
     ) -> Result<()> {
+        // Engine-bookkeeping writes (mount state blobs, counters) never fire
+        // triggers: the payload is operational metadata, and at bookkeeping
+        // write rates a full trigger walk per commit is the cost that burned
+        // three cores on an idle mount. Content writes never carry the marker.
+        if node_event
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("bookkeeping"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            tracing::trace!(
+                node_id = %node_event.node_id,
+                "Skipping TriggerEvaluation: bookkeeping write"
+            );
+            return Ok(());
+        }
+
         // Get node_type from the event field first, fallback to metadata
         let node_type = node_event
             .node_type

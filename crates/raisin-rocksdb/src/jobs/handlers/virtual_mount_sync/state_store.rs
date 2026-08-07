@@ -205,6 +205,10 @@ pub(super) async fn persist_mount_state_detailed(
     // attribute the mount node to `"system"`.
     tx.set_auth_context(AuthContext::system_as(SYNC_ACTOR))?;
     tx.set_message("virtual mount sync: persist state")?;
+    // State blobs are engine bookkeeping: durable, replicated, event-emitting,
+    // but they must not mint a TreeSnapshot job and a full trigger walk per
+    // page/run — that fan-out is what let an idle mount burn three cores.
+    tx.set_bookkeeping(true)?;
 
     let Some(mut node) = tx.get_node(SYSTEM_WORKSPACE, mount_id).await? else {
         // At `warn`, not silence: production runs `RUST_LOG=warn`, and a state
@@ -226,10 +230,12 @@ pub(super) async fn persist_mount_state_detailed(
     // ours is not a conflict (it is our own earlier write, or a node restored
     // from an older snapshot), so we proceed. Only a stored seq that has moved
     // AHEAD means someone else wrote.
-    let stored_seq = node
+    let stored_state = node
         .properties
         .get("state")
-        .and_then(|pv| serde_json::to_value(pv).ok())
+        .and_then(|pv| serde_json::to_value(pv).ok());
+    let stored_seq = stored_state
+        .as_ref()
         .and_then(|v| v.get("state_seq").and_then(|t| t.as_u64()))
         .unwrap_or(0);
     if stored_seq > state.state_seq {
@@ -241,11 +247,40 @@ pub(super) async fn persist_mount_state_detailed(
         );
         return Ok(StateWrite::Superseded);
     }
-    state.state_seq = stored_seq + 1;
 
-    let state_value = serde_json::to_value(&*state)
+    // No-op detection: if the state we are about to write is byte-identical to
+    // what is stored (state_seq aside — the CAS counter always differs), there
+    // is nothing to record and committing would mint a replicated node revision
+    // that says nothing. A reconcile pass with zero findings and a capability
+    // re-check with an unchanged answer both land here. `misconfig.rs` learned
+    // this lesson years earlier ("an unconditional write would mint a node
+    // revision — replicated — on every tick, forever"); this applies it to the
+    // funnel every other writer goes through.
+    let mut ours = serde_json::to_value(&*state)
         .map_err(|e| Error::Validation(format!("state serialize failed: {e}")))?;
-    let state_pv: PropertyValue = serde_json::from_value(state_value)
+    if let Some(stored) = &stored_state {
+        let mut stored_cmp = stored.clone();
+        if let Some(o) = stored_cmp.as_object_mut() {
+            o.remove("state_seq");
+        }
+        let mut ours_cmp = ours.clone();
+        if let Some(o) = ours_cmp.as_object_mut() {
+            o.remove("state_seq");
+        }
+        if stored_cmp == ours_cmp {
+            // Keep the in-memory seq aligned with storage so later writes in
+            // this run still pass the CAS.
+            state.state_seq = stored_seq;
+            return Ok(StateWrite::Written);
+        }
+    }
+
+    state.state_seq = stored_seq + 1;
+    if let Some(o) = ours.as_object_mut() {
+        o.insert("state_seq".to_string(), serde_json::json!(state.state_seq));
+    }
+
+    let state_pv: PropertyValue = serde_json::from_value(ours)
         .map_err(|e| Error::Validation(format!("state to PropertyValue failed: {e}")))?;
     node.properties.insert("state".to_string(), state_pv);
     tx.upsert_node(SYSTEM_WORKSPACE, &node).await?;

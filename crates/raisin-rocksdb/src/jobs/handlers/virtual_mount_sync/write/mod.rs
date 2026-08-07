@@ -66,6 +66,7 @@ mod create;
 mod deletes;
 mod fields;
 mod guard;
+pub(crate) mod pending;
 mod plan;
 mod policy;
 mod preimage;
@@ -224,6 +225,124 @@ const STOP_CHECK_EVERY: usize = 20;
 /// instead of one per second; short enough that an operator who fixes a scope
 /// sees writeback resume while they are still looking at the screen.
 const MISCONFIGURED_BACKOFF_SECS: i64 = 900;
+
+/// How many pending edits one page boundary pushes; the rest wait for the next
+/// boundary so a burst of edits cannot starve the walk.
+const PENDING_PER_BOUNDARY: usize = 20;
+
+/// Push nodes edited while THIS run has been walking the provider.
+///
+/// The scheduled drain nominates from an index snapshotted at run start, so an
+/// edit landing mid-import is invisible to it until the next run — which a
+/// long backfill can postpone for hours. The capture hook notes such edits in
+/// [`pending`]; this pushes them at a page boundary, where the batcher is
+/// flushed and the lease is held — exactly the invariant the ordinary drain
+/// relies on (an unflushed stamp is never applied after the read's write).
+///
+/// Deliberately only the plain UPDATE arm. Deletes, creates and submit have
+/// their own rails and scans that must not run per page — and a submit retried
+/// from here would be a duplicate send.
+///
+/// Never fails the walk, and never writes mount state: a losing writer would
+/// burn a `state_seq` the walk's own cursor writes depend on.
+pub(super) async fn drain_pending(
+    ctx: &SyncCtx<'_>,
+    state: &MountState,
+    batcher: &mut batch::SyncBatcher<'_>,
+) -> usize {
+    let fields = match ctx.write_mode.get() {
+        Some(WriteMode::StateOnly(fields)) => fields.clone(),
+        Some(WriteMode::Mirror(plan)) => plan.fields.clone(),
+        _ => return 0,
+    };
+    // A push landing mid-remap ping-pongs: the walk re-materializes the field
+    // from the provider's pre-push view while `__pushed_state` records it as
+    // pushed, so it is re-nominated on every page until the walk ends.
+    if ctx.scope.force_rewrite {
+        return 0;
+    }
+    // Standing off after a config error means NO provider calls.
+    if let Some(retry_after) = state.writeback_retry_after {
+        if Utc::now().timestamp() < retry_after {
+            return 0;
+        }
+    }
+    if ctx.out_of_time(Utc::now().timestamp()) {
+        return 0;
+    }
+    let key = pending::pending_key(
+        &ctx.scope.tenant,
+        &ctx.scope.repo,
+        &ctx.config_branch,
+        &ctx.scope.mount_id,
+    );
+    let ids = pending::take(&key, PENDING_PER_BOUNDARY);
+    if ids.is_empty() {
+        return 0;
+    }
+    let policy = match resolve_conflict_policy(&ctx.mount) {
+        Ok(policy) => policy,
+        Err(_) => {
+            // The run's own full drain already refused and badged the mount;
+            // a page boundary has nothing to add. Hand the notes back.
+            for id in &ids {
+                pending::note(&key, id);
+            }
+            return 0;
+        }
+    };
+
+    let mut pushed = 0usize;
+    let mut iter = ids.into_iter();
+    while let Some(node_id) = iter.next() {
+        if ctx.out_of_time(Utc::now().timestamp()) {
+            pending::note(&key, &node_id);
+            for rest in iter {
+                pending::note(&key, &rest);
+            }
+            break;
+        }
+        // One point read for the external id; `push_one` re-reads and
+        // re-checks divergence itself, so a stale note (already drained,
+        // converged, unmapped) costs this read and nothing else. A note whose
+        // push fails is dropped, not retried: the edit itself is safe — the
+        // node still diverges, so the next run's full drain re-nominates it
+        // from its fresh index. Only the latency shortcut is lost.
+        let node = match ctx.materializer.read_node(&ctx.scope, &node_id).await {
+            Ok(Some(node)) => node,
+            _ => continue,
+        };
+        let Some(external_id) = super::materializer::node_external_id(&node) else {
+            continue;
+        };
+        let candidate = candidates::Candidate {
+            node_id: node_id.clone(),
+            external_id: external_id.to_string(),
+        };
+        if let Ok(push::Pushed::Sent) =
+            push::push_one(ctx, batcher, &candidate, &fields, &policy).await
+        {
+            pushed += 1;
+        }
+    }
+    if pushed > 0 {
+        // The pushes staged etag stamp-backs; land them before the walk reads
+        // its next page — the same invariant as the ordinary drain.
+        if let Err(e) = batcher.flush().await {
+            tracing::warn!(
+                mount_id = %ctx.scope.mount_id,
+                error = %e,
+                "mid-run pending drain: flush failed; stamps land with the next page flush"
+            );
+        }
+        tracing::info!(
+            mount_id = %ctx.scope.mount_id,
+            pushed,
+            "pushed pending local edits at a page boundary"
+        );
+    }
+    pushed
+}
 
 /// Push whatever local edits this mount owes the provider.
 ///

@@ -559,6 +559,12 @@ impl TransactionalContext for RocksDBTransaction {
         setters::set_is_system(self, is_system)
     }
 
+    /// Mark this transaction as engine bookkeeping (skips TreeSnapshot +
+    /// trigger fan-out; stays durable, replicated, and event-emitting).
+    fn set_bookkeeping(&self, bookkeeping: bool) -> Result<()> {
+        setters::set_bookkeeping(self, bookkeeping)
+    }
+
     fn set_auth_context(&self, auth_context: raisin_models::auth::AuthContext) -> Result<()> {
         setters::set_auth_context(self, auth_context)
     }

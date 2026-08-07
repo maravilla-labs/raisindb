@@ -22,6 +22,9 @@ pub(crate) struct TransactionMetadata {
     pub(crate) manual_version_node_id: Option<Arc<String>>,
     /// Whether this is a system commit (background job, migration, etc.)
     pub(crate) is_system: bool,
+    /// Whether this commit is engine bookkeeping (state blobs, counters).
+    /// Skips TreeSnapshot + trigger fan-out; see `TransactionalContext::set_bookkeeping`.
+    pub(crate) bookkeeping: bool,
     /// The single HLC timestamp used for ALL operations in this transaction
     /// This ensures atomicity - all nodes in a transaction share the same revision
     pub(crate) transaction_revision: Option<HLC>,

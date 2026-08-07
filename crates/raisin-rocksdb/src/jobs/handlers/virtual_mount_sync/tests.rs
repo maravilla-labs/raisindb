@@ -328,6 +328,7 @@ fn ctx<'a>(
     SyncCtx {
         // Tests never race the wall clock; far-future so the budget never trips.
         deadline: i64::MAX,
+        write_mode: std::sync::OnceLock::new(),
         public_origin: None,
         storage: env.storage.clone(),
         // Mirrors `resolve.rs`: the scope's watched fields come from the
