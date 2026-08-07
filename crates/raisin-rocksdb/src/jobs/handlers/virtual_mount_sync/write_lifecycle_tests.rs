@@ -627,3 +627,51 @@ async fn a_config_error_ends_the_drain_and_stands_the_mount_off() {
          the whole point of it"
     );
 }
+
+/// A run that was killed before it could finalize is closed out by the next
+/// one, instead of sitting at `running` forever.
+///
+/// The watchdog drops a sync at its current await point, so `finalize` never
+/// executes: `status` stays `"syncing"` and the newest run record stays
+/// `running`, and nothing else in the system rewrites either. The console then
+/// shows a mount permanently "syncing now" with `Sync now` greyed out —
+/// busy-looking and doing nothing — which is exactly what a throttled calendar
+/// mount looked like in production.
+#[test]
+fn a_killed_run_is_closed_out_by_the_next_one() {
+    let mut state = MountState::default();
+    let started = Utc::now().timestamp() - 3600;
+    state.status = Some("syncing".to_string());
+    state.last_run = Some(sync::config::SyncRun::started(started, "delta", "schedule"));
+
+    let ran_for = sync::run::close_interrupted_run(&mut state, started + 3600)
+        .expect("an open run must be closed");
+    assert_eq!(ran_for, 3600);
+
+    let closed = state.last_run.as_ref().expect("the record survives");
+    assert_eq!(
+        closed.outcome, "interrupted",
+        "a killed run is not an error and not a success — it has its own outcome"
+    );
+    assert!(
+        closed.finished_at.is_some(),
+        "an open run with no end time reads as still running"
+    );
+    assert_eq!(
+        state.recent_runs.first().map(|r| r.outcome.as_str()),
+        Some("interrupted"),
+        "it must also reach the history, or the console shows no trace of the kill"
+    );
+
+    // A run that ended properly is left exactly as it is.
+    let mut settled = MountState::default();
+    settled.last_run = Some({
+        let mut r = sync::config::SyncRun::started(started, "delta", "schedule");
+        r.finish(started + 5, "ok", None);
+        r
+    });
+    assert!(
+        sync::run::close_interrupted_run(&mut settled, started + 3600).is_none(),
+        "only an OPEN run is closed; rewriting a finished one would fabricate history"
+    );
+}

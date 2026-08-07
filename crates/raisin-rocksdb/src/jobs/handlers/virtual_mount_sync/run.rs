@@ -146,6 +146,17 @@ impl VirtualMountSyncHandler {
         // a mount reporting healthy because someone marked a mail read.
         let write_only = mode == write::WRITE_ONLY_MODE;
         let run_started_at = Utc::now().timestamp();
+
+        // Close out a run that was KILLED before it could finalize. See
+        // [`close_interrupted_run`] for why holding the lease makes this safe.
+        if let Some(ran_for) = close_interrupted_run(&mut state, run_started_at) {
+            tracing::warn!(
+                mount_id = %mount_id,
+                ran_for_secs = ran_for,
+                "previous run never finalized; recording it as interrupted"
+            );
+        }
+
         if !write_only {
             state.status = Some("syncing".to_string());
         }
@@ -263,4 +274,40 @@ impl VirtualMountSyncHandler {
         }
         outcome
     }
+}
+
+/// Close out a run that was KILLED before it could finalize, returning how long
+/// it had been open.
+///
+/// Only ever called with the per-mount lease held, and that is what makes it
+/// safe: no other run can be live, so an open record belongs to one that died —
+/// the watchdog dropping the task at an await point, or a restart mid-sync.
+/// `finalize` never ran for it, so nothing else in the system will ever close
+/// it.
+///
+/// Left open it is not merely untidy. `status` stays `"syncing"`, so the console
+/// reports a sync in progress indefinitely and greys out `Sync now`, while the
+/// newest run in the history sits at `running` forever — a mount that looks busy
+/// and is doing nothing. It also buries the real signal: a mount whose runs keep
+/// being killed (a throttled provider is the usual cause) becomes
+/// indistinguishable from one that is merely slow.
+pub(super) fn close_interrupted_run(state: &mut MountState, now: i64) -> Option<i64> {
+    let open = state.last_run.as_mut()?;
+    if open.outcome != "running" {
+        return None;
+    }
+    open.finish(
+        now,
+        "interrupted",
+        Some(
+            "the run was killed before it could finish - most often the job watchdog's \
+             timeout, or a restart mid-sync. Nothing was lost; the resume point is intact."
+                .to_string(),
+        ),
+    );
+    let closed = open.clone();
+    let ran_for = now - closed.started_at;
+    state.recent_runs.insert(0, closed);
+    state.recent_runs.truncate(config::MAX_RUN_HISTORY);
+    Some(ran_for)
 }
