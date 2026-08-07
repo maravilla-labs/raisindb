@@ -413,10 +413,11 @@ export default function MountDetail() {
     )
   }
 
-  const kind = statusKind(mount.state)
+  const kind = statusKind(mount.state, mount.enabled)
   const meta = STATUS_META[kind]
   const lastRun = mount.state?.last_run
   const recentRuns = mount.state?.recent_runs ?? []
+  const stopRequested = mount.state?.stop_requested === true
 
   return (
     <div className="animate-fade-in pb-8">
@@ -443,14 +444,11 @@ export default function MountDetail() {
                 syncing now
               </span>
             )}
-            {!mount.enabled && (
-              <span className="px-2 py-0.5 text-xs rounded-full bg-zinc-500/10 text-zinc-400 border border-white/10">
-                Disabled
-              </span>
-            )}
-            {paused && (
+            {/* Disabled/Paused now live in the status badge itself (statusKind
+                gets `enabled`), so the row and this header can never disagree. */}
+            {stopRequested && (
               <span className="px-2 py-0.5 text-xs rounded-full bg-amber-500/10 text-amber-300 border border-amber-400/30">
-                Paused
+                Stop requested — the run ends at its next page boundary
               </span>
             )}
           </div>
@@ -499,16 +497,23 @@ export default function MountDetail() {
             {paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
             {paused ? 'Resume' : 'Pause'}
           </button>
-          {/* Only offered while something is actually running. */}
+          {/* Only offered while something is actually running. Once a stop has
+              been requested the button says so and stops accepting clicks —
+              the stop is served at the run's next page boundary, and a second
+              click cannot make that happen sooner. */}
           {syncing && (
             <button
               onClick={() => setConfirmStop(true)}
-              disabled={busyControl}
-              title="Stop the running sync and discard its resume point"
+              disabled={busyControl || stopRequested}
+              title={
+                stopRequested
+                  ? 'Stop already requested — the run ends at its next page boundary'
+                  : 'Stop the running sync and discard its resume point'
+              }
               className="flex items-center gap-1.5 px-3 py-2 text-sm text-zinc-300 hover:text-red-300 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors disabled:opacity-40"
             >
               <Square className="w-4 h-4" />
-              Stop
+              {stopRequested ? 'Stopping…' : 'Stop'}
             </button>
           )}
           <button
@@ -696,6 +701,62 @@ export default function MountDetail() {
                   responses, one of which is "do nothing".
                 */}
                 <PendingReason state={mount.state} lastRun={lastRun} />
+                {/*
+                  Every non-pending drain outcome, because the quiet ones are
+                  the dangerous ones: under the default `remote_wins` policy a
+                  conflicted push is ABANDONED — the user's edit is discarded
+                  and the run still reports ok. Losing an edit with no trace is
+                  the sharpest failure this feature can produce, so the trace
+                  lives here.
+                */}
+                {(() => {
+                  const d = mount.state?.last_drain
+                  if (!d) return null
+                  const rows: Array<{ label: string; value: number; tone?: 'warn' | 'bad'; hint: string }> = [
+                    { label: 'deleted at provider', value: d.deleted ?? 0, tone: 'warn' as const, hint: 'Local deletes propagated to the provider.' },
+                    { label: 'detached', value: d.detached ?? 0, hint: 'Local deletes deliberately NOT propagated (delete_policy: detach) — the provider keeps its copy.' },
+                    { label: 'rejected', value: d.rejected ?? 0, tone: 'warn' as const, hint: 'Updates withheld whole because the node moved and move_policy is reject. Move it back (or change the policy) to release them.' },
+                    {
+                      label: 'conflicts',
+                      value: d.conflicts ?? 0,
+                      tone: 'bad' as const,
+                      hint:
+                        (mount.write_config?.conflict || 'remote_wins') === 'remote_wins'
+                          ? 'The provider refused these as stale. Under remote_wins the local edit was ABANDONED — the next sync overwrites it with the provider’s value.'
+                          : 'The provider refused these as stale; resolved by this mount’s conflict policy.',
+                    },
+                    { label: 'parked', value: d.parked ?? 0, tone: 'warn' as const, hint: 'Conflicts left pending for a human decision. The edits stay on the nodes until resolved.' },
+                    { label: 'gone', value: d.gone ?? 0, hint: 'The provider no longer has the object; the edit was settled and the item re-imports under its current identity.' },
+                  ].filter((r) => r.value > 0)
+                  if (rows.length === 0 && !d.blocked) return null
+                  return (
+                    <div className="mt-2.5 text-xs bg-white/5 border border-white/10 rounded-lg p-2.5 space-y-1">
+                      <div className="text-zinc-400 font-medium mb-1">Write drain outcomes</div>
+                      {d.blocked && (
+                        <div className="text-red-300">
+                          A delete rail blocked this run — every outbound change is parked while
+                          the delete volume is reviewed.
+                        </div>
+                      )}
+                      {rows.map((r) => (
+                        <div key={r.label} className="flex items-start gap-2" title={r.hint}>
+                          <span
+                            className={
+                              r.tone === 'bad'
+                                ? 'text-red-300 font-medium'
+                                : r.tone === 'warn'
+                                  ? 'text-amber-300 font-medium'
+                                  : 'text-zinc-300 font-medium'
+                            }
+                          >
+                            {r.value} {r.label}
+                          </span>
+                          <span className="text-zinc-500">{r.hint}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })()}
               </>
             ) : (
               <p className="text-sm text-zinc-500">No run has been recorded yet.</p>

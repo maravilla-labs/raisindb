@@ -176,7 +176,9 @@ function DraggableTreeNode({
                   {...childrenProvided.droppableProps}
                   className={childrenSnapshot.isDraggingOver ? 'bg-green-500/10 rounded-lg' : ''}
                 >
-                  {node.children!.map((child, childIndex) => (
+                  {(node.children as unknown[])
+                    .filter((c): c is Node => !!c && typeof c === 'object')
+                    .map((child, childIndex) => (
                     <DraggableTreeNode
                       key={child.id}
                       node={child}

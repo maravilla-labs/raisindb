@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSL-1.1
 
 import { useEffect, useState, useCallback } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { HardDrive, Plus, RefreshCw, AlertTriangle, Activity, Webhook, X, Wand2, ChevronRight } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -17,6 +17,7 @@ import { workspacesApi } from '../api/workspaces'
 import {
   backfillProgress,
   isActive,
+  isPaused,
   isSyncing,
   pushIndicator,
   STATUS_META,
@@ -130,6 +131,17 @@ export default function Mounts() {
   const syncBusy = (m: VirtualMount) =>
     (!!m.id && enqueuing.has(m.id)) || isSyncing(m.state)
 
+  /**
+   * Why Sync/Remap are unavailable, or null when they are not. A disabled or
+   * paused mount used to accept the click and toast "Sync queued" for work the
+   * scheduler would never run.
+   */
+  const syncUnavailable = (m: VirtualMount): string | null => {
+    if (!m.enabled) return 'This mount is disabled — enable it first'
+    if (isPaused(m.state)) return 'Paused — resume on the mount page to sync'
+    return null
+  }
+
   async function handleSync(m: VirtualMount) {
     if (!repo || !m.id) return
     markEnqueuing(m.id, true)
@@ -240,12 +252,15 @@ export default function Mounts() {
       header: 'Status',
       width: '200px',
       render: (m) => {
-        const kind = statusKind(m.state)
+        const kind = statusKind(m.state, m.enabled)
         const meta = STATUS_META[kind]
         const push = pushIndicator(m.state)
         return (
           <div className="flex flex-col gap-0.5">
-            <span className={`flex items-center gap-1 px-2 py-0.5 text-xs rounded-full w-fit ${meta.cls}`}>
+            <span
+              className={`flex items-center gap-1 px-2 py-0.5 text-xs rounded-full w-fit ${meta.cls}`}
+              title={meta.hint}
+            >
               <meta.Icon className={`w-3 h-3 ${kind === 'syncing' ? 'animate-spin' : ''}`} />
               {meta.label}
             </span>
@@ -317,22 +332,23 @@ export default function Mounts() {
       width: '170px',
       render: (m) => {
         const busy = syncBusy(m)
+        const unavailable = syncUnavailable(m)
         return (
           <div className="flex items-center gap-1">
             <button
               onClick={() => handleSync(m)}
-              disabled={busy}
+              disabled={busy || !!unavailable}
               className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-300 hover:text-primary-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              title={isSyncing(m.state) ? 'A sync is already running' : 'Sync now'}
+              title={unavailable ?? (isSyncing(m.state) ? 'A sync is already running' : 'Sync now')}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`} />
               {isSyncing(m.state) ? 'Syncing…' : 'Sync now'}
             </button>
             <button
               onClick={() => setRemapTarget(m)}
-              disabled={busy}
+              disabled={busy || !!unavailable}
               className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-400 hover:text-amber-300 hover:bg-white/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Re-import every item through the current mapping function and folder hierarchy"
+              title={unavailable ?? 'Re-import every item through the current mapping function and folder hierarchy'}
             >
               <Wand2 className="w-3.5 h-3.5" />
               Remap
@@ -394,7 +410,21 @@ export default function Mounts() {
           <div className="text-center py-12">
             <HardDrive className="w-16 h-16 text-zinc-500 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-white mb-2">No mounts yet</h3>
-            <p className="text-zinc-400">Create a mount to bring external content into a workspace</p>
+            {integrations.length === 0 ? (
+              <>
+                <p className="text-zinc-400">
+                  A mount syncs through a connector, and no connector is configured yet.
+                </p>
+                <Link
+                  to={`/${repo}/integrations`}
+                  className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg transition-colors"
+                >
+                  Set up a connector first
+                </Link>
+              </>
+            ) : (
+              <p className="text-zinc-400">Create a mount to bring external content into a workspace</p>
+            )}
           </div>
         </GlassCard>
       ) : (

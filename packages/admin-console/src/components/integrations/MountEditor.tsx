@@ -258,7 +258,15 @@ export default function MountEditor({
     rootParentId?: string
     apply: (item: BrowseItem) => void
   } | null>(null)
-  const canBrowse = selectedIntegration?.capabilities?.supports_browse === true && !!accountRef
+  // With exactly one connection the select legitimately stays on "Use the only
+  // connection" (empty value, resolved server-side) — but browsing still needs
+  // a concrete account to dial with. Deriving it here is what keeps the
+  // remote-root/mailbox/site pickers available in the single-connection case
+  // they were built for, without changing what gets SAVED (`accountRef` stays
+  // empty so the mount keeps following the connector's only/default account).
+  const effectiveAccountId = accountRef || (accounts.length === 1 ? accounts[0].id : '')
+  const canBrowse =
+    selectedIntegration?.capabilities?.supports_browse === true && !!effectiveAccountId
 
   /** The picker needs the same selectors the mount syncs with. */
   const browseSyncConfig = useMemo(
@@ -433,13 +441,21 @@ export default function MountEditor({
                   setAccountRef('')
                 }}
               >
-                <option value="">Select connector…</option>
+                <option value="">
+                  {integrations.length === 0 ? 'No connectors configured yet' : 'Select connector…'}
+                </option>
                 {integrations.map((i) => (
                   <option key={i.path} value={i.path}>
                     {i.title}
                   </option>
                 ))}
               </select>
+              {integrations.length === 0 && (
+                <p className="mt-1 text-xs text-amber-300/90">
+                  A mount syncs through a connector. Set one up under{' '}
+                  <span className="font-medium">Integrations</span> first, then come back here.
+                </p>
+              )}
             </div>
             <div>
               <label className={labelCls}>
@@ -607,7 +623,7 @@ export default function MountEditor({
             <RemotePicker
               repo={repo}
               integrationPath={integrationRef}
-              accountId={accountRef || undefined}
+              accountId={effectiveAccountId || undefined}
               kind={picker.kind}
               title={picker.title}
               searchable={picker.searchable}
@@ -917,7 +933,7 @@ export default function MountEditor({
                 repo={repo}
                 request={{
                   integration_path: selectedIntegration.path,
-                  account_id: accountRef || undefined,
+                  account_id: effectiveAccountId || undefined,
                   remote_root: remoteRoot.trim() || undefined,
                   // Forward the surface selector so a calendar/files mount is
                   // probed against what it actually syncs, not the mailbox.
@@ -928,10 +944,17 @@ export default function MountEditor({
             </div>
           )}
 
-          <label className="flex items-center gap-2 text-white text-sm">
-            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} className="w-4 h-4 rounded" />
-            Enabled
-          </label>
+          <div>
+            <label className="flex items-center gap-2 text-white text-sm">
+              <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} className="w-4 h-4 rounded" />
+              Enabled
+            </label>
+            <p className="mt-1 ml-6 text-xs text-zinc-500">
+              Disabling unregisters the provider push subscription. To suspend syncing
+              temporarily, use <span className="text-zinc-300">Pause</span> on the mount page
+              instead — it keeps the subscription, so nothing that arrives in the gap is lost.
+            </p>
+          </div>
 
           <div className="flex flex-col-reverse md:flex-row gap-3 pt-2">
             <button type="button" onClick={onClose} className="flex-1 px-6 py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-lg transition-colors">

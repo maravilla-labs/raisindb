@@ -321,6 +321,30 @@ export default function IntegrationEditor({
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
+          {/*
+            The template's setup instructions, RENDERED, first. They exist for
+            exactly one moment — a first-time operator setting up the provider
+            side — and burying them in an editing textarea at the bottom of the
+            form served the connector author, not the person the text is for.
+          */}
+          {setupInstructions.trim() && (
+            <div className="rounded-lg border border-primary-500/20 bg-primary-500/5 p-4">
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <p className="text-sm font-semibold text-white">Before you start</p>
+                {docsUrl.trim() && (
+                  <a
+                    href={docsUrl.trim()}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-primary-400 hover:text-primary-300"
+                  >
+                    <ExternalLink className="w-3 h-3" /> Provider docs
+                  </a>
+                )}
+              </div>
+              <MarkdownRenderer content={setupInstructions} />
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelCls}>Name *</label>
@@ -405,22 +429,23 @@ export default function IntegrationEditor({
               )}
             </div>
 
-            <div>
-              <label className={labelCls}>Setup instructions (markdown)</label>
-              <textarea
-                className={`${field} resize-y font-mono text-xs`}
-                rows={5}
-                value={setupInstructions}
-                onChange={(e) => setSetupInstructions(e.target.value)}
-                placeholder="Steps the operator must complete on the provider side…"
-              />
-              {setupInstructions.trim() && (
-                <div className="mt-2 rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">Preview</p>
-                  <MarkdownRenderer content={setupInstructions} />
-                </div>
-              )}
-            </div>
+            {/* Authoring lives behind a fold — the rendered copy is at the top
+                of the form where the operator it addresses actually looks. */}
+            <details className="rounded-lg border border-white/10">
+              <summary className="cursor-pointer select-none px-3 py-2 text-sm text-zinc-300 hover:text-white">
+                Edit setup instructions
+              </summary>
+              <div className="p-3 border-t border-white/10">
+                <label className={labelCls}>Setup instructions (markdown)</label>
+                <textarea
+                  className={`${field} resize-y font-mono text-xs`}
+                  rows={5}
+                  value={setupInstructions}
+                  onChange={(e) => setSetupInstructions(e.target.value)}
+                  placeholder="Steps the operator must complete on the provider side…"
+                />
+              </div>
+            </details>
           </fieldset>
 
           <fieldset className="border border-white/10 rounded-lg p-4 space-y-4">

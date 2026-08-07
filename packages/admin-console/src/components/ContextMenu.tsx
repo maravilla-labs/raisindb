@@ -8,7 +8,8 @@ import {
   EyeOff,
   Trash2,
   MoreVertical,
-  AlertCircle
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react'
 import type { Node } from '../api/nodes'
 
@@ -23,6 +24,8 @@ interface ContextMenuProps {
   onPublish?: () => void
   onUnpublish?: () => void
   onDelete: () => void
+  /** Re-fetch this node's children from the server (lazy trees go stale). */
+  onRefresh?: () => void
 }
 
 export default function ContextMenu({
@@ -35,6 +38,7 @@ export default function ContextMenu({
   onPublish,
   onUnpublish,
   onDelete,
+  onRefresh,
 }: ContextMenuProps) {
   return (
     <Menu as="div" className="relative">
@@ -47,6 +51,24 @@ export default function ContextMenu({
 
       <Menu.Items className="absolute right-0 mt-2 w-56 origin-top-right glass-dark rounded-lg shadow-lg ring-1 ring-white/10 focus:outline-none z-50">
         <div className="p-1">
+          {onRefresh && (
+            <Menu.Item>
+              {({ active }) => (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRefresh()
+                  }}
+                  className={`${
+                    active ? 'bg-white/10' : ''
+                  } group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-white transition-colors`}
+                >
+                  <RefreshCw className="w-4 h-4 text-sky-400" />
+                  Refresh
+                </button>
+              )}
+            </Menu.Item>
+          )}
           <Menu.Item>
             {({ active }) => (
               <button

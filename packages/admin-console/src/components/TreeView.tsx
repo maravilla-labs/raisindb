@@ -1,4 +1,4 @@
-import { ChevronRight, ChevronDown, Folder, FileText, Package, User, Calendar, Settings, Tag, Layout, Database } from 'lucide-react'
+import { ChevronRight, ChevronDown, Folder, FileText, Package, User, Calendar, Settings, Tag, Layout, Database, Loader2 } from 'lucide-react'
 import ContextMenu from './ContextMenu'
 import VirtualNodeBadge, { virtualMountId } from './VirtualNodeBadge'
 import type { Node } from '../api/nodes'
@@ -16,10 +16,14 @@ interface TreeViewProps {
   onPublish?: (node: Node) => void
   onUnpublish?: (node: Node) => void
   onDelete?: (node: Node) => void
+  /** Re-fetch a node's children from the server. */
+  onRefresh?: (node: Node) => void
   onCreateRoot?: () => void
   selectedNodeId?: string
   /** Mount ids whose writeback is off — virtual nodes under them are read-only. */
   readOnlyMountIds?: Set<string>
+  /** Nodes whose children are being fetched right now (chevron shows a spinner). */
+  loadingNodes?: Set<string>
 }
 
 interface TreeNodeProps {
@@ -37,22 +41,29 @@ interface TreeNodeProps {
   onPublish?: (node: Node) => void
   onUnpublish?: (node: Node) => void
   onDelete?: (node: Node) => void
+  onRefresh?: (node: Node) => void
   isSelected: boolean
+  loadingNodes?: Set<string>
+}
+
+/** Children that are actually loaded node objects — never the lazy id strings. */
+function loadedChildren(node: Node): Node[] {
+  if (!Array.isArray(node.children)) return []
+  return (node.children as unknown[]).filter(
+    (c): c is Node => !!c && typeof c === 'object'
+  )
 }
 
 function TreeNode({
   node, level, expandedNodes, selectedNodeId, readOnlyMountIds,
-  onNodeClick, onNodeExpand, onEdit, onAddChild, onCopy, onMove, onPublish, onUnpublish, onDelete,
-  isSelected
+  onNodeClick, onNodeExpand, onEdit, onAddChild, onCopy, onMove, onPublish, onUnpublish, onDelete, onRefresh,
+  isSelected, loadingNodes
 }: TreeNodeProps) {
   const mountId = virtualMountId(node)
   const isReadOnly = !!mountId && !!readOnlyMountIds?.has(mountId)
   const isExpanded = expandedNodes?.has(node.id) || false
-
-  // Use server-provided has_children when available, fall back to checking children array
-  const hasChildren = node.has_children !== undefined
-    ? node.has_children
-    : (node.children && node.children.length > 0)
+  const isLoading = loadingNodes?.has(node.id) || false
+  const children = loadedChildren(node)
 
   // For showing expand chevron: use has_children or assume true if children not loaded yet
   const showExpandChevron = node.has_children !== undefined
@@ -96,11 +107,14 @@ function TreeNode({
           <button
             onClick={(e) => {
               e.stopPropagation()
-              if (onNodeExpand) onNodeExpand(node)
+              if (!isLoading && onNodeExpand) onNodeExpand(node)
             }}
             className="p-1 hover:bg-white/10 rounded"
+            aria-label={isExpanded ? 'Collapse' : 'Expand'}
           >
-            {isExpanded ? (
+            {isLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin text-zinc-400" />
+            ) : isExpanded ? (
               <ChevronDown className="w-4 h-4" />
             ) : (
               <ChevronRight className="w-4 h-4" />
@@ -133,13 +147,14 @@ function TreeNode({
             onPublish={() => onPublish?.(node)}
             onUnpublish={() => onUnpublish?.(node)}
             onDelete={() => onDelete?.(node)}
+            onRefresh={onRefresh ? () => onRefresh(node) : undefined}
           />
         </div>
       </div>
 
-      {isExpanded && hasChildren && (
+      {isExpanded && children.length > 0 && (
         <div>
-          {node.children!.map((child) => (
+          {children.map((child) => (
             <TreeNode
               key={child.id}
               node={child}
@@ -156,7 +171,9 @@ function TreeNode({
               onPublish={onPublish}
               onUnpublish={onUnpublish}
               onDelete={onDelete}
+              onRefresh={onRefresh}
               isSelected={selectedNodeId ? child.id === selectedNodeId : false}
+              loadingNodes={loadingNodes}
             />
           ))}
         </div>
@@ -167,8 +184,8 @@ function TreeNode({
 
 export default function TreeView({
   nodes, expandedNodes, onNodeClick, onNodeExpand,
-  onEdit, onAddChild, onCopy, onMove, onPublish, onUnpublish, onDelete,
-  onCreateRoot, selectedNodeId, readOnlyMountIds
+  onEdit, onAddChild, onCopy, onMove, onPublish, onUnpublish, onDelete, onRefresh,
+  onCreateRoot, selectedNodeId, readOnlyMountIds, loadingNodes
 }: TreeViewProps) {
   if (nodes.length === 0) {
     return (
@@ -207,7 +224,9 @@ export default function TreeView({
           onPublish={onPublish}
           onUnpublish={onUnpublish}
           onDelete={onDelete}
+          onRefresh={onRefresh}
           isSelected={selectedNodeId ? node.id === selectedNodeId : false}
+          loadingNodes={loadingNodes}
         />
       ))}
     </div>

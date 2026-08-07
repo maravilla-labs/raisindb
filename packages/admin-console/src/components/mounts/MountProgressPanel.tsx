@@ -84,6 +84,16 @@ export default function MountProgressPanel({ state }: MountProgressPanelProps) {
           <span className="text-blue-400">{progress.text}</span>
         )}
 
+        {/* The mount's life AFTER the walk is delta work, which was invisible:
+            a settled mount read "Full walk complete / N items" forever while
+            incremental syncs kept importing. */}
+        {complete && (state?.delta_items_done ?? 0) > 0 && (
+          <span className="text-zinc-400">
+            {state!.delta_items_done!.toLocaleString()} item
+            {state!.delta_items_done === 1 ? '' : 's'} via delta since
+          </span>
+        )}
+
         {pendingSubtrees > 0 && (
           <span
             className="flex items-center gap-1.5 text-zinc-500"

@@ -23,25 +23,41 @@ export default function Integrations() {
   const [editing, setEditing] = useState<Integration | undefined>(undefined)
   const [showEditor, setShowEditor] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Integration | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  // Mounts are loaded only to warn on delete — a connector's mounts silently
+  // stop syncing when it goes away, and the operator deserves the count.
+  const [mounts, setMounts] = useState<Array<{ integration_ref: string; title: string }>>([])
   const { toasts, error: showError, success: showSuccess, closeToast } = useToast()
 
   const load = useCallback(async () => {
     if (!repo) return
     setLoading(true)
-    try {
-      const [ints, pkgs, tmpl] = await Promise.all([
-        integrationsApi.listIntegrations(repo),
-        integrationsApi.listAdapterPackages(repo),
-        integrationsApi.listConnectorTemplates(repo),
-      ])
-      setIntegrations(ints)
-      setAdapters(pkgs)
-      setTemplates(tmpl)
-    } catch (e: any) {
-      showError('Failed to load connectors', e?.message)
-    } finally {
-      setLoading(false)
+    // allSettled, and the CONNECTOR list decides pass/fail on its own. A failed
+    // load must never fall through to "No connectors yet": the natural response
+    // to that empty state is to recreate a connector that already exists —
+    // which means re-entering a client secret and re-consenting every account.
+    // (Mounts.tsx documents the same fix for the same bug.)
+    const [ints, pkgs, tmpl, mts] = await Promise.allSettled([
+      integrationsApi.listIntegrations(repo),
+      integrationsApi.listAdapterPackages(repo),
+      integrationsApi.listConnectorTemplates(repo),
+      integrationsApi.listMounts(repo),
+    ])
+    if (ints.status === 'fulfilled') {
+      setIntegrations(ints.value)
+      setLoadError(null)
+    } else {
+      setLoadError((ints.reason as any)?.message || 'The connector list could not be loaded.')
     }
+    // Decorations: their absence degrades the page, never blanks it.
+    if (pkgs.status === 'fulfilled') setAdapters(pkgs.value)
+    if (tmpl.status === 'fulfilled') setTemplates(tmpl.value)
+    if (mts.status === 'fulfilled') {
+      setMounts(
+        mts.value.map((m: any) => ({ integration_ref: m.integration_ref, title: m.title })),
+      )
+    }
+    setLoading(false)
   }, [repo])
 
   useEffect(() => {
@@ -221,6 +237,25 @@ export default function Integrations() {
 
       {loading ? (
         <div className="text-center text-zinc-400 py-12">Loading…</div>
+      ) : loadError ? (
+        <GlassCard>
+          <div className="text-center py-12">
+            <XCircle className="w-16 h-16 text-red-400/70 mx-auto mb-4" />
+            <h3 className="text-xl font-semibold text-white mb-2">
+              The connector list could not be loaded
+            </h3>
+            <p className="text-zinc-400">{loadError}</p>
+            <p className="text-zinc-500 text-sm mt-1">
+              Your connectors still exist — do not recreate them.
+            </p>
+            <button
+              onClick={() => void load()}
+              className="mt-4 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm rounded-lg transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </GlassCard>
       ) : integrations.length === 0 ? (
         <GlassCard>
           <div className="text-center py-12">
@@ -269,7 +304,24 @@ export default function Integrations() {
       <ConfirmDialog
         open={deleteTarget !== null}
         title="Delete connector"
-        message={`Delete “${deleteTarget?.title}”? Connected accounts will be lost.`}
+        message={(() => {
+          if (!deleteTarget) return ''
+          const dependent = mounts.filter((m) => m.integration_ref === deleteTarget.path)
+          if (dependent.length === 0) {
+            return `Delete “${deleteTarget.title}”? Connected accounts will be lost.`
+          }
+          const names = dependent
+            .slice(0, 3)
+            .map((m) => `“${m.title}”`)
+            .join(', ')
+          const more = dependent.length > 3 ? ` and ${dependent.length - 3} more` : ''
+          return (
+            `Delete “${deleteTarget.title}”? Connected accounts will be lost, and ` +
+            `${dependent.length} mount${dependent.length === 1 ? '' : 's'} ` +
+            `(${names}${more}) sync${dependent.length === 1 ? 's' : ''} through this ` +
+            `connector and will STOP SYNCING until re-pointed at another one.`
+          )
+        })()}
         variant="danger"
         confirmText="Delete"
         onConfirm={confirmDelete}

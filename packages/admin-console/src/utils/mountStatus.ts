@@ -12,9 +12,12 @@
 import {
   AlertTriangle,
   CheckCircle,
+  CircleOff,
   HardDrive,
   Loader2,
+  PauseCircle,
   ShieldAlert,
+  StopCircle,
   type LucideIcon,
 } from 'lucide-react'
 import type { MountState, SyncRun, WriteConfig } from '../api/integrations'
@@ -61,18 +64,34 @@ export function mountIsWritable(mount?: { write_config?: WriteConfig }): boolean
 export type StatusKind =
   | 'ok'
   | 'syncing'
+  | 'stopping'
   | 'interrupted'
   | 'auth_required'
   | 'misconfigured'
   | 'degraded'
+  | 'paused'
+  | 'disabled'
   | 'idle'
 
-export function statusKind(state?: MountState): StatusKind {
+export function statusKind(state?: MountState, enabled: boolean = true): StatusKind {
+  // Operator intent wins over whatever the engine's status flag still says: a
+  // disabled or paused mount is not "OK" and not "Syncing" — the list is where
+  // an operator scans "why is nothing syncing", and those two answers ARE the
+  // answer. (The invariant at the top of this file: the row and the page it
+  // links to must never disagree.)
+  if (!enabled) return 'disabled'
+  if (state?.paused) return 'paused'
   const s = (state?.status || '').toLowerCase()
   if (s === 'ok' || s === 'synced') return 'ok'
   // A `syncing` flag whose run is long gone is not a live sync. Saying so is
   // what stops the console showing a permanent spinner over a dead run.
-  if (s === 'syncing') return isStaleSyncing(state) ? 'interrupted' : 'syncing'
+  if (s === 'syncing') {
+    if (isStaleSyncing(state)) return 'interrupted'
+    // A stop that has been requested but not yet served: the run ends at its
+    // next page boundary. Without this the operator clicks Stop again and
+    // again, since nothing visibly changed.
+    return state?.stop_requested ? 'stopping' : 'syncing'
+  }
   if (s === 'auth_required') return 'auth_required'
   // Checked before 'degraded': the operator action is completely different.
   // Degraded means "flaky, it may recover"; misconfigured means "it will never
@@ -137,6 +156,27 @@ export const STATUS_META: Record<StatusKind, StatusMeta> = {
     dot: 'bg-amber-400',
     Icon: AlertTriangle,
     hint: 'The last sync did not finish — it was most likely cut short by the job timeout. The next scheduled run picks up where it stopped; you can also sync now.',
+  },
+  stopping: {
+    label: 'Stopping',
+    cls: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+    dot: 'bg-amber-400',
+    Icon: StopCircle,
+    hint: 'Stop requested — the running sync ends at its next page boundary.',
+  },
+  paused: {
+    label: 'Paused',
+    cls: 'bg-zinc-500/10 text-zinc-300 border-white/10',
+    dot: 'bg-zinc-400',
+    Icon: PauseCircle,
+    hint: 'Scheduling is suspended by an operator. The push subscription stays registered — resume to catch up on everything that arrived in the gap.',
+  },
+  disabled: {
+    label: 'Disabled',
+    cls: 'bg-zinc-500/10 text-zinc-400 border-white/10',
+    dot: 'bg-zinc-500',
+    Icon: CircleOff,
+    hint: 'This mount is switched off. Its provider subscription is torn down; enable it to sync again.',
   },
   idle: {
     label: 'Idle',

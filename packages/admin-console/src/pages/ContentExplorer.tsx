@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams, useParams } from 'react-router-dom'
 import { ArrowLeft, Search, ChevronRight, Home, Plus, Clock, Filter, GitMerge, RefreshCw, CheckCircle } from 'lucide-react'
 import { Allotment } from 'allotment'
@@ -61,6 +61,11 @@ export default function ContentExplorer() {
   const [deleteConfirm, setDeleteConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null)
   // Mount ids whose writeback is off — their virtual nodes render as read-only.
   const [readOnlyMountIds, setReadOnlyMountIds] = useState<Set<string>>(new Set())
+  // Nodes whose children are being fetched right now (chevron spinner) — also
+  // the in-flight guard that stops a double-click from firing two fetches.
+  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
+  const loadingNodesRef = useRef<Set<string>>(new Set())
+  const [refreshingTree, setRefreshingTree] = useState(false)
   const { toasts, error: showError, closeToast } = useToast()
 
   // Read revision from URL query params (keep as string, don't parse to number)
@@ -184,36 +189,135 @@ export default function ContentExplorer() {
     }
   }
 
-  async function loadNodeChildren(node: NodeType) {
-    try {
-      // If children already loaded as objects, just expand
-      if (node.children && node.children.length > 0 && typeof node.children[0] === 'object') {
-        setExpandedNodes(prev => new Set(prev).add(node.id))
-        return
+  /** Graft freshly-fetched children onto one node of a tree, immutably. */
+  function withChildren(tree: NodeType[], nodeId: string, children: NodeType[]): NodeType[] {
+    return tree.map(n => {
+      if (n.id === nodeId) {
+        return { ...n, children }
       }
+      if (n.children && Array.isArray(n.children)) {
+        return { ...n, children: withChildren(n.children as NodeType[], nodeId, children) }
+      }
+      return n
+    })
+  }
 
-      // Fetch children with full details
+  /** Every descendant id under a node in the current tree (for pruning expansion state). */
+  function descendantIds(node: NodeType): string[] {
+    const out: string[] = []
+    const walk = (n: NodeType) => {
+      if (!n.children || !Array.isArray(n.children)) return
+      for (const c of n.children as unknown[]) {
+        if (c && typeof c === 'object') {
+          const child = c as NodeType
+          out.push(child.id)
+          walk(child)
+        }
+      }
+    }
+    walk(node)
+    return out
+  }
+
+  async function loadNodeChildren(node: NodeType, opts?: { force?: boolean }) {
+    // If children already loaded as objects, just expand — unless forced.
+    const alreadyLoaded =
+      node.children && node.children.length > 0 && typeof node.children[0] === 'object'
+    if (alreadyLoaded && !opts?.force) {
+      setExpandedNodes(prev => new Set(prev).add(node.id))
+      return
+    }
+
+    // In-flight guard: a second click while loading must not fire a second
+    // fetch (the two responses used to race and clobber each other's grafts).
+    if (loadingNodesRef.current.has(node.id)) return
+    loadingNodesRef.current.add(node.id)
+    setLoadingNodes(new Set(loadingNodesRef.current))
+
+    // Optimistic expand: the chevron flips and spins immediately, so the first
+    // click always visibly responds.
+    setExpandedNodes(prev => new Set(prev).add(node.id))
+
+    try {
       const childDetails = currentRevision !== null
         ? await nodesApi.listChildrenAtRevision(repo, branch, workspace, node.path, currentRevision, currentLocale || undefined)
         : await nodesApi.listChildrenAtHead(repo, branch, workspace, node.path, currentLocale || undefined)
 
-      // Update the nodes tree with children
-      const updateNodeInTree = (nodes: NodeType[]): NodeType[] => {
-        return nodes.map(n => {
-          if (n.id === node.id) {
-            return { ...n, children: childDetails }
-          }
-          if (n.children && Array.isArray(n.children)) {
-            return { ...n, children: updateNodeInTree(n.children as NodeType[]) }
-          }
-          return n
+      // FUNCTIONAL update, never a closure over `nodes`: parallel loads (URL
+      // deep-link expansion + user clicks) used to rebuild the tree from a
+      // stale snapshot and silently drop each other's children — the "have to
+      // click a folder twice" bug.
+      setNodes(prev => withChildren(prev, node.id, childDetails))
+
+      if (opts?.force) {
+        // A forced refresh replaces the subtree with fresh objects whose
+        // children are unloaded — descendants' expansion state would point at
+        // nothing renderable, so prune it.
+        const stale = new Set(descendantIds(node))
+        setExpandedNodes(prev => {
+          const next = new Set([...prev].filter(id => !stale.has(id)))
+          next.add(node.id)
+          return next
         })
       }
-
-      setNodes(updateNodeInTree(nodes))
-      setExpandedNodes(prev => new Set(prev).add(node.id))
     } catch (error) {
       console.error('Failed to load children:', error)
+      // The expand did not happen; say so and put the chevron back.
+      setExpandedNodes(prev => {
+        const next = new Set(prev)
+        next.delete(node.id)
+        return next
+      })
+      showError(`Could not load children of “${node.name || node.path}” — check the connection and try again`)
+    } finally {
+      loadingNodesRef.current.delete(node.id)
+      setLoadingNodes(new Set(loadingNodesRef.current))
+    }
+  }
+
+  /** Context-menu "Refresh": re-fetch one node's children from the server. */
+  function refreshNodeChildren(node: NodeType) {
+    loadNodeChildren(node, { force: true })
+  }
+
+  /** Toolbar refresh: reload roots, then re-fetch children of still-expanded nodes. */
+  async function refreshTree() {
+    if (refreshingTree) return
+    setRefreshingTree(true)
+    try {
+      const data = currentRevision !== null
+        ? await nodesApi.listRootAtRevision(repo, branch, workspace, currentRevision, currentLocale || undefined)
+        : await nodesApi.listRootAtHead(repo, branch, workspace, currentLocale || undefined)
+      setNodes(data)
+
+      // Re-hydrate the branches the user had open, breadth-first so parents
+      // are loaded before their children are looked up.
+      const wanted = expandedNodes
+      const surviving = new Set<string>()
+      let frontier: NodeType[] = data
+      while (frontier.length > 0) {
+        const next: NodeType[] = []
+        for (const n of frontier) {
+          if (!wanted.has(n.id)) continue
+          surviving.add(n.id)
+          try {
+            const childDetails = currentRevision !== null
+              ? await nodesApi.listChildrenAtRevision(repo, branch, workspace, n.path, currentRevision, currentLocale || undefined)
+              : await nodesApi.listChildrenAtHead(repo, branch, workspace, n.path, currentLocale || undefined)
+            setNodes(prev => withChildren(prev, n.id, childDetails))
+            next.push(...childDetails)
+          } catch {
+            // A branch that fails to reload simply renders collapsed.
+          }
+        }
+        frontier = next
+      }
+      setExpandedNodes(surviving)
+    } catch (error) {
+      console.error('Failed to refresh tree:', error)
+      showError('Could not refresh the tree — check the connection and try again')
+    } finally {
+      setRefreshingTree(false)
     }
   }
 
@@ -670,15 +774,26 @@ export default function ContentExplorer() {
                     <Plus className="w-4 h-4" />
                     Create Root Node
                   </button>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-                    <input
-                      type="text"
-                      placeholder="Search nodes..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
-                    />
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="text"
+                        placeholder="Search nodes..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full pl-10 pr-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                    </div>
+                    <button
+                      onClick={refreshTree}
+                      disabled={refreshingTree}
+                      title="Refresh tree (keeps open folders)"
+                      aria-label="Refresh tree"
+                      className="p-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 border border-white/20 rounded-lg text-zinc-300 transition-colors"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${refreshingTree ? 'animate-spin' : ''}`} />
+                    </button>
                   </div>
                 </div>
 
@@ -690,12 +805,14 @@ export default function ContentExplorer() {
                     <TreeView
                       nodes={nodes}
                       expandedNodes={expandedNodes}
+                      loadingNodes={loadingNodes}
                       selectedNodeId={selectedNode?.id}
                       onNodeClick={(node) => {
                         handleNodeClick(node)
                         setShowMobileTree(false) // Switch to content view
                       }}
                       onNodeExpand={handleNodeExpand}
+                      onRefresh={refreshNodeChildren}
                       onEdit={(node) => {
                         setSelectedNode(node)
                         setShowEditor(true)
@@ -792,15 +909,26 @@ export default function ContentExplorer() {
                     <Plus className="w-4 h-4" />
                     Create Root Node
                   </button>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-                    <input
-                      type="text"
-                      placeholder="Search nodes..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
-                    />
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="text"
+                        placeholder="Search nodes..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full pl-10 pr-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                    </div>
+                    <button
+                      onClick={refreshTree}
+                      disabled={refreshingTree}
+                      title="Refresh tree (keeps open folders)"
+                      aria-label="Refresh tree"
+                      className="p-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 border border-white/20 rounded-lg text-zinc-300 transition-colors"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${refreshingTree ? 'animate-spin' : ''}`} />
+                    </button>
                   </div>
                 </div>
 
@@ -853,10 +981,12 @@ export default function ContentExplorer() {
                     <TreeView
                       nodes={nodes}
                       expandedNodes={expandedNodes}
+                      loadingNodes={loadingNodes}
                       selectedNodeId={selectedNode?.id}
                       readOnlyMountIds={readOnlyMountIds}
                       onNodeClick={handleNodeClick}
                       onNodeExpand={handleNodeExpand}
+                      onRefresh={refreshNodeChildren}
                       onEdit={(node) => {
                         setSelectedNode(node)
                         setShowEditor(true)
