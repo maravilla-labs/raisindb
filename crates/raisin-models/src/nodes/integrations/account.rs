@@ -65,6 +65,24 @@ pub struct ConnectedAccount {
     pub secret_fields: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+    /// Scopes the provider actually GRANTED at the last authorization.
+    ///
+    /// Not what was asked for. A connector's scope list can be widened long
+    /// after an account consented, and neither Microsoft nor Google upgrades an
+    /// existing grant — they issue the wider scope only on fresh consent. So an
+    /// account can be perfectly healthy, refresh its token forever, and still be
+    /// unable to perform a write, with nothing anywhere saying why until the
+    /// first push comes back 403.
+    ///
+    /// Recorded here so that shortfall is visible BEFORE it bites. Empty means
+    /// the provider did not report a scope, which is not the same as "none" and
+    /// must not be rendered as a shortfall.
+    ///
+    /// It also has to live on the typed model rather than only in the stored
+    /// JSON: connection edits round-trip accounts through this struct, so a
+    /// field it does not know about is silently dropped on the next save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 impl ConnectedAccount {

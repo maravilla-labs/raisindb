@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: BSL-1.1
 
 import { useEffect, useRef, useState } from 'react'
-import { LinkIcon, Unlink, Loader2, UserCircle, Plus, Pencil, AlertTriangle } from 'lucide-react'
+import {
+  LinkIcon,
+  Unlink,
+  Loader2,
+  UserCircle,
+  Plus,
+  Pencil,
+  AlertTriangle,
+  RefreshCw,
+} from 'lucide-react'
 import {
   integrationsApi,
   type Integration,
@@ -256,9 +265,52 @@ export default function ConnectedAccounts({
                   <div className="text-zinc-500 text-xs truncate">
                     {subtitleFor(account, connectionFor(account.id))}
                   </div>
+                  {/*
+                    The whole point of recording granted scopes. Without this the
+                    shortfall surfaces as a 403 on the first write — hours or
+                    days after the connector's scope list was widened, and
+                    nowhere near the account that needs re-consenting.
+                  */}
+                  {(connectionFor(account.id)?.missing_scopes?.length ?? 0) > 0 && (
+                    <div className="mt-1 text-xs text-amber-400">
+                      Missing permissions — reconnect to grant:{' '}
+                      <span className="font-mono text-[11px] text-amber-300/90">
+                        {connectionFor(account.id)!.missing_scopes!.join(', ')}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-1">
+              {/*
+                Reconnect runs the SAME authorization flow as Connect. It is a
+                separate control because the two answer different questions —
+                "add an account" versus "this account needs re-consenting" — and
+                because a missing scope is otherwise invisible until a write
+                comes back 403 hours later.
+
+                Safe to offer per account now that the callback matches on the
+                provider's subject and updates in place: re-authorizing keeps
+                the account id, so every mount pointing at it keeps working.
+                Before that this button would have silently created a SECOND
+                account and changed nothing.
+              */}
+              {connectionFor(account.id)?.auth_kind === 'oauth' && supportsOauth && (
+                <button
+                  type="button"
+                  onClick={handleConnect}
+                  disabled={connecting}
+                  title="Re-run sign-in for this account, e.g. to grant newly requested permissions"
+                  className="flex items-center gap-1 px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-white/10 rounded transition-colors disabled:opacity-50"
+                >
+                  {connecting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  )}
+                  Reconnect
+                </button>
+              )}
               {connectionFor(account.id)?.auth_kind === 'config' && (
                 <button
                   type="button"

@@ -990,6 +990,21 @@ export interface Connection {
   /** Names only of the secret fields that are stored. */
   secret_fields: string[]
   created_at?: string
+  /** Scopes the provider granted when this account last authorized. */
+  scopes?: string[]
+  /**
+   * Scopes the connector NOW requests that this account has not granted.
+   *
+   * Non-empty means the account is healthy in every observable way — its token
+   * refreshes, reads work — and still cannot perform some operation, because
+   * neither Microsoft nor Google upgrades an existing grant. Only a fresh
+   * authorization does. Reconnecting is the fix.
+   *
+   * Absent when the provider never reported its scopes: that is not evidence it
+   * granted nothing, and rendering every such account as broken would train
+   * people to ignore the warning.
+   */
+  missing_scopes?: string[]
 }
 
 export interface UpsertConnectionBody {

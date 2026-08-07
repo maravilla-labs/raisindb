@@ -372,6 +372,17 @@ pub async fn callback(
         .and_then(|v| v.as_str())
         .and_then(id_token_email)
         .unwrap_or_default();
+    // What the provider ACTUALLY granted, which is not always what was asked
+    // for. Recorded so the console can tell an account that is missing a
+    // permission from one that is merely broken — the difference between
+    // "reconnect to grant it" and "something else is wrong". Both Microsoft and
+    // Google return a space-delimited `scope`; an absent one means the provider
+    // did not say, which is not the same as "none" and is stored as such.
+    let granted_scopes: Vec<String> = body
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
 
     // --- Encrypt the token bundle and append a plaintext-metadata account ---
     // Past this point the user has already consented and the provider has
@@ -390,7 +401,43 @@ pub async fn callback(
             }
         };
 
-    let account_id = nanoid::nanoid!();
+    let mut accounts = connected_accounts(&node);
+
+    // RECONNECT, not "connect a second time".
+    //
+    // An account is identified by the provider's own subject, so re-consenting
+    // as the same user UPDATES that account in place and keeps its id. This is
+    // the whole mechanism behind widening a scope: every mount references an
+    // account by `account_ref`, so minting a new id would leave those mounts
+    // pointing at the OLD account and its old, narrower grant — the operator
+    // consents to the new permission, sees a second account appear, and nothing
+    // whatsoever changes about the mounts they were trying to fix.
+    //
+    // That is what forced disconnect-then-connect, which is worse than it
+    // sounds: disconnecting is precisely what breaks the `account_ref` the
+    // mounts depend on. Matching on subject removes the need for either step.
+    //
+    // An empty subject cannot be matched on — some providers return no id_token
+    // — so those still append. Guessing which existing account an anonymous
+    // grant belongs to would eventually attach someone's tokens to someone
+    // else's account.
+    let existing = if subject.is_empty() {
+        None
+    } else {
+        accounts.iter().position(|a| {
+            a.get("subject").and_then(|v| v.as_str()) == Some(subject.as_str())
+                && a.get("provider_type").and_then(|v| v.as_str()) == Some(provider_type.as_str())
+        })
+    };
+
+    let account_id = match existing {
+        Some(i) => accounts[i]
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        None => nanoid::nanoid!(),
+    };
     let account = json!({
         "id": account_id,
         "label": if subject.is_empty() { provider_type.clone() } else { subject.clone() },
@@ -398,10 +445,21 @@ pub async fn callback(
         "provider_type": provider_type,
         "expires_at": now_secs() as i64 + expires_in.max(0),
         "tokens_encrypted": tokens_encrypted,
+        "scopes": granted_scopes,
+        "connected_at": now_secs() as i64,
     });
 
-    let mut accounts = connected_accounts(&node);
-    accounts.push(account);
+    match existing {
+        Some(i) => {
+            tracing::info!(
+                integration_path = %entry.target_path,
+                account_id = %account_id,
+                "re-authorized an existing account in place; its id and every mount                  referencing it are unchanged"
+            );
+            accounts[i] = account;
+        }
+        None => accounts.push(account),
+    }
     set_connected_accounts(&mut node, accounts)?;
     if let Err(e) = svc.update_node(node).await {
         tracing::error!(error = %e, integration_path = %entry.target_path,

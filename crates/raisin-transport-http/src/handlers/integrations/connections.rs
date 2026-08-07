@@ -50,6 +50,22 @@ pub struct ConnectionView {
     pub secret_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+    /// Scopes the provider granted when this account last authorized.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// Scopes the connector NOW requests that this account has not granted.
+    ///
+    /// Non-empty means the account is healthy in every observable way — the
+    /// token refreshes, reads work — and yet cannot perform some operation,
+    /// because neither Microsoft nor Google upgrades an existing grant. Only a
+    /// fresh authorization does. Surfacing it here is what turns a 403 at write
+    /// time into something an operator can see and act on beforehand.
+    ///
+    /// Empty when the account reported no scopes at all: the provider not
+    /// saying what it granted is not evidence that it granted nothing, and
+    /// showing every such account as broken would train people to ignore this.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_scopes: Vec<String>,
 }
 
 impl From<&ConnectedAccount> for ConnectionView {
@@ -66,8 +82,31 @@ impl From<&ConnectedAccount> for ConnectionView {
             config: a.config_or_empty(),
             secret_fields: a.secret_fields.clone(),
             created_at: a.created_at.clone(),
+            scopes: a.scopes.clone(),
+            // Filled in by the caller, which is the only place that can see the
+            // connector's current scope list.
+            missing_scopes: Vec::new(),
         }
     }
+}
+
+/// Which of the connector's currently-requested scopes an account has not
+/// granted.
+///
+/// Comparison is exact and case-sensitive: providers echo scopes back verbatim,
+/// and normalizing would risk calling a genuinely missing scope present.
+///
+/// Returns nothing when the account reported no scopes — see
+/// [`ConnectionView::missing_scopes`].
+fn missing_scopes(granted: &[String], requested: &str) -> Vec<String> {
+    if granted.is_empty() {
+        return Vec::new();
+    }
+    requested
+        .split_whitespace()
+        .filter(|want| !granted.iter().any(|has| has == want))
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,8 +135,19 @@ pub async fn list_connections(
         .ok_or_else(|| ApiError::node_not_found(q.integration_path.clone()))?;
 
     let accounts = parse_accounts(&node);
+    // The connector's CURRENT ask, which is what a granted scope has to be
+    // measured against — the list can be widened by a package update long after
+    // an account consented.
+    let requested = super::scopes_string(&super::oauth_config(&node));
     Ok(Json(ListResponse {
-        connections: accounts.iter().map(ConnectionView::from).collect(),
+        connections: accounts
+            .iter()
+            .map(|a| {
+                let mut view = ConnectionView::from(a);
+                view.missing_scopes = missing_scopes(&a.scopes, &requested);
+                view
+            })
+            .collect(),
     }))
 }
 
@@ -161,6 +211,9 @@ pub async fn create_connection(
                 secrets_encrypted: secrets.blob,
                 secret_fields: secrets.field_names,
                 created_at: Some(chrono::Utc::now().to_rfc3339()),
+                // A credential connection has no OAuth grant, so it has no
+                // scopes and can never report a shortfall.
+                scopes: Vec::new(),
             };
 
             let view = ConnectionView::from(&account);
