@@ -81,6 +81,18 @@ impl UnifiedJobEventHandler {
         // it silently drops valid trigger events (e.g. the agent-continuation
         // aggregated_result event), permanently hanging the conversation.
         if let Some(registry) = &self.trigger_registry {
+            // Load the scope's snapshot on first contact (then once per TTL).
+            // Without this the quick-reject below only ever engaged after a
+            // trigger DEFINITION was edited in the scope — everywhere else it
+            // failed open forever, and each of an import's thousands of
+            // writes walked the full trigger list.
+            registry
+                .ensure_loaded(
+                    &node_event.tenant_id,
+                    &node_event.repository_id,
+                    &node_event.branch,
+                )
+                .await;
             if !registry.could_have_matches_for_scope(
                 &node_event.tenant_id,
                 &node_event.repository_id,

@@ -168,6 +168,36 @@ impl<S: Storage> TriggerRegistry<S> {
         }
     }
 
+    /// Make sure this scope has a FRESH snapshot, loading one if needed.
+    ///
+    /// The quick-reject is only authoritative for a loaded scope, and nothing
+    /// used to load a scope until its first trigger EDIT — so most scopes
+    /// failed open forever and every write in the system paid a full trigger
+    /// evaluation (two unbounded workspace scans in the matcher). This makes
+    /// the load event-driven: one storage read per scope per TTL, amortized
+    /// across every event in that scope. Stampede-protected by `invalidate`'s
+    /// try_lock; a skipped or failed load keeps failing open, which is the
+    /// pre-existing behaviour.
+    pub async fn ensure_loaded(&self, tenant_id: &str, repo_id: &str, branch: &str) {
+        let key: ScopeKey = (
+            tenant_id.to_string(),
+            repo_id.to_string(),
+            branch.to_string(),
+        );
+        if self.cache.get_fresh(&key).is_some() {
+            return;
+        }
+        if let Err(e) = self.invalidate(tenant_id, repo_id, branch).await {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                repo_id = %repo_id,
+                branch = %branch,
+                error = %e,
+                "trigger registry load failed; quick-reject stays open for this scope"
+            );
+        }
+    }
+
     /// Invalidate and reload triggers for ONE (tenant, repo, branch) scope.
     ///
     /// Other scopes' snapshots are untouched. Uses try_lock to prevent

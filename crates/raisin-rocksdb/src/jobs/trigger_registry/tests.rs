@@ -202,6 +202,63 @@ fn test_get_candidates_filtering() {
     assert_eq!(candidates.len(), 0);
 }
 
+/// The quick-reject tests the INTERSECTION of the workspace and node_type
+/// dimensions: a trigger wildcard in one dimension but filtered in the other
+/// must NOT make unrelated events pass. (Regression: the old check returned
+/// true the moment ANY trigger anywhere was wildcard in ONE dimension, so on
+/// real deployments — where most triggers skip one filter — the quick-reject
+/// never rejected anything and every import write walked the full list.)
+#[test]
+fn quick_reject_is_per_dimension_intersection() {
+    fn trigger(id: &str, workspaces: Option<Vec<&str>>, node_types: Option<Vec<&str>>) -> CachedTrigger {
+        CachedTrigger {
+            id: id.to_string(),
+            function_path: Some("/functions/test".to_string()),
+            trigger_name: id.to_string(),
+            trigger_path: None,
+            priority: 0,
+            enabled: true,
+            event_kinds: vec!["Created".to_string()],
+            filters: TriggerFilters {
+                workspaces: workspaces.map(|v| v.into_iter().map(String::from).collect()),
+                node_types: node_types.map(|v| v.into_iter().map(String::from).collect()),
+                paths: None,
+                property_filters: None,
+            },
+            max_retries: None,
+            workflow_data: None,
+        }
+    }
+
+    // A: only workspace "content", any node_type. B: any workspace, only "blog:Post".
+    let snapshot = TriggerRegistrySnapshot::build_indexes(
+        vec![
+            trigger("a", Some(vec!["content"]), None),
+            trigger("b", None, Some(vec!["blog:Post"])),
+        ],
+        1,
+    );
+
+    // An unrelated event (e.g. a system-workspace bookkeeping node) matches
+    // NEITHER trigger's intersection — must be rejected.
+    assert!(!snapshot.could_have_matches("raisin:system", "raisin:VirtualMount"));
+
+    // Each trigger's own intersection still passes.
+    assert!(snapshot.could_have_matches("content", "anything:Else")); // A
+    assert!(snapshot.could_have_matches("elsewhere", "blog:Post")); // B
+
+    // A trigger wildcard in BOTH dimensions keeps everything passing.
+    let open = TriggerRegistrySnapshot::build_indexes(vec![trigger("c", None, None)], 1);
+    assert!(open.could_have_matches("raisin:system", "raisin:VirtualMount"));
+
+    // A loaded-but-empty scope (version >= 1) definitively rejects…
+    let empty = TriggerRegistrySnapshot::build_indexes(vec![], 1);
+    assert!(!empty.could_have_matches("content", "blog:Post"));
+    // …while a never-loaded snapshot (version 0) fails open.
+    let unloaded = TriggerRegistrySnapshot::empty();
+    assert!(unloaded.could_have_matches("content", "blog:Post"));
+}
+
 // ───────────────────────── Per-scope snapshot cache ─────────────────────────
 
 mod snapshot_cache {

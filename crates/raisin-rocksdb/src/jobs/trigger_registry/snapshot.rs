@@ -161,18 +161,27 @@ impl TriggerRegistrySnapshot {
             return true;
         }
 
-        // Wildcards always match
-        if !self.wildcard_workspace.is_empty() || !self.wildcard_node_type.is_empty() {
+        // A trigger matches only when BOTH its workspace filter and its
+        // node_type filter accept the event, so the quick-reject tests the
+        // INTERSECTION of the two dimensions: is any single trigger open to
+        // this workspace (wildcard or listed) AND open to this node_type?
+        //
+        // The old check returned true the moment ANY trigger anywhere was
+        // wildcard in ONE dimension. On a real deployment most triggers skip
+        // one filter, so the quick-reject never rejected anything — every
+        // write in the system walked the full trigger list ("42 evaluated,
+        // 0 matched" on each of an import's thousands of commits).
+        let nt_listed = self.by_node_type.get(node_type);
+        let open_to_node_type = |id: &String| {
+            self.wildcard_node_type.contains(id) || nt_listed.is_some_and(|s| s.contains(id))
+        };
+
+        if self.wildcard_workspace.iter().any(open_to_node_type) {
             return true;
         }
-
-        // Check if workspace is indexed
-        let has_workspace = self.indexed_workspaces.contains(workspace);
-        // Check if node_type is indexed
-        let has_node_type = self.indexed_node_types.contains(node_type);
-
-        // If either is indexed, we might have matches
-        has_workspace || has_node_type
+        self.by_workspace
+            .get(workspace)
+            .is_some_and(|ids| ids.iter().any(open_to_node_type))
     }
 
     /// Get candidate triggers for an event
