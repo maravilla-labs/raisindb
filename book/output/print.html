@@ -94,7 +94,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-98a3460e.js";
+            window.path_to_searchindex_js = "searchindex-d32cd949.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-50ab3bbb.js"></script>
@@ -7224,6 +7224,60 @@ SHOW SECURITY CONFIG FOR 'content';
 <li><code>error</code> — park the edit and report it.</li>
 <li><code>resolver_function</code> — hand the decision to a function shipped by the package, which answers <code>local_wins</code>, <code>remote_wins</code>, <code>merged</code> or <code>park</code>. Anything unclear — a throw, an unrecognized answer — parks rather than guesses.</li>
 </ul>
+<h3 id="a-write-that-can-never-succeed-must-not-be-retried"><a class="header" href="#a-write-that-can-never-succeed-must-not-be-retried">A write that can never succeed must not be retried</a></h3>
+<p>The mode table above says what to push. The other half is what to do when a push
+comes back refused, and the two failures that matter are the ones no retry can
+resolve.</p>
+<p>A <code>config_error</code> — a missing OAuth scope is the canonical case — will fail
+identically every time until a human changes something outside this system. Left
+as an ordinary per-item failure it produces a loop with no exit: the edit stays
+pending, the next drain retries it, and so on. That ran in production. One
+un-pushable calendar edit produced roughly 78 drains a minute, burned a core,
+and consumed 303 of the tenant’s rate-limit responses in forty minutes, while
+other mounts’ syncs no-oped behind the lease it was holding.</p>
+<p>So the first <code>config_error</code> ends the drain — every remaining push would fail the
+same way — badges the mount <code>misconfigured</code>, and stands off for fifteen minutes.
+The stand-off is a window rather than a flag because what fixes the condition
+leaves no trace here: someone consents to a scope at the provider, and nothing
+in this system observes that. A sticky flag would keep a recovered mount
+disabled; a window heals by itself, and being wrong costs one call per quarter
+hour instead of thousands per hour.</p>
+<p>Throttling needs the opposite treatment and the same care. A provider shedding
+load answers 429 — and, in Graph’s case, 503 — meaning “later”, not “wrong”. Read
+as an ordinary transient failure it is retried promptly, which on a throttled
+tenant is self-sustaining: the walk is slow because the provider is throttling,
+prompt retries make it slower, the run outlives the job watchdog and is killed
+before it can finish, and the mount is left claiming to sync while never
+completing an import.</p>
+<h3 id="a-killed-run-has-to-be-closed-by-the-next-one"><a class="header" href="#a-killed-run-has-to-be-closed-by-the-next-one">A killed run has to be closed by the next one</a></h3>
+<p>The watchdog stops an overrunning sync by dropping the task at its current await
+point. There is no destructor behind that: the finalize step simply never runs,
+so the mount’s status stays <code>syncing</code> and its newest run record stays <code>running</code>,
+and nothing else ever rewrites either. The mount then looks permanently busy
+while doing nothing.</p>
+<p>The next run to take the per-mount lease closes it out. Holding the lease is what
+makes that safe to assert — no other run can be live, so an open record belongs
+to one that died. It is recorded as <code>interrupted</code> rather than as an error:
+nothing failed, and the resume point is intact. What it buys is the ability to
+tell a mount whose runs keep being killed from one that is merely slow, which
+from the outside look identical.</p>
+<h2 id="permissions-outlive-the-grant-that-carried-them"><a class="header" href="#permissions-outlive-the-grant-that-carried-them">Permissions outlive the grant that carried them</a></h2>
+<p>Neither Microsoft nor Google upgrades an existing OAuth grant. A connector’s
+scope list can be widened long after an account consented, and that account
+keeps precisely the permissions it had — while remaining healthy in every
+observable way, refreshing its token and reading happily. The shortfall surfaces
+only as a 403 on the first write.</p>
+<p>Two things make that manageable. The account records what the provider actually
+granted, so the console can compare it against what the connector now asks for
+and name the difference. And re-authorizing <strong>updates the account in place</strong>,
+matched on the provider’s own subject, so it keeps its id.</p>
+<p>That second point is the load-bearing one. Every mount references an account by
+id, so an authorization flow that minted a new one on each consent — which is
+what this did originally — left the mounts pointing at the old account and its
+old, narrower grant. The operator granted the permission, watched a duplicate
+account appear, and nothing about the mounts changed. The only way through was
+to disconnect first, which is exactly what breaks the reference the mounts
+depend on.</p>
 <h2 id="attachments-and-content-on-demand"><a class="header" href="#attachments-and-content-on-demand">Attachments, and content on demand</a></h2>
 <p>A sync writes attachment <strong>metadata</strong> only: a <code>raisin:Asset</code> child per attachment with its name, mime type and size. Downloading every attachment of every message during a sync would multiply a mailbox import by whole documents, and most attachments are never opened. <code>file == null</code> on a mount-owned asset means precisely “not fetched yet”; the bytes are fetched when something asks for them and stored like any other asset’s.</p>
 <p>Attachments are children rather than an array property because the Drive adapter already maps provider blobs to <code>raisin:Asset</code> — an array would build a second, parallel blob path. As children they are queryable, can be full-text indexed, and inline images fall out naturally through a <code>content_id</code>.</p>
