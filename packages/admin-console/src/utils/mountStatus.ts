@@ -333,6 +333,16 @@ export const RUN_OUTCOME_META: Record<string, OutcomeMeta> = {
   auth_required: { label: 'Auth required', cls: 'bg-yellow-500/10 text-yellow-400', dot: 'bg-yellow-400' },
   misconfigured: { label: 'Misconfigured', cls: 'bg-orange-500/10 text-orange-400', dot: 'bg-orange-400' },
   skipped: { label: 'Skipped', cls: 'bg-zinc-500/10 text-zinc-400', dot: 'bg-zinc-500' },
+  // A run the job watchdog killed, or one cut short by a restart. Amber rather
+  // than red: nothing failed and nothing was lost — the resume point survives —
+  // but a mount whose runs keep being interrupted is never finishing an import,
+  // and that has to be visible. Before this outcome existed such a run simply
+  // stayed `Running` forever, so the mount looked busy instead of stuck.
+  interrupted: {
+    label: 'Interrupted',
+    cls: 'bg-amber-500/10 text-amber-400',
+    dot: 'bg-amber-400',
+  },
 }
 
 export function runOutcomeMeta(run: SyncRun): OutcomeMeta {
