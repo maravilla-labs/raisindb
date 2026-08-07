@@ -253,6 +253,14 @@ children of `mount.remote_root`.
 Returns `{ items: ExternalItem[], next_cursor: string | null }`. Return `next_cursor: null`
 when there are no more pages. The full-reconcile path (§5) calls `list` recursively.
 
+> **`folder_id` is not optional to honor.** The engine's full walk recurses folders
+> explicitly: every `list` call names the folder whose children it wants (`null` only for
+> the mount root). An adapter that ignores `folder_id` and always lists its configured root
+> looks completely healthy on a FLAT hierarchy — the first call is the root — and then
+> silently never imports any nested content, while re-discovering the same root-level
+> folders on every recursion step so the walk never converges (production incident,
+> 2026-08, MS Graph drive adapter).
+
 ### 2.3 `get`
 
 Fetch a single item by `item_id` (preferred) or by `path` (relative to `remote_root`).
@@ -353,12 +361,25 @@ the provider has a real delta/changes API and advertise `supports_changes: true`
 | `since_token` | String \| null | Cursor from a previous `next_token`; `null` on the first delta call. |
 | `folder_id` | String? | Scope of the change feed; defaults to `mount.remote_root`. |
 
-Returns `{ items: Change[], next_token: string }`. The engine pages until `next_token`
-stabilizes or `max_items_per_sync` is reached, then persists `next_token` as the mount's
-`last_sync_token`. `next_token` must be a durable, resumable cursor: re-running from a
-persisted token must be safe (the engine's upserts are idempotent). If the provider has **no**
-delta API, set `supports_changes: false` and the engine falls back to a full-listing diff via
-`list`; you need not implement `get_changes` in that case.
+Returns `{ items: Change[], next_token: string, has_more?: boolean }`. The engine persists
+`next_token` after each page as the mount's `last_sync_token`. `next_token` must be a
+durable, resumable cursor: re-running from a persisted token must be safe (the engine's
+upserts are idempotent). If the provider has **no** delta API, set
+`supports_changes: false` and the engine falls back to a full-listing diff via `list`; you
+need not implement `get_changes` in that case.
+
+> **Declare `has_more` — do not rely on token identity to end paging.** `has_more: true`
+> means "this token is a mid-enumeration cursor, call me again now"; `has_more: false` means
+> "caught up — the token is the NEXT run's resume point, stop paging." The engine cannot
+> infer this from the token itself: Microsoft Graph mints a **fresh** delta token on every
+> poll of an idle feed, so "the token stopped changing" never happens there — before
+> `has_more` existed, the engine's delta loop spun empty pages at request speed against an
+> idle Graph calendar, committing the fresh cursor each round, until the job watchdog killed
+> the run (production incident, 2026-08). Adapters that omit `has_more` (legacy) fall back
+> to the engine's heuristic: it stops paging at the first **empty page** or when the token
+> round-trips unchanged. If your provider can return empty pages *mid-enumeration* (Graph
+> documents this), you MUST declare `has_more` or a backlog drain will stop early — resumably
+> and harmlessly, but one page per run.
 
 > **CRITICAL — never return `next_token: null` to mean "no changes."** When there is nothing
 > new, return the **unchanged cursor** you were given (`since_token`), not `null`. A `null`
