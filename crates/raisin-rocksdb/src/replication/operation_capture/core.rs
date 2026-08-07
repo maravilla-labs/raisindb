@@ -386,17 +386,36 @@ impl OperationCapture {
     ///
     /// This should be called on startup to resume from where we left off.
     pub async fn restore_from_oplog(&self, tenant_id: &str, repo_id: &str) -> Result<()> {
+        // Our own op_seq must be exact — a reused sequence number would
+        // overwrite oplog entries — so it always comes from the log itself
+        // (a single reverse seek on the key encoding; the seq lives in the
+        // key, no value is read).
         let highest_seq =
             self.oplog_repo
                 .get_highest_seq(tenant_id, repo_id, &self.cluster_node_id)?;
 
-        let all_ops = self.oplog_repo.get_all_operations(tenant_id, repo_id)?;
-
-        let mut merged_vc = VectorClock::new();
-        for (_, ops) in all_ops {
-            for op in ops {
-                merged_vc.merge(&op.vector_clock);
-            }
+        // The vector clock is maintained incrementally on every append
+        // (`increment_vector_clock_for_node`), so the persisted snapshot is
+        // the normal startup source — the full-oplog materialization this
+        // used to do here (every op, node payloads included) was the ~20 GB
+        // RSS spike and most of a multi-minute silent boot.
+        //
+        // The snapshot is written non-atomically after the op batch, so it
+        // can trail by a crash window. Merging our own true highest seq below
+        // covers the one entry where staleness is unsafe; a trailing entry
+        // for a peer only causes an idempotent re-pull. An empty snapshot
+        // (legacy DB predating snapshot maintenance) falls back to a
+        // keys-only rebuild, which also persists the snapshot for next boot.
+        let mut merged_vc = self
+            .oplog_repo
+            .get_vector_clock_snapshot(tenant_id, repo_id)?;
+        if merged_vc.is_empty() {
+            merged_vc = self
+                .oplog_repo
+                .rebuild_vector_clock_snapshot(tenant_id, repo_id)?;
+        }
+        if highest_seq > merged_vc.get(&self.cluster_node_id) {
+            merged_vc.set(&self.cluster_node_id, highest_seq);
         }
 
         {

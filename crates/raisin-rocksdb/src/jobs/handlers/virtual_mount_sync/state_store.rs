@@ -25,20 +25,11 @@ pub async fn record_push_delivery(
     mount_id: &str,
     accepted: bool,
 ) -> Result<bool> {
-    let svc: NodeService<RocksDBStorage> = NodeService::new_with_context(
-        storage.clone(),
-        tenant.to_string(),
-        repo.to_string(),
-        branch.to_string(),
-        SYSTEM_WORKSPACE.to_string(),
-    );
-    let Some(node) = svc.get(mount_id).await? else {
-        // At `warn`, matching `persist_mount_state`'s identical condition twenty
-        // lines down. This used to return a bare `Ok(false)` and the caller only
-        // logged `Err`, so "the delivery was not recorded" was discarded by BOTH
-        // sides — which is how the console showed `ACCEPTED 0 · REJECTED 0`
-        // while its own run history listed webhook-triggered syncs on the same
-        // page. The counter write was being lost, and nothing said so.
+    // Read through the module's system-auth reader: an unauthenticated
+    // NodeService read is silently denied by RLS and reports as "mount node
+    // not found on this branch", which is a lie — the node is there, the read
+    // was refused. That mislabel cost a full branch-resolution investigation.
+    let Some(mut state) = read_mount_state(storage, tenant, repo, branch, mount_id).await? else {
         tracing::warn!(
             mount_id = %mount_id,
             branch = %branch,
@@ -47,12 +38,6 @@ pub async fn record_push_delivery(
         );
         return Ok(false);
     };
-    let mut state: MountState = node
-        .properties
-        .get("state")
-        .and_then(|pv| serde_json::to_value(pv).ok())
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
 
     let now = Utc::now().timestamp();
     if accepted {

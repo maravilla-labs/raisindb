@@ -11,9 +11,10 @@
 
 use super::helpers::get_oplog_cf;
 use super::OpLogRepository;
-use crate::keys::vector_clock_snapshot_key;
+use crate::keys::{decode_u64, oplog_tenant_repo_prefix, vector_clock_snapshot_key};
 use raisin_error::{Error, Result};
 use raisin_replication::VectorClock;
+use rocksdb::{Direction, IteratorMode};
 
 impl OpLogRepository {
     /// Get the current vector clock snapshot for a tenant/repo
@@ -171,13 +172,46 @@ impl OpLogRepository {
         tenant_id: &str,
         repo_id: &str,
     ) -> Result<VectorClock> {
-        let all_ops = self.get_all_operations(tenant_id, repo_id)?;
+        let cf = get_oplog_cf(&self.db)?;
+        let prefix = oplog_tenant_repo_prefix(tenant_id, repo_id);
+        let snapshot_key = vector_clock_snapshot_key(tenant_id, repo_id);
         let mut vector_clock = VectorClock::new();
 
-        // Find the highest op_seq for each cluster node
-        for (cluster_node_id, ops) in all_ops {
-            if let Some(max_op) = ops.iter().max_by_key(|op| op.op_seq) {
-                vector_clock.set(&cluster_node_id, max_op.op_seq);
+        // The key alone carries everything this rebuild needs —
+        // {tenant}\0{repo}\0{cluster_node_id}\0{op_seq: 8B BE}\0{ts: 8B BE} —
+        // so scan KEYS ONLY. The previous implementation materialized every
+        // operation (full node payloads included) into memory to read two
+        // fields per op; on a mount-import-sized oplog that peaked around
+        // 20 GB RSS and pinned a core for minutes at startup.
+        //
+        // Parse the fixed-width fields from the END of the key: the binary
+        // seq/ts segments may themselves contain 0x00 bytes, so splitting on
+        // the separator is wrong (same trap as ORDERED_CHILDREN keys).
+        const TAIL: usize = 1 + 8 + 1 + 8; // \0 op_seq \0 timestamp
+
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+        for item in iter {
+            let (key, _value) =
+                item.map_err(|e| Error::storage(format!("Iterator error: {}", e)))?;
+            if !key.starts_with(&prefix[..prefix.len() - 1]) {
+                break;
+            }
+            if key.as_ref() == snapshot_key.as_slice() {
+                continue;
+            }
+            if key.len() < prefix.len() + TAIL {
+                continue;
+            }
+            let node_end = key.len() - TAIL;
+            let seq_start = node_end + 1;
+            let Ok(op_seq) = decode_u64(&key[seq_start..seq_start + 8]) else {
+                continue;
+            };
+            let cluster_node_id = String::from_utf8_lossy(&key[prefix.len()..node_end]);
+            if op_seq > vector_clock.get(&cluster_node_id) {
+                vector_clock.set(&cluster_node_id, op_seq);
             }
         }
 

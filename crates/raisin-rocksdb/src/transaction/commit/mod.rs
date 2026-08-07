@@ -62,15 +62,37 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     let is_system = commit_meta.is_system;
 
     tracing::warn!(
-        "COMMIT DEBUG: max_revision={:?}, branch={:?}",
+        "COMMIT DEBUG: max_revision={:?}, branch={:?}, actor={:?}, message={:?}, is_system={}",
         max_revision,
-        branch
+        branch,
+        actor.as_deref(),
+        message.as_deref(),
+        is_system
     );
 
     let mut batch_to_write = tx.extract_batch()?;
 
     // PHASE 2: Extract changed nodes and translations for async snapshot creation
     let changed_nodes = tx.extract_changed_nodes()?;
+
+    // Diagnostic for runaway mount-node commit loops: name the writer whenever a
+    // VirtualMount node is part of a commit. One line per COMMIT (a transaction
+    // batches its writes and commits once), aggregating the affected mounts.
+    let mount_changes: Vec<String> = changed_nodes
+        .iter()
+        .filter(|(_, change)| change.node_type.as_deref() == Some("raisin:VirtualMount"))
+        .map(|(node_id, change)| format!("{node_id}:{:?}", change.operation))
+        .collect();
+    if !mount_changes.is_empty() {
+        tracing::warn!(
+            mounts = ?mount_changes,
+            branch = ?branch.as_deref(),
+            actor = ?actor.as_deref(),
+            message = ?message.as_deref(),
+            is_system,
+            "VirtualMount node committed"
+        );
+    }
     let changed_translations = tx.extract_changed_translations()?;
 
     tracing::debug!(

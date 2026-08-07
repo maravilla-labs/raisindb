@@ -4,7 +4,8 @@ use super::helpers::{deserialize_operation, get_oplog_cf};
 use super::types::OpLogStats;
 use super::OpLogRepository;
 use crate::keys::{
-    oplog_from_seq_prefix, oplog_node_prefix, oplog_tenant_repo_prefix, vector_clock_snapshot_key,
+    decode_u64, oplog_from_seq_prefix, oplog_node_prefix, oplog_tenant_repo_prefix,
+    vector_clock_snapshot_key,
 };
 use hashbrown::HashMap;
 use raisin_error::{Error, Result};
@@ -269,36 +270,43 @@ impl OpLogRepository {
 
     /// Get the highest sequence number for a specific node
     ///
-    /// Returns 0 if no operations exist
+    /// Returns 0 if no operations exist.
+    ///
+    /// The op_seq is big-endian in the key directly after the node prefix, so
+    /// the highest sequence is the LAST key under the prefix: one reverse
+    /// seek, no value deserialization. The previous forward walk deserialized
+    /// every operation under the node — on a mount-import-sized oplog that
+    /// was a large share of a multi-minute silent startup.
     pub fn get_highest_seq(&self, tenant_id: &str, repo_id: &str, node_id: &str) -> Result<u64> {
         let cf = get_oplog_cf(&self.db)?;
         let prefix = oplog_node_prefix(tenant_id, repo_id, node_id);
 
-        // Iterate backwards from the prefix to get the latest
-        let iter = self
+        // Smallest key sorting after every key under the prefix: the prefix
+        // ends with the 0x00 separator, so bumping that byte to 0x01 is the
+        // exact successor. No stored oplog key can equal it.
+        let mut upper = prefix.clone();
+        let last = upper
+            .last_mut()
+            .expect("oplog node prefix is never empty");
+        debug_assert_eq!(*last, 0, "oplog node prefix must end with the separator");
+        *last = 0x01;
+
+        let mut iter = self
             .db
-            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            .iterator_cf(&cf, IteratorMode::From(&upper, Direction::Reverse));
 
-        let mut highest = 0u64;
-
-        for item in iter {
-            let (key, value) =
+        if let Some(item) = iter.next() {
+            let (key, _value) =
                 item.map_err(|e| Error::storage(format!("Iterator error: {}", e)))?;
-
-            // Check if still within our prefix
-            if !key.starts_with(&prefix[..prefix.len() - 1]) {
-                break;
-            }
-
-            let op: Operation = rmp_serde::from_slice(&value)
-                .map_err(|e| Error::storage(format!("Failed to deserialize operation: {}", e)))?;
-
-            if op.op_seq > highest {
-                highest = op.op_seq;
+            if key.starts_with(&prefix) && key.len() >= prefix.len() + 8 {
+                let seq = decode_u64(&key[prefix.len()..prefix.len() + 8]).map_err(|e| {
+                    Error::storage(format!("Failed to decode op_seq from oplog key: {e:?}"))
+                })?;
+                return Ok(seq);
             }
         }
 
-        Ok(highest)
+        Ok(0)
     }
 
     /// Get statistics about the operation log
