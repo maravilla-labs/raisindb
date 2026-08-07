@@ -624,7 +624,28 @@ export interface MountState {
     failed: number
     truncated: boolean
     stopped: boolean
+    /** Local deletes propagated to the provider. */
+    deleted?: number
+    /** Local deletes deliberately NOT propagated, under `delete_policy: detach`. */
+    detached?: number
+    /** A blast-radius rail refused this run's deletes; everything is parked. */
+    blocked?: boolean
+    /** Updates withheld whole under `move_policy: reject`. */
+    rejected?: number
+    /** Pushes the provider refused as stale, abandoned by the conflict policy. */
+    conflicts?: number
+    /** Conflicts left pending for a human. */
+    parked?: number
   }
+  /**
+   * Epoch seconds before which the write drain will not run again, after a
+   * failure no retry can fix (a missing OAuth scope being the usual one).
+   *
+   * The reason a mount can show pending edits, `outcome: ok`, and no activity:
+   * it is deliberately standing off. Without this the state is indistinguishable
+   * from a mount that simply has nothing to do.
+   */
+  writeback_retry_after?: number
   /**
    * Push (webhook) subscription lifecycle state, engine-managed. Populated only
    * for mounts whose connector supports push and whose `sync_config.mode` is

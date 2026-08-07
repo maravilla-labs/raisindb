@@ -282,6 +282,14 @@ async fn a_stop_ends_the_drain_at_the_next_checkpoint() {
 
     // Clearing the stop lets the very same edits drain normally — they were
     // parked, not consumed.
+    //
+    // `run_sync` now does this clearing itself, once a run has reached its end:
+    // a stop is a request to end THIS run, not a mode the mount stays in.
+    // Nothing else in the engine ever cleared the flag, so a mount that was
+    // stopped once stayed stopped — every later run exited at its first
+    // checkpoint and reported a cheerful `ok` with nothing done, while
+    // scheduling carried on as normal. That is what this manual clear stands in
+    // for; the automatic one lives at the end of `run_sync`.
     let mut cleared = sync::read_mount_state(&env.storage, TENANT, REPO, "main", MOUNT_ID)
         .await
         .unwrap()

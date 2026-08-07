@@ -32,6 +32,7 @@ import TestConnectionPanel from '../components/integrations/TestConnectionPanel'
 import CapabilityChips from '../components/integrations/CapabilityChips'
 import MountProgressPanel from '../components/mounts/MountProgressPanel'
 import MountWritebackBlock from '../components/integrations/MountWritebackBlock'
+import PendingReason from '../components/mounts/PendingReason'
 import MountRunTimeline from '../components/mounts/MountRunTimeline'
 import MountPushPanel from '../components/mounts/MountPushPanel'
 import MountStatCard from '../components/mounts/MountStatCard'
@@ -687,6 +688,14 @@ export default function MountDetail() {
                     />
                   </div>
                 ) : null}
+                {/*
+                  WHY they are pending, which is the half the count leaves out.
+                  A drain reports ok whether it pushed everything or nothing, so
+                  the same `1` can mean "out of time", "stopped", "blocked by a
+                  rail" or "standing off after a refused write" — four different
+                  responses, one of which is "do nothing".
+                */}
+                <PendingReason state={mount.state} lastRun={lastRun} />
               </>
             ) : (
               <p className="text-sm text-zinc-500">No run has been recorded yet.</p>

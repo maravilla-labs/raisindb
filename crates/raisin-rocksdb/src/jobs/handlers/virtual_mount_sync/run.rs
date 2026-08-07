@@ -266,6 +266,31 @@ impl VirtualMountSyncHandler {
             "virtual mount sync finished"
         );
 
+        // A stop is a REQUEST TO END THIS RUN, not a mode the mount stays in.
+        //
+        // Nothing else clears the flag. Every phase reads it and quits — the
+        // drain at its first candidate, the delta and full walks at their first
+        // page boundary — so a flag left set makes every subsequent run exit
+        // immediately and report `ok` with nothing done. Scheduling is
+        // unaffected, which is what makes it so hard to see: runs keep
+        // appearing every minute, each one "completes without errors", and the
+        // mount quietly never syncs or pushes again. One production mount sat
+        // like that with a single edit pending, indefinitely, after an operator
+        // pressed Stop during an incident.
+        //
+        // Cleared HERE rather than where the stop is observed, because reaching
+        // this point is what proves the request was served: the run has ended.
+        // Read fresh rather than trusted from `state`, so a stop pressed while
+        // this run was working is honoured and then cleared, instead of being
+        // carried into the next run.
+        if super::stop_requested(&ctx).await {
+            state.stop_requested = false;
+            tracing::info!(
+                mount_id = %mount_id,
+                "stop request served by this run; clearing it so the next run proceeds"
+            );
+        }
+
         let outcome = self.finalize(&ctx, &mut state, result, counts).await;
 
         // Release the lease.
