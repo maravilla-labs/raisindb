@@ -3095,6 +3095,12 @@ struct StateOnlyMock {
     /// ms-graph adapter's `null` for a 404 ("gone": Graph message ids are not
     /// stable, so a moved message's stored id no longer resolves).
     update_reply: Mutex<Option<Value>>,
+    /// When set, `update` FAILS with this error instead of answering.
+    ///
+    /// Distinct from `update_reply`, which models an adapter that answers
+    /// something other than "done". This models one that refuses outright —
+    /// the 403-for-a-missing-scope case, where no retry can ever succeed.
+    update_error: Mutex<Option<String>>,
 }
 
 impl StateOnlyMock {
@@ -3113,6 +3119,10 @@ impl StateOnlyMock {
     /// Make every subsequent `update` answer `reply` verbatim.
     fn set_update_reply(&self, reply: Value) {
         *self.update_reply.lock().unwrap() = Some(reply);
+    }
+    /// Make every subsequent `update` fail with a `config_error`.
+    fn fail_updates_with_config_error(&self, message: &str) {
+        *self.update_error.lock().unwrap() = Some(message.to_string());
     }
 }
 
@@ -3164,6 +3174,9 @@ impl AdapterInvoker for StateOnlyMock {
             }
             "update" => {
                 self.updates.lock().unwrap().push(params.clone());
+                if let Some(msg) = self.update_error.lock().unwrap().clone() {
+                    return Err(AdapterError::Config(msg));
+                }
                 if let Some(reply) = self.update_reply.lock().unwrap().clone() {
                     return Ok(reply);
                 }

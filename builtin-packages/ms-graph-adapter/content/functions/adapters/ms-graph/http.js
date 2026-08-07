@@ -64,6 +64,23 @@ export function raiseForStatus(resp, context) {
   if (status === 400 || status === 404) {
     throw coded(context + ": " + msg, "config_error");
   }
+
+  // SERVICE BUSY. Graph answers 503 (and 504) when it is shedding load, and it
+  // means exactly what 429 means for our purposes: come back later, the request
+  // itself was fine.
+  //
+  // Left as a plain Error these became `Transient`, which the engine retries
+  // promptly — so a throttled tenant got hammered rather than backed off. On a
+  // large calendar that is self-sustaining: the walk is slow because Graph is
+  // throttling, the retries make it slower, the run outlives the job watchdog
+  // and is killed before it can finalize, and the mount sits at `syncing`
+  // forever while never finishing an import. Reported as `rate_limited` so the
+  // engine requeues with backoff, which is the only response that lets the
+  // walk converge.
+  if (status === 503 || status === 504) {
+    throw coded(context + ": Microsoft Graph is busy (" + status + ")", "rate_limited");
+  }
+
   throw new Error(context + ": " + msg);
 }
 

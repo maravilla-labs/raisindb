@@ -104,6 +104,18 @@ properties:
     # scopes to an already-configured connector. Add them in the admin console
     # and reconnect each account; Microsoft only issues the new consent on a
     # fresh authorization.
+    #
+    # The WRITE scopes below are what the write path needs, and nothing else can
+    # substitute for them: with read-only consent every push returns 403 and the
+    # adapter reports a config_error naming the missing scope. They are still
+    # delegated — the account reaches only what a human already has.
+    #
+    # `Mail.ReadWrite` covers the state_only path (the read flag, flags, moving
+    # a message); `Mail.Send` is separate at Microsoft and is what an outbox
+    # needs. `Calendars.ReadWrite` covers a calendar mirror AND an RSVP.
+    # OneDrive stays read-only: a Graph drive write is an upload session rather
+    # than a JSON body, so this adapter does not implement it and asking for
+    # `Files.ReadWrite` would request access it cannot use.
     scopes:
       - offline_access
       - openid
@@ -111,8 +123,14 @@ properties:
       - profile
       - Mail.Read
       - Mail.Read.Shared
+      - Mail.ReadWrite
+      - Mail.ReadWrite.Shared
+      - Mail.Send
+      - Mail.Send.Shared
       - Calendars.Read
       - Calendars.Read.Shared
+      - Calendars.ReadWrite
+      - Calendars.ReadWrite.Shared
       - Files.Read
       - Files.Read.All
       - Sites.Read.All

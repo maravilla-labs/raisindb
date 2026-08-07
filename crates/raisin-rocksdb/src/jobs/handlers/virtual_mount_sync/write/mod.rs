@@ -121,6 +121,14 @@ pub(super) struct DrainStats {
     pub truncated: bool,
     /// An operator's Stop landed mid-drain and the rest was abandoned.
     pub stopped: bool,
+    /// A push failed with a CONFIG error — a missing OAuth scope, a mount
+    /// pointed at something that cannot accept writes.
+    ///
+    /// Terminal for the whole drain, not for the one candidate. The condition is
+    /// a property of the MOUNT, so every remaining push would fail identically,
+    /// and the edits are not bad data: they stay pending and land untouched once
+    /// the configuration is fixed.
+    pub misconfigured: bool,
     /// Candidates never attempted because the drain ended early.
     ///
     /// Only ever non-zero alongside `truncated`, `stopped` or `blocked`. Carried
@@ -210,6 +218,13 @@ impl DrainStats {
 /// stop instead of pushing its whole candidate list first.
 const STOP_CHECK_EVERY: usize = 20;
 
+/// How long the drain stands off after a `config_error`.
+///
+/// Long enough that a permanently-broken mount costs one call per quarter hour
+/// instead of one per second; short enough that an operator who fixes a scope
+/// sees writeback resume while they are still looking at the screen.
+const MISCONFIGURED_BACKOFF_SECS: i64 = 900;
+
 /// Push whatever local edits this mount owes the provider.
 ///
 /// **Never fails the run.** A provider that refuses writes must not stop reads:
@@ -241,6 +256,21 @@ pub(super) async fn drain(
         WriteMode::Mirror(plan) => (plan.fields.clone(), Some(plan)),
     };
     let fields = &fields;
+
+    // Standing off after a config error. Checked before ANY provider call and
+    // before the delete rails, because the point is to make no calls at all.
+    if let Some(retry_after) = state.writeback_retry_after {
+        let now = Utc::now().timestamp();
+        if now < retry_after {
+            tracing::debug!(
+                mount_id = %ctx.scope.mount_id,
+                retry_in_secs = retry_after - now,
+                "writeback is standing off after a configuration failure; skipping \
+                 this drain. Edits stay pending and go out once the window elapses."
+            );
+            return DrainStats::default();
+        }
+    }
 
     let mut stats = DrainStats::default();
 
@@ -373,6 +403,24 @@ pub(super) async fn drain(
                     error = %e,
                     "writeback push failed; leaving the edit pending"
                 );
+                // Both of these end the drain, and for the same reason: the
+                // fault is the MOUNT's, not this candidate's, so every
+                // remaining push would fail identically.
+                //
+                // Config is the one that shipped broken. It used to fall
+                // through to the next candidate, which meant a push that can
+                // NEVER succeed — a missing Calendars.ReadWrite scope, say —
+                // was retried on every drain forever. One un-pushable edit
+                // became an infinite loop: push, fail, leave pending, drain
+                // again, push. It burned a core in production and spent the
+                // provider's rate limit on calls that were always going to 403.
+                if matches!(e, AdapterError::Config(_)) {
+                    stats.misconfigured = true;
+                    stats.pending += candidates.len().saturating_sub(i + 1);
+                    state.writeback_retry_after =
+                        Some(Utc::now().timestamp() + MISCONFIGURED_BACKOFF_SECS);
+                    break;
+                }
                 if matches!(e, AdapterError::AuthExpired) {
                     break;
                 }
@@ -437,7 +485,20 @@ pub(super) async fn drain(
     // self-clearing by design: the next delta overwrites the local value and the
     // node converges without anyone doing anything, so badging the mount for it
     // would leave every `remote_wins` mount permanently red.
-    state.writeback_status = if stats.parked > 0 {
+    // `misconfigured` outranks `conflict`: a conflict is a decision waiting to
+    // be made about one edit, while a misconfiguration means nothing can be
+    // pushed at all. It is also what the automatic-drain gate reads, so
+    // clearing it on a drain that never reached the provider would restart the
+    // retry loop it exists to stop.
+    // A drain that got here without a config failure has proved the mount is
+    // configured, so the stand-off goes. Otherwise a mount that recovered would
+    // keep skipping drains for the rest of its window.
+    if !stats.misconfigured {
+        state.writeback_retry_after = None;
+    }
+    state.writeback_status = if stats.misconfigured {
+        Some("misconfigured".to_string())
+    } else if stats.parked > 0 {
         Some("conflict".to_string())
     } else {
         None

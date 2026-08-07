@@ -33,8 +33,14 @@ properties:
     auth_url: https://accounts.google.com/o/oauth2/v2/auth
     token_url: https://oauth2.googleapis.com/token
     # Least-privilege default: read-only access to calendars and their events.
+    # `calendar.events` is the write scope: a mirror mount creates, edits and
+    # deletes events with it. Without it every push is a 403 and the adapter
+    # reports a config_error naming this scope. Read-only alone cannot be
+    # upgraded silently — Google issues a widened scope on fresh consent only,
+    # so an existing connection must be reconnected after this changes.
     scopes:
       - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar.events
     # Filled in by the admin console to match the deployment's callback URL,
     # e.g. https://<host>/api/integrations/<repo>/oauth/callback
     # The <repo> segment is REQUIRED and the path must end in /callback --

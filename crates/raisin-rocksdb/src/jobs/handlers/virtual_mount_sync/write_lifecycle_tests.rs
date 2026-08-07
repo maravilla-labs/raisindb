@@ -566,3 +566,64 @@ async fn an_idle_drain_writes_no_receipt() {
         "an idle drain must not stamp a receipt over a real one"
     );
 }
+
+/// A push that fails with `config_error` ENDS the drain and stands the mount
+/// off, instead of leaving the edit pending for the next run to retry.
+///
+/// This shipped broken and reached production. A missing `Calendars.ReadWrite`
+/// scope makes every push 403 forever, and the drain logged "leaving the edit
+/// pending" and moved on to the next candidate — so the same un-pushable edits
+/// were retried on every drain, permanently. It burned a core and spent the
+/// provider's rate limit on calls that were always going to be refused.
+///
+/// Three things are asserted, because fixing only the first would still loop:
+/// the drain STOPS rather than working through the remaining candidates, the
+/// mount is badged so an operator can see why, and a stand-off is recorded so
+/// the next run does not immediately try again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_error_ends_the_drain_and_stands_the_mount_off() {
+    let env = setup().await;
+    let mount = state_only_mount();
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = StateOnlyMock::new();
+    let ids = sync_in_mails(&mat, 3).await;
+    flip_unread(&env, &ids).await;
+    mock.fail_updates_with_config_error("missing Calendars.ReadWrite");
+
+    let c = ctx(&env, &mount, &mock, &mat);
+    let mut state = MountState::default();
+    let before = Utc::now().timestamp();
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let stats = sync::write::drain(&c, &mut state, &mut batcher, &state_only_mode()).await;
+
+    assert!(stats.misconfigured, "a config error must be terminal");
+    assert_eq!(
+        mock.update_count(),
+        1,
+        "the drain must stop at the FIRST config error, not try all three: every \
+         remaining push would fail identically"
+    );
+    assert_eq!(
+        state.writeback_status.as_deref(),
+        Some("misconfigured"),
+        "the operator has to be able to see why nothing is being pushed"
+    );
+    let retry_after = state
+        .writeback_retry_after
+        .expect("a stand-off must be recorded, or the next drain retries at once");
+    assert!(
+        retry_after > before,
+        "the stand-off must be in the future: {retry_after} vs {before}"
+    );
+
+    // And the stand-off is honoured: a second drain makes no provider call.
+    let mut batcher = sync::batch::SyncBatcher::new(&c).await.unwrap();
+    let again = sync::write::drain(&c, &mut state, &mut batcher, &state_only_mode()).await;
+    assert_eq!(again.pushed, 0);
+    assert_eq!(
+        mock.update_count(),
+        1,
+        "the second drain must make NO call while the stand-off is open — that is \
+         the whole point of it"
+    );
+}

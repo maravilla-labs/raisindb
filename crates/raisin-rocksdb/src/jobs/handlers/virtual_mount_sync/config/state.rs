@@ -380,6 +380,23 @@ pub struct MountState {
     /// must read to learn the mount is stuck is the same silence as no message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writeback_status: Option<String>,
+    /// Unix epoch seconds before which the write drain does not run again,
+    /// after a push failed for a reason no retry can fix.
+    ///
+    /// A push that returns `config_error` — a missing OAuth scope is the common
+    /// one — fails identically every time until a HUMAN changes something
+    /// outside this system. Without a stand-off the drain retried it on every
+    /// run: one un-pushable edit became a permanent loop that burned CPU and
+    /// spent the provider's rate limit on calls guaranteed to be refused.
+    ///
+    /// Time-based rather than a sticky flag on purpose. The thing that fixes it
+    /// (consenting to a scope at the provider) leaves no trace in this system,
+    /// so there is nothing to observe and clear a flag on — a sticky mount would
+    /// stay stuck after the operator had already fixed it. A window heals by
+    /// itself, and being wrong costs one call per window instead of thousands
+    /// per hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_retry_after: Option<i64>,
     /// Why [`Self::writeback_supported`] is `Some(false)` — e.g. which adapter
     /// operation is missing. Cleared when writeback is supported.
     ///
