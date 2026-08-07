@@ -504,6 +504,83 @@ async fn delta_add_update_delete() {
     assert_eq!(virtual_assets(&all_nodes(&env, TARGET_WS).await).len(), 0);
 }
 
+/// An idle Microsoft-Graph-style delta feed mints a FRESH delta token on every
+/// poll: empty page, new token, forever. The old termination check (`next ==
+/// token`) never fired on that shape, so the delta loop spun empty pages at
+/// provider speed — committing the fresh cursor each round — until the job
+/// watchdog killed the run at 600s, the lease leaked, and the scheduler
+/// re-enqueued: the production "mount committed 4×/second with no sync
+/// running" incident. The loop must stop on the FIRST empty page (legacy
+/// adapters) and must obey `has_more` when the adapter states it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_feed_with_a_fresh_token_every_poll_terminates() {
+    // Legacy adapter (no has_more): every poll returns a NEW token, no items.
+    // Each leg gets its own env: the per-page cursor persist bumps the stored
+    // state_seq, so reusing one env would make a later leg's write Superseded
+    // and end the pass for the wrong reason.
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+    let mount = mk_mount(SyncConfig::default());
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = MockAdapter::default();
+    for i in 0..50 {
+        mock.push_changes(json!({ "items": [], "next_token": format!("fresh-{i}") }));
+    }
+    let mut state = MountState {
+        last_sync_token: Some("t0".to_string()),
+        ..Default::default()
+    };
+    super::delta::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.op_count("get_changes"),
+        1,
+        "an empty page is not forward progress; the loop must stop at the first one"
+    );
+    // The fresh token is still persisted as the resume point.
+    assert_eq!(state.last_sync_token.as_deref(), Some("fresh-0"));
+
+    // has_more: false stops even with items in the page (caught-up final page).
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = MockAdapter::default();
+    mock.push_changes(json!({ "items": [
+        { "type": "created", "item": ext_item("A", "a.txt", false, "v1"), "relative_path": "a.txt" }
+    ], "next_token": "delta-link-1", "has_more": false }));
+    mock.push_changes(json!({ "items": [], "next_token": "should-not-be-fetched" }));
+    let mut state = MountState {
+        last_sync_token: Some("t0".to_string()),
+        ..Default::default()
+    };
+    super::delta::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(mock.op_count("get_changes"), 1, "has_more=false ends the pass");
+    assert_eq!(state.last_sync_token.as_deref(), Some("delta-link-1"));
+
+    // has_more: true keeps paging even across an EMPTY page (Graph documents
+    // empty mid-enumeration pages), then stops at has_more: false.
+    let env = setup().await;
+    persist_config_nodes(&env, "main").await;
+    let mat = RocksDbMaterializer::new(env.storage.clone());
+    let mock = MockAdapter::default();
+    mock.push_changes(json!({ "items": [], "next_token": "page-2", "has_more": true }));
+    mock.push_changes(json!({ "items": [
+        { "type": "created", "item": ext_item("B", "b.txt", false, "v1"), "relative_path": "b.txt" }
+    ], "next_token": "delta-link-2", "has_more": false }));
+    let mut state = MountState {
+        last_sync_token: Some("t0".to_string()),
+        ..Default::default()
+    };
+    super::delta::run(&ctx(&env, &mount, &mock, &mat), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(mock.op_count("get_changes"), 2, "has_more=true pages through");
+    assert_eq!(state.last_sync_token.as_deref(), Some("delta-link-2"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rename_matches_by_external_id() {
     let env = setup().await;

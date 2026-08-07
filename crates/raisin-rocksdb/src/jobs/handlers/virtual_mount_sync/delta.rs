@@ -143,8 +143,41 @@ pub async fn run_with(
             None => break,
         }
 
-        // Stop when the cursor stabilizes (no forward progress) or the cap is hit.
-        if next == token || processed >= max {
+        // Termination, in order of authority:
+        //
+        // 1. The adapter said whether it has more pages. Trust it: a `false`
+        //    means "caught up; the token is next run's resume point".
+        // 2. Legacy adapters (no `has_more`): an EMPTY page cannot be forward
+        //    progress, so stop. Token identity is NOT a usable signal here —
+        //    Microsoft Graph mints a fresh delta token on every poll of an
+        //    idle feed, so the old `next == token` check never fired and this
+        //    loop spun empty pages at provider speed, committing the fresh
+        //    cursor each round, until the watchdog killed the run (~600s),
+        //    the lease leaked, and the scheduler re-enqueued — the observed
+        //    "mount committed 4×/second with no sync running".
+        // 3. The per-run item cap.
+        // 4. The wall-clock budget — the same self-stop the full walk has,
+        //    so a genuinely long delta ends as a clean truncated chunk with a
+        //    durable cursor instead of a watchdog kill that skips finalize.
+        match page.has_more {
+            Some(false) => break,
+            Some(true) => {}
+            None => {
+                if page.items.is_empty() || next == token {
+                    break;
+                }
+            }
+        }
+        if processed >= max {
+            break;
+        }
+        if ctx.out_of_time(chrono::Utc::now().timestamp()) {
+            tracing::info!(
+                mount_id = %ctx.mount.mount_id,
+                processed,
+                "wall-clock budget spent during delta; ending this pass cleanly at a \
+                 durable cursor. The next run resumes from it."
+            );
             break;
         }
         token = next;

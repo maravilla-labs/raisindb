@@ -112,6 +112,9 @@ export function opGetChanges(credential, mount, params) {
   });
   // next_token is NEVER null: prefer a fresh nextSyncToken, fall back to the
   // page token while paging, else echo the caller's token so the cursor holds.
+  // `has_more` tells the engine explicitly whether this is a mid-enumeration
+  // page (nextPageToken: keep paging now) or a caught-up cursor (stop; resume
+  // next run) — token identity is not a reliable signal across providers.
   var next = body.nextSyncToken || body.nextPageToken || token;
-  return { items: items, next_token: next };
+  return { items: items, next_token: next, has_more: Boolean(body.nextPageToken) };
 }

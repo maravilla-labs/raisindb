@@ -87,8 +87,20 @@ export function opGetChanges(credential, mount, params) {
   // Durable, resumable cursor. While paging Graph returns @odata.nextLink; the
   // final page returns @odata.deltaLink. NEVER null: when nothing is new the
   // deltaLink round-trips, and we defensively echo the prior token/url otherwise.
+  //
+  // `has_more` tells the engine whether to KEEP PAGING NOW (a nextLink: this is
+  // a mid-enumeration cursor) or stop (a deltaLink: caught up; the token is the
+  // next run's resume point). The engine cannot infer this from the token
+  // itself — Graph mints a fresh delta token on every poll of an idle feed, so
+  // "the token stopped changing" never happens, and before this field the
+  // delta loop spun empty deltaLink pages at request speed until the job
+  // watchdog killed the run.
   var next = body["@odata.nextLink"] || body["@odata.deltaLink"] || token || url;
-  return { items: items, next_token: next };
+  return {
+    items: items,
+    next_token: next,
+    has_more: Boolean(body["@odata.nextLink"]),
+  };
 }
 
 // ONE NODE PER SERIES, not one per occurrence.

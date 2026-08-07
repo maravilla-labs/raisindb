@@ -518,8 +518,10 @@ function opGetChanges(credential, mount, params) {
     return { type: "updated", item: item, relative_path: item.name };
   });
   // Durable, resumable cursor: prefer nextPageToken while paging, else the new start token.
+  // `has_more` says explicitly whether to keep paging now (nextPageToken) or
+  // stop with a caught-up cursor — token identity is not a reliable signal.
   var next = body.nextPageToken || body.newStartPageToken || token;
-  return { items: items, next_token: next };
+  return { items: items, next_token: next, has_more: Boolean(body.nextPageToken) };
 }
 
 // ---- dispatch -------------------------------------------------------------

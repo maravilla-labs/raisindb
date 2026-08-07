@@ -48,6 +48,19 @@ pub struct ChangesPage {
     pub items: Vec<Change>,
     #[serde(default)]
     pub next_token: Option<String>,
+    /// Whether the provider has MORE pages right now (`true`: `next_token` is
+    /// a mid-enumeration cursor, keep paging) or is caught up (`false`:
+    /// `next_token` is the resume point for the NEXT run — stop).
+    ///
+    /// The adapter must say this explicitly because token identity cannot:
+    /// Microsoft Graph mints a fresh delta token on every poll of an idle
+    /// feed, so "the token stopped changing" NEVER holds there, and the delta
+    /// loop span empty pages at ~4 requests/second — committing the fresh
+    /// cursor each time — until the watchdog killed the run. `None` (legacy
+    /// adapter without the field) falls back to the empty-page heuristic in
+    /// `delta.rs`.
+    #[serde(default)]
+    pub has_more: Option<bool>,
 }
 
 /// A `list` page.
