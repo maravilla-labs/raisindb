@@ -65,7 +65,7 @@ pub(super) fn disposition(error: &AdapterError) -> Disposition {
         // The provider refused to even look at the request. This is the one
         // answer that proves nothing was sent, which is why it is the one answer
         // that may be sent again.
-        AdapterError::RateLimited => Disposition::Requeue,
+        AdapterError::RateLimited { .. } => Disposition::Requeue,
 
         // Definitive pre-effect rejections. The request was understood and
         // declined: a token the provider will not accept, a mount pointing at a
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn only_rate_limited_requeues() {
         assert_eq!(
-            disposition(&AdapterError::RateLimited),
+            disposition(&AdapterError::RateLimited { retry_after_secs: None }),
             Disposition::Requeue
         );
         for e in [

@@ -8,7 +8,7 @@
 
 import { enc } from "./common.js";
 import { GRAPH, graphFetch } from "./http.js";
-import { includeAttachments, principal } from "./mount.js";
+import { includeAttachments, outlookHeaders, principal } from "./mount.js";
 
 // ---- address formatting ---------------------------------------------------
 
@@ -121,7 +121,7 @@ export function mailAttachments(credential, mount, messageId) {
         "/messages/" +
         enc(messageId) +
         "/attachments?$select=id,name,contentType,size,isInline,contentId",
-      { context: "list attachments" }
+      { context: "list attachments", headers: outlookHeaders(mount) }
     );
     var list = (resp.body && resp.body.value) || [];
     var out = [];

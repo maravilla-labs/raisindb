@@ -9,7 +9,7 @@
 
 import { coded, enc } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { INSTANCE_PAGE, calendarId, driveBase, driveContainer, eventSelect, mailFolderId, mailSelect, pageSize, principal, resourceOf, windowBounds } from "./mount.js";
+import { INSTANCE_PAGE, calendarId, driveBase, driveContainer, eventSelect, mailFolderId, mailSelect, outlookHeaders, pageSize, principal, resourceOf, windowBounds } from "./mount.js";
 import { enrichAttachments } from "./mail.js";
 import { toExternalItem } from "./items.js";
 import { calendarChanges } from "./changes.js";
@@ -40,7 +40,10 @@ export function opList(credential, mount, params) {
       GRAPH + principal(mount) + "/mailFolders/" + enc(mailFolderId(mount)) +
       "/messages?$top=" + pageSize(params) + "&$select=" + enc(mailSelect(mount));
   }
-  var resp = graphFetch(credential, "GET", url, { context: "list" });
+  var resp = graphFetch(credential, "GET", url, {
+    context: "list",
+    headers: outlookHeaders(mount),
+  });
   var body = resp.body || {};
   var values = body.value || [];
   var items = values.map(function (v) {
@@ -81,6 +84,7 @@ export function seriesExceptions(credential, mount, values) {
     var resp = graphFetch(credential, "GET", url, {
       context: "list:series_instances",
       rawStatusOk: true,
+      headers: outlookHeaders(mount),
     });
     // A master that vanished between the page and this call is not an error:
     // the next run reconciles it. Anything else is reported normally.
@@ -127,7 +131,7 @@ export function cancelledOccurrences(credential, mount, masterId, out) {
     "GET",
     GRAPH + principal(mount) + "/events/" + enc(masterId) +
       "?$select=id,cancelledOccurrences",
-    { context: "list:cancelled_occurrences", rawStatusOk: true }
+    { context: "list:cancelled_occurrences", rawStatusOk: true, headers: outlookHeaders(mount) }
   );
   if (probe.status < 200 || probe.status >= 300) return;
   var ids = (probe.body && probe.body.cancelledOccurrences) || [];
@@ -145,7 +149,7 @@ export function cancelledOccurrences(credential, mount, masterId, out) {
       "GET",
       GRAPH + principal(mount) + "/events/" + enc(ids[k]) +
         "?$select=" + enc(eventSelect(mount)),
-      { context: "list:cancelled_occurrence", rawStatusOk: true }
+      { context: "list:cancelled_occurrence", rawStatusOk: true, headers: outlookHeaders(mount) }
     );
     if (one.status < 200 || one.status >= 300) continue;
     var ev = one.body;
@@ -176,7 +180,11 @@ export function opGet(credential, mount, params) {
       GRAPH + principal(mount) + "/messages/" + enc(params.item_id) +
       "?$select=" + enc(mailSelect(mount));
   }
-  var resp = graphFetch(credential, "GET", url, { context: "get", rawStatusOk: true });
+  var resp = graphFetch(credential, "GET", url, {
+    context: "get",
+    rawStatusOk: true,
+    headers: outlookHeaders(mount),
+  });
   if (resp.status === 404) return null;
   raiseForStatus(resp, "get");
   return toExternalItem(resp.body, resource, mount);
@@ -219,7 +227,7 @@ export function opGetContent(credential, mount, params) {
       "GET",
       GRAPH + principal(mount) + "/messages/" + enc(params.parent_item_id) +
         "/attachments/" + enc(params.item_id),
-      { context: "get_content(attachment)" }
+      { context: "get_content(attachment)", headers: outlookHeaders(mount) }
     ).body;
     if (!att || typeof att.contentBytes !== "string") {
       // A referenceAttachment / itemAttachment carries no bytes at all. Saying
@@ -242,6 +250,7 @@ export function opGetContent(credential, mount, params) {
       : GRAPH + principal(mount) + "/messages/" + enc(params.item_id);
   var resp2 = graphFetch(credential, "GET", base + "?$select=body", {
     context: "get_content",
+    headers: outlookHeaders(mount),
   });
   var b = resp2.body && resp2.body.body;
   var mime = b && b.contentType === "html" ? "text/html" : "text/plain";

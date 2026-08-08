@@ -8,7 +8,7 @@
 
 import { enc } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { calendarSupportsDelta, driveContainer, eventSelect, mailFolderId, mailSelect, principal, resourceOf, windowBounds } from "./mount.js";
+import { calendarSupportsDelta, driveContainer, eventSelect, mailFolderId, mailSelect, outlookHeaders, principal, resourceOf, windowBounds } from "./mount.js";
 import { enrichAttachments } from "./mail.js";
 import { toExternalItem } from "./items.js";
 import { seriesExceptions } from "./read.js";
@@ -63,7 +63,10 @@ export function opGetChanges(credential, mount, params) {
   // resume point and must be used verbatim.
   var baselineOnly = !token && params.baseline_only === true;
   var url = token || initialDeltaUrl(mount, resource, baselineOnly);
-  var resp = graphFetch(credential, "GET", url, { context: "get_changes" });
+  var resp = graphFetch(credential, "GET", url, {
+    context: "get_changes",
+    headers: outlookHeaders(mount),
+  });
   var body = resp.body || {};
   var values = body.value || [];
   var items =
@@ -209,6 +212,7 @@ export function fetchEvent(credential, mount, eventId) {
   var resp = graphFetch(credential, "GET", url, {
     context: "get_changes:series_master",
     rawStatusOk: true,
+    headers: outlookHeaders(mount),
   });
   if (resp.status === 404) return null;
   raiseForStatus(resp, "get_changes:series_master");

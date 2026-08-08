@@ -672,7 +672,7 @@ Signal failures by **throwing an `Error` with a `code` property**. The engine di
 | `code` | Meaning | What the engine does |
 |--------|---------|----------------------|
 | `"auth_expired"` | The `access_token` is rejected / the account needs re-auth. | Marks the account as needing re-authentication, sets the mount's `state.status = "auth_required"`, and **pauses the mount** (skips it in future sync checks) until the user reconnects. Not retried. |
-| `"rate_limited"` | The provider is throttling. | Backs off using the standard job retry mechanism (exponential). The mount is retried later; no state corruption. |
+| `"rate_limited"` | The provider is throttling. | Backs off and retries later; no state corruption. When the message carries `retry_after=<seconds>` (from the provider's own `Retry-After`) the engine records it on the mount and refuses to schedule until the window elapses, capped at one hour — a stated wait is an instruction, and the exponential backoff is only a guess for when nothing was stated. |
 | `"conflict"` | A write lost an optimistic-concurrency check (etag mismatch): the object changed since this mount read it. | The ONE error the drain does not simply propagate — it routes through the mount's conflict policy (§10.5). Never a sync-loop failure and never a job retry. The default `remote_wins` abandons the local edit and counts it; `local_wins` re-sends unconditionally; `error` and a parking resolver leave it pending at `state.writeback_status: "conflict"`. |
 | anything else | Transient failure. | Standard job retry: increments `state.consecutive_failures`, records `state.last_error`, and re-enqueues with backoff. After the configured threshold (default 5) the mount goes `state.status = "degraded"` and the interval backs off. Success resets the counters. |
 
@@ -682,6 +682,13 @@ Example:
 if (resp.status === 401) {
   const e = new Error("access token rejected");
   e.code = "auth_expired";
+  // Optional, and only meaningful with `rate_limited`: the provider's own
+  // `Retry-After`. Append it to the MESSAGE as `retry_after=<seconds>` — the
+  // host surfaces a thrown Error as its message string and nothing else, so a
+  // structured field cannot cross the boundary. The engine parses it and
+  // refuses to schedule the mount until the window elapses (capped at 1h).
+  // Absent means "the provider did not say" and leaves the engine's
+  // exponential backoff in charge — which is NOT the same as "retry now".
   throw e;
 }
 ```

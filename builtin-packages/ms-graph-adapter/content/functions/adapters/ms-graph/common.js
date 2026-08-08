@@ -9,9 +9,21 @@
 //! to import, which is what keeps the module graph a DAG.
 
 
-export function coded(message, code) {
-  var e = new Error(message);
+// The engine sees a thrown Error only as its MESSAGE STRING (the QuickJS host
+// surfaces nothing else), so anything the engine must act on has to survive in
+// the text. `code` is matched there, and so is `retry_after=<seconds>`: when a
+// provider states how long to wait, guessing an exponential backoff instead is
+// strictly worse — too short re-hammers a throttled tenant, too long stalls a
+// mount that was told it could resume in 20 seconds.
+export function coded(message, code, retryAfterSeconds) {
+  var text = message;
+  var n = Number(retryAfterSeconds);
+  if (isFinite(n) && n > 0) {
+    text = text + " (retry_after=" + Math.ceil(n) + ")";
+  }
+  var e = new Error(text);
   e.code = code;
+  if (isFinite(n) && n > 0) e.retry_after = Math.ceil(n);
   return e;
 }
 

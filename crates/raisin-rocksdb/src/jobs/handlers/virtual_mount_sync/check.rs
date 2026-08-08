@@ -167,6 +167,18 @@ pub fn is_due(mount: &MountConfig, now: i64) -> bool {
     if mount.state.status.as_deref() == Some("auth_required") {
         return false;
     }
+    // The PROVIDER told us to wait. Checked above every other "due" reason —
+    // including the backfill fast path below, which is the one that would
+    // otherwise ignore it: a throttled mount mid-import runs its chunks
+    // back-to-back, so without this guard a 429 with `Retry-After: 300` is
+    // answered by another call within seconds. That is the self-sustaining
+    // spiral the 503 classification exists to prevent, re-entered through the
+    // scheduler instead of the job retry.
+    if let Some(until) = mount.state.retry_after {
+        if now < until {
+            return false;
+        }
+    }
     // An unfinished backfill is due as soon as the previous chunk finished,
     // rather than after the poll interval: a mailbox imported 500 items per run
     // at one run every 5 minutes would take days. Chunks therefore run
@@ -331,6 +343,26 @@ mod tests {
             write_config: WriteConfig::default(),
             state: MountState::default(),
         }
+    }
+
+    /// A stated `Retry-After` outranks every other reason to run — including
+    /// the backfill fast path, which is exactly the one that would otherwise
+    /// answer a "wait 5 minutes" with another call within seconds, because
+    /// import chunks run back-to-back.
+    #[test]
+    fn a_provider_stated_backoff_outranks_even_a_pending_backfill() {
+        let now = 1_000_000;
+        let mut m = mount();
+        m.state.retry_after = Some(now + 300);
+        assert!(!is_due(&m, now), "must not run before the stated wait");
+
+        // The backfill fast path must not smuggle it past the guard.
+        m.state.backfill_cursor = Some("resume-here".to_string());
+        m.state.consecutive_failures = 0;
+        assert!(!is_due(&m, now), "a pending backfill does not override a throttle");
+
+        // Once the window elapses, normal scheduling resumes.
+        assert!(is_due(&m, now + 300));
     }
 
     #[test]

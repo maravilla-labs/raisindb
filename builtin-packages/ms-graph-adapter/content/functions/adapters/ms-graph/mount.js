@@ -53,6 +53,60 @@ export function includeAttachments(mount) {
   return v === true || v === "true";
 }
 
+// ---- immutable Outlook ids ------------------------------------------------
+
+// Ask Graph for IMMUTABLE ids on Outlook resources (mail, events).
+//
+// Graph's DEFAULT message id is derived from the item's location, so MOVING a
+// message between folders changes its id. A virtual mount keys each node on
+// `external_id` for the node's whole lifetime, so with default ids a user
+// filing a mail into a subfolder is reported as a DELETE of the old id plus a
+// CREATE of a new one: the node is destroyed and rebuilt, taking its
+// attachment subnodes, its history and any local annotation with it, and any
+// pending writeback against the old id 404s. Immutable ids are Microsoft's
+// answer to exactly this, and they cost one request header.
+//
+// DEFAULT ON, because the alternative is a silent data-loss path on the single
+// most ordinary thing a person does to an email. Opt out per mount/connection
+// with `immutable_ids: false` — see the migration note below before you do.
+//
+// MIGRATION — read before flipping this on an existing mount. Immutable ids are
+// a DIFFERENT id space, so a mount that already synced with default ids will
+// not recognise its own items: the next full reconcile imports every message
+// afresh under its immutable id and prunes the old nodes. That is a one-time
+// re-import — node ids change, per-node history restarts, attachments are
+// re-fetched — and on a mount with writeback enabled the re-imported nodes are
+// unseeded, so the first drain pushes their current values back once (bounded
+// by `max_items_per_sync` per run, idempotent). Nothing is lost at the
+// PROVIDER. To defer the re-import, set `immutable_ids: false` on that mount
+// and plan the migration; new mounts should always run with it on.
+export function useImmutableIds(mount) {
+  // OUTLOOK resources only. A driveItem id is already stable across moves and
+  // renames, and Graph has no immutable-id notion for drives — sending the
+  // header there would be noise on every request of the busiest resource.
+  var resource = resourceOf(mount);
+  if (resource !== "mail" && resource !== "calendar") return false;
+  var v = configValue(mount, "immutable_ids");
+  if (v === false || v === "false") return false;
+  return true;
+}
+
+// Headers for a request against an Outlook resource, merged with anything the
+// caller already sends. ONE helper so the read paths, the write path and the
+// attachment fetch cannot disagree about which id space they are in — a mount
+// that listed with immutable ids and PATCHed with default ones would 404 on
+// every write it attempted.
+export function outlookHeaders(mount, extra) {
+  var headers = {};
+  if (extra) {
+    for (var k in extra) headers[k] = extra[k];
+  }
+  if (useImmutableIds(mount)) {
+    headers["Prefer"] = 'IdType="ImmutableId"';
+  }
+  return headers;
+}
+
 // Whether this mount wants the FULL message body inline (sync_config.include_body).
 //
 // Off by default and deliberately so: mail syncs link-only, and adding `body`

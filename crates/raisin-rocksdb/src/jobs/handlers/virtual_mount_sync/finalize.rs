@@ -69,6 +69,9 @@ impl VirtualMountSyncHandler {
                     state.last_error = None;
                     state.last_sync_at = Some(now);
                 }
+                // A run that got through means the throttle is over, whatever
+                // the last one was told to wait.
+                state.retry_after = None;
                 run.finish(now, "ok", None);
                 None
             }
@@ -81,6 +84,18 @@ impl VirtualMountSyncHandler {
             Err(e) => {
                 state.consecutive_failures += 1;
                 state.last_error = Some(e.to_string());
+
+                // The provider stated how long to wait. Record it so
+                // `check::is_due` refuses to schedule before then — the
+                // engine's exponential backoff is a guess and this is not.
+                if let Some(secs) = e.retry_after_secs() {
+                    state.retry_after = Some(now + secs as i64);
+                    tracing::info!(
+                        mount_id = %ctx.mount.mount_id,
+                        retry_after_secs = secs,
+                        "provider asked us to back off; not scheduling this mount until then"
+                    );
+                }
 
                 // A misconfigured mount gets its own status so the UI can say
                 // "fix this" rather than "it is flaky" — the operator action is

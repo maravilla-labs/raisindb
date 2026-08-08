@@ -325,6 +325,16 @@ pub struct MountState {
     pub last_error: Option<String>,
     #[serde(default)]
     pub consecutive_failures: u64,
+    /// Epoch seconds before which this mount must not be synced again, because
+    /// the PROVIDER said so (`Retry-After` on a 429/503).
+    ///
+    /// Distinct from the exponential backoff in `effective_interval_secs`,
+    /// which is the engine GUESSING. A stated wait is an instruction: ignoring
+    /// it re-hammers a throttled tenant, and a throttled tenant that keeps
+    /// being hammered is how a slow walk becomes a walk that never finishes.
+    /// Cleared by the first run that gets through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<i64>,
     /// `"ok" | "syncing" | "auth_required" | "degraded" | "misconfigured"`.
     #[serde(default)]
     pub status: Option<String>,

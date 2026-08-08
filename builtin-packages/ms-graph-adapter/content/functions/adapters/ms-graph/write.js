@@ -13,7 +13,7 @@
 
 import { coded, enc, isEmptyObject } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { calendarId, principal, resourceOf } from "./mount.js";
+import { calendarId, outlookHeaders, principal, resourceOf } from "./mount.js";
 import { toExternalItem } from "./items.js";
 import { opGet } from "./read.js";
 
@@ -129,12 +129,15 @@ export function diagnoseWrite(resp, context, resource) {
 export var WRITE_STATUSES = [400, 403, 404, 409, 412];
 
 // The etag header, sent only when the stored value has the shape of one.
-export function ifMatch(etag) {
+export function ifMatch(etag, mount) {
   var headers = { "Content-Type": "application/json" };
   if (typeof etag === "string" && ETAG_SHAPE.test(etag)) {
     headers["If-Match"] = etag;
   }
-  return headers;
+  // The write MUST address the same id space the read paths listed with, or
+  // every PATCH against an immutable id 404s (and vice versa). `mount` is
+  // optional only so an older caller keeps compiling; always pass it.
+  return mount ? outlookHeaders(mount, headers) : headers;
 }
 
 // The `{external_id, etag}` receipt the engine stamps back. `body` is Graph's
@@ -175,7 +178,7 @@ export function opUpdate(credential, mount, params) {
   }
 
   var resp = graphFetch(credential, "PATCH", writeItemUrl(mount, resource, params.item_id), {
-    headers: ifMatch(params.etag),
+    headers: ifMatch(params.etag, mount),
     body: params.payload,
     context: "update",
     rawStatuses: WRITE_STATUSES,
@@ -228,7 +231,7 @@ export function opCreate(credential, mount, params) {
   var url = GRAPH + principal(mount) + "/calendars/" + enc(calId) + "/events";
 
   var resp = graphFetch(credential, "POST", url, {
-    headers: { "Content-Type": "application/json" },
+    headers: outlookHeaders(mount, { "Content-Type": "application/json" }),
     body: params.payload,
     context: "create",
     rawStatuses: WRITE_STATUSES,
@@ -297,7 +300,7 @@ export function opDelete(credential, mount, params) {
   }
 
   var resp = graphFetch(credential, "DELETE", writeItemUrl(mount, resource, params.item_id), {
-    headers: ifMatch(params.etag),
+    headers: ifMatch(params.etag, mount),
     context: "delete",
     rawStatuses: WRITE_STATUSES,
   });

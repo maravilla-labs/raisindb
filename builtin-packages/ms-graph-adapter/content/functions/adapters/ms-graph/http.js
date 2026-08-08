@@ -13,6 +13,31 @@ import { coded } from "./common.js";
 
 export var GRAPH = "https://graph.microsoft.com/v1.0";
 
+/**
+ * Seconds Graph asked us to wait, from `Retry-After`.
+ *
+ * Graph sends it on 429 and on most 503s, in delta-seconds. Honoring it is the
+ * difference between backing off as instructed and guessing: the engine's own
+ * exponential backoff has no idea whether the tenant is 20 seconds or 20
+ * minutes from recovery, and being wrong in the short direction is what turns
+ * throttling into a self-sustaining spiral (see the 503 comment below).
+ *
+ * Header casing is not guaranteed across hosts, so match case-insensitively.
+ * An HTTP-date form (legal, rare from Graph) is ignored rather than
+ * mis-parsed — a wrong number is worse than none.
+ */
+function retryAfterSeconds(resp) {
+  var headers = resp && resp.headers;
+  if (!headers) return null;
+  for (var k in headers) {
+    if (String(k).toLowerCase() !== "retry-after") continue;
+    var n = Number(headers[k]);
+    if (isFinite(n) && n > 0) return Math.ceil(n);
+    return null;
+  }
+  return null;
+}
+
 export function raiseForStatus(resp, context) {
   var status = resp.status;
   if (status >= 200 && status < 300) return;
@@ -21,7 +46,11 @@ export function raiseForStatus(resp, context) {
     throw coded("Microsoft Graph rejected the access token", "auth_expired");
   }
   if (status === 429) {
-    throw coded("Microsoft Graph rate limit exceeded", "rate_limited");
+    throw coded(
+      "Microsoft Graph rate limit exceeded",
+      "rate_limited",
+      retryAfterSeconds(resp)
+    );
   }
   var msg =
     (body && body.error && body.error.message) ||
@@ -78,7 +107,11 @@ export function raiseForStatus(resp, context) {
   // engine requeues with backoff, which is the only response that lets the
   // walk converge.
   if (status === 503 || status === 504) {
-    throw coded(context + ": Microsoft Graph is busy (" + status + ")", "rate_limited");
+    throw coded(
+      context + ": Microsoft Graph is busy (" + status + ")",
+      "rate_limited",
+      retryAfterSeconds(resp)
+    );
   }
 
   throw new Error(context + ": " + msg);

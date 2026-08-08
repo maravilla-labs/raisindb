@@ -28,8 +28,15 @@ pub enum AdapterError {
     #[error("adapter auth expired")]
     AuthExpired,
     /// `code: "rate_limited"` — back off and retry later.
+    ///
+    /// Carries the provider's own `Retry-After` when it stated one. Guessing
+    /// instead is worse in both directions: too short re-hammers a throttled
+    /// tenant (the self-sustaining spiral that killed a production calendar
+    /// walk), too long stalls a mount that was told it could resume in twenty
+    /// seconds. `None` means the provider said nothing and the engine's
+    /// exponential backoff applies.
     #[error("adapter rate limited")]
-    RateLimited,
+    RateLimited { retry_after_secs: Option<u64> },
     /// `code: "conflict"` — write-through optimistic-concurrency failure.
     #[error("adapter conflict: {0}")]
     Conflict(String),
@@ -67,6 +74,26 @@ pub enum AdapterError {
     Transient(String),
 }
 
+/// Pull `retry_after=<seconds>` out of an adapter's error message.
+///
+/// The QuickJS host surfaces a thrown `Error` as its message string and
+/// nothing else, so a structured field cannot cross the boundary — the
+/// adapter's `coded()` helper appends the value to the text and this reads it
+/// back. Absent, unparseable or non-positive values yield `None`, which simply
+/// means "the provider did not say" and leaves the exponential backoff in
+/// charge.
+fn parse_retry_after(lowercased_message: &str) -> Option<u64> {
+    let idx = lowercased_message.find("retry_after=")?;
+    let rest = &lowercased_message[idx + "retry_after=".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let secs: u64 = digits.parse().ok()?;
+    // A provider asking us to wait a week is a bug or a hostile answer, not an
+    // instruction to take a mount offline for a week. Cap it at an hour; the
+    // scheduler's own interval takes over from there.
+    const MAX_RETRY_AFTER_SECS: u64 = 3600;
+    (secs > 0).then_some(secs.min(MAX_RETRY_AFTER_SECS))
+}
+
 impl AdapterError {
     /// Classify an adapter failure message into a typed error. The QuickJS
     /// runtime surfaces a thrown `Error` as a message string; we match the
@@ -76,7 +103,9 @@ impl AdapterError {
         if m.contains("auth_expired") {
             AdapterError::AuthExpired
         } else if m.contains("rate_limited") {
-            AdapterError::RateLimited
+            AdapterError::RateLimited {
+                retry_after_secs: parse_retry_after(&m),
+            }
         } else if m.contains("cursor_invalid") {
             AdapterError::CursorInvalid(message.to_string())
         } else if m.contains("config_error") {
@@ -88,13 +117,21 @@ impl AdapterError {
         }
     }
 
+    /// The provider's requested wait, when it stated one.
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            AdapterError::RateLimited { retry_after_secs } => *retry_after_secs,
+            _ => None,
+        }
+    }
+
     /// Whether re-running the identical request could plausibly succeed.
     ///
     /// The single place this judgement is made, so the scheduler, the job-retry
     /// decision and the mount status can never disagree about an error.
     pub fn is_retryable(&self) -> bool {
         match self {
-            AdapterError::RateLimited | AdapterError::Transient(_) => true,
+            AdapterError::RateLimited { .. } | AdapterError::Transient(_) => true,
             // AuthExpired pauses the mount until reconnect; Config needs an
             // operator edit; Conflict is resolved by the next sync's fresh read.
             // CursorInvalid is recovered in-run by dropping the cursor and
@@ -502,6 +539,52 @@ pub type AdapterInvokerHandle = Arc<dyn AdapterInvoker>;
 mod tests {
     use super::*;
 
+    /// A provider that states how long to wait must be obeyed, not guessed at.
+    #[test]
+    fn a_stated_retry_after_survives_the_js_boundary() {
+        // The adapter's `coded()` appends it; only the message string crosses.
+        let e = AdapterError::classify(
+            "get_changes: Microsoft Graph is busy (503) (retry_after=120): rate_limited",
+        );
+        assert!(matches!(
+            e,
+            AdapterError::RateLimited {
+                retry_after_secs: Some(120)
+            }
+        ));
+        assert_eq!(e.retry_after_secs(), Some(120));
+
+        // Silence means "the provider did not say" — the engine's exponential
+        // backoff stays in charge, which is NOT the same as "retry now".
+        let quiet = AdapterError::classify("rate_limited");
+        assert!(matches!(
+            quiet,
+            AdapterError::RateLimited {
+                retry_after_secs: None
+            }
+        ));
+
+        // A hostile or buggy value must not take a mount offline for a week.
+        assert_eq!(
+            AdapterError::classify("rate_limited (retry_after=999999)").retry_after_secs(),
+            Some(3600)
+        );
+        // Junk parses as "not stated" rather than as a wrong number.
+        assert_eq!(
+            AdapterError::classify("rate_limited (retry_after=soon)").retry_after_secs(),
+            None
+        );
+        assert_eq!(
+            AdapterError::classify("rate_limited (retry_after=0)").retry_after_secs(),
+            None
+        );
+        // Only rate limits carry one.
+        assert_eq!(
+            AdapterError::classify("config_error (retry_after=30)").retry_after_secs(),
+            None
+        );
+    }
+
     #[test]
     fn classify_maps_reserved_codes() {
         assert!(matches!(
@@ -510,7 +593,7 @@ mod tests {
         ));
         assert!(matches!(
             AdapterError::classify("rate_limited by provider"),
-            AdapterError::RateLimited
+            AdapterError::RateLimited { .. }
         ));
         assert!(matches!(
             AdapterError::classify("etag conflict"),

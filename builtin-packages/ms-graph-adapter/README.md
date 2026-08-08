@@ -212,6 +212,47 @@ Graph returns a page plus either `@odata.nextLink` (more pages) or
 the engine persists it and passes it back verbatim on the next call. `next_token`
 is **never null** — when nothing is new the `deltaLink` round-trips unchanged.
 
+Each page also carries **`has_more`**: `true` for a `nextLink` (a
+mid-enumeration cursor — keep paging now), `false` for a `deltaLink` (caught up
+— the token is the *next run's* resume point). The engine cannot infer this
+from the token itself, because Graph mints a **fresh delta token on every poll
+of an idle feed**: before `has_more` existed the delta loop had only "the token
+stopped changing" to stop on, so against an idle calendar it span empty pages at
+request speed — committing the fresh cursor each round — until the job watchdog
+killed the run every ten minutes.
+
+## Immutable ids (mail and calendar)
+
+Requests against Outlook resources carry `Prefer: IdType="ImmutableId"`, and the
+mount keys each node on the id Graph returns.
+
+Graph's **default** message id is derived from the item's location, so moving a
+message between folders **changes its id**. To a virtual mount — which keys a
+node on `external_id` for the node's whole lifetime — that reads as a *delete of
+the old id plus a create of a new one*: the node is destroyed and rebuilt,
+taking its attachment subnodes, its history and any local annotation with it,
+and any pending writeback against the old id 404s. Filing an email is the single
+most ordinary thing a person does to a mailbox, so this is on by default.
+
+**Migration.** Immutable ids are a *different id space*. A mount that already
+synced with default ids will not recognise its own items: the next full
+reconcile imports every message afresh under its immutable id and prunes the old
+nodes. That is a one-time re-import — node ids change, per-node history
+restarts, attachments are re-fetched — and on a mount with writeback enabled the
+re-imported nodes are unseeded, so the first drain pushes their current values
+back once (bounded by `max_items_per_sync` per run, and idempotent). **Nothing
+is lost at the provider.**
+
+Two ways to manage it:
+
+- **Take the re-import** (recommended, and cheapest while a mount is small).
+- **Defer**: set `immutable_ids: false` on the mount (or the connection) to keep
+  the old id space. New mounts should always run with it on.
+
+If a *folder-scoped* mail mount reports `misconfigured` right after the switch,
+re-pick its folder in the mount editor: `remote_root` holds a folder id captured
+in the old id space.
+
 ## Security notes
 
 - Refresh tokens never enter the function sandbox. The adapter receives only a
