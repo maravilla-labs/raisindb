@@ -197,21 +197,45 @@ export function opGet(credential, mount, params) {
 export function opGetContent(credential, mount, params) {
   var resource = resourceOf(mount);
   if (resource === "files") {
-    // REFUSED, not attempted. Two independent reasons this path cannot return
-    // correct bytes today, and both fail silently rather than loudly:
-    // `raisin.http.fetch` decodes every response as TEXT, so any binary file
-    // (image, PDF, zip) is corrupted before the adapter even sees it — the
-    // exact failure the mail-attachment branch below documents; and Graph's
-    // `/content` 302-redirects to a per-item download host outside the
-    // adapter's network allow-list. Storing corrupted bytes that read as
-    // "fetched" is strictly worse than saying no; consumers should fetch via
-    // the item's `download_url` metadata (re-read it via `get` first — the
-    // pre-authenticated URL expires within about an hour).
-    throw coded(
-      "get_content: drive file content sync is not supported by this adapter yet " +
-        "(binary-safe fetch is not available; use the download_url from a fresh `get`)",
-      "config_error"
+    // POINT at the bytes; do not carry them.
+    //
+    // This adapter cannot return drive-file bytes itself: `raisin.http.fetch`
+    // decodes every response as TEXT, so any binary file (image, PDF, zip) is
+    // corrupted before the adapter even sees it — the failure the attachment
+    // branch below documents — and Graph's `/content` 302-redirects to a
+    // per-item download host outside this adapter's network allow-list.
+    //
+    // So we answer with `fetch_url` and the ENGINE downloads it, in Rust,
+    // behind the operator's egress policy. The URL is minted HERE, on this
+    // call, and used immediately: `@microsoft.graph.downloadUrl` is
+    // pre-authenticated and lives about an hour, so the one thing that must
+    // never happen is serving a copy persisted at sync time. That is exactly
+    // why the node's `meta.download_url` is a convenience link and not the
+    // content path.
+    var meta = graphFetch(
+      credential,
+      "GET",
+      GRAPH + driveBase(mount) + "/items/" + enc(params.item_id) +
+        "?$select=id,name,size,file,@microsoft.graph.downloadUrl",
+      { context: "get_content(file)", rawStatusOk: true }
     );
+    if (meta.status === 404) return null;
+    raiseForStatus(meta, "get_content(file)");
+    var item = meta.body || {};
+    var url = item["@microsoft.graph.downloadUrl"];
+    if (typeof url !== "string" || !url) {
+      // A folder, or an item Graph will not hand out a link for. Saying so
+      // beats storing an empty file that reads as "fetched".
+      throw coded(
+        "get_content: Microsoft Graph returned no download URL for '" +
+          params.item_id + "' (a folder, or content this account cannot read)",
+        "config_error"
+      );
+    }
+    return {
+      fetch_url: url,
+      mime_type: (item.file && item.file.mimeType) || "application/octet-stream",
+    };
   }
   // A mail ATTACHMENT: `parent_item_id` is the message, `item_id` the
   // attachment. Graph has no route that addresses an attachment on its own, so

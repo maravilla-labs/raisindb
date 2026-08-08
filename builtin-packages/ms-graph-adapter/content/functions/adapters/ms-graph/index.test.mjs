@@ -18,7 +18,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { opList } from './read.js'
+import { opList, opGetContent } from './read.js'
 import { opGetChanges } from './changes.js'
 import { raiseForStatus } from './http.js'
 import { outlookHeaders, useImmutableIds } from './mount.js'
@@ -162,6 +162,46 @@ test('status codes map to the reserved engine codes', () => {
   )
   // Success is not an error.
   assert.equal(raiseForStatus({ status: 200, headers: {}, body: {} }, 'ctx'), undefined)
+})
+
+// ---- file content ---------------------------------------------------------
+
+test('drive content is POINTED at with a freshly minted url, never a stored one', () => {
+  // The adapter cannot carry the bytes: the host decodes every response as
+  // text, so a PDF through a JS string comes back corrupted. It answers with a
+  // url and the ENGINE downloads it in Rust.
+  const calls = stubHttp([
+    {
+      body: {
+        id: '01ABC',
+        file: { mimeType: 'application/pdf' },
+        '@microsoft.graph.downloadUrl': 'https://dl.example/fresh-link',
+      },
+    },
+  ])
+  const out = opGetContent(CREDENTIAL, filesMount(), { item_id: '01ABC' })
+
+  assert.equal(out.fetch_url, 'https://dl.example/fresh-link')
+  assert.equal(out.mime_type, 'application/pdf')
+  // Never inline bytes — that is the corruption path.
+  assert.equal(out.content, undefined)
+  assert.equal(out.content_base64, undefined)
+  // The url is minted on THIS call. A pre-authenticated Graph link lives about
+  // an hour, so serving a copy captured at sync time is the bug this avoids.
+  assert.match(calls[0].url, /\/items\/01ABC\?\$select=/)
+  assert.match(calls[0].url, /downloadUrl/)
+})
+
+test('a drive item with no download url is refused rather than half-served', () => {
+  stubHttp([{ body: { id: 'FOLDER-1', folder: { childCount: 3 } } }])
+  assert.throws(
+    () => opGetContent(CREDENTIAL, filesMount(), { item_id: 'FOLDER-1' }),
+    (e) => e.code === 'config_error',
+    'a folder has no content; storing an empty file that reads as "fetched" is worse'
+  )
+  // A vanished item is null (settled), not an error.
+  stubHttp([{ status: 404, body: {} }])
+  assert.equal(opGetContent(CREDENTIAL, filesMount(), { item_id: 'GONE' }), null)
 })
 
 // ---- immutable ids --------------------------------------------------------

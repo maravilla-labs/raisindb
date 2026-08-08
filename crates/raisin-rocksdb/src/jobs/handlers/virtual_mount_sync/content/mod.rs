@@ -29,6 +29,7 @@ use super::{
 };
 
 mod decode;
+mod fetch_url;
 
 pub(super) use decode::{content_hash, decode_content, split_external_id};
 
@@ -145,7 +146,22 @@ impl VirtualMountSyncHandler {
             .await
             .map_err(|e| Error::storage(format!("get_content failed: {e}")))?;
 
-        let (bytes, mime) = decode_content(&result, &node)?;
+        // Three answer shapes, and the third is the one an adapter reaches for
+        // when it CANNOT carry the bytes: a provider that hands out a
+        // pre-authenticated, short-lived download URL. The engine fetches that
+        // itself — in Rust, where bytes survive — behind the operator's egress
+        // policy. See `fetch_url` for why neither half of that is optional.
+        let (bytes, mime) = match result.get("fetch_url").and_then(|v| v.as_str()) {
+            Some(url) => {
+                let declared = result
+                    .get("mime_type")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| node_str_prop(&node, "file_type"));
+                fetch_url::fetch_content_url(url, declared).await?
+            }
+            None => decode_content(&result, &node)?,
+        };
         self.store_content(&target, node, bytes, mime).await
     }
 

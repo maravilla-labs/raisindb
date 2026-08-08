@@ -50,8 +50,24 @@ function handler(input) {
       title: filename,
       mimeType: item.mime_type || null,
       size: item.size_bytes != null ? item.size_bytes : null,
-      // Link-only in v1 — the human-openable and direct-download URLs.
+      // The human-openable link. Durable: this is the item's page in
+      // OneDrive/SharePoint, and it survives as long as the item does.
       web_url: item.web_url || null,
+      // SHORT-LIVED, and deliberately not the way to read this file.
+      //
+      // Graph's `@microsoft.graph.downloadUrl` is pre-authenticated and expires
+      // in roughly an hour, while this node is only rewritten when its etag
+      // changes — so a settled file carries a link that has been dead for
+      // weeks and still looks durable. It is kept because it is genuinely
+      // useful in the minutes after a sync (a preview, a quick hand-off) and
+      // removing a published property would break consumers.
+      //
+      // To READ THE BYTES, ask the engine for the content instead: the
+      // adapter's `get_content` mints a fresh URL per call and the engine
+      // downloads it binary-safely. To judge how stale this copy is, read the
+      // engine's own `__synced_at` on the node — deliberately NOT a timestamp
+      // minted here, which would make this mapper answer differently for
+      // identical input and rewrite the node on every remap.
       download_url: item.download_url || null,
       provider: "ms-graph",
       provider_kind: "file",

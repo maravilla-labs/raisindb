@@ -198,7 +198,7 @@ engine never calls them.
 | `capabilities` | `{}` | `Capabilities` (§3.3) |
 | `list` | `{ folder_id?, cursor?, limit? }` | `{ items: ExternalItem[], next_cursor: string \| null }` |
 | `get` | `{ item_id?, path? }` | `ExternalItem \| null` |
-| `get_content` | `{ item_id }` | `{ content, mime_type }` |
+| `get_content` | `{ item_id, parent_item_id?, mime_type? }` | `{ content \| content_base64 \| fetch_url, mime_type }` |
 | `create` _(write)_ | `{ parent_id, name, is_folder, payload?, content?, mime_type? }` | `ExternalItem` |
 | `update` _(write)_ | `{ item_id, payload?, name?, content?, mime_type?, fields?, etag? }` | `ExternalItem` |
 | `delete` _(write)_ | `{ item_id, mode? }` | `{ deleted: true }` |
@@ -276,8 +276,28 @@ none yet.
 **Binary content MUST use `content_base64`.** `content` is a JS string and a JS string cannot
 hold arbitrary bytes — a PDF round-tripped through one comes back corrupted, with no error
 anywhere. The engine prefers `content_base64` whenever both are present, so an adapter that
-adds it later is immediately correct. Returning neither is an error, deliberately: writing a
-zero-byte file would make "content present" true forever and no retry could recover it.
+adds it later is immediately correct. Returning none of the three shapes is an error,
+deliberately: writing a zero-byte file would make "content present" true forever and no retry
+could recover it.
+
+**Or POINT at the bytes: `{ fetch_url, mime_type? }`.** Some providers hand out content as a
+pre-authenticated, short-lived URL rather than an inline payload — Microsoft Graph's
+`@microsoft.graph.downloadUrl` is the canonical case. Two things make that awkward for an
+adapter to serve itself: the host decodes every `raisin.http.fetch` response as TEXT (so the
+bytes are corrupted before your code sees them), and such a URL usually redirects to a
+per-item download host your `network_policy` does not allow-list.
+
+So answer with the URL and the ENGINE downloads it, in Rust, where bytes survive. Two rules:
+
+- **Mint the URL on the call, never persist it.** These links expire — Graph's in about an
+  hour — so a copy captured at sync time is dead long before someone opens the file. Fetch
+  the item fresh inside `get_content` and return the URL it carries. (Persisting one on the
+  node as a *convenience* link is fine; it must not be the content path.)
+- **The engine guards where it will dial.** The URL is validated against the operator-owned
+  egress policy (`[mcp_client]`) — HTTPS only, no loopback/private/link-local addresses, no
+  redirects, a 64 MB ceiling and a 2-minute timeout. A URL pointing inward is refused rather
+  than fetched, because "the engine dials whatever an adapter returns" is the textbook SSRF
+  shape.
 
 `params`:
 
