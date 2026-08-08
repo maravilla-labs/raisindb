@@ -43,6 +43,22 @@ are `/me` and `/me/drive`.
 For calendars, `sync_config.window` bounds the `calendarView` delta:
 `{ days_back: 7, days_ahead: 30 }` by default.
 
+Every item's `external_id` and `name` are the **Graph item id**, never the
+filename or subject, so two items can never collide on a path and a rename
+never moves a node.
+
+**A provider-side MOVE is a two-step story, by design.** When a file is moved to
+a different OneDrive folder, the next ordinary sync updates the node's
+`parent_id` property — the truth is in the data immediately — but leaves the
+node where it is in the tree: an upsert matched by `external_id` deliberately
+preserves the existing path, which is what stops a rename from creating
+duplicates. To re-shape the tree to the provider's current hierarchy, run a
+**Remap** on the mount (`Remap` in the admin console, or `mode: "remap"`). That
+runs a relocation pre-pass which moves each node to its newly-mapped path
+**preserving the node id**, so revision history and anything added locally
+survive — unlike a delete-and-recreate, which loses both. The same applies after
+changing `path_template`, which is the case remap was built for.
+
 ## Shared mailboxes and SharePoint
 
 By default a mount reads the connected account's own data. Two settings change
