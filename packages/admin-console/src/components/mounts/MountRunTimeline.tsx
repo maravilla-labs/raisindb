@@ -160,6 +160,33 @@ export default function MountRunTimeline({ runs }: MountRunTimelineProps) {
                         </div>
                       ))}
                     </div>
+                    {/* The WRITE half of the run. Shown only once a mount has
+                        pushed something, so a read-only mount carries no
+                        permanent zeroes — the same rule the Last-run card
+                        follows, and the same numbers, so expanding a run in
+                        history and reading the card cannot disagree. */}
+                    {(run.pushed || run.stamped || run.writeback_pending) ? (
+                      <div className="grid grid-cols-3 gap-2 text-[11px]">
+                        {(
+                          [
+                            ['Pushed', run.pushed ?? 0],
+                            ['Stamped', run.stamped ?? 0],
+                            ['Pending', run.writeback_pending ?? 0],
+                          ] as const
+                        ).map(([label, value]) => (
+                          <div key={label} className="rounded bg-white/5 px-2 py-1.5">
+                            <div className="text-zinc-500">{label}</div>
+                            <div
+                              className={`tabular-nums ${
+                                label === 'Pending' && value > 0 ? 'text-amber-300' : 'text-zinc-200'
+                              }`}
+                            >
+                              {value.toLocaleString()}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="text-[11px] text-zinc-500 tabular-nums">
                       {run.items_done.toLocaleString()} items processed · started{' '}
                       {formatAbsoluteSeconds(run.started_at)}

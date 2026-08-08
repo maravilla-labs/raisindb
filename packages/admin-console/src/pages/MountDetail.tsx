@@ -875,7 +875,11 @@ export default function MountDetail() {
                 {integration.title || integration.name}
               </Link>
               <p className="text-xs text-zinc-500 mt-0.5 mb-3">{integration.provider_type}</p>
-              <CapabilityChips capabilities={integration.capabilities} compact />
+              <CapabilityChips
+                capabilities={integration.capabilities}
+                checkedAt={integration.capabilities_checked_at}
+                compact
+              />
             </GlassCard>
           )}
         </div>

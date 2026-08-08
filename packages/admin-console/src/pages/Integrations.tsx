@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
-import { Plug, Plus, Package, CheckCircle, XCircle, Users } from 'lucide-react'
+import { Plug, Plus, Package, CheckCircle, XCircle, Users, AlertTriangle } from 'lucide-react'
 import GlassCard from '../components/GlassCard'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { ItemTable, type TableColumn } from '../components/ItemTable'
@@ -151,18 +151,39 @@ export default function Integrations() {
       key: 'capabilities',
       header: 'Capabilities',
       width: '260px',
-      render: (i) => <CapabilityChips capabilities={i.capabilities} compact />,
+      render: (i) => (
+        <CapabilityChips
+          capabilities={i.capabilities}
+          checkedAt={i.capabilities_checked_at}
+          compact
+        />
+      ),
     },
     {
       key: 'accounts',
       header: 'Accounts',
       width: '120px',
-      render: (i) => (
-        <span className="flex items-center gap-1 text-zinc-300 text-sm">
-          <Users className="w-3.5 h-3.5" />
-          {i.connected_accounts?.length || 0}
-        </span>
-      ),
+      render: (i) => {
+        // A connector with no account cannot sync anything, and until now that
+        // was a grey "0" indistinguishable from a healthy count. (Deliberately
+        // NOT flagging an elapsed `expires_at`: access tokens are refreshed
+        // transparently, so that would warn on the normal case.)
+        const n = i.connected_accounts?.length || 0
+        return (
+          <span
+            className={`flex items-center gap-1 text-sm ${n === 0 ? 'text-amber-300' : 'text-zinc-300'}`}
+            title={
+              n === 0
+                ? 'No account connected — this connector cannot sync until one is. Open it and use Add connection.'
+                : `${n} connected account${n === 1 ? '' : 's'}`
+            }
+          >
+            <Users className="w-3.5 h-3.5" />
+            {n}
+            {n === 0 && <AlertTriangle className="w-3 h-3" />}
+          </span>
+        )
+      },
     },
     {
       key: 'secret',

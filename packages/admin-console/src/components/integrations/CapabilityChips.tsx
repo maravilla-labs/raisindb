@@ -2,12 +2,22 @@
 
 import { Eye, Pencil, Zap, Webhook, Search, FolderTree, HelpCircle } from 'lucide-react'
 import type { Capabilities } from '../../api/integrations'
+import { dateFromIso, formatRelative } from '../../utils/time'
 
 interface CapabilityChipsProps {
   capabilities?: Capabilities
   /** When true, render a compact row (smaller text, no "unknown" helper copy). */
   compact?: boolean
   className?: string
+  /**
+   * `capabilities_checked_at` from the connector, when known.
+   *
+   * These chips are not decoration: the cached answer behind them GATES the
+   * write-mode selector, the push-mode options and the remote pickers. A probe
+   * from three months ago can therefore be the reason an option is missing,
+   * and without the date there is nothing on screen that says so.
+   */
+  checkedAt?: string | null
 }
 
 interface ChipDef {
@@ -43,7 +53,7 @@ export function capabilitiesUnknown(capabilities?: Capabilities): boolean {
  * true and muted when false. When capabilities were never probed, shows a
  * neutral "unknown" chip prompting a connection test.
  */
-export default function CapabilityChips({ capabilities, compact, className = '' }: CapabilityChipsProps) {
+export default function CapabilityChips({ capabilities, compact, className = '', checkedAt }: CapabilityChipsProps) {
   if (capabilitiesUnknown(capabilities)) {
     return (
       <span
@@ -74,6 +84,14 @@ export default function CapabilityChips({ capabilities, compact, className = '' 
           </span>
         )
       })}
+      {checkedAt && (
+        <span
+          className={`text-zinc-500 ${compact ? 'text-[10px]' : 'text-xs'}`}
+          title={`Capabilities were last probed on ${checkedAt}. Run Test connection to refresh them.`}
+        >
+          checked {formatRelative(dateFromIso(checkedAt))}
+        </span>
+      )}
     </div>
   )
 }

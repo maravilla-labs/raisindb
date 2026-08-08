@@ -689,6 +689,35 @@ export default function MountEditor({
                 />
               </div>
             </div>
+            {/*
+              The rail that stops a provider hiccup deleting the whole mount
+              subtree. It existed in the config and had no control at all, so
+              the only way to reach it was editing the node by hand — and the
+              only way to discover it was reading the API types.
+            */}
+            <div>
+              <label className="flex items-center gap-2 text-white text-sm">
+                <input
+                  type="checkbox"
+                  checked={sync.allow_empty_reconcile === true}
+                  onChange={(e) => patchSync({ allow_empty_reconcile: e.target.checked })}
+                  className="w-4 h-4 rounded"
+                />
+                Let an empty listing delete everything
+              </label>
+              <p className="mt-1 ml-6 text-xs text-zinc-500">
+                Off by default, and worth leaving off. When the provider returns
+                zero items, an empty listing is more often a hiccup or a
+                permissions change than a genuinely emptied folder — and the
+                content this would delete is not recoverable.
+              </p>
+              {sync.allow_empty_reconcile === true && (
+                <p className="mt-1 ml-6 text-xs text-amber-300/90">
+                  A single empty response from the provider will now remove every node
+                  this mount owns.
+                </p>
+              )}
+            </div>
             {integrationRef && (
               <p
                 className="flex items-start gap-1.5 text-xs text-zinc-500"
