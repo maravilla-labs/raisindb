@@ -190,6 +190,21 @@ async fn main() {
         event_bus.subscribe(std::sync::Arc::new(
             schema_stats_event_handler::SchemaStatsEventHandler::new(schema_stats_cache.clone()),
         ));
+
+        // Replication checkpoint ingestion copies the node_types / archetypes
+        // column families straight into the live database and emits NO events by
+        // design, so the per-scope invalidation above never fires for it. The
+        // workspace catalog already registers here for exactly this reason
+        // (`engine::catalog_cache`); the schema stats cache did not, so a replica
+        // that caught up by checkpoint kept planning against the counts it held
+        // before the ingest until the 5-minute TTL floor expired.
+        //
+        // Stale counts are a PLANNING fault, not a wrong-answer fault — the
+        // planner picks a worse compound index — which is precisely why it would
+        // never have surfaced as a bug report.
+        let stats_for_ingest = schema_stats_cache.clone();
+        raisin_core::register_invalidator(move || stats_for_ingest.invalidate_all());
+
         tracing::info!("Schema stats cache initialized with event-driven invalidation");
     }
 
