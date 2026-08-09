@@ -322,11 +322,30 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
     // =========================================================================
 
     /// Load schema statistics from the cache (if configured) and apply them to the physical planner.
+    ///
+    /// `selection` is the query's WHERE clause. The stats are used ONLY to refine
+    /// selectivity for `node_type =` / `archetype =` equality (see
+    /// `helpers::selection_uses_schema_stats`), so a query without one of those
+    /// predicates skips this entirely: on a cache miss the computation below
+    /// deserializes every NodeType and Archetype on the branch just to count
+    /// them, which was ~33% of production CPU when run per query (2026-08).
+    ///
+    /// The gate lives HERE, not at the three call sites, deliberately. Each site
+    /// would otherwise need its own copy of the predicate walk, and this codebase
+    /// has a documented recurring bug class of mirrored paths silently drifting —
+    /// a caller that forgot the gate would quietly reintroduce the whole cost.
+    /// `None` means "no WHERE clause", which cannot contain the predicate, so it
+    /// skips too.
     pub(crate) async fn apply_schema_stats(
         &self,
         physical_planner: &mut PhysicalPlanner,
         branch: &str,
+        selection: Option<&raisin_sql::analyzer::TypedExpr>,
     ) {
+        let uses_stats = selection.is_some_and(helpers::selection_uses_schema_stats);
+        if !uses_stats {
+            return;
+        }
         if let Some(ref stats_cache) = self.schema_stats_cache {
             let scope_key = format!("{}:{}:{}", self.tenant_id, self.repo_id, branch);
             let storage_ref = self.storage.clone();
@@ -559,9 +578,15 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             physical_planner.set_compound_indexes(indexes);
         }
 
-        // Load schema statistics for data-driven selectivity estimation
-        self.apply_schema_stats(&mut physical_planner, &self.branch)
-            .await;
+        // Load schema statistics for data-driven selectivity estimation.
+        // Gated inside `apply_schema_stats` on the WHERE clause actually
+        // containing a node_type/archetype equality — see that method.
+        self.apply_schema_stats(
+            &mut physical_planner,
+            &self.branch,
+            helpers::analyzed_selection(&analyzed),
+        )
+        .await;
 
         let physical_plan = physical_planner.plan(&optimized)?;
 

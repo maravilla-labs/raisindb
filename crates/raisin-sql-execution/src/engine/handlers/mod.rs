@@ -134,9 +134,15 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             }
         }
 
-        // Load schema statistics for data-driven selectivity estimation
-        self.apply_schema_stats(&mut physical_planner, &self.branch)
-            .await;
+        // Load schema statistics for data-driven selectivity estimation.
+        // Gated inside `apply_schema_stats` on the WHERE clause actually
+        // containing a node_type/archetype equality — see that method.
+        self.apply_schema_stats(
+            &mut physical_planner,
+            &self.branch,
+            query.selection.as_ref(),
+        )
+        .await;
 
         let physical_plan = physical_planner.plan(&optimized_plan)?;
 
@@ -392,9 +398,15 @@ impl<S: Storage + raisin_storage::transactional::TransactionalStorage + 'static>
             physical_planner.set_compound_indexes(indexes);
         }
 
-        // Load schema statistics for data-driven selectivity estimation
-        self.apply_schema_stats(&mut physical_planner, &self.branch)
-            .await;
+        // Load schema statistics for data-driven selectivity estimation.
+        // Gated inside `apply_schema_stats` on the WHERE clause actually
+        // containing a node_type/archetype equality — see that method.
+        self.apply_schema_stats(
+            &mut physical_planner,
+            &self.branch,
+            helpers::analyzed_selection(analyzed),
+        )
+        .await;
 
         let physical_plan = physical_planner.plan(&optimized)?;
 

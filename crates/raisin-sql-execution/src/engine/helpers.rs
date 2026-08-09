@@ -20,6 +20,19 @@ pub(super) fn extract_node_type_from_analyzed(analyzed: &AnalyzedStatement) -> O
     None
 }
 
+/// The WHERE clause of an analyzed statement, if it has one.
+///
+/// Exists so every `apply_schema_stats` call site can hand it the same
+/// `Option<&TypedExpr>` regardless of whether it holds a raw query or an
+/// `AnalyzedStatement` — the gate then lives in one place instead of being
+/// re-derived per site. Mirrors `extract_node_type_from_analyzed`'s shape.
+pub(super) fn analyzed_selection(analyzed: &AnalyzedStatement) -> Option<&TypedExpr> {
+    if let AnalyzedStatement::Query(ref q) = analyzed {
+        return q.selection.as_ref();
+    }
+    None
+}
+
 /// Recursively search a TypedExpr for `node_type = 'value'` pattern
 pub(crate) fn extract_node_type_from_expr(expr: &TypedExpr) -> Option<String> {
     match &expr.expr {
@@ -51,6 +64,56 @@ pub(crate) fn extract_node_type_from_expr(expr: &TypedExpr) -> Option<String> {
             extract_node_type_from_expr(left).or_else(|| extract_node_type_from_expr(right))
         }
         _ => None,
+    }
+}
+
+/// Does this WHERE clause contain a `node_type = '...'` or `archetype = '...'`
+/// equality — the ONLY thing `SchemaStats` can change the plan for?
+///
+/// `schema_stats` is read in exactly one place,
+/// `physical_plan/planner/scan_planning/selectivity.rs::estimate_selectivity`,
+/// and only to refine `ColumnEq` on those two columns from the flat 0.05
+/// heuristic to `1/count`. Every other predicate ignores it entirely. So for a
+/// query without such an equality the stats are computed, cached and then never
+/// read — and computing them deserializes EVERY NodeType and Archetype on the
+/// branch (recursive `PropertyValueSchema` trees) just to take two `.len()`s.
+/// In production that was ~33% of server CPU and a large share of the 41% spent
+/// in `PropertyValue::deserialize` (2026-08 investigation).
+///
+/// BOTH columns must be checked. Gating on `node_type` alone silently degrades
+/// archetype-equality plans back to the 0.05 heuristic — a planner regression
+/// with no error anywhere.
+///
+/// Kept next to `extract_node_type_from_expr` and mirroring its traversal
+/// (including the reversed `'X' = column` form) so the two cannot drift.
+pub(crate) fn selection_uses_schema_stats(expr: &TypedExpr) -> bool {
+    fn is_stats_column(name: &str) -> bool {
+        name.eq_ignore_ascii_case("node_type") || name.eq_ignore_ascii_case("archetype")
+    }
+
+    match &expr.expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
+            if let Expr::Column { column, .. } = &left.expr {
+                if is_stats_column(column) && matches!(right.expr, Expr::Literal(Literal::Text(_)))
+                {
+                    return true;
+                }
+            }
+            if let Expr::Column { column, .. } = &right.expr {
+                if is_stats_column(column) && matches!(left.expr, Expr::Literal(Literal::Text(_))) {
+                    return true;
+                }
+            }
+            false
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            selection_uses_schema_stats(left) || selection_uses_schema_stats(right)
+        }
+        _ => false,
     }
 }
 
@@ -224,5 +287,119 @@ async fn load_compound_indexes_uncached<S: Storage>(
             tracing::warn!("   Failed to load NodeType '{}': {}", node_type_name, e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_stats_gate_tests {
+    use super::*;
+    use raisin_sql::analyzer::DataType;
+
+    fn col(name: &str) -> TypedExpr {
+        TypedExpr::new(
+            Expr::Column {
+                table: "nodes".to_string(),
+                column: name.to_string(),
+            },
+            DataType::Text,
+        )
+    }
+
+    fn lit(v: &str) -> TypedExpr {
+        TypedExpr::new(Expr::Literal(Literal::Text(v.to_string())), DataType::Text)
+    }
+
+    fn eq(l: TypedExpr, r: TypedExpr) -> TypedExpr {
+        TypedExpr::new(
+            Expr::BinaryOp {
+                left: Box::new(l),
+                op: BinaryOperator::Eq,
+                right: Box::new(r),
+            },
+            DataType::Boolean,
+        )
+    }
+
+    fn and(l: TypedExpr, r: TypedExpr) -> TypedExpr {
+        TypedExpr::new(
+            Expr::BinaryOp {
+                left: Box::new(l),
+                op: BinaryOperator::And,
+                right: Box::new(r),
+            },
+            DataType::Boolean,
+        )
+    }
+
+    #[test]
+    fn node_type_equality_needs_the_stats() {
+        assert!(selection_uses_schema_stats(&eq(
+            col("node_type"),
+            lit("raisin:Page")
+        )));
+    }
+
+    /// The regression this gate is most likely to cause. `estimate_selectivity`
+    /// refines `archetype =` from `1/archetype_count` exactly as it does
+    /// `node_type =`, so a gate that only recognised `node_type` would silently
+    /// drop archetype-equality plans back to the flat 0.05 heuristic — a worse
+    /// plan with no error anywhere.
+    #[test]
+    fn archetype_equality_needs_the_stats_too() {
+        assert!(selection_uses_schema_stats(&eq(
+            col("archetype"),
+            lit("article")
+        )));
+    }
+
+    #[test]
+    fn reversed_literal_first_form_is_recognised() {
+        assert!(selection_uses_schema_stats(&eq(
+            lit("raisin:Page"),
+            col("node_type")
+        )));
+    }
+
+    #[test]
+    fn column_matching_is_case_insensitive() {
+        assert!(selection_uses_schema_stats(&eq(
+            col("NODE_TYPE"),
+            lit("raisin:Page")
+        )));
+    }
+
+    #[test]
+    fn nested_under_and_is_found() {
+        let e = and(
+            eq(col("path"), lit("/docs")),
+            eq(col("node_type"), lit("raisin:Page")),
+        );
+        assert!(selection_uses_schema_stats(&e));
+    }
+
+    /// The whole point: an ordinary path/id lookup must NOT drag in a full
+    /// NodeType + Archetype deserialize just to compute two counts nothing reads.
+    #[test]
+    fn a_predicate_the_stats_cannot_affect_skips_them() {
+        assert!(!selection_uses_schema_stats(&eq(col("path"), lit("/docs"))));
+        assert!(!selection_uses_schema_stats(&and(
+            eq(col("path"), lit("/docs")),
+            eq(col("name"), lit("index")),
+        )));
+    }
+
+    /// `node_type > 'x'` is not an equality, so `estimate_selectivity` never
+    /// consults the stats for it.
+    #[test]
+    fn non_equality_on_a_stats_column_does_not_qualify() {
+        let gt = TypedExpr::new(
+            Expr::BinaryOp {
+                left: Box::new(col("node_type")),
+                op: BinaryOperator::Gt,
+                right: Box::new(lit("raisin:Page")),
+            },
+            DataType::Boolean,
+        );
+        assert!(!selection_uses_schema_stats(&gt));
     }
 }
