@@ -1,3 +1,23 @@
 [target.aarch64-apple-darwin]
 # Keep debug info in separate .o files instead of bloating the final binaries.
 rustflags = ["-C", "split-debuginfo=unpacked"]
+
+# The SERVER target. Frame pointers make the release binary profilable: perf can
+# only walk a stack it can unwind, and without them `perf record -g` on the
+# production server returns leaf functions with no callers. That is exactly
+# where the 2026-08 RSS investigation stalled — the hot allocation sites were
+# identifiable (`Vec::from_iter`, `list_by_type`, `core::fmt::write`) but
+# nothing could attribute them to the code that called them, so "which subsystem
+# is allocating 145 MB/s" was unanswerable from a binary already in production.
+#
+# Costs ~1-2% throughput (one register) and is the standard trade for a
+# production build you intend to profile. Keep it: the alternative is cutting a
+# fresh release mid-incident before diagnosis can even start.
+#
+# Deliberately scoped to the Linux triple rather than [build], so macOS dev
+# builds keep their flags and do not eat a full rebuild. NOTE: per-target
+# rustflags do NOT merge with [build].rustflags and are overridden wholesale by
+# a RUSTFLAGS env var — if the release workflow ever sets RUSTFLAGS for Linux
+# (it sets them only for Windows today), this block stops applying silently.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "force-frame-pointers=yes"]
