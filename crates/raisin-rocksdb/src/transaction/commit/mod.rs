@@ -62,8 +62,14 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     let is_system = commit_meta.is_system;
     let bookkeeping = commit_meta.bookkeeping;
 
-    tracing::warn!(
-        "COMMIT DEBUG: max_revision={:?}, branch={:?}, actor={:?}, message={:?}, is_system={}",
+    // debug!, NOT warn!: this fires on EVERY commit and formats five fields to do
+    // it. At warn! it survives the production `RUST_LOG=warn` filter, which put
+    // ~11% of server CPU into `core::fmt::write` / `format_inner` and emitted
+    // 9375 lines in the first 40s of boot (2026-08 RSS investigation). Every
+    // `format!` is an allocation, and allocation churn — not live data — is what
+    // drove RSS to 9.3 GB. Leave it at debug!.
+    tracing::debug!(
+        "COMMIT: max_revision={:?}, branch={:?}, actor={:?}, message={:?}, is_system={}",
         max_revision,
         branch,
         actor.as_deref(),
@@ -79,20 +85,31 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     // Diagnostic for runaway mount-node commit loops: name the writer whenever a
     // VirtualMount node is part of a commit. One line per COMMIT (a transaction
     // batches its writes and commits once), aggregating the affected mounts.
-    let mount_changes: Vec<String> = changed_nodes
-        .iter()
-        .filter(|(_, change)| change.node_type.as_deref() == Some("raisin:VirtualMount"))
-        .map(|(node_id, change)| format!("{node_id}:{:?}", change.operation))
-        .collect();
-    if !mount_changes.is_empty() {
-        tracing::warn!(
-            mounts = ?mount_changes,
-            branch = ?branch.as_deref(),
-            actor = ?actor.as_deref(),
-            message = ?message.as_deref(),
-            is_system,
-            "VirtualMount node committed"
-        );
+    //
+    // Demoted from warn! to debug!, and the Vec is now built ONLY when the level
+    // is live. It was raised to warn! to catch the runaway loop in production;
+    // that investigation is closed (the loop is `finalize.rs` stamping
+    // last_attempt_at/last_sync_at/recent_runs into the blob that
+    // `state_store.rs`'s no-op guard compares, so the guard can never fire). At
+    // warn! this allocated a `format!` String per changed mount on the hot commit
+    // path under the production filter — keep it available for the next
+    // investigation, not billed to every commit.
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let mount_changes: Vec<String> = changed_nodes
+            .iter()
+            .filter(|(_, change)| change.node_type.as_deref() == Some("raisin:VirtualMount"))
+            .map(|(node_id, change)| format!("{node_id}:{:?}", change.operation))
+            .collect();
+        if !mount_changes.is_empty() {
+            tracing::debug!(
+                mounts = ?mount_changes,
+                branch = ?branch.as_deref(),
+                actor = ?actor.as_deref(),
+                message = ?message.as_deref(),
+                is_system,
+                "VirtualMount node committed"
+            );
+        }
     }
     let changed_translations = tx.extract_changed_translations()?;
 
@@ -257,8 +274,14 @@ pub(super) async fn commit_impl(tx: &RocksDBTransaction) -> Result<()> {
     // live observers keep working; the event carries a `bookkeeping` marker so
     // fan-out consumers like trigger evaluation can bow out cheaply).
     if let Some(branch_name) = branch.as_deref() {
-        tx.emit_node_events(&tenant_id, &repo_id, branch_name, &changed_nodes, bookkeeping)
-            .await;
+        tx.emit_node_events(
+            &tenant_id,
+            &repo_id,
+            branch_name,
+            &changed_nodes,
+            bookkeeping,
+        )
+        .await;
     }
 
     // PHASE 5.6: Push captured operations to replication peers
