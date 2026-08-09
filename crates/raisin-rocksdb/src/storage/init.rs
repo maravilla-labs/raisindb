@@ -151,25 +151,39 @@ impl RocksDBStorage {
         );
         let workspace_repo_arc = Arc::new(workspaces.clone());
 
-        // Create schema repositories with operation capture now that it's available
-        let node_type_repo_arc = Arc::new(NodeTypeRepositoryImpl::new_with_capture(
-            db.clone(),
-            revision_repo_arc.clone(),
-            branch_repo_arc.clone(),
-            operation_capture.clone(),
-        ));
-        let archetype_repo_arc = Arc::new(ArchetypeRepositoryImpl::new_with_capture(
-            db.clone(),
-            revision_repo_arc.clone(),
-            branch_repo_arc.clone(),
-            operation_capture.clone(),
-        ));
-        let element_type_repo_arc = Arc::new(ElementTypeRepositoryImpl::new_with_capture(
-            db.clone(),
-            revision_repo_arc.clone(),
-            branch_repo_arc.clone(),
-            operation_capture.clone(),
-        ));
+        // Create schema repositories with operation capture now that it's
+        // available, and with the event bus so a LOCAL schema edit publishes
+        // `Event::Schema` too. Without the bus the only publisher is the
+        // replication applicator, so the node that originates the edit — every
+        // node in a single-node deployment — leaves the schema stats cache
+        // stale until its TTL expires.
+        let node_type_repo_arc = Arc::new(
+            NodeTypeRepositoryImpl::new_with_capture(
+                db.clone(),
+                revision_repo_arc.clone(),
+                branch_repo_arc.clone(),
+                operation_capture.clone(),
+            )
+            .with_event_bus(event_bus.clone()),
+        );
+        let archetype_repo_arc = Arc::new(
+            ArchetypeRepositoryImpl::new_with_capture(
+                db.clone(),
+                revision_repo_arc.clone(),
+                branch_repo_arc.clone(),
+                operation_capture.clone(),
+            )
+            .with_event_bus(event_bus.clone()),
+        );
+        let element_type_repo_arc = Arc::new(
+            ElementTypeRepositoryImpl::new_with_capture(
+                db.clone(),
+                revision_repo_arc.clone(),
+                branch_repo_arc.clone(),
+                operation_capture.clone(),
+            )
+            .with_event_bus(event_bus.clone()),
+        );
         let tag_repo_arc = Arc::new(TagRepositoryImpl::new(db.clone()));
 
         // Create storage instance

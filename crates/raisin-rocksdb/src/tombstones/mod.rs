@@ -187,5 +187,22 @@ pub fn add_node_tombstones(
     // 10. TRANSLATION_DATA - Tombstone translation data (prefix scan)
     index_tombstones::tombstone_translation_data(batch, db, ctx, cfs, node, revision)?;
 
+    // 11. REGISTRY - Drop the virtual-mount registry entry (no-op for every
+    //     other node type).
+    //
+    //     A real delete rather than a tombstone: the registry is a live derived
+    //     set with no revision dimension, and the point of it is that the scan
+    //     shrinks when a mount goes away. This is the ONE delete point, which is
+    //     why it belongs here rather than in each caller — the transaction,
+    //     repository and cascade delete paths all funnel through this function.
+    crate::vmount_registry::record_node_delete(
+        batch,
+        db,
+        ctx.tenant_id,
+        ctx.repo_id,
+        ctx.branch,
+        node,
+    )?;
+
     Ok(())
 }

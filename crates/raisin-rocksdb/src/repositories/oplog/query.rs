@@ -285,9 +285,7 @@ impl OpLogRepository {
         // ends with the 0x00 separator, so bumping that byte to 0x01 is the
         // exact successor. No stored oplog key can equal it.
         let mut upper = prefix.clone();
-        let last = upper
-            .last_mut()
-            .expect("oplog node prefix is never empty");
+        let last = upper.last_mut().expect("oplog node prefix is never empty");
         debug_assert_eq!(*last, 0, "oplog node prefix must end with the separator");
         *last = 0x01;
 

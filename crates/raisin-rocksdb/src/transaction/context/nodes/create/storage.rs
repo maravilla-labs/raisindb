@@ -56,6 +56,14 @@ pub(super) fn write_node_to_batch(
 
     batch.put_cf(cf_nodes, node_key.clone(), node_value);
 
+    // Virtual-mount registry, in THIS batch. Writing it anywhere else — an event
+    // handler, a follow-up commit — is what lets a mount exist with no registry
+    // entry, which is silent: it just never syncs. A no-op for every node type
+    // that isn't `raisin:VirtualMount`.
+    crate::vmount_registry::record_node_write(
+        &mut batch, &tx.db, tenant_id, repo_id, branch, node,
+    )?;
+
     Ok(node_key)
 }
 

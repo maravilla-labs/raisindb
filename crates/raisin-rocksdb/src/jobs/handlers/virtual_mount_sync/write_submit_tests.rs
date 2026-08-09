@@ -329,7 +329,9 @@ async fn a_rate_limited_command_returns_to_queued_and_is_issued_again() {
     let env = setup().await;
     let mount = submit_mount();
     let mock = SubmitMock::new(vec![
-        Answer::Err(AdapterError::RateLimited { retry_after_secs: None }),
+        Answer::Err(AdapterError::RateLimited {
+            retry_after_secs: None,
+        }),
         Answer::Ok("SENT-2"),
     ]);
     let id = command(&env, "m1", "queued").await;

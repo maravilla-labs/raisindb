@@ -114,9 +114,18 @@ pub(super) async fn list_repositories(
         let (key, _) =
             item.map_err(|e| raisin_error::Error::storage(format!("Iterator error: {}", e)))?;
 
+        // `prefix_iterator_cf` is bounded by the CF's prefix extractor, not the
+        // seek key, so it walks past `{tenant}\0repos\0` — and the shape test
+        // below then reports the over-read rows as phantom repositories. See
+        // `crate::management::helpers::list_repositories_for_tenant`.
+        if !key.starts_with(&prefix) {
+            break;
+        }
+
         let key_str = String::from_utf8_lossy(&key);
         let parts: Vec<&str> = key_str.split('\0').collect();
-        if parts.len() >= 3 {
+        // Exactly `{tenant}\0repos\0{repo}` (`keys::repository_key`).
+        if parts.len() == 3 {
             repos.push(parts[2].to_string());
         }
     }

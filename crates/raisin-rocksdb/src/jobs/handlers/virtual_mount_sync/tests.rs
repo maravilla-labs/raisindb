@@ -557,7 +557,11 @@ async fn an_idle_feed_with_a_fresh_token_every_poll_terminates() {
     super::delta::run(&ctx(&env, &mount, &mock, &mat), &mut state)
         .await
         .unwrap();
-    assert_eq!(mock.op_count("get_changes"), 1, "has_more=false ends the pass");
+    assert_eq!(
+        mock.op_count("get_changes"),
+        1,
+        "has_more=false ends the pass"
+    );
     assert_eq!(state.last_sync_token.as_deref(), Some("delta-link-1"));
 
     // has_more: true keeps paging even across an EMPTY page (Graph documents
@@ -577,7 +581,11 @@ async fn an_idle_feed_with_a_fresh_token_every_poll_terminates() {
     super::delta::run(&ctx(&env, &mount, &mock, &mat), &mut state)
         .await
         .unwrap();
-    assert_eq!(mock.op_count("get_changes"), 2, "has_more=true pages through");
+    assert_eq!(
+        mock.op_count("get_changes"),
+        2,
+        "has_more=true pages through"
+    );
     assert_eq!(state.last_sync_token.as_deref(), Some("delta-link-2"));
 }
 
@@ -3643,3 +3651,6 @@ mod write_conflict_tests;
 
 #[path = "write_submit_tests.rs"]
 mod write_submit_tests;
+
+#[path = "registry_tests.rs"]
+mod registry_tests;

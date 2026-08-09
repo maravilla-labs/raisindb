@@ -68,6 +68,7 @@ mod storage;
 pub mod tantivy_transfer;
 mod tombstones;
 mod transaction;
+pub mod vmount_registry;
 
 pub use admin_user_store::AdminUserStore;
 pub use api_key_store::ApiKeyStore;

@@ -7,6 +7,7 @@
 //! `register_job_with_id_idempotent` with dedup key `vmount-sync:{mount_id}` so a
 //! mount never has two in-flight syncs.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -25,6 +26,26 @@ use crate::RocksDBStorage;
 /// disagree about which repositories exist — a scan that enumerates differently
 /// from its sibling is a mount that is synced but never reconciled, or the
 /// reverse, with nothing anywhere saying so.
+///
+/// # This is O(repos WITH mounts), not O(all repos)
+///
+/// It used to be the latter: `list_tenants` × `list_repositories`, then a
+/// `list_by_type("raisin:VirtualMount")` per repo in [`check_repo`]. Both of
+/// those are index-backed and individually cheap; the problem was volume. Every
+/// 60 seconds the tick fanned a type scan out to every repository in the
+/// deployment, virtually none of which had ever had a mount, and
+/// `VirtualMountSyncHandler::handle` measured **51% of total server CPU** in
+/// production. The shape dates to the feature's first commit (`e201f92`), so
+/// there was no regression to find — the enumeration itself was the cost.
+///
+/// [`crate::vmount_registry`] now records which repos hold a mount, written in
+/// the same batch as the mount node, and this reads that. An EXPLICIT
+/// `repo_filter` still bypasses the registry: an operator naming a repository
+/// means "look here", and answering "that repo isn't in the index" would make a
+/// targeted invocation the one call that cannot repair anything.
+///
+/// The registry being complete is load-bearing, so it is audited — see
+/// [`super::registry_backfill`], driven from [`run_check`].
 pub(super) async fn scan_scope(
     storage: &Arc<RocksDBStorage>,
     tenant_filter: Option<String>,
@@ -38,7 +59,8 @@ pub(super) async fn scan_scope(
     for tenant in tenants {
         let repos = match &repo_filter {
             Some(r) => vec![r.clone()],
-            None => match crate::management::list_repositories(storage, &tenant).await {
+            None => match crate::management::list_repos_with_virtual_mounts(storage, &tenant).await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(tenant = %tenant, error = %e, "vmount scan: list repos failed");
@@ -49,6 +71,85 @@ pub(super) async fn scan_scope(
         out.extend(repos.into_iter().map(|repo| (tenant.clone(), repo)));
     }
     Ok(out)
+}
+
+/// How often the full-enumeration audit of the registry runs.
+const REGISTRY_RECONCILE_INTERVAL_SECS: i64 = 3600;
+
+/// When this process last ran the audit. `0` means never, which is what makes
+/// the first tick after startup the BACKFILL pass for mounts predating the
+/// registry.
+///
+/// Process-local on purpose. The registry is derived local state, like the
+/// spatial and fulltext indexes: each node writes its own from its own node
+/// writes, so each node must audit its own. A cluster-wide lease would leave
+/// every other node's registry unaudited.
+static LAST_REGISTRY_RECONCILE: AtomicI64 = AtomicI64::new(0);
+
+/// Run the registry audit if it is due, swallowing failures.
+///
+/// An audit that fails must not stop the tick it rides on: the fast path is
+/// still correct for every mount that IS registered, and refusing to sync those
+/// because the drift check errored would turn a diagnostic into an outage.
+async fn maybe_reconcile_registry(
+    storage: &Arc<RocksDBStorage>,
+    tenant_filter: &Option<String>,
+    repo_filter: &Option<String>,
+    now: i64,
+) {
+    let last = LAST_REGISTRY_RECONCILE.load(Ordering::Relaxed);
+    if last != 0 && now - last < REGISTRY_RECONCILE_INTERVAL_SECS {
+        return;
+    }
+    // Claim the slot before doing the work, so two overlapping ticks in this
+    // process don't both walk every repository.
+    if LAST_REGISTRY_RECONCILE
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let first_pass = last == 0;
+
+    match super::registry_backfill::reconcile_registry(
+        storage,
+        tenant_filter.clone(),
+        repo_filter.clone(),
+    )
+    .await
+    {
+        Ok(report) => {
+            if first_pass {
+                tracing::info!(
+                    repos = report.repos_scanned,
+                    mounts = report.mounts_found,
+                    backfilled = report.repaired,
+                    pruned = report.pruned,
+                    "vmount-registry: backfill pass complete"
+                );
+            } else if report.repaired > 0 {
+                // Loud on purpose: after startup, a repair means a node write
+                // path staged a mount without staging its registry entry, and
+                // that mount was not syncing until this pass found it.
+                tracing::warn!(
+                    repos = report.repos_scanned,
+                    mounts = report.mounts_found,
+                    repaired = report.repaired,
+                    "vmount-registry: DRIFT — the fast sync scan was missing mounts"
+                );
+            } else {
+                tracing::debug!(
+                    repos = report.repos_scanned,
+                    mounts = report.mounts_found,
+                    pruned = report.pruned,
+                    "vmount-registry: reconcile clean"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "vmount-registry: reconcile failed");
+        }
+    }
 }
 
 /// The branch a repo's mount/integration CONFIG lives on.
@@ -85,6 +186,11 @@ pub async fn run_check(
     repo_filter: Option<String>,
 ) -> Result<usize> {
     let now = Utc::now().timestamp();
+
+    // Before the fast scan, not after: a repair found here must take effect on
+    // THIS tick, or a stranded mount waits another minute for no reason.
+    maybe_reconcile_registry(storage, &tenant_filter, &repo_filter, now).await;
+
     let mut enqueued = 0usize;
     for (tenant, repo) in scan_scope(storage, tenant_filter, repo_filter).await? {
         match check_repo(storage, &tenant, &repo, now).await {
@@ -359,7 +465,10 @@ mod tests {
         // The backfill fast path must not smuggle it past the guard.
         m.state.backfill_cursor = Some("resume-here".to_string());
         m.state.consecutive_failures = 0;
-        assert!(!is_due(&m, now), "a pending backfill does not override a throttle");
+        assert!(
+            !is_due(&m, now),
+            "a pending backfill does not override a throttle"
+        );
 
         // Once the window elapses, normal scheduling resumes.
         assert!(is_due(&m, now + 300));

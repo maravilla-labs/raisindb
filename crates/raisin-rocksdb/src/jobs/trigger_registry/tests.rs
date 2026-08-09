@@ -210,7 +210,11 @@ fn test_get_candidates_filtering() {
 /// never rejected anything and every import write walked the full list.)
 #[test]
 fn quick_reject_is_per_dimension_intersection() {
-    fn trigger(id: &str, workspaces: Option<Vec<&str>>, node_types: Option<Vec<&str>>) -> CachedTrigger {
+    fn trigger(
+        id: &str,
+        workspaces: Option<Vec<&str>>,
+        node_types: Option<Vec<&str>>,
+    ) -> CachedTrigger {
         CachedTrigger {
             id: id.to_string(),
             function_path: Some("/functions/test".to_string()),

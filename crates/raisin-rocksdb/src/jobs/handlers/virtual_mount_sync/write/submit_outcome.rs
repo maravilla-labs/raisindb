@@ -110,7 +110,9 @@ mod tests {
     #[test]
     fn only_rate_limited_requeues() {
         assert_eq!(
-            disposition(&AdapterError::RateLimited { retry_after_secs: None }),
+            disposition(&AdapterError::RateLimited {
+                retry_after_secs: None
+            }),
             Disposition::Requeue
         );
         for e in [

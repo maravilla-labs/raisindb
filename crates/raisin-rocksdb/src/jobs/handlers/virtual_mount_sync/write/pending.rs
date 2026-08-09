@@ -31,12 +31,7 @@ fn map() -> &'static Mutex<HashMap<String, HashSet<String>>> {
 /// One key per mount, derived identically on the note side (capture hook) and
 /// the take side (page-boundary drain). Mirrors the lease-key identity: config
 /// branch, not target branch.
-pub(crate) fn pending_key(
-    tenant: &str,
-    repo: &str,
-    config_branch: &str,
-    mount_id: &str,
-) -> String {
+pub(crate) fn pending_key(tenant: &str, repo: &str, config_branch: &str, mount_id: &str) -> String {
     format!("{tenant}\0{repo}\0{config_branch}\0{mount_id}")
 }
 

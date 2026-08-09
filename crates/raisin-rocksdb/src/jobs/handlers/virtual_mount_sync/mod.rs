@@ -35,6 +35,7 @@ mod ephemeral;
 mod full;
 mod full_reconcile;
 mod materializer;
+mod registry_backfill;
 mod subscription;
 
 #[cfg(test)]

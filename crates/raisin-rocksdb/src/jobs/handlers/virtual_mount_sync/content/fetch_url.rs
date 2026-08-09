@@ -52,8 +52,11 @@ pub(crate) async fn fetch_content_url(
     raw_url: &str,
     declared_mime: Option<String>,
 ) -> Result<(Vec<u8>, String)> {
-    let url = Url::parse(raw_url)
-        .map_err(|e| Error::Validation(format!("get_content returned an unparseable fetch_url: {e}")))?;
+    let url = Url::parse(raw_url).map_err(|e| {
+        Error::Validation(format!(
+            "get_content returned an unparseable fetch_url: {e}"
+        ))
+    })?;
 
     // Scheme, host, allow-list, and the resolved addresses. `guard` performs the
     // second (post-DNS) check, which is what a save-time-only validation misses.

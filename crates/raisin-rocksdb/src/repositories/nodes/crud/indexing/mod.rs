@@ -121,6 +121,17 @@ impl NodeRepositoryImpl {
         // call.
         self.add_spatial_indexes(batch, node, tenant_id, repo_id, branch, workspace, revision)?;
 
+        // 9. Virtual-mount registry.
+        //
+        // Same reasoning as the spatial writer above, and the same batch: this
+        // repository path is a second node writer, so a registry entry written
+        // only on the transaction path would be missing for every mount created
+        // through `storage.nodes().add(...)`/`update(...)` — and a missing entry
+        // is silent, the mount simply never syncs. See `crate::vmount_registry`.
+        crate::vmount_registry::record_node_write(
+            batch, &self.db, tenant_id, repo_id, branch, node,
+        )?;
+
         Ok(())
     }
 
