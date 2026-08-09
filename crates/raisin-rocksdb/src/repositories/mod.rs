@@ -20,6 +20,7 @@ mod registry;
 mod relations;
 mod repository_management;
 mod revisions;
+pub(crate) mod schema_events;
 mod session;
 pub mod spatial_index;
 mod system_updates;

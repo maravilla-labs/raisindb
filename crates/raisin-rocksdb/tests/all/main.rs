@@ -54,6 +54,7 @@ mod replication_attribution_test;
 mod replication_performance_test;
 mod rls_integration_tests;
 mod scheduled_invocation_test;
+mod schema_event_local_publish_test;
 mod simple_operation_capture_test;
 mod spatial_compaction_test;
 mod spatial_index_test;

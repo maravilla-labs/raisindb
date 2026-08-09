@@ -2,6 +2,9 @@
 
 use super::ArchetypeRepositoryImpl;
 use super::TOMBSTONE;
+use crate::repositories::schema_events::{
+    publish_local_schema_event, SchemaChange, SchemaKindFamily,
+};
 use crate::{cf, cf_handle, keys};
 use chrono::Utc;
 use raisin_error::{Error as RaisinError, Result};
@@ -229,6 +232,20 @@ impl ArchetypeRepository for ArchetypeRepositoryImpl {
             }
         }
 
+        // Local schema event. `create`, `update`, `put`, `publish` and
+        // `unpublish` all funnel through here, so this one site covers them.
+        publish_local_schema_event(
+            self.event_bus.as_ref(),
+            scope,
+            &enriched.name,
+            SchemaKindFamily::Archetype,
+            if existing.is_some() {
+                SchemaChange::Updated
+            } else {
+                SchemaChange::Created
+            },
+        );
+
         Ok(revision)
     }
 
@@ -300,6 +317,14 @@ impl ArchetypeRepository for ArchetypeRepositoryImpl {
                     .await;
             }
         }
+
+        publish_local_schema_event(
+            self.event_bus.as_ref(),
+            scope,
+            name,
+            SchemaKindFamily::Archetype,
+            SchemaChange::Deleted,
+        );
 
         Ok(Some(revision))
     }

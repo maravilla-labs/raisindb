@@ -6,6 +6,7 @@ use crate::repositories::{BranchRepositoryImpl, RevisionRepositoryImpl};
 use crate::{cf, cf_handle, keys};
 use chrono::Utc;
 use raisin_error::{Error as RaisinError, Result};
+use raisin_events::EventBus;
 use raisin_hlc::HLC;
 use raisin_models::nodes::types::NodeType;
 use raisin_models::tree::ChangeOperation;
@@ -23,6 +24,10 @@ pub struct NodeTypeRepositoryImpl {
     pub(super) revision_repo: Arc<RevisionRepositoryImpl>,
     pub(super) branch_repo: Arc<BranchRepositoryImpl>,
     pub(super) operation_capture: Option<Arc<crate::OperationCapture>>,
+    /// Event bus for local `Event::Schema` emission. Optional for the same
+    /// reason `operation_capture` is: repositories built for tests, embedded
+    /// uses and background jobs pass none and stay silent.
+    pub(super) event_bus: Option<Arc<dyn EventBus>>,
 }
 
 impl NodeTypeRepositoryImpl {
@@ -36,6 +41,7 @@ impl NodeTypeRepositoryImpl {
             revision_repo,
             branch_repo,
             operation_capture: None,
+            event_bus: None,
         }
     }
 
@@ -50,7 +56,17 @@ impl NodeTypeRepositoryImpl {
             revision_repo,
             branch_repo,
             operation_capture: Some(operation_capture),
+            event_bus: None,
         }
+    }
+
+    /// Attach the event bus so local schema writes publish `Event::Schema`.
+    ///
+    /// Without it the schema-stats cache only self-heals on its 5-minute TTL,
+    /// and never gets the correctness signal on the originating node.
+    pub fn with_event_bus(mut self, event_bus: Arc<dyn EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     pub(super) fn decode_revision(key: &[u8]) -> Result<HLC> {

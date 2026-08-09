@@ -2,6 +2,9 @@
 
 use super::NodeTypeRepositoryImpl;
 use super::TOMBSTONE;
+use crate::repositories::schema_events::{
+    publish_local_schema_event, SchemaChange, SchemaKindFamily,
+};
 use crate::{cf, cf_handle, keys};
 use raisin_error::{Error as RaisinError, Result};
 use raisin_hlc::HLC;
@@ -229,6 +232,20 @@ impl NodeTypeRepository for NodeTypeRepositoryImpl {
             }
         }
 
+        // Local schema event. `create`, `update`, `put`, `publish` and
+        // `unpublish` all funnel through here, so this one site covers them.
+        publish_local_schema_event(
+            self.event_bus.as_ref(),
+            scope,
+            &enriched.name,
+            SchemaKindFamily::NodeType,
+            if existing.is_some() {
+                SchemaChange::Updated
+            } else {
+                SchemaChange::Created
+            },
+        );
+
         Ok(revision)
     }
 
@@ -299,6 +316,14 @@ impl NodeTypeRepository for NodeTypeRepositoryImpl {
                     .await;
             }
         }
+
+        publish_local_schema_event(
+            self.event_bus.as_ref(),
+            scope,
+            name,
+            SchemaKindFamily::NodeType,
+            SchemaChange::Deleted,
+        );
 
         Ok(Some(revision))
     }
