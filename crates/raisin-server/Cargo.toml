@@ -10,8 +10,26 @@ license = "BSL-1.1"
 # arena fragmentation that glibc malloc accumulates under the per-execution
 # allocation churn of the function runtime (19GB RSS on prod, 2026-07).
 # background_threads is Linux-only in tikv-jemallocator.
+#
+# `profiling` / `stats` compile jemalloc's heap profiler and stats counters IN
+# but leave them INACTIVE — they cost effectively nothing until switched on at
+# runtime. Without them the `prof:*` / `stats_print` options are not merely
+# ignored, they are rejected outright ("<jemalloc>: Invalid conf pair:
+# prof:true"), so an RSS investigation on a running server has no instrument at
+# all and needs a fresh release before it can even start. That is exactly what
+# happened chasing the 9.3 GB plateau (2026-08); keep them compiled in.
+#
+# Activate at runtime via the PREFIXED env var — tikv-jemalloc builds jemalloc
+# with the `_rjem_` prefix, so plain `MALLOC_CONF` is silently NOT read:
+#   _RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/path/jeprof
+# Add `abort_conf:true` when testing a conf string — invalid pairs are ignored
+# with only a stderr line otherwise, which reads exactly like "it worked".
 [target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
+tikv-jemallocator = { version = "0.6", features = [
+    "background_threads",
+    "profiling",
+    "stats",
+] }
 
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
 tikv-jemallocator = "0.6"
