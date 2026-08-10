@@ -247,10 +247,74 @@ impl FlowEventBroadcaster {
         self.channels.remove(instance_id);
     }
 
+    /// Drop an instance's channel once nobody is listening.
+    ///
+    /// **Every subscriber must call this when it goes away** — see
+    /// [`FlowEventSubscription`], which does it from `Drop`.
+    ///
+    /// A `broadcast::Sender` keeps its ring alive while it is in the map, and
+    /// the ring retains the last `CHANNEL_CAPACITY` events even after the last
+    /// receiver is gone. Since `FlowEvent` carries `serde_json::Value` step
+    /// outputs and tool-call results, a finished flow instance whose channel is
+    /// never released pins up to 100 of those forever, keyed by an
+    /// ever-growing set of instance ids.
+    pub fn release_if_idle(&self, instance_id: &str) {
+        self.channels
+            .remove_if(instance_id, |_, sender| sender.receiver_count() == 0);
+    }
+
     /// Clean up channels with no subscribers
     pub fn cleanup_empty_channels(&self) {
         self.channels
             .retain(|_, sender| sender.receiver_count() > 0);
+    }
+
+    /// Live channel count. Diagnostics/test only — a value that climbs without
+    /// bound means a subscribe site is missing its [`FlowEventSubscription`].
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+}
+
+/// A flow-event subscription that releases its channel when dropped.
+///
+/// Prefer this over calling [`FlowEventBroadcaster::subscribe`] directly:
+/// deref to use the receiver, and the channel is reclaimed automatically once
+/// the last subscriber for the instance goes away.
+pub struct FlowEventSubscription {
+    broadcaster: FlowEventBroadcaster,
+    instance_id: String,
+    /// `Option` so `Drop` can release the receiver BEFORE consulting
+    /// `receiver_count`. Field drops run *after* the `Drop` body, so holding it
+    /// directly would make `release_if_idle` always see our own receiver still
+    /// registered and never reclaim anything — the guard would compile, run,
+    /// and silently do nothing.
+    receiver: Option<broadcast::Receiver<FlowEvent>>,
+}
+
+impl FlowEventSubscription {
+    /// Subscribe to an instance's events, reclaiming the channel on drop.
+    pub fn new(broadcaster: &FlowEventBroadcaster, instance_id: &str) -> Self {
+        let receiver = broadcaster.subscribe(instance_id);
+        Self {
+            broadcaster: broadcaster.clone(),
+            instance_id: instance_id.to_string(),
+            receiver: Some(receiver),
+        }
+    }
+
+    /// Mutable access to the underlying receiver.
+    pub fn receiver(&mut self) -> &mut broadcast::Receiver<FlowEvent> {
+        self.receiver
+            .as_mut()
+            .expect("receiver is only taken in Drop")
+    }
+}
+
+impl Drop for FlowEventSubscription {
+    fn drop(&mut self) {
+        drop(self.receiver.take());
+        self.broadcaster.release_if_idle(&self.instance_id);
     }
 }
 
@@ -314,5 +378,40 @@ mod tests {
 
         let _r2 = broadcaster.subscribe("test");
         assert_eq!(broadcaster.subscriber_count("test"), 2);
+    }
+
+    /// The guard must actually reclaim the channel. It releases the receiver
+    /// before checking `receiver_count`; if that ordering regresses the guard
+    /// still compiles and runs but never removes anything, and the map grows
+    /// one retained event ring per instance forever.
+    #[test]
+    fn a_dropped_subscription_reclaims_its_channel() {
+        let broadcaster = FlowEventBroadcaster::new();
+
+        {
+            let _sub = FlowEventSubscription::new(&broadcaster, "instance-1");
+            assert_eq!(broadcaster.channel_count(), 1);
+        }
+
+        assert_eq!(
+            broadcaster.channel_count(),
+            0,
+            "the channel must be reclaimed when the last subscription drops"
+        );
+    }
+
+    /// One subscriber leaving must not cut off the others.
+    #[test]
+    fn a_channel_survives_while_another_subscriber_remains() {
+        let broadcaster = FlowEventBroadcaster::new();
+        let _keeper = FlowEventSubscription::new(&broadcaster, "instance-1");
+
+        {
+            let _leaver = FlowEventSubscription::new(&broadcaster, "instance-1");
+            assert_eq!(broadcaster.subscriber_count("instance-1"), 2);
+        }
+
+        assert_eq!(broadcaster.channel_count(), 1);
+        assert_eq!(broadcaster.subscriber_count("instance-1"), 1);
     }
 }

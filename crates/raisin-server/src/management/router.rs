@@ -304,6 +304,16 @@ pub fn management_router(
         .route("/management/admin/health/storage", get(health::get_health))
         // Server-wide metrics (moved from /management/metrics).
         .route("/management/admin/metrics", get(maintenance::get_metrics))
+        // Memory diagnostics: allocator counters + per-CF RocksDB properties +
+        // in-process collection sizes. Safe to poll; see `crate::diagnostics`.
+        .route(
+            "/management/admin/diagnostics/memory",
+            get(maintenance::get_memory_diagnostics),
+        )
+        .route(
+            "/management/admin/diagnostics/malloc-stats",
+            get(maintenance::get_malloc_stats),
+        )
         .route(
             "/management/admin/metrics/replication",
             get(health::replication_metrics_handler),

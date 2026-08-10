@@ -19,6 +19,12 @@ pub mod state;
 mod types;
 pub mod upload_processors;
 pub(crate) mod util;
+/// Live upload-session count, for the server's memory diagnostics.
+///
+/// Re-exported at the crate root because `handlers` is private and this is the
+/// one thing outside the HTTP layer that needs to look inside it.
+pub use handlers::uploads::upload_session_count;
+
 mod handlers {
     pub mod admin;
     #[cfg(feature = "storage-rocksdb")]

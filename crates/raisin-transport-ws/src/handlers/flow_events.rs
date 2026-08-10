@@ -57,7 +57,12 @@ where
     let subscription_id = Uuid::new_v4().to_string();
 
     let broadcaster = raisin_storage::jobs::global_flow_broadcaster();
-    let mut receiver = broadcaster.subscribe(&payload.instance_id);
+    // Subscription, not a bare `subscribe`: the forwarder task below exits on a
+    // terminal event or a closed channel, and the guard's Drop is what returns
+    // the instance's broadcast channel to the pool. Without it the global map
+    // grows by one retained event ring per flow instance ever watched.
+    let mut subscription =
+        raisin_storage::jobs::FlowEventSubscription::new(broadcaster, &payload.instance_id);
 
     // Clone handles needed by the spawned task
     let sub_id = subscription_id.clone();
@@ -66,7 +71,7 @@ where
 
     tokio::spawn(async move {
         loop {
-            match receiver.recv().await {
+            match subscription.receiver().recv().await {
                 Ok(event) => {
                     let event_type = event.event_type().to_string();
                     let is_terminal = matches!(

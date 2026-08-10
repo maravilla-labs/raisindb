@@ -23,6 +23,7 @@
 
 use async_trait::async_trait;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -81,22 +82,110 @@ pub trait JobMonitor: Send + Sync {
     }
 }
 
+/// Handle identifying one registration in a [`JobMonitorHub`].
+///
+/// Opaque and `Copy`; pass it back to
+/// [`JobMonitorHub::remove_monitor`], or hold a
+/// [`JobMonitorGuard`] and let `Drop` do it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MonitorId(u64);
+
+/// Unregisters a monitor when the thing that owns it goes away.
+///
+/// **Hold one of these for anything shorter-lived than the process** — most
+/// importantly per-connection monitors such as the job SSE streams. Before this
+/// existed, `add_monitor` was append-only with no removal API at all, so each
+/// SSE connection (and each `EventSource` auto-reconnect behind a proxy idle
+/// timeout) added a monitor that lived until shutdown. The cost was not just
+/// the retained `Arc`: every broadcast spawns a task per monitor with a *cloned*
+/// payload, and the periodic system jobs broadcast continuously, so the wasted
+/// clone-and-spawn work grew linearly in dead monitors forever.
+pub struct JobMonitorGuard {
+    hub: Arc<JobMonitorHub>,
+    id: MonitorId,
+}
+
+impl JobMonitorGuard {
+    pub fn id(&self) -> MonitorId {
+        self.id
+    }
+}
+
+impl Drop for JobMonitorGuard {
+    fn drop(&mut self) {
+        let hub = self.hub.clone();
+        let id = self.id;
+        // Drop is sync and the registry is behind an async lock, so hand the
+        // removal to the runtime. Outside a runtime (tests, shutdown) there is
+        // nothing left to leak into.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                hub.remove_monitor(id).await;
+            });
+        }
+    }
+}
+
+/// Registered monitors, each paired with the id that removes it.
+type MonitorList = Arc<RwLock<Vec<(MonitorId, Arc<dyn JobMonitor>)>>>;
+
 /// Composite monitor that broadcasts events to multiple monitors
 pub struct JobMonitorHub {
-    monitors: Arc<RwLock<Vec<Arc<dyn JobMonitor>>>>,
+    monitors: MonitorList,
+    next_id: AtomicU64,
 }
 
 impl JobMonitorHub {
     pub fn new() -> Self {
         Self {
             monitors: Arc::new(RwLock::new(Vec::new())),
+            next_id: AtomicU64::new(0),
         }
     }
 
-    /// Register a new monitor
-    pub async fn add_monitor(&self, monitor: Arc<dyn JobMonitor>) {
+    /// Register a new monitor for the lifetime of the process.
+    ///
+    /// Use this only for monitors that genuinely live as long as the server
+    /// (e.g. the job dispatcher). For anything tied to a connection or request,
+    /// use [`JobMonitorHub::register`] and hold the guard.
+    pub async fn add_monitor(&self, monitor: Arc<dyn JobMonitor>) -> MonitorId {
+        let id = MonitorId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let mut monitors = self.monitors.write().await;
-        monitors.push(monitor);
+        monitors.push((id, monitor));
+        id
+    }
+
+    /// Register a monitor that unregisters itself when the returned guard drops.
+    pub async fn register(self: &Arc<Self>, monitor: Arc<dyn JobMonitor>) -> JobMonitorGuard {
+        let id = self.add_monitor(monitor).await;
+        JobMonitorGuard {
+            hub: self.clone(),
+            id,
+        }
+    }
+
+    /// Remove one monitor. Returns whether it was still registered.
+    pub async fn remove_monitor(&self, id: MonitorId) -> bool {
+        let mut monitors = self.monitors.write().await;
+        let before = monitors.len();
+        monitors.retain(|(existing, _)| *existing != id);
+        let removed = monitors.len() != before;
+        if removed && monitors.capacity() > 1024 && monitors.capacity() > monitors.len() * 4 {
+            monitors.shrink_to_fit();
+        }
+        removed
+    }
+
+    /// Number of currently registered monitors.
+    ///
+    /// Exposed for the memory diagnostics endpoint: a value that climbs over
+    /// time is the signature of a registration site that forgot its guard.
+    pub async fn len(&self) -> usize {
+        self.monitors.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
     }
 
     /// Remove all monitors
@@ -108,7 +197,7 @@ impl JobMonitorHub {
     /// Broadcast an event to all registered monitors
     pub async fn broadcast_update(&self, event: JobEvent) {
         let monitors = self.monitors.read().await;
-        for monitor in monitors.iter() {
+        for (_, monitor) in monitors.iter() {
             // Run each monitor notification in parallel
             let monitor = monitor.clone();
             let event = event.clone();
@@ -121,7 +210,7 @@ impl JobMonitorHub {
     /// Notify all monitors of a new job
     pub async fn broadcast_created(&self, job: &JobInfo) {
         let monitors = self.monitors.read().await;
-        for monitor in monitors.iter() {
+        for (_, monitor) in monitors.iter() {
             let monitor = monitor.clone();
             let job = job.clone();
             tokio::spawn(async move {
@@ -133,7 +222,7 @@ impl JobMonitorHub {
     /// Notify all monitors of job removal
     pub async fn broadcast_removed(&self, job_id: &JobId) {
         let monitors = self.monitors.read().await;
-        for monitor in monitors.iter() {
+        for (_, monitor) in monitors.iter() {
             let monitor = monitor.clone();
             let job_id = job_id.clone();
             tokio::spawn(async move {
@@ -145,7 +234,7 @@ impl JobMonitorHub {
     /// Notify all monitors of job progress
     pub async fn broadcast_progress(&self, job_id: &JobId, progress: f32) {
         let monitors = self.monitors.read().await;
-        for monitor in monitors.iter() {
+        for (_, monitor) in monitors.iter() {
             let monitor = monitor.clone();
             let job_id = job_id.clone();
             tokio::spawn(async move {
@@ -164,7 +253,7 @@ impl JobMonitorHub {
             monitor_count = monitor_count,
             "JobMonitorHub: broadcasting log to monitors"
         );
-        for monitor in monitors.iter() {
+        for (_, monitor) in monitors.iter() {
             let monitor = monitor.clone();
             let entry = entry.clone();
             tokio::spawn(async move {

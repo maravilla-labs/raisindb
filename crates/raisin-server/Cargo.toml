@@ -24,12 +24,25 @@ license = "BSL-1.1"
 #   _RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/path/jeprof
 # Add `abort_conf:true` when testing a conf string — invalid pairs are ignored
 # with only a stderr line otherwise, which reads exactly like "it worked".
+#
+# `tikv-jemalloc-ctl` is what finally READS those counters from inside the
+# process. Compiling `stats` in without it left the server unable to report a
+# single number about its own heap, so an RSS investigation could only watch
+# cgroup RSS from outside and guess at the mechanism. See
+# `src/diagnostics/allocator.rs`.
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = { version = "0.6", features = [
     "background_threads",
     "profiling",
     "stats",
 ] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
+# For `malloc_stats_print`, which jemalloc-ctl does not wrap. Declared here
+# rather than hand-writing the `extern "C"` block because the symbol is
+# `_rjem_`-PREFIXED in this build (see the note above) and the sys crate already
+# carries the correct `link_name` for both prefixed and unprefixed builds.
+tikv-jemalloc-sys = { version = "0.6", features = ["stats"] }
+libc = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
 tikv-jemallocator = "0.6"

@@ -57,11 +57,29 @@ pub struct RocksDBConfig {
 
     // Performance tuning
     /// Block cache size in bytes (default: 512MB)
+    ///
+    /// ONE `Cache` of this size is shared by every column family, and it also
+    /// holds the index and filter blocks (see `to_rocksdb_options`). It is
+    /// therefore the real ceiling on RocksDB read-side memory, not a per-CF
+    /// figure.
     pub block_cache_size: usize,
-    /// Write buffer size in bytes (default: 64MB)
+    /// Per-column-family write buffer (memtable) size in bytes.
+    ///
+    /// Multiply by `max_write_buffer_number` AND by the ~49 column families
+    /// before reading this as a memory budget — that product is why
+    /// `db_write_buffer_size` exists.
     pub write_buffer_size: usize,
-    /// Maximum number of write buffers (default: 4)
+    /// Maximum number of write buffers per column family
     pub max_write_buffer_number: i32,
+    /// Global memtable budget across ALL column families, in bytes.
+    ///
+    /// `write_buffer_size * max_write_buffer_number` is a PER-CF bound, and
+    /// this database has ~49 column families, so the per-CF settings alone
+    /// permit multi-GB of unflushed memtables. This is the only setting that
+    /// caps the total: once the sum crosses it RocksDB force-flushes the
+    /// largest memtable. `0` disables the cap (RocksDB's default, and how this
+    /// ran before 2026-08).
+    pub db_write_buffer_size: usize,
     /// Bits per key for bloom filter (default: 10)
     pub bloom_filter_bits: f64,
     /// Compression type for data blocks

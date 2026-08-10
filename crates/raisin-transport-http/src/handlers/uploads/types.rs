@@ -83,6 +83,25 @@ impl UploadSessionStore {
         let mut sessions = self.sessions.write().await;
         sessions.remove(upload_id);
     }
+
+    /// Number of upload sessions held in memory.
+    ///
+    /// Surfaced for the memory diagnostics endpoint. `delete` currently has no
+    /// callers and `UploadSession::expires_at` is never enforced, so this count
+    /// is expected to be monotonic — one entry per upload ever started,
+    /// completed or not. If it is large, that is a real finding, not noise.
+    pub async fn len(&self) -> usize {
+        self.sessions.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
+}
+
+/// Live upload session count, for memory diagnostics.
+pub async fn upload_session_count() -> usize {
+    UPLOAD_STORE.len().await
 }
 
 /// Global upload session store

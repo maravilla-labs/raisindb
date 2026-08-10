@@ -158,6 +158,34 @@ pub struct ServerConfigFile {
     /// disable the check with an unbounded value.
     #[serde(default)]
     pub max_active_jobs_per_tenant: Option<usize>,
+    /// Storage engine memory bounds (TOML `[storage]`). Absent means the
+    /// backend's production preset.
+    #[serde(default)]
+    pub storage: StorageConfig,
+}
+
+/// RocksDB memory bounds exposed to operators (TOML `[storage]` section).
+///
+/// These are the two settings that actually cap the engine's memory, so a box
+/// under pressure can be tuned without a rebuild. Both are `None` by default,
+/// meaning "keep `RocksDBConfig::production()`".
+///
+/// Declared here rather than reusing `raisin_rocksdb`'s type because that crate
+/// is behind the optional `storage-rocksdb` feature while this config is always
+/// compiled — same reasoning as [`TriggerSafetyConfig`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// Block cache size in bytes. ONE cache is shared by every column family
+    /// and also holds index and filter blocks, so this is the ceiling on
+    /// RocksDB read-side memory. Default: 512MB.
+    #[serde(default)]
+    pub block_cache_size: Option<usize>,
+    /// Global memtable budget in bytes across ALL column families. The per-CF
+    /// write buffer is charged ~49 times over, so this — not the per-CF size —
+    /// is what bounds write-side memory. `Some(0)` disables the cap.
+    /// Default: 512MB.
+    #[serde(default)]
+    pub db_write_buffer_size: Option<usize>,
 }
 
 /// Trigger circuit breaker configuration (TOML `[trigger_safety]` section).

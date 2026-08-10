@@ -18,6 +18,7 @@ mod admin_user_init_handler;
 mod builtin_package_init_handler;
 mod config;
 mod deps_setup;
+mod diagnostics;
 #[cfg(feature = "storage-rocksdb")]
 mod flow_sweeper;
 mod function_module_event_handler;

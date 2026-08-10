@@ -6,6 +6,43 @@
 use crate::{cf, cf_handle, keys, RocksDBStorage};
 use raisin_error::Result;
 
+/// Compact a key range across EVERY column family.
+///
+/// `DB::compact_range` operates on the **default** column family only, and this
+/// database keeps no data there — so calling it directly compacts nothing at
+/// all. Every compaction entry point must fan out over
+/// [`crate::all_column_families`] with `compact_range_cf`, which is what this
+/// helper exists to guarantee.
+///
+/// `None`/`None` compacts the full key space of each CF.
+pub(super) fn compact_all_column_families(
+    storage: &RocksDBStorage,
+    start: Option<&[u8]>,
+    end: Option<&[u8]>,
+) {
+    for cf_name in crate::all_column_families() {
+        match cf_handle(storage.db(), cf_name) {
+            Ok(cf) => storage.db().compact_range_cf(cf, start, end),
+            Err(e) => {
+                tracing::warn!(cf = cf_name, error = %e, "Skipping compaction for column family")
+            }
+        }
+    }
+}
+
+/// Exclusive upper bound for a prefix scan: the prefix with its last non-`0xFF`
+/// byte incremented. `None` when the prefix is all `0xFF` (unbounded above).
+fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.pop() {
+        if last != 0xFF {
+            end.push(last + 1);
+            return Some(end);
+        }
+    }
+    None
+}
+
 /// Run RocksDB compaction for a specific repository key range
 pub(super) fn run_rocksdb_compaction(
     storage: &RocksDBStorage,
@@ -13,10 +50,11 @@ pub(super) fn run_rocksdb_compaction(
     repo_id: &str,
 ) -> Result<()> {
     let prefix = keys::repo_prefix(tenant_id, repo_id);
+    // The old call passed the same bound as start AND end, which is an empty
+    // range — compaction had nothing to do even on the CF it did reach.
+    let end = prefix_upper_bound(&prefix);
 
-    // Compact range for this repository's keys
-    // Note: This compacts across all column families
-    storage.db().compact_range(Some(&prefix), Some(&prefix[..]));
+    compact_all_column_families(storage, Some(&prefix), end.as_deref());
 
     Ok(())
 }

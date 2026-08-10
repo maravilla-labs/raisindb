@@ -6869,6 +6869,7 @@ dependencies = [
  "futures-util",
  "include_dir",
  "jsonwebtoken",
+ "libc",
  "mime_guess",
  "nanoid",
  "pgwire",
@@ -6906,6 +6907,8 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "tokio",
  "tokio-postgres",
@@ -9380,6 +9383,17 @@ dependencies = [
  "lazy_static",
  "regex",
  "rustc-hash 1.1.0",
+]
+
+[[package]]
+name = "tikv-jemalloc-ctl"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "661f1f6a57b3a36dc9174a2c10f19513b4866816e13425d3e418b11cc37bc24c"
+dependencies = [
+ "libc",
+ "paste",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

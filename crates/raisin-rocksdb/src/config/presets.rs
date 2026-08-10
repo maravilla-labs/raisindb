@@ -18,10 +18,16 @@ impl RocksDBConfig {
             path: PathBuf::from("./data"),
             create_if_missing: true,
             block_cache_size: 128 * 1024 * 1024, // 128MB
-            write_buffer_size: 16 * 1024 * 1024, // 16MB
+            write_buffer_size: 8 * 1024 * 1024,  // 8MB per CF
             max_write_buffer_number: 2,
+            db_write_buffer_size: 128 * 1024 * 1024, // 128MB across all CFs
             bloom_filter_bits: 10.0,
-            compression: CompressionType::Snappy,
+            // Lz4, not Snappy: `compression` was previously a dead setting
+            // (a CF option set on the DB options) and every CF was hardcoded to
+            // Lz4 in `create_column_family_descriptors`. Now that the field is
+            // live it must name what we actually write, or a deploy would
+            // silently change the codec of every new SST.
+            compression: CompressionType::Lz4,
             enable_statistics: false,
             enable_checksums: false,
             integrity_check_interval: Duration::from_secs(24 * 60 * 60), // 24 hours
@@ -65,10 +71,17 @@ impl RocksDBConfig {
             path: PathBuf::from("./data"),
             create_if_missing: true,
             block_cache_size: 512 * 1024 * 1024, // 512MB
-            write_buffer_size: 64 * 1024 * 1024, // 64MB
-            max_write_buffer_number: 4,
+            // 16MB (not 64MB) because this is charged PER column family and
+            // there are ~49 of them. The old 64MB x 4 was never actually
+            // applied — it sat on the DB options, which RocksDB ignores for
+            // CFs — so this is the first release where the number is real.
+            write_buffer_size: 16 * 1024 * 1024, // 16MB per CF
+            max_write_buffer_number: 3,
+            db_write_buffer_size: 512 * 1024 * 1024, // 512MB across all CFs
             bloom_filter_bits: 10.0,
-            compression: CompressionType::Snappy,
+            // Lz4 — see the note in `development()`; this matches what every CF
+            // has actually been writing.
+            compression: CompressionType::Lz4,
             enable_statistics: true,
             enable_checksums: true,
             integrity_check_interval: Duration::from_secs(6 * 60 * 60), // 6 hours
@@ -112,8 +125,9 @@ impl RocksDBConfig {
             path: PathBuf::from("./data"),
             create_if_missing: true,
             block_cache_size: 2048 * 1024 * 1024, // 2GB
-            write_buffer_size: 128 * 1024 * 1024, // 128MB
-            max_write_buffer_number: 6,
+            write_buffer_size: 64 * 1024 * 1024,  // 64MB per CF
+            max_write_buffer_number: 4,
+            db_write_buffer_size: 2048 * 1024 * 1024, // 2GB across all CFs
             bloom_filter_bits: 10.0,
             compression: CompressionType::Lz4,
             enable_statistics: true,

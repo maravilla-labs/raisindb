@@ -119,7 +119,7 @@ pub async fn compact_tenant(
     }
 
     // Run global compaction
-    storage.db().compact_range::<&[u8], &[u8]>(None, None);
+    helpers::compact_all_column_families(storage, None, None);
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -142,7 +142,7 @@ pub async fn compact_global(storage: &RocksDBStorage) -> Result<CompactionStats>
     let bytes_before = get_total_db_size(storage)?;
 
     // Run RocksDB compaction across all column families
-    storage.db().compact_range::<&[u8], &[u8]>(None, None);
+    helpers::compact_all_column_families(storage, None, None);
 
     let bytes_after = get_total_db_size(storage)?;
     let duration_ms = start.elapsed().as_millis() as u64;

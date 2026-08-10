@@ -29,6 +29,20 @@ pub fn init_storage(server_config: &MergedConfig) -> Arc<RocksDBStorage> {
         config = config.with_max_active_jobs_per_tenant(Some(max_active));
     }
 
+    if let Some(size) = server_config.storage.block_cache_size {
+        config.block_cache_size = size;
+    }
+    if let Some(size) = server_config.storage.db_write_buffer_size {
+        config.db_write_buffer_size = size;
+    }
+    tracing::info!(
+        block_cache_mb = config.block_cache_size / (1024 * 1024),
+        db_write_buffer_mb = config.db_write_buffer_size / (1024 * 1024),
+        write_buffer_mb = config.write_buffer_size / (1024 * 1024),
+        max_write_buffer_number = config.max_write_buffer_number,
+        "RocksDB memory bounds"
+    );
+
     if server_config.replication_enabled {
         if let Some(ref node_id) = server_config.cluster_node_id {
             config.cluster_node_id = Some(node_id.clone());

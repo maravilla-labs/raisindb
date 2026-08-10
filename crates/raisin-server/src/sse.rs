@@ -137,7 +137,10 @@ pub async fn job_events_stream_rocksdb(
     // Create and register the monitor with the instance-based registry
     let monitor = Arc::new(SseJobMonitor::new(tx.clone()));
     let registry = storage.job_registry();
-    registry.monitors().add_monitor(monitor).await;
+    // Held by the stream below, so the registration goes away with the
+    // connection. `add_monitor` on its own is process-lifetime and would leak
+    // one monitor per connect — including every EventSource auto-reconnect.
+    let monitor_guard = registry.monitors().register(monitor).await;
 
     // Send initial state - only jobs for this tenant
     let storage_clone = storage.clone();
@@ -178,30 +181,34 @@ pub async fn job_events_stream_rocksdb(
                 }
             }
         })
-        .map(move |sse_event| match sse_event {
-            SseEvent::JobUpdate(event) => {
-                let tenant = event.job_info.tenant.clone();
-                let job_id = event.job_id.clone();
-                let mut data = SseEventData::from(*event);
-                // Attach the job's execution scope (repo/branch/workspace)
-                // from its persisted context — a cheap synchronous RocksDB
-                // point read — so repo-scoped admin views can filter live
-                // events instead of showing every repository's executions.
-                if let Ok(Some(ctx)) = scope_storage.job_data_store().get(&tenant, &job_id) {
-                    data.workspace = Some(ctx.workspace_id.clone());
-                    data.scope = Some(raisin_storage::JobScope {
-                        repo: ctx.repo_id,
-                        branch: ctx.branch,
-                        workspace: ctx.workspace_id,
-                    });
+        .map(move |sse_event| {
+            // Anchors the monitor registration to this stream's lifetime.
+            let _monitor_guard = &monitor_guard;
+            match sse_event {
+                SseEvent::JobUpdate(event) => {
+                    let tenant = event.job_info.tenant.clone();
+                    let job_id = event.job_id.clone();
+                    let mut data = SseEventData::from(*event);
+                    // Attach the job's execution scope (repo/branch/workspace)
+                    // from its persisted context — a cheap synchronous RocksDB
+                    // point read — so repo-scoped admin views can filter live
+                    // events instead of showing every repository's executions.
+                    if let Ok(Some(ctx)) = scope_storage.job_data_store().get(&tenant, &job_id) {
+                        data.workspace = Some(ctx.workspace_id.clone());
+                        data.scope = Some(raisin_storage::JobScope {
+                            repo: ctx.repo_id,
+                            branch: ctx.branch,
+                            workspace: ctx.workspace_id,
+                        });
+                    }
+                    let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
+                    Ok(Event::default().event("job-update").data(data))
                 }
-                let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
-                Ok(Event::default().event("job-update").data(data))
-            }
-            SseEvent::JobLog(entry) => {
-                let data = serde_json::to_string(&SseJobLogEvent::from(entry))
-                    .unwrap_or_else(|_| "{}".to_string());
-                Ok(Event::default().event("job-log").data(data))
+                SseEvent::JobLog(entry) => {
+                    let data = serde_json::to_string(&SseJobLogEvent::from(entry))
+                        .unwrap_or_else(|_| "{}".to_string());
+                    Ok(Event::default().event("job-log").data(data))
+                }
             }
         });
     // End the response when the server starts shutting down, so this
@@ -233,7 +240,8 @@ where
     // Create and register the monitor (using global registry for non-RocksDB storage)
     let monitor = Arc::new(SseJobMonitor::new(tx.clone()));
     let registry = raisin_storage::jobs::global_registry();
-    registry.monitors().add_monitor(monitor).await;
+    // Guarded for the same reason as the RocksDB variant above.
+    let monitor_guard = registry.monitors().register(monitor).await;
 
     // Send initial state - all current jobs (no tenant context outside RocksDB build)
     tokio::spawn(async move {
@@ -252,16 +260,20 @@ where
     });
 
     // Convert channel receiver to SSE stream
-    let stream = ReceiverStream::new(rx).map(|sse_event| match sse_event {
-        SseEvent::JobUpdate(event) => {
-            let data = serde_json::to_string(&SseEventData::from(*event))
-                .unwrap_or_else(|_| "{}".to_string());
-            Ok(Event::default().event("job-update").data(data))
-        }
-        SseEvent::JobLog(entry) => {
-            let data = serde_json::to_string(&SseJobLogEvent::from(entry))
-                .unwrap_or_else(|_| "{}".to_string());
-            Ok(Event::default().event("job-log").data(data))
+    let stream = ReceiverStream::new(rx).map(move |sse_event| {
+        // Anchors the monitor registration to this stream's lifetime.
+        let _monitor_guard = &monitor_guard;
+        match sse_event {
+            SseEvent::JobUpdate(event) => {
+                let data = serde_json::to_string(&SseEventData::from(*event))
+                    .unwrap_or_else(|_| "{}".to_string());
+                Ok(Event::default().event("job-update").data(data))
+            }
+            SseEvent::JobLog(entry) => {
+                let data = serde_json::to_string(&SseJobLogEvent::from(entry))
+                    .unwrap_or_else(|_| "{}".to_string());
+                Ok(Event::default().event("job-log").data(data))
+            }
         }
     });
     // See the module docs: an open SSE response holds axum's drain.

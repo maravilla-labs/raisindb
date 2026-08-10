@@ -195,3 +195,38 @@ where
     tracing::error!("Async tenant compaction jobs are only supported with RocksDB storage");
     Err(StatusCode::NOT_IMPLEMENTED)
 }
+
+// ---------------------------------------------------------------------------
+// Memory diagnostics
+// ---------------------------------------------------------------------------
+
+/// Read-only memory sample: allocator counters, per-column-family RocksDB
+/// properties, and the sizes of the long-lived in-process collections.
+///
+/// Poll this; a single reading says almost nothing, and the slope across a few
+/// hours identifies the mechanism. See `crate::diagnostics` for how to read the
+/// payload.
+///
+/// Cheap by construction — every field is a counter read or a `len()`, never a
+/// scan — so it is safe on a monitoring interval.
+#[cfg(feature = "storage-rocksdb")]
+pub async fn get_memory_diagnostics(
+    State(state): State<ManagementState<raisin_rocksdb::RocksDBStorage>>,
+) -> Json<ApiResponse<crate::diagnostics::MemoryDiagnostics>> {
+    Json(ApiResponse::ok(
+        crate::diagnostics::sample(&state.storage).await,
+    ))
+}
+
+/// jemalloc's full human-readable statistics dump.
+///
+/// This is what distinguishes "retained but free" from "genuinely held" —
+/// per-arena dirty/muzzy page counts and bin fragmentation. Returns plain text.
+/// More expensive than the sample above (it walks every arena and briefly takes
+/// allocator locks), so call it deliberately, not on a poll.
+///
+/// Unavailable off Linux, where jemalloc's `stats` feature is not compiled in.
+pub async fn get_malloc_stats() -> Result<String, (StatusCode, String)> {
+    crate::diagnostics::allocator::malloc_stats_text()
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))
+}

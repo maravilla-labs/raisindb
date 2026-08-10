@@ -298,6 +298,15 @@ pub mod cf {
     pub const PENDING_BATCH_OPS: &str = "pending_batch_ops";
 }
 
+/// Every column family name, for callers outside this crate.
+///
+/// Exposed for the server's memory diagnostics, which reads RocksDB's per-CF
+/// memory properties — those must cover ALL column families or the sum
+/// under-reports, and this database's memory story is largely "×49".
+pub fn all_column_family_names() -> Vec<&'static str> {
+    all_column_families()
+}
+
 /// Get all column family names
 pub(crate) fn all_column_families() -> Vec<&'static str> {
     vec![
@@ -354,14 +363,26 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
 
 /// Create column family descriptors with optimized options
 ///
+/// **This is where every CF-scoped setting must live.** `DB::open_cf_descriptors`
+/// takes CF options exclusively from these descriptors; the `Options` passed
+/// alongside them supply only DB-wide settings. Anything CF-scoped placed there
+/// instead is silently ignored (see [`config::RocksDBConfig::to_rocksdb_options`]).
+///
+/// `cache` is the single process-wide block cache — one bounded pool charged by
+/// all ~49 column families, holding data, index and filter blocks alike. Per-CF
+/// `BlockBasedOptions` below must ALL be built from
+/// [`config::RocksDBConfig::block_table_options`] so none of them silently
+/// falls back to RocksDB's private default 32MB cache.
+///
 /// `spatial_compaction` configures the [`spatial::SpatialPruneFilterFactory`],
 /// which is attached to `cf::SPATIAL_INDEX` and to NO other column family.
 pub(crate) fn create_column_family_descriptors(
+    config: &config::RocksDBConfig,
+    cache: &rocksdb::Cache,
     spatial_compaction: &spatial::SpatialCompactionConfig,
 ) -> Vec<ColumnFamilyDescriptor> {
     let mut cfs = Vec::new();
-    let mut default_opts = Options::default();
-    default_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+    let default_opts = config.column_family_options(cache);
 
     for cf_name in all_column_families() {
         let mut opts = default_opts.clone();
@@ -378,22 +399,18 @@ pub(crate) fn create_column_family_descriptors(
         // This improves performance for negative lookups (property doesn't exist)
         // by avoiding disk I/O for non-existent keys
         if cf_name == cf::PROPERTY_INDEX {
-            let mut block_opts = rocksdb::BlockBasedOptions::default();
-            // 10 bits per key gives ~1% false positive rate
-            block_opts.set_bloom_filter(10.0, false);
+            // 10 bits per key gives ~1% false positive rate.
             // Use ribbon filter for better space efficiency (requires RocksDB 6.15+)
             // block_opts.set_ribbon_filter(10.0);
-            opts.set_block_based_table_factory(&block_opts);
+            opts.set_block_based_table_factory(&config.block_table_options(cache, 10.0));
         }
 
         // Special configuration for SPATIAL_INDEX CF (geohash-based)
         // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0geo\0{property}\0{geohash}\0{~rev}\0{node_id}
         // Optimized for geohash prefix scans (proximity queries via ring expansion)
         if cf_name == cf::SPATIAL_INDEX {
-            let mut block_opts = rocksdb::BlockBasedOptions::default();
-            // Enable bloom filter for negative lookups on geohash prefixes
-            block_opts.set_bloom_filter(10.0, false);
-            opts.set_block_based_table_factory(&block_opts);
+            // Bloom filter for negative lookups on geohash prefixes
+            opts.set_block_based_table_factory(&config.block_table_options(cache, 10.0));
             // (the geohash prefix extractor is installed above, from the shared table)
             // Prune superseded revisions and aged-out tombstones during
             // compaction. Without this the CF only ever grows: the revision is
@@ -410,10 +427,8 @@ pub(crate) fn create_column_family_descriptors(
         // Key format: {tenant}\0{repo}\0{branch}\0{workspace}\0uniq\0{node_type}\0{property_name}\0{value_hash}\0{~revision}
         // Bloom filters improve O(1) conflict detection by avoiding disk I/O for non-existent keys
         if cf_name == cf::UNIQUE_INDEX {
-            let mut block_opts = rocksdb::BlockBasedOptions::default();
             // 10 bits per key gives ~1% false positive rate
-            block_opts.set_bloom_filter(10.0, false);
-            opts.set_block_based_table_factory(&block_opts);
+            opts.set_block_based_table_factory(&config.block_table_options(cache, 10.0));
         }
 
         cfs.push(ColumnFamilyDescriptor::new(cf_name, opts));
@@ -446,7 +461,11 @@ pub fn open_db<P: AsRef<Path>>(path: P) -> Result<DB> {
 /// ```
 pub fn open_db_with_config(config: &config::RocksDBConfig) -> Result<DB> {
     let db_opts = config.to_rocksdb_options();
-    let cfs = create_column_family_descriptors(&config.spatial_compaction);
+    // ONE cache for the whole database. `rocksdb::Cache` is a shared_ptr
+    // handle and each table factory takes its own reference, so dropping this
+    // binding after `open` does not free the cache.
+    let cache = config.shared_block_cache();
+    let cfs = create_column_family_descriptors(config, &cache, &config.spatial_compaction);
 
     let db = DB::open_cf_descriptors(&db_opts, &config.path, cfs)
         .map_err(|e| raisin_error::Error::storage(format!("Failed to open RocksDB: {}", e)))?;

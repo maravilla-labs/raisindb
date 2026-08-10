@@ -76,11 +76,17 @@ async fn stream_conversation_events_inner(
     );
 
     let broadcaster = raisin_storage::jobs::global_conversation_broadcaster();
-    let mut receiver = broadcaster.subscribe(&subscription_key);
+    // Subscription, not a bare `subscribe`: the guard's Drop returns the
+    // channel when this stream ends. A conversation's ring retains its last
+    // 100 events — streamed text chunks and tool-call result JSON — so a
+    // released channel is the difference between a bounded map and one that
+    // pins hundreds of KB per finished conversation forever.
+    let mut subscription =
+        raisin_storage::jobs::ConversationEventSubscription::new(broadcaster, &subscription_key);
 
     let stream = async_stream::stream! {
         loop {
-            match receiver.recv().await {
+            match subscription.receiver().recv().await {
                 Ok(event) => {
                     let event_type = event.event_type();
 

@@ -37,11 +37,16 @@ pub async fn stream_flow_events(
     );
 
     let broadcaster = raisin_storage::jobs::global_flow_broadcaster();
-    let mut receiver = broadcaster.subscribe(&instance_id);
+    // Subscription, not a bare `subscribe`: this stream ends on a terminal
+    // event, a lagging client, or shutdown, and the guard's Drop is what
+    // returns the instance's broadcast channel — and the up-to-100 retained
+    // step-output payloads in its ring — to the pool.
+    let mut subscription =
+        raisin_storage::jobs::FlowEventSubscription::new(broadcaster, &instance_id);
 
     let stream = async_stream::stream! {
         loop {
-            match receiver.recv().await {
+            match subscription.receiver().recv().await {
                 Ok(event) => {
                     let event_type = event.event_type();
 

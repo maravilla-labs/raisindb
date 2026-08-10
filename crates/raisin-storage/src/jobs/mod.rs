@@ -27,9 +27,15 @@ pub mod worker;
 
 pub use conversation_events::{
     global_conversation_broadcaster, ConversationEvent, ConversationEventBroadcaster,
+    ConversationEventSubscription,
 };
-pub use flow_events::{global_flow_broadcaster, FlowEvent, FlowEventBroadcaster};
-pub use monitor::{JobEvent, JobLogEntry, JobMonitor, JobMonitorHub, LogEmitter, LoggingMonitor};
+pub use flow_events::{
+    global_flow_broadcaster, FlowEvent, FlowEventBroadcaster, FlowEventSubscription,
+};
+pub use monitor::{
+    JobEvent, JobLogEntry, JobMonitor, JobMonitorGuard, JobMonitorHub, LogEmitter, LoggingMonitor,
+    MonitorId,
+};
 pub use mount_events::{
     global_mount_broadcaster, mount_channel_key, MountSyncBroadcaster, MountSyncEvent,
 };

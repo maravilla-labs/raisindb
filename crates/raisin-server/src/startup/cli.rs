@@ -110,6 +110,8 @@ pub struct MergedConfig {
     pub trigger_safety: config::TriggerSafetyConfig,
     /// Physical backstop behind `trigger_safety` (see `MergedConfig` doc)
     pub max_active_jobs_per_tenant: Option<usize>,
+    /// Storage engine memory bounds (block cache, global memtable budget)
+    pub storage: config::StorageConfig,
 }
 
 impl ServerConfig {
@@ -270,6 +272,11 @@ impl ServerConfig {
             .as_ref()
             .and_then(|c| c.max_active_jobs_per_tenant);
 
+        let storage = toml_config
+            .as_ref()
+            .map(|c| c.storage.clone())
+            .unwrap_or_default();
+
         Ok(MergedConfig {
             port,
             data_dir,
@@ -294,6 +301,7 @@ impl ServerConfig {
             mcp_client,
             trigger_safety,
             max_active_jobs_per_tenant,
+            storage,
         })
     }
 }

@@ -222,10 +222,69 @@ impl ConversationEventBroadcaster {
         self.channels.remove(conversation_path);
     }
 
+    /// Drop a conversation's channel once nobody is listening.
+    ///
+    /// **Every subscriber must call this when it goes away** — see
+    /// [`ConversationEventSubscription`], which does it from `Drop`.
+    ///
+    /// The retained-ring problem here is the most expensive of the three
+    /// broadcasters: a `broadcast::Sender` left in the map holds its last
+    /// `CHANNEL_CAPACITY` events, and `ConversationEvent` carries streamed text
+    /// chunks and tool-call result JSON. One finished conversation whose
+    /// channel is never released can pin hundreds of KB indefinitely, keyed by
+    /// an ever-growing set of conversation paths.
+    pub fn release_if_idle(&self, conversation_path: &str) {
+        self.channels
+            .remove_if(conversation_path, |_, sender| sender.receiver_count() == 0);
+    }
+
     /// Clean up channels with no subscribers
     pub fn cleanup_empty_channels(&self) {
         self.channels
             .retain(|_, sender| sender.receiver_count() > 0);
+    }
+
+    /// Live channel count. Diagnostics/test only — a value that climbs without
+    /// bound means a subscribe site is missing its
+    /// [`ConversationEventSubscription`].
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+}
+
+/// A conversation-event subscription that releases its channel when dropped.
+pub struct ConversationEventSubscription {
+    broadcaster: ConversationEventBroadcaster,
+    conversation_path: String,
+    /// `Option` so `Drop` can release the receiver BEFORE consulting
+    /// `receiver_count` — field drops run after the `Drop` body, so a directly
+    /// held receiver would make the guard a silent no-op.
+    receiver: Option<broadcast::Receiver<ConversationEvent>>,
+}
+
+impl ConversationEventSubscription {
+    /// Subscribe to a conversation's events, reclaiming the channel on drop.
+    pub fn new(broadcaster: &ConversationEventBroadcaster, conversation_path: &str) -> Self {
+        let receiver = broadcaster.subscribe(conversation_path);
+        Self {
+            broadcaster: broadcaster.clone(),
+            conversation_path: conversation_path.to_string(),
+            receiver: Some(receiver),
+        }
+    }
+
+    /// Mutable access to the underlying receiver.
+    pub fn receiver(&mut self) -> &mut broadcast::Receiver<ConversationEvent> {
+        self.receiver
+            .as_mut()
+            .expect("receiver is only taken in Drop")
+    }
+}
+
+impl Drop for ConversationEventSubscription {
+    fn drop(&mut self) {
+        drop(self.receiver.take());
+        self.broadcaster.release_if_idle(&self.conversation_path);
     }
 }
 
@@ -323,6 +382,41 @@ mod tests {
 
         broadcaster.remove_channel("to-remove");
         assert_eq!(broadcaster.subscriber_count("to-remove"), 0);
+    }
+
+    /// The guard must actually reclaim the channel — it releases the receiver
+    /// before checking `receiver_count`. If that ordering regresses the guard
+    /// compiles and runs but removes nothing, and each finished conversation
+    /// pins its last 100 events (text chunks, tool-call result JSON) forever.
+    #[test]
+    fn a_dropped_subscription_reclaims_its_channel() {
+        let broadcaster = ConversationEventBroadcaster::new();
+
+        {
+            let _sub = ConversationEventSubscription::new(&broadcaster, "/conversations/one");
+            assert_eq!(broadcaster.channel_count(), 1);
+        }
+
+        assert_eq!(
+            broadcaster.channel_count(),
+            0,
+            "the channel must be reclaimed when the last subscription drops"
+        );
+    }
+
+    /// One subscriber leaving must not cut off the others.
+    #[test]
+    fn a_channel_survives_while_another_subscriber_remains() {
+        let broadcaster = ConversationEventBroadcaster::new();
+        let _keeper = ConversationEventSubscription::new(&broadcaster, "/conversations/one");
+
+        {
+            let _leaver = ConversationEventSubscription::new(&broadcaster, "/conversations/one");
+            assert_eq!(broadcaster.subscriber_count("/conversations/one"), 2);
+        }
+
+        assert_eq!(broadcaster.channel_count(), 1);
+        assert_eq!(broadcaster.subscriber_count("/conversations/one"), 1);
     }
 
     #[test]

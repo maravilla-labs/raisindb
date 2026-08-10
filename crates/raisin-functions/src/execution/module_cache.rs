@@ -84,6 +84,16 @@ pub fn is_enabled() -> bool {
 static MODULE_CACHE: std::sync::OnceLock<raisin_core::TtlCache<ModuleSet>> =
     std::sync::OnceLock::new();
 
+/// Entry count and how many of those are logically expired.
+///
+/// `TtlCache::get` returns `None` past the TTL but leaves the entry in the map,
+/// and `cleanup_expired` has no production caller — so a large `expired` count
+/// here is retained module SOURCE TEXT that nothing will ever hand out again.
+/// Surfaced for the memory diagnostics endpoint.
+pub fn module_cache_stats() -> raisin_core::CacheStats {
+    module_cache().stats()
+}
+
 fn module_cache() -> &'static raisin_core::TtlCache<ModuleSet> {
     MODULE_CACHE.get_or_init(|| {
         // Replication checkpoint ingestion writes function code straight into

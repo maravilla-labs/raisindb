@@ -22,6 +22,7 @@ pub use chunks::upload_chunk;
 pub use completion::{cancel_upload, complete_upload};
 pub use create::create_upload;
 pub use status::{get_upload_progress, get_upload_status};
+pub use types::upload_session_count;
 pub use types::{
     ChunkUploadResponse, CompleteUploadRequest, CompleteUploadResponse, CreateUploadRequest,
     CreateUploadResponse, UploadSession, UploadSessionStatus, UploadSessionStore,

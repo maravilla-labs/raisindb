@@ -115,6 +115,18 @@ impl JobRegistry {
     pub fn monitors(&self) -> &Arc<JobMonitorHub> {
         &self.monitors
     }
+
+    /// Number of job entries currently held in memory.
+    ///
+    /// Surfaced for the memory diagnostics endpoint. Note there are TWO
+    /// registries in a running server — the storage-owned one, which the 60s
+    /// cleanup sweep trims, and the process-wide [`global_registry`], which
+    /// nothing sweeps. Admin-triggered work (integrity scans, backups,
+    /// maintenance, vector reindexes) registers against the latter, so its
+    /// count only ever goes up. Sample both.
+    pub async fn job_count(&self) -> usize {
+        self.jobs.read().await.len()
+    }
 }
 
 /// Global job registry instance
