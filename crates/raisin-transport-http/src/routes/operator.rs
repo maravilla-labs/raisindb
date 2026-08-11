@@ -47,13 +47,17 @@ async fn admin_system_auth_context(mut req: Request<Body>, next: Next) -> Respon
     next.run(req).await
 }
 
-/// Build the operator package routes (upload + unified package command).
+/// Build the operator routes: packages, plus the integration credentials a control
+/// plane must write.
 ///
 /// - `POST /management/packages/{repo}/upload` — multipart `.rap` upload into
 ///   the tenant's `packages` workspace (same handler as the customer upload).
 /// - `GET/POST /management/packages/{repo}/{branch}/head/{*path}` — unified
 ///   package command endpoint (`raisin:install?mode=sync`, `raisin:browse`,
 ///   `raisin:file`), mirroring `/api/packages/...`.
+/// - `POST /management/integrations/{repo}/oauth/client-secret` — the operator
+///   counterpart of `/api/integrations/{repo}/oauth/client-secret`, for connectors
+///   whose OAuth client belongs to the platform rather than to the customer.
 #[cfg(feature = "storage-rocksdb")]
 pub fn operator_package_routes(state: AppState) -> Router {
     #[allow(deprecated)]
@@ -66,6 +70,25 @@ pub fn operator_package_routes(state: AppState) -> Router {
         .route(
             "/management/packages/{repo}/{branch}/head/{*path}",
             any(crate::handlers::packages::handle_package_command),
+        )
+        // Same handler as `/api/integrations/{repo}/oauth/client-secret`, reachable by the
+        // OPERATOR rather than by a tenant admin.
+        //
+        // A managed connector — one whose OAuth client belongs to the platform rather than
+        // to the customer — cannot be completed from the console by design: it declares an
+        // empty OAuth surface precisely so an operator is never shown credentials they do
+        // not own. The control plane has to write them instead, and it authenticates with
+        // the superadmin token, which `require_auth_middleware` does not accept. So without
+        // this route no principal could provision such a connector at all: the console has
+        // no field, and the control plane got a 401.
+        //
+        // This adds a door, not a key. The handler is unchanged and still calls
+        // `require_admin`; `admin_system_auth_context` below supplies the system
+        // `AuthContext` that satisfies it, exactly as it already does for package installs.
+        // `/api/integrations/*` is untouched.
+        .route(
+            "/management/integrations/{repo}/oauth/client-secret",
+            post(crate::handlers::integrations::set_client_secret),
         )
         .layer(from_fn(admin_system_auth_context))
         .with_state(state)
