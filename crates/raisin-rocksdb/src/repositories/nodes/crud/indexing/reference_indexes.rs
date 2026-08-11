@@ -35,7 +35,9 @@ const TOMBSTONE: &[u8] = b"T";
 pub(crate) fn walk_references(
     properties: &HashMap<String, PropertyValue>,
 ) -> Vec<(String, RaisinReference)> {
-    crate::indexing::walk_properties(properties, |value| match value {
+    // Reference-ness is a property of the VALUE; the walk cursor (path, enclosing
+    // element type) is not consulted.
+    crate::indexing::walk_properties(properties, |_cursor, value| match value {
         PropertyValue::Reference(r) => Some(r),
         _ => None,
     })

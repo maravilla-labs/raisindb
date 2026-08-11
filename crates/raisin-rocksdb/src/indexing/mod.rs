@@ -41,7 +41,7 @@ mod spatial_tests;
 pub mod spatial_tombstone;
 pub mod spatial_walk;
 
-pub use property_walk::walk_properties;
+pub use property_walk::{walk_properties, walk_properties_mut, WalkCursor};
 pub use spatial::{
     write_node_spatial_indexes, write_spatial_property, SpatialIndexTargets, TombstonePrecisions,
     SPATIAL_TOMBSTONE,

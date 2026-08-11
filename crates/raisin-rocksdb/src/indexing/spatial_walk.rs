@@ -55,7 +55,9 @@ pub const MAX_GEOMETRY_PATHS_PER_NODE: usize = 64;
 /// tombstoner, the policy resolver and the rebuild job all use it, so the path a
 /// key embeds and the path a tombstone targets cannot disagree.
 pub fn walk_geometries(properties: &HashMap<String, PropertyValue>) -> Vec<(String, &GeoJson)> {
-    walk_properties(properties, |value| match value {
+    // Geometry-ness is a property of the VALUE, so the cursor is not consulted —
+    // selection here is structural by design (see the module header).
+    walk_properties(properties, |_cursor, value| match value {
         PropertyValue::Geometry(geometry) => Some(geometry),
         _ => None,
     })
