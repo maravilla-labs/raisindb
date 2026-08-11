@@ -114,11 +114,13 @@ impl FunctionLoader {
             .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
             .unwrap_or_else(NetworkPolicy::default);
 
-        // Parse secret policy (absent = no secret access; see SecretPolicy)
+        // Parse secret policy (absent = no secret access; see SecretPolicy).
+        // Goes through the same parse_or_deny as execution::code_loader so a
+        // malformed block warns here too instead of denying in silence.
         let secret_policy = props
             .get("secret_policy")
-            .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
-            .unwrap_or_else(crate::types::SecretPolicy::default);
+            .map(|v| crate::types::SecretPolicy::parse_or_deny(v.clone(), &name))
+            .unwrap_or_default();
 
         let metadata = FunctionMetadata {
             name,

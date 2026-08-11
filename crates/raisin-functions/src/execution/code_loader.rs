@@ -249,19 +249,14 @@ pub fn extract_secret_policy(node: &Node) -> SecretPolicy {
     let Some(raw) = node.properties.get("secret_policy") else {
         return SecretPolicy::default();
     };
-    let parsed = serde_json::to_value(raw)
-        .map_err(|e| e.to_string())
-        .and_then(|v| serde_json::from_value::<SecretPolicy>(v).map_err(|e| e.to_string()));
-
-    match parsed {
-        Ok(policy) => policy,
+    match serde_json::to_value(raw) {
+        Ok(v) => SecretPolicy::parse_or_deny(v, &node.path),
         Err(e) => {
             tracing::warn!(
                 function_path = %node.path,
                 error = %e,
-                "secret_policy on this function could not be parsed and was ignored; \
-                 the function has NO secret access. Expected `enabled: true` plus \
-                 `allowed_names: [...]`."
+                "secret_policy could not be read from the node and was ignored; \
+                 this function has NO secret access."
             );
             SecretPolicy::default()
         }

@@ -281,6 +281,30 @@ impl SecretPolicy {
         self
     }
 
+    /// Parse a raw `secret_policy` block, denying (and WARNING) if it will not
+    /// parse.
+    ///
+    /// The single parse point for both loaders — `execution::code_loader`
+    /// (which reads a `Node`) and `loader` (which reads a JSON property map).
+    /// They had the same silent `unwrap_or_default()`, which is exactly the
+    /// mirrored-code-path drift this repo keeps getting bitten by: fixing the
+    /// diagnostic in one would have left the other quietly denying.
+    ///
+    /// `context` identifies the function in the log line.
+    pub fn parse_or_deny(raw: serde_json::Value, context: &str) -> Self {
+        match serde_json::from_value::<Self>(raw) {
+            Ok(policy) => policy,
+            Err(e) => {
+                tracing::warn!(
+                    function = %context,
+                    error = %e,
+                    "secret_policy could not be parsed and was ignored; this function has                      NO secret access. Expected `enabled: true` plus `allowed_names: [...]`."
+                );
+                Self::default()
+            }
+        }
+    }
+
     /// Whether `name` is allowed by this policy.
     ///
     /// Uses the same `glob::Pattern` matcher as
