@@ -252,7 +252,16 @@ async fn call_provider_list_models(
                 Err("AWS Bedrock requires a region in the endpoint field".to_string())
             }
         }
-        AIProvider::Custom => Ok(vec![]),
+        AIProvider::Custom => {
+            // Returning an empty list used to make "Test connection" pass against an
+            // endpoint that was unreachable or misconfigured — the one thing the button
+            // exists to catch. Actually call it.
+            let url = endpoint.ok_or_else(|| {
+                "Custom provider requires api_endpoint (the OpenAI-compatible base URL)".to_string()
+            })?;
+            let p = GroqProvider::with_base_url(api_key.unwrap_or_default(), url);
+            p.list_available_models().await.map_err(|e| e.to_string())
+        }
         AIProvider::Local => Ok(vec![]),
     }
 }

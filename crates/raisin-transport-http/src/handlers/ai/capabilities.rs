@@ -130,11 +130,14 @@ pub async fn get_model_capabilities(
         AIProvider::Custom => Ok(Json(ModelCapabilitiesResponse {
             model_id: model_id.clone(),
             provider,
+            // An OpenAI-compatible endpoint serves `/embeddings` and supports tool calls
+            // as part of the shape it implements. Reporting `tools: false` here made the
+            // console hide tool configuration for agents that would have worked.
             capabilities: CapabilitiesInfo {
                 chat: true,
-                embeddings: false,
+                embeddings: true,
                 vision: false,
-                tools: false,
+                tools: true,
                 streaming: true,
             },
         })),

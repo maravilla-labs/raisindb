@@ -44,23 +44,58 @@ pub trait EmbeddingProvider: Send + Sync {
 // OpenAI
 // ---------------------------------------------------------------------------
 
+/// OpenAI's own embeddings host. Any OpenAI-compatible endpoint — a self-hosted server,
+/// a gateway, Azure — can be substituted via [`OpenAIProvider::with_base_url`].
+const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
+
 pub struct OpenAIProvider {
     api_key: String,
     model: String,
     dimensions: usize,
+    base_url: String,
     client: reqwest::Client,
 }
 
 impl OpenAIProvider {
     pub fn new(api_key: String, model: String) -> Result<Self> {
-        let dimensions = Self::get_dimensions(&model)?;
+        Self::build(api_key, model, None, None)
+    }
+
+    /// Point the provider at an OpenAI-compatible endpoint other than OpenAI's own.
+    pub fn with_base_url(api_key: String, model: String, base_url: String) -> Result<Self> {
+        Self::build(api_key, model, Some(base_url), None)
+    }
+
+    /// Full constructor.
+    ///
+    /// `dimensions` is needed because [`Self::get_dimensions`] only recognises OpenAI's
+    /// own model names. Against any other OpenAI-compatible endpoint the model is named
+    /// by whoever runs it, so the width has to come from configuration — without this,
+    /// a custom `base_url` is unusable no matter what it points at.
+    pub fn build(
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+        dimensions: Option<usize>,
+    ) -> Result<Self> {
+        let dimensions = match dimensions {
+            Some(d) if d > 0 => d,
+            _ => Self::get_dimensions(&model)?,
+        };
 
         Ok(Self {
             api_key,
             model,
             dimensions,
+            base_url: base_url
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| OPENAI_API_BASE.to_string()),
             client: reqwest::Client::new(),
         })
+    }
+
+    fn endpoint(&self) -> String {
+        format!("{}/embeddings", self.base_url)
     }
 
     fn get_dimensions(model: &str) -> Result<usize> {
@@ -69,8 +104,8 @@ impl OpenAIProvider {
             "text-embedding-3-small" => Ok(1536),
             "text-embedding-3-large" => Ok(3072),
             _ => Err(Error::Validation(format!(
-                "Unknown OpenAI model: {}",
-                model
+                "Unknown OpenAI model `{model}`: set `dimensions` in the embedding config \
+                 when using a model this build does not know"
             ))),
         }
     }
@@ -100,7 +135,7 @@ impl EmbeddingProvider for OpenAIProvider {
 
         let response = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(self.endpoint())
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -143,7 +178,7 @@ impl EmbeddingProvider for OpenAIProvider {
 
         let response = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(self.endpoint())
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -177,11 +212,12 @@ impl EmbeddingProvider for OpenAIProvider {
             )));
         }
 
-        Ok(response_data
-            .data
-            .into_iter()
-            .map(|d| d.embedding)
-            .collect())
+        // Sort by index before dropping it. The API does not guarantee `data` comes back
+        // in request order, and the caller matches vectors to inputs positionally — so an
+        // unsorted response silently attaches every embedding to the wrong text.
+        let mut rows = response_data.data;
+        rows.sort_by_key(|d| d.index);
+        Ok(rows.into_iter().map(|d| d.embedding).collect())
     }
 
     fn dimensions(&self) -> usize {
@@ -209,6 +245,10 @@ struct OpenAIEmbeddingResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAIEmbeddingData {
     embedding: Vec<f32>,
+    /// Position in the request. Load-bearing for batches — see
+    /// `generate_embeddings_batch`. Defaulted so a server that omits it still parses.
+    #[serde(default)]
+    index: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -399,10 +439,22 @@ impl OllamaProvider {
     }
 
     pub fn with_base_url(base_url: String, model: String) -> Result<Self> {
-        let dimensions = Self::get_dimensions(&model)?;
+        Self::build(base_url, model, None)
+    }
+
+    /// Full constructor.
+    ///
+    /// `dimensions` overrides the built-in table. Ollama serves whatever model the
+    /// operator pulled, so a fixed list of four names cannot keep up — and an unknown
+    /// name is a hard error without this.
+    pub fn build(base_url: String, model: String, dimensions: Option<usize>) -> Result<Self> {
+        let dimensions = match dimensions {
+            Some(d) if d > 0 => d,
+            _ => Self::get_dimensions(&model)?,
+        };
 
         Ok(Self {
-            base_url,
+            base_url: base_url.trim_end_matches('/').to_string(),
             model,
             dimensions,
             client: reqwest::Client::new(),
@@ -416,8 +468,8 @@ impl OllamaProvider {
             "mxbai-embed-large" => Ok(1024),
             "snowflake-arctic-embed" => Ok(1024),
             _ => Err(Error::Validation(format!(
-                "Unknown Ollama model: {}",
-                model
+                "Unknown Ollama model `{model}`: set `dimensions` in the embedding config \
+                 when using a model this build does not know"
             ))),
         }
     }
@@ -559,33 +611,51 @@ pub fn create_provider(
     create_provider_with_url(provider, api_key, model, None)
 }
 
-/// Create an embedding provider with optional base URL override.
+/// Create an embedding provider with an optional base URL override.
 ///
-/// The `base_url` parameter is used by Ollama to connect to a remote instance.
-/// For other providers, it is ignored.
+/// Honoured by OpenAI (and anything OpenAI-compatible) as well as Ollama.
 pub fn create_provider_with_url(
     provider: &crate::config::EmbeddingProvider,
     api_key: &str,
     model: &str,
     base_url: Option<&str>,
 ) -> Result<Box<dyn EmbeddingProvider>> {
+    create_provider_full(provider, api_key, model, base_url, None)
+}
+
+/// Create an embedding provider with a base URL *and* an explicit dimension.
+///
+/// Both overrides exist for the same reason: against a non-first-party endpoint, neither
+/// the host nor the model name is something this crate can know in advance. The built-in
+/// dimension tables only cover the vendors' own model names, so a custom endpoint needs
+/// the width supplied from the tenant's config.
+///
+/// The dimension is a **one-way door** — it is hashed into the embedder identity and the
+/// vector index is built at that width, so changing it later means reindexing everything
+/// that used it.
+pub fn create_provider_full(
+    provider: &crate::config::EmbeddingProvider,
+    api_key: &str,
+    model: &str,
+    base_url: Option<&str>,
+    dimensions: Option<usize>,
+) -> Result<Box<dyn EmbeddingProvider>> {
     match provider {
-        crate::config::EmbeddingProvider::OpenAI => {
-            let provider = OpenAIProvider::new(api_key.to_string(), model.to_string())?;
-            Ok(Box::new(provider))
-        }
+        crate::config::EmbeddingProvider::OpenAI => Ok(Box::new(OpenAIProvider::build(
+            api_key.to_string(),
+            model.to_string(),
+            base_url.map(str::to_string),
+            dimensions,
+        )?)),
         crate::config::EmbeddingProvider::Claude => {
             let provider = VoyageProvider::new(api_key.to_string(), model.to_string())?;
             Ok(Box::new(provider))
         }
-        crate::config::EmbeddingProvider::Ollama => {
-            let provider = if let Some(url) = base_url {
-                OllamaProvider::with_base_url(url.to_string(), model.to_string())?
-            } else {
-                OllamaProvider::new(model.to_string())?
-            };
-            Ok(Box::new(provider))
-        }
+        crate::config::EmbeddingProvider::Ollama => Ok(Box::new(OllamaProvider::build(
+            base_url.unwrap_or("http://localhost:11434").to_string(),
+            model.to_string(),
+            dimensions,
+        )?)),
         crate::config::EmbeddingProvider::HuggingFace => Err(Error::Validation(
             "HuggingFace local embeddings require the 'candle' feature".to_string(),
         )),
@@ -595,6 +665,128 @@ pub fn create_provider_with_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── base_url and dimension overrides ────────────────────────────────────────
+    //
+    // Both exist so a non-vendor endpoint is reachable at all. Before them, a tenant
+    // could configure a custom endpoint, have it accepted, and still have every single
+    // embedding request go to api.openai.com.
+
+    #[test]
+    fn openai_defaults_to_openais_own_host() {
+        let p = OpenAIProvider::new("k".into(), "text-embedding-3-small".into()).unwrap();
+        assert_eq!(p.endpoint(), "https://api.openai.com/v1/embeddings");
+    }
+
+    #[test]
+    fn openai_honours_a_custom_base_url() {
+        let p = OpenAIProvider::with_base_url(
+            "k".into(),
+            "text-embedding-3-small".into(),
+            "https://marvel.maravilla.cloud/v1".into(),
+        )
+        .unwrap();
+        assert_eq!(p.endpoint(), "https://marvel.maravilla.cloud/v1/embeddings");
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_produce_a_double_slash() {
+        let p = OpenAIProvider::with_base_url(
+            "k".into(),
+            "text-embedding-3-small".into(),
+            "https://host/v1/".into(),
+        )
+        .unwrap();
+        assert_eq!(p.endpoint(), "https://host/v1/embeddings");
+    }
+
+    /// The point of the override: a gateway names its own models, so the built-in table
+    /// cannot possibly know them.
+    #[test]
+    fn an_unknown_model_works_when_dimensions_are_supplied() {
+        let p = OpenAIProvider::build(
+            "k".into(),
+            "maravilla/embed".into(),
+            Some("https://marvel.maravilla.cloud/v1".into()),
+            Some(1536),
+        )
+        .unwrap();
+        assert_eq!(p.dimensions(), 1536);
+    }
+
+    #[test]
+    fn an_unknown_model_without_dimensions_still_fails_loudly() {
+        // `.err()` rather than `unwrap_err()`: the latter needs `Debug` on the provider,
+        // and deriving that would put the API key one `{:?}` away from a log line.
+        let err = OpenAIProvider::build("k".into(), "maravilla/embed".into(), None, None)
+            .err()
+            .expect("an unknown model with no dimensions must fail")
+            .to_string();
+        assert!(
+            err.contains("dimensions"),
+            "the error must say how to fix it: {err}"
+        );
+    }
+
+    /// A zero is a missing value, not a legitimate width — fall back rather than build a
+    /// provider that reports zero-dimensional vectors.
+    #[test]
+    fn a_zero_dimension_override_is_ignored() {
+        let p = OpenAIProvider::build("k".into(), "text-embedding-3-small".into(), None, Some(0))
+            .unwrap();
+        assert_eq!(p.dimensions(), 1536);
+    }
+
+    #[test]
+    fn ollama_accepts_an_unknown_model_with_dimensions() {
+        let p = OllamaProvider::build(
+            "http://host:11434".into(),
+            "some-new-model".into(),
+            Some(1024),
+        )
+        .unwrap();
+        assert_eq!(p.dimensions(), 1024);
+        assert!(
+            OllamaProvider::build("http://host:11434".into(), "some-new-model".into(), None)
+                .is_err()
+        );
+    }
+
+    /// Batch embeddings are matched to inputs by position, so an out-of-order response
+    /// would attach every vector to the wrong text — silently.
+    #[test]
+    fn batch_rows_are_sorted_by_index_before_the_index_is_dropped() {
+        let mut rows = vec![
+            OpenAIEmbeddingData {
+                embedding: vec![3.0],
+                index: 2,
+            },
+            OpenAIEmbeddingData {
+                embedding: vec![1.0],
+                index: 0,
+            },
+            OpenAIEmbeddingData {
+                embedding: vec![2.0],
+                index: 1,
+            },
+        ];
+        rows.sort_by_key(|d| d.index);
+        let ordered: Vec<Vec<f32>> = rows.into_iter().map(|d| d.embedding).collect();
+        assert_eq!(ordered, vec![vec![1.0], vec![2.0], vec![3.0]]);
+    }
+
+    #[test]
+    fn the_full_factory_threads_both_overrides_through() {
+        let p = create_provider_full(
+            &crate::config::EmbeddingProvider::OpenAI,
+            "k",
+            "maravilla/embed",
+            Some("https://marvel.maravilla.cloud/v1"),
+            Some(1536),
+        )
+        .unwrap();
+        assert_eq!(p.dimensions(), 1536);
+    }
 
     #[test]
     fn test_openai_get_dimensions() {

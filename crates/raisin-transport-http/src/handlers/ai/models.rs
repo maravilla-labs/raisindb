@@ -274,7 +274,17 @@ pub(super) async fn fetch_models_from_provider(
                 Err("AWS Bedrock requires region in endpoint".to_string())
             }
         }
-        AIProvider::Custom => Err("Custom provider not supported for model discovery".to_string()),
+        AIProvider::Custom => {
+            // An OpenAI-compatible endpoint serves `GET {base}/models`, so discovery
+            // works exactly as it does for Groq — same client, caller-supplied host.
+            let url = endpoint.ok_or_else(|| {
+                "Custom provider requires api_endpoint (the OpenAI-compatible base URL)".to_string()
+            })?;
+            let p = GroqProvider::with_base_url(api_key.unwrap_or_default(), url);
+            p.list_available_models()
+                .await
+                .map_err(|e| format!("Custom provider error: {}", e))
+        }
         AIProvider::Local => {
             // Local Candle models are defined statically
             Ok(vec![

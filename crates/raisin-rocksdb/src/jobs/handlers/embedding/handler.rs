@@ -10,7 +10,7 @@ use raisin_ai::storage::TenantAIConfigStore;
 use raisin_embeddings::config::{EmbeddingProvider, TenantEmbeddingConfig};
 use raisin_embeddings::crypto::ApiKeyEncryptor;
 use raisin_embeddings::models::EmbeddingData;
-use raisin_embeddings::provider::create_provider;
+use raisin_embeddings::provider::create_provider_full;
 use raisin_embeddings::EmbeddingStorage;
 use raisin_embeddings::TenantEmbeddingConfigStore;
 use raisin_error::{Error, Result};
@@ -101,12 +101,23 @@ impl EmbeddingJobHandler {
         }
 
         // Resolve provider - use unified AI config if available, otherwise legacy fields
-        let (embedding_provider, api_key, model) = self
+        let resolved = self
             .resolve_embedding_provider(&config, &context.tenant_id)
             .await?;
 
-        // Create embedding provider
-        let provider = create_provider(&embedding_provider, &api_key, &model)?;
+        // Create embedding provider.
+        //
+        // `base_url` and `dimensions` are both load-bearing for any endpoint that is not
+        // the vendor's own: the built-in dimension tables only know the vendors' model
+        // names, so a self-hosted or gateway endpoint cannot be reached without them.
+        let provider = create_provider_full(
+            &resolved.provider,
+            &resolved.api_key,
+            &resolved.model,
+            resolved.base_url.as_deref(),
+            Some(config.dimensions),
+        )?;
+        let model = resolved.model;
 
         // Fetch node at exact revision
         let node = self
@@ -501,7 +512,7 @@ impl EmbeddingJobHandler {
         &self,
         config: &TenantEmbeddingConfig,
         tenant_id: &str,
-    ) -> Result<(EmbeddingProvider, String, String)> {
+    ) -> Result<ResolvedEmbeddingProvider> {
         let encryptor = ApiKeyEncryptor::new(&self.master_key);
 
         if config.uses_unified_provider() {
@@ -551,7 +562,11 @@ impl EmbeddingJobHandler {
 
             // Map TenantAIConfig provider to EmbeddingProvider
             let embedding_provider = match provider_ref.as_str() {
-                "openai" => EmbeddingProvider::OpenAI,
+                // Everything that speaks OpenAI's `/embeddings` shape shares one client;
+                // they differ only in host, which `api_endpoint` supplies.
+                "openai" | "azure_openai" | "groq" | "openrouter" | "custom" => {
+                    EmbeddingProvider::OpenAI
+                }
                 "anthropic" | "claude" => EmbeddingProvider::Claude,
                 "ollama" => EmbeddingProvider::Ollama,
                 _ => {
@@ -568,7 +583,15 @@ impl EmbeddingJobHandler {
                 "Using unified AI provider for embeddings"
             );
 
-            Ok((embedding_provider, api_key, model_ref))
+            Ok(ResolvedEmbeddingProvider {
+                provider: embedding_provider,
+                api_key,
+                model: model_ref,
+                // Previously dropped on the floor, which is why a tenant could configure
+                // a custom endpoint, see it accepted, and still have every embedding go
+                // to the vendor's default host.
+                base_url: ai_provider.api_endpoint.clone(),
+            })
         } else {
             // Legacy mode - use fields directly from TenantEmbeddingConfig
             let api_key_encrypted = config.api_key_encrypted.as_ref().ok_or_else(|| {
@@ -584,7 +607,23 @@ impl EmbeddingJobHandler {
                 "Using legacy embedding provider configuration"
             );
 
-            Ok((config.provider.clone(), api_key, config.model.clone()))
+            Ok(ResolvedEmbeddingProvider {
+                provider: config.provider.clone(),
+                api_key,
+                model: config.model.clone(),
+                base_url: config.base_url.clone(),
+            })
         }
     }
+}
+
+/// Everything needed to build an embedding client for a tenant.
+///
+/// A struct rather than a tuple because `base_url` was the field that used to get lost:
+/// a 3-tuple made "provider, key, model" look complete when it was not.
+struct ResolvedEmbeddingProvider {
+    provider: EmbeddingProvider,
+    api_key: String,
+    model: String,
+    base_url: Option<String>,
 }

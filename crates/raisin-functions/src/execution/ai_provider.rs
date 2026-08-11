@@ -303,7 +303,34 @@ fn create_provider_instance(
                 models_dir,
             )))
         }
-        AIProvider::Google | AIProvider::Custom => Err(raisin_error::Error::Backend(format!(
+        AIProvider::Custom => {
+            // Any OpenAI-compatible `/chat/completions` endpoint: a self-hosted vLLM or
+            // llama.cpp server, or a gateway sitting in front of one.
+            //
+            // `GroqProvider` *is* that client — the only Groq-specific things about it
+            // are its default base URL and a model-name heuristic for tool support, and
+            // a supplied endpoint replaces the first. Reusing it avoids maintaining a
+            // second copy of the same protocol.
+            //
+            // The endpoint is required rather than defaulted: there is no sensible
+            // default host for "custom", and guessing one would send a tenant's traffic
+            // somewhere they never asked for.
+            //
+            // The key is *not* required, matching `AIProvider::requires_api_key()` — a
+            // self-hosted endpoint on a private network legitimately has none. An
+            // endpoint that does want one answers a keyless request with its own 401,
+            // which says more than a generic config error could.
+            let key = api_key.unwrap_or_default();
+            let endpoint = provider_config.api_endpoint.as_ref().ok_or_else(|| {
+                raisin_error::Error::Backend(
+                    "Custom provider requires api_endpoint (the OpenAI-compatible base \
+                     URL, e.g. https://host/v1)"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(GroqProvider::with_base_url(key, endpoint)))
+        }
+        AIProvider::Google => Err(raisin_error::Error::Backend(format!(
             "Provider {:?} not yet supported",
             provider_config.provider
         ))),
@@ -316,4 +343,58 @@ fn create_provider_instance(
 /// hard-errors if it is missing/invalid (no fallback).
 fn get_master_key() -> Result<[u8; 32], raisin_error::Error> {
     raisin_crypto::master_key()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raisin_ai::config::AIProviderConfig;
+
+    fn config(provider: AIProvider, endpoint: Option<&str>) -> AIProviderConfig {
+        AIProviderConfig {
+            provider,
+            api_key_encrypted: None,
+            api_endpoint: endpoint.map(str::to_string),
+            enabled: true,
+            models: vec![],
+        }
+    }
+
+    /// The whole point of `Custom`: reach an OpenAI-compatible endpoint that this build
+    /// has never heard of. Before this it returned "not yet supported", which forced
+    /// tenants to masquerade as `groq` while pointing somewhere else entirely.
+    #[test]
+    fn custom_builds_against_a_supplied_endpoint() {
+        let cfg = config(
+            AIProvider::Custom,
+            Some("https://marvel.maravilla.cloud/v1"),
+        );
+        assert!(create_provider_instance(&cfg, Some("mrv_key")).is_ok());
+    }
+
+    /// There is no sensible default host for "custom"; guessing one would send a
+    /// tenant's traffic somewhere they never asked for.
+    #[test]
+    fn custom_without_an_endpoint_is_refused_with_a_usable_message() {
+        let cfg = config(AIProvider::Custom, None);
+        let err = create_provider_instance(&cfg, Some("k"))
+            .err()
+            .expect("an endpoint is required")
+            .to_string();
+        assert!(err.contains("api_endpoint"), "got: {err}");
+    }
+
+    /// Matches `AIProvider::requires_api_key()`, which reports false for Custom — a
+    /// self-hosted endpoint on a private network legitimately has no key.
+    #[test]
+    fn custom_does_not_require_an_api_key() {
+        let cfg = config(AIProvider::Custom, Some("http://10.0.0.5:8000/v1"));
+        assert!(create_provider_instance(&cfg, None).is_ok());
+    }
+
+    #[test]
+    fn google_is_still_unsupported() {
+        let cfg = config(AIProvider::Google, Some("https://example.test"));
+        assert!(create_provider_instance(&cfg, Some("k")).is_err());
+    }
 }
