@@ -239,6 +239,7 @@ mod tests {
             is_translatable: None,
             allow_additional_properties: None,
             spatial: None,
+            encrypted: None,
         }
     }
 

@@ -24,6 +24,15 @@ impl RevisionRepositoryImpl {
         Self { db, hlc_state }
     }
 
+    /// The shared HLC state behind this repository.
+    ///
+    /// Handed to the secret store so secret versions interleave monotonically
+    /// with node revisions minted by the same process, rather than coming from
+    /// a second, independently-ticking clock.
+    pub fn hlc_state(&self) -> Arc<NodeHLCState> {
+        self.hlc_state.clone()
+    }
+
     /// Update HLC from a remote operation (during replication)
     pub fn update_hlc(&self, remote_hlc: &HLC) -> HLC {
         self.hlc_state.update(remote_hlc)

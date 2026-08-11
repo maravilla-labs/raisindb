@@ -72,6 +72,9 @@ pub(crate) fn convert_property(prop: &PropertyDef) -> Result<PropertyValueSchema
                 // `SPATIAL_INDEX(...)` property modifier fills this at the
                 // top-level property instead.
                 spatial: None,
+                // Likewise for secrets: a secret is vaulted under a name derived
+                // from the property path, which an anonymous item does not have.
+                encrypted: None,
             };
             (None, Some(Box::new(item_schema)))
         }
@@ -105,6 +108,11 @@ pub(crate) fn convert_property(prop: &PropertyDef) -> Result<PropertyValueSchema
         // defaults, so leaving it unset is correct behaviour meanwhile — geometry
         // properties are still indexed automatically by value type.
         spatial: None,
+        // TODO(secrets): populate from an `ENCRYPTED` property modifier once the
+        // DDL parser produces one. Until then a nodetype created through SQL DDL
+        // cannot declare a secret field — declare it in YAML instead. `None` is
+        // the safe default: not secret, stored as written.
+        encrypted: None,
     })
 }
 

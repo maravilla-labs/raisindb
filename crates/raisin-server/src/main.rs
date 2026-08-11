@@ -19,6 +19,7 @@ mod builtin_package_init_handler;
 mod config;
 mod deps_setup;
 mod diagnostics;
+mod encrypted_fields_event_handler;
 #[cfg(feature = "storage-rocksdb")]
 mod flow_sweeper;
 mod function_module_event_handler;
@@ -132,6 +133,16 @@ async fn main() {
         }
     }
 
+    // Install the secret-vaulting policy before ANY write path can run — this
+    // has to be ahead of storage init, the job system and both transports,
+    // because the first node write is the first chance to leak a plaintext
+    // secret. Process-global for the same reason as the MCP egress policy
+    // below: the write paths that consult it sit deep enough that threading a
+    // handle to each would mean several near-identical parameters, and one of
+    // them disagreeing would be silent.
+    #[cfg(feature = "storage-rocksdb")]
+    raisin_rocksdb::vaulting::configure_vaulting(server_config.secrets.vaulting_enabled);
+
     // Run external dependency setup (Tesseract OCR, etc.)
     tracing::info!("Checking external dependencies...");
     if let Err(e) = deps_setup::run_dependency_setup(&server_config.data_dir) {
@@ -190,6 +201,14 @@ async fn main() {
         let event_bus = storage.event_bus();
         event_bus.subscribe(std::sync::Arc::new(
             schema_stats_event_handler::SchemaStatsEventHandler::new(schema_stats_cache.clone()),
+        ));
+
+        // The encrypted-fields gate rides the same event, for a much sharper
+        // reason: a stale statistic costs a worse plan, a stale `false` there
+        // writes a secret to disk in plaintext. Its checkpoint-ingest
+        // invalidation is already registered inside `encrypted_fields::global()`.
+        event_bus.subscribe(std::sync::Arc::new(
+            encrypted_fields_event_handler::EncryptedFieldsEventHandler,
         ));
 
         // Replication checkpoint ingestion copies the node_types / archetypes

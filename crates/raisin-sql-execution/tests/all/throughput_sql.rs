@@ -94,6 +94,7 @@ fn prop_schema(name: &str, ty: PropertyType) -> PropertyValueSchema {
         allow_additional_properties: None,
         index: None,
         spatial: None,
+        encrypted: None,
     }
 }
 

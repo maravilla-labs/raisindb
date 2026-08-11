@@ -123,7 +123,31 @@ pub struct RocksDBTransaction {
     /// thousand-item batch accumulates thousands of keys. The dedup check below
     /// runs on every reservation, and a linear scan over that made it quadratic.
     pub(super) reserved_create_paths: Arc<Mutex<HashSet<String>>>,
+
+    /// Secret-store versions minted by THIS transaction: name -> (version,
+    /// hash of the plaintext that version holds).
+    ///
+    /// Bulk SQL DML can `put_node` the same node twice inside one transaction
+    /// (an INSERT followed by an UPDATE of the same row, say), and the
+    /// transaction's HLC is allocated once for all of it — so both writes land
+    /// on ONE node revision, the second overwriting the first in the batch.
+    /// Minting a second secret version for the second write would leave `@1` an
+    /// orphan nothing resolves to, and would make the version counter track
+    /// statement count rather than value changes.
+    ///
+    /// The hash is why the memo is safe to reuse: if the second write carries a
+    /// DIFFERENT plaintext, reusing the first version would store the wrong
+    /// value under the reference that survives. A hash mismatch mints a new
+    /// version; only a byte-identical rewrite is deduplicated. The plaintext
+    /// itself is deliberately not retained.
+    ///
+    /// Same scratch-state shape as `reserved_create_paths` above: owned by the
+    /// transaction, dropped with it.
+    pub(super) vaulted_secrets: VaultedSecrets,
 }
+
+/// Secret name -> (version minted in this transaction, hash of its plaintext).
+type VaultedSecrets = Arc<Mutex<HashMap<String, (u64, [u8; 32])>>>;
 
 impl RocksDBTransaction {
     /// Create a new RocksDB transaction
@@ -185,7 +209,40 @@ impl RocksDBTransaction {
             validate_schema: Arc::new(Mutex::new(true)), // Default: validation enabled
             path_reservation_owner,
             reserved_create_paths: Arc::new(Mutex::new(HashSet::new())),
+            vaulted_secrets: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// The version this transaction already minted for `name` holding exactly
+    /// this plaintext, if any.
+    ///
+    /// See [`RocksDBTransaction::vaulted_secrets`] for why a second write of the
+    /// same node in one transaction reuses it rather than appending, and why a
+    /// changed plaintext must not.
+    pub(super) fn vaulted_secret_version(
+        &self,
+        name: &str,
+        plaintext_hash: &[u8; 32],
+    ) -> Option<u64> {
+        self.vaulted_secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .filter(|(_, hash)| hash == plaintext_hash)
+            .map(|(version, _)| *version)
+    }
+
+    /// Record the version minted for `name` by this transaction.
+    pub(super) fn record_vaulted_secret(
+        &self,
+        name: String,
+        version: u64,
+        plaintext_hash: [u8; 32],
+    ) {
+        self.vaulted_secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name, (version, plaintext_hash));
     }
 
     /// Reserve a CREATE path for this transaction.

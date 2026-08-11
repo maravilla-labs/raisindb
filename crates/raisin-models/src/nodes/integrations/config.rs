@@ -132,13 +132,13 @@ pub fn secret_field_names(properties: &[PropertyValueSchema]) -> Vec<String> {
 }
 
 /// Whether a property carries a truthy `meta.<key>` flag.
-pub(super) fn meta_flag(schema: &PropertyValueSchema, key: &str) -> bool {
-    use crate::nodes::properties::value::PropertyValue;
-    schema
-        .meta
-        .as_ref()
-        .and_then(|m| m.get(key))
-        .is_some_and(|v| matches!(v, PropertyValue::Boolean(true)))
+///
+/// `pub` because the secret-field readers need the same answer this gives, and
+/// a second implementation of "is this meta flag true" is exactly how one
+/// reader ends up saying a field is not secret. Delegates to
+/// [`crate::nodes::properties::schema::meta_bool`], the single reader.
+pub fn meta_flag(schema: &PropertyValueSchema, key: &str) -> bool {
+    crate::nodes::properties::schema::meta_bool(schema.meta.as_ref(), key)
 }
 
 /// Read a non-empty string property.

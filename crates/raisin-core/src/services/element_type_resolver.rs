@@ -32,9 +32,23 @@ pub struct ResolvedElementType {
     pub resolved_strict: bool,
 }
 
+/// Where the resolver fetches an ElementType from.
+///
+/// Two variants because a caller BELOW the storage facade — the RocksDB node
+/// repository, which can never hold an `Arc<RocksDBStorage>` without making a
+/// reference cycle that never closes the database — still needs
+/// inheritance-aware resolution. Only the FETCH differs; the inheritance walk
+/// below is single, which is the point. A second walk that missed an INHERITED
+/// `encrypted` declaration would write a plaintext secret to disk.
+#[derive(Clone)]
+enum ElementTypeSource<S: Storage> {
+    Storage(Arc<S>),
+    Lookup(Arc<dyn crate::services::schema_lookup::ElementTypeLookup>),
+}
+
 #[derive(Clone)]
 pub struct ElementTypeResolver<S: Storage> {
-    storage: Arc<S>,
+    source: ElementTypeSource<S>,
     tenant_id: String,
     repo_id: String,
     branch: String,
@@ -43,10 +57,47 @@ pub struct ElementTypeResolver<S: Storage> {
 impl<S: Storage> ElementTypeResolver<S> {
     pub fn new(storage: Arc<S>, tenant_id: String, repo_id: String, branch: String) -> Self {
         Self {
-            storage,
+            source: ElementTypeSource::Storage(storage),
             tenant_id,
             repo_id,
             branch,
+        }
+    }
+
+    /// Build from a bare ElementType lookup, for callers that hold the
+    /// repository but not the storage facade.
+    pub fn from_lookup(
+        lookup: Arc<dyn crate::services::schema_lookup::ElementTypeLookup>,
+        tenant_id: String,
+        repo_id: String,
+        branch: String,
+    ) -> Self {
+        Self {
+            source: ElementTypeSource::Lookup(lookup),
+            tenant_id,
+            repo_id,
+            branch,
+        }
+    }
+
+    /// The ONE fetch, so both sources feed the same walk.
+    async fn fetch(&self, name: &str) -> Result<Option<ElementType>> {
+        match &self.source {
+            ElementTypeSource::Storage(storage) => {
+                storage
+                    .element_types()
+                    .get(
+                        BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
+                        name,
+                        None,
+                    )
+                    .await
+            }
+            ElementTypeSource::Lookup(lookup) => {
+                lookup
+                    .get_element_type(&self.tenant_id, &self.repo_id, &self.branch, name)
+                    .await
+            }
         }
     }
 
@@ -89,17 +140,9 @@ impl<S: Storage> ElementTypeResolver<S> {
             chain.push(element_type_name.to_string());
 
             // Fetch the ElementType
-            let repo = self.storage.element_types();
-            let element_type = repo
-                .get(
-                    BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
-                    element_type_name,
-                    None,
-                )
-                .await?
-                .ok_or_else(|| {
-                    Error::NotFound(format!("ElementType not found: {}", element_type_name))
-                })?;
+            let element_type = self.fetch(element_type_name).await?.ok_or_else(|| {
+                Error::NotFound(format!("ElementType not found: {}", element_type_name))
+            })?;
 
             let mut field_map: HashMap<String, FieldSchema> = HashMap::new();
             let mut resolved_layout: Option<Vec<LayoutNode>> = None;
@@ -153,17 +196,9 @@ impl<S: Storage> ElementTypeResolver<S> {
 
     /// Check if an ElementType exists and is published
     pub async fn validate_exists_and_published(&self, element_type_name: &str) -> Result<()> {
-        let repo = self.storage.element_types();
-        let element_type = repo
-            .get(
-                BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
-                element_type_name,
-                None,
-            )
-            .await?
-            .ok_or_else(|| {
-                Error::NotFound(format!("ElementType not found: {}", element_type_name))
-            })?;
+        let element_type = self.fetch(element_type_name).await?.ok_or_else(|| {
+            Error::NotFound(format!("ElementType not found: {}", element_type_name))
+        })?;
 
         if !element_type.publishable.unwrap_or(false) {
             return Err(Error::Validation(format!(
@@ -200,6 +235,7 @@ mod tests {
             translatable: None,
             index: None,
             meta: None,
+            encrypted: None,
         }
     }
 

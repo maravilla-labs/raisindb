@@ -58,13 +58,8 @@ impl<S: Storage> NodeTypeResolver<S> {
                 None
             };
 
-            let repo = self.storage.node_types();
-            let node_type = repo
-                .get(
-                    BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
-                    node_type_name,
-                    max_revision.as_ref(),
-                )
+            let node_type = self
+                .fetch(node_type_name, max_revision)
                 .await?
                 .ok_or_else(|| {
                     Error::NotFound(format!("NodeType not found: {}", node_type_name))
@@ -201,14 +196,7 @@ impl<S: Storage> NodeTypeResolver<S> {
         node_type_name: &str,
         pin_hlc: HLC,
     ) -> Result<HLC> {
-        let repo = self.storage.node_types();
-        let node_type = repo
-            .get(
-                BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
-                node_type_name,
-                Some(&pin_hlc),
-            )
-            .await?;
+        let node_type = self.fetch(node_type_name, Some(pin_hlc)).await?;
 
         if node_type.is_none() {
             return Err(Error::Validation(format!(

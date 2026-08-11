@@ -31,6 +31,7 @@ fn prop_schema(spatial: Option<SpatialPropertySchema>) -> PropertyValueSchema {
         allow_additional_properties: None,
         index: None,
         spatial,
+        encrypted: None,
     }
 }
 

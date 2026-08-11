@@ -112,6 +112,8 @@ pub struct MergedConfig {
     pub max_active_jobs_per_tenant: Option<usize>,
     /// Storage engine memory bounds (block cache, global memtable budget)
     pub storage: config::StorageConfig,
+    /// Secret handling (auto-vaulting on/off)
+    pub secrets: config::SecretsConfig,
 }
 
 impl ServerConfig {
@@ -262,6 +264,14 @@ impl ServerConfig {
             .map(|c| c.mcp_client.clone())
             .unwrap_or_default();
 
+        // Secret handling from TOML (no CLI override, deliberately: turning
+        // vaulting off should require editing the config file, not a flag
+        // someone can paste into a shell). Absent section = vaulting ON.
+        let secrets = toml_config
+            .as_ref()
+            .map(|c| c.secrets.clone())
+            .unwrap_or_default();
+
         // Trigger circuit breaker config from TOML (no CLI override for now)
         let trigger_safety = toml_config
             .as_ref()
@@ -299,6 +309,7 @@ impl ServerConfig {
             locks,
             system_definitions,
             mcp_client,
+            secrets,
             trigger_safety,
             max_active_jobs_per_tenant,
             storage,

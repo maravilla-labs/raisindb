@@ -149,6 +149,15 @@ pub struct RocksDBStorage {
     pub(crate) virtual_mount_sync:
         Arc<std::sync::RwLock<Option<Arc<crate::jobs::VirtualMountSyncHandler>>>>,
 
+    // The secret store, built on first use.
+    //
+    // Lazy rather than eager because it needs a master keyring, and a
+    // deployment that never declares an `encrypted` field must not be forced to
+    // configure one just to open a database. The write path asks for it only
+    // once a NodeType actually declares a secret — at which point a missing
+    // keyring is a hard error, not a silent plaintext write.
+    pub(crate) secret_store: Arc<std::sync::OnceLock<Arc<crate::secret_store::SecretStore>>>,
+
     // Replication components
     pub(crate) operation_capture: Arc<crate::OperationCapture>,
     pub(crate) operation_queue: Option<Arc<crate::replication::OperationQueue>>,

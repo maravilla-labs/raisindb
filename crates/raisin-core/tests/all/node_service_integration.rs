@@ -104,6 +104,7 @@ fn create_property_schema(
         allow_additional_properties: None,
         index: None,
         spatial: None,
+        encrypted: None,
     }
 }
 

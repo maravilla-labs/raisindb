@@ -273,6 +273,7 @@ fn secret_fields_are_read_from_meta() {
         allow_additional_properties: None,
         index: None,
         spatial: None,
+        encrypted: None,
     };
 
     let props = vec![prop("host", false), prop("password", true)];

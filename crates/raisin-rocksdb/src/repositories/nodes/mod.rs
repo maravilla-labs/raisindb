@@ -86,9 +86,18 @@ pub struct NodeRepositoryImpl {
     path_reservations: Arc<StdMutex<HashMap<String, u64>>>,
     /// Monotonic source of reservation owner tokens.
     reservation_owner_counter: Arc<AtomicU64>,
+    /// Auto-vaulting of `encrypted` schema fields.
+    ///
+    /// Lives here because this repository is the one component BOTH write
+    /// layers can reach: `add_impl`/`update_impl` are its own methods, and the
+    /// transaction holds it as `tx.node_repo`. One instance means one set of
+    /// schema lookups and one secret-store slot, rather than each layer
+    /// building its own — which is how the two would drift.
+    vaulter: crate::vaulting::Vaulter,
 }
 
 impl NodeRepositoryImpl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<DB>,
         event_bus: Arc<dyn EventBus>,
@@ -98,7 +107,16 @@ impl NodeRepositoryImpl {
         node_type_repo: Arc<crate::repositories::NodeTypeRepositoryImpl>,
         workspace_repo: Arc<crate::repositories::WorkspaceRepositoryImpl>,
         operation_capture: Arc<crate::OperationCapture>,
+        element_type_repo: Arc<crate::repositories::ElementTypeRepositoryImpl>,
+        secret_store: Arc<std::sync::OnceLock<Arc<crate::secret_store::SecretStore>>>,
     ) -> Self {
+        let vaulter = crate::vaulting::Vaulter::new(
+            node_type_repo.clone(),
+            element_type_repo,
+            secret_store,
+            db.clone(),
+            revision_repo.hlc_state(),
+        );
         Self {
             db,
             event_bus,
@@ -111,7 +129,20 @@ impl NodeRepositoryImpl {
             operation_capture,
             path_reservations: Arc::new(StdMutex::new(HashMap::new())),
             reservation_owner_counter: Arc::new(AtomicU64::new(1)),
+            vaulter,
         }
+    }
+
+    /// Seal any plaintext sitting in a field declared `encrypted: true`.
+    ///
+    /// The single entry point for every write layer — see `crate::vaulting`.
+    pub(crate) async fn vault_encrypted_fields(
+        &self,
+        scope: crate::vaulting::VaultScope<'_>,
+        node: &mut raisin_models::nodes::Node,
+        memo: Option<&crate::vaulting::VaultMemo>,
+    ) -> raisin_error::Result<()> {
+        self.vaulter.vault(scope, node, memo).await
     }
 
     /// Allocate a fresh owner token for CREATE path reservations.

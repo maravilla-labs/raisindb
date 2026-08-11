@@ -67,6 +67,7 @@ fn create_property(name: &str, property_type: PropertyType) -> PropertyValueSche
         allow_additional_properties: None,
         index: None,
         spatial: None,
+        encrypted: None,
     }
 }
 

@@ -81,6 +81,7 @@ fn make_field_base(name: &str, required: bool, multiple: bool) -> FieldTypeSchem
         translatable: None,
         index: None,
         meta: None,
+        encrypted: None,
     }
 }
 
@@ -135,6 +136,7 @@ fn create_property_schema(
         allow_additional_properties: None,
         index: None,
         spatial: None,
+        encrypted: None,
     }
 }
 

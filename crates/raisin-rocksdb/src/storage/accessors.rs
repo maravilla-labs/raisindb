@@ -235,4 +235,52 @@ impl RocksDBStorage {
     pub fn operation_capture(&self) -> &Arc<crate::OperationCapture> {
         &self.operation_capture
     }
+
+    /// The secret store, built on first use.
+    ///
+    /// # Why this can fail, and why that is the point
+    ///
+    /// The store needs a master keyring. A deployment that declares no
+    /// `encrypted` field never calls this, so it never needs one. But once a
+    /// NodeType DOES declare a secret, the auto-vault write path calls this on
+    /// every write to that type — and an unconfigured keyring must be an
+    /// ERROR there, never a fallback. The alternative (carry on without a
+    /// store) writes the plaintext to the node blob and to the property index,
+    /// which no later fix recovers.
+    ///
+    /// The keyring comes from the environment (`RAISIN_MASTER_KEYS` /
+    /// `RAISIN_MASTER_KEY`), the same source every other sealed-at-rest value
+    /// in the server uses. It shares the revision repository's HLC so secret
+    /// versions interleave monotonically with node revisions.
+    pub fn secret_store(&self) -> raisin_error::Result<Arc<crate::secret_store::SecretStore>> {
+        if let Some(store) = self.secret_store.get() {
+            return Ok(store.clone());
+        }
+        let keys = raisin_crypto::EnvKeyProvider::shared().map_err(|e| {
+            raisin_error::Error::InvalidState(format!(
+                "the secret store needs a master keyring, and none is configured: {e}"
+            ))
+        })?;
+        let store = Arc::new(crate::secret_store::SecretStore::with_hlc(
+            self.db.clone(),
+            Arc::new(raisin_crypto::SecretBox::with_keyring(keys)),
+            self.revisions.hlc_state(),
+        ));
+        // A racing caller may have won; keep whichever instance landed so every
+        // caller shares one HLC.
+        let _ = self.secret_store.set(store);
+        Ok(self
+            .secret_store
+            .get()
+            .expect("secret store is set on the line above")
+            .clone())
+    }
+
+    /// Install a pre-built secret store. Returns false if one is already set.
+    ///
+    /// For tests and for a server that wants to supply its own keyring rather
+    /// than the environment's.
+    pub fn set_secret_store(&self, store: Arc<crate::secret_store::SecretStore>) -> bool {
+        self.secret_store.set(store).is_ok()
+    }
 }

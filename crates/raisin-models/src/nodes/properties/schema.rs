@@ -78,6 +78,64 @@ pub struct PropertyValueSchema {
     /// [`resolve_spatial_policy`](crate::nodes::properties::spatial_policy::resolve_spatial_policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial: Option<SpatialPropertySchema>,
+    /// The value is a secret: it is moved into the secret store on write and the
+    /// stored property holds a `secret://…` reference instead of the plaintext.
+    ///
+    /// This is enforced by the server at the write layer, so no transport can
+    /// bypass it. Reads return the reference; they never resolve it.
+    ///
+    /// A first-class field rather than a `meta` key because `meta` is
+    /// free-form and uninterpreted, and this one changes what gets stored.
+    /// The legacy `meta.secret: true` spelling is still honoured on read — see
+    /// [`is_secret`] — so already-shipped schemas keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<bool>,
+}
+
+/// Whether a truthy boolean `meta.<key>` flag is present.
+///
+/// THE one reader of a `meta` boolean flag. There were three — this function,
+/// [`crate::nodes::types::element::fields::base_field::is_secret`] and
+/// `integrations::config::meta_flag` — each re-deciding whether the string
+/// `"true"` counts (it does not). For an ordinary UI hint a disagreement is
+/// cosmetic; for `meta.secret` one reader saying "no" writes the value to disk
+/// in plaintext, so they are collapsed into this.
+///
+/// Takes the map rather than a schema so both shapes that carry `meta`
+/// ([`PropertyValueSchema`] and `FieldTypeSchema`) feed the same code.
+pub fn meta_bool(meta: Option<&HashMap<String, PropertyValue>>, key: &str) -> bool {
+    matches!(
+        meta.and_then(|m| m.get(key)),
+        Some(PropertyValue::Boolean(true))
+    )
+}
+
+/// Whether a property schema declares its value a secret.
+///
+/// Checks the first-class [`PropertyValueSchema::encrypted`] field, then falls
+/// back to the legacy `meta.secret: true` convention that shipped connector
+/// schemas still use. One reader, so the two spellings cannot drift.
+pub fn is_secret(schema: &PropertyValueSchema) -> bool {
+    if let Some(flag) = schema.encrypted {
+        return flag;
+    }
+    meta_bool(schema.meta.as_ref(), "secret")
+}
+
+/// Whether a secret field's NAME can be addressed unambiguously.
+///
+/// The property walker's path format joins segments with `.` and has no
+/// escaping, so a property literally named `a.b` is indistinguishable from key
+/// `b` inside object `a`. For an index entry that ambiguity is a known,
+/// tolerated limitation. For a SECRET it is not: the vault path becomes the
+/// secret's storage name, so two different fields could collide on one secret,
+/// or a rewrite could land on the wrong leaf — either way a value ends up
+/// somewhere its author did not intend.
+///
+/// Enforced at the write layer, where it refuses the write, rather than being
+/// silently tolerated.
+pub fn secret_name_is_addressable(name: &str) -> bool {
+    !name.contains('.')
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
@@ -168,6 +226,79 @@ pub enum CompoundColumnType {
     Timestamp,
     /// Boolean values
     Boolean,
+}
+
+#[cfg(test)]
+mod secret_flag_tests {
+    use super::*;
+
+    fn from_yaml(yaml: &str) -> PropertyValueSchema {
+        serde_yaml::from_str(yaml).expect("schema should deserialize")
+    }
+
+    /// The first-class spelling, which is what the server enforces.
+    #[test]
+    fn encrypted_true_marks_the_property_secret() {
+        assert!(is_secret(&from_yaml(
+            "name: password\ntype: String\nencrypted: true\n"
+        )));
+    }
+
+    /// Shipped connector schemas (e.g. the imap-adapter's `password` field) use
+    /// `meta.secret`, and must keep working — the `meta` map is the only place a
+    /// hint could live before `encrypted` existed.
+    #[test]
+    fn legacy_meta_secret_is_still_honoured() {
+        assert!(is_secret(&from_yaml(
+            "name: password\ntype: String\nmeta:\n  secret: true\n"
+        )));
+    }
+
+    /// The explicit field wins, in BOTH directions — including `encrypted:
+    /// false` overriding a stale `meta.secret: true`, which is the only way to
+    /// un-mark a field without editing the meta bag.
+    #[test]
+    fn the_first_class_field_takes_precedence_over_meta() {
+        assert!(is_secret(&from_yaml(
+            "name: p\ntype: String\nencrypted: true\nmeta:\n  secret: false\n"
+        )));
+        assert!(!is_secret(&from_yaml(
+            "name: p\ntype: String\nencrypted: false\nmeta:\n  secret: true\n"
+        )));
+    }
+
+    /// Absent means not secret. Stated as a test because the fail-closed rule
+    /// applies to schema *resolution* failures, not to a schema that resolved
+    /// fine and simply declares nothing.
+    #[test]
+    fn absent_flag_is_not_secret() {
+        assert!(!is_secret(&from_yaml("name: title\ntype: String\n")));
+        assert!(!is_secret(&from_yaml(
+            "name: title\ntype: String\nmeta:\n  label: Title\n"
+        )));
+    }
+
+    /// `meta.secret` must be a real boolean — the string "true" is not a flag.
+    /// Mirrors `meta_flag`'s behaviour so the two readers cannot disagree.
+    #[test]
+    fn a_stringy_meta_secret_does_not_count() {
+        assert!(!is_secret(&from_yaml(
+            "name: p\ntype: String\nmeta:\n  secret: \"true\"\n"
+        )));
+    }
+
+    /// `encrypted` must survive a YAML round trip. `PropertyValueSchema`
+    /// silently DROPS unknown top-level keys (which is why hints live in
+    /// `meta`), so a field that failed to deserialize would read as "not
+    /// secret" and store the value in plaintext, with no error anywhere.
+    #[test]
+    fn encrypted_survives_a_round_trip() {
+        let schema = from_yaml("name: password\ntype: String\nencrypted: true\n");
+        let round_tripped: PropertyValueSchema =
+            serde_yaml::from_str(&serde_yaml::to_string(&schema).unwrap()).unwrap();
+        assert_eq!(round_tripped.encrypted, Some(true));
+        assert!(is_secret(&round_tripped));
+    }
 }
 
 #[cfg(test)]

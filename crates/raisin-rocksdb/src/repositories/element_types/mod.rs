@@ -202,3 +202,25 @@ impl ElementTypeRepositoryImpl {
         }
     }
 }
+
+/// The ElementType half of the schema lookup the shared resolvers take. See the
+/// `NodeTypeLookup` impl on `NodeTypeRepositoryImpl` for why this exists.
+#[async_trait::async_trait]
+impl raisin_core::services::schema_lookup::ElementTypeLookup for ElementTypeRepositoryImpl {
+    async fn get_element_type(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        name: &str,
+    ) -> raisin_error::Result<Option<raisin_models::nodes::types::element::element_type::ElementType>>
+    {
+        use raisin_storage::ElementTypeRepository;
+        self.get(
+            raisin_storage::scope::BranchScope::new(tenant_id, repo_id, branch),
+            name,
+            None,
+        )
+        .await
+    }
+}

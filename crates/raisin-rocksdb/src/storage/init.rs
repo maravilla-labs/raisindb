@@ -186,6 +186,12 @@ impl RocksDBStorage {
         );
         let tag_repo_arc = Arc::new(TagRepositoryImpl::new(db.clone()));
 
+        // One secret-store slot, shared by the storage accessor and the node
+        // repository's vaulter, so a store installed on either is the one both
+        // use.
+        let secret_store_slot: Arc<std::sync::OnceLock<Arc<crate::secret_store::SecretStore>>> =
+            Arc::new(std::sync::OnceLock::new());
+
         // Create storage instance
         let storage = Self {
             nodes: NodeRepositoryImpl::new(
@@ -197,6 +203,8 @@ impl RocksDBStorage {
                 node_type_repo_arc.clone(),
                 workspace_repo_arc.clone(),
                 operation_capture.clone(),
+                element_type_repo_arc.clone(),
+                secret_store_slot.clone(),
             ),
             node_types: (*node_type_repo_arc).clone(),
             archetypes: (*archetype_repo_arc).clone(),
@@ -237,6 +245,7 @@ impl RocksDBStorage {
             virtual_mount_sync: Arc::new(std::sync::RwLock::new(None)), // Set after init_job_system()
             index_lock_manager: Arc::new(crate::jobs::IndexLockManager::new()),
             fulltext_error_counter: crate::jobs::handlers::FulltextErrorCounter::new(),
+            secret_store: secret_store_slot,
             operation_capture: operation_capture.clone(),
             operation_queue: operation_queue.clone(),
             replication_coordinator: Arc::new(tokio::sync::RwLock::new(None)), // Will be initialized in start_replication()

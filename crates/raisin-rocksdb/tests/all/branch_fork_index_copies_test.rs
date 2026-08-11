@@ -104,6 +104,7 @@ fn member_type() -> NodeType {
                 allow_additional_properties: None,
                 index: None,
                 spatial: None,
+                encrypted: None,
             },
             PropertyValueSchema {
                 name: Some("team".to_string()),
@@ -120,6 +121,7 @@ fn member_type() -> NodeType {
                 allow_additional_properties: None,
                 index: None,
                 spatial: None,
+                encrypted: None,
             },
         ]),
         compound_indexes: Some(vec![CompoundIndexDefinition {

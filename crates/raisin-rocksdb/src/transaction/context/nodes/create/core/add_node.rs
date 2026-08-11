@@ -133,6 +133,39 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         revision
     );
 
+    // 6a. Seal any plaintext sitting in a field declared `encrypted: true`,
+    // replacing it with a `secret://` reference.
+    //
+    // This slot is load-bearing on both sides: the validator above still saw
+    // PLAINTEXT (so its constraints mean something), and everything below —
+    // the read cache, the node blob, and above all the property / unique /
+    // compound index writers — must only ever see the reference. An index
+    // entry keyed on a plaintext password turns `properties->>'password'` into
+    // an oracle, permanently.
+    //
+    // The vaulter is the node repository's, shared with the repository write
+    // path so the two cannot drift; the memo is the transaction's, so two
+    // writes of one node under one HLC mint one secret version. See
+    // `crate::vaulting`.
+    // `updated_by` was stamped from the same actor a few steps above; reading
+    // it back avoids cloning the actor string on every write.
+    let vault_actor = normalized_node
+        .updated_by
+        .clone()
+        .unwrap_or_else(|| "anonymous".to_string());
+    tx.node_repo
+        .vault_encrypted_fields(
+            crate::vaulting::VaultScope {
+                tenant_id: &tenant_id,
+                repo_id: &repo_id,
+                branch: &branch,
+                actor: &vault_actor,
+            },
+            &mut normalized_node,
+            Some(&tx.vaulted_secrets),
+        )
+        .await?;
+
     // 6. Update read cache for read-your-writes semantics
     cache::update_read_cache(tx, workspace, &normalized_node, None)?;
 

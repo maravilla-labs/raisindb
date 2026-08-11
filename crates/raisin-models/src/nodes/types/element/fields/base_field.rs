@@ -75,4 +75,28 @@ pub struct FieldTypeSchema {
     /// integrations can attach their own configuration to a field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<HashMap<String, PropertyValue>>,
+    /// The value is a secret: it is moved into the secret store on write and the
+    /// stored field holds a `secret://…` reference instead of the plaintext.
+    ///
+    /// Mirrors `PropertyValueSchema.encrypted` so element and archetype fields
+    /// are declarable the same way as NodeType properties. Enforced by the
+    /// server at the write layer; reads return the reference and never resolve
+    /// it. The legacy `meta.secret: true` spelling is still honoured on read —
+    /// see [`is_secret`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<bool>,
+}
+
+/// Whether a field schema declares its value a secret.
+///
+/// Checks the first-class [`FieldTypeSchema::encrypted`] field, then falls back
+/// to the legacy `meta.secret: true` convention. Mirrors
+/// [`crate::nodes::properties::schema::is_secret`] for NodeType properties.
+pub fn is_secret(schema: &FieldTypeSchema) -> bool {
+    if let Some(flag) = schema.encrypted {
+        return flag;
+    }
+    // The legacy fallback goes through the ONE `meta` boolean reader, so this
+    // and the NodeType-property side cannot drift over what counts as true.
+    crate::nodes::properties::schema::meta_bool(schema.meta.as_ref(), "secret")
 }

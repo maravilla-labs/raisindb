@@ -199,6 +199,7 @@ mod tests {
             translatable: None,
             index: None,
             meta: None,
+            encrypted: None,
         }
     }
 

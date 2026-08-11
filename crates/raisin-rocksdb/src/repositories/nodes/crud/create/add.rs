@@ -69,6 +69,36 @@ impl NodeRepositoryImpl {
         self.check_unique_constraints(&node, tenant_id, repo_id, branch, workspace)
             .await?;
 
+        // ========== Vault `encrypted` schema fields ==========
+        //
+        // AFTER validation (which must see plaintext for its constraints to
+        // mean anything) and BEFORE the WriteBatch below, which serializes the
+        // node blob and writes the property / unique / compound index entries.
+        // An index entry keyed on a plaintext password turns
+        // `properties->>'password'::String = '<guess>'` into a working oracle,
+        // permanently — the entries carry the revision, so nothing rewrites
+        // them later.
+        //
+        // No memo: two repository calls are two logical writes with two
+        // revisions, so each SHOULD mint its own secret version. The
+        // transaction path passes one because its writes share an HLC.
+        // See `crate::vaulting`.
+        let vault_actor = node
+            .updated_by
+            .clone()
+            .unwrap_or_else(|| "anonymous".to_string());
+        self.vault_encrypted_fields(
+            crate::vaulting::VaultScope {
+                tenant_id,
+                repo_id,
+                branch,
+                actor: &vault_actor,
+            },
+            &mut node,
+            None,
+        )
+        .await?;
+
         // ========== STEP 1: Allocate revision ==========
         let step_start = std::time::Instant::now();
         let revision = self.revision_repo.allocate_revision();

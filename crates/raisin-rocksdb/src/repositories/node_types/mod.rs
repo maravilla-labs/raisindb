@@ -255,3 +255,29 @@ impl NodeTypeRepositoryImpl {
         }
     }
 }
+
+/// Inheritance-aware resolution needs only "fetch a NodeType by name", and this
+/// is the object-safe form of that. It exists so a caller BELOW the storage
+/// facade — the node repository, which can never hold an `Arc<RocksDBStorage>`
+/// without making a reference cycle — can drive the SAME `NodeTypeResolver`
+/// rather than growing a second inheritance walk. See
+/// `raisin_core::services::schema_lookup`.
+#[async_trait::async_trait]
+impl raisin_core::services::schema_lookup::NodeTypeLookup for NodeTypeRepositoryImpl {
+    async fn get_node_type(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        name: &str,
+        max_revision: Option<raisin_hlc::HLC>,
+    ) -> raisin_error::Result<Option<raisin_models::nodes::types::NodeType>> {
+        use raisin_storage::NodeTypeRepository;
+        self.get(
+            raisin_storage::scope::BranchScope::new(tenant_id, repo_id, branch),
+            name,
+            max_revision.as_ref(),
+        )
+        .await
+    }
+}

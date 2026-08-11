@@ -48,6 +48,7 @@ pub mod services {
     pub mod block_translation_service;
     pub mod derived_cache_registry;
     pub mod element_type_resolver;
+    pub mod encrypted_fields;
     pub mod indexing_policy;
     pub mod node_service;
     pub mod node_type_resolver;
@@ -56,6 +57,7 @@ pub mod services {
     pub mod permission_service;
     pub mod reference_resolver;
     pub mod rls_filter;
+    pub mod schema_lookup;
     pub mod schema_stats_cache;
     pub mod transaction;
     pub mod translation_resolver;

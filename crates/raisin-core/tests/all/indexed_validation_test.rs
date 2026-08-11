@@ -47,6 +47,7 @@ async fn create_node_type_with_unique_property(storage: &InMemoryStorage, name: 
             allow_additional_properties: None,
             index: None,
             spatial: None,
+            encrypted: None,
         }]),
         allowed_children: Vec::new(),
         required_nodes: Vec::new(),

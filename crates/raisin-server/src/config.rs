@@ -162,6 +162,42 @@ pub struct ServerConfigFile {
     /// backend's production preset.
     #[serde(default)]
     pub storage: StorageConfig,
+    /// Secret handling (TOML `[secrets]`). Absent means auto-vaulting is ON,
+    /// which is the only supported steady state.
+    #[serde(default)]
+    pub secrets: SecretsConfig,
+}
+
+/// Secret handling (TOML `[secrets]` section).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SecretsConfig {
+    /// Whether a property declared `encrypted: true` is moved into the secret
+    /// store on write.
+    ///
+    /// **Defaults to `true`, and should stay there.** Setting it to `false`
+    /// makes those properties store PLAINTEXT — in the node blob and in the
+    /// property index, where it is then queryable. It exists only as an
+    /// operational escape hatch: vaulting sits on the core write path and fails
+    /// closed, so a defect refuses writes rather than degrading them, and an
+    /// operator needs an option that is not an emergency rollback.
+    ///
+    /// Disabling is loud by design: once at startup, and again for every node
+    /// whose secret fields are skipped. Re-enabling does NOT retroactively seal
+    /// anything written while it was off.
+    #[serde(default = "default_true")]
+    pub vaulting_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for SecretsConfig {
+    fn default() -> Self {
+        Self {
+            vaulting_enabled: true,
+        }
+    }
 }
 
 /// RocksDB memory bounds exposed to operators (TOML `[storage]` section).

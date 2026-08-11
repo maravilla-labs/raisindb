@@ -31,6 +31,7 @@ mod cluster_move_node_test;
 mod compare_put_vs_add;
 mod create_path_uniqueness_test;
 mod debug_msgpack_issue;
+mod encrypted_field_vaulting_test;
 mod fulltext_job_store_integration;
 mod hnsw_integration_test;
 mod index_parity_test;

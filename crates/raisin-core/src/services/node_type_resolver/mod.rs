@@ -68,9 +68,28 @@ impl ResolvedNodeType {
 /// Maximum depth of inheritance chain to prevent stack overflow
 const MAX_INHERITANCE_DEPTH: usize = 20;
 
+/// Where the resolver fetches a NodeType from.
+///
+/// Two variants because a caller BELOW the storage facade — the RocksDB node
+/// repository, which can never hold an `Arc<RocksDBStorage>` without making a
+/// reference cycle that never closes the database — still needs
+/// inheritance-aware resolution. Only the FETCH differs; the inheritance walk
+/// in `resolution.rs` stays single, which is the point: a second walk that
+/// missed an INHERITED `encrypted` declaration would write a plaintext secret
+/// to disk.
+///
+/// Workspace NodeType PINS are the one part of resolution that reads something
+/// other than node types, so a lookup-only resolver reports no pins — the same
+/// answer the unpinned [`NodeTypeResolver::resolve`] entry point uses anyway.
+#[derive(Clone)]
+enum NodeTypeSource<S: Storage> {
+    Storage(Arc<S>),
+    Lookup(Arc<dyn crate::services::schema_lookup::NodeTypeLookup>),
+}
+
 #[derive(Clone)]
 pub struct NodeTypeResolver<S: Storage> {
-    storage: Arc<S>,
+    source: NodeTypeSource<S>,
     tenant_id: String,
     repo_id: String,
     branch: String,
@@ -79,10 +98,57 @@ pub struct NodeTypeResolver<S: Storage> {
 impl<S: Storage> NodeTypeResolver<S> {
     pub fn new(storage: Arc<S>, tenant_id: String, repo_id: String, branch: String) -> Self {
         Self {
-            storage,
+            source: NodeTypeSource::Storage(storage),
             tenant_id,
             repo_id,
             branch,
+        }
+    }
+
+    /// Build from a bare NodeType lookup, for callers that hold the repository
+    /// but not the storage facade. Such a resolver reports no workspace pins.
+    pub fn from_lookup(
+        lookup: Arc<dyn crate::services::schema_lookup::NodeTypeLookup>,
+        tenant_id: String,
+        repo_id: String,
+        branch: String,
+    ) -> Self {
+        Self {
+            source: NodeTypeSource::Lookup(lookup),
+            tenant_id,
+            repo_id,
+            branch,
+        }
+    }
+
+    /// The ONE fetch, so both sources feed the same inheritance walk.
+    pub(super) async fn fetch(
+        &self,
+        name: &str,
+        max_revision: Option<HLC>,
+    ) -> Result<Option<NodeType>> {
+        match &self.source {
+            NodeTypeSource::Storage(storage) => {
+                storage
+                    .node_types()
+                    .get(
+                        BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
+                        name,
+                        max_revision.as_ref(),
+                    )
+                    .await
+            }
+            NodeTypeSource::Lookup(lookup) => {
+                lookup
+                    .get_node_type(
+                        &self.tenant_id,
+                        &self.repo_id,
+                        &self.branch,
+                        name,
+                        max_revision,
+                    )
+                    .await
+            }
         }
     }
 
@@ -122,7 +188,12 @@ impl<S: Storage> NodeTypeResolver<S> {
     }
 
     async fn load_workspace_pins(&self, workspace: &str) -> Result<HashMap<String, Option<HLC>>> {
-        let workspaces = self.storage.workspaces();
+        // A lookup-only resolver has no workspace repository to consult, and no
+        // pins is exactly what `resolve` assumes.
+        let NodeTypeSource::Storage(storage) = &self.source else {
+            return Ok(HashMap::new());
+        };
+        let workspaces = storage.workspaces();
         if let Some(ws) = workspaces
             .get(RepoScope::new(&self.tenant_id, &self.repo_id), workspace)
             .await?
@@ -135,14 +206,8 @@ impl<S: Storage> NodeTypeResolver<S> {
 
     /// Check if a NodeType exists and is published
     pub async fn validate_exists_and_published(&self, node_type_name: &str) -> Result<()> {
-        let repo = self.storage.node_types();
-
-        let node_type = repo
-            .get(
-                BranchScope::new(&self.tenant_id, &self.repo_id, &self.branch),
-                node_type_name,
-                None,
-            )
+        let node_type = self
+            .fetch(node_type_name, None)
             .await?
             .ok_or_else(|| Error::NotFound(format!("NodeType not found: {}", node_type_name)))?;
 

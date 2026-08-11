@@ -232,6 +232,7 @@ mod tests {
             allow_additional_properties: None,
             index: Some(index),
             spatial: None,
+            encrypted: None,
         }
     }
 
