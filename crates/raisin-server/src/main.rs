@@ -489,6 +489,10 @@ async fn main() {
                 job_registry: Some(storage.job_registry().clone()),
                 job_data_store: Some(storage.job_data_store().clone()),
                 lock_manager: lock_manager.clone(),
+                // None when no master keyring is configured — the binding then
+                // reports the subsystem as unconfigured rather than failing at
+                // an opaque decrypt.
+                secret_store: storage.secret_store().ok(),
                 schema_stats_cache: Some(schema_stats_cache.clone()),
             });
 

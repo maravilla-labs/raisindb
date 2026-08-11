@@ -1,17 +1,6 @@
 ---
 sidebar_position: 4
-draft: true
 ---
-
-<!--
-DRAFT — excluded from production builds by `draft: true`.
-
-The store, the `encrypted: true` schema flag and the crypto layer are built. The
-CLI commands, the `/api/secrets` endpoints and the `raisin.secrets` function
-binding described below are NOT yet implemented. Remove `draft: true` once those
-surfaces land, and re-check every command and endpoint on this page against what
-actually shipped.
--->
 
 # Secrets
 
@@ -97,15 +86,74 @@ raisindb secret rotate stripe-key
 raisindb secret rm stripe-key
 ```
 
-Over HTTP, under `/api/secrets/{repo}/{branch}`, admin-gated. Note what is *not*
-there: **no endpoint returns a plaintext value.** `list` and `show` return names,
-versions, timestamps and the key id.
+Over HTTP, under `/api/secrets/{repo}/{branch}`, admin-gated:
+
+| Method | Path | Returns |
+|---|---|---|
+| `PUT` | `/api/secrets/{repo}/{branch}/{name}` | `{ name, version, reference }` |
+| `GET` | `/api/secrets/{repo}/{branch}` | `{ secrets: [...] }` — newest version of each name |
+| `GET` | `/api/secrets/{repo}/{branch}/{name}` | the newest version's metadata, plus `versions: [...]` |
+| `DELETE` | `/api/secrets/{repo}/{branch}/{name}` | `{ name, version, deleted: true }` |
+| `POST` | `/api/secrets/{repo}/{branch}/rotate/{name}` | `{ name, version, rotated, reference }` |
+
+Note what is *not* there: **no endpoint returns a plaintext value.** `list` and
+`show` return names, versions, timestamps and the key id.
+
+A name may contain `/` (the vaulted-field convention is
+`node/{id}/{field.path}`), so `{name}` is a wildcard capture that runs to the end
+of the path. That is why rotation reads `rotate/{name}` and not `{name}/rotate` —
+a wildcard has to be the last segment.
+
+Send those slashes **literally**, not as `%2F`:
+
+```
+PUT /api/secrets/shop/main/node/01H8XY/api_key
+```
+
+An encoded `%2F` is decoded during capture and reaches the same secret, so it is
+a redundant spelling rather than a distinct name — but intermediaries normalise
+it inconsistently, so the literal form is the one to send.
+
+The same operations are on the WebSocket API as `secret_put`, `secret_rotate`,
+`secret_list`, `secret_get` and `secret_delete`, with `{repo, branch}` taken from
+the connection's request context. `secret_get` returns **metadata**; as over
+HTTP, there is no request that returns a value.
 
 ## Using a secret from a function
+
+The common case is a secret stored in a node field. The property holds a
+reference, and reads never resolve it, so the function is handed the reference
+string — pass it straight through:
+
+```js
+const node = await raisin.nodes.get(id);
+node.api_key                                  // "secret://node/01H8XY.../api_key@1"
+const key = await raisin.secrets.get(node.api_key);
+```
+
+`get()` takes either a full reference or a bare name, so an operator-managed
+secret works the same way:
 
 ```js
 const key = await raisin.secrets.get("stripe-key");
 ```
+
+**Do not strip the `secret://` prefix or the `@version` suffix yourself.** A
+secret name may itself contain `@`, and only a trailing run of digits after the
+*last* `@` is a version — get that wrong and you silently read someone else's
+secret, or the wrong version of your own.
+
+For a config value that *might* be a reference, `resolve()` handles both:
+
+```js
+const host = await raisin.secrets.resolve(cfg.host);      // plain value, unchanged
+const pass = await raisin.secrets.resolve(cfg.password);  // reference -> plaintext
+```
+
+A plain literal passes through untouched and needs no grant. A reference that
+fails to resolve **throws** rather than returning the reference string — sending
+the literal `secret://…` to a provider as an API key would only surface as a
+baffling 401 far from the cause.
 
 This is **deny-by-default**. A function may only read the secrets its own
 `secret_policy` allowlist names, exactly like `network_policy` gates outbound
@@ -121,13 +169,22 @@ row-level security bypassed *and* hold `raisin.http` — so an unrestricted secr
 binding would be a one-line path to exfiltrating every credential in the
 repository. Grant the narrowest pattern that works.
 
+The allowlist is matched against the **parsed name**, so the same secret gets the
+same answer whichever spelling you pass — a grant of `node/*` covers
+`secret://node/01H8.../api_key@1` without also listing the reference form.
+
 Functions with the right grant can also write:
 
 ```js
 await raisin.secrets.put("ms-token", token);     // -> { name, version }
 await raisin.secrets.rotate("stripe-key", next);
 await raisin.secrets.list();                     // names + metadata
+await raisin.secrets.delete("old-key");
 ```
+
+Writes always append a version, so a write against a **pinned** reference
+(`secret://k@1`) is refused rather than silently ignoring the pin — otherwise it
+would look as though version 1 had been replaced.
 
 ## Versions, rotation and history
 
