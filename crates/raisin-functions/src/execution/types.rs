@@ -92,6 +92,14 @@ where
     /// won't work without it)
     pub lock_manager: Option<raisin_locks::LockManagerHandle>,
 
+    /// Secret store for `raisin.secrets.*` (optional).
+    ///
+    /// `None` when the deployment has no master keyring configured, in which
+    /// case the binding reports the subsystem as unconfigured. Note that a
+    /// PRESENT store is not itself a grant — every call is gated by the
+    /// function's `SecretPolicy`, which denies by default.
+    pub secret_store: Option<Arc<raisin_rocksdb::secret_store::SecretStore>>,
+
     /// Schema statistics cache for SQL planner selectivity estimation.
     ///
     /// Without it, every `raisin.sql.query()` call re-runs two full listings (all

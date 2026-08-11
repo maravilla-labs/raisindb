@@ -687,6 +687,99 @@ globalThis.raisin = {
             return __isErr(r) ? false : r;
         },
     },
+    // Encrypted secret store (raisin.secrets.*).
+    //
+    // Gated by the function's `secret_policy` in its .node.yaml:
+    //
+    //   secret_policy:
+    //     enabled: true
+    //     allowed_names: ["stripe/*"]
+    //
+    // With no secret_policy the function has NO secret access at all — every
+    // call below throws a policy_denied error naming the secret. That default
+    // is deliberate: adapters run privileged and hold raisin.http, so an
+    // ungated secrets binding would be a one-line exfiltration path.
+    //
+    // Every method THROWS on failure (denial, missing secret, unconfigured
+    // store). None of them degrade to a falsy value: a silent null here would
+    // be indistinguishable from "the credential is empty", and the function
+    // would go on to authenticate with nothing.
+    secrets: {
+        // get(nameOrRef, version?) -> string (the plaintext)
+        //
+        // Accepts EITHER spelling of the same secret:
+        //   raisin.secrets.get('stripe_key')
+        //   raisin.secrets.get('secret://node/01H8XY.../api_key@1')
+        //
+        // The second is what the main flow hands you. A node property in a
+        // field declared `encrypted: true` stores the REFERENCE, and node reads
+        // never resolve it, so:
+        //
+        //   const node = raisin.nodes.get('data', '/connections/stripe');
+        //   const key  = raisin.secrets.get(node.properties.api_key);
+        //
+        // Pass the string through as-is — do NOT strip `secret://` or the
+        // `@version` suffix yourself. A name may contain `@` (ops@example.com),
+        // so only a trailing all-digit run after the LAST `@` is a version, and
+        // that rule is applied here by the same parser the storage layer uses.
+        //
+        // A version pinned in the reference IS honoured (secret://k@1 returns
+        // version 1, not the latest) — which is what makes reading an older
+        // node revision give the value that revision actually held. Passing a
+        // `version` argument on top of a pinned reference THROWS: two stated
+        // versions cannot both hold, and quietly picking one could hand you a
+        // value that revision never had. Pass one or the other.
+        get: (nameOrRef, version) => {
+            const r = __call('secrets_get', [nameOrRef, version === undefined ? null : version]);
+            if (__isErr(r)) throw new Error(r.message);
+            return r;
+        },
+        // resolve(value) -> string
+        // Returns the plaintext if `value` is a secret:// reference, or `value`
+        // unchanged if it is not — so a config field that is a literal on one
+        // deployment and a vaulted reference on another is read the same way:
+        //
+        //   const password = raisin.secrets.resolve(conn.password);
+        //
+        // A reference that FAILS to resolve throws; it never falls back to
+        // returning the reference text, which would send `secret://...` to a
+        // provider as a credential.
+        resolve: (value) => {
+            const r = __call('secrets_resolve', [value]);
+            if (__isErr(r)) throw new Error(r.message);
+            return r;
+        },
+        // put(name, value) -> { name, version }   (appends; never overwrites)
+        // A bare name or an UNPINNED secret:// reference; a pinned one is
+        // refused, since a write appends rather than replacing that version.
+        put: (name, value) => {
+            const r = __call('secrets_put', [name, value]);
+            if (__isErr(r)) throw new Error(r.message);
+            return r;
+        },
+        // list() -> [{ name, version, created_at, created_by, deleted, ... }]
+        // Metadata only — never ciphertext or plaintext — and filtered to the
+        // names this function's policy allows.
+        list: () => {
+            const r = __call('secrets_list', []);
+            if (__isErr(r)) throw new Error(r.message);
+            return r;
+        },
+        // rotate(name, newValue) -> { name, version }
+        // An append stamped as a rotation: pinned secret://name@N references
+        // keep resolving to the old version.
+        rotate: (name, value) => {
+            const r = __call('secrets_rotate', [name, value]);
+            if (__isErr(r)) throw new Error(r.message);
+            return r;
+        },
+        // delete(name) -> { name, version }  (appends a tombstone)
+        delete: (name) => {
+            const r = __call('secrets_delete', [name]);
+            if (__isErr(r)) throw new Error(r.message);
+            return r;
+        },
+    },
     // Counting reservations (claim N of M units without overselling).
     inventory: {
         // claim(pool, n, capacity) -> { claimed, remaining? }

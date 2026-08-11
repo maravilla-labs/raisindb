@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{NetworkPolicy, ResourceLimits, TriggerCondition};
+use super::{NetworkPolicy, ResourceLimits, SecretPolicy, TriggerCondition};
 
 /// Supported function runtime languages
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,6 +122,13 @@ pub struct FunctionMetadata {
     #[serde(default)]
     pub network_policy: NetworkPolicy,
 
+    /// Secret access policy for `raisin.secrets.*`.
+    ///
+    /// Absent means **no secret access** — see [`SecretPolicy`] for why the
+    /// default has to be the denying one.
+    #[serde(default)]
+    pub secret_policy: SecretPolicy,
+
     /// Inline triggers (events that invoke this function)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<TriggerCondition>,
@@ -166,6 +173,7 @@ impl FunctionMetadata {
             entry_file: "index.js:handler".to_string(),
             resource_limits: ResourceLimits::default(),
             network_policy: NetworkPolicy::default(),
+            secret_policy: SecretPolicy::default(),
             triggers: Vec::new(),
             input_schema: None,
             output_schema: None,
@@ -238,6 +246,12 @@ impl FunctionMetadata {
     /// Set network policy
     pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
         self.network_policy = policy;
+        self
+    }
+
+    /// Set secret policy
+    pub fn with_secret_policy(mut self, policy: SecretPolicy) -> Self {
+        self.secret_policy = policy;
         self
     }
 

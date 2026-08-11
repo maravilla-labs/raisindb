@@ -39,6 +39,11 @@ pub struct MockFunctionApi {
     /// is what lets a test assert the exact URL, headers and body a function
     /// produced rather than just its return value.
     http_calls: std::sync::Mutex<Vec<Value>>,
+    /// In-memory secret store: `name -> versions`, append-only, newest last.
+    /// A tombstone is a `None` value, so `get` can distinguish "deleted" from
+    /// "never existed" exactly as the real store does.
+    #[allow(clippy::type_complexity)]
+    secrets: std::sync::Mutex<std::collections::HashMap<String, Vec<Option<String>>>>,
 }
 
 impl MockFunctionApi {
@@ -52,6 +57,7 @@ impl MockFunctionApi {
             all_errors: None,
             http_responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
             http_calls: std::sync::Mutex::new(Vec::new()),
+            secrets: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -668,6 +674,88 @@ impl FunctionApi for MockFunctionApi {
         use raisin_locks::LockManager;
         let remaining = self.locks.release_claim(pool, n.max(0) as u64).await?;
         Ok(remaining as i64)
+    }
+
+    // ========== Secrets (in-memory, append-only) ==========
+    //
+    // NOTE: the mock enforces NO SecretPolicy. The policy gate lives in
+    // `RaisinFunctionApi` (api/raisindb/secrets.rs) and is tested there; these
+    // fixtures exist so the runtime bindings can be exercised without a
+    // keyring or a RocksDB handle.
+
+    async fn secret_get(&self, spec: &str, version: Option<i64>) -> Result<String> {
+        // Same parse the real API does, via the same helper: the mock must
+        // accept a `secret://name@N` reference or the runtime parity tests
+        // would pass while the real surface differs.
+        let parsed = crate::api::parse_read_spec(spec, version)?;
+        let name = parsed.name.as_str();
+        let store = self.secrets.lock().unwrap();
+        let versions = store.get(name).ok_or_else(|| {
+            raisin_error::Error::NotFound(format!("secret '{name}' is not present on this node"))
+        })?;
+        // Ordinals are 1-based, matching SecretRecord::version.
+        let idx = match parsed.version {
+            Some(v) if v >= 1 => (v as usize) - 1,
+            _ => versions.len().saturating_sub(1),
+        };
+        match versions.get(idx) {
+            Some(Some(value)) => Ok(value.clone()),
+            Some(None) => Err(raisin_error::Error::NotFound(format!(
+                "secret '{name}' version {} was deleted",
+                idx + 1
+            ))),
+            None => Err(raisin_error::Error::NotFound(format!(
+                "secret '{name}' version {} is not present on this node",
+                idx + 1
+            ))),
+        }
+    }
+
+    async fn secret_resolve(&self, value: &str) -> Result<String> {
+        if !raisin_models::secret_ref::SecretRef::is_secret_ref(value) {
+            return Ok(value.to_string());
+        }
+        self.secret_get(value, None).await
+    }
+
+    async fn secret_put(&self, spec: &str, value: &str) -> Result<Value> {
+        let name = crate::api::parse_write_spec(spec, "write")?;
+        let name = name.as_str();
+        let mut store = self.secrets.lock().unwrap();
+        let versions = store.entry(name.to_string()).or_default();
+        versions.push(Some(value.to_string()));
+        Ok(serde_json::json!({ "name": name, "version": versions.len() }))
+    }
+
+    async fn secret_list(&self) -> Result<Vec<Value>> {
+        let store = self.secrets.lock().unwrap();
+        let mut names: Vec<&String> = store.keys().collect();
+        names.sort(); // deterministic for tests
+        Ok(names
+            .into_iter()
+            .map(|name| {
+                let versions = &store[name];
+                serde_json::json!({
+                    "name": name,
+                    "version": versions.len(),
+                    "deleted": versions.last().map(|v| v.is_none()).unwrap_or(false),
+                    "created_by": "mock",
+                })
+            })
+            .collect())
+    }
+
+    async fn secret_rotate(&self, spec: &str, value: &str) -> Result<Value> {
+        self.secret_put(spec, value).await
+    }
+
+    async fn secret_delete(&self, spec: &str) -> Result<Value> {
+        let name = crate::api::parse_write_spec(spec, "delete")?;
+        let name = name.as_str();
+        let mut store = self.secrets.lock().unwrap();
+        let versions = store.entry(name.to_string()).or_default();
+        versions.push(None);
+        Ok(serde_json::json!({ "name": name, "version": versions.len() }))
     }
 
     async fn integrations_sync_now(&self, _mount_id: &str, _mode: Option<&str>) -> Result<Value> {

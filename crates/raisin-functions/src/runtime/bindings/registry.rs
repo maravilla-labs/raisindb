@@ -321,6 +321,16 @@ impl<'a> ArgParser<'a> {
         })
     }
 
+    /// Get next optional i64 argument
+    pub fn optional_i64(&mut self) -> Result<Option<i64>> {
+        let val = self.args.get(self.pos);
+        self.pos += 1;
+        match val {
+            Some(Value::Null) | None => Ok(None),
+            Some(v) => Ok(v.as_i64().or_else(|| v.as_u64().map(|n| n as i64))),
+        }
+    }
+
     /// Get next JSON array argument
     pub fn json_array(&mut self) -> Result<Vec<Value>> {
         let val = self

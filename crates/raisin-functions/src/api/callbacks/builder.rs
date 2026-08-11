@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use super::lock_ops::*;
 use super::node_ops::*;
+use super::secret_ops::*;
 use super::service_ops::*;
 use super::sql_ops::*;
 use super::transaction_ops::*;
@@ -85,6 +86,12 @@ pub struct RaisinFunctionApiCallbacks {
     pub lock_renew: Option<LockRenewCallback>,
     pub inventory_claim: Option<InventoryClaimCallback>,
     pub inventory_release: Option<InventoryReleaseCallback>,
+    // Secret store callbacks
+    pub secret_get: Option<SecretGetCallback>,
+    pub secret_put: Option<SecretPutCallback>,
+    pub secret_list: Option<SecretListCallback>,
+    pub secret_rotate: Option<SecretRotateCallback>,
+    pub secret_delete: Option<SecretDeleteCallback>,
 }
 
 impl RaisinFunctionApiCallbacks {
@@ -410,6 +417,33 @@ impl RaisinFunctionApiCallbacks {
 
     pub fn with_inventory_release(mut self, callback: InventoryReleaseCallback) -> Self {
         self.inventory_release = Some(callback);
+        self
+    }
+
+    // Secret store builder methods
+
+    pub fn with_secret_get(mut self, callback: SecretGetCallback) -> Self {
+        self.secret_get = Some(callback);
+        self
+    }
+
+    pub fn with_secret_put(mut self, callback: SecretPutCallback) -> Self {
+        self.secret_put = Some(callback);
+        self
+    }
+
+    pub fn with_secret_list(mut self, callback: SecretListCallback) -> Self {
+        self.secret_list = Some(callback);
+        self
+    }
+
+    pub fn with_secret_rotate(mut self, callback: SecretRotateCallback) -> Self {
+        self.secret_rotate = Some(callback);
+        self
+    }
+
+    pub fn with_secret_delete(mut self, callback: SecretDeleteCallback) -> Self {
+        self.secret_delete = Some(callback);
         self
     }
 }

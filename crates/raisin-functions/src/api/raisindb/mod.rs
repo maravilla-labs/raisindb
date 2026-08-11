@@ -37,6 +37,7 @@ mod network_policy;
 mod nodes;
 mod resources;
 mod scheduler;
+mod secrets;
 mod sql;
 mod tasks;
 mod tx;
@@ -52,7 +53,7 @@ use std::sync::{Arc, Mutex};
 
 use super::callbacks::RaisinFunctionApiCallbacks;
 use super::FunctionApi;
-use crate::types::{ExecutionContext, LogEntry, NetworkPolicy};
+use crate::types::{ExecutionContext, LogEntry, NetworkPolicy, SecretPolicy};
 
 /// Real FunctionApi implementation for RaisinDB
 ///
@@ -63,6 +64,13 @@ pub struct RaisinFunctionApi {
     pub(crate) context: ExecutionContext,
     /// Network policy for HTTP access control
     pub(crate) network_policy: NetworkPolicy,
+    /// Secret policy for `raisin.secrets.*` access control.
+    ///
+    /// Not a constructor argument, deliberately: [`SecretPolicy::default`]
+    /// denies everything, so a call site that has not thought about secrets
+    /// gets no secrets rather than silently inheriting someone else's grant.
+    /// Opt in with [`RaisinFunctionApi::with_secret_policy`].
+    pub(crate) secret_policy: SecretPolicy,
     /// Callbacks for operations
     pub(crate) callbacks: RaisinFunctionApiCallbacks,
     /// Captured logs
@@ -84,9 +92,20 @@ impl RaisinFunctionApi {
         Self {
             context,
             network_policy,
+            secret_policy: SecretPolicy::default(),
             callbacks,
             logs: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Grant this API surface the function's declared secret policy.
+    ///
+    /// Without it the API denies every `raisin.secrets.*` call, which is the
+    /// intended state for any surface that does not load a function node (and
+    /// therefore has no declared grant to honour).
+    pub fn with_secret_policy(mut self, policy: SecretPolicy) -> Self {
+        self.secret_policy = policy;
+        self
     }
 
     /// Get captured logs
@@ -635,6 +654,32 @@ impl FunctionApi for RaisinFunctionApi {
 
     async fn inventory_release(&self, pool: &str, n: i64) -> Result<i64> {
         self.impl_inventory_release(pool, n).await
+    }
+
+    // ========== Secret Operations ==========
+
+    async fn secret_get(&self, spec: &str, version: Option<i64>) -> Result<String> {
+        self.impl_secret_get(spec, version).await
+    }
+
+    async fn secret_resolve(&self, value: &str) -> Result<String> {
+        self.impl_secret_resolve(value).await
+    }
+
+    async fn secret_put(&self, name: &str, value: &str) -> Result<Value> {
+        self.impl_secret_put(name, value).await
+    }
+
+    async fn secret_list(&self) -> Result<Vec<Value>> {
+        self.impl_secret_list().await
+    }
+
+    async fn secret_rotate(&self, name: &str, value: &str) -> Result<Value> {
+        self.impl_secret_rotate(name, value).await
+    }
+
+    async fn secret_delete(&self, name: &str) -> Result<Value> {
+        self.impl_secret_delete(name).await
     }
 
     // ========== Integration / Mount Operations ==========

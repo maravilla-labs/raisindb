@@ -26,6 +26,7 @@ pub mod notify;
 pub mod pdf;
 pub mod resources;
 pub mod scheduler;
+pub mod secrets;
 pub mod sql;
 pub mod tasks;
 pub mod transactions;
@@ -51,6 +52,7 @@ pub fn build_registry() -> BindingsRegistry {
     methods.extend(locks::methods());
     methods.extend(integrations::methods());
     methods.extend(imap::methods());
+    methods.extend(secrets::methods());
 
     // Resource operations
     methods.extend(resources::methods());
@@ -286,6 +288,13 @@ mod tests {
             "lock_renew",
             "inventory_claim",
             "inventory_release",
+            // Secret operations (6)
+            "secret_get",
+            "secret_resolve",
+            "secret_put",
+            "secret_list",
+            "secret_rotate",
+            "secret_delete",
             // Integration / mount operations (1)
             "integrations_sync_now",
             // IMAP operations (3)
@@ -337,6 +346,7 @@ mod tests {
             // Plurals to singular for category prefixes
             .replace("nodes_", "node_")
             .replace("locks_", "lock_")
+            .replace("secrets_", "secret_")
             .replace("events_", "event_")
             .replace("tasks_", "task_")
             .replace("functions_", "function_")
@@ -391,8 +401,8 @@ mod tests {
 
         // Upper bound check (shouldn't have too many extra methods)
         assert!(
-            method_count <= 95,
-            "Expected at most 95 methods, got {}. Did you accidentally duplicate some bindings?",
+            method_count <= 100,
+            "Expected at most 100 methods, got {}. Did you accidentally duplicate some bindings?",
             method_count
         );
 

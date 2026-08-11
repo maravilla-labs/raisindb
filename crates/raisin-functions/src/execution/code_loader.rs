@@ -24,7 +24,9 @@ use raisin_models::nodes::properties::PropertyValue;
 use raisin_models::nodes::Node;
 use raisin_storage::{ListOptions, NodeRepository, Storage, StorageScope};
 
-use crate::types::{FunctionLanguage, FunctionMetadata, NetworkPolicy, ResourceLimits};
+use crate::types::{
+    FunctionLanguage, FunctionMetadata, NetworkPolicy, ResourceLimits, SecretPolicy,
+};
 
 /// Load a function node from the functions workspace by exact path.
 pub async fn load_function_node<S>(
@@ -133,6 +135,7 @@ where
     let language = extract_language(func_node)?;
     let entry_file = extract_entry_file(func_node)?;
     let network_policy = extract_network_policy(func_node);
+    let secret_policy = extract_secret_policy(func_node);
     let resource_limits = extract_resource_limits(func_node);
 
     // Resolve entry file path
@@ -157,6 +160,7 @@ where
     // Build metadata with network_policy and resource_limits from function node
     let mut metadata = FunctionMetadata::new(name, language).with_entry_file(handler_name);
     metadata.network_policy = network_policy;
+    metadata.secret_policy = secret_policy;
     metadata.resource_limits = resource_limits;
 
     Ok((code, metadata))
@@ -221,6 +225,21 @@ pub fn extract_network_policy(node: &Node) -> NetworkPolicy {
         .get("network_policy")
         .and_then(|v| serde_json::to_value(v).ok())
         .and_then(|v| serde_json::from_value::<NetworkPolicy>(v).ok())
+        .unwrap_or_default()
+}
+
+/// Extract secret_policy from node properties.
+///
+/// Returns the function's `raisin.secrets.*` policy. An absent or malformed
+/// block yields the DEFAULT, which denies everything — a function that never
+/// declared `secret_policy` must not be able to read a single secret. See
+/// [`SecretPolicy`] for why that default is load-bearing rather than merely
+/// tidy.
+pub fn extract_secret_policy(node: &Node) -> SecretPolicy {
+    node.properties
+        .get("secret_policy")
+        .and_then(|v| serde_json::to_value(v).ok())
+        .and_then(|v| serde_json::from_value::<SecretPolicy>(v).ok())
         .unwrap_or_default()
 }
 

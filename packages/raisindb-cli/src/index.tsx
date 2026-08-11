@@ -17,6 +17,7 @@ import { repoCreate, repoList, repoDelete } from './commands/repo.js';
 import { aiProviderSet, aiProviderList, aiProviderTest } from './commands/ai.js';
 import { userRegister } from './commands/user.js';
 import { corsAdd, corsList, corsRemove } from './commands/cors.js';
+import { secretSet, secretList, secretShow, secretRotate, secretRemove } from './commands/secret.js';
 import { login, logout, isAuthenticated, loginWithPassword, loginWithToken } from './auth.js';
 import { getServer } from './config.js';
 import { HelpDisplay } from './components/HelpDisplay.js';
@@ -510,6 +511,84 @@ aiProviderCmd
   .description('Test the live connection to a configured provider')
   .option('--tenant <tenant>', 'Tenant ID', 'default')
   .action((provider, options) => runAdmin(() => aiProviderTest(provider, { tenant: options.tenant })));
+
+// Encrypted secret store (gh-secret style: the value is never echoed).
+// There is deliberately no `secret get` — the API exposes no plaintext read,
+// and a CLI that printed one would leak credentials into scrollback and CI
+// logs. Functions read values via raisin.secrets.get, gated by secret_policy.
+const secretCmd = program
+  .command('secret')
+  .description('Manage encrypted secrets (branch-scoped; values are never echoed)');
+
+secretCmd
+  .command('set <name>')
+  .description('Write a new version of a secret (value read from STDIN by default)')
+  .option('--value <value>', 'Value inline (discouraged: lands in shell history)')
+  .option('--value-env <var>', 'Read the value from an environment variable')
+  .option('-r, --repo <name>', 'Target repository (defaults to the configured repo)')
+  .option('-b, --branch <branch>', 'Target branch', 'main')
+  .action((name, options) =>
+    runAdmin(() =>
+      secretSet(name, {
+        value: options.value,
+        valueEnv: options.valueEnv,
+        repo: options.repo,
+        branch: options.branch,
+      })
+    )
+  );
+
+secretCmd
+  .command('list')
+  .description('List secrets (metadata only — never values)')
+  .option('-r, --repo <name>', 'Target repository (defaults to the configured repo)')
+  .option('-b, --branch <branch>', 'Target branch', 'main')
+  .option('--json', 'Machine-readable JSON output')
+  .action((options) =>
+    runAdmin(() => secretList({ repo: options.repo, branch: options.branch, json: options.json }))
+  );
+
+secretCmd
+  .command('show <name>')
+  .description('Show one secret\'s metadata (version, timestamps, author) — never its value')
+  .option('-r, --repo <name>', 'Target repository (defaults to the configured repo)')
+  .option('-b, --branch <branch>', 'Target branch', 'main')
+  .option('--json', 'Machine-readable JSON output')
+  .action((name, options) =>
+    runAdmin(() =>
+      secretShow(name, { repo: options.repo, branch: options.branch, json: options.json })
+    )
+  );
+
+secretCmd
+  .command('rotate <name>')
+  .description('Append a new version stamped as a rotation (value from STDIN by default)')
+  .option('--value <value>', 'Value inline (discouraged: lands in shell history)')
+  .option('--value-env <var>', 'Read the value from an environment variable')
+  .option('-r, --repo <name>', 'Target repository (defaults to the configured repo)')
+  .option('-b, --branch <branch>', 'Target branch', 'main')
+  .action((name, options) =>
+    runAdmin(() =>
+      secretRotate(name, {
+        value: options.value,
+        valueEnv: options.valueEnv,
+        repo: options.repo,
+        branch: options.branch,
+      })
+    )
+  );
+
+secretCmd
+  .command('rm <name>')
+  .description('Delete a secret (tombstone; requires --yes)')
+  .option('-r, --repo <name>', 'Target repository (defaults to the configured repo)')
+  .option('-b, --branch <branch>', 'Target branch', 'main')
+  .option('-y, --yes', 'Confirm deletion')
+  .action((name, options) =>
+    runAdmin(() =>
+      secretRemove(name, { repo: options.repo, branch: options.branch, yes: options.yes })
+    )
+  );
 
 // Identity user commands
 const userCmd = program

@@ -28,6 +28,7 @@ pub mod nodes;
 pub mod query_context;
 pub mod resources;
 pub mod scheduler;
+pub mod secrets;
 pub mod sql;
 pub mod sql_generator;
 pub(crate) mod sql_params;
@@ -363,6 +364,55 @@ where
                 tenant_id.clone(),
                 repo_id.clone(),
                 branch.clone(),
+            )
+        }),
+
+        // Secret store operations - only available when a master keyring is
+        // configured. Present here is NOT a grant: every call is still gated by
+        // the function's own SecretPolicy, which denies by default.
+        secret_get: deps.secret_store.as_ref().map(|s| {
+            secrets::create_secret_get(
+                s.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+                auth_context.clone(),
+            )
+        }),
+        secret_put: deps.secret_store.as_ref().map(|s| {
+            secrets::create_secret_put(
+                s.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+                auth_context.clone(),
+            )
+        }),
+        secret_list: deps.secret_store.as_ref().map(|s| {
+            secrets::create_secret_list(
+                s.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+                auth_context.clone(),
+            )
+        }),
+        secret_rotate: deps.secret_store.as_ref().map(|s| {
+            secrets::create_secret_rotate(
+                s.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+                auth_context.clone(),
+            )
+        }),
+        secret_delete: deps.secret_store.as_ref().map(|s| {
+            secrets::create_secret_delete(
+                s.clone(),
+                tenant_id.clone(),
+                repo_id.clone(),
+                branch.clone(),
+                auth_context.clone(),
             )
         }),
     }

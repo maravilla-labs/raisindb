@@ -114,6 +114,12 @@ impl FunctionLoader {
             .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
             .unwrap_or_else(NetworkPolicy::default);
 
+        // Parse secret policy (absent = no secret access; see SecretPolicy)
+        let secret_policy = props
+            .get("secret_policy")
+            .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
+            .unwrap_or_else(crate::types::SecretPolicy::default);
+
         let metadata = FunctionMetadata {
             name,
             title,
@@ -137,6 +143,7 @@ impl FunctionLoader {
             entry_file,
             resource_limits,
             network_policy,
+            secret_policy,
             triggers: props
                 .get("triggers")
                 .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())

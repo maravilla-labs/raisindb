@@ -1207,6 +1207,137 @@ async fn test_locks_and_inventory_bindings() {
     assert_eq!(output["released"], true);
 }
 
+/// `raisin.secrets.*` must be reachable from JavaScript and round-trip through
+/// the shared registry. The MockFunctionApi enforces no policy — the policy gate
+/// is `RaisinFunctionApi`'s and is tested in `api/raisindb/tests.rs`; what this
+/// pins is the JS surface (names, argument order, return shapes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_secrets_bindings() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            const first = raisin.secrets.put('stripe/live', 'sk_v1');
+            const readBack = raisin.secrets.get('stripe/live');
+            const rotated = raisin.secrets.rotate('stripe/live', 'sk_v2');
+            const afterRotate = raisin.secrets.get('stripe/live');
+            // A pinned version still resolves to the OLD value.
+            const pinned = raisin.secrets.get('stripe/live', 1);
+
+            raisin.secrets.put('sendgrid', 'sg_v1');
+            const listed = raisin.secrets.list();
+
+            const tomb = raisin.secrets.delete('sendgrid');
+
+            let deletedThrew = false;
+            try { raisin.secrets.get('sendgrid'); } catch (e) { deletedThrew = true; }
+
+            let missingThrew = false;
+            try { raisin.secrets.get('never-written'); } catch (e) { missingThrew = true; }
+
+            return {
+                firstVersion: first.version,
+                firstName: first.name,
+                readBack: readBack,
+                rotatedVersion: rotated.version,
+                afterRotate: afterRotate,
+                pinned: pinned,
+                listedNames: listed.map(s => s.name),
+                listedHasNoValue: listed.every(s => s.value === undefined),
+                tombVersion: tomb.version,
+                deletedThrew: deletedThrew,
+                missingThrew: missingThrew,
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("test_secrets");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    assert_eq!(output["firstVersion"], 1);
+    assert_eq!(output["firstName"], "stripe/live");
+    assert_eq!(output["readBack"], "sk_v1");
+    assert_eq!(output["rotatedVersion"], 2);
+    assert_eq!(output["afterRotate"], "sk_v2");
+    // Rotation appends: the pinned reference keeps resolving to v1.
+    assert_eq!(output["pinned"], "sk_v1");
+    assert_eq!(
+        output["listedNames"],
+        serde_json::json!(["sendgrid", "stripe/live"])
+    );
+    assert_eq!(output["listedHasNoValue"], true);
+    assert_eq!(output["tombVersion"], 2);
+    // A deleted secret and a never-written one both THROW — a silent null here
+    // would let a function authenticate with nothing.
+    assert_eq!(output["deletedThrew"], true);
+    assert_eq!(output["missingThrew"], true);
+}
+
+/// THE primary use case, end to end in JS: a node property holds a full
+/// `secret://name@version` reference, and the function passes that exact string
+/// to `get` without stripping anything. Also pins `resolve`'s literal
+/// passthrough and the `@`-in-a-name rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_secrets_accepts_references() {
+    let runtime = QuickJsRuntime::new();
+
+    let code = r#"
+        function handler(input) {
+            // Two versions, so a pin has something to distinguish.
+            raisin.secrets.put('node/01H8XY/api_key', 'v1');
+            raisin.secrets.rotate('node/01H8XY/api_key', 'v2');
+
+            // What a node property in an `encrypted: true` field actually holds:
+            const propertyValue = 'secret://node/01H8XY/api_key@1';
+
+            return {
+                // Passed through verbatim — no stripping by the author.
+                pinned: raisin.secrets.get(propertyValue),
+                unpinned: raisin.secrets.get('secret://node/01H8XY/api_key'),
+                bareName: raisin.secrets.get('node/01H8XY/api_key'),
+                // resolve() handles both a reference and a plain literal.
+                resolvedRef: raisin.secrets.resolve(propertyValue),
+                resolvedLiteral: raisin.secrets.resolve('a-plain-password'),
+                // A name containing '@' is a NAME, not a pin.
+                atName: (function () {
+                    raisin.secrets.put('ops@example.com', 'mail-pw');
+                    return raisin.secrets.get('secret://ops@example.com');
+                })(),
+            };
+        }
+    "#;
+
+    let context = ExecutionContext::new("tenant1", "repo1", "main", "test-user")
+        .with_input(serde_json::json!({}));
+    let metadata = FunctionMetadata::javascript("test_secret_refs");
+    let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+    let result = runtime
+        .execute(code, "handler", context, &metadata, api, HashMap::new())
+        .await
+        .unwrap();
+
+    assert!(result.success, "function errored: {:?}", result.error);
+    let output = result.output.unwrap();
+    // The pin is honoured: an older node revision resolves to what it held.
+    assert_eq!(output["pinned"], "v1");
+    assert_eq!(output["unpinned"], "v2");
+    assert_eq!(output["bareName"], "v2");
+    assert_eq!(output["resolvedRef"], "v1");
+    // A non-reference comes back untouched.
+    assert_eq!(output["resolvedLiteral"], "a-plain-password");
+    assert_eq!(output["atName"], "mail-pw");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_integrations_sync_now_wrapper_round_trips() {
     let runtime = QuickJsRuntime::new();
@@ -1746,6 +1877,7 @@ async fn test_raisin_api_surface_snapshot() {
             "notify",
             "pdf",
             "scheduler",
+            "secrets",
             "sql",
             "tasks",
         ],

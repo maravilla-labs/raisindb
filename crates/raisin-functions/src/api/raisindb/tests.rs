@@ -152,3 +152,348 @@ fn imap_conn_debug_redacts_password() {
     assert!(dbg.contains("<redacted>"), "Debug should mark redaction");
     assert!(dbg.contains("imap.example.org"));
 }
+
+// ========== Secret policy tests ==========
+//
+// The gate must run BEFORE the store is consulted, so every test here uses a
+// `RaisinFunctionApiCallbacks::default()` — i.e. NO secret callbacks at all. A
+// denial therefore proves the policy refused; if the gate ran second, the same
+// call would surface the "subsystem not configured" validation error instead.
+
+use crate::types::SecretPolicy;
+
+fn api_with_secret_policy(policy: SecretPolicy) -> RaisinFunctionApi {
+    let ctx = ExecutionContext::new("tenant1", "repo1", "main", "test-user");
+    RaisinFunctionApi::new(
+        ctx,
+        NetworkPolicy::default(),
+        RaisinFunctionApiCallbacks::default(),
+    )
+    .with_secret_policy(policy)
+}
+
+/// A recorded callback set, so an ALLOWED call can be shown to reach the store.
+fn api_with_recording_callbacks(policy: SecretPolicy) -> RaisinFunctionApi {
+    use std::sync::Arc;
+    let callbacks = RaisinFunctionApiCallbacks::default()
+        .with_secret_get(Arc::new(|name: String, v: Option<u64>| {
+            // Echoes back what the API actually asked the store for, so a test
+            // can assert BOTH the parsed name and the resolved version.
+            Box::pin(async move {
+                Ok(match v {
+                    Some(v) => format!("plaintext-of-{name}@{v}"),
+                    None => format!("plaintext-of-{name}"),
+                })
+            })
+        }))
+        .with_secret_list(Arc::new(|| {
+            Box::pin(async move {
+                Ok(vec![
+                    serde_json::json!({ "name": "stripe/live", "version": 1 }),
+                    serde_json::json!({ "name": "twilio/token", "version": 1 }),
+                    serde_json::json!({ "version": 1 }), // nameless: must be dropped
+                ])
+            })
+        }));
+    let ctx = ExecutionContext::new("tenant1", "repo1", "main", "test-user");
+    RaisinFunctionApi::new(ctx, NetworkPolicy::default(), callbacks).with_secret_policy(policy)
+}
+
+fn assert_policy_denied(err: raisin_error::Error, name: &str) {
+    assert!(
+        matches!(err, raisin_error::Error::PermissionDenied(_)),
+        "expected PermissionDenied, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("secrets:policy_denied"),
+        "denial must carry the stable code: {msg}"
+    );
+    assert!(
+        msg.contains(name),
+        "denial must name the secret so the author can see WHICH grant is missing: {msg}"
+    );
+}
+
+/// No policy at all = no secret access. This is the default a function gets
+/// when its `.node.yaml` says nothing about secrets.
+#[tokio::test]
+async fn secret_get_denied_without_policy() {
+    let api = api_with_secret_policy(SecretPolicy::default());
+    let err = api
+        .impl_secret_get("stripe/live", None)
+        .await
+        .expect_err("no policy must deny");
+    assert_policy_denied(err, "stripe/live");
+}
+
+/// Every mutating operation is gated too — a function that cannot read a
+/// secret must not be able to overwrite, rotate or tombstone it either.
+#[tokio::test]
+async fn secret_writes_denied_without_policy() {
+    let api = api_with_secret_policy(SecretPolicy::default());
+
+    assert_policy_denied(
+        api.impl_secret_put("stripe/live", "v").await.unwrap_err(),
+        "stripe/live",
+    );
+    assert_policy_denied(
+        api.impl_secret_rotate("stripe/live", "v")
+            .await
+            .unwrap_err(),
+        "stripe/live",
+    );
+    assert_policy_denied(
+        api.impl_secret_delete("stripe/live").await.unwrap_err(),
+        "stripe/live",
+    );
+
+    let err = api.impl_secret_list().await.unwrap_err();
+    assert!(
+        matches!(err, raisin_error::Error::PermissionDenied(_)),
+        "list must be denied too, got: {err}"
+    );
+}
+
+/// `enabled: true` with an empty allow-list must still deny: "opted in" can
+/// never silently mean "unrestricted".
+#[tokio::test]
+async fn secret_get_denied_when_allowlist_empty() {
+    let api = api_with_secret_policy(SecretPolicy {
+        enabled: true,
+        allowed_names: Vec::new(),
+    });
+    let err = api
+        .impl_secret_get("stripe/live", None)
+        .await
+        .expect_err("empty allow-list must deny");
+    assert_policy_denied(err, "stripe/live");
+}
+
+/// A name outside the allow-list is denied, and the error says so rather than
+/// returning an empty/None result that reads like "no such secret".
+#[tokio::test]
+async fn secret_get_denied_for_unlisted_name() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec!["stripe/*".to_string()]));
+    let err = api
+        .impl_secret_get("twilio/token", None)
+        .await
+        .expect_err("unlisted name must be denied");
+    assert_policy_denied(err, "twilio/token");
+}
+
+/// An allow-listed name reaches the store. Combined with the tests above, this
+/// is what shows the gate is a gate and not a wall.
+#[tokio::test]
+async fn secret_get_allowed_for_exact_name() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec![
+        "sendgrid_api_key".to_string()
+    ]));
+    let value = api
+        .impl_secret_get("sendgrid_api_key", None)
+        .await
+        .expect("allow-listed name must be readable");
+    assert_eq!(value, "plaintext-of-sendgrid_api_key");
+}
+
+/// A glob grant covers every name it matches — and nothing else.
+#[tokio::test]
+async fn secret_get_allowed_by_glob() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec!["stripe/*".to_string()]));
+
+    assert_eq!(
+        api.impl_secret_get("stripe/live", None).await.unwrap(),
+        "plaintext-of-stripe/live"
+    );
+    assert_eq!(
+        api.impl_secret_get("stripe/test", None).await.unwrap(),
+        "plaintext-of-stripe/test"
+    );
+
+    // The glob does not reach a sibling prefix.
+    assert_policy_denied(
+        api.impl_secret_get("stripeX/live", None).await.unwrap_err(),
+        "stripeX/live",
+    );
+}
+
+/// `list` filters to the allowed names rather than denying, so a granted
+/// function can discover what it may use — but it must NOT be able to
+/// enumerate credentials it cannot read.
+#[tokio::test]
+async fn secret_list_filters_to_allowed_names() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec!["stripe/*".to_string()]));
+
+    let listed = api.impl_secret_list().await.expect("list must be allowed");
+    let names: Vec<&str> = listed
+        .iter()
+        .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+        .collect();
+
+    assert_eq!(
+        names,
+        vec!["stripe/live"],
+        "list must drop both the unlisted name and the nameless entry"
+    );
+}
+
+// ========== secret:// reference handling ==========
+//
+// The primary use case: a node property in an `encrypted: true` field holds
+// `secret://node/{id}/{field}@N`, node reads never resolve it, so the function
+// is handed the whole reference string and passes it straight to `get`.
+
+/// Both spellings of ONE secret must get ONE answer. If the policy were matched
+/// against the raw argument instead of the parsed name, a caller could dodge
+/// an allow-list simply by re-spelling — deny a bare name, allow the reference,
+/// or vice versa.
+#[tokio::test]
+async fn policy_matches_the_parsed_name_for_both_spellings() {
+    let allowed = api_with_recording_callbacks(SecretPolicy::allow_names(vec![
+        "node/01H8XY/api_key".to_string(),
+    ]));
+
+    // Allowed: identical outcome whichever way it is named.
+    assert_eq!(
+        allowed
+            .impl_secret_get("node/01H8XY/api_key", None)
+            .await
+            .unwrap(),
+        "plaintext-of-node/01H8XY/api_key"
+    );
+    assert_eq!(
+        allowed
+            .impl_secret_get("secret://node/01H8XY/api_key", None)
+            .await
+            .unwrap(),
+        "plaintext-of-node/01H8XY/api_key"
+    );
+
+    // Denied: also identical whichever way it is named.
+    let denied =
+        api_with_recording_callbacks(SecretPolicy::allow_names(vec!["stripe/*".to_string()]));
+    assert_policy_denied(
+        denied
+            .impl_secret_get("node/01H8XY/api_key", None)
+            .await
+            .unwrap_err(),
+        "node/01H8XY/api_key",
+    );
+    assert_policy_denied(
+        denied
+            .impl_secret_get("secret://node/01H8XY/api_key@3", None)
+            .await
+            .unwrap_err(),
+        // The denial names the PARSED name, not the raw reference.
+        "node/01H8XY/api_key",
+    );
+}
+
+/// A glob grant covers the reference spelling too — `node/*` must not require
+/// the author to also write `secret://node/*`.
+#[tokio::test]
+async fn a_glob_grant_covers_the_reference_spelling() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec!["node/*".to_string()]));
+    assert_eq!(
+        api.impl_secret_get("secret://node/01H8XY/api_key", None)
+            .await
+            .unwrap(),
+        "plaintext-of-node/01H8XY/api_key"
+    );
+}
+
+/// A version pinned INSIDE the reference reaches the store. This is what keeps
+/// a time-travel read honest: an older node revision holds an older version,
+/// and reading it must give what the node actually held then, not the latest.
+#[tokio::test]
+async fn a_pinned_version_in_the_reference_is_honoured() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec!["k".to_string()]));
+
+    assert_eq!(
+        api.impl_secret_get("secret://k@1", None).await.unwrap(),
+        "plaintext-of-k@1"
+    );
+    // Unpinned reads the newest.
+    assert_eq!(
+        api.impl_secret_get("secret://k", None).await.unwrap(),
+        "plaintext-of-k"
+    );
+    // An explicit argument alongside an UNPINNED reference is unambiguous.
+    assert_eq!(
+        api.impl_secret_get("secret://k", Some(4)).await.unwrap(),
+        "plaintext-of-k@4"
+    );
+    // ...but a pin AND an argument state two versions, which is refused rather
+    // than silently resolved: the whole point of a pinned reference is that
+    // reading an old node revision cannot quietly return a value it never held.
+    let err = api
+        .impl_secret_get("secret://k@1", Some(4))
+        .await
+        .expect_err("two stated versions must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains('1') && msg.contains('4'), "name both: {msg}");
+}
+
+/// The `@` rule the API exists to keep out of function authors' hands: a name
+/// may contain `@`, so `secret://ops@example.com` is a NAME, not a pin.
+#[tokio::test]
+async fn an_at_sign_in_the_name_is_not_read_as_a_version() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec![
+        "ops@example.com".to_string()
+    ]));
+    assert_eq!(
+        api.impl_secret_get("secret://ops@example.com", None)
+            .await
+            .unwrap(),
+        "plaintext-of-ops@example.com"
+    );
+}
+
+/// `resolve` passes a non-reference through untouched — and does so WITHOUT a
+/// policy check, since nothing secret was touched. That is what lets an adapter
+/// read a config field that is a literal on one deployment and a vaulted
+/// reference on another with one line of code.
+#[tokio::test]
+async fn resolve_passes_a_literal_through_unchanged() {
+    let api = api_with_recording_callbacks(SecretPolicy::default()); // no grants at all
+    assert_eq!(
+        api.impl_secret_resolve("a-literal-password").await.unwrap(),
+        "a-literal-password"
+    );
+}
+
+/// `resolve` on an actual reference resolves it — and is still gated.
+#[tokio::test]
+async fn resolve_resolves_a_reference_and_is_still_gated() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec!["k".to_string()]));
+    assert_eq!(
+        api.impl_secret_resolve("secret://k@2").await.unwrap(),
+        "plaintext-of-k@2"
+    );
+
+    let denied = api_with_recording_callbacks(SecretPolicy::default());
+    assert_policy_denied(
+        denied.impl_secret_resolve("secret://k").await.unwrap_err(),
+        "k",
+    );
+}
+
+/// A write against a PINNED reference is refused rather than silently ignoring
+/// the pin, which would let an author believe they had replaced version 1.
+#[tokio::test]
+async fn a_write_refuses_a_pinned_reference() {
+    let api = api_with_recording_callbacks(SecretPolicy::allow_names(vec!["k".to_string()]));
+
+    for err in [
+        api.impl_secret_put("secret://k@1", "v").await.unwrap_err(),
+        api.impl_secret_rotate("secret://k@1", "v")
+            .await
+            .unwrap_err(),
+        api.impl_secret_delete("secret://k@1").await.unwrap_err(),
+    ] {
+        assert!(
+            err.to_string().contains("append"),
+            "refusal should explain that writes append: {err}"
+        );
+    }
+}

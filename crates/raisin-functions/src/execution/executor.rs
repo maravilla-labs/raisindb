@@ -219,6 +219,7 @@ where
         job_registry: deps.job_registry.clone(),
         job_data_store: deps.job_data_store.clone(),
         lock_manager: deps.lock_manager.clone(),
+        secret_store: deps.secret_store.clone(),
         schema_stats_cache: deps.schema_stats_cache.clone(),
     });
 
@@ -285,11 +286,16 @@ where
 
     // 5. Create API with callbacks
     // Use the function's network_policy from metadata instead of global config
-    let api: Arc<dyn FunctionApi> = Arc::new(RaisinFunctionApi::new(
-        exec_context.clone(),
-        metadata.network_policy.clone(),
-        api_callbacks,
-    ));
+    // The secret policy comes from the same function node as the network
+    // policy; without this the API denies every raisin.secrets.* call.
+    let api: Arc<dyn FunctionApi> = Arc::new(
+        RaisinFunctionApi::new(
+            exec_context.clone(),
+            metadata.network_policy.clone(),
+            api_callbacks,
+        )
+        .with_secret_policy(metadata.secret_policy.clone()),
+    );
 
     // 6. Create loaded function with sibling files for module resolution
     let loaded_function = LoadedFunction::with_files(

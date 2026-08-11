@@ -393,6 +393,147 @@ declare namespace raisin {
     function get(jobIdOrKey: string): Promise<any>;
   }
 
+  /**
+   * Metadata about one secret. Never carries the secret itself — the type has
+   * no field that could hold ciphertext or plaintext.
+   */
+  interface SecretMetadata {
+    name: string;
+    /** Human-facing ordinal, from 1. Use it as `secrets.get(name, version)`. */
+    version: number;
+    /** Which master key sealed it. */
+    key_id: number;
+    /** RFC 3339. */
+    created_at: string;
+    created_by: string;
+    /** Set only by `rotate`. */
+    rotated_at?: string | null;
+    /** The node this secret backs, when it is a vaulted schema field. */
+    owner_node?: string | null;
+    owner_field?: string | null;
+    /** True when the newest version is a tombstone. */
+    deleted: boolean;
+    ciphertext_len: number;
+  }
+
+  /**
+   * Encrypted secret store, scoped to the current `{tenant, repo, branch}`.
+   *
+   * **Access is denied by default.** A function reaches these only if its
+   * `.node.yaml` declares a matching grant:
+   *
+   * ```yaml
+   * secret_policy:
+   *   enabled: true
+   *   allowed_names:
+   *     - "stripe/*"
+   *     - "sendgrid_api_key"
+   * ```
+   *
+   * Without one, every call below throws a `policy_denied` error naming the
+   * secret. That default is deliberate: adapters run privileged and hold
+   * `raisin.http`, so an ungated secrets binding would be a one-line
+   * exfiltration path for every credential in the repo.
+   *
+   * Every method THROWS on failure (denial, missing secret, deleted secret,
+   * unconfigured store) — none of them degrade to `null`, which would be
+   * indistinguishable from an empty credential.
+   *
+   * ## The main flow: a secret stored in a node property
+   *
+   * The common case is not a standalone secret — it is a field on a regular
+   * node declared `encrypted: true` in its NodeType. Three steps:
+   *
+   * 1. The property does not hold the credential. It holds a REFERENCE:
+   *    `"secret://node/01H8XY.../api_key@1"`.
+   * 2. A node read returns that string verbatim. **Reads never resolve** —
+   *    there is no query flag and no endpoint that returns a value.
+   * 3. The function passes the string straight to `get` (or `resolve`):
+   *
+   * ```javascript
+   * const node = await raisin.nodes.get('data', '/connections/stripe');
+   * const key  = raisin.secrets.get(node.properties.api_key);
+   * ```
+   *
+   * Pass the reference through **as-is**. Do not strip `secret://` or the
+   * `@version` suffix yourself: a name may itself contain `@` (an operator
+   * name like `ops@example.com`), so only a trailing all-digit run after the
+   * LAST `@` is a version. `get` applies that rule using the same parser the
+   * storage layer uses.
+   */
+  /**
+   * Declared as an interface rather than a `namespace`, because `delete` is a
+   * reserved word that TypeScript rejects as an ambient `function` name but
+   * accepts as an interface method. (The `http`, `nodes` and `admin.nodes`
+   * namespaces above still use `function delete(...)`, which does not parse —
+   * a pre-existing break, unnoticed because this package has no drift test.)
+   */
+  interface SecretsApi {
+    /**
+     * Read a secret's plaintext.
+     *
+     * `nameOrRef` is EITHER a bare name (`"stripe_key"`) or a full reference
+     * (`"secret://node/01H8XY.../api_key@1"`) — see the three-step flow above
+     * for why the reference form is what you will usually be holding.
+     *
+     * A version pinned in the reference is HONOURED: `secret://k@1` returns
+     * version 1, not the latest. That is what makes reading an older node
+     * revision give the value that revision actually held.
+     *
+     * Passing the `version` argument **and** a pinned reference throws. Two
+     * stated versions cannot both be satisfied, and silently preferring either
+     * could return a value the node revision never held — which is the exact
+     * guarantee a pinned reference exists to provide. Pass one or the other;
+     * `get('k', 2)` and `get('secret://k', 2)` are both fine.
+     *
+     * The policy allow-list is matched against the parsed NAME, so both
+     * spellings of one secret always get the same allow/deny answer.
+     *
+     * Throws if the policy denies the name, or the secret is missing or
+     * deleted.
+     */
+    get(nameOrRef: string, version?: number): Promise<string>;
+    /**
+     * Resolve a value that MAY be a `secret://` reference.
+     *
+     * Returns the plaintext when it is one, or the value unchanged when it is
+     * not — so a config field that is a literal password on one deployment and
+     * a vaulted reference on another is read the same way:
+     *
+     * ```javascript
+     * const password = raisin.secrets.resolve(conn.password);
+     * ```
+     *
+     * A reference that fails to resolve THROWS; it never falls back to
+     * returning the reference text, which would send `secret://...` to a
+     * provider as a credential. A plain literal is passed through without any
+     * policy check, since no secret was touched.
+     */
+    resolve(value: string): Promise<string>;
+    /**
+     * Append a new version. Never overwrites — prior versions stay readable.
+     *
+     * Accepts a bare name or an UNPINNED reference; a pinned one
+     * (`secret://k@1`) is refused, because a write appends a new version
+     * rather than replacing that one.
+     */
+    put(name: string, value: string): Promise<{ name: string; version: number }>;
+    /**
+     * Metadata for the newest version of every secret this function may read.
+     * Never returns values, and is filtered to the policy's allowed names.
+     */
+    list(): Promise<SecretMetadata[]>;
+    /**
+     * Append a new version stamped as a rotation. Pinned `secret://name@N`
+     * references keep resolving to the old version.
+     */
+    rotate(name: string, value: string): Promise<{ name: string; version: number }>;
+    /** Append a tombstone. Prior versions remain readable by pinned reference. */
+    delete(name: string): Promise<{ name: string; version: number }>;
+  }
+
+  const secrets: SecretsApi;
+
   namespace sql {
     function query(sql: string, params: any[]): Promise<any>;
     function execute(sql: string, params: any[]): Promise<number>;

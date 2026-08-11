@@ -571,6 +571,67 @@ pub trait FunctionApi: Send + Sync {
     /// Return `n` units to inventory `pool`. Returns the new remaining count.
     async fn inventory_release(&self, pool: &str, n: i64) -> Result<i64>;
 
+    // ========== Secret Operations ==========
+
+    /// Read a secret's plaintext.
+    ///
+    /// `spec` is EITHER a bare name (`"stripe_key"`) or a full reference
+    /// (`"secret://node/01H8XY/api_key@1"`). The reference form is what the
+    /// primary use case hands the caller: a node property in an
+    /// `encrypted: true` field stores the reference, node reads never resolve
+    /// it, so the function passes that exact string straight back here. Parsing
+    /// goes through [`raisin_models::secret_ref`], never a hand-rolled split —
+    /// a name may itself contain `@`.
+    ///
+    /// A version pinned in the reference is honoured. Passing an explicit
+    /// `version` argument AS WELL is an error, not a precedence question: two
+    /// stated versions cannot both be satisfied, and silently picking either
+    /// could return a value an old node revision never held. Every call is
+    /// gated by the
+    /// function's [`SecretPolicy`](crate::types::SecretPolicy) on the PARSED
+    /// name, BEFORE the store is touched, so the two spellings of one secret
+    /// cannot get different answers. A denial is a hard error naming the secret
+    /// — never an empty result a caller could mistake for "no such secret".
+    ///
+    /// The returned plaintext is the caller's to handle; it is never logged.
+    async fn secret_get(&self, spec: &str, version: Option<i64>) -> Result<String>;
+
+    /// Resolve a property value that MAY be a `secret://` reference.
+    ///
+    /// Returns the plaintext when `value` is a reference, and `value` unchanged
+    /// when it is not — so a connector config field that is a literal on one
+    /// deployment and a vaulted reference on another is consumed the same way.
+    /// A reference that fails to resolve is an ERROR, never the input echoed
+    /// back: that fallback would send the literal text `secret://stripe_key` to
+    /// a provider as a credential.
+    async fn secret_resolve(&self, value: &str) -> Result<String>;
+
+    /// Append a new version of `name` and return `{ name, version }`.
+    ///
+    /// `name` accepts the reference spelling too, but a PINNED reference is
+    /// refused: a write always appends, so `secret://k@1` cannot mean what it
+    /// says. Never overwrites — a prior version stays readable through a pinned
+    /// reference forever.
+    async fn secret_put(&self, name: &str, value: &str) -> Result<Value>;
+
+    /// Metadata for the newest version of every secret this function may see.
+    ///
+    /// Returns [`SecretMetadata`](raisin_rocksdb::secret_store::SecretMetadata)
+    /// shapes — name, version, timestamps, tombstone flag — and NEVER ciphertext
+    /// or plaintext. Filtered to names the policy allows, so a function cannot
+    /// enumerate credentials it may not read.
+    async fn secret_list(&self) -> Result<Vec<Value>>;
+
+    /// Append a new version of `name`, stamped as a rotation. Returns
+    /// `{ name, version }`. Anything holding a pinned `secret://name@N` keeps
+    /// resolving to the old version.
+    async fn secret_rotate(&self, name: &str, value: &str) -> Result<Value>;
+
+    /// Append a tombstone for `name`. Prior versions stay readable through a
+    /// pinned reference (MVCC time-travel reads depend on it). Returns
+    /// `{ name, version }` — the tombstone's ordinal.
+    async fn secret_delete(&self, name: &str) -> Result<Value>;
+
     // ========== Integration / Mount Operations ==========
 
     /// Trigger a "sync now" for a virtual mount (connector).

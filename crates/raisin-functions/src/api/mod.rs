@@ -20,6 +20,7 @@ mod ai;
 mod callbacks;
 mod mock;
 mod raisindb;
+pub mod secret_spec;
 mod traits;
 
 pub use ai::{
@@ -69,6 +70,11 @@ pub use callbacks::{
     SchedulerGetCallback,
     SchedulerListCallback,
     SchedulerScheduleCallback,
+    SecretDeleteCallback,
+    SecretGetCallback,
+    SecretListCallback,
+    SecretPutCallback,
+    SecretRotateCallback,
     SqlExecuteCallback,
     SqlQueryCallback,
     TaskCompleteCallback,
@@ -98,4 +104,5 @@ pub use callbacks::{
 };
 pub use mock::MockFunctionApi;
 pub use raisindb::RaisinFunctionApi;
+pub use secret_spec::{parse_read_spec, parse_secret_spec, parse_write_spec, SecretSpec};
 pub use traits::FunctionApi;

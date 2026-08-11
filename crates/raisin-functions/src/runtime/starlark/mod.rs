@@ -146,6 +146,97 @@ def handler(input):
         assert_eq!(output["released"], true);
     }
 
+    /// Parity with the QuickJS `test_secrets_bindings`: `raisin.secrets.*` is
+    /// exposed via the shared registry (Starlark auto-generates the namespace
+    /// from the descriptor `category`) and behaves identically — same names,
+    /// same argument order, same append-not-overwrite semantics.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_secrets_bindings() {
+        let runtime = StarlarkRuntime::new();
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+        let code = r#"
+def handler(input):
+    first = raisin.secrets.put("stripe/live", "sk_v1")
+    read_back = raisin.secrets.get("stripe/live")
+    rotated = raisin.secrets.rotate("stripe/live", "sk_v2")
+    after_rotate = raisin.secrets.get("stripe/live")
+    pinned = raisin.secrets.get("stripe/live", 1)
+    raisin.secrets.put("sendgrid", "sg_v1")
+    listed = raisin.secrets.list()
+    tomb = raisin.secrets.delete("sendgrid")
+    return {
+        "firstVersion": first["version"],
+        "firstName": first["name"],
+        "readBack": read_back,
+        "rotatedVersion": rotated["version"],
+        "afterRotate": after_rotate,
+        "pinned": pinned,
+        "listedNames": [s["name"] for s in listed],
+        "tombVersion": tomb["version"],
+    }
+"#;
+
+        let context = create_test_context();
+        let metadata = FunctionMetadata::starlark("test-secrets");
+
+        let result = runtime
+            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .await
+            .expect("execution ok");
+        assert!(result.success, "function errored: {:?}", result.error);
+        let output = result.output.unwrap();
+        assert_eq!(output["firstVersion"], 1);
+        assert_eq!(output["firstName"], "stripe/live");
+        assert_eq!(output["readBack"], "sk_v1");
+        assert_eq!(output["rotatedVersion"], 2);
+        assert_eq!(output["afterRotate"], "sk_v2");
+        assert_eq!(output["pinned"], "sk_v1");
+        assert_eq!(
+            output["listedNames"],
+            serde_json::json!(["sendgrid", "stripe/live"])
+        );
+        assert_eq!(output["tombVersion"], 2);
+    }
+
+    /// Parity with the QuickJS `test_secrets_accepts_references`: the reference
+    /// spelling, the honoured pin and `resolve`'s passthrough behave identically
+    /// in Starlark.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_secrets_accepts_references() {
+        let runtime = StarlarkRuntime::new();
+        let api = Arc::new(MockFunctionApi::new(serde_json::json!({})));
+
+        let code = r#"
+def handler(input):
+    raisin.secrets.put("node/01H8XY/api_key", "v1")
+    raisin.secrets.rotate("node/01H8XY/api_key", "v2")
+    property_value = "secret://node/01H8XY/api_key@1"
+    return {
+        "pinned": raisin.secrets.get(property_value),
+        "unpinned": raisin.secrets.get("secret://node/01H8XY/api_key"),
+        "bareName": raisin.secrets.get("node/01H8XY/api_key"),
+        "resolvedRef": raisin.secrets.resolve(property_value),
+        "resolvedLiteral": raisin.secrets.resolve("a-plain-password"),
+    }
+"#;
+
+        let context = create_test_context();
+        let metadata = FunctionMetadata::starlark("test-secret-refs");
+
+        let result = runtime
+            .execute(code, "handler", context, &metadata, api, HashMap::new())
+            .await
+            .expect("execution ok");
+        assert!(result.success, "function errored: {:?}", result.error);
+        let output = result.output.unwrap();
+        assert_eq!(output["pinned"], "v1");
+        assert_eq!(output["unpinned"], "v2");
+        assert_eq!(output["bareName"], "v2");
+        assert_eq!(output["resolvedRef"], "v1");
+        assert_eq!(output["resolvedLiteral"], "a-plain-password");
+    }
+
     #[tokio::test]
     async fn test_execute_with_context() {
         let runtime = StarlarkRuntime::new();

