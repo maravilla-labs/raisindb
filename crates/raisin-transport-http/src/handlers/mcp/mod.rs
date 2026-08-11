@@ -238,6 +238,7 @@ async fn dispatch(
         branch,
         MCP_DISCOVERY_WORKSPACE,
         Default::default(),
+        Default::default(),
         caller_auth.clone(),
     );
 
@@ -253,6 +254,7 @@ async fn dispatch(
         repo,
         branch,
         MCP_DISCOVERY_WORKSPACE,
+        Default::default(),
         Default::default(),
         Some(AuthContext::system()),
     );

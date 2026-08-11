@@ -28,6 +28,7 @@ mod node_types;
 mod nodes;
 mod repositories;
 mod scheduler;
+mod secrets;
 mod subscriptions;
 mod tags;
 mod transactions;
@@ -46,6 +47,7 @@ pub use node_types::*;
 pub use nodes::*;
 pub use repositories::*;
 pub use scheduler::*;
+pub use secrets::*;
 pub use subscriptions::*;
 pub use tags::*;
 pub use transactions::*;
@@ -344,6 +346,16 @@ where
         RequestType::InventoryRelease => {
             handle_inventory_release(state, connection_state, request).await
         }
+
+        // Secret store operations. Every arm must be present here: the
+        // catch-all below turns a MISSING arm into a runtime NOT_IMPLEMENTED
+        // rather than a compile error, so a variant added to `RequestType`
+        // without its arm ships silently broken.
+        RequestType::SecretPut => handle_secret_put(state, connection_state, request).await,
+        RequestType::SecretRotate => handle_secret_rotate(state, connection_state, request).await,
+        RequestType::SecretList => handle_secret_list(state, connection_state, request).await,
+        RequestType::SecretGet => handle_secret_get(state, connection_state, request).await,
+        RequestType::SecretDelete => handle_secret_delete(state, connection_state, request).await,
 
         // Not yet implemented
         _ => Ok(Some(ResponseEnvelope::error(

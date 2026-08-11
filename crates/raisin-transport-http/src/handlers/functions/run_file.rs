@@ -255,7 +255,14 @@ pub async fn run_file(
             loaded.metadata.network_policy.http_enabled,
             loaded.metadata.network_policy.allowed_urls
         );
-        let api = build_function_api(&state_clone, &tenant_clone, &repo_clone, loaded.metadata.network_policy.clone(), None);
+        let api = build_function_api(
+            &state_clone,
+            &tenant_clone,
+            &repo_clone,
+            loaded.metadata.network_policy.clone(),
+            loaded.metadata.secret_policy.clone(),
+            None,
+        );
         let executor = FunctionExecutor::new();
 
         let exec_result = executor.execute(&loaded, context.clone(), api.clone()).await;

@@ -97,6 +97,7 @@ pub(super) async fn invoke_adapter(
         tenant_id,
         repo,
         loaded.metadata.network_policy.clone(),
+        loaded.metadata.secret_policy.clone(),
         None,
     );
     let result = FunctionExecutor::new()

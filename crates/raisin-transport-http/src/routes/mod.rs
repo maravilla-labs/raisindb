@@ -23,6 +23,8 @@ mod operator;
 mod packages;
 mod repository;
 mod scheduler;
+#[cfg(feature = "storage-rocksdb")]
+mod secrets;
 
 #[cfg(feature = "storage-rocksdb")]
 pub use operator::operator_package_routes;
@@ -89,6 +91,12 @@ pub fn routes(state: AppState) -> Router {
 
     // Atomic locks / inventory
     router = router.merge(locks::locks_routes(&state));
+
+    // Secret store (admin-gated; values are write-only)
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        router = router.merge(secrets::secrets_routes(&state));
+    }
 
     // Outbound integrations (connect external systems, token lifecycle, sync)
     router = router.merge(integrations::integration_routes(&state));

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use raisin_functions::{
     execution::callbacks::create_production_callbacks, execution::ExecutionDependencies,
-    ExecutionContext, NetworkPolicy, RaisinFunctionApi,
+    ExecutionContext, NetworkPolicy, RaisinFunctionApi, SecretPolicy,
 };
 use raisin_models::auth::AuthContext;
 
@@ -32,6 +32,10 @@ pub(super) fn build_mcp_function_api(
     branch: &str,
     workspace: &str,
     network_policy: NetworkPolicy,
+    // The function's declared secret policy; `SecretPolicy::default()` denies
+    // every `raisin.secrets.*` call (correct for the data/discovery backends,
+    // which execute no function node of their own).
+    secret_policy: SecretPolicy,
     auth_context: Option<AuthContext>,
 ) -> Arc<RaisinFunctionApi> {
     let repo_id = repo.to_string();
@@ -54,14 +58,20 @@ pub(super) fn build_mcp_function_api(
         job_registry: Some(state.storage.job_registry().clone()),
         job_data_store: Some(state.storage.job_data_store().clone()),
         lock_manager: state.lock_manager.clone(),
+        // None when no master keyring is configured. A present store is not a
+        // grant — the function's own SecretPolicy still gates every call.
+        secret_store: state.storage.secret_store().ok(),
         schema_stats_cache: state.schema_stats_cache.clone(),
     });
 
     let callbacks = create_production_callbacks(deps, tenant, repo_id, branch_owned, auth_context);
 
-    Arc::new(RaisinFunctionApi::new(
-        ExecutionContext::new(tenant_id, repo, branch, "system").with_workspace(workspace),
-        network_policy,
-        callbacks,
-    ))
+    Arc::new(
+        RaisinFunctionApi::new(
+            ExecutionContext::new(tenant_id, repo, branch, "system").with_workspace(workspace),
+            network_policy,
+            callbacks,
+        )
+        .with_secret_policy(secret_policy),
+    )
 }

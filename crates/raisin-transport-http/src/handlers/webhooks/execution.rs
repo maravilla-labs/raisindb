@@ -243,6 +243,7 @@ async fn execute_sync(
         tenant_id,
         repo,
         loaded.metadata.network_policy.clone(),
+        loaded.metadata.secret_policy.clone(),
         None,
     );
     let executor = FunctionExecutor::new();

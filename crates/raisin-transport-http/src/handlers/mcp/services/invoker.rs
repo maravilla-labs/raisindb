@@ -177,6 +177,7 @@ impl HttpFunctionInvoker {
             &self.branch,
             "functions",
             loaded.metadata.network_policy.clone(),
+            loaded.metadata.secret_policy.clone(),
             Some(auth),
         );
 

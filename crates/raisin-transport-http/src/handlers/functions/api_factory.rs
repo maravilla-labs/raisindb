@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use raisin_functions::{
     execution::callbacks::create_production_callbacks, execution::ExecutionDependencies,
-    ExecutionContext, NetworkPolicy, RaisinFunctionApi,
+    ExecutionContext, NetworkPolicy, RaisinFunctionApi, SecretPolicy,
 };
 use raisin_models::auth::AuthContext;
 
@@ -36,6 +36,10 @@ pub(crate) fn build_function_api(
     tenant_id: &str,
     repo: &str,
     network_policy: NetworkPolicy,
+    // The function's declared secret policy. `SecretPolicy::default()` denies
+    // every `raisin.secrets.*` call, which is the right value for any caller
+    // that is not executing a specific function node.
+    secret_policy: SecretPolicy,
     auth_context: Option<AuthContext>,
 ) -> Arc<RaisinFunctionApi> {
     let repo_id = repo.to_string();
@@ -61,16 +65,22 @@ pub(crate) fn build_function_api(
         job_registry: Some(state.storage.job_registry().clone()),
         job_data_store: Some(state.storage.job_data_store().clone()),
         lock_manager: state.lock_manager.clone(),
+        // None when no master keyring is configured. A present store is not a
+        // grant — the function's own SecretPolicy still gates every call.
+        secret_store: state.storage.secret_store().ok(),
         schema_stats_cache: state.schema_stats_cache.clone(),
     });
 
     // Build all callbacks via canonical factory
     let callbacks = create_production_callbacks(deps, tenant, repo_id, branch, auth_context);
 
-    Arc::new(RaisinFunctionApi::new(
-        ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, "system")
-            .with_workspace(FUNCTIONS_WORKSPACE),
-        network_policy,
-        callbacks,
-    ))
+    Arc::new(
+        RaisinFunctionApi::new(
+            ExecutionContext::new(tenant_id, repo, DEFAULT_BRANCH, "system")
+                .with_workspace(FUNCTIONS_WORKSPACE),
+            network_policy,
+            callbacks,
+        )
+        .with_secret_policy(secret_policy),
+    )
 }

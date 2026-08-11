@@ -417,6 +417,7 @@ pub(super) fn create_function_invoke_sync_callback(
                     &tenant_id,
                     &repo,
                     loaded.metadata.network_policy.clone(),
+                    loaded.metadata.secret_policy.clone(),
                     None,
                 );
 

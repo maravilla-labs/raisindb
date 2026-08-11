@@ -54,6 +54,7 @@ pub(super) mod crud;
 pub mod keys;
 pub mod lifecycle;
 mod record;
+mod resolve;
 #[cfg(test)]
 mod tests;
 

@@ -425,4 +425,14 @@ pub enum RequestType {
     LocksRenew,
     InventoryClaim,
     InventoryRelease,
+
+    // Secret store operations (admin-gated). There is deliberately no request
+    // that returns a plaintext value: `SecretGet` returns METADATA. Server-side
+    // use resolves a `secret://` reference through `SecretStore::resolve`,
+    // which no client-facing path can reach.
+    SecretPut,
+    SecretRotate,
+    SecretList,
+    SecretGet,
+    SecretDelete,
 }

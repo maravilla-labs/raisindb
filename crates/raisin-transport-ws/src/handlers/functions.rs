@@ -384,6 +384,14 @@ mod inner {
                 .as_ref()
                 .map(|s| s.job_data_store().clone()),
             lock_manager: state.lock_manager.clone(),
+            // Like the job-system deps above, the accessor lives on the
+            // concrete RocksDB storage. None when no master keyring is
+            // configured; a present store is not a grant, the function's own
+            // SecretPolicy still gates every call.
+            secret_store: state
+                .rocksdb_storage
+                .as_ref()
+                .and_then(|s| s.secret_store().ok()),
             schema_stats_cache: state.schema_stats_cache.clone(),
         });
 
@@ -396,12 +404,15 @@ mod inner {
             None, // no auth context from WS for now
         );
 
-        let api = Arc::new(RaisinFunctionApi::new(
-            ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
-                .with_workspace(FUNCTIONS_WORKSPACE),
-            metadata.network_policy.clone(),
-            callbacks,
-        ));
+        let api = Arc::new(
+            RaisinFunctionApi::new(
+                ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
+                    .with_workspace(FUNCTIONS_WORKSPACE),
+                metadata.network_policy.clone(),
+                callbacks,
+            )
+            .with_secret_policy(metadata.secret_policy.clone()),
+        );
 
         let context = ExecutionContext::new(&tenant_id, &repo, DEFAULT_BRANCH, "system")
             .with_workspace(FUNCTIONS_WORKSPACE)
