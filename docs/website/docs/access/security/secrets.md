@@ -79,12 +79,30 @@ Not every secret belongs to a node field. Operator-owned secrets — a shared AP
 key, a webhook signing secret — can be managed on their own.
 
 ```bash
-raisindb secret set stripe-key      # reads the value from stdin, never argv
+echo -n "sk-live-abc123" | raisindb secret set stripe-key   # value from stdin, never argv
 raisindb secret list                # names and metadata only
-raisindb secret show stripe-key     # metadata; never the value
-raisindb secret rotate stripe-key
-raisindb secret rm stripe-key
+raisindb secret show stripe-key     # metadata + every version; never the value
+raisindb secret rotate stripe-key   # value from stdin, as with set
+raisindb secret rm stripe-key --yes # appends a tombstone
 ```
+
+`set` and `rotate` read the value from **stdin by default** — no flag — because
+the spelling that feels natural (`secret set NAME value`) is exactly the one that
+writes the credential into shell history and exposes it in the process table. In
+CI, `--value-env VAR` reads it from the environment instead.
+
+Both print the reference to paste into a node property, so you never assemble it
+by hand:
+
+```
+Secret 'stripe-key' written to shop/main as version 1 (value from stdin).
+  Reference (paste into an encrypted property): secret://stripe-key
+```
+
+Every command is branch-scoped: `--repo` and `--branch` (default `main`), with
+`--repo` falling back to the configured default repository. There is no
+`secret get` — no API returns a plaintext value, and a command that printed one
+would put credentials into terminal scrollback and CI logs.
 
 Over HTTP, under `/api/secrets/{repo}/{branch}`, admin-gated:
 
@@ -143,6 +161,14 @@ secret name may itself contain `@`, and only a trailing run of digits after the
 *last* `@` is a version — get that wrong and you silently read someone else's
 secret, or the wrong version of your own.
 
+A version pinned in the reference is honoured: `secret://k@1` reads version 1,
+not the newest. That is what makes reading an older node revision give the value
+that revision actually held. `get()` also takes an explicit version argument —
+`get("stripe-key", 2)`, or `get("secret://stripe-key", 2)` — but passing one
+*alongside a pinned reference* throws, because two stated versions cannot both
+be satisfied and quietly preferring either would defeat the guarantee the pin
+exists for.
+
 For a config value that *might* be a reference, `resolve()` handles both:
 
 ```js
@@ -157,12 +183,21 @@ baffling 401 far from the cause.
 
 This is **deny-by-default**. A function may only read the secrets its own
 `secret_policy` allowlist names, exactly like `network_policy` gates outbound
-HTTP:
+HTTP. Declare it in the function's `.node.yaml`:
 
 ```yaml
 secret_policy:
-  allow: ["stripe-key", "ms-*"]
+  enabled: true
+  allowed_names:
+    - "stripe-key"
+    - "ms-*"
 ```
+
+Both fields are required in substance. Omitting `enabled: true` denies
+everything, and so does an empty `allowed_names` — "opted in" never silently
+means "unrestricted". A denial names the secret and which of those two rules
+applied, so a missing grant reads as a missing grant rather than a missing
+secret.
 
 This matters more than it might look. Virtual-node adapters run privileged with
 row-level security bypassed *and* hold `raisin.http` — so an unrestricted secrets
@@ -200,11 +235,22 @@ Deleting a node tombstones its secrets; older versions stay readable so historic
 revisions still resolve. Clearing the field alone leaves earlier versions intact
 for the same reason.
 
-## Branches
+## Branches, copies and promotion
 
 Secrets are branch-scoped and are copied when you fork a branch, so a feature
 branch can hold test credentials without touching production. Promoting content
-between branches carries the referenced secrets with it.
+between branches carries the referenced secrets with it, so a promoted node can
+still resolve on the target.
+
+**Copying a node gives the copy its own secret.** A copy gets a new node id, and
+the secret name is derived from it, so the copy is re-sealed under its own name
+rather than sharing the original's. That is what stops deleting the source from
+taking the copy's password with it — and it means changing one afterwards does
+not change the other, which is usually what you want but is worth knowing if you
+expected them to stay in step.
+
+Promotion is the opposite case and behaves the opposite way: it preserves the
+node id, so both branches genuinely reference the same secret.
 
 ## Keys and rotation
 
@@ -216,24 +262,53 @@ RAISIN_MASTER_KEYS="1:<64 hex chars>,2:<64 hex chars>"
 RAISIN_MASTER_KEY_ACTIVE=2
 ```
 
-Every blob records which key sealed it, so old and new keys coexist and rotation
-is rolling rather than a flag day: deploy every node with both keys, then move
-`RAISIN_MASTER_KEY_ACTIVE` forward one node at a time.
+Old and new keys coexist, so rotation is rolling rather than a flag day: deploy
+every node with both keys, then move `RAISIN_MASTER_KEY_ACTIVE` forward one node
+at a time. **Keep retired keys in `RAISIN_MASTER_KEYS`** — anything still sealed
+under one stops opening the moment you drop it.
 
 The older single `RAISIN_MASTER_KEY` still works and is treated as key id `0`.
 
 :::warning Every node needs the same keys
-Ciphertext replicates; keys do not. A node that receives a secret sealed under a
-key it does not have will say so explicitly — `unknown key id 2 (have: [0, 1])` —
-rather than failing obscurely. Keep the key set identical across the cluster.
+Ciphertext replicates; keys do not. Keep the key set identical across the
+cluster, or a node will receive secrets it cannot open.
 :::
 
+### Envelope versions, and what is not active yet
+
+There are two on-disk envelope formats. The reader accepts both, always. Which
+one gets *written* is gated:
+
+| | v1 (written today) | v2 (`RAISIN_CRYPTO_EMIT_V2=1`) |
+|---|---|---|
+| key id in the blob | no | yes |
+| bound to tenant/repo/field (AAD) | no | yes |
+| opening a blob | trial-decrypt across the keyring | direct lookup by key id |
+
+**v1 is still the default**, because a v2 blob cannot be read by a node running
+an older binary — the format cannot flip in the same release that learns to read
+it. Until you set `RAISIN_CRYPTO_EMIT_V2`, three things do not apply:
+
+- **Blobs do not record which key sealed them.** Rotation still works, because a
+  v1 blob is opened by trying each key in the ring, but a blob no key opens
+  reports a plain decryption failure rather than naming the missing key id.
+- **AAD binding is not in effect.** A v2 blob is bound to its tenant, repo and
+  field; a v1 blob is not, so it would still decrypt if moved elsewhere.
+- **The development key is not marked** (see below).
+
+Turn the gate on only once every node in the cluster is running a binary that can
+read v2 — that is the whole reason it is a separate step.
+
 :::danger Development keys
-With no key configured, a dev-mode server uses a publicly-known all-zero key.
-Anything sealed with it is marked as such, and the server refuses to open those
-blobs when it is not in dev mode — so a development database promoted to
-production fails loudly instead of looking encrypted while being readable by
-anyone.
+With no key configured, a dev-mode server uses a publicly-known all-zero key —
+anything sealed with it is readable by anyone.
+
+Once `RAISIN_CRYPTO_EMIT_V2` is on, such blobs are tagged with a reserved key id
+and the server refuses to open them outside dev mode, so a promoted development
+database fails loudly instead of merely looking encrypted. **Under the current v1
+default there is no such tag and no such refusal** — a dev database promoted to
+production will keep working, silently, under a key that is public knowledge.
+Never promote one; re-seal the secrets instead.
 :::
 
 ## What this does not cover yet

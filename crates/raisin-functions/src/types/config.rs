@@ -230,7 +230,19 @@ impl NetworkPolicy {
 ///     - "stripe/*"
 ///     - "sendgrid_api_key"
 /// ```
+///
+/// # `deny_unknown_fields` is deliberate
+///
+/// Without it a misspelled key is silently DROPPED and both fields fall back to
+/// their defaults — so `allow: ["stripe-key"]` parses without a murmur and
+/// yields `enabled: false, allowed_names: []`, i.e. deny-everything, from a
+/// block the author believes grants access. The eventual denial then says "this
+/// function has no secret_policy" to someone looking straight at one. Refusing
+/// the unknown key turns that into a parse error naming it, which
+/// `extract_secret_policy` logs. (This type is new, so there is no stored data
+/// carrying extra keys for the strictness to break.)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretPolicy {
     /// Whether this function may touch the secret store at all.
     ///
@@ -336,6 +348,22 @@ mod tests {
             allowed_names: Vec::new(),
         };
         assert!(!policy.is_name_allowed("stripe_key"));
+    }
+
+    /// The trap this guards: `allow:` instead of `allowed_names:` must be a
+    /// parse ERROR, not a silently-dropped key that leaves a deny-everything
+    /// policy behind a block the author thinks grants access.
+    #[test]
+    fn secret_policy_rejects_an_unknown_key() {
+        let err = serde_json::from_value::<SecretPolicy>(serde_json::json!({
+            "enabled": true,
+            "allow": ["stripe-key"]
+        }))
+        .expect_err("a misspelled key must not be silently dropped");
+        assert!(
+            err.to_string().contains("allow"),
+            "the error must name the offending key: {err}"
+        );
     }
 
     #[test]

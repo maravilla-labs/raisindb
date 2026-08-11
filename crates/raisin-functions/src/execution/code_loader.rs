@@ -235,12 +235,37 @@ pub fn extract_network_policy(node: &Node) -> NetworkPolicy {
 /// declared `secret_policy` must not be able to read a single secret. See
 /// [`SecretPolicy`] for why that default is load-bearing rather than merely
 /// tidy.
+///
+/// # A malformed block is loud
+///
+/// Denying is the right *behaviour* for a block that will not parse, but it is
+/// a terrible *diagnostic*: the resulting denial says "this function has no
+/// secret_policy" to an author who is looking straight at the block they wrote.
+/// `SecretPolicy` is `deny_unknown_fields`, so a misspelled key (`allow:`
+/// instead of `allowed_names:`) fails to parse rather than being dropped, and
+/// this warns with the serde error naming the offending key. The safe default
+/// still applies — the log is what makes it debuggable.
 pub fn extract_secret_policy(node: &Node) -> SecretPolicy {
-    node.properties
-        .get("secret_policy")
-        .and_then(|v| serde_json::to_value(v).ok())
-        .and_then(|v| serde_json::from_value::<SecretPolicy>(v).ok())
-        .unwrap_or_default()
+    let Some(raw) = node.properties.get("secret_policy") else {
+        return SecretPolicy::default();
+    };
+    let parsed = serde_json::to_value(raw)
+        .map_err(|e| e.to_string())
+        .and_then(|v| serde_json::from_value::<SecretPolicy>(v).map_err(|e| e.to_string()));
+
+    match parsed {
+        Ok(policy) => policy,
+        Err(e) => {
+            tracing::warn!(
+                function_path = %node.path,
+                error = %e,
+                "secret_policy on this function could not be parsed and was ignored; \
+                 the function has NO secret access. Expected `enabled: true` plus \
+                 `allowed_names: [...]`."
+            );
+            SecretPolicy::default()
+        }
+    }
 }
 
 /// Extract resource_limits from node properties.
