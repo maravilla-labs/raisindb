@@ -79,6 +79,22 @@ properties:
       HTTP access configuration.
       Structure: { http_enabled, allowed_urls, max_concurrent_requests, request_timeout_ms }
 
+  - name: secret_policy
+    type: Object
+    required: false
+    title: Secret Policy
+    description: |
+      Which secrets this function may reach through `raisin.secrets.*`.
+      Structure: { enabled, allowed_names }
+
+      Deny-by-default: an absent block, `enabled: false`, or an empty
+      `allowed_names` all mean no access. `allowed_names` entries are globs
+      matched against the resolved secret NAME, so a grant works whether the
+      caller passes `stripe-key` or `secret://stripe-key@2`.
+
+      This node type is `strict`, so the property has to be declared here
+      before it can be set at all.
+
   - name: triggers
     type: Array
     required: false
