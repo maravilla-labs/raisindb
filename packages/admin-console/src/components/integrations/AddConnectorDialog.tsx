@@ -168,9 +168,15 @@ export default function AddConnectorDialog({
                     </div>
                   </div>
 
+                  {/* Deliberately vague about WHAT comes next, because it differs per
+                      connector and the template is what decides: an OAuth connector the
+                      operator registered themselves wants a client id and secret, one whose
+                      credentials are provisioned wants nothing but "Connect account", and
+                      IMAP wants a username and password and has no OAuth client at all.
+                      Naming any of them here is wrong for the other two. */}
                   <p className="text-xs text-zinc-500">
                     The provider settings, config schema and setup instructions come from the
-                    template. You will add the client id, client secret and connections next.
+                    template. You will add any remaining details and connect an account next.
                   </p>
                 </>
               )}

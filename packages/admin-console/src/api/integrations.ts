@@ -204,6 +204,14 @@ export interface Integration {
   config_type?: string
   /** NodeType declaring the per-connection config fields ("Add connection"). */
   connection_config_type?: string
+  /**
+   * NodeType declaring which `oauth_config` fields THIS CONNECTOR's operator owns.
+   * When set, the editor renders those instead of its built-in credential form —
+   * a connector whose client credentials are issued elsewhere declares a type with
+   * none, so nothing is offered. Absent = the built-in form, which is correct when
+   * the operator registers the provider app themselves.
+   */
+  oauth_config_type?: string
   /** Connector-level non-secret config values, validated against `config_type`. */
   config?: Record<string, unknown>
   /** Names only of the connector-level secrets that are stored. */
@@ -750,6 +758,7 @@ function nodeToIntegration(node: Node): Integration {
     docs_url: (p.docs_url as string) || undefined,
     config_type: (p.config_type as string) || undefined,
     connection_config_type: (p.connection_config_type as string) || undefined,
+    oauth_config_type: (p.oauth_config_type as string) || undefined,
     config: (p.config as Record<string, unknown>) || undefined,
     config_secret_fields: (p.config_secret_fields as string[]) || [],
     _raw: p,

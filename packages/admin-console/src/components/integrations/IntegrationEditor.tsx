@@ -103,6 +103,39 @@ export default function IntegrationEditor({
     }
   }, [repo, current?.config_type])
 
+  // The OAuth surface, same idea one level up: when the connector declares an
+  // `oauth_config_type`, that NodeType states which OAuth fields ITS OPERATOR
+  // owns, and we render those instead of the built-in credential form below.
+  //
+  // A connector whose client credentials are issued elsewhere — by a control
+  // plane, or an upstream broker — declares a type with no credential
+  // properties, so nothing is offered and the operator is left with "Connect
+  // account". Offering them a client id they do not own is not just noise: the
+  // save path replaces the whole property map, so an edit there can wipe
+  // provisioned values.
+  const [oauthSchema, setOauthSchema] = useState<ResolvedNodeType | null>(null)
+
+  useEffect(() => {
+    const typeName = current?.oauth_config_type
+    if (!typeName) {
+      setOauthSchema(null)
+      return
+    }
+    let cancelled = false
+    nodeTypesApi
+      .getResolved(repo, 'main', typeName, 'raisin:system')
+      .then((r) => !cancelled && setOauthSchema(r))
+      .catch(() => {
+        // Same degradation as above: fall back to the built-in form rather than
+        // render nothing, so an uninstalled package never leaves an operator
+        // with no way to configure OAuth at all.
+        if (!cancelled) setOauthSchema(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [repo, current?.oauth_config_type])
+
   /** Swap the authority segment in both Microsoft endpoint URLs. */
   function applyMsTenant() {
     const tenant = msTenant.trim()
@@ -347,13 +380,17 @@ export default function IntegrationEditor({
           )}
           <div className="grid grid-cols-2 gap-4">
             <div>
+              {/* Placeholders stay provider-NEUTRAL. They used to read "google-drive" /
+                  "Google Drive" / "/adapters/google-drive", which meant every connector —
+                  Microsoft, IMAP, anything — showed Google hints in its empty fields, and
+                  read as though the wrong connector had been opened. */}
               <label className={labelCls}>Name *</label>
               <input
                 className={field}
                 value={name}
                 disabled={isEdit}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="google-drive"
+                placeholder="my-connector"
               />
             </div>
             <div>
@@ -362,7 +399,7 @@ export default function IntegrationEditor({
                 className={field}
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Google Drive"
+                placeholder="My Connector"
               />
             </div>
             <div>
@@ -371,7 +408,7 @@ export default function IntegrationEditor({
                 className={field}
                 value={providerType}
                 onChange={(e) => setProviderType(e.target.value)}
-                placeholder="google-drive"
+                placeholder="custom"
               />
             </div>
             <div>
@@ -380,7 +417,7 @@ export default function IntegrationEditor({
                 className={field}
                 value={adapterFn}
                 onChange={(e) => setAdapterFn(e.target.value)}
-                placeholder="/adapters/google-drive"
+                placeholder="/adapters/my-connector"
               />
             </div>
           </div>
@@ -448,6 +485,29 @@ export default function IntegrationEditor({
             </details>
           </fieldset>
 
+          {oauthSchema ? (
+            /* The connector declared its OAuth surface. Render exactly what it
+               says the operator owns — which for a connector with externally
+               issued credentials is nothing, collapsing this to a note. */
+            <fieldset className="border border-white/10 rounded-lg p-4 space-y-4">
+              <legend className="px-2 text-sm font-semibold text-zinc-300">
+                OAuth configuration
+              </legend>
+              {(oauthSchema.resolved_properties || []).length === 0 ? (
+                <p className="text-sm text-zinc-400">
+                  This connector's OAuth client is configured for you — there is nothing to
+                  enter here. Connect an account below.
+                </p>
+              ) : (
+                <SchemaForm
+                  properties={(oauthSchema.resolved_properties || []) as any[]}
+                  values={oauth as Record<string, any>}
+                  onChange={(name, value) => patchOauth({ [name]: value } as Partial<OAuthConfig>)}
+                  disabled={saving}
+                />
+              )}
+            </fieldset>
+          ) : (
           <fieldset className="border border-white/10 rounded-lg p-4 space-y-4">
             <legend className="px-2 text-sm font-semibold text-zinc-300">OAuth configuration</legend>
             <div className="grid grid-cols-2 gap-4">
@@ -596,6 +656,7 @@ export default function IntegrationEditor({
               )}
             </div>
           </fieldset>
+          )}
 
           {configSchema && (configSchema.resolved_properties?.length ?? 0) > 0 && (
             <fieldset className="border border-white/10 rounded-lg p-4 space-y-4">

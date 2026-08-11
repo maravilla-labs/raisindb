@@ -426,10 +426,14 @@ mod tests {
         );
 
         let integration = by_name("raisin:Integration").expect("raisin:Integration must load");
-        assert_eq!(integration.version, Some(2));
+        // raisin:Integration is strict, so each property below must be declared or a
+        // connector using it is rejected on write — and adding one is a schema change
+        // that must bump the version, or existing repos never resync.
+        assert_eq!(integration.version, Some(3));
         for prop in [
             "config_type",
             "connection_config_type",
+            "oauth_config_type",
             "config",
             "config_secrets_encrypted",
             "config_secret_fields",

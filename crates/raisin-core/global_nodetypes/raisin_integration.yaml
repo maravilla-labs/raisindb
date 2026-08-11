@@ -1,7 +1,7 @@
 name: raisin:Integration
 description: Tenant/repo-level configuration for an external system integration
 icon: plug
-version: 2
+version: 3
 strict: true
 indexable: true
 index_types: [Property]
@@ -70,6 +70,34 @@ properties:
       "msgraph:ConnectionConfig" (tenant_id). Extends raisin:ConnectionConfig.
       Its values live on each connected_accounts[] entry, which is what lets one
       connector hold several independent connections.
+
+  - name: oauth_config_type
+    type: String
+    required: false
+    title: OAuth Config Type
+    description: |
+      NodeType describing the OAuth fields THIS CONNECTOR's operator actually
+      owns, e.g. "acme:ProvisionedOAuthConfig". Values land in `oauth_config`;
+      the server reads that object exactly as before, so this changes nothing
+      but which fields the admin console offers.
+
+      Absent = the console renders its built-in OAuth form (client id, secret,
+      auth/token URL, scopes, redirect URI), which is the right surface when the
+      operator registers the provider app themselves.
+
+      Declare it when they do NOT. A connector whose client credentials are
+      issued by a control plane, or by an upstream broker, ships a type with no
+      credential properties: the console then offers nothing to edit and the
+      operator is left with "Connect account". A deployment that pre-assigns
+      client ids but lets operators choose scopes declares a type with just
+      scopes. There is no "managed" flag — the schema IS the statement of what
+      the operator owns, which is why this stays honest as new arrangements
+      appear.
+
+      Same mechanism as config_type / connection_config_type: resolved through
+      NodeTypeResolver (so `extends` and mixins work) and rendered from `meta`
+      hints. An unresolvable type degrades to the built-in form rather than
+      rendering nothing.
 
   - name: config
     type: Object
