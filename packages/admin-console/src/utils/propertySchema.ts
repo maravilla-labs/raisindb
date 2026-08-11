@@ -56,9 +56,20 @@ export function getSchemaDescription(schema: any): string | undefined {
  * Secret values are never sent to the browser — only the field NAME appears, in
  * `secret_fields` / `config_secret_fields`. The form renders a write-only input
  * and submits changes through the dedicated encrypting endpoints.
+ *
+ * `encrypted` is the first-class spelling: `PropertyValueSchema` and
+ * `FieldTypeSchema` both carry `encrypted: Option<bool>`, and the server's write
+ * layer vaults such a field into the secret store. It is checked FIRST because
+ * it is the one the server acts on — a form that rendered a plain input for it
+ * would show the operator a `secret://…` reference where a value belongs.
+ *
+ * The two legacy spellings stay honoured, matching the server's own `is_secret`:
+ * a top-level `secret` (client-supplied inline schemas) and `meta.secret`
+ * (already-shipped authored schemas, where free-form `meta` was the only key
+ * that survived the serde round trip).
  */
 export function isSecretField(schema: any): boolean {
-  return Boolean(schema?.secret ?? metaOf(schema).secret)
+  return Boolean(schema?.encrypted ?? schema?.secret ?? metaOf(schema).encrypted ?? metaOf(schema).secret)
 }
 
 /** Optional grouping key, so related fields render together. */

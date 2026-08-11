@@ -59,6 +59,7 @@ import AccessControlSettings from './pages/AccessControlSettings'
 import Integrations from './pages/Integrations'
 import McpConnections from './pages/McpConnections'
 import Mounts from './pages/Mounts'
+import Secrets from './pages/Secrets'
 import MountDetail from './pages/MountDetail'
 
 /**
@@ -190,6 +191,11 @@ function App() {
           {/* Sidebar highlighting is prefix-based (`isActive('/mounts')` in
               RepositoryLayout), so the nested detail route keeps Mounts lit. */}
           <Route path="mounts/:mountName" element={<MountDetail />} />
+          {/* Secrets are scoped to a BRANCH, so both forms are registered: the
+              branchless one falls back to `main`, and the branch switcher
+              rewrites to the `:branch` form (see RepositoryLayout's routeTypes). */}
+          <Route path="secrets" element={<Secrets />} />
+          <Route path=":branch/secrets" element={<Secrets />} />
           <Route path="query" element={<SqlQuery />} />
           <Route path="logs" element={<RepositoryExecutionLogs />} />
           <Route path="flows" element={<RepositoryFlows />} />
