@@ -82,7 +82,7 @@ use raisin_models::secret_ref::{format_secret_ref, node_field_secret_name, Secre
 use rocksdb::DB;
 
 use crate::indexing::property_walk::{walk_properties, walk_properties_mut, WalkCursor};
-use crate::secret_store::{SecretOwner, SecretScope, SecretStore};
+use crate::secret_store::{SecretOwner, SecretScope, SecretStore, StoredSecret};
 use crate::RocksDBStorage;
 
 /// Upper bound on vaulted fields per node, mirroring
@@ -171,10 +171,27 @@ impl Vaulter {
         }
     }
 
+    /// The secret store, built on first use.
+    ///
+    /// Only the COPY path needs this directly: a copy mints a new node id, so
+    /// the copy's secret has a new NAME, and only a re-seal under that name can
+    /// produce it. Every other lifecycle path moves sealed bytes and goes
+    /// through `secret_store::lifecycle`, which needs no keyring.
+    pub(crate) fn store(&self) -> Result<Arc<SecretStore>> {
+        lazy_secret_store(&self.secret_store, &self.db, &self.hlc)
+    }
+
     /// Seal every plaintext value sitting in a declared-secret field, rewriting
     /// the property to a `secret://` reference.
     ///
-    /// Returns `Ok(())` untouched for the ~99.9% of writes whose NodeType
+    /// Returns the versions MINTED by this call, in the order they were sealed,
+    /// so the caller can capture them for replication BEFORE it captures the
+    /// node operation — see `replication/operation_capture/secret_ops.rs` for
+    /// why that order is the whole guarantee. A memoized reuse mints nothing and
+    /// therefore reports nothing: the first write in the transaction already
+    /// captured that version.
+    ///
+    /// Returns an empty vector untouched for the ~99.9% of writes whose NodeType
     /// declares no secret field at all — that case costs one map lookup and no
     /// walk.
     pub(crate) async fn vault(
@@ -182,13 +199,13 @@ impl Vaulter {
         scope: VaultScope<'_>,
         node: &mut Node,
         memo: Option<&VaultMemo>,
-    ) -> Result<()> {
+    ) -> Result<Vec<StoredSecret>> {
         let fields = self.resolve_gate(node, &scope).await?;
 
         // THE FAST PATH. `EncryptedFields::None` is the only value that skips
         // the walk; `Unknown` deliberately does not (see the gate's docs).
         if !fields.must_examine() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         // The operator kill switch, checked AFTER the gate so a disabled
@@ -212,7 +229,7 @@ impl Vaulter {
                  the node blob and in the property index. Re-enabling does not retroactively seal \
                  anything already written this way."
             );
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let top_level: HashSet<&str> = match &fields {
@@ -249,6 +266,7 @@ impl Vaulter {
         let actor = scope.actor.to_string();
         let mut failure: Option<raisin_error::Error> = None;
         let mut vaulted = 0usize;
+        let mut minted: Vec<StoredSecret> = Vec::new();
 
         let deep = fields.needs_deep_walk();
         let mut vault_leaf = |cursor: &WalkCursor<'_>, value: &mut PropertyValue| -> bool {
@@ -322,13 +340,15 @@ impl Vaulter {
                         },
                     };
                     let owner = SecretOwner::node_field(actor.clone(), &node_id, cursor.path);
-                    match store.put(&secret_scope, &name, plaintext.as_bytes(), &owner) {
-                        Ok((_, version)) => {
+                    match store.put_recorded(&secret_scope, &name, plaintext.as_bytes(), &owner) {
+                        Ok(stored) => {
+                            let version = stored.record.version;
                             if let Some(m) = memo {
                                 m.lock()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .insert(name.clone(), (version, hash));
                             }
+                            minted.push(stored);
                             version
                         }
                         Err(e) => {
@@ -371,7 +391,7 @@ impl Vaulter {
             );
         }
 
-        Ok(())
+        Ok(minted)
     }
 
     /// Read the gate, resolving and caching the NodeType on a miss.
@@ -507,6 +527,64 @@ impl Vaulter {
 
         Ok(out)
     }
+}
+
+/// Retire the secrets an UPDATE dropped: an `encrypted` property removed, or
+/// set null.
+///
+/// The mirror image of [`Vaulter::vault`], and it belongs beside the other
+/// old-vs-new index diffs (property, reference, spatial, compound) that every
+/// update path already runs — same shape, same inputs, same reason. Without it a
+/// cleared password stays readable through `secret://node/{id}/password`
+/// forever, and the node no longer even shows that it exists.
+///
+/// **Staged into the caller's batch**, unlike the vault write, which is
+/// immediate. A rolled-back transaction that had already tombstoned would have
+/// destroyed a live secret; a rolled-back transaction that minted an extra
+/// version merely leaves an orphan.
+///
+/// Needs no keyring — a tombstone carries no ciphertext.
+///
+/// Returns the tombstones written, for the caller to capture for replication.
+/// That capture is NOT optional: the replication apply path writes node
+/// snapshots directly (`snapshot_ops.rs`), never through this function, so a
+/// peer would otherwise keep the cleared secret live.
+pub(crate) fn tombstone_cleared_secrets(
+    db: &DB,
+    batch: &mut rocksdb::WriteBatch,
+    scope: &SecretScope,
+    old: &Node,
+    new: &Node,
+    revision: &raisin_hlc::HLC,
+    actor: &str,
+) -> Result<Vec<StoredSecret>> {
+    let cleared = crate::secret_store::lifecycle::cleared_secret_names(old, new);
+    if cleared.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let handle = crate::secret_store::lifecycle::secrets_cf(db)?;
+    let mut written = Vec::new();
+    for name in cleared {
+        let Some(previous) = crate::secret_store::lifecycle::newest_version(db, scope, &name)?
+        else {
+            continue; // nothing stored under that name on this branch
+        };
+        if previous.record.deleted {
+            continue;
+        }
+        let record = crate::secret_store::lifecycle::tombstone_of(&previous, Some(actor));
+        let at = crate::secret_store::lifecycle::strictly_after(*revision, previous.revision);
+        crate::secret_store::lifecycle::write_record_to_batch(
+            batch, handle, scope, &name, &at, &record,
+        )?;
+        written.push(StoredSecret {
+            name,
+            revision: at,
+            record,
+        });
+    }
+    Ok(written)
 }
 
 /// Build the secret store on first use, sharing one instance per database.

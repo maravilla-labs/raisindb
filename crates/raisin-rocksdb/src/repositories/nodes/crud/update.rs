@@ -119,17 +119,18 @@ impl NodeRepositoryImpl {
             .updated_by
             .clone()
             .unwrap_or_else(|| "anonymous".to_string());
-        self.vault_encrypted_fields(
-            crate::vaulting::VaultScope {
-                tenant_id,
-                repo_id,
-                branch,
-                actor: &vault_actor,
-            },
-            &mut node,
-            None,
-        )
-        .await?;
+        let mut secret_ops = self
+            .vault_encrypted_fields(
+                crate::vaulting::VaultScope {
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    actor: &vault_actor,
+                },
+                &mut node,
+                None,
+            )
+            .await?;
 
         // ========== STEP 1: Allocate revision ==========
         let step_start = std::time::Instant::now();
@@ -171,6 +172,21 @@ impl NodeRepositoryImpl {
                 &revision,
             );
         }
+
+        // Secret store: an `encrypted` property REMOVED (or set null) must
+        // retire its secret, or the old value stays readable through
+        // `secret://node/{id}/{field}` forever with nothing on the node to show
+        // it exists. Same old-vs-new diff as its index neighbours here; see
+        // `crate::vaulting::tombstone_cleared_secrets`.
+        secret_ops.extend(crate::vaulting::tombstone_cleared_secrets(
+            &self.db,
+            &mut batch,
+            &crate::secret_store::SecretScope::new(tenant_id, repo_id, branch),
+            &old_node,
+            &node,
+            &revision,
+            &vault_actor,
+        )?);
 
         // Reference index: tombstone stale OLD entries (reference removed /
         // retargeted) — otherwise REFERENCES()/backlinks keep matching this
@@ -263,6 +279,14 @@ impl NodeRepositoryImpl {
                 &updated_branch,
                 revision,
             )
+            .await;
+
+        // ========== STEP 6b: Capture secret versions, BEFORE the node ==========
+        // Same `(tenant, repo)` lane as the node operation below, and earlier in
+        // it — which is what makes a peer's causal buffer hold the node snapshot
+        // until the secret has landed. See
+        // `replication/operation_capture/secret_ops.rs`.
+        self.capture_secret_versions(tenant_id, repo_id, branch, &vault_actor, &secret_ops)
             .await;
 
         // ========== STEP 7: Capture operation for replication ==========

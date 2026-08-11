@@ -225,6 +225,28 @@ impl NodeRepositoryImpl {
             // Update parent reference
             new_node.parent = Node::extract_parent_name_from_path(&new_node_path);
 
+            // Every node in the tree gets a NEW id, so every one of them must
+            // get its own secrets — same reasoning as the single-node copy; see
+            // `revault.rs`.
+            let minted_secrets = self
+                .revault_copied_node(
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    &source_node.id,
+                    &mut new_node,
+                    &translation_actor,
+                )
+                .await?;
+            self.capture_secret_versions(
+                tenant_id,
+                repo_id,
+                branch,
+                &translation_actor,
+                &minted_secrets,
+            )
+            .await;
+
             // Determine the NEW parent ID for ORDERED_CHILDREN index
             let new_parent_id: Option<String> = if depth == 0 {
                 Some(target_parent_node.id.clone())

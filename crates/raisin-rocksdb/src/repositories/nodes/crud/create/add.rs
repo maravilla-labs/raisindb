@@ -87,17 +87,24 @@ impl NodeRepositoryImpl {
             .updated_by
             .clone()
             .unwrap_or_else(|| "anonymous".to_string());
-        self.vault_encrypted_fields(
-            crate::vaulting::VaultScope {
-                tenant_id,
-                repo_id,
-                branch,
-                actor: &vault_actor,
-            },
-            &mut node,
-            None,
-        )
-        .await?;
+        let minted_secrets = self
+            .vault_encrypted_fields(
+                crate::vaulting::VaultScope {
+                    tenant_id,
+                    repo_id,
+                    branch,
+                    actor: &vault_actor,
+                },
+                &mut node,
+                None,
+            )
+            .await?;
+
+        // Replicate the sealed bytes BEFORE the node that references them, on
+        // the node's own (tenant, repo) lane — see
+        // `replication/operation_capture/secret_ops.rs`.
+        self.capture_secret_versions(tenant_id, repo_id, branch, &vault_actor, &minted_secrets)
+            .await;
 
         // ========== STEP 1: Allocate revision ==========
         let step_start = std::time::Instant::now();

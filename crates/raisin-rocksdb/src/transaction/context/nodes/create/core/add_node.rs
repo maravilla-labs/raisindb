@@ -153,7 +153,8 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         .updated_by
         .clone()
         .unwrap_or_else(|| "anonymous".to_string());
-    tx.node_repo
+    let minted_secrets = tx
+        .node_repo
         .vault_encrypted_fields(
             crate::vaulting::VaultScope {
                 tenant_id: &tenant_id,
@@ -165,6 +166,15 @@ pub async fn add_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
             Some(&tx.vaulted_secrets),
         )
         .await?;
+
+    // 6b. Replicate the sealed bytes BEFORE the node that references them.
+    // Same `(tenant, repo)` lane as the node operation this transaction will
+    // capture at commit, and earlier in it — which is what makes a peer's causal
+    // buffer hold the node snapshot until the secret has landed. See
+    // `replication/operation_capture/secret_ops.rs`.
+    tx.node_repo
+        .capture_secret_versions(&tenant_id, &repo_id, &branch, &vault_actor, &minted_secrets)
+        .await;
 
     // 6. Update read cache for read-your-writes semantics
     cache::update_read_cache(tx, workspace, &normalized_node, None)?;

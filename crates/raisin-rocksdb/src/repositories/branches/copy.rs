@@ -179,9 +179,11 @@ impl BranchRepositoryImpl {
                 skipped_unparseable += 1;
             }
 
-            // Only copy if revision <= max_revision
+            // Only copy if revision <= max_revision — unless the CF declares the
+            // head is not a meaningful bound on it (see
+            // `CopyPlan::honour_max_revision`).
             if let Some(revision) = revision_opt {
-                if &revision <= max_revision {
+                if !plan.honour_max_revision || &revision <= max_revision {
                     // Create new key with target branch instead of source branch
                     // Replace the branch component (index 2) with target_branch
                     let new_key = Self::build_key_with_branch(&parts, target_branch);

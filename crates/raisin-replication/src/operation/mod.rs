@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-pub use op_type::OpType;
+pub use op_type::{OpType, ReplicatedSecret};
 
 /// A replayable operation that represents a single mutation in the database.
 ///
@@ -144,6 +144,13 @@ pub enum OperationTarget {
     OAuthRefreshFamily(String),
     /// An API key.
     ApiKey(String),
+    /// One secret name, qualified by branch — `{branch}:{name}`.
+    ///
+    /// The branch belongs in the target because the store is branch-scoped: the
+    /// same name on two branches is two independent secrets, and merging them
+    /// into one LWW register would let a promotion onto `staging` clobber
+    /// `main`'s value.
+    Secret(String),
     /// A single committed revision (branch + head HLC). Revisions are
     /// cumulative deltas, NOT convergent register states: every distinct
     /// ApplyRevision must be applied, so each gets its own target and is
@@ -172,6 +179,7 @@ impl std::fmt::Display for OperationTarget {
             Self::OAuthRefreshToken(id) => write!(f, "oauth_refresh_token:{}", id),
             Self::OAuthRefreshFamily(id) => write!(f, "oauth_refresh_family:{}", id),
             Self::ApiKey(id) => write!(f, "api_key:{}", id),
+            Self::Secret(id) => write!(f, "secret:{}", id),
             Self::Revision(id) => write!(f, "revision:{}", id),
         }
     }

@@ -136,13 +136,64 @@ impl NodeRepositoryImpl {
     /// Seal any plaintext sitting in a field declared `encrypted: true`.
     ///
     /// The single entry point for every write layer — see `crate::vaulting`.
+    /// Returns the secret versions minted by this call, for replication capture.
     pub(crate) async fn vault_encrypted_fields(
         &self,
         scope: crate::vaulting::VaultScope<'_>,
         node: &mut raisin_models::nodes::Node,
         memo: Option<&crate::vaulting::VaultMemo>,
-    ) -> raisin_error::Result<()> {
+    ) -> raisin_error::Result<Vec<crate::secret_store::StoredSecret>> {
         self.vaulter.vault(scope, node, memo).await
+    }
+
+    /// Capture secret versions for replication.
+    ///
+    /// Call this BEFORE capturing the node operation that references them, on
+    /// the node's own `(tenant, repo)` — see
+    /// `replication/operation_capture/secret_ops.rs`.
+    ///
+    /// A capture failure is logged, never propagated: a hiccup here must not
+    /// fail the node write. The consequence is a reference that resolves on this
+    /// node and is `Pending` on peers until the next write of the same secret,
+    /// which is exactly the "not converged yet" state the store's error split
+    /// already models — while a propagated error would mean an encrypted field
+    /// cannot be saved at all.
+    pub(crate) async fn capture_secret_versions(
+        &self,
+        tenant_id: &str,
+        repo_id: &str,
+        branch: &str,
+        actor: &str,
+        minted: &[crate::secret_store::StoredSecret],
+    ) {
+        for stored in minted {
+            if let Err(e) = self
+                .operation_capture
+                .capture_upsert_secret(
+                    tenant_id.to_string(),
+                    repo_id.to_string(),
+                    branch.to_string(),
+                    stored,
+                    actor.to_string(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    secret = %stored.name,
+                    version = stored.record.version,
+                    "failed to capture a secret version for replication; peers will report it \
+                     Pending until the next write of this secret"
+                );
+            }
+        }
+    }
+
+    /// The secret store — see [`crate::vaulting::Vaulter::store`].
+    pub(crate) fn secret_store(
+        &self,
+    ) -> raisin_error::Result<std::sync::Arc<crate::secret_store::SecretStore>> {
+        self.vaulter.store()
     }
 
     /// Allocate a fresh owner token for CREATE path reservations.

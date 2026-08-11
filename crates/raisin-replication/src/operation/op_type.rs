@@ -377,6 +377,35 @@ pub enum OpType {
     /// the revocation.
     UpsertApiKey { key_id: String, api_key: ApiKey },
 
+    /// One version of one secret, as SEALED BYTES.
+    ///
+    /// # This never carries plaintext
+    ///
+    /// [`ReplicatedSecret`] has no field that could hold it: the payload is the
+    /// envelope the originating node produced plus the `key_id` it sealed under,
+    /// so a peer stores exactly what the origin stored and opens it with its own
+    /// copy of that master key. Re-sealing on the receiving side would need the
+    /// plaintext on the wire, which is the thing this design exists to avoid.
+    ///
+    /// # Ordering against the node that references it
+    ///
+    /// Captured on the node's REAL `(tenant, repo)` and BEFORE the node
+    /// operation, in the same commit. `OperationCapture` keeps one vector clock
+    /// per `(tenant, repo)`, so same-lane capture is what makes the causal
+    /// delivery buffer hold the node snapshot until this has landed. Captured on
+    /// a different lane (the `system` pseudo-repo the OAuth captures use, say)
+    /// there would be no ordering relation at all and a peer could apply the
+    /// node first.
+    ///
+    /// A dangling reference must NEVER fail the node apply — a secret-store
+    /// hiccup cannot be allowed to stall the replication stream. It surfaces at
+    /// reveal time, as `Pending`, which is precisely the "not converged yet"
+    /// answer the store's error split exists to give.
+    UpsertSecret {
+        name: String,
+        secret: ReplicatedSecret,
+    },
+
     /// Rotate refresh token (increment generation counter)
     ///
     /// This operation is captured when a token is refreshed, incrementing the
@@ -385,4 +414,37 @@ pub enum OpType {
         session_id: String,
         new_generation: u32,
     },
+}
+
+/// One version of one secret on the wire: **ciphertext only**.
+///
+/// A structural mirror of the storage record in `raisin-rocksdb`'s secret store,
+/// declared here because `raisin-replication` sits below the storage engine and
+/// cannot depend on it. The engine converts in both directions.
+///
+/// `revision` is the storage key's descending-HLC trailer, which is NOT inside
+/// the record. It rides along so a peer writes the byte-identical key rather
+/// than minting its own — which makes a redelivery idempotent instead of
+/// appending a duplicate version, and keeps a pinned `secret://name@N` resolving
+/// to the same bytes on every node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicatedSecret {
+    /// The sealed envelope. Empty for a tombstone.
+    pub ciphertext: Vec<u8>,
+    /// Which master key sealed it. A peer whose keyring lacks the id fails
+    /// loudly at REVEAL time, naming the id — never at apply time.
+    pub key_id: u16,
+    /// The human-facing ordinal (`secret://name@{version}`).
+    pub version: u64,
+    /// Storage revision: the key's 16-byte descending trailer.
+    pub revision: HLC,
+    pub created_at: String,
+    pub created_by: String,
+    pub rotated_at: Option<String>,
+    pub owner_node: Option<String>,
+    pub owner_field: Option<String>,
+    /// Tombstone marker. A field clear and a node delete both replicate as an
+    /// `UpsertSecret` whose record is a tombstone — one operation covers the
+    /// whole lifecycle, which is why there is no `DeleteSecret`.
+    pub deleted: bool,
 }

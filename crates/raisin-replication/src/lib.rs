@@ -111,7 +111,7 @@ pub use metrics::{
     ReplicationMetrics,
 };
 pub use metrics_reporter::{metrics_to_json, metrics_to_json_compact, MetricsReporter};
-pub use operation::{OpType, Operation, OperationTarget};
+pub use operation::{OpType, Operation, OperationTarget, ReplicatedSecret};
 pub use operation_decomposer::decompose_operation;
 pub use operation_decomposer_metrics::OperationDecomposer;
 pub use peer_manager::{ConnectionState, PeerManager, PeerManagerError, PeerStatus};

@@ -43,6 +43,11 @@ impl OperationPriority {
             | OpType::UpsertOAuthRefreshToken { .. }
             | OpType::RevokeOAuthRefreshFamily { .. }
             | OpType::UpsertApiKey { .. }
+            // A secret must never be applied AFTER the node that references it:
+            // the reference would resolve to nothing until the next delivery.
+            // Critical is the only class that cannot be reordered behind the
+            // Medium/Low node operations by `sort_operations_by_priority`.
+            | OpType::UpsertSecret { .. }
             | OpType::RotateRefreshToken { .. } => OperationPriority::Critical,
 
             // High: Schema and workspace structure

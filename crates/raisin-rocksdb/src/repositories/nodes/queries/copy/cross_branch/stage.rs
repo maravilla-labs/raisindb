@@ -91,6 +91,12 @@ impl NodeRepositoryImpl {
             Some(&entry.dst_parent_id),
         )?;
 
+        // A `secret://` reference is branch-agnostic but `cf::SECRETS` is
+        // branch-scoped, so the sealed record has to travel with the node or the
+        // promoted node's encrypted fields resolve to nothing on the target —
+        // silently, because reads never resolve a reference. See `secrets.rs`.
+        self.stage_secret_copies(batch, &node, scope, &mut acc.secrets)?;
+
         // Compound/unique indexes: tombstone the OLD target values first,
         // then write the new entries — without the tombstones a changed
         // column value would leave the stale old-value entry live (the

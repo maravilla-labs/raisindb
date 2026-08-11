@@ -52,6 +52,7 @@
 
 pub(super) mod crud;
 pub mod keys;
+pub mod lifecycle;
 mod record;
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,7 @@ use raisin_hlc::NodeHLCState;
 use raisin_models::secret_ref::SecretRefError;
 use rocksdb::DB;
 
+pub use lifecycle::StoredSecret;
 pub use record::{SecretMetadata, SecretOwner, SecretRecord};
 
 /// Which `{tenant, repo, branch}` a secret operation addresses.

@@ -15,6 +15,7 @@ mod core;
 mod node_ops;
 mod oauth_ops;
 mod schema_ops;
+mod secret_ops;
 mod workspace_ops;
 
 #[cfg(test)]

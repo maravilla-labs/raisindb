@@ -96,6 +96,29 @@ impl NodeRepositoryImpl {
         new_node.created_at = Some(chrono::Utc::now());
         new_node.updated_at = Some(chrono::Utc::now());
 
+        // The copy has a NEW id, so it must have its OWN secrets: the properties
+        // still carry `secret://node/{source_id}/…` references, and leaving them
+        // would make two nodes share one value — deleting the source would
+        // destroy the copy's. Re-vault before the write, so what lands (and what
+        // the index writers see) already names the new node. See `revault.rs`
+        // for why this is the opposite of a cross-branch promotion.
+        let copy_actor = operation_meta
+            .as_ref()
+            .map(|m| m.actor.clone())
+            .unwrap_or_else(|| "system".to_string());
+        let minted_secrets = self
+            .revault_copied_node(
+                tenant_id,
+                repo_id,
+                branch,
+                &source.id,
+                &mut new_node,
+                &copy_actor,
+            )
+            .await?;
+        self.capture_secret_versions(tenant_id, repo_id, branch, &copy_actor, &minted_secrets)
+            .await;
+
         // Use add_impl since we're creating a new node (copy creates a brand new node with new ID)
         self.add_impl(
             tenant_id,

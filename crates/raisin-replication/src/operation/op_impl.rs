@@ -136,6 +136,11 @@ impl Operation {
                 OperationTarget::OAuthRefreshFamily(family_id.clone())
             }
             OpType::UpsertApiKey { key_id, .. } => OperationTarget::ApiKey(key_id.clone()),
+            // Branch-qualified: `cf::SECRETS` is branch-scoped, so the same name
+            // on two branches is two independent registers.
+            OpType::UpsertSecret { name, .. } => {
+                OperationTarget::Secret(format!("{}:{}", self.branch, name))
+            }
             OpType::UpsertIdentity { identity_id, .. } | OpType::DeleteIdentity { identity_id } => {
                 OperationTarget::Identity(identity_id.clone())
             }

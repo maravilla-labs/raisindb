@@ -207,7 +207,8 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
         .updated_by
         .clone()
         .unwrap_or_else(|| "anonymous".to_string());
-    tx.node_repo
+    let mut secret_ops = tx
+        .node_repo
         .vault_encrypted_fields(
             crate::vaulting::VaultScope {
                 tenant_id: &tenant_id,
@@ -219,6 +220,42 @@ pub async fn put_node(tx: &RocksDBTransaction, workspace: &str, node: &Node) -> 
             Some(&tx.vaulted_secrets),
         )
         .await?;
+
+    // 7b. The other half of the same diff: an `encrypted` property REMOVED (or
+    // set null) must retire its secret, or the old value stays readable through
+    // `secret://node/{id}/{field}` forever with nothing on the node to show it
+    // exists. This sits with the property / reference / spatial / compound
+    // old-vs-new tombstone steps below because it is the same diff over the same
+    // two nodes — and it must run AFTER vaulting, so the new node already holds
+    // its references and a rewritten field is not mistaken for a cleared one.
+    if let Some(ref old_node) = existing_node {
+        let mut batch = tx
+            .batch
+            .lock()
+            .map_err(|e| raisin_error::Error::storage(format!("Lock error: {}", e)))?;
+        secret_ops.extend(crate::vaulting::tombstone_cleared_secrets(
+            &tx.db,
+            &mut batch,
+            &crate::secret_store::SecretScope::new(
+                tenant_id.as_str(),
+                repo_id.as_str(),
+                branch.as_str(),
+            ),
+            old_node,
+            &normalized_node,
+            &revision,
+            &vault_actor,
+        )?);
+    }
+
+    // 7c. Replicate the sealed bytes (and any tombstone) BEFORE the node that
+    // references them. Same `(tenant, repo)` lane as the node operation this
+    // transaction captures at commit, and earlier in it — which is what makes a
+    // peer's causal buffer hold the node snapshot until the secret has landed.
+    // See `replication/operation_capture/secret_ops.rs`.
+    tx.node_repo
+        .capture_secret_versions(&tenant_id, &repo_id, &branch, &vault_actor, &secret_ops)
+        .await;
 
     // 7. Update read cache for read-your-writes semantics
     cache::update_read_cache(

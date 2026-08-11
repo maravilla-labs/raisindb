@@ -20,6 +20,7 @@ mod collect;
 mod helpers;
 mod prune;
 mod roots;
+mod secrets;
 mod stage;
 mod translations;
 
@@ -60,6 +61,8 @@ struct CopyAccumulators {
     nodes_for_replication: Vec<(Node, String, String)>,
     /// Highest order label written per target parent (metadata cache upkeep).
     max_label_per_parent: HashMap<String, String>,
+    /// Secret versions copied into the target branch, for replication capture.
+    secrets: Vec<crate::secret_store::StoredSecret>,
 }
 
 /// One source node staged for copying, with its resolved parent ids.
@@ -165,6 +168,7 @@ impl NodeRepositoryImpl {
             change_infos,
             nodes_for_replication,
             max_label_per_parent,
+            secrets: Vec::new(),
         };
         for entry in &entries {
             self.stage_cross_branch_entry(&mut batch, entry, &scope, &mut acc)
@@ -175,6 +179,7 @@ impl NodeRepositoryImpl {
             mut change_infos,
             nodes_for_replication,
             max_label_per_parent,
+            secrets,
         } = acc;
 
         let copied = entries.len();
@@ -267,6 +272,13 @@ impl NodeRepositoryImpl {
                 &updated_branch,
                 revision,
             )
+            .await;
+
+        // Secrets FIRST, on the same (tenant, repo) lane as the node operations
+        // below: `OperationCapture` keeps one vector clock per (tenant, repo),
+        // so same-lane-and-earlier is what makes a peer's causal delivery buffer
+        // hold the node snapshot until the secret has landed.
+        self.capture_secret_versions(tenant_id, repo_id, target_branch, &meta_actor, &secrets)
             .await;
 
         self.capture_cross_branch_operations(

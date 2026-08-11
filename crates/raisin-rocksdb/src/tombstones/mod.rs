@@ -21,10 +21,12 @@
 //! 8. **COMPOUND_INDEX** - Multi-column compound indexes
 //! 9. **SPATIAL_INDEX** - Geohash-based spatial indexes
 //! 10. **TRANSLATION_DATA** - Locale overlay data
+//! 11. **SECRETS** - Vaulted `encrypted` field values
 
 mod core_tombstones;
 pub mod helpers;
 mod index_tombstones;
+mod secret_tombstones;
 
 #[cfg(test)]
 mod tests;
@@ -53,6 +55,7 @@ pub const DELETION_COLUMN_FAMILIES: &[&str] = &[
     cf::COMPOUND_INDEX,
     cf::SPATIAL_INDEX,
     cf::TRANSLATION_DATA,
+    cf::SECRETS,
 ];
 
 /// Context for tombstone operations
@@ -87,6 +90,7 @@ pub struct TombstoneColumnFamilies<'a> {
     pub compound_index: &'a ColumnFamily,
     pub spatial_index: &'a ColumnFamily,
     pub translation_data: &'a ColumnFamily,
+    pub secrets: &'a ColumnFamily,
 }
 
 impl<'a> TombstoneColumnFamilies<'a> {
@@ -104,6 +108,7 @@ impl<'a> TombstoneColumnFamilies<'a> {
             compound_index: cf_handle(db, cf::COMPOUND_INDEX)?,
             spatial_index: cf_handle(db, cf::SPATIAL_INDEX)?,
             translation_data: cf_handle(db, cf::TRANSLATION_DATA)?,
+            secrets: cf_handle(db, cf::SECRETS)?,
         })
     }
 
@@ -187,7 +192,14 @@ pub fn add_node_tombstones(
     // 10. TRANSLATION_DATA - Tombstone translation data (prefix scan)
     index_tombstones::tombstone_translation_data(batch, db, ctx, cfs, node, revision)?;
 
-    // 11. REGISTRY - Drop the virtual-mount registry entry (no-op for every
+    // 11. SECRETS - Retire every vaulted `encrypted` field value the node owns.
+    //     Found by an EXACT key prefix (`node/{node_id}/`), not by walking the
+    //     node's properties: a field cleared on an earlier revision left a
+    //     secret the current properties no longer mention, and that one must be
+    //     retired too. Prior versions survive — see `secret_tombstones`.
+    secret_tombstones::tombstone_secrets(batch, db, ctx, cfs, node, revision)?;
+
+    // 12. REGISTRY - Drop the virtual-mount registry entry (no-op for every
     //     other node type).
     //
     //     A real delete rather than a tombstone: the registry is a live derived

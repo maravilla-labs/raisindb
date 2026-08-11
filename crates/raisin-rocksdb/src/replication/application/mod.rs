@@ -16,6 +16,7 @@
 //! - `tag_operations` - Tag creation and deletion operations
 //! - `relation_operations` - Relation and archetype operations
 //! - `schema_operations` - NodeType, Archetype, and ElementType operations
+//! - `secret_operations` - Vaulted secret versions (ciphertext only)
 //!
 //! ## Helper Modules
 //!
@@ -33,6 +34,7 @@ mod identity_operations;
 mod node_operations;
 mod oauth_operations;
 mod relation_operations;
+mod secret_operations;
 mod tag_operations;
 mod tenant_operations;
 mod user_operations;

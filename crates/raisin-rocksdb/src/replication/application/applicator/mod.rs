@@ -516,6 +516,11 @@ impl OperationApplicator {
                 )
                 .await
             }
+            // ========== Secret Store ==========
+            OpType::UpsertSecret { name, secret } => {
+                super::secret_operations::apply_upsert_secret(self, name, secret, op).await
+            }
+
             OpType::UpsertApiKey { key_id, api_key } => {
                 super::oauth_operations::apply_upsert_api_key(
                     self,

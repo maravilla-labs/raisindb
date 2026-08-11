@@ -6,9 +6,8 @@ use raisin_hlc::HLC;
 use raisin_models::secret_ref::validate_secret_name;
 use rocksdb::{Direction, IteratorMode};
 
-use super::keys::{
-    branch_secrets_prefix, name_from_key, revision_from_key, secret_versions_prefix,
-};
+use super::keys::{branch_secrets_prefix, name_from_key, revision_from_key};
+use super::lifecycle::{self, StoredSecret};
 use super::{
     Result, SecretError, SecretMetadata, SecretOwner, SecretRecord, SecretScope, SecretStore,
 };
@@ -47,6 +46,22 @@ impl SecretStore {
         plaintext: &[u8],
         owner: &SecretOwner,
     ) -> Result<(String, u64)> {
+        let stored = self.append(scope, name, plaintext, owner, false)?;
+        Ok((stored.name, stored.record.version))
+    }
+
+    /// [`SecretStore::put`], returning the record as written.
+    ///
+    /// The write paths need this: what replicates is the sealed record AND the
+    /// storage revision that keys it (which is not inside the record), so a peer
+    /// can write the identical key rather than minting a divergent one.
+    pub fn put_recorded(
+        &self,
+        scope: &SecretScope,
+        name: &str,
+        plaintext: &[u8],
+        owner: &SecretOwner,
+    ) -> Result<StoredSecret> {
         self.append(scope, name, plaintext, owner, false)
     }
 
@@ -62,7 +77,8 @@ impl SecretStore {
         new_plaintext: &[u8],
         owner: &SecretOwner,
     ) -> Result<(String, u64)> {
-        self.append(scope, name, new_plaintext, owner, true)
+        let stored = self.append(scope, name, new_plaintext, owner, true)?;
+        Ok((stored.name, stored.record.version))
     }
 
     /// Append a tombstone version. Prior versions are left intact.
@@ -70,12 +86,26 @@ impl SecretStore {
     /// Returns the tombstone's ordinal. Deleting an unknown name is not an
     /// error — the tombstone is what a converging replica needs to see.
     pub fn delete(&self, scope: &SecretScope, name: &str, owner: &SecretOwner) -> Result<u64> {
+        Ok(self.delete_recorded(scope, name, owner)?.record.version)
+    }
+
+    /// [`SecretStore::delete`], returning the tombstone as written — see
+    /// [`SecretStore::put_recorded`] for why the caller needs it.
+    pub fn delete_recorded(
+        &self,
+        scope: &SecretScope,
+        name: &str,
+        owner: &SecretOwner,
+    ) -> Result<StoredSecret> {
         validate_secret_name(name)?;
-        let version = self.next_ordinal(scope, name)?;
         let record = SecretRecord {
             ciphertext: Vec::new(),
-            key_id: self.secret_box.keys().active().0,
-            version,
+            // Deliberately meaningless: there is nothing to open, and `get`
+            // reports `Gone` before it consults the keyring. See
+            // `lifecycle::tombstone_of`, which mints the same shape without a
+            // keyring at all.
+            key_id: 0,
+            version: self.next_ordinal(scope, name)?,
             created_at: Utc::now().to_rfc3339(),
             created_by: owner.actor_or_anonymous(),
             rotated_at: None,
@@ -83,8 +113,24 @@ impl SecretStore {
             owner_field: owner.field.clone(),
             deleted: true,
         };
-        self.write_record(scope, name, &record)?;
-        Ok(version)
+        self.write_record(scope, name, &record)
+    }
+
+    /// Write one record verbatim at an explicit revision.
+    ///
+    /// The **replication** entry point: a peer's sealed bytes are written under
+    /// the peer's `key_id`, at the peer's revision, so the two nodes hold
+    /// byte-identical keys and a redelivery is idempotent. Never re-seals —
+    /// that would need the plaintext and would change the `key_id`.
+    pub fn put_verbatim(
+        &self,
+        scope: &SecretScope,
+        name: &str,
+        revision: &raisin_hlc::HLC,
+        record: &SecretRecord,
+    ) -> Result<()> {
+        validate_secret_name(name)?;
+        lifecycle::write_record(&self.db, scope, name, revision, record)
     }
 
     fn append(
@@ -94,7 +140,7 @@ impl SecretStore {
         plaintext: &[u8],
         owner: &SecretOwner,
         is_rotation: bool,
-    ) -> Result<(String, u64)> {
+    ) -> Result<StoredSecret> {
         validate_secret_name(name)?;
 
         let ctx = SecretContext::node_secret(&scope.tenant, &scope.repo)?;
@@ -114,21 +160,22 @@ impl SecretStore {
             owner_field: owner.field.clone(),
             deleted: false,
         };
-        let version = record.version;
-        self.write_record(scope, name, &record)?;
-        Ok((name.to_string(), version))
+        self.write_record(scope, name, &record)
     }
 
-    fn write_record(&self, scope: &SecretScope, name: &str, record: &SecretRecord) -> Result<()> {
-        let handle = self.cf()?;
+    fn write_record(
+        &self,
+        scope: &SecretScope,
+        name: &str,
+        record: &SecretRecord,
+    ) -> Result<StoredSecret> {
         let revision = self.hlc.tick();
-        let key =
-            super::keys::secret_key(&scope.tenant, &scope.repo, &scope.branch, name, &revision);
-        let value = rmp_serde::to_vec_named(record)
-            .map_err(|e| SecretError::Encoding(format!("serialize secret record: {e}")))?;
-        self.db
-            .put_cf(handle, &key, &value)
-            .map_err(|e| SecretError::Storage(e.to_string()))
+        lifecycle::write_record(&self.db, scope, name, &revision, record)?;
+        Ok(StoredSecret {
+            name: name.to_string(),
+            revision,
+            record: record.clone(),
+        })
     }
 
     /// One past the newest ordinal, or 1 for a name with no versions.
@@ -138,7 +185,7 @@ impl SecretStore {
     /// claim ordinal 3, and `get` resolves newest-first. See [`SecretRecord`].
     fn next_ordinal(&self, scope: &SecretScope, name: &str) -> Result<u64> {
         Ok(match self.newest(scope, name)? {
-            Some((_, r)) => r.version.saturating_add(1),
+            Some(s) => s.record.version.saturating_add(1),
             None => 1,
         })
     }
@@ -153,20 +200,12 @@ impl SecretStore {
     pub fn get(&self, scope: &SecretScope, name: &str, version: Option<u64>) -> Result<Vec<u8>> {
         validate_secret_name(name)?;
 
-        let (_, record) = match version {
-            None => self
-                .newest(scope, name)?
-                .ok_or_else(|| SecretError::Pending {
-                    name: name.to_string(),
-                    version: None,
-                })?,
-            Some(v) => self
-                .version(scope, name, v)?
-                .ok_or_else(|| SecretError::Pending {
-                    name: name.to_string(),
-                    version: Some(v),
-                })?,
-        };
+        let record = lifecycle::version_of(&self.db, scope, name, version)?
+            .ok_or_else(|| SecretError::Pending {
+                name: name.to_string(),
+                version,
+            })?
+            .record;
 
         if record.deleted {
             return Err(SecretError::Gone {
@@ -237,37 +276,33 @@ impl SecretStore {
         Ok(self
             .scan_versions(scope, name, None)?
             .into_iter()
-            .map(|(rev, r)| SecretMetadata::from_record(name.to_string(), rev, &r))
+            .map(|s| SecretMetadata::from_record(s.name, s.revision, &s.record))
             .collect())
+    }
+
+    /// The stored record for one version, ciphertext included and unopened.
+    ///
+    /// The **promotion** entry point: a cross-branch copy moves this verbatim
+    /// into the target branch. `None` when the version is absent.
+    pub fn read_verbatim(
+        &self,
+        scope: &SecretScope,
+        name: &str,
+        version: Option<u64>,
+    ) -> Result<Option<StoredSecret>> {
+        validate_secret_name(name)?;
+        lifecycle::version_of(&self.db, scope, name, version)
     }
 
     // ---- internals ------------------------------------------------------
 
     fn cf(&self) -> Result<&rocksdb::ColumnFamily> {
-        self.db
-            .cf_handle(cf::SECRETS)
-            .ok_or(SecretError::ColumnFamilyMissing(cf::SECRETS))
+        lifecycle::secrets_cf(&self.db)
     }
 
     /// The newest version, i.e. the FIRST entry of a forward prefix scan.
-    fn newest(&self, scope: &SecretScope, name: &str) -> Result<Option<(HLC, SecretRecord)>> {
-        Ok(self.scan_versions(scope, name, Some(1))?.into_iter().next())
-    }
-
-    /// The newest record carrying ordinal `version`.
-    ///
-    /// Newest-first resolution is what makes a duplicated ordinal (see
-    /// [`SecretRecord`]) deterministic rather than arbitrary.
-    fn version(
-        &self,
-        scope: &SecretScope,
-        name: &str,
-        version: u64,
-    ) -> Result<Option<(HLC, SecretRecord)>> {
-        Ok(self
-            .scan_versions(scope, name, None)?
-            .into_iter()
-            .find(|(_, r)| r.version == version))
+    fn newest(&self, scope: &SecretScope, name: &str) -> Result<Option<StoredSecret>> {
+        lifecycle::newest_version(&self.db, scope, name)
     }
 
     fn scan_versions(
@@ -275,31 +310,7 @@ impl SecretStore {
         scope: &SecretScope,
         name: &str,
         limit: Option<usize>,
-    ) -> Result<Vec<(HLC, SecretRecord)>> {
-        let handle = self.cf()?;
-        let prefix = secret_versions_prefix(&scope.tenant, &scope.repo, &scope.branch, name);
-
-        let mut out = Vec::new();
-        for item in self
-            .db
-            .iterator_cf(handle, IteratorMode::From(&prefix, Direction::Forward))
-        {
-            let (key, value) = item.map_err(|e| SecretError::Storage(e.to_string()))?;
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let Some(revision) = revision_from_key(&key) else {
-                continue;
-            };
-            let record: SecretRecord = rmp_serde::from_slice(&value)
-                .map_err(|e| SecretError::Encoding(format!("deserialize secret record: {e}")))?;
-            out.push((revision, record));
-            if let Some(n) = limit {
-                if out.len() >= n {
-                    break;
-                }
-            }
-        }
-        Ok(out)
+    ) -> Result<Vec<StoredSecret>> {
+        lifecycle::read_versions(&self.db, scope, name, limit)
     }
 }

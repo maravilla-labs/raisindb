@@ -63,6 +63,17 @@ pub(crate) struct CopyPlan {
     pub display_name: &'static str,
     /// Where the revision lives, so the copy can honour `max_revision`.
     pub revision: RevisionLocator,
+    /// Whether `max_revision` (the source branch HEAD, or the fork point) is a
+    /// meaningful bound on this CF's revisions.
+    ///
+    /// True for everything written on the node revision timeline. False for
+    /// `cf::SECRETS`, whose revisions are minted by the secret store's own tick
+    /// and are therefore reliably LATER than the node revision they belong to —
+    /// the store is written during the write, before the branch HEAD advances.
+    /// Filtering it by the head does not fork "an older view of the secrets", it
+    /// forks NONE of them, and the resulting branch looks healthy because reads
+    /// return a `secret://` reference without resolving it.
+    pub honour_max_revision: bool,
 }
 
 /// A column family's relationship to branch scoping.
@@ -81,6 +92,17 @@ const fn copied(display_name: &'static str, revision: RevisionLocator) -> Branch
     BranchScope::Copied(CopyPlan {
         display_name,
         revision,
+        honour_max_revision: true,
+    })
+}
+
+/// [`copied`], but copying EVERY version regardless of `max_revision` — see
+/// [`CopyPlan::honour_max_revision`].
+const fn copied_unbounded(display_name: &'static str, revision: RevisionLocator) -> BranchScope {
+    BranchScope::Copied(CopyPlan {
+        display_name,
+        revision,
+        honour_max_revision: false,
     })
 }
 
@@ -208,7 +230,17 @@ pub(crate) const BRANCH_CF_REGISTRY: &[(&str, BranchScope)] = &[
     //
     // `Tail` is correct because the descending HLC is the last 16 bytes and
     // `{name}` is null-free.
-    (cf::SECRETS, copied("secrets", RevisionLocator::Tail)),
+    //
+    // UNBOUNDED, and it must be. A secret is written by the store's own ticking
+    // HLC during the node write — i.e. AFTER the node revision was allocated and
+    // before the branch HEAD advanced to it — so every secret revision is later
+    // than the head the copier bounds by. Honouring `max_revision` here does not
+    // fork an older view of the secrets, it forks none of them.
+    // (`secret_lifecycle_test::a_fork_still_carries_secrets` is the guard.)
+    (
+        cf::SECRETS,
+        copied_unbounded("secrets", RevisionLocator::Tail),
+    ),
     (
         cf::GRAPH_CACHE,
         BranchScope::SkippedOnPurpose(
