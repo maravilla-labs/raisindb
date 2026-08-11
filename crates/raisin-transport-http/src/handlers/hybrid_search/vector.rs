@@ -45,12 +45,11 @@ pub(super) async fn perform_vector_search(
         return Err("Embeddings not enabled for this tenant".into());
     }
 
-    // Decrypt API key
-    let master_key = std::env::var("RAISIN_MASTER_KEY").map_err(|_| "RAISIN_MASTER_KEY not set")?;
-    let master_key_bytes: [u8; 32] = hex::decode(&master_key)
-        .map_err(|e| format!("Invalid master key hex: {}", e))?
-        .try_into()
-        .map_err(|_| "Master key must be 32 bytes")?;
+    // Decrypt API key. Goes through the shared loader so this path honours the
+    // legacy EMBEDDING_MASTER_KEY fallback like the rest of the server does.
+    let master_key_bytes = raisin_crypto::master_key_with_embedding_fallback()
+        .map_err(|e| format!("Invalid master key: {}", e))?
+        .ok_or("RAISIN_MASTER_KEY not set")?;
 
     let encryptor = ApiKeyEncryptor::new(&master_key_bytes);
     let api_key_encrypted = config

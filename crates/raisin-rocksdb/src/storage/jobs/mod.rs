@@ -128,45 +128,20 @@ impl RocksDBStorage {
         .await
     }
 
-    /// Get master encryption key from environment variable
+    /// Get the master encryption key.
     ///
-    /// Reads the `RAISIN_MASTER_KEY` environment variable and converts it to a 32-byte key.
-    /// The key must be exactly 64 hexadecimal characters (32 bytes).
-    ///
-    /// # Returns
-    ///
-    /// A 32-byte array containing the master encryption key
+    /// Delegates to the shared `raisin-crypto` loader, which reads
+    /// `RAISIN_MASTER_KEY` with the legacy `EMBEDDING_MASTER_KEY` fallback.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - `RAISIN_MASTER_KEY` environment variable is not set
-    /// - The key is not valid hexadecimal
-    /// - The key is not exactly 32 bytes
+    /// Returns an error if neither variable is set, or if the value present is
+    /// not 32 bytes of hex.
     fn get_master_encryption_key() -> Result<[u8; 32]> {
-        let key_hex = std::env::var("RAISIN_MASTER_KEY").map_err(|_| {
+        raisin_crypto::master_key_with_embedding_fallback()?.ok_or_else(|| {
             raisin_error::Error::Validation(
                 "RAISIN_MASTER_KEY environment variable not set".to_string(),
             )
-        })?;
-
-        let key_bytes = hex::decode(&key_hex).map_err(|e| {
-            raisin_error::Error::Validation(format!(
-                "Invalid RAISIN_MASTER_KEY: not valid hex: {}",
-                e
-            ))
-        })?;
-
-        if key_bytes.len() != 32 {
-            return Err(raisin_error::Error::Validation(format!(
-                "Invalid RAISIN_MASTER_KEY: expected 32 bytes, got {}",
-                key_bytes.len()
-            )));
-        }
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&key_bytes);
-
-        Ok(key)
+        })
     }
 }

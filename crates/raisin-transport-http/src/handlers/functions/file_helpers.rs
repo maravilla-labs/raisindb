@@ -228,31 +228,19 @@ fn extract_function_config(node: &Node) -> Option<(NetworkPolicy, ResourceLimits
 // Encryption key helper
 // ============================================================================
 
-/// Get the master encryption key from environment variable.
+/// Get the master encryption key.
 ///
-/// The key must be set in `RAISIN_MASTER_KEY` as a 64-character hex string
-/// representing 32 bytes.
+/// Delegates to the shared `raisin-crypto` loader, which reads
+/// `RAISIN_MASTER_KEY` with the legacy `EMBEDDING_MASTER_KEY` fallback. Reading
+/// the environment here directly is what used to make this path hard-error on a
+/// deployment that set only `EMBEDDING_MASTER_KEY` while the rest of the server
+/// decrypted fine — the propagating `set_var` in `raisin-server`'s `main` only
+/// runs when background jobs are enabled.
 #[cfg(feature = "storage-rocksdb")]
 pub(super) fn get_master_encryption_key() -> Result<[u8; 32], raisin_error::Error> {
-    let key_hex = std::env::var("RAISIN_MASTER_KEY").map_err(|_| {
+    raisin_crypto::master_key_with_embedding_fallback()?.ok_or_else(|| {
         raisin_error::Error::Validation(
             "RAISIN_MASTER_KEY environment variable not set".to_string(),
         )
-    })?;
-
-    let key_bytes = hex::decode(&key_hex).map_err(|e| {
-        raisin_error::Error::Validation(format!("Invalid RAISIN_MASTER_KEY: not valid hex: {}", e))
-    })?;
-
-    if key_bytes.len() != 32 {
-        return Err(raisin_error::Error::Validation(format!(
-            "Invalid RAISIN_MASTER_KEY: expected 32 bytes, got {}",
-            key_bytes.len()
-        )));
-    }
-
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&key_bytes);
-
-    Ok(key)
+    })
 }

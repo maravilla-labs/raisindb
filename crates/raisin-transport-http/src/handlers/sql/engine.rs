@@ -451,13 +451,11 @@ fn configure_embedding_provider(
     config: &raisin_embeddings::TenantEmbeddingConfig,
     rocksdb_storage: &raisin_rocksdb::RocksDBStorage,
 ) -> Result<QueryEngine<crate::state::Store>, ApiError> {
-    // Decrypt API key
-    let master_key = std::env::var("RAISIN_MASTER_KEY")
-        .map_err(|_| ApiError::internal("RAISIN_MASTER_KEY not set"))?;
-    let master_key_bytes: [u8; 32] = hex::decode(&master_key)
-        .map_err(|e| ApiError::internal(format!("Invalid master key hex: {}", e)))?
-        .try_into()
-        .map_err(|_| ApiError::internal("Master key must be 32 bytes"))?;
+    // Decrypt API key. Goes through the shared loader so this path honours the
+    // legacy EMBEDDING_MASTER_KEY fallback like the rest of the server does.
+    let master_key_bytes = raisin_crypto::master_key_with_embedding_fallback()
+        .map_err(|e| ApiError::internal(format!("Invalid master key: {}", e)))?
+        .ok_or_else(|| ApiError::internal("RAISIN_MASTER_KEY not set"))?;
 
     let encryptor = ApiKeyEncryptor::new(&master_key_bytes);
     if let Some(api_key_encrypted) = &config.api_key_encrypted {
