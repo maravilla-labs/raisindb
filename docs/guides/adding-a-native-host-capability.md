@@ -42,24 +42,30 @@ FETCH`), and functions call high-level operations against a real IMAP server.
 
 ## 2. Anatomy of a native binding (five pieces)
 
-A new native namespace `raisin.<ns>` is exactly five edits. Using `imap` as the
+A new native namespace `raisin.<ns>` is four edits. Using `imap` as the
 worked example, with the real paths from what landed:
 
 | # | Piece | File(s) |
 |---|-------|---------|
 | 1 | **Protocol implementation** (pure Rust) | `crates/raisin-functions/src/runtime/imap/` (`mod.rs`, `client.rs`, `parse.rs`) |
-| 2 | **`FunctionApi` trait methods** + real impl + mock impl | `api/traits.rs`, `api/raisindb/imap.rs`, `api/mock/mod.rs` |
-| 3 | **Shared registry descriptors** (drives Starlark + python/typescript) | `runtime/bindings/methods/imap.rs`, registered in `methods/mod.rs` |
-| 4 | **QuickJS module** (registers `__raisin_internal.<ns>_*`) | `runtime/quickjs/api_imap.rs`, wired in `quickjs/mod.rs` + `quickjs/environment.rs` |
-| 5 | **QuickJS ergonomic wrapper** (`raisin.<ns>.*`) | `runtime/quickjs/api_wrapper.js` |
+| 2 | **`FunctionApi` trait methods** + real impl + **mock impl** | `api/traits.rs`, `api/raisindb/imap.rs`, `api/mock/mod.rs` |
+| 3 | **Shared registry descriptors** (drives Starlark, python, typescript) | `runtime/bindings/methods/imap.rs`, registered in `methods/mod.rs` |
+| 4 | **QuickJS ergonomic wrapper** (`raisin.<ns>.*`) | `runtime/quickjs/api_wrapper.js` |
 
-All paths are under `crates/raisin-functions/src/`. `http.rs`, `locks.rs`, and
+Plus one edit outside the crate: the `namespace <ns>` block in
+`packages/raisindb-functions-types/raisin.d.ts`.
+
+All Rust paths are under `crates/raisin-functions/src/`. `http.rs`, `locks.rs`, and
 `integrations.rs` are the templates for each layer; `integrations_sync_now` (added
 alongside IMAP) is the freshest end-to-end example to grep and copy.
 
-The key idea: **one registry descriptor reaches Starlark; one QuickJS module
-reaches JavaScript; both call the same `FunctionApi` method.** You write the
-protocol once and both runtimes get it.
+The mock impl in step 2 is **not optional** — the `FunctionApi` trait has no
+default bodies, so omitting it fails the build.
+
+The key idea: **one registry descriptor reaches every runtime.** Starlark
+generates its namespace from the descriptor's `category` automatically; QuickJS
+needs only a hand-written ergonomic wrapper over the same generic gateway. You
+write the protocol once and both runtimes get it.
 
 ---
 
@@ -177,41 +183,52 @@ methods.extend(imap::methods());
 
 ---
 
-## 6. Step 4 — QuickJS module + wrapper (reaches JavaScript)
+## 6. Step 4 — QuickJS wrapper (reaches JavaScript)
 
-QuickJS does not consume the descriptor list; it binds by hand, but against the
-*same* `FunctionApi`.
+**There is no per-namespace QuickJS module any more.** QuickJS reaches every
+registry method through ONE generic dispatcher,
+`runtime/quickjs/gateway.rs`'s `__raisin_call(method, argsJson)`, registered once
+in `environment.rs` via `register_registry_gateway`. Starlark uses the same
+registry through `runtime/starlark/gateway.rs`, and *auto-generates* its
+namespaces from each descriptor's `category` (`starlark/setup_code.rs`), so
+**Starlark needs no per-namespace code at all** — only add your category to the
+skip-list there if you want it excluded.
 
-**Native module** — `crates/raisin-functions/src/runtime/quickjs/api_imap.rs`
-exports `register_imap_internal(ctx, internal, api)` which installs
-`__raisin_internal.imap_fetch_since`, `imap_list_mailboxes`, `imap_fetch_message`
-(each takes/returns JSON strings). Wire it up in two places:
-
-- `runtime/quickjs/mod.rs`: `mod api_imap;`
-- `runtime/quickjs/environment.rs`: `use super::api_imap::register_imap_internal;`
-  then call `register_imap_internal(ctx, &internal, api.clone())?;` alongside the
-  other `register_*_internal` calls.
+So the only QuickJS work is the ergonomic wrapper. Writing a
+`runtime/quickjs/api_<ns>.rs` and registering it in `environment.rs` — as earlier
+versions of this guide instructed — produces a file nothing calls;
+`environment.rs` registers only `temp`, `fetch` and the gateways.
 
 **Ergonomic wrapper** — add a `raisin.imap` block to
 `runtime/quickjs/api_wrapper.js`, next to the `raisin.locks` / `raisin.integrations`
-blocks. It JSON-encodes arguments, calls `__raisin_internal.imap_*`, parses the
-result, and throws on `{ error }`:
+blocks. It calls the gateway helper `__call(internalName, args)` with your
+descriptor's `internal_name`, and throws on `{ error }`:
 
 ```javascript
 imap: {
+    // fetchSince(conn, sinceUid, opts?) -> { messages, ... }
     fetchSince: (conn, sinceUid, opts) => {
-        const r = JSON.parse(__raisin_internal.imap_fetch_since(
-            JSON.stringify(conn), sinceUid,
-            opts === undefined ? null : JSON.stringify(opts)));
-        if (r && r.error) throw new Error(r.error);
+        const r = __call('imap_fetch_since',
+            [conn, sinceUid, opts === undefined ? null : opts]);
+        if (r && r.error) throw new Error(r.message || r.error);
         return r;
     },
     // listMailboxes, fetchMessage …
 },
 ```
 
+`__call` handles the JSON encode/decode, so pass real values, not strings. Compare
+the `raisin.locks` block in the same file for the established shape, including the
+`__isErr(r) ? false : r` idiom where a failure should degrade rather than throw.
+
 Now `raisin.imap.fetchSince(...)` exists in QuickJS too — same protocol code, same
 `FunctionApi`, same policy gate.
+
+**Also update `packages/raisindb-functions-types/raisin.d.ts`.** Despite its
+"auto-generated" header it has **no generator and no drift test**, and
+`packages/raisindb-skills` tells agents it is the authoritative API list — a
+namespace missing from it is invisible to every TypeScript author and every
+skill-driven agent, with no CI signal.
 
 ---
 
@@ -270,10 +287,12 @@ only `host:port`, no secret.
 One protocol implementation, gated once, reaches both runtimes:
 
 ```
-runtime/imap/ (protocol)  ─┐
-                           ├─►  FunctionApi::imap_*  ─┬─► methods/imap.rs  ──► Starlark / python / typescript
-                           │                          └─► api_imap.rs + wrapper ──► QuickJS (JavaScript)
-NetworkPolicy gate ────────┘
+runtime/imap/ (protocol)  ─┐                          ┌─► starlark/gateway.rs  ──► Starlark (auto-generated
+                           │                          │                             from the `category`)
+                           ├─►  FunctionApi::imap_*  ──┤
+                           │    via methods/imap.rs    │
+NetworkPolicy gate ────────┘    (the ONE registry)     └─► quickjs/gateway.rs   ──► QuickJS, via the
+                                                                                    api_wrapper.js block
 ```
 
 That is the "users can write connectors to almost any service" story: HTTP

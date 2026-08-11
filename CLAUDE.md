@@ -39,6 +39,12 @@ cargo fmt --workspace
 cargo clippy --workspace
 ```
 
+**`cargo check --workspace` does not compile test targets.** Adding a field to a
+widely-constructed struct (e.g. `PropertyValueSchema`) passes `check` cleanly and
+then fails to build every test that uses a struct literal. Before declaring such
+a change green, run `cargo test --workspace --no-run` — or at least
+`cargo test -p <crate> --lib --no-run` for the crates you touched.
+
 ## Disk: watch `target/`
 
 A full test build is large and *will* fill a disk if unattended. The driver is
@@ -93,6 +99,7 @@ Transport (HTTP/WS/PGWire)  →  Core Business Logic  →  Storage Abstraction  
 | `raisin-sql-execution` | Physical plan execution, Cypher/PGQ support |
 | `raisin-replication` | CRDT-based multi-master replication |
 | `raisin-hlc` | Hybrid Logical Clock for versioning |
+| `raisin-crypto` | AES-256-GCM envelope, `SecretContext` AAD binding, master-key keyring — the ONLY encryptor (see Secrets & Encryption) |
 | `raisin-mcp-protocol` | MCP wire types + outbound MCP **client** (no `raisin-functions` dep — see below) |
 | `raisin-mcp` | MCP **server** surface; depends on `raisin-mcp-protocol` and re-exports it |
 
@@ -241,10 +248,21 @@ Docs: `docs/website/docs/access/sql/nested-geospatial.md` and
 Invariants to preserve:
 
 - **ONE walker, ONE path format.** `indexing/property_walk.rs::walk_properties`
-  is the only recursion; `walk_geometries` (spatial) and `walk_references`
-  (references) are selectors over it. A writer and a tombstoner that disagree
-  about the format leave entries that can never be shadowed — a stale spatial hit
-  surviving every update and delete. Never add a third walker.
+  is the only recursion; `walk_geometries` (spatial), `walk_references`
+  (references) and the secret-field selector are selectors over it. A writer and
+  a tombstoner that disagree about the format leave entries that can never be
+  shadowed — a stale spatial hit surviving every update and delete. Never add a
+  second traversal: when a selector needs more information, **extend the one
+  walker**. That is why the selector takes a `WalkCursor` (path plus the nearest
+  enclosing `element_type`) rather than just the value — value-shaped selection
+  works for geometry and references, but not for anything schema-driven.
+  `walk_properties_mut` lives in the same file for the same reason, guarded by a
+  test asserting it yields exactly the paths `walk_properties` does.
+- **The walker descends `Array`, `Object`, `Element` AND `Composite`.** Composite
+  was missing until the secret work added it, which meant a geometry inside a
+  block collection was stored, reported the index healthy, and was invisible to
+  every `ST_DWITHIN`. If you add a new container `PropertyValue` variant, teach
+  the walker about it or it silently becomes a hole in three subsystems.
 - **A top-level path is byte-identical to the bare property name**, which is why
   no existing index entry needed migrating. Don't "improve" the format.
 - **Five sites must walk, not iterate `node.properties`**: the writer and
@@ -296,18 +314,35 @@ Invariants to preserve:
 
 ## Node Revision History & Authorship
 
-**Authorship AND timestamps are stamped at the low-level write layer.**
-`created_by` / `updated_by` / `created_at` / `updated_at` are filled in the
-low-level write functions every path funnels through: `add_node.rs` (the
-optimized CREATE path) and `put_node.rs` (create-or-update), both under
-`raisin-rocksdb/.../create/core/`, plus the direct repository path
-`repositories/nodes/crud/create/add.rs` (`add_impl`) and `crud/update.rs`.
-They resolve the actor from the transaction's auth context (`actor_id()`) →
-raw actor → `"anonymous"`. `put_node`/`update` preserve the original
-`created_by`/`created_at` on update. Don't re-stamp these in higher layers —
-and if you add a new low-level write path, stamp it there too. A missing
-`created_at` cascades: no `__created_at` property-index entry → `ORDER BY
-created_at LIMIT k` (PropertyOrderScan) silently returns nothing.
+**Timestamps are stamped at every low-level write layer; authorship only where
+there is an actor.** The distinction is load-bearing — don't assume a node
+written through the repository layer carries `updated_by`.
+
+- **Transaction layer** — `add_node.rs` (the optimized CREATE path) and
+  `put_node.rs` (create-or-update), both under
+  `raisin-rocksdb/src/transaction/context/nodes/create/core/`. These stamp
+  **both** timestamps and authorship, resolving the actor from the transaction's
+  auth context (`actor_id()`) → raw actor → `"anonymous"`.
+- **Repository layer** — `repositories/nodes/crud/create/add.rs` (`add_impl`) and
+  `crud/update.rs` (`update_impl`). These stamp **timestamps only**, via
+  `Node::ensure_write_timestamps()`. `update.rs` says so explicitly: *"updated_by
+  cannot be resolved here: the repository layer has no actor"*. They do preserve
+  the original `created_by`/`created_at` on update.
+
+Don't re-stamp in higher layers — and if you add a new low-level write path,
+stamp it there too. A missing `created_at` cascades: no `__created_at`
+property-index entry → `ORDER BY created_at LIMIT k` (PropertyOrderScan) silently
+returns nothing.
+
+**These four are not an exhaustive content-mutation funnel.**
+`repositories/nodes/queries/property.rs` (`update_property`), `publishing.rs`,
+`queries/copy/single.rs` and `queries/copy/cross_branch/` all write node content
+without going through `put_node`. Anything that must see *every* content mutation
+has to cover those too. And `NodeService` is **not** a chokepoint at all: SQL DML
+writes straight to the transaction context
+(`raisin-sql-execution/.../dml_executor/workspace_dml.rs`,
+`bulk_operations.rs`), as does the WS create handler — so logic placed in
+`NodeService` is silently bypassed by `psql` and by WebSocket writes.
 
 **Revision history (git-style "file history")** lists a node's MVCC revisions,
 newest first, via `NodeService::history(id, limit)` →
@@ -332,6 +367,80 @@ and the same `audit_repo` backs the read APIs. Query audit logs via:
 - **WS**: `audit_query` request (`{ node_id | path }`)
 The adapter records `node.updated_by` as the log's `user_id`, so audit authorship is
 reliable now that authorship is stamped at the transaction layer (above).
+
+## Secrets & Encryption
+
+**Plaintext never leaves. Ciphertext is not a secret only because the key is not
+in the database** — that is what makes a stolen RocksDB backup inert, and it is
+why the root key stays outside the DB.
+
+A schema field declares `encrypted: true` (a first-class field on
+`PropertyValueSchema` and `FieldTypeSchema`; the legacy `meta.secret: true`
+spelling is still read as a fallback — one reader, `is_secret`, so the two cannot
+drift). On write the server moves the value into `cf::SECRETS` and rewrites the
+property to a `secret://<name>[@<version>]` reference. **Reads never resolve**;
+they return the reference, which is why a reference is safe in a node property,
+an API response, a SQL result, an audit entry and a replication payload.
+
+- **The write layer is the enforcement point, NOT `NodeService`.** SQL DML and
+  the WS create handler write straight to the transaction context, so anything
+  placed in `NodeService` is bypassable by `psql`. Vaulting hooks
+  `transaction/context/nodes/create/core/{put_node,add_node}.rs`, plus the paths
+  that never see a transaction (`repositories/nodes/queries/property.rs`'s
+  `update_property`, and `crud/create/add.rs` / `crud/update.rs` as backstops).
+- **Vault BEFORE indexing.** Index first and the plaintext's hash is written to
+  `cf::PROPERTY_INDEX` / `UNIQUE_INDEX` / `COMPOUND_INDEX` permanently, which
+  turns `properties->>'password'::String = '<guess>'` into an oracle. Ordering
+  inside `put_node`: after revision allocation and `validate_node` (so the
+  validator still sees plaintext and its constraints mean something), before the
+  read cache, the node blob write, and every index call.
+- **Fail CLOSED.** Every neighbouring module fails open — `coercion.rs` swallows
+  schema-resolution errors, the fulltext planner falls back to index-all-strings.
+  Copying that here writes plaintext to disk. On any doubt, refuse the write.
+- **The `has encrypted fields` gate is a cache, and a stale `false` is a plaintext
+  leak** — so it is event-invalidated on `Event::Schema` (never TTL, which would
+  be a bounded leak window) *and* registered with `derived_cache_registry`,
+  because checkpoint SST ingest emits no events. Stale `true` costs one wasted
+  walk; stale `false` costs a secret. Bias to `true`.
+- **The replication apply path must not re-vault** — an arriving node already
+  carries references. It does not go through `put_node`, so this is free; keep it
+  that way.
+- **`SecretContext` fields are private, constructible only via family
+  constructors** in `raisin-crypto`. Its AAD binds ciphertext to
+  `{tenant, repo, scope, field}`, length-prefixed (not `\0`-joined, or
+  `tenant="a\0b"` would collide with `tenant="a", repo="b"`). Several readers
+  swallow decrypt errors with `.ok()`, so a hand-written context that drifts from
+  the writer's does not throw — it silently becomes "credential absent, proceed
+  UNAUTHENTICATED".
+- **Envelope v2 is `[RSB2][key_id u16][nonce 12][ct+tag]`; the reader takes v1
+  forever.** `seal()` still EMITS v1 unless `RAISIN_CRYPTO_EMIT_V2` is set,
+  because a v2 blob is unreadable by a peer on the previous binary — the format
+  cannot flip in the same release that learns to read it. Where v1 is accepted the
+  AAD is accident-detection, not attacker-resistance: stripping v2→v1 is deleting
+  six bytes.
+- **Key ids are reserved**: `0x0000` legacy `RAISIN_MASTER_KEY`, `0xFFFE` the
+  insecure dev zero key, `0xFFFF` per-process ephemeral. Opening a `0xFFFE` blob
+  outside dev mode is an ERROR naming the dev key, so a dev database promoted to
+  prod fails loudly instead of looking encrypted.
+- **`cf::SECRETS` is branch-scoped and `Copied` on fork**, keyed
+  `{tenant}\0{repo}\0{branch}\0{name}\0{~rev}` with a descending HLC last
+  (`RevisionLocator::Tail`); `{name}` must be null-free. A reference is
+  branch-agnostic while the store is branch-scoped, so **cross-branch promotion
+  must copy the referenced secret rows** — otherwise publish produces a fork whose
+  nodes render fine until someone reveals one. A node COPY must re-vault, or
+  deleting the source destroys the copy's secret.
+- **Delete tombstones, never refcounts.** Older node revisions still reference
+  older versions, and refcounting would mean indexing every revision of every node
+  on every branch — a second reference index with a second path format.
+- Adding a column family means: `mod cf`, `all_column_families()`,
+  `BRANCH_CF_REGISTRY` (a test fails the build if unclassified) **and**
+  `TENANT_PREFIXED_CFS` in `storage/tenant_wipe.rs` — that last one is *not*
+  test-enforced and is the one that gets missed.
+
+Not yet done, deliberately: existing `*_encrypted` node properties are unmigrated
+and still visible to `SELECT *`; `Permission::is_field_accessible` remains dead
+code; SQL DDL has no `ENCRYPTED` modifier, so secret fields must be declared in
+YAML.
 
 ## Atomic Locks & Inventory (`raisin-locks`)
 
@@ -381,11 +490,20 @@ Full authoring guide: `docs/workflows.md`. Engine-owned gaps and their triage:
   `cancel_instance` writes the node directly and is the one known exception
   (see `docs/OPEN-ITEMS.md`). Multi-node deployments need `[locks]` with the
   `redis` backend — `inprocess`/disabled serializes within ONE node only.
-- **Every terminal transition must notify the parent instance.**
-  `notify_parent_flow` is called from four places (complete, fail, timeout,
-  cancel); miss one and a parent parked on a join waits forever with no error
-  anywhere. This has now been the bug twice. The sites are not yet funnelled
-  through one helper — check all of them when adding a terminal path.
+- **Every terminal transition must notify the parent instance.** Miss one and a
+  parent parked on a join waits forever with no error anywhere. This has now been
+  the bug twice. Four terminal paths, but only **three** of them call
+  `notify_parent_flow`:
+  - complete — `runtime/executor/result_handlers.rs` (`"completed"`)
+  - fail — `runtime/executor/result_handlers.rs` (`"failed"`)
+  - timeout — `runtime/resume/mod.rs` (`"failed"`)
+  - cancel — `service.rs::cancel_instance` **hand-rolls the same
+    `function_result` / `child_completed` payload inline** instead of calling the
+    helper.
+
+  So changing the payload shape in `notify_parent_flow` silently diverges the
+  cancel path. Funnelling cancel through the helper is the obvious fix and has not
+  been done; until then, treat the two as a pair.
 - **A handler returning `Err` and one returning `StepResult::Error` are the
   same event** and both route through `handle_error_result` (retry / error edge
   / continue-on-fail / fail). Only `FlowError::is_infrastructural()` errors
@@ -474,9 +592,9 @@ Invariants to preserve:
 ## Job dedup is per-PROCESS, not per-cluster
 
 `JobRegistry`'s dedup map is an in-memory `HashMap` with no storage behind it
-(`raisin-storage/src/jobs/registry/mod.rs`). `register_job_with_id_idempotent`
-collapses duplicates **within one process only** — on an N-node cluster every
-node runs its own copy of a periodic job.
+(`raisin-storage/src/jobs/registry/`; `register_job_with_id_idempotent` lives in
+`registry/registration.rs`). It collapses duplicates **within one process only** —
+on an N-node cluster every node runs its own copy of a periodic job.
 
 Anything that must run once per cluster needs a `raisin_locks` lease inside the
 handler (and the `redis` backend; `inprocess` serializes within one node).
