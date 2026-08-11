@@ -61,6 +61,7 @@ pub mod oauth_store;
 mod prefix_transform;
 pub mod replication;
 pub mod repositories;
+pub mod secret_store;
 pub mod security;
 pub mod spatial;
 pub mod spatial_state;
@@ -68,6 +69,7 @@ mod storage;
 pub mod tantivy_transfer;
 mod tombstones;
 mod transaction;
+pub mod vaulting;
 pub mod vmount_registry;
 
 pub use admin_user_store::AdminUserStore;
@@ -296,6 +298,17 @@ pub mod cf {
     // Stores PendingOpRecord (bincode) so single-op fulltext edits survive
     // process restarts before the aggregator's idle-flush window fires.
     pub const PENDING_BATCH_OPS: &str = "pending_batch_ops";
+
+    // The secret store. THE ONLY place ciphertext lives.
+    // Key format: {tenant}\0{repo}\0{branch}\0{name}\0{~rev:16}
+    // `~rev` is a bitwise-NOT (descending) HLC, so a forward prefix scan returns
+    // a secret's versions newest-first and older versions stay readable through a
+    // rotation. `{name}` is null-free (`node/{node_id}/{field.path}` for a
+    // vaulted schema field, or an operator-chosen name), which is what lets the
+    // branch copier's part-2 rewrite and the `Tail` revision locator work.
+    //
+    // A node property never holds ciphertext — it holds a `secret://` reference.
+    pub const SECRETS: &str = "secrets";
 }
 
 /// Every column family name, for callers outside this crate.
@@ -358,6 +371,7 @@ pub(crate) fn all_column_families() -> Vec<&'static str> {
         cf::PROCESSING_RULES,
         cf::PENDING_BATCH_OPS,
         cf::AUDIT_LOG,
+        cf::SECRETS,
     ]
 }
 

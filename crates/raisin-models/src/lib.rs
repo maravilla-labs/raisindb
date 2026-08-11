@@ -52,6 +52,7 @@ pub mod nodes;
 pub mod operations;
 pub mod permissions;
 pub mod registry;
+pub mod secret_ref;
 pub mod timestamp;
 pub mod translations;
 pub mod tree;

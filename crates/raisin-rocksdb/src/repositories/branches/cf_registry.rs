@@ -197,6 +197,18 @@ pub(crate) const BRANCH_CF_REGISTRY: &[(&str, BranchScope)] = &[
              branch on which they never happened.",
         ),
     ),
+    // {tenant}\0{repo}\0{branch}\0{name}\0{~rev}
+    //
+    // Copied, and it MUST be: a node's `secret://` reference is branch-agnostic
+    // (the name embeds the node id, which survives a fork), while the store is
+    // branch-scoped. Skip the copy and every vaulted field on the fork points at
+    // a secret that does not exist there — and because reads return the
+    // reference without resolving it, the fork looks healthy until someone
+    // actually reveals one.
+    //
+    // `Tail` is correct because the descending HLC is the last 16 bytes and
+    // `{name}` is null-free.
+    (cf::SECRETS, copied("secrets", RevisionLocator::Tail)),
     (
         cf::GRAPH_CACHE,
         BranchScope::SkippedOnPurpose(
@@ -400,6 +412,10 @@ mod tests {
             cf::UNIQUE_INDEX,
             cf::NODES,
             cf::PATH_INDEX,
+            // A fork that drops secrets still LOOKS healthy: reads return the
+            // `secret://` reference without resolving it, so every vaulted field
+            // renders normally right up until something tries to reveal one.
+            cf::SECRETS,
         ] {
             assert!(copied.contains(required), "{required} must be forked");
         }

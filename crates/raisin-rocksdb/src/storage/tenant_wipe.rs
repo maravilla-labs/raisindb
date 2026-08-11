@@ -66,6 +66,11 @@ const TENANT_PREFIXED_CFS: &[&str] = &[
     cf::NODE_TYPES,
     cf::ARCHETYPES,
     cf::ELEMENT_TYPES,
+    // Secret store. Wiping a tenant MUST take its secrets with it — leaving
+    // them behind would keep live credentials for a tenant that no longer
+    // exists, and this list is not covered by the branch-registry
+    // exhaustiveness test, so an omission here is silent.
+    cf::SECRETS,
     // Tenant configuration
     cf::TENANT_EMBEDDING_CONFIG,
     cf::TENANT_AI_CONFIG,
