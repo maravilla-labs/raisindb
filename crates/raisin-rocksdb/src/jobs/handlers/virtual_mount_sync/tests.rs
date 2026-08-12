@@ -81,6 +81,7 @@ fn scope() -> MountScope {
         mount_path: MOUNT_PATH.to_string(),
         force_rewrite: false,
         watched_fields: Vec::new(),
+        read_local_wins: false,
     }
 }
 
@@ -3636,6 +3637,9 @@ mod write_capture_tests;
 
 #[path = "write_mirror_tests.rs"]
 mod write_mirror_tests;
+
+#[path = "read_local_wins_tests.rs"]
+mod read_local_wins_tests;
 
 #[path = "index_scope_tests.rs"]
 mod index_scope_tests;

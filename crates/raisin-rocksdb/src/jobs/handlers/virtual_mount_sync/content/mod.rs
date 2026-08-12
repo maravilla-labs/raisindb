@@ -140,6 +140,9 @@ impl VirtualMountSyncHandler {
             mount_path: mount.mount_path.clone(),
             force_rewrite: false,
             watched_fields: Vec::new(),
+            // Moot while `watched_fields` is empty, but explicitly off: a
+            // content fetch never merges anything.
+            read_local_wins: false,
         };
         let result = invoker
             .invoke(&scope, &adapter_path, input)

@@ -11,7 +11,7 @@ use super::index::{MountScope, SyncIndex, VirtualNodeRef};
 use super::node_paths::join_path;
 use super::ops::BatchOp;
 use super::stamp::watched_subset;
-use super::write_view::{carried_pushed_state, write_view_of};
+use super::write_view::{carried_pushed_state, preserve_pending_edits, write_view_of};
 use super::RocksDbMaterializer;
 use crate::jobs::handlers::virtual_mount_sync::config::build_properties;
 
@@ -189,10 +189,65 @@ impl RocksDbMaterializer {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| path.rsplit('/').next().unwrap_or("item").to_string());
 
+        // LocalWins pre-merge. An upsert rebuilds the node wholesale from
+        // mapper output AND reseeds `__pushed_state` from the incoming item, so
+        // without this branch a pending local edit is both reverted and
+        // de-nominated whenever the remote etag moved — silently, with no
+        // error, which for a provider whose etag moves on the very field being
+        // edited (Graph's `isRead`) means the edit is NEVER written back.
+        //
+        // Gated three ways so every other mount is untouched instruction for
+        // instruction: the mount opted into `local_wins`, it watches fields,
+        // and the item matched an EXISTING node by external id (`carried` below
+        // answers exactly that) — a path-fallback or brand-new node has no
+        // baseline and nothing local to preserve.
+        //
+        // The live node is re-read inside the open transaction rather than
+        // trusting the run-start index: the index write view is loaded once and
+        // refreshed only by this run's own writes, so an edit landing mid-run —
+        // the exact race the stamp path's read-modify-write already defends
+        // against — is invisible to it. One point read per changed-item
+        // upsert, paid only by mounts that opted in. A node deleted mid-run
+        // falls through to today's behaviour: the upsert recreates it from
+        // remote, and the delete-reconcile walk owns what the local delete
+        // meant.
+        //
+        // Deliberately NOT gated on `scope.force_rewrite`: a remap's contract
+        // is "re-apply the mapper to unchanged remote data", not "resolve
+        // conflicts in remote's favour", so it inherits the preserve step.
+        //
+        // Known edge, documented rather than solved: `name` is not a property
+        // and not pushable via `state_only`, so a name derived from a pending
+        // watched field still follows the remote item.
+        //
+        // An incoming DELETE is also not preserved (see the Delete arm above):
+        // a `state_only` edit is a patch against a remote object, and when the
+        // provider says the object is gone there is nothing left to patch —
+        // `local_wins` never promised resurrection, and the 409 force path
+        // cannot recreate either (it re-sends an update, not a create).
+        let carried = index
+            .by_external(&virt.external_id)
+            .and_then(|existing| existing.pushed_state().cloned());
+        let preserved = if scope.read_local_wins
+            && !scope.watched_fields.is_empty()
+            && index.by_external(&virt.external_id).is_some()
+        {
+            match tx.get_node(&scope.workspace, &id).await? {
+                Some(live) => write_view_of(&live, &scope.watched_fields).and_then(|view| {
+                    preserve_pending_edits(&mapped.properties, &view, &scope.watched_fields)
+                }),
+                None => None,
+            }
+        } else {
+            None
+        };
+
         // The item the provider just reported IS the pushed state: seeding
         // `__pushed_state` from the mapper's own output is what makes a REMOTE
         // change converge on arrival instead of looking like a local edit and
-        // being pushed straight back.
+        // being pushed straight back. (Under `local_wins`, `preserved` above
+        // has already carved the pending fields out of both maps; everything
+        // else still converges exactly this way.)
         //
         // `watched_subset` answers `None` only when this mount watches NOTHING,
         // i.e. the engine has nothing to say about the baseline — which is not
@@ -204,10 +259,18 @@ impl RocksDbMaterializer {
         // forward instead. (An empty map from `watched_subset` is a real answer
         // — "watching, none of these fields reported" — and must NOT fall
         // through to the carry.)
-        let carried = index
-            .by_external(&virt.external_id)
-            .and_then(|existing| existing.pushed_state().cloned());
-        let pushed_state = watched_subset(&mapped.properties, &scope.watched_fields).or(carried);
+        //
+        // (The `.or(carried)` fallback and the preserve branch can never both
+        // fire: `preserved` requires watched fields, under which
+        // `watched_subset` always answers `Some`.)
+        let (merged_props, pushed_state) = match preserved {
+            Some((merged, baseline)) => (Some(merged), Some(baseline)),
+            None => (
+                None,
+                watched_subset(&mapped.properties, &scope.watched_fields).or(carried),
+            ),
+        };
+        let effective_props = merged_props.as_ref().unwrap_or(&mapped.properties);
 
         let node = Node {
             id,
@@ -215,7 +278,7 @@ impl RocksDbMaterializer {
             name,
             path: path.clone(),
             workspace: Some(scope.workspace.clone()),
-            properties: build_properties(&mapped.properties, virt, pushed_state.as_ref()),
+            properties: build_properties(effective_props, virt, pushed_state.as_ref()),
             ..Default::default()
         };
 

@@ -122,6 +122,82 @@ pub fn pushed_state_of(node: &Node) -> Option<Map<String, Value>> {
         })
 }
 
+/// The `local_wins` pre-merge for one incoming upsert: the mapper output with
+/// pending local edits overlaid, and the baseline to reseed alongside it.
+///
+/// `None` when nothing is pending — the caller must then take the ordinary
+/// reseed path untouched, which is what keeps `remote_wins` behaviour
+/// instruction-identical on every mount that has not opted in.
+///
+/// `live` is the node as it stands NOW, not the run-start index view: a user
+/// edit landing after index load (the exact mid-run race the Hue postmortem
+/// documents) is invisible to the index, and reverting an edit because it was
+/// recent is precisely the failure `local_wins` exists to close.
+///
+/// Three rules, one per map:
+///
+/// * a pending field whose INCOMING value already equals the local one is
+///   dropped from the pending set first — the remote already holds the edit,
+///   and reseeding its baseline from the item is the correct convergence
+///   rather than a pointless no-op push next drain. This is the same "a remote
+///   change converges on arrival" invariant the ordinary path enforces, not an
+///   exception to it.
+/// * the merged properties carry the LOCAL value of every remaining pending
+///   field — including its ABSENCE: a local delete of the field must not be
+///   resurrected by the incoming value.
+/// * the reseeded baseline starts from the incoming item (non-diverged watched
+///   fields must still converge) and then keeps the OLD stored entry for
+///   exactly the pending fields — absent stays absent, because "the provider
+///   never reported this" and "the provider reported null" are different
+///   answers and conflating them hides the first edit of an unreported field
+///   from [`WriteView::diverges`].
+///
+/// The net effect: the node keeps the user's values, the baseline keeps the
+/// evidence that they are un-pushed, and the next drain nominates them exactly
+/// as if the remote item had never arrived — while `__etag` (stamped by the
+/// caller from the incoming item) names the remote version we knowingly
+/// overrode, so that push normally succeeds without ever reaching the 409
+/// force path.
+pub(super) fn preserve_pending_edits(
+    incoming: &Map<String, Value>,
+    live: &WriteView,
+    watched_fields: &[String],
+) -> Option<(Map<String, Value>, Map<String, Value>)> {
+    let pending: Vec<String> = live
+        .diverged_fields(watched_fields)
+        .into_iter()
+        .filter(|f| incoming.get(f) != live.watched.get(f))
+        .collect();
+    if pending.is_empty() {
+        return None;
+    }
+    // `watched_subset` rather than a local loop, for the same reason this
+    // module exists at all: two definitions of "the watched subset" is how a
+    // reseed and a converge check start disagreeing. `pending` is non-empty
+    // here, so `watched_fields` is non-empty and the subset is `Some`.
+    let mut baseline = super::stamp::watched_subset(incoming, watched_fields).unwrap_or_default();
+    let mut merged = incoming.clone();
+    for field in &pending {
+        match live.watched.get(field) {
+            Some(local) => {
+                merged.insert(field.clone(), local.clone());
+            }
+            None => {
+                merged.remove(field);
+            }
+        }
+        match live.pushed.as_ref().and_then(|p| p.get(field)) {
+            Some(old) => {
+                baseline.insert(field.clone(), old.clone());
+            }
+            None => {
+                baseline.remove(field);
+            }
+        }
+    }
+    Some((merged, baseline))
+}
+
 /// The stored baseline to carry on an index entry, given the write view already
 /// derived from the same node.
 ///

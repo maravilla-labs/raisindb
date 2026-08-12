@@ -78,6 +78,12 @@ pub(super) fn raw_value(node: &Node, key: &str) -> Value {
 /// the provider just reported IS the pushed state, so the next drain sees
 /// nothing to send. Preserving a stale map here would make every remote edit
 /// look like a local one and push the provider's own change back at it.
+///
+/// Unless the mount's conflict policy is `local_wins`, in which case `stage_op`
+/// pre-merges: the inputs handed here already carry the local values of any
+/// pending fields and the OLD baseline entries for exactly those fields, so
+/// this function needs no policy branch of its own — see
+/// `materializer/stage.rs` and `preserve_pending_edits`.
 pub fn build_properties(
     mapped: &serde_json::Map<String, Value>,
     virt: &crate::jobs::handlers::virtual_mount_sync::materializer::VirtualMeta,

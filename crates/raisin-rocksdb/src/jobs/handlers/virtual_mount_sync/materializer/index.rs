@@ -32,7 +32,23 @@ pub struct MountScope {
     /// is applied, so a changed mapper — a new node type, a renamed property, a
     /// new folder hierarchy — is invisible to everything already synced. Remap
     /// is the deliberate, operator-triggered exception.
+    ///
+    /// A remap on a mount whose [`Self::read_local_wins`] is set still keeps
+    /// pending local edits: its contract is "re-apply the mapper to unchanged
+    /// remote data", not "resolve conflicts in remote's favour", so the
+    /// preserve step in `stage_op` deliberately does not branch on this flag.
     pub force_rewrite: bool,
+    /// Whether an incoming remote item may overwrite a locally-diverged watched
+    /// field. `false` for every policy except an explicit, well-formed
+    /// `local_wins` — `remote_wins`, `error`, `resolver_function`, unset, and
+    /// unparseable values all read as `false`, because the read path must never
+    /// invent a merge rule the write path would refuse.
+    ///
+    /// A bool rather than the `ConflictPolicy` enum on purpose: the
+    /// materializer has no business knowing about resolver plumbing, and the
+    /// enum stays `pub(crate)` inside `write::conflict` where refusals are
+    /// handled loudly.
+    pub read_local_wins: bool,
     /// Node properties this mount may push outward — the `state_only`
     /// allow-list, taken from `write_config.mutable_fields`.
     ///

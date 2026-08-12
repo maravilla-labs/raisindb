@@ -60,7 +60,10 @@
 //! nominate.
 
 mod candidates;
-mod conflict;
+// `pub(crate)` so `resolve.rs` can map the policy onto
+// `MountScope::read_local_wins`; the enum itself stays `pub(crate)` too, so the
+// materializer never grows a dependency on resolver plumbing.
+pub(crate) mod conflict;
 mod conflict_push;
 mod create;
 mod deletes;

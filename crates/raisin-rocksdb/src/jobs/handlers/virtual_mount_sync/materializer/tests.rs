@@ -325,3 +325,106 @@ fn a_write_view_distinguishes_unseeded_from_diverged() {
     // A mount that watches nothing carries no view at all.
     assert!(write_view_of(&node, &[]).is_none());
 }
+
+/// The `local_wins` pre-merge, in isolation: which fields survive, which
+/// converge, and how ABSENCE travels through both maps.
+#[test]
+fn preserve_pending_edits_keeps_edits_and_their_divergence() {
+    use super::write_view::{preserve_pending_edits, WriteView};
+    use serde_json::{json, Map, Value};
+
+    let fields = vec!["unread".to_string(), "folder".to_string()];
+    let obj = |v: Value| match v {
+        Value::Object(m) => m,
+        _ => unreachable!(),
+    };
+
+    // Pending `unread` edit (local true, pushed false); `folder` converged.
+    let live = WriteView {
+        watched: obj(json!({ "unread": true, "folder": "inbox" })),
+        pushed: Some(obj(json!({ "unread": false, "folder": "inbox" }))),
+    };
+
+    // The incoming item still says false, and moves the folder.
+    let incoming = obj(json!({ "unread": false, "folder": "archive", "subject": "hi" }));
+    let (merged, baseline) =
+        preserve_pending_edits(&incoming, &live, &fields).expect("unread is pending");
+    // The pending field keeps the local value; everything else — the
+    // non-diverged watched field AND the unwatched property — follows the item.
+    assert_eq!(
+        Value::Object(merged),
+        json!({ "unread": true, "folder": "archive", "subject": "hi" })
+    );
+    // The baseline keeps the OLD entry for the pending field only.
+    assert_eq!(
+        Value::Object(baseline),
+        json!({ "unread": false, "folder": "archive" })
+    );
+
+    // An item already carrying the local value has nothing pending: the caller
+    // must take the ordinary reseed path, which is the convergence.
+    let matching = obj(json!({ "unread": true, "folder": "inbox" }));
+    assert!(preserve_pending_edits(&matching, &live, &fields).is_none());
+
+    // No local edit at all: same answer, ordinary path.
+    let converged = WriteView {
+        watched: obj(json!({ "unread": false, "folder": "inbox" })),
+        pushed: Some(obj(json!({ "unread": false, "folder": "inbox" }))),
+    };
+    let moved = obj(json!({ "unread": false, "folder": "archive" }));
+    assert!(preserve_pending_edits(&moved, &converged, &fields).is_none());
+}
+
+/// Absence is load-bearing on both sides of the merge: a first edit of a field
+/// the provider never reported must stay diverged (baseline entry REMOVED, not
+/// nulled), and a local delete of a field must not be resurrected by the
+/// incoming value.
+#[test]
+fn preserve_pending_edits_treats_absence_as_an_answer() {
+    use super::write_view::{preserve_pending_edits, WriteView};
+    use serde_json::{json, Map, Value};
+
+    let fields = vec!["unread".to_string()];
+    let obj = |v: Value| match v {
+        Value::Object(m) => m,
+        _ => unreachable!(),
+    };
+
+    // First edit of a never-reported field: local present, baseline lacks it.
+    let live = WriteView {
+        watched: obj(json!({ "unread": true })),
+        pushed: Some(Map::new()),
+    };
+    let incoming = obj(json!({ "unread": false }));
+    let (merged, baseline) =
+        preserve_pending_edits(&incoming, &live, &fields).expect("first edit is pending");
+    assert_eq!(Value::Object(merged), json!({ "unread": true }));
+    assert!(
+        !baseline.contains_key("unread"),
+        "the baseline must stay ABSENT — storing the incoming value (or null) \
+         would make the first edit look already-pushed"
+    );
+
+    // Unseeded node (no `__pushed_state` at all): same rule.
+    let unseeded = WriteView {
+        watched: obj(json!({ "unread": true })),
+        pushed: None,
+    };
+    let (_, baseline) =
+        preserve_pending_edits(&incoming, &unseeded, &fields).expect("unseeded edit is pending");
+    assert!(!baseline.contains_key("unread"));
+
+    // Local DELETE of a watched field the provider still reports: the merge
+    // must not resurrect it.
+    let deleted = WriteView {
+        watched: Map::new(),
+        pushed: Some(obj(json!({ "unread": false }))),
+    };
+    let (merged, baseline) =
+        preserve_pending_edits(&incoming, &deleted, &fields).expect("the delete is pending");
+    assert!(
+        !merged.contains_key("unread"),
+        "keeping the incoming value would resurrect a locally-deleted field"
+    );
+    assert_eq!(Value::Object(baseline), json!({ "unread": false }));
+}

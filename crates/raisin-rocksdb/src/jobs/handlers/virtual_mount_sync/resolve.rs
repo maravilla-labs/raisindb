@@ -139,6 +139,17 @@ impl VirtualMountSyncHandler {
             // the teardown and renew callers must never rewrite content.
             force_rewrite: false,
             watched_fields: mount.write_config.declared_mutable_fields().to_vec(),
+            // Pure config parsing, safe to resolve before capabilities are
+            // probed — the same rationale as `watched_fields` above: what the
+            // read path PRESERVES must not depend on what the adapter happens
+            // to answer this run. A refusal (typo) reads as `false`: the write
+            // plan already surfaces the bad config loudly, and the read path
+            // falling back to today's remote-wins behaviour is the
+            // conservative half.
+            read_local_wins: matches!(
+                write::conflict::resolve_conflict_policy(mount),
+                Ok(write::conflict::ConflictPolicy::LocalWins)
+            ),
         };
         Ok(CtxParts {
             public_origin: integration.public_origin.clone(),
