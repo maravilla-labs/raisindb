@@ -10,7 +10,7 @@ use raisin_models::auth::AuthContext;
 use serde::{Deserialize, Serialize};
 
 use super::state_store::{now_secs, OAUTH_STATE_STORE, STATE_TTL_SECS};
-use super::{json_str, oauth_config, require_admin, scopes_string};
+use super::{is_connect_broker_url, json_str, oauth_config, require_admin, scopes_string};
 use crate::error::ApiError;
 use crate::middleware::TenantInfo;
 use crate::state::AppState;
@@ -52,7 +52,26 @@ pub async fn start(
         ApiError::validation_failed("integration oauth_config.auth_url is missing")
     })?;
     let client_id = json_str(&cfg, "client_id").ok_or_else(|| {
-        ApiError::validation_failed("integration oauth_config.client_id is missing")
+        // Two very different situations hide behind an empty client_id, and the
+        // operator can act on neither with the generic message:
+        //
+        // - A MANAGED connector (consent brokered through Maravilla Connect)
+        //   whose client the control plane simply has not minted yet. Expected
+        //   and temporary; the console keys its "provisioning pending" surface
+        //   off this code, so keep the code stable.
+        // - A BYO connector genuinely missing its client id: a real
+        //   misconfiguration the operator fixes in the form.
+        if is_connect_broker_url(&auth_url) {
+            ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "MANAGED_CONNECTOR_UNPROVISIONED",
+                "This connector's OAuth client has not been provisioned yet by the \
+                 Maravilla control plane. Provisioning runs out of band — retry shortly, \
+                 or ask your Maravilla admin to run \"Repair\" for this organization.",
+            )
+        } else {
+            ApiError::validation_failed("integration oauth_config.client_id is missing")
+        }
     })?;
     // Derived, not trusted: a stored value that does not point at the one route
     // `oauth_callback` is registered on is repaired here, so consent never ends

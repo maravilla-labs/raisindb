@@ -792,7 +792,11 @@ function integrationToProperties(i: Integration): Record<string, unknown> {
     title: i.title,
     provider_type: i.provider_type,
     adapter_function: i.adapter_function,
-    oauth_config: i.oauth_config || {},
+    // Omitting `oauth_config` is meaningful, not sloppy: a managed connector's
+    // OAuth client is written by the control plane, and the editor deliberately
+    // leaves the field undefined so whatever the server holds (possibly
+    // provisioned AFTER this form loaded) rides through untouched via `_raw`.
+    ...(i.oauth_config ? { oauth_config: i.oauth_config } : {}),
     ...(i.api_config ? { api_config: i.api_config } : {}),
     // Schema-driven connector config. Secrets never travel here — they go
     // through setConfigSecrets, which encrypts them server-side.
@@ -1150,7 +1154,12 @@ export const integrationsApi = {
       // Never inherit the template's identity or its engine-owned fields.
       id: undefined,
       path: undefined,
-      enabled: overrides.enabled ?? true,
+      // Carry the template's own flag. Managed templates ship `enabled: false`
+      // deliberately — it means "no OAuth client yet" — and the control plane
+      // flips it to true when it provisions the client. Forcing `true` here
+      // erased that signal, so an unprovisioned connector looked healthy and
+      // its "Connect account" button failed with an opaque 400.
+      enabled: overrides.enabled ?? template.enabled,
       connected_accounts: [],
       capabilities: undefined,
       capabilities_checked_at: undefined,

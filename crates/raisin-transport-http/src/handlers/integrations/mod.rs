@@ -144,6 +144,39 @@ pub(crate) fn oauth_config(node: &Node) -> Value {
     json_prop(node, "oauth_config")
 }
 
+/// Whether an authorize URL belongs to a Maravilla Connect broker rather than
+/// to a provider directly.
+///
+/// The SAME test flightdeck's connector reconciler uses to decide which
+/// connectors it provisions, and that symmetry is the point: a connector this
+/// returns `true` for gets its `client_id` minted by the control plane, so an
+/// empty `client_id` on it means "provisioning has not run yet" — a distinct,
+/// expected state that `oauth_start` reports under its own error code
+/// (`MANAGED_CONNECTOR_UNPROVISIONED`) instead of a generic validation failure.
+///
+/// The path must be EXACTLY `/authorize`, which is what separates a Connect
+/// broker from a provider that merely happens to live on a `connect.` host:
+/// Stripe's own endpoint is `https://connect.stripe.com/oauth/authorize`, and a
+/// substring test would tell an operator who configured their own Stripe client
+/// to sit and wait for a control plane that is never coming.
+pub(crate) fn is_connect_broker_url(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
+    if !host.starts_with("connect.") {
+        return false;
+    }
+    // Trim a query or fragment: `/authorize?x=1` is still the authorize endpoint.
+    path.split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        == "authorize"
+}
+
 /// Read a string field from a JSON object, trimming empties to `None`.
 pub(crate) fn json_str(obj: &Value, key: &str) -> Option<String> {
     obj.get(key)
@@ -351,5 +384,51 @@ mod redirect_uri_tests {
             resolve(&cfg, "studio"),
             "https://example.test/api/integrations/studio/oauth/callback"
         );
+    }
+}
+
+#[cfg(test)]
+mod connect_broker_tests {
+    use super::is_connect_broker_url;
+
+    /// Must match flightdeck's `is_connect_url`: the two decide the same
+    /// question ("is this connector's client control-plane-minted?") from
+    /// opposite ends, and a disagreement means either a managed connector gets
+    /// the generic "client_id is missing" error, or a BYO connector is told to
+    /// wait for provisioning that will never come.
+    #[test]
+    fn only_connect_authorize_urls_are_broker_urls() {
+        assert!(is_connect_broker_url(
+            "https://connect.maravilla.cloud/authorize"
+        ));
+        assert!(is_connect_broker_url("https://connect.example.test/authorize"));
+        // Providers reached directly are not brokered.
+        assert!(!is_connect_broker_url(
+            "https://accounts.google.com/o/oauth2/v2/auth"
+        ));
+        assert!(!is_connect_broker_url(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        ));
+        // The token endpoint of Connect itself is not an authorize URL.
+        assert!(!is_connect_broker_url("https://connect.maravilla.cloud/token"));
+        assert!(!is_connect_broker_url(""));
+    }
+
+    /// A provider that merely LIVES on a `connect.` host is not brokered. An
+    /// operator who configured their own Stripe client must not be told to wait
+    /// for a control plane that will never provision it.
+    #[test]
+    fn a_provider_on_a_connect_host_is_not_brokered() {
+        assert!(!is_connect_broker_url(
+            "https://connect.stripe.com/oauth/authorize"
+        ));
+        // A query string does not stop it being Connect's authorize endpoint.
+        assert!(is_connect_broker_url(
+            "https://connect.maravilla.cloud/authorize?x=1"
+        ));
+        // Host must be the connect subdomain, not merely contain it.
+        assert!(!is_connect_broker_url(
+            "https://notconnect.example.test/authorize"
+        ));
     }
 }

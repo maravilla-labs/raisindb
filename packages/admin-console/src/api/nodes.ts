@@ -126,6 +126,32 @@ export interface RemoveRelationRequest {
   targetPath: string       // Path to the target node
 }
 
+/**
+ * What a committing write actually answers: the node wrapped in commit
+ * metadata. POST always commits (the server supplies default commit info when
+ * none is sent) and PUT commits when the request carries `commit`, so both can
+ * answer this instead of a bare `Node`.
+ */
+interface CommitEnvelope {
+  node: Node
+  revision: unknown
+  committed: boolean
+}
+
+/**
+ * Normalize a write response to the bare node.
+ *
+ * Every caller of create/createRoot/update feeds the result straight into a
+ * `nodeTo*()` mapper. Handing those mappers the ENVELOPE produced models whose
+ * every field was empty — which is how "Add connector" used to open the editor
+ * on a husk with no path, no title and no Capabilities/Connections sections.
+ * The check is shape-based so a bare-node response (PUT without commit) passes
+ * through untouched.
+ */
+function unwrapNode(r: Node | CommitEnvelope): Node {
+  return r && typeof r === 'object' && 'node' in r ? (r as CommitEnvelope).node : (r as Node)
+}
+
 export const nodesApi = {
   // ===== HEAD OPERATIONS (current/mutable state) =====
 
@@ -214,21 +240,30 @@ export const nodesApi = {
    * POST /api/repository/{repo}/{branch}/head/{ws}/
    */
   createRoot: (repo: string, branch: string, workspace: string, request: CreateNodeRequest) =>
-    api.post<Node>(`/api/repository/${repo}/${branch}/head/${workspace}/`, request),
+    api
+      .post<Node | CommitEnvelope>(`/api/repository/${repo}/${branch}/head/${workspace}/`, request)
+      .then(unwrapNode),
 
   /**
    * Create child node
    * POST /api/repository/{repo}/{branch}/head/{ws}/{path}
    */
   create: (repo: string, branch: string, workspace: string, parentPath: string, request: CreateNodeRequest) =>
-    api.post<Node>(`/api/repository/${repo}/${branch}/head/${workspace}${parentPath}`, request),
+    api
+      .post<Node | CommitEnvelope>(
+        `/api/repository/${repo}/${branch}/head/${workspace}${parentPath}`,
+        request
+      )
+      .then(unwrapNode),
 
   /**
    * Update node
    * PUT /api/repository/{repo}/{branch}/head/{ws}/{path}
    */
   update: (repo: string, branch: string, workspace: string, path: string, request: UpdateNodeRequest) =>
-    api.put<Node>(`/api/repository/${repo}/${branch}/head/${workspace}${path}`, request),
+    api
+      .put<Node | CommitEnvelope>(`/api/repository/${repo}/${branch}/head/${workspace}${path}`, request)
+      .then(unwrapNode),
 
   /**
    * Delete node

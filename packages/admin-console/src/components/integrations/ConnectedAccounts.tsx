@@ -184,7 +184,20 @@ export default function ConnectedAccounts({
       }, 600)
     } catch (e: any) {
       setConnecting(false)
-      onError('Connect failed', e?.message)
+      // The one start-failure an operator can do nothing about locally: a
+      // managed connector whose OAuth client the control plane has not minted
+      // yet (the server names it — see oauth_start.rs). The raw message
+      // ("client_id is missing") read as their misconfiguration; it is not.
+      if (e?.code === 'MANAGED_CONNECTOR_UNPROVISIONED') {
+        onError(
+          'Provisioning pending',
+          'This connector’s OAuth client has not been provisioned by the Maravilla ' +
+            'control plane yet. It usually arrives within a minute — leave this dialog ' +
+            'open and try again, or ask your Maravilla admin to run “Repair”.',
+        )
+      } else {
+        onError('Connect failed', e?.message)
+      }
     }
   }
 

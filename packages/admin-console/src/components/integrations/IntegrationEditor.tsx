@@ -114,27 +114,125 @@ export default function IntegrationEditor({
   // save path replaces the whole property map, so an edit there can wipe
   // provisioned values.
   const [oauthSchema, setOauthSchema] = useState<ResolvedNodeType | null>(null)
+  // The declared-but-unresolvable type name, when the fetch failed. Kept so the
+  // fallback is LOUD: silently swapping in the built-in credential form made a
+  // managed connector show client-id/secret fields for credentials Maravilla
+  // owns (seen live when maravilla-hue-adapter shipped without its
+  // `maravilla:ProvisionedOauthConfig` dependency).
+  const [oauthSchemaError, setOauthSchemaError] = useState<string | null>(null)
 
   useEffect(() => {
     const typeName = current?.oauth_config_type
     if (!typeName) {
       setOauthSchema(null)
+      setOauthSchemaError(null)
       return
     }
     let cancelled = false
     nodeTypesApi
       .getResolved(repo, 'main', typeName, 'raisin:system')
-      .then((r) => !cancelled && setOauthSchema(r))
+      .then((r) => {
+        if (cancelled) return
+        setOauthSchema(r)
+        setOauthSchemaError(null)
+      })
       .catch(() => {
         // Same degradation as above: fall back to the built-in form rather than
         // render nothing, so an uninstalled package never leaves an operator
-        // with no way to configure OAuth at all.
-        if (!cancelled) setOauthSchema(null)
+        // with no way to configure OAuth at all — but record it, and never fall
+        // back to the credential form for a Connect-brokered connector (see
+        // `provisionedOauth` below).
+        if (!cancelled) {
+          setOauthSchema(null)
+          setOauthSchemaError(typeName)
+        }
       })
     return () => {
       cancelled = true
     }
   }, [repo, current?.oauth_config_type])
+
+  // --- Managed (control-plane-provisioned) connectors ---------------------
+  //
+  // A managed connector consents through Maravilla Connect rather than the
+  // provider directly; its authorize URL is the tell (the same test flightdeck's
+  // reconciler and the server's oauth_start use). Its OAuth client is minted by
+  // the control plane AFTER the operator adds the connector, so "no client_id
+  // yet" is an expected, temporary state — not a misconfiguration.
+  const savedOauth: OAuthConfig = current?.oauth_config || {}
+  const isConnectBrokered = /:\/\/connect\./.test(savedOauth.auth_url || '')
+  // The operator owns no OAuth fields when the declared schema says so — or
+  // when the schema cannot be resolved but the connector is Connect-brokered:
+  // falling back to the credential form there offers fields Maravilla owns,
+  // and saving them wipes provisioned values.
+  const provisionedOauth =
+    (!!oauthSchema && (oauthSchema.resolved_properties || []).length === 0) ||
+    (!!oauthSchemaError && isConnectBrokered)
+  const provisioningPending = provisionedOauth && !(savedOauth.client_id || '').trim()
+
+  // Set by the provisioning poll so the dirty-baseline effect below skips the
+  // one `current` change the operator did not cause. See both sites.
+  const skipRebaselineRef = useRef(false)
+  // Whether the operator has moved the Enabled checkbox in this session. Once
+  // they have, a background refresh must not move it back under their hand.
+  const enabledTouchedRef = useRef(false)
+
+  // The editor is handed the LIST ROW (or the create response); refetch on open
+  // so `current` — and the `_raw` a save merges over — starts from the server's
+  // truth. Without this, a provisioning run that landed between the list load
+  // and opening this dialog is invisible, and pressing Update would revert it.
+  useEffect(() => {
+    if (!integration?.name) return
+    let cancelled = false
+    integrationsApi
+      .getIntegration(repo, integration.name)
+      .then((fresh) => {
+        if (cancelled) return
+        setCurrent(fresh)
+        setEnabled(fresh.enabled)
+        setSecretSet(fresh.client_secret_set || false)
+      })
+      .catch(() => {
+        /* The prop copy still renders; the pre-save refetch is the backstop. */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [repo, integration?.name])
+
+  // While provisioning is pending, poll the node so the screen unlocks itself
+  // the moment the control plane writes the client. The reconciler runs out of
+  // band (flightdeck), so nothing else would ever refresh this dialog — the
+  // operator would sit forever on a blocked Connect button.
+  //
+  // A POLL MUST NEVER QUIETLY TOUCH THE FORM. Adopting the node on every tick
+  // re-baselines the dirty snapshot (the effect below keys on `current`), so
+  // anything typed while waiting stops counting as an edit: it is never saved
+  // and nothing on screen says so. Nothing is written until provisioning
+  // actually lands, and even then the baseline is left alone so in-progress
+  // edits stay dirty and still save.
+  useEffect(() => {
+    if (!provisioningPending || !current?.name) return
+    const name = current.name
+    const t = window.setInterval(() => {
+      integrationsApi
+        .getIntegration(repo, name)
+        .then((fresh) => {
+          if (!(fresh.oauth_config?.client_id || '').trim()) return
+          skipRebaselineRef.current = true
+          setCurrent(fresh)
+          setSecretSet(fresh.client_secret_set || false)
+          // The reconciler flips `enabled` on when it provisions, so reflect
+          // that — unless the operator has already moved the checkbox
+          // themselves, which is an edit like any other.
+          if (!enabledTouchedRef.current) setEnabled(fresh.enabled)
+        })
+        .catch(() => {
+          /* Transient — the next tick retries. */
+        })
+    }, 5000)
+    return () => window.clearInterval(t)
+  }, [repo, provisioningPending, current?.name])
 
   /** Swap the authority segment in both Microsoft endpoint URLs. */
   function applyMsTenant() {
@@ -185,10 +283,14 @@ export default function IntegrationEditor({
         const resolved =
           s.base_url_configured && s.oauth_redirect_uri ? s.oauth_redirect_uri : clientRedirectUri
         setRedirectUri(resolved)
-        // The shipped connector templates ship `redirect_uri: ""`, which makes
-        // oauth/start 400. Prefill it so the common case is correct by default;
-        // never overwrite a value the operator already set.
-        setOauth((prev) => (prev.redirect_uri ? prev : { ...prev, redirect_uri: resolved }))
+        // Deliberately NOT prefilled into `oauth.redirect_uri`. The server
+        // derives and repairs an empty/wrong redirect_uri itself in oauth_start
+        // AND oauth_callback (resolve_redirect_uri), so the prefill bought
+        // nothing — and it cost a lot: when the resolved value equaled the
+        // origin-based initial `redirectUri`, `setRedirectUri` above was a
+        // no-op, the dirty baseline was never retaken, and every fresh managed
+        // connector opened permanently "dirty", blocking Connect account and
+        // Test connection with "click Update first" until a pointless Update.
       })
       .catch(() => {
         /* Non-fatal: the origin-based fallback is already shown. */
@@ -229,7 +331,15 @@ export default function IntegrationEditor({
   // Re-baseline whenever the saved node changes (mount, save, post-connect
   // reload) and after the async redirect-URI prefill lands, so neither counts
   // as an operator edit.
+  //
+  // The provisioning poll is the one `current` change that must NOT re-baseline:
+  // it is a background refresh the operator did not ask for, and folding it into
+  // the baseline would discard whatever they had typed while waiting.
   useEffect(() => {
+    if (skipRebaselineRef.current) {
+      skipRebaselineRef.current = false
+      return
+    }
     baselineRef.current = snapshotRef.current
   }, [current, redirectUri])
 
@@ -246,7 +356,10 @@ export default function IntegrationEditor({
   const dirty = formSnapshot !== baselineRef.current
   const connectBlockedReason = !current?.path
     ? 'Create this connector first.'
-    : pendingSecrets
+    : provisioningPending
+      ? 'Waiting for the Maravilla control plane to provision this connector’s OAuth client. ' +
+        'This page rechecks automatically — the button unlocks itself when the client arrives.'
+      : pendingSecrets
       ? 'You have entered a secret that is not saved yet. Click Update first — until you do, the ' +
         'server still has the old secret (or none), and the provider will reject the connection.'
       : dirty
@@ -281,18 +394,34 @@ export default function IntegrationEditor({
         .split(/[\n,]/)
         .map((s) => s.trim())
         .filter(Boolean)
+      // Merge over the FRESHEST property bag the server will let us have, not
+      // the one this dialog mounted with. The PUT replaces the whole map, so a
+      // stale bag deletes whatever landed while the dialog was open — most
+      // painfully a control-plane provisioning run's client_id and encrypted
+      // client secret. On failure fall back to the last-known bag rather than
+      // failing the save.
+      let raw = current?._raw
+      if (isEdit) {
+        try {
+          raw = (await integrationsApi.getIntegration(repo, integration!.name))._raw
+        } catch {
+          /* Offline or deleted-underneath; the save itself will say which. */
+        }
+      }
       const model: Integration = {
         // Carry the server's own property bag so the save merges onto it rather
         // than replacing it — without this, Update deletes connected_accounts,
-        // client_secret_encrypted, capabilities and api_config. `current` is
-        // refreshed after a connect, so this is the post-connect bag.
-        _raw: current?._raw,
+        // client_secret_encrypted, capabilities and api_config.
+        _raw: raw,
         name: name.trim(),
         title: title.trim(),
         provider_type: providerType.trim(),
         adapter_function: adapterFn.trim(),
         enabled,
-        oauth_config: { ...oauth, scopes },
+        // A provisioned OAuth surface is control-plane-owned: OMIT it entirely
+        // (it then rides through untouched via `_raw`) so this form can never
+        // overwrite a client_id/redirect_uri written after it loaded.
+        ...(provisionedOauth ? {} : { oauth_config: { ...oauth, scopes } }),
         setup_instructions: setupInstructions.trim() || undefined,
         docs_url: docsUrl.trim() || undefined,
         ...(configSchema ? { config: configValues } : {}),
@@ -426,7 +555,10 @@ export default function IntegrationEditor({
             <input
               type="checkbox"
               checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
+              onChange={(e) => {
+                enabledTouchedRef.current = true
+                setEnabled(e.target.checked)
+              }}
               className="w-4 h-4 rounded"
             />
             Enabled
@@ -485,7 +617,7 @@ export default function IntegrationEditor({
             </details>
           </fieldset>
 
-          {oauthSchema ? (
+          {oauthSchema || provisionedOauth ? (
             /* The connector declared its OAuth surface. Render exactly what it
                says the operator owns — which for a connector with externally
                issued credentials is nothing, collapsing this to a note. */
@@ -493,14 +625,36 @@ export default function IntegrationEditor({
               <legend className="px-2 text-sm font-semibold text-zinc-300">
                 OAuth configuration
               </legend>
-              {(oauthSchema.resolved_properties || []).length === 0 ? (
-                <p className="text-sm text-zinc-400">
-                  This connector's OAuth client is configured for you — there is nothing to
-                  enter here. Connect an account below.
+              {oauthSchemaError && (
+                <p className="text-xs text-amber-400">
+                  This connector declares <code className="font-mono">{oauthSchemaError}</code>,
+                  which is not installed in this repo — treating it as managed by Maravilla
+                  because consent goes through Maravilla Connect. Install the package that
+                  ships the type to clear this notice.
                 </p>
+              )}
+              {provisionedOauth ? (
+                provisioningPending ? (
+                  // NOT the reassuring note below: the client does not exist
+                  // yet, so "Connect an account" would 400. Say what is being
+                  // waited for; the poll above keeps this current.
+                  <p className="flex items-start gap-1.5 text-sm text-amber-400">
+                    <span>
+                      Waiting for the Maravilla control plane to provision this connector’s
+                      OAuth client. This page rechecks automatically — connecting unlocks as
+                      soon as the client arrives. If nothing happens for several minutes, ask
+                      your Maravilla admin to run “Repair” on this organization.
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-sm text-zinc-400">
+                    This connector's OAuth client is configured for you — there is nothing to
+                    enter here. Connect an account below.
+                  </p>
+                )
               ) : (
                 <SchemaForm
-                  properties={(oauthSchema.resolved_properties || []) as any[]}
+                  properties={(oauthSchema?.resolved_properties || []) as any[]}
                   values={oauth as Record<string, any>}
                   onChange={(name, value) => patchOauth({ [name]: value } as Partial<OAuthConfig>)}
                   disabled={saving}
@@ -510,6 +664,14 @@ export default function IntegrationEditor({
           ) : (
           <fieldset className="border border-white/10 rounded-lg p-4 space-y-4">
             <legend className="px-2 text-sm font-semibold text-zinc-300">OAuth configuration</legend>
+            {oauthSchemaError && (
+              <p className="text-xs text-amber-400">
+                This connector declares <code className="font-mono">{oauthSchemaError}</code> as
+                its OAuth surface, but that type is not installed in this repo — showing the
+                generic credential form instead. Only edit these fields if you actually own
+                this connector's OAuth client.
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className={labelCls}>Client ID</label>
@@ -719,6 +881,16 @@ export default function IntegrationEditor({
                   // `credential.access_token`. Default to the first account.
                   account_id: testAccountId || undefined,
                 }}
+                // Capabilities are cached on the node only when the probe runs,
+                // and connecting an account never ran it — so "Capabilities
+                // unknown" stuck until a manual Test. Auto-run at exactly the
+                // moment a result can newly exist: an account is present (and
+                // selected, so the probe carries a credential) but no probe has
+                // ever recorded one. `autoRan` inside the panel keeps this to
+                // one run per open.
+                autoRun={
+                  testAccounts.length > 0 && !!testAccountId && !current.capabilities_checked_at
+                }
                 disabledReason={
                   needsAccount
                     ? 'Connect an account below first — this connector uses OAuth, so the test needs a credential.'
