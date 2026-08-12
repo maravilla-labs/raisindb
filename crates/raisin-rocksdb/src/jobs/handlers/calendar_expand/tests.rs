@@ -252,3 +252,98 @@ fn only_series_masters_parse_as_masters() {
     node.properties.remove("recurrence_type");
     assert!(parse_master(&node).is_none());
 }
+
+// ── deriving the instant a provider never reported ──────────────────────────
+//
+// Microsoft Graph reports a naive local datetime plus a separate timeZone and
+// never a UTC instant, so the ms-graph mapper writes `start_utc: null` by
+// design and defers the instant to "later, where a real tz database exists".
+// Until that derivation existed, every Outlook series master failed with
+// `master has no parsable start_utc` and produced no occurrences at all —
+// silently, on a mount that reported a clean sync.
+
+/// A master shaped the way ms-graph writes one: local wall clock + zone, no UTC.
+fn local_only_master(id: &str, start_local: &str, end_local: &str) -> raisin_models::nodes::Node {
+    let mut node = weekly_master(id, None);
+    node.properties.remove("start_utc");
+    node.properties.remove("end_utc");
+    node.properties.insert("start_local".into(), s(start_local));
+    node.properties.insert("end_local".into(), s(end_local));
+    node
+}
+
+#[test]
+fn a_master_with_only_local_time_still_expands() {
+    let node = local_only_master("m-local", "2026-03-10T09:00:00", "2026-03-10T09:30:00");
+    let master = parse_master(&node).unwrap();
+
+    // 09:00 Europe/Zurich on 2026-03-10 is CET (UTC+1).
+    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-10T08:00:00Z");
+
+    let out = expand(
+        &master,
+        Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap(),
+        10,
+    )
+    .unwrap();
+    assert!(!out.occurrences.is_empty(), "a local-only master must expand");
+
+    // The end must be derived too, or every occurrence is zero-length while
+    // still looking like a successful expansion.
+    for occ in &out.occurrences {
+        assert_eq!(
+            occ.end_utc - occ.start_utc,
+            chrono::Duration::minutes(30),
+            "occurrence lost its duration"
+        );
+    }
+}
+
+#[test]
+fn a_stored_utc_instant_still_wins_over_its_local_twin() {
+    let mut node = weekly_master("m-both", None);
+    // Deliberately disagreeing: the indexed UTC column is what everything else
+    // orders by, so it must win rather than being recomputed from the local.
+    node.properties
+        .insert("start_local".into(), s("2026-03-10T17:00:00"));
+    let master = parse_master(&node).unwrap();
+    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-10T08:00:00Z");
+}
+
+#[test]
+fn the_ambiguous_dst_hour_resolves_to_the_earlier_instant() {
+    // 2026-10-25 02:30 Europe/Zurich happens TWICE (CEST then CET).
+    let node = local_only_master("m-ambiguous", "2026-10-25T02:30:00", "2026-10-25T03:00:00");
+    let master = parse_master(&node).unwrap();
+    // The first pass through 02:30 is 00:30Z (UTC+2); the second is 01:30Z.
+    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-10-25T00:30:00Z");
+}
+
+#[test]
+fn the_nonexistent_dst_hour_steps_forward_instead_of_vanishing() {
+    // 2026-03-29 02:30 Europe/Zurich never happens — the clock jumps 02:00→03:00.
+    let node = local_only_master("m-gap", "2026-03-29T02:30:00", "2026-03-29T03:00:00");
+    let master = parse_master(&node).unwrap();
+    // Must resolve to the first instant that exists, not drop the master.
+    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-29T01:00:00Z");
+}
+
+#[test]
+fn an_all_day_local_date_resolves_to_local_midnight() {
+    let node = local_only_master("m-allday", "2026-03-10", "2026-03-11");
+    let master = parse_master(&node).unwrap();
+    // Midnight in Zurich, NOT midnight UTC — the whole reason the mapper
+    // refuses to convert all-day values without a tz database.
+    assert_eq!(format_utc(master.start_utc.unwrap()), "2026-03-09T23:00:00Z");
+}
+
+#[test]
+fn no_zone_and_no_utc_is_still_reported_rather_than_guessed() {
+    let mut node = local_only_master("m-nozone", "2026-03-10T09:00:00", "2026-03-10T09:30:00");
+    node.properties.remove("timezone");
+    let master = parse_master(&node).unwrap();
+    // Guessing UTC here would silently move a meeting by the zone's offset.
+    assert!(master.start_utc.is_none());
+    assert_eq!(build_ical(&master).unwrap_err(), ExpandError::NoStart);
+}

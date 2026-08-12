@@ -101,6 +101,76 @@ fn parse_utc(raw: &str) -> Option<DateTime<Utc>> {
         .map(|d| d.with_timezone(&Utc))
 }
 
+/// The UTC instant of a naive wall clock in an IANA zone.
+///
+/// THIS IS THE OTHER HALF OF A CONTRACT THE ADAPTERS RELY ON. Microsoft Graph
+/// reports a naive local datetime plus a separate `timeZone` and never a UTC
+/// instant, so the ms-graph mapper deliberately writes `start_utc: null` and
+/// records that the instant is "derived later where a real tz database exists".
+/// This is that place — and until it existed, every Outlook series master
+/// failed expansion with `master has no parsable start_utc` and simply had no
+/// occurrences (320 of them in one production run), while the mount reported a
+/// clean sync.
+///
+/// Local time is not a bijection, so both irregular cases are decided here
+/// rather than left to a panic-on-unwrap:
+///
+/// * AMBIGUOUS (the DST fall-back hour, which happens twice): take the EARLIER
+///   instant. That is the first time the clock reads e.g. 02:30, and it is what
+///   Outlook, Google Calendar and RFC 5545 implementations do.
+/// * NONEXISTENT (the spring-forward gap, which never happens): step forward in
+///   one-minute increments to the first instant that does exist — the same
+///   "clock skips ahead" behaviour a person would apply. Bounded at the gap's
+///   plausible maximum so a pathological zone cannot spin.
+fn instant_in_zone(local: &str, tz_name: &str) -> Option<DateTime<Utc>> {
+    use chrono::offset::LocalResult;
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone};
+
+    let tz: chrono_tz::Tz = tz_name.parse().ok()?;
+
+    // Both shapes the mapper writes: a wall clock, or a bare date for all-day.
+    let naive = NaiveDateTime::parse_from_str(local, super::LOCAL_FMT)
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(local, super::LOCAL_DATE_FMT)
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+        })?;
+
+    match tz.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
+        LocalResult::Ambiguous(earlier, _later) => Some(earlier.with_timezone(&Utc)),
+        LocalResult::None => {
+            // Longest DST jump in the tz database is 2h; 180 minutes is slack.
+            for minutes in 1..=180 {
+                let shifted = naive + chrono::Duration::minutes(minutes);
+                if let LocalResult::Single(dt) = tz.from_local_datetime(&shifted) {
+                    return Some(dt.with_timezone(&Utc));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// A timestamp property, falling back to its local twin resolved in `timezone`.
+///
+/// The stored UTC column WINS whenever it is present — it is the indexed,
+/// fixed-width value everything else orders by, and `build_ical` re-derives the
+/// wall clock from it for exactly that reason. The fallback only fills a hole.
+fn instant_or_local(
+    node: &Node,
+    utc_key: &str,
+    local_key: &str,
+    timezone: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    if let Some(instant) = instant_prop(node, utc_key) {
+        return Some(instant);
+    }
+    let local = str_prop(node, local_key)?;
+    instant_in_zone(&local, timezone?)
+}
+
 /// The `recurrence` array as content lines. Absent, empty, or non-string
 /// elements answer an empty vector rather than an error: a master with no rule
 /// is simply not expandable, which the caller reports once.
@@ -135,13 +205,18 @@ pub fn parse_master(node: &Node) -> Option<SeriesMaster> {
         .iter()
         .filter_map(|k| node.properties.get(*k).map(|v| (k.to_string(), v.clone())))
         .collect();
+    // Resolved ONCE here rather than at each use, so `build_ical`, the duration
+    // and the projection all see one coherent master — a provider that reports
+    // only local time must not produce a master that expands but has
+    // zero-length occurrences.
+    let timezone = str_prop(node, "timezone");
     Some(SeriesMaster {
         node_id: node.id.clone(),
         external_id: str_prop(node, "__external_id"),
         recurrence: recurrence_lines(node),
-        timezone: str_prop(node, "timezone"),
-        start_utc: instant_prop(node, "start_utc"),
-        end_utc: instant_prop(node, "end_utc"),
+        start_utc: instant_or_local(node, "start_utc", "start_local", timezone.as_deref()),
+        end_utc: instant_or_local(node, "end_utc", "end_local", timezone.as_deref()),
+        timezone,
         start_local: str_prop(node, "start_local"),
         all_day: bool_prop(node, "all_day").unwrap_or(false),
         status: str_prop(node, "status"),
