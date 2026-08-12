@@ -633,11 +633,25 @@ function toExternal(node, mount, fields, intent) {
       payload.end = end;
       payload.isAllDay = allDay;
       emitted++;
-    } else if (intent === "create") {
-      // An event with no resolvable start is not a thing Graph can store, and a
-      // POST that omits it is a 400 the engine would count as a per-item
-      // failure and retry forever. Declining is the honest answer: nothing is
-      // sent, nothing is stamped, and fixing the node still creates it.
+    } else {
+      // DECLINE THE WHOLE PUSH — on update as well as on create.
+      //
+      // On create this was always right: an event with no resolvable start is
+      // not a thing Graph can store, and a POST that omits it is a 400 the
+      // engine would retry forever.
+      //
+      // On UPDATE it used to fall through, dropping the time from the PATCH
+      // while the rest of the payload went out. The engine then baselined every
+      // field it had ASKED to send — `start_local` included — because
+      // `__pushed_state` is stamped from the node's own values and never checked
+      // against what the payload actually carried. So rescheduling an event
+      // whose Windows timezone is missing from `WINDOWS_TO_IANA` moved the time
+      // in RaisinDB, never moved it in Outlook, and recorded it as pushed. The
+      // two then diverge permanently and invisibly: nothing re-nominates the
+      // node, so it says 14:00 while Outlook says 10:00, forever.
+      //
+      // Declining parks the intent instead: attributable, visible, and fixing
+      // the zone mapping still pushes it.
       return null;
     }
   }

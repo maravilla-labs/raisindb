@@ -13,7 +13,7 @@ use raisin_hlc::HLC;
 use raisin_storage::Storage;
 
 use super::super::config::{MountConfig, PendingDelete};
-use super::super::materializer::{node_external_id, node_mount_id};
+use super::super::materializer::{node_external_id, node_mount_id, under};
 use crate::RocksDBStorage;
 
 /// Recover a deleted node's provenance from the MVCC pre-image.
@@ -23,9 +23,10 @@ use crate::RocksDBStorage;
 /// precisely the invisibility this walk exists to solve.
 ///
 /// Returns `None` unless the pre-image proves the node was this mount's —
-/// `__mount_id` matching AND a non-empty `__external_id`, the same invariant
-/// `SyncIndex.by_path` enforces on the read side. Anything less and a user's own
-/// node under the mount path could be pushed as a provider delete.
+/// `__mount_id` matching, a non-empty `__external_id`, AND a path inside the
+/// mount subtree, the same invariant `SyncIndex.by_path` enforces on the read
+/// side. Anything less and a user's own node under the mount path could be
+/// pushed as a provider delete.
 pub(super) async fn recover_delete(
     storage: &Arc<RocksDBStorage>,
     tenant: &str,
@@ -62,6 +63,35 @@ pub(super) async fn recover_delete(
     let Some(external_id) = node_external_id(&node).filter(|e| !e.is_empty()) else {
         return Ok(None);
     };
+
+    // OWNERSHIP NEEDS POSITIVE EVIDENCE, and `__mount_id` alone is not it.
+    //
+    // The reserved properties travel WITH a node: move one out of the mount
+    // subtree and it keeps `__mount_id` and `__external_id` indefinitely.
+    // `relocate` is what interprets a move — under `move_policy: detach` it
+    // strips the node's mount ownership — but that runs on the next drain, and
+    // until it does the node still reads as mount-owned here.
+    //
+    // So: move a node out of the mount, then delete it at its new location
+    // before a reconcile pass reaches it, and this queues a remote DELETE of a
+    // message, file or event the user only ever moved. Real content destroyed at
+    // the provider, by a sequence someone can perform in five seconds without
+    // touching the mount at all.
+    //
+    // Every other layer that decides what this mount owns — `scan_mount_nodes`,
+    // the index, `relocate` itself — is path-scoped. This was the one that was
+    // not, and "no contrary evidence" is not ownership.
+    if !under(&mount.mount_path, &node.path) {
+        tracing::info!(
+            mount_id = %mount.mount_id,
+            path = %node.path,
+            mount_path = %mount.mount_path,
+            external_id = %external_id,
+            "a deleted node carried this mount's ids but sat OUTSIDE its subtree; \
+             it had been moved out, so no remote delete is queued for it"
+        );
+        return Ok(None);
+    }
 
     Ok(Some(PendingDelete {
         node_id: change.node_id.clone(),

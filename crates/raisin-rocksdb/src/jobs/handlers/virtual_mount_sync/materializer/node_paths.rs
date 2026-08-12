@@ -82,7 +82,7 @@ pub(super) fn join_path(mount_path: &str, rel: &str) -> String {
 }
 
 /// Every ancestor path of `path`, excluding `path` itself and the root.
-pub(super) fn ancestor_paths(path: &str) -> Vec<String> {
+pub(crate) fn ancestor_paths(path: &str) -> Vec<String> {
     let segments: Vec<&str> = path
         .trim_start_matches('/')
         .split('/')

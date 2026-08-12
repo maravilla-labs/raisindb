@@ -146,9 +146,24 @@ impl VirtualMountSyncHandler {
             // plan already surfaces the bad config loudly, and the read path
             // falling back to today's remote-wins behaviour is the
             // conservative half.
+            //
+            // EVERY policy that KEEPS the local edit, not only `local_wins`.
+            //
+            // Under `error` the drain parks the conflict for a person to decide
+            // — and then the same run's read phase rebuilt the node from the
+            // provider and reseeded `__pushed_state`, so by the time anyone
+            // looked there was nothing left to decide. The edit the mount had
+            // just promised to hold was gone, and the park message described a
+            // choice that no longer existed. A resolver policy had the same
+            // hole: an intent parked because the resolver threw, declined, or
+            // answered "ask a human" was reverted underneath it.
+            //
+            // `remote_wins` stays false, because there the revert IS the policy.
             read_local_wins: matches!(
                 write::conflict::resolve_conflict_policy(mount),
-                Ok(write::conflict::ConflictPolicy::LocalWins)
+                Ok(write::conflict::ConflictPolicy::LocalWins
+                    | write::conflict::ConflictPolicy::Error
+                    | write::conflict::ConflictPolicy::Resolver(_))
             ),
         };
         Ok(CtxParts {

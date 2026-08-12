@@ -114,7 +114,36 @@ export function diagnoseWrite(resp, context, resource) {
     );
   }
 
+  // A 400 is TWO different faults wearing one status code, and coding them
+  // alike broke the whole drain over one bad item.
+  //
+  // `config_error` is terminal FOR THE MOUNT: the engine stops the drain and
+  // badges it `misconfigured`. That is right when the request could never
+  // succeed as written — an unknown property, a resource this mount may not
+  // patch — and exactly wrong for a rejection of ONE item's payload. There,
+  // every candidate ordered after it was skipped, deterministically, on every
+  // run: one malformed event head-of-line blocked the rest of the calendar
+  // indefinitely, while `first_error` carried Graph's message with no node id
+  // to attribute it to.
+  //
+  // The codes below name the ITEM, so they must not be mount-fatal. They carry
+  // no reserved code, which the engine classifies as transient: the drain
+  // continues past them and the item is counted as failed. That does mean a
+  // permanently malformed item is re-attempted once per drain — bounded, and a
+  // far better trade than blocking every edit behind it.
   if (status === 400) {
+    var itemFault =
+      graphCode === "ErrorInvalidPropertyValue" ||
+      graphCode === "ErrorInvalidIdMalformed" ||
+      graphCode === "ErrorInvalidRecipients" ||
+      graphCode === "ErrorMessageSizeExceeded" ||
+      (typeof graphCode === "string" && graphCode.indexOf("ErrorOccurrence") === 0);
+    if (itemFault) {
+      throw new Error(
+        context + ": Microsoft Graph rejected THIS ITEM (400 " + graphCode + "): " +
+          (graphMsg || "no message") + ". Other items in this mount are unaffected."
+      );
+    }
     throw coded(
       context + ": " + (graphMsg || "Microsoft Graph rejected the request (400)"),
       "config_error"

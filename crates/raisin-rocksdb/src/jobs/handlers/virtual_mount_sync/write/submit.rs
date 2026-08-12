@@ -57,6 +57,21 @@ pub(super) async fn drain_submit(
 ) -> DrainStats {
     let mut stats = DrainStats::default();
 
+    // Honour a stand-off before scanning anything. A provider that stated a wait
+    // gets that wait: without this the throttle above would stop one drain and
+    // the next tick would walk straight back into it, which is the loop the
+    // stand-off exists to break.
+    if let Some(retry_after) = state.writeback_retry_after {
+        if chrono::Utc::now().timestamp() < retry_after {
+            tracing::debug!(
+                mount_id = %ctx.scope.mount_id,
+                retry_after,
+                "outbox drain skipped: the provider asked us to wait"
+            );
+            return stats;
+        }
+    }
+
     // The outbox cannot be read from `SyncIndex`: a command is authored by a
     // user and carries no `__mount_id`/`__external_id` until this drain stamps
     // one on it, and the index holds only nodes that already have both.
@@ -186,7 +201,29 @@ pub(super) async fn drain_submit(
         let mut stop_drain = false;
         match submit_step::issue_one(ctx, node, plan).await {
             Issued::Sent => stats.submitted += 1,
-            Issued::Requeued => stats.requeued += 1,
+            // A THROTTLE STOPS THE DRAIN. It is a statement about the TENANT, so
+            // every remaining command would be refused the same way — the drain
+            // used to carry on and put 499 more calls into a provider that had
+            // just asked us to stop, on every tick, with nothing on the mount to
+            // show for it. A stated wait is an instruction, not a hint.
+            //
+            // What is left stays `queued` and goes out once the stand-off
+            // expires, which is the same shape the credential-refused branch
+            // below already has.
+            Issued::Requeued { retry_after_secs } => {
+                stats.requeued += 1;
+                stop_drain = true;
+                if let Some(secs) = retry_after_secs {
+                    state.writeback_retry_after =
+                        Some(chrono::Utc::now().timestamp() + secs as i64);
+                }
+                tracing::info!(
+                    mount_id = %ctx.scope.mount_id,
+                    retry_after_secs,
+                    pending = queued.len() - i - 1,
+                    "the provider throttled the outbox; leaving the rest queued"
+                );
+            }
             Issued::Failed {
                 reason,
                 stop_drain: s,
@@ -228,7 +265,8 @@ pub(super) async fn drain_submit(
             tracing::warn!(
                 mount_id = %ctx.scope.mount_id,
                 pending = left,
-                "the account's credential was refused; leaving the rest of the outbox queued"
+                "the outbox drain stopped early on a mount-level refusal; the rest \
+                 stays queued"
             );
             break;
         }

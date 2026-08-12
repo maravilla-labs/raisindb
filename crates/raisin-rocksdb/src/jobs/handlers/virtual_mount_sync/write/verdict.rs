@@ -36,6 +36,44 @@ pub(crate) fn writeback_verdict(
     match resolve_mode(write_config, capabilities, mapper) {
         WriteMode::Off => (None, None),
         WriteMode::Refused(reason) => (Some(false), Some(reason)),
-        WriteMode::StateOnly(_) | WriteMode::Mirror(_) | WriteMode::Submit(_) => (Some(true), None),
+        // Supported, but with a stated caveat when only PART of the mount's
+        // allow-list is actually writable.
+        //
+        // `(Some(true), None)` used to mean two different things: "everything
+        // you asked for is pushable" and "some of it is". A mount declaring two
+        // fields against an adapter that accepts one looked identical to a fully
+        // working mount, while every edit to the dropped field was silently
+        // never nominated — `candidates` tests divergence against the EFFECTIVE
+        // list, so the node was filtered out with no log line and no counter.
+        //
+        // Deliberately not a refusal: the fields the adapter does accept still
+        // push, and refusing the mount over a partial shortfall would stop those
+        // too. The reason is the whole fix — it names which field is stuck.
+        WriteMode::StateOnly(_) | WriteMode::Mirror(_) | WriteMode::Submit(_) => {
+            (Some(true), unpushable_note(write_config, capabilities))
+        }
     }
+}
+
+/// The declared mutable fields the adapter will not accept, as an operator-facing
+/// note — `None` when the whole allow-list is honoured.
+///
+/// Named, never counted: WHICH field is unpushable is the whole of what someone
+/// needs in order to fix it.
+fn unpushable_note(write_config: &WriteConfig, capabilities: &Capabilities) -> Option<String> {
+    let dropped: Vec<&str> = write_config
+        .declared_mutable_fields()
+        .iter()
+        .filter(|f| !capabilities.mutable_fields.contains(f))
+        .map(String::as_str)
+        .collect();
+    if dropped.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "the adapter does not accept {} of this mount's mutable_fields ({}); \
+         edits to those fields are never pushed",
+        dropped.len(),
+        dropped.join(", ")
+    ))
 }

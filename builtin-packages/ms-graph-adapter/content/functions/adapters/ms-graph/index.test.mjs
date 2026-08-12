@@ -148,6 +148,65 @@ test('a cursor minted before identity existed is resynced once, not trusted', ()
   )
 })
 
+// ---- get_changes: partial payloads ----------------------------------------
+
+test('a flag-only delta entry is re-read in full, not mapped as nulls', () => {
+  // Marking a message unread in Outlook produces a delta entry carrying ONLY
+  // the changed property. `mailMeta` answers a missing key with an explicit
+  // null — correct for the full walk, where absent really does mean no value —
+  // and the engine's upsert rebuilds the property map wholesale from it. So one
+  // click in Outlook wiped the message's subject, sender, recipients and date to
+  // null while the node kept its id and its etag, leaving nothing downstream
+  // able to tell "has no subject" from "we were not told the subject".
+  const token = mintCursor(mailMount())
+  const calls = stubHttp([
+    {
+      body: {
+        value: [{ '@odata.etag': 'W/"2"', id: 'MSG-1', isRead: false }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+    // The re-read the adapter must perform before anything maps it.
+    {
+      body: {
+        id: 'MSG-1',
+        subject: 'Invoice 4711',
+        isRead: false,
+        receivedDateTime: '2026-08-12T09:00:00Z',
+        from: { emailAddress: { name: 'Ada', address: 'ada@example.com' } },
+      },
+    },
+  ])
+
+  const out = opGetChanges(CREDENTIAL, mailMount(), { since_token: token })
+
+  assert.match(calls[1].url, /\/messages\/MSG-1/, 'the partial entry must be re-read')
+  assert.match(calls[1].url, /\$select=/, 'and re-read with the mount projection')
+
+  const meta = out.items[0].item.metadata
+  assert.equal(meta.subject, 'Invoice 4711')
+  assert.equal(meta.from_address, 'ada@example.com')
+  assert.equal(meta.date, '2026-08-12T09:00:00Z')
+  assert.equal(meta.unread, true, 'and the change itself still lands')
+})
+
+test('a complete delta entry costs no extra request', () => {
+  // The re-read is per CHANGED-AND-PARTIAL item. New mail arrives complete and
+  // must not pay for it.
+  const token = mintCursor(mailMount())
+  const calls = stubHttp([
+    {
+      body: {
+        value: [{ id: 'MSG-2', subject: 'Hello', receivedDateTime: '2026-08-12T10:00:00Z' }],
+        '@odata.deltaLink': 'https://graph/d',
+      },
+    },
+  ])
+  const out = opGetChanges(CREDENTIAL, mailMount(), { since_token: token })
+  assert.equal(calls.length, 1, 'one request, not two')
+  assert.equal(out.items[0].item.metadata.subject, 'Hello')
+})
+
 // ---- get_changes: drive deletions -----------------------------------------
 
 test('a driveItem deletion is a delete, not an update', () => {

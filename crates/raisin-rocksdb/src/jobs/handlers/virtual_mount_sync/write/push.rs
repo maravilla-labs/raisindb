@@ -207,7 +207,13 @@ pub(super) async fn push_one(
                 ctx,
                 policy,
                 &node_json,
-                push_fields,
+                // The mount's EFFECTIVE allow-list, not this attempt's diverged
+                // subset. `push_fields` is what went on the wire; `fields` is
+                // what this mount may write at all, and it is the latter that
+                // bounds what a resolver is allowed to decide — see
+                // `resolve_one`, where passing the wrong one silently truncated
+                // the resolver's answer.
+                fields,
                 &view.watched,
                 view.pushed.as_ref(),
                 stored_etag.as_deref(),

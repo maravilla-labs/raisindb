@@ -8,7 +8,7 @@
 
 import { coded, enc, isEmptyObject } from "./common.js";
 import { GRAPH, graphFetch, raiseForStatus } from "./http.js";
-import { principal, resourceOf } from "./mount.js";
+import { outlookHeaders, principal, resourceOf } from "./mount.js";
 import { opUpdate } from "./write.js";
 
 // ---- submit (the outbox) --------------------------------------------------
@@ -115,10 +115,27 @@ export function opSubmit(credential, mount, params) {
   // PARKED. That is the correct default for a command, and it is the opposite
   // of the correct default for a read.
   var resp = graphFetch(credential, "POST", url, {
-    headers: { "Content-Type": "application/json" },
+    // The immutable-id header, like every OTHER call this adapter makes.
+    //
+    // `outlookHeaders` exists so that no path can disagree about which id space
+    // it is in, and this was the one call that bypassed it. With
+    // `immutable_ids` on — the default — the mount lists, reads and PATCHes in
+    // the immutable space, so every id stored on a node is an immutable one.
+    // Sending it to /reply, /forward or /respond WITHOUT the header addresses
+    // the DEFAULT space, where it means nothing: reply, forward and RSVP could
+    // not work at all on a default mount, and failed terminally with a
+    // diagnosis that blamed the message for no longer existing.
+    headers: outlookHeaders(mount, { "Content-Type": "application/json" }),
     body: body,
     context: "submit",
-    rawStatuses: [400, 403, 404],
+    // 5xx is claimed HERE and nowhere else, because for a SEND it means the
+    // opposite of what it means for a read. The shared mapping turns 503/504
+    // into `rate_limited` — the one disposition the outbox RE-SENDS — and a 504
+    // on /sendMail is the classic case where the request did reach Exchange and
+    // the gateway merely gave up waiting for the answer. Re-sending delivers the
+    // same mail twice, to real people, irreversibly. Handled below as an unknown
+    // outcome instead: parked once, never retried.
+    rawStatuses: [400, 403, 404, 500, 502, 503, 504],
   });
 
   var status = resp.status;
@@ -162,6 +179,23 @@ export function opSubmit(credential, mount, params) {
     throw coded(
       "submit: " + (graphMsg || "Microsoft Graph rejected the command (400)"),
       "config_error"
+    );
+  }
+
+  // A 5xx on a SEND is genuinely ambiguous, and the honest answer is to say so.
+  //
+  // A plain Error reaches the engine as `Transient`, which `disposition` maps to
+  // PARK — the command lands at `unknown`, is never auto-retried, and a person
+  // can settle it by looking in Sent Items. That is the whole point of the
+  // at-most-once protocol, and coding it `rate_limited` (which is what the
+  // shared mapping does for 503/504) opted this path out of it: `rate_limited`
+  // is the one disposition that RESENDS.
+  if (status >= 500) {
+    throw new Error(
+      "submit: Microsoft Graph answered " + status + " (" +
+        (graphMsg || "no message") + "). Whether the command was issued is " +
+        "UNKNOWN — a gateway timeout on a send often means the send happened. " +
+        "Not retrying; check Sent Items before requeueing."
     );
   }
 

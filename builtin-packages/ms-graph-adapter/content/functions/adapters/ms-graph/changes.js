@@ -162,6 +162,81 @@ function resolveCursor(mount, resource, token) {
   return wrapped;
 }
 
+// ---- partial delta payloads -----------------------------------------------
+//
+// A delta entry for a CHANGED item is not always the whole item. Graph is
+// entitled to send only what changed — marking a message unread in Outlook
+// produces `{ "@odata.etag": ..., id, isRead: false }` and nothing else — and
+// `mailMeta` answers a missing key with an explicit `null`, because for the
+// full walk an absent key genuinely means "no value".
+//
+// The engine's upsert then rebuilds the node's property map wholesale from that
+// answer, which is its documented contract, so ONE flag change in Outlook wiped
+// the message's subject, sender, recipients, date and body to null. The node
+// kept its id and its etag, so nothing downstream could tell the difference
+// between "this message has no subject" and "we were not told the subject".
+//
+// Fixed at the source rather than by teaching the engine to merge: an
+// `ExternalItem` means COMPLETE state, everywhere, and a merge contract would
+// make it impossible to ever clear a field legitimately. A partial entry is
+// re-read in full instead.
+//
+// MAIL ONLY, deliberately.
+//
+// The anchor keys below are ones every real message carries under this
+// adapter's own projection, so testing for their KEY (not their value)
+// distinguishes "was not sent" from "was sent as null". A flag-only change
+// carries none of them.
+//
+// The other two resources are left alone rather than guessed at. A driveItem
+// delta is documented to carry the whole resource; and on the calendar side
+// `calendarChanges` already re-reads a series master through `fetchEvent`, so a
+// second hydration here would double-fetch — and a `seriesMaster` legitimately
+// carries no `start` of its own, which makes any simple anchor wrong. If a
+// calendar equivalent of this bug turns up, it needs its own anchor, not this
+// one widened.
+function isPartial(v, resource) {
+  if (resource !== "mail") return false;
+  if (!v || v["@removed"] || !v.id) return false;
+  return !("receivedDateTime" in v) && !("sentDateTime" in v) && !("subject" in v);
+}
+
+// Re-read one message with the mount's full projection. Returns null when it is
+// gone, which the caller treats as "skip", never as "it has no fields".
+function refetchFull(credential, mount, id) {
+  var url =
+    GRAPH + principal(mount) + "/messages/" + enc(id) +
+    "?$select=" + enc(mailSelect(mount));
+  var resp = graphFetch(credential, "GET", url, {
+    context: "get_changes:rehydrate",
+    rawStatusOk: true,
+    headers: outlookHeaders(mount),
+  });
+  if (resp.status === 404) return null;
+  raiseForStatus(resp, "get_changes:rehydrate");
+  return resp.body || null;
+}
+
+// Replace every partial entry in a delta page with the full object.
+//
+// Costs one request per CHANGED item, and only for the ones that arrived
+// partial — a page of unchanged items costs nothing, and a page of new mail
+// arrives complete.
+function hydratePage(credential, mount, resource, values) {
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    var v = values[i];
+    if (!isPartial(v, resource) || !v.id) {
+      out.push(v);
+      continue;
+    }
+    var full = refetchFull(credential, mount, v.id);
+    if (!full) continue; // gone between the page and now; the walk reconciles it
+    out.push(full);
+  }
+  return out;
+}
+
 export function opGetChanges(credential, mount, params) {
   var resource = resourceOf(mount);
   var token = params.since_token;
@@ -179,7 +254,9 @@ export function opGetChanges(credential, mount, params) {
     headers: outlookHeaders(mount),
   });
   var body = resp.body || {};
-  var values = body.value || [];
+  // A changed item may arrive carrying ONLY what changed; re-read those in full
+  // before anything maps them, or the upsert writes nulls over real values.
+  var values = hydratePage(credential, mount, resource, body.value || []);
   var items =
     resource === "calendar"
       ? calendarChanges(credential, mount, values)

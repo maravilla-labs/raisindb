@@ -20,7 +20,13 @@ pub(super) enum Issued {
     Sent,
     /// Explicitly refused before the provider looked at it (`rate_limited`),
     /// so it is back at `queued` and will be tried again.
-    Requeued,
+    ///
+    /// Carries the provider's stated wait, because a throttle is a statement
+    /// about the TENANT, not about this one command: every remaining command
+    /// would be refused identically. The drain used to carry on regardless —
+    /// 499 more calls into a provider that had just asked us to stop, repeated
+    /// on every tick, with nothing on the mount to show for it.
+    Requeued { retry_after_secs: Option<u64> },
     /// Terminal `failed`: definitively not sent.
     Failed { reason: String, stop_drain: bool },
     /// Terminal `unknown`: it may have been sent. Never auto-retried.
@@ -41,6 +47,28 @@ pub(super) async fn issue_one(
     node: &raisin_models::nodes::Node,
     plan: &SubmitPlan,
 ) -> Issued {
+    // 0. READ THE NODE AS IT STANDS NOW, not as the drain first saw it.
+    //
+    //    `drain_submit` takes ONE snapshot and issues up to
+    //    `max_items_per_sync` commands from it, each a provider call that can
+    //    take tens of seconds. Command #200's turn comes minutes after its node
+    //    was read — and a person fixing a typo or dropping a recipient on a
+    //    still-`queued` mail writes ordinary properties, which move neither
+    //    `status` nor `__write_seq`. So the CAS claim below applied happily and
+    //    the PRE-EDIT payload went out. Mail cannot be recalled.
+    //
+    //    `push_one` already re-reads for exactly this reason (its step 2); the
+    //    submit path never got the same treatment. `command_seq` comes from the
+    //    fresh read too, so the claim asserts against what was actually mapped.
+    let fresh = match ctx.materializer.read_node(&ctx.scope, &node.id).await {
+        Ok(Some(fresh)) => fresh,
+        // Gone between the scan and now: nothing was sent, and there is nothing
+        // left to send it for.
+        Ok(None) => return Issued::Abandoned,
+        Err(e) => return Issued::NotAttempted(format!("re-read before send failed: {e}")),
+    };
+    let node = &fresh;
+
     // 1. PREPARE, before claiming anything. The mapper is pure, so asking it
     //    first costs nothing and keeps a mapper problem out of the claim's
     //    ambiguity window — a command stranded at `unknown` because its mapper
@@ -172,7 +200,9 @@ pub(super) async fn issue_one(
                 let mut set = Map::new();
                 set.insert("last_error".into(), json!(e.to_string()));
                 apply(ctx, node, claim_seq, status::QUEUED, set).await;
-                Issued::Requeued
+                Issued::Requeued {
+                    retry_after_secs: e.retry_after_secs(),
+                }
             }
             Disposition::Failed => {
                 let reason = e.to_string();

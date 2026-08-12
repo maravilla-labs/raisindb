@@ -129,9 +129,17 @@ pub(crate) fn resolve_conflict_policy(mount: &MountConfig) -> Result<ConflictPol
 
 /// Decide what to do about ONE refused push.
 ///
-/// `fields` is the payload's allow-list, `watched` the node's current values and
-/// `last_pushed` what the provider last agreed to — together they are the
-/// `field_diff` a resolver reasons over.
+/// `fields` is the mount's EFFECTIVE ALLOW-LIST — what this mount may write at
+/// all — never the diverged subset that happened to go on the wire this attempt.
+/// `watched` is the node's current values and `last_pushed` what the provider
+/// last agreed to; together they are the `field_diff` a resolver reasons over.
+///
+/// The distinction was a real defect. This used to receive the diverged subset,
+/// so a resolver answering "keep the local subject AND restore the remote
+/// category" had the category half dropped as "outside this mount's write
+/// allow-list" when it was squarely inside it — and in the degenerate case every
+/// merged key was dropped and the intent parked with a reason that blamed the
+/// mount's configuration for the engine's own narrowing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_one(
     ctx: &SyncCtx<'_>,

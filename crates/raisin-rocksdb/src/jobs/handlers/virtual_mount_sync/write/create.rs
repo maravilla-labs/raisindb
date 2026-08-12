@@ -64,9 +64,39 @@ pub(super) async fn drain_creates(
         }
     };
 
+    // Paths the ENGINE authored to hold mount content, not paths a user
+    // authored to be pushed.
+    //
+    // `upsert_deep_node` auto-creates the ancestor folders a mapped item's path
+    // needs, and those folders carry no `__external_id` — which is the whole of
+    // what `is_create_candidate` was testing. So a mirror mount with
+    // `raisin:Folder` in its `create_node_types` and a hierarchical
+    // `path_template` pushed its own scaffolding to the provider, minting a
+    // synthetic folder tree next to the real content.
+    //
+    // The positive evidence is structural: a node that is an ANCESTOR of
+    // something this mount owns is scaffolding for that something. Deriving it
+    // from the scan we already have costs one pass and no extra read.
+    let chain_paths: std::collections::HashSet<String> = nodes
+        .iter()
+        .filter(|node| node.properties.contains_key("__external_id"))
+        .flat_map(|node| super::super::materializer::ancestor_paths(&node.path))
+        .collect();
+
     let mut pending: Vec<raisin_models::nodes::Node> = nodes
         .into_iter()
         .filter(|node| is_create_candidate(ctx, node))
+        .filter(|node| {
+            if chain_paths.contains(&node.path) {
+                tracing::debug!(
+                    mount_id = %ctx.scope.mount_id,
+                    path = %node.path,
+                    "not creating a folder this engine authored to hold mount content"
+                );
+                return false;
+            }
+            true
+        })
         .collect();
     if pending.is_empty() {
         return;

@@ -264,6 +264,22 @@ pub(super) async fn drain_pending(
     if ctx.scope.force_rewrite {
         return 0;
     }
+    // A BLOCKED mount makes no outbound changes at all — including here.
+    //
+    // A `blocked` verdict from the delete rails parks EVERY pending intent, not
+    // only the deletes, and `drain` honours that by returning before it pushes
+    // anything. This path did not: it is called at every page boundary of the
+    // read phases, which keep running after the drain parks, so a mount an
+    // operator had parked to investigate a suspected mass delete went on
+    // issuing real provider updates for the rest of the run. The console said
+    // "nothing was sent to the provider and nothing was lost" while it was
+    // being sent.
+    //
+    // Checked BEFORE `pending::take`, so the notes survive to be drained once
+    // the block is lifted rather than being consumed and dropped.
+    if state.writeback_blocked.is_some() {
+        return 0;
+    }
     // Standing off after a config error means NO provider calls.
     if let Some(retry_after) = state.writeback_retry_after {
         if Utc::now().timestamp() < retry_after {
@@ -459,14 +475,24 @@ pub(super) async fn drain(
     // the next run, in a stable order.
     let limit = ctx.mount.sync_config.max_items_per_sync.max(1) as usize;
     let candidates = candidates::candidates(batcher.virtual_nodes(), fields, limit);
-    // `return stats`, never `DrainStats::default()`: a mirror run that pushed
-    // deletes and then found no field updates still has a receipt to leave.
-    if candidates.is_empty() {
-        if stats != DrainStats::default() {
-            state.last_drain = Some(stats.summary());
-        }
-        return stats;
-    }
+    // No field updates is NOT an early exit. This used to `return stats` here,
+    // and it was the only return in the whole drain that came after work may
+    // have been staged and before BOTH the flush below and the status block —
+    // so one branch leaked two separate defects:
+    //
+    //  * `drain_creates` stages an ADOPT op (the `__external_id` the provider
+    //    just minted) into the batcher. A `mode: "write"` latency drain creates
+    //    a node, finds no update candidates, and returns without flushing — so
+    //    the node never records the id it was created under, the next drain
+    //    sees it as un-adopted, and creates ANOTHER remote object. Every drain,
+    //    forever.
+    //  * The badge below never ran, so a mount whose conflict had since been
+    //    resolved stayed amber `conflict` with no Reason row to explain it —
+    //    exactly the "keeps investigating, keeps finding it healthy" the status
+    //    block's own comment says it exists to prevent.
+    //
+    // Falling through with an empty candidate list costs one skipped loop.
+    let has_candidates = !candidates.is_empty();
 
     for (i, candidate) in candidates.iter().enumerate() {
         // Both checks happen BEFORE the push, never after it: they decide
@@ -675,10 +701,16 @@ pub(super) async fn drain(
             policy.as_str()
         ));
     }
-    // Written on every drain that had candidates, clean ones included: a summary
+    // Written on every drain that DID something, clean ones included: a summary
     // left over from an earlier run would read as the current state, and "120
     // pushed, 380 pending" going stale is exactly the wrong thing to leave on a
     // mount that has since caught up.
-    state.last_drain = Some(stats.summary());
+    //
+    // A drain with no candidates and nothing staged leaves the previous receipt
+    // alone: it did not run, and overwriting a real receipt with an empty one
+    // would erase what the last drain actually did.
+    if has_candidates || stats != DrainStats::default() {
+        state.last_drain = Some(stats.summary());
+    }
     stats
 }
