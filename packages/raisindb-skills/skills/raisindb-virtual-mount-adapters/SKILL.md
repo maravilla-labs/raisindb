@@ -1,6 +1,6 @@
 ---
 name: raisindb-virtual-mount-adapters
-description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, write modes (state_only/mirror/submit), echo prevention, and the field-tested traps. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
+description: "Build custom connector adapters for RaisinDB virtual mounts: sync external systems (mail, calendars, drives, any API) into nodes and push local edits back. Covers the adapter operation contract (capabilities/list/get_changes/update/submit/subscribe), error taxonomy, cursors and has_more, bidirectional mappers, the receipt-etag and item-build-parity contracts, diverged-fields subsets, conflict policies (RemoteWins/LocalWins), write modes (state_only/mirror/submit), resolvers, echo prevention, and the field-tested traps. Use whenever the user wants a connector, adapter, integration sync, virtual mount, two-way sync with an external service, or mentions raisin:VirtualMount, raisin:Integration, get_changes, or 'sync X into RaisinDB'."
 ---
 
 # RaisinDB Virtual-Mount Adapters
@@ -47,7 +47,7 @@ export default function handler(input) {
 `credential` arrives **decrypted, in memory, per call** — access token only,
 never a refresh token. `mount` is a read-only config snapshot.
 
-## The five rules that come from production incidents
+## The seven rules that come from production incidents
 
 Every one of these was a real outage. Do not relearn them.
 
@@ -103,6 +103,39 @@ Every one of these was a real outage. Do not relearn them.
    every sync; one that misses real changes drops updates. Prefer the
    provider's real change marker; fall back to `lastModified`.
 
+6. **THE RECEIPT ETAG CONTRACT.** Every `update` (and `create`) must return
+   a receipt `{ external_id, etag }` where `etag` is **the exact etag the
+   next walk/delta will compute for the post-write state**. A `null` receipt
+   etag means "keep the stale pre-write etag" — so the very next read sees a
+   mismatch, rebuilds the node from the remote item, reseeds the baseline,
+   and **silently reverts any local edit made while the run was in flight**
+   (the Hue "can turn the light on but never off again" outage). What to DO:
+   - If the provider echoes the updated resource on the write, derive the
+     receipt etag from that echo **with the same formula the read path
+     uses** (e.g. `@odata.etag || eTag || lastModifiedDateTime` — call the
+     one shared function, never a re-implementation).
+   - If the write response is bodiless or yields no etag by that formula,
+     do a **read-after-write** (`get` the resource) and derive the etag from
+     what came back. A write path that cannot answer with the post-write
+     etag is not done.
+   - Providers with no native etag at all: synthesize a **deterministic
+     content hash** over the fields the item exposes — and because it is
+     content-derived, the write path MUST read-after-write to hash the
+     post-write state; hashing the request you sent is a guess, not a
+     receipt.
+
+7. **Item-build parity.** Every code path that builds an item — full walk,
+   single `get`, `get_changes` feed, and the write-receipt path from rule
+   6 — must produce **byte-identical metadata (and therefore the identical
+   etag) for the same provider state**, including join-derived and enriched
+   fields. One path filling a join field with `null` where another fills a
+   value means two etags for one provider state, and every sync of that item
+   is a spurious rebuild that clobbers pending edits (the Hue single-get vs
+   full-walk divergence). What to DO: route all item construction through
+   one shared `toExternalItem()`-style builder, and make single `get` fetch
+   (or explicitly reproduce) every enrichment the walk performs — never let
+   it return a "cheaper" shape of the same object.
+
 ## Cursors and paging (read side)
 
 - `list` pages via `next_cursor` (null = done). `get_changes` pages via
@@ -126,11 +159,34 @@ nodes. **One function, both directions** — `to_node` (default operation),
 
 - A mapper that declares a field mutable MUST round-trip it exactly, or
   echo-prevention breaks and the field re-pushes forever.
-- `to_external` receives `fields` — the engine sends **only the fields that
-  actually diverged**. Emit exactly what `fields` names, nothing more: some
-  provider fields have side effects on mere presence in an update (Graph
-  re-sends meeting invites to every attendee whenever `attendees` appears
-  in a PATCH).
+- **`to_external` receives only the diverged subset.** The engine compares
+  watched fields against the baseline (`__pushed_state`) and hands you
+  `fields` containing **only the fields that actually diverged** — possibly
+  a single one. Design `to_external` so that **every single-field subset of
+  your mutable fields produces a valid, non-null payload**. Returning
+  null/empty for any subset makes the push `Skipped`: the node stays
+  diverged and is **re-nominated every drain, forever, with no request ever
+  going out and no error surfaced** — a silent wedge. Test each mutable
+  field alone in `fields`.
+- **Group fields: trigger on ANY member, emit VALUES for ALL.** Fields that
+  only make sense together on the wire (colour x/y pairs, start/end/timezone
+  triples) must be pushed as the full group when *any* member appears in
+  `fields`, reading the missing members' current **values** from the node —
+  never gate the group on ALL members being in `fields`. The Hue mapper
+  required both `color_x` AND `color_y` diverged; a one-coordinate edit
+  emitted nothing and wedged forever. (Membership in `fields` is the
+  trigger; the node's values are the payload.)
+- **Aliases must clear every gate.** If a field has two spellings
+  (`unread`/`is_read`), each alias must appear in the adapter's
+  `mutable_fields`, the mapper's write allow-list, AND `to_node`'s output
+  (so the baseline carries both and either edit diverges) — one missed gate
+  means one spelling silently never writes back, while the other works
+  (the ms-graph `is_read` outage). Pick a deterministic winner when both
+  diverge at once.
+- Outside the diverged-subset rules above, emit exactly what a push needs
+  and nothing more: some provider fields have side effects on mere presence
+  in an update (Graph re-sends meeting invites to every attendee whenever
+  `attendees` appears in a PATCH).
 - Child nodes (mail attachments → `raisin:Asset` subnodes) are supported —
   see §6.2 of the contract.
 - Calendars: map to `raisin:Event` (§6.1) and sync **series masters with
@@ -149,11 +205,58 @@ Three modes, resolved from `write_config` ∩ your declared capabilities:
   **never retried on an ambiguous answer**. Implement `submit` as a single
   provider call so the duplicate window is one HTTP request.
 
-Engine guarantees you build against: pushes carry only diverged fields;
-`__pushed_state`/`__etag` stamp-backs prevent your own writes echoing back
-as changes; `update` receives the stored `etag` as the concurrency base —
-throw `conflict` when the provider says the object moved on, never
-overwrite silently.
+Engine guarantees you build against: a sync run drains local edits FIRST,
+then reads; there is no dirty flag — divergence is a value comparison
+against the engine-owned `__pushed_state` baseline; pushes carry only
+diverged fields; `__pushed_state`/`__etag` stamp-backs prevent your own
+writes echoing back as changes; `update` receives the stored `etag` as the
+concurrency base — throw `conflict` when the provider says the object moved
+on, never overwrite silently. And return the post-write etag in the receipt
+(rule 6) — the stamp-back is only as good as the etag you hand it.
+
+### Read-path conflict semantics (know what the engine does to your nodes)
+
+What happens when an incoming item's etag differs from the stored one
+depends on the mount's conflict policy — and the adapter's receipt-etag
+discipline decides how often that branch is even reached:
+
+- **RemoteWins (default).** The node is **rebuilt wholesale** from mapper
+  output and `__pushed_state` is **reseeded from the incoming item**. Any
+  pending local edit is silently reverted AND de-nominated — it will never
+  push. There is no partial merge.
+- **LocalWins (read side).** Pending diverged watched fields keep their
+  LOCAL values (a local delete stays deleted); the reseeded baseline keeps
+  the OLD entries for exactly those fields; everything else — non-diverged
+  watched fields, unwatched properties, the etag — follows the incoming
+  item, so the follow-up drain pushes cleanly against the fresh etag.
+  Incoming deletes still win. It protects **pending** edits only: an
+  already-pushed edit replayed by a lagging delta is protected by nothing
+  but your receipt etag matching.
+- **LocalWins (write side, on a provider 409)** re-sends with etag null.
+
+Therefore: **the receipt etag (rule 6) plus item-build parity (rule 7) are
+the first line of defence** — with them, the read following your own push
+computes the same etag, skips the item, and neither policy branch fires.
+LocalWins is the safety net for edits made *while a run is in flight*, not
+a licence to return sloppy receipts. Assume RemoteWins when writing the
+adapter: a correct adapter never needs the net.
+
+### Resolvers vs mirror updates
+
+Two distinct write-back participants — pick by what the answer is:
+
+- **Mirror/state_only `update`** is for edits that are pure provider state:
+  the diverged fields map 1:1 onto a provider PATCH and the receipt closes
+  the loop. Most fields belong here.
+- A **resolver** (e.g. `resolvers/ms-graph-mail`) participates when the
+  engine must adjudicate a conflict or a non-1:1 write — it renders a
+  verdict from local + remote + baseline rather than blindly mapping
+  fields. A resolver must apply the **same alias and polarity rules as the
+  mapper** (ms-graph-mail: `is_read` mirrors `unread` with inverted
+  polarity, checked after `unread` so verdicts match the mapper's payload
+  precedence) — a resolver whose field rules drift from the mapper's
+  produces verdicts the push then contradicts. If you ship both, test them
+  against the same fixture set.
 
 ## Push notifications (webhooks)
 
@@ -170,6 +273,15 @@ counted.
   (fresh-token idle feed, `has_more` transitions), and the http status →
   error-code mapping. These are pure functions; testing them is cheap and
   every skipped one has become a production incident.
+- **Receipt/walk etag parity tests**: assert
+  `receipt.etag === toExternalItem(sameProviderState).etag` for every write
+  path — normal echo, fallback-marker body, and the bodiless read-after-
+  write path. Asserting mere etag *presence* passes with a stale etag and
+  ships the clobber bug.
+- **Single-field subset tests**: call `to_external` with each mutable field
+  ALONE in `fields` (and each member of every group field alone) and assert
+  a non-null payload every time — the forever-renominated wedge is
+  invisible to round-trip tests that always pass full field sets.
 - **Rust harness tests** (`crates/raisin-functions/.../tests_ms_graph_adapter.rs`
   pattern) load your real JS through QuickJS and pin the wire contract.
 - **Never trust a flat-hierarchy or idle-feed test alone**: add one nested
@@ -189,6 +301,7 @@ my-adapter/
     _raisin__system/connectors/<name>/.node.yaml   # connector registration
     functions/adapters/<name>/                      # the adapter (+ modules)
     functions/mappers/<name>/                       # optional mapper(s)
+    functions/resolvers/<name>/                     # optional resolver(s)
 ```
 
 Multi-file adapters work in every execution path (the module map is loaded
