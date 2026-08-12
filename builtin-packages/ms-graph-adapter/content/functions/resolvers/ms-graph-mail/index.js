@@ -59,7 +59,7 @@
  * of them silently dropped.
  *
  * `labels` is NOT live yet: this adapter's `capabilities` declares
- * `mutable_fields: ["unread"]` only, so the engine drops a merged `labels` as
+ * `mutable_fields: ["unread", "is_read"]` only, so the engine drops a merged `labels` as
  * outside the allow-list (with a warning) and the edit parks. The branch is here
  * so the rule ships with the resolver rather than after it — the day the adapter
  * PATCHes `categories` and adds it to `mutable_fields`, merging starts working
@@ -94,6 +94,24 @@ function handler(input) {
       return { resolution: "local_wins" };
     }
     if (unread.local === false && unread.pushed !== false) {
+      return { resolution: "remote_wins" };
+    }
+  }
+
+  // `is_read` is the Graph-truth ALIAS of `unread` (the adapter's capabilities
+  // declare both; the mapper folds them into one `isRead` on the wire). Same
+  // two rules, inverted polarity: is_read=false is the deliberate "come back
+  // to this" and survives; is_read=true yields to a remote that is at least as
+  // far along. Checked AFTER `unread` so that when both spellings appear in
+  // one diff the canonical column decides — mirroring the mapper's own
+  // precedence, which is what keeps the resolver's verdict consistent with the
+  // payload the refused push actually carried.
+  var isRead = diff.is_read;
+  if (isRead && typeof isRead.local === "boolean") {
+    if (isRead.local === false && isRead.pushed !== false) {
+      return { resolution: "local_wins" };
+    }
+    if (isRead.local === true && isRead.pushed !== true) {
       return { resolution: "remote_wins" };
     }
   }

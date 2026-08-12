@@ -37,6 +37,19 @@ test('marking a message read yields to the remote', () => {
   });
 });
 
+test('the is_read alias follows the same rules with inverted polarity', () => {
+  // is_read=false is the deliberate "come back to this"; is_read=true yields
+  // to a remote that is at least as far along. Mirrors the mapper's alias.
+  assert.deepEqual(resolve({ is_read: { local: false, pushed: true } }), {
+    resolution: 'local_wins',
+  });
+  assert.deepEqual(resolve({ is_read: { local: true, pushed: false } }), {
+    resolution: 'remote_wins',
+  });
+  // No local boolean, no verdict — parks like the unread case.
+  assert.equal(resolve({ is_read: { local: null, pushed: true } }).resolution, 'park');
+});
+
 test('categories merge to the union — nobody loses a label', () => {
   const out = resolve({ labels: { local: ['Blue', 'Urgent'], pushed: ['Blue'] } });
   assert.equal(out.resolution, 'merged');

@@ -140,15 +140,29 @@ export function ifMatch(etag, mount) {
   return mount ? outlookHeaders(mount, headers) : headers;
 }
 
-// The `{external_id, etag}` receipt the engine stamps back. `body` is Graph's
-// response to the write; a null etag is safe — the engine keeps the previously
-// stored one, and `__pushed_state`, not the etag, is what suppresses the echo.
+// The `{external_id, etag}` receipt the engine stamps back.
+//
+// THE ETAG MUST BE THE ONE THE NEXT WALK/DELTA COMPUTES for the post-write
+// state. The engine's read path skips an item only when its etag matches the
+// stored one; a receipt that stamps anything else makes the run FOLLOWING this
+// push mismatch its own write, rebuild the node wholesale and reseed
+// __pushed_state from remote — silently reverting any edit made while the run
+// was in flight, because the read path has no local-wins branch. (This is the
+// exact clobber the Hue adapter shipped and had to fix.)
+//
+// The read paths derive an item's etag as
+// `@odata.etag || eTag || lastModifiedDateTime` (items.js `toExternalItem`) —
+// and mail items DO land on the ISO fallback in practice — so the receipt
+// reads Graph's write response with the SAME formula. The response HEADER etag
+// is deliberately not used: the walk never sees headers, so a header-only
+// value is a guaranteed mismatch. A null etag (bodiless response) falls back
+// at the engine to the STALE pre-write stored etag; `opUpdate` avoids that by
+// reading the item back instead.
 export function writeReceipt(resp, fallbackId) {
   var body = resp.body || {};
   return {
     external_id: body.id || fallbackId || null,
-    // reqwest lowercases header names, hence "etag" not "ETag".
-    etag: body["@odata.etag"] || (resp.headers && resp.headers["etag"]) || null,
+    etag: body["@odata.etag"] || body.eTag || body.lastModifiedDateTime || null,
   };
 }
 
@@ -188,9 +202,25 @@ export function opUpdate(credential, mount, params) {
   // id, and the delta feed will re-import it under that id.
   if (diagnoseWrite(resp, "update", resource) === "gone") return null;
 
-  // Graph answers a PATCH with 200 and the FULL updated object, so `@odata.etag`
-  // is normally in the body — read exactly as `toExternalItem` reads it.
-  return writeReceipt(resp, params.item_id);
+  // Graph answers a PATCH with 200 and the FULL updated object, so the receipt
+  // can usually be read straight off the response with the walk's own etag
+  // formula — no extra request spent. When the response yields NO etag by that
+  // formula (a bodiless 2xx from a proxy or a future Graph behavior change),
+  // the receipt comes from a read-after-write through `opGet` instead: it
+  // builds the item through the same $select / `toExternalItem` path the walk
+  // uses, so the stamped etag is byte-identical to what the next run computes.
+  // Returning a null etag here would fall back at the engine to the STALE
+  // pre-write etag, and the next walk would clobber the very state this PATCH
+  // just pushed.
+  var receipt = writeReceipt(resp, params.item_id);
+  if (!receipt.etag) {
+    var item = opGet(credential, mount, { item_id: receipt.external_id || params.item_id });
+    // A read-back 404 means the item changed ids between the PATCH and the
+    // read; the delta feed re-imports it under the new id, and the bodiless
+    // receipt is the best remaining answer.
+    if (item) return { external_id: item.external_id, etag: item.etag };
+  }
+  return receipt;
 }
 
 // ---- create (calendar mirror) ---------------------------------------------

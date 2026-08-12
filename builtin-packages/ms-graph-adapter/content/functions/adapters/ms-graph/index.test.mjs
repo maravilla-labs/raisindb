@@ -22,6 +22,8 @@ import { opList, opGetContent } from './read.js'
 import { opGetChanges } from './changes.js'
 import { raiseForStatus } from './http.js'
 import { outlookHeaders, useImmutableIds } from './mount.js'
+import { opUpdate } from './write.js'
+import { toExternalItem } from './items.js'
 
 // ---- host stub -------------------------------------------------------------
 
@@ -202,6 +204,69 @@ test('a drive item with no download url is refused rather than half-served', () 
   // A vanished item is null (settled), not an error.
   stubHttp([{ status: 404, body: {} }])
   assert.equal(opGetContent(CREDENTIAL, filesMount(), { item_id: 'GONE' }), null)
+})
+
+// ---- update receipts ------------------------------------------------------
+//
+// The receipt's etag must be THE ONE THE NEXT WALK/DELTA COMPUTES for the
+// post-write state. A receipt on any other representation makes the run after
+// a push mismatch its own write: the node is rebuilt wholesale from remote and
+// __pushed_state reseeded, silently reverting edits made while the run was in
+// flight — the read path has no local-wins branch. (The Hue adapter shipped
+// exactly this and had to fix it with a read-after-write.)
+
+test('the update receipt etag is the one the next walk computes', () => {
+  // Graph answered the PATCH with the full updated message: the receipt reads
+  // it with the walk's own formula (@odata.etag || eTag || lastModifiedDateTime),
+  // so it must equal toExternalItem's etag for the identical body.
+  const updated = {
+    id: 'MSG-1',
+    '@odata.etag': 'W/"CQAAABYAAABn"',
+    lastModifiedDateTime: '2026-08-12T10:00:00Z',
+    subject: 'x',
+    isRead: true,
+  }
+  const calls = stubHttp([{ body: updated }])
+  const receipt = opUpdate(CREDENTIAL, mailMount(), {
+    item_id: 'MSG-1',
+    payload: { isRead: true },
+  })
+  assert.equal(receipt.external_id, 'MSG-1')
+  assert.equal(receipt.etag, toExternalItem(updated, 'mail', mailMount()).etag)
+  // The PATCH body sufficed — no read-after-write request was spent.
+  assert.equal(calls.length, 1)
+})
+
+test('a mail item on the ISO fallback still gets a walk-identical receipt', () => {
+  // Mail items sometimes carry no @odata.etag at all; the read paths then fall
+  // back to lastModifiedDateTime. The receipt must fall back the SAME way — a
+  // null here would leave the engine holding the STALE pre-write etag, and the
+  // next delta would rebuild the node from the push's own echo.
+  const updated = { id: 'MSG-2', lastModifiedDateTime: '2026-08-12T10:05:00Z' }
+  stubHttp([{ body: updated }])
+  const receipt = opUpdate(CREDENTIAL, mailMount(), {
+    item_id: 'MSG-2',
+    payload: { isRead: false },
+  })
+  assert.equal(receipt.etag, toExternalItem(updated, 'mail', mailMount()).etag)
+})
+
+test('a bodiless PATCH answer triggers a read-after-write, not a null etag', () => {
+  const fresh = { id: 'MSG-3', '@odata.etag': 'W/"AFTER"', subject: 'x' }
+  const calls = stubHttp([
+    { status: 200, body: {} }, // the PATCH echoed nothing usable
+    { body: fresh }, // the read-back
+  ])
+  const receipt = opUpdate(CREDENTIAL, mailMount(), {
+    item_id: 'MSG-3',
+    payload: { isRead: true },
+  })
+  // The read-back goes through opGet — same $select, same toExternalItem — so
+  // the stamped etag is byte-identical to what the next walk computes, with
+  // strict item-build parity between the single get and the full walk.
+  assert.match(calls[1].url, /\/messages\/MSG-3\?\$select=/)
+  assert.equal(receipt.external_id, 'MSG-3')
+  assert.equal(receipt.etag, toExternalItem(fresh, 'mail', mailMount()).etag)
 })
 
 // ---- immutable ids --------------------------------------------------------

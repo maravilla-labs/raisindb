@@ -76,6 +76,14 @@ function toNode(input) {
     is_draft: meta.is_draft === true,
     snippet: meta.snippet || null,
     unread: meta.unread === true,
+    // The Graph-truth ALIAS of `unread` (is_read === !unread; it does NOT
+    // invert against Graph's isRead). It exists because "is_read" is the
+    // natural snake_case of Graph's own field and callers kept writing it —
+    // and an edit to a property the engine does not carry in its
+    // __pushed_state baseline dies silently at divergence detection, with no
+    // error anywhere. Emitting BOTH spellings here keeps the baseline complete
+    // so an edit to either one diverges and nominates the node.
+    is_read: meta.unread !== true,
     has_attachments: meta.has_attachments === true,
     size: item.size_bytes != null ? item.size_bytes : null,
     importance: meta.importance || null,
@@ -174,27 +182,39 @@ function attachmentChildren(list) {
  * sending a whole message object where a patch was meant is how a sync
  * overwrites a body it was never asked to touch.
  *
- * `unread` inverts: Graph's property is `isRead`.
+ * `unread` inverts: Graph's property is `isRead`. `is_read` is its Graph-truth
+ * alias (declared in the adapter's capabilities too) and does NOT invert.
  */
-var WRITABLE_FIELDS = ["unread"];
+var WRITABLE_FIELDS = ["unread", "is_read"];
 
 function toExternal(node, mount, fields) {
   if (!node) return null;
   var props = node.properties || {};
   var wanted = fields && fields.length ? fields : WRITABLE_FIELDS;
 
+  // `fields` is the DIVERGED-ONLY subset, not "everything writable": the
+  // engine names exactly the properties whose value moved off the
+  // __pushed_state baseline. Any single member must therefore produce a full,
+  // valid PATCH on its own — gating a payload key on two fields arriving
+  // together is how a one-field divergence becomes a null return, a Skipped
+  // push, and a node re-nominated forever with no request ever going out.
+  //
+  // `unread` and `is_read` are two spellings of ONE Graph property, so they
+  // are resolved to a single `isRead` rather than looped over independently.
+  // `unread` is the canonical raisin:Mail column and wins when both diverged
+  // and disagree — they only disagree when a caller wrote one spelling over
+  // stale sync state in the other, and trusting the canonical column is the
+  // deterministic answer. Absent is not the same as false either way: a node
+  // that never carried the flag must not be pushed as "read", hence the
+  // typeof gates.
   var payload = {};
   var emitted = 0;
-  for (var i = 0; i < wanted.length; i++) {
-    var field = wanted[i];
-    if (WRITABLE_FIELDS.indexOf(field) === -1) continue;
-    if (field === "unread") {
-      // Absent is not the same as false: a node that never carried the property
-      // must not be pushed as "read".
-      if (props.unread === undefined || props.unread === null) continue;
-      payload.isRead = props.unread !== true;
-      emitted++;
-    }
+  if (wanted.indexOf("unread") !== -1 && typeof props.unread === "boolean") {
+    payload.isRead = props.unread !== true;
+    emitted++;
+  } else if (wanted.indexOf("is_read") !== -1 && typeof props.is_read === "boolean") {
+    payload.isRead = props.is_read === true;
+    emitted++;
   }
 
   // Nothing writable in this request: say "not writable" rather than issuing an

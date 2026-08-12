@@ -143,3 +143,66 @@ test('to_external still pushes only the read flag', () => {
   });
   assert.deepEqual(out, { payload: { isRead: true }, external_id: 'x' });
 });
+
+test('unread alone in fields produces a write — fields is the diverged-only subset', () => {
+  // The engine sends ONLY the fields whose value moved off the __pushed_state
+  // baseline. A mapper that needs company for a field returns null instead of
+  // a payload, the push is Skipped, and the node is re-nominated forever with
+  // no request ever going out (the Hue colour-pair bug).
+  const out = handler({
+    operation: 'to_external',
+    mount,
+    fields: ['unread'],
+    node: { properties: { unread: true, __external_id: 'x' } },
+  });
+  assert.deepEqual(out, { payload: { isRead: false }, external_id: 'x' });
+});
+
+test('is_read alone in fields produces a write, with no inversion', () => {
+  // The Graph-truth alias: is_read carries isRead's own polarity, unlike
+  // `unread` which inverts.
+  const out = handler({
+    operation: 'to_external',
+    mount,
+    fields: ['is_read'],
+    node: { properties: { is_read: true, __external_id: 'x' } },
+  });
+  assert.deepEqual(out, { payload: { isRead: true }, external_id: 'x' });
+});
+
+test('when both spellings diverged, the canonical unread column decides', () => {
+  // They can only disagree when a caller wrote one spelling over stale sync
+  // state in the other; one deterministic winner, never two payload writes.
+  const out = handler({
+    operation: 'to_external',
+    mount,
+    fields: ['is_read', 'unread'],
+    node: { properties: { unread: true, is_read: true } },
+  });
+  assert.deepEqual(out.payload, { isRead: false });
+});
+
+test('a node that never carried the flag is not pushed as "read"', () => {
+  // Absent is not false: null, not an empty PATCH that bumps the change key.
+  assert.equal(
+    handler({ operation: 'to_external', mount, fields: ['is_read'], node: { properties: {} } }),
+    null
+  );
+  assert.equal(
+    handler({ operation: 'to_external', mount, fields: ['unread'], node: { properties: {} } }),
+    null
+  );
+});
+
+test('to_node emits both spellings of the read flag, mutually inverse', () => {
+  // Both must live in the __pushed_state baseline, or an edit to the missing
+  // spelling never diverges and is never nominated — the "toggle is silently
+  // inert" symptom.
+  const read = map({ unread: false });
+  assert.equal(read.properties.unread, false);
+  assert.equal(read.properties.is_read, true);
+
+  const fresh = map({ unread: true });
+  assert.equal(fresh.properties.unread, true);
+  assert.equal(fresh.properties.is_read, false);
+});
